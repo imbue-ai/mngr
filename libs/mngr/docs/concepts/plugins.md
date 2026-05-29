@@ -320,23 +320,19 @@ To add visible CLI options to existing commands (so they appear in `--help`), im
 
 `mngr help` lists standalone topic pages (concepts that span multiple commands, like `mngr help address`) alongside per-command help. Implement `register_help_topics` to contribute your own pages; they appear in `mngr help` and are viewable via `mngr help <topic>` whenever your plugin is installed.
 
-The easiest approach is to ship a directory of markdown files and expose it with `build_topics_from_directory`. Each `.md` file becomes one topic, keyed by its filename stem, with its first heading as the one-line description:
+Each topic is a `TopicHelpPage` whose metadata (key, description, aliases, see-also) is declared explicitly. Its body comes from one of:
+
+- `body_path`: a markdown file, read lazily and rendered as markdown (rich-rendered in an interactive terminal). Use this to keep long-form prose in a `.md` file. The file must ship inside your package -- e.g. keep it under your `imbue/...` tree, or `force-include` it in the wheel (see [the note in CLAUDE.md / packaging]); a path outside the installed package works in an editable checkout but is absent from a PyPI wheel.
+- `content`: an inline body string, shown verbatim (handy for short, preformatted text).
 
 ```python
 from pathlib import Path
 
 from imbue.mngr import hookimpl
-from imbue.mngr.interfaces.help_topic import build_topics_from_directory
-
-@hookimpl
-def register_help_topics():
-    return build_topics_from_directory("my_plugin", Path(__file__).parent / "docs")
-```
-
-For full control (aliases, "See Also" references, inline content), return `TopicHelpPage` objects directly:
-
-```python
 from imbue.mngr.interfaces.help_topic import TopicHelpPage
+
+# docs/ is shipped inside the package (e.g. via wheel force-include)
+_DOCS = Path(__file__).parent / "docs"
 
 @hookimpl
 def register_help_topics():
@@ -345,13 +341,13 @@ def register_help_topics():
             key="my_topic",
             aliases=("mt",),
             one_line_description="What my plugin adds",
-            content="Detailed explanation ...",
+            body_path=_DOCS / "my_topic.md",
             see_also=(("create", "Create and run an agent"),),
         ),
     ]
 ```
 
-A plugin topic whose key collides with a built-in topic is skipped (built-in topics always win), so pick distinctive keys.
+A plugin topic whose key (or alias) collides with a built-in topic is skipped (built-in topics always win), so pick distinctive keys.
 
 ### Error handling
 

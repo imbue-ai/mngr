@@ -14,12 +14,14 @@ import click
 import pluggy
 from loguru import logger
 
-from imbue.imbue_common.pure import pure
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.help_formatter import format_git_style_help
 from imbue.mngr.cli.help_formatter import get_all_help_metadata
 from imbue.mngr.cli.help_formatter import get_help_metadata
+from imbue.mngr.cli.help_formatter import get_terminal_width
+from imbue.mngr.cli.help_formatter import is_interactive_terminal
+from imbue.mngr.cli.help_formatter import render_markdown
 from imbue.mngr.cli.help_formatter import run_pager
 from imbue.mngr.cli.help_topics import get_all_topics
 from imbue.mngr.cli.help_topics import get_topic
@@ -61,29 +63,36 @@ def load_help_topics_from_plugins(pm: pluggy.PluginManager) -> None:
 # =============================================================================
 
 
-@pure
-def format_topic_help(topic: TopicHelpPage) -> str:
-    """Format a topic help page in git-style man-page format."""
+def format_topic_help(topic: TopicHelpPage, *, use_ansi: bool, width: int) -> str:
+    """Format a topic help page for terminal display.
+
+    A topic whose body is a markdown file (``body_path``) is rendered as markdown
+    -- via rich when ``use_ansi`` is True, otherwise as raw markdown -- and the
+    file's own heading serves as the page title. A topic with inline ``content``
+    is shown verbatim in git-style man-page format (NAME / DESCRIPTION). Both
+    layouts append a SEE ALSO section when references are present.
+    """
     output = StringIO()
+    body = topic.load_body()
 
-    # NAME section
-    output.write("NAME\n")
-    name_str = topic.key
-    if topic.aliases:
-        name_str += f" ({', '.join(topic.aliases)})"
-    output.write(f"       {name_str} - {topic.one_line_description}\n")
-    output.write("\n")
-
-    # DESCRIPTION section
-    output.write("DESCRIPTION\n")
-    for line in topic.content.strip().split("\n"):
-        if line.strip():
-            output.write(f"       {line}\n")
-        else:
+    if topic.is_markdown_body:
+        output.write(render_markdown(body, use_ansi=use_ansi, width=width))
+        if not output.getvalue().endswith("\n"):
             output.write("\n")
-    output.write("\n")
+    else:
+        output.write("NAME\n")
+        name_str = topic.key
+        if topic.aliases:
+            name_str += f" ({', '.join(topic.aliases)})"
+        output.write(f"       {name_str} - {topic.one_line_description}\n\n")
+        output.write("DESCRIPTION\n")
+        for line in body.strip().split("\n"):
+            if line.strip():
+                output.write(f"       {line}\n")
+            else:
+                output.write("\n")
+        output.write("\n")
 
-    # SEE ALSO section
     if topic.see_also:
         output.write("SEE ALSO\n")
         for name, description in topic.see_also:
@@ -166,14 +175,14 @@ def _show_command_help(
     help_key = ".".join(cmd.name for cmd in commands if cmd.name is not None)
     metadata = get_help_metadata(help_key)
 
-    help_text = format_git_style_help(target_ctx, target_cmd, metadata)
+    help_text = format_git_style_help(target_ctx, target_cmd, metadata, use_ansi=is_interactive_terminal())
     config = _get_config_from_ctx(ctx)
     run_pager(help_text, config)
 
 
 def _show_topic_help(ctx: click.Context, topic: TopicHelpPage) -> None:
     """Show a standalone topic help page through the pager."""
-    help_text = format_topic_help(topic)
+    help_text = format_topic_help(topic, use_ansi=is_interactive_terminal(), width=get_terminal_width())
     config = _get_config_from_ctx(ctx)
     run_pager(help_text, config)
 

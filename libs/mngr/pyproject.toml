@@ -38,6 +38,7 @@ dependencies = [
     "paramiko>=3.0",
     "pluggy>=1.5.0",
     "pygtail>=0.14.0",
+    "rich>=13.0",
     "tabulate>=0.9.0",
     "tenacity>=8.0",
     "tomlkit>=0.12.0",
@@ -61,6 +62,14 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["imbue"]
 exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py", "**/utils/plugin_testing.py"]
+
+# Ship the help-topic doc files inside the package so `mngr help <topic>` works
+# in a PyPI wheel install (the top-level docs/ tree is otherwise not packaged).
+# builtin_help_topics.py reads these from imbue/mngr/docs at runtime. Keep in
+# sync with the topic dirs referenced there.
+[tool.hatch.build.targets.wheel.force-include]
+"docs/concepts" = "imbue/mngr/docs/concepts"
+"docs/commands/generic" = "imbue/mngr/docs/commands/generic"
 
 [tool.uv.sources]
 imbue-common = { workspace = true }

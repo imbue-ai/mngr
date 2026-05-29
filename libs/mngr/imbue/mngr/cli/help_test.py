@@ -9,7 +9,6 @@ from imbue.mngr.cli.help import format_topic_help
 from imbue.mngr.cli.help_topics import get_all_topics
 from imbue.mngr.cli.help_topics import get_topic
 from imbue.mngr.interfaces.help_topic import TopicHelpPage
-from imbue.mngr.interfaces.help_topic import build_topics_from_directory
 from imbue.mngr.main import cli
 from imbue.mngr.utils.testing import capture_loguru
 
@@ -44,7 +43,7 @@ def test_get_all_topics_contains_registered_topics() -> None:
 
 
 def test_doc_based_topics_are_registered() -> None:
-    """Topics from generic/ and concepts/ docs directories are auto-registered."""
+    """The built-in doc-backed topics (generic/ and concepts/) are registered."""
     topics = get_all_topics()
     # generic/ topics
     assert "multi_target" in topics
@@ -57,51 +56,22 @@ def test_doc_based_topics_are_registered() -> None:
     assert "providers" in topics
 
 
-def test_doc_based_topic_has_content() -> None:
-    """Doc-based topics have content loaded from the markdown file."""
+def test_doc_based_topic_loads_body_from_file() -> None:
+    """A doc-backed topic loads its body lazily from the markdown file."""
     topic = get_topic("idle_detection")
     assert topic is not None
-    assert "idle" in topic.content.lower()
+    assert topic.is_markdown_body
+    assert topic.content is None
+    assert "idle" in topic.load_body().lower()
     assert topic.docs_path is not None
     assert topic.docs_path.endswith(".md")
 
 
-def test_doc_based_topic_has_description_from_heading() -> None:
-    """Doc-based topics extract their one-line description from the first heading."""
+def test_doc_based_topic_has_explicit_description() -> None:
+    """A doc-backed topic carries its one-line description explicitly (not parsed)."""
     topic = get_topic("idle_detection")
     assert topic is not None
     assert topic.one_line_description == "Idle Detection"
-
-
-# =============================================================================
-# build_topics_from_directory tests
-# =============================================================================
-
-
-def test_build_topics_from_directory_returns_page_per_file(tmp_path: Path) -> None:
-    """build_topics_from_directory creates one topic page per markdown file."""
-    (tmp_path / "alpha.md").write_text("# Alpha Topic\n\nAlpha body.")
-    (tmp_path / "beta.md").write_text("# Beta Topic\n\nBeta body.")
-    topics = build_topics_from_directory("my_plugin", tmp_path)
-    by_key = {topic.key: topic for topic in topics}
-    assert set(by_key) == {"alpha", "beta"}
-    assert by_key["alpha"].one_line_description == "Alpha Topic"
-    assert "Alpha body." in by_key["alpha"].content
-    assert by_key["alpha"].docs_path == "my_plugin/alpha.md"
-
-
-def test_build_topics_from_directory_ignores_non_markdown(tmp_path: Path) -> None:
-    """build_topics_from_directory only picks up .md files."""
-    (tmp_path / "topic.md").write_text("# A Topic\n\nBody.")
-    (tmp_path / "notes.txt").write_text("not a topic")
-    (tmp_path / "README").write_text("also not a topic")
-    topics = build_topics_from_directory("my_plugin", tmp_path)
-    assert [topic.key for topic in topics] == ["topic"]
-
-
-def test_build_topics_from_directory_missing_directory_is_empty(tmp_path: Path) -> None:
-    """build_topics_from_directory returns nothing for a directory that does not exist."""
-    assert build_topics_from_directory("my_plugin", tmp_path / "does_not_exist") == ()
 
 
 # =============================================================================
@@ -109,41 +79,54 @@ def test_build_topics_from_directory_missing_directory_is_empty(tmp_path: Path) 
 # =============================================================================
 
 
-def test_format_topic_help_contains_name_section() -> None:
-    """format_topic_help includes a NAME section with key and description."""
+def test_format_topic_help_inline_contains_name_section() -> None:
+    """An inline-content topic renders in man-page format with a NAME section."""
     topic = TopicHelpPage(
         key="test-topic",
         one_line_description="A test topic",
         content="Some content here.",
     )
-    output = format_topic_help(topic)
+    output = format_topic_help(topic, use_ansi=False, width=80)
     assert "NAME" in output
     assert "test-topic - A test topic" in output
 
 
-def test_format_topic_help_contains_aliases() -> None:
-    """format_topic_help shows aliases in the NAME section."""
+def test_format_topic_help_inline_contains_aliases() -> None:
+    """An inline-content topic shows aliases in the NAME section."""
     topic = TopicHelpPage(
         key="test-topic",
         one_line_description="A test topic",
         aliases=("tt", "test"),
         content="Some content here.",
     )
-    output = format_topic_help(topic)
+    output = format_topic_help(topic, use_ansi=False, width=80)
     assert "test-topic (tt, test)" in output
 
 
-def test_format_topic_help_contains_description() -> None:
-    """format_topic_help includes a DESCRIPTION section with the content."""
+def test_format_topic_help_inline_contains_description() -> None:
+    """An inline-content topic includes a DESCRIPTION section with the content."""
     topic = TopicHelpPage(
         key="test-topic",
         one_line_description="A test topic",
         content="First line.\n\nSecond paragraph.",
     )
-    output = format_topic_help(topic)
+    output = format_topic_help(topic, use_ansi=False, width=80)
     assert "DESCRIPTION" in output
     assert "First line." in output
     assert "Second paragraph." in output
+
+
+def test_format_topic_help_doc_backed_renders_body(tmp_path: Path) -> None:
+    """A doc-backed topic renders its markdown file body (no man-page NAME chrome)."""
+    md = tmp_path / "topic.md"
+    md.write_text("# A Doc Topic\n\nThe body prose.")
+    topic = TopicHelpPage(key="doc-topic", one_line_description="A Doc Topic", body_path=md)
+    output = format_topic_help(topic, use_ansi=False, width=80)
+    # Non-ansi: the raw markdown body is emitted verbatim (rich is only used
+    # for interactive terminals), including the file's own heading.
+    assert "# A Doc Topic" in output
+    assert "The body prose." in output
+    assert "NAME" not in output
 
 
 def test_format_topic_help_contains_see_also() -> None:
@@ -154,7 +137,7 @@ def test_format_topic_help_contains_see_also() -> None:
         content="Some content.",
         see_also=(("other-topic", "Related topic"),),
     )
-    output = format_topic_help(topic)
+    output = format_topic_help(topic, use_ansi=False, width=80)
     assert "SEE ALSO" in output
     assert "mngr help other-topic" in output
 
@@ -166,7 +149,7 @@ def test_format_topic_help_omits_see_also_when_empty() -> None:
         one_line_description="A test topic",
         content="Some content.",
     )
-    output = format_topic_help(topic)
+    output = format_topic_help(topic, use_ansi=False, width=80)
     assert "SEE ALSO" not in output
 
 
@@ -253,21 +236,22 @@ def test_help_doc_based_topic(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """'mngr help multi_target' shows a doc-based topic page."""
+    """'mngr help multi_target' renders the doc-backed topic's markdown body."""
     result = cli_runner.invoke(cli, ["help", "multi_target"], obj=plugin_manager, catch_exceptions=False)
     assert result.exit_code == 0
-    assert "multi_target" in result.output
-    assert "DESCRIPTION" in result.output
+    # Doc-backed topics render the markdown file body (no man-page NAME/DESCRIPTION
+    # chrome); the body's heading/prose is what appears.
+    assert "target" in result.output.lower()
 
 
 def test_help_concepts_topic(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """'mngr help idle_detection' shows a concepts topic page."""
+    """'mngr help idle_detection' renders the concepts topic's markdown body."""
     result = cli_runner.invoke(cli, ["help", "idle_detection"], obj=plugin_manager, catch_exceptions=False)
     assert result.exit_code == 0
-    assert "idle_detection" in result.output
+    assert "Idle Detection" in result.output
     assert "idle" in result.output.lower()
 
 

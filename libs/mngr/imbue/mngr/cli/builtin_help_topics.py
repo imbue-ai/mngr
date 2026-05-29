@@ -18,22 +18,59 @@ from pathlib import Path
 
 from imbue.mngr import hookimpl
 from imbue.mngr.interfaces.help_topic import TopicHelpPage
-from imbue.mngr.interfaces.help_topic import build_topics_from_directory
 
-# Docs root relative to this file:
-# this file: libs/mngr/imbue/mngr/cli/builtin_help_topics.py
-# docs root: libs/mngr/docs/
-_DOCS_ROOT = Path(__file__).resolve().parents[3] / "docs"
+# Docs root resolution. In a source/editable checkout the docs live at
+# libs/mngr/docs (three parents up from this file). In a wheel they are
+# force-included under the package at imbue/mngr/docs (the top-level docs/ tree
+# is not otherwise shipped -- see CLAUDE.md). Prefer the packaged copy, falling
+# back to the source tree.
+#   this file: .../imbue/mngr/cli/builtin_help_topics.py
+# _PACKAGED_DOCS_ROOT is imbue/mngr/docs (force-included in the wheel);
+# _SOURCE_DOCS_ROOT is libs/mngr/docs (the source/editable checkout).
+_PACKAGED_DOCS_ROOT = Path(__file__).resolve().parents[1] / "docs"
+_SOURCE_DOCS_ROOT = Path(__file__).resolve().parents[3] / "docs"
+_DOCS_ROOT = _PACKAGED_DOCS_ROOT if _PACKAGED_DOCS_ROOT.is_dir() else _SOURCE_DOCS_ROOT
 
-# Directories whose markdown files become topic pages, mapped to their path
-# prefix relative to the docs root (used by the doc generator for link paths).
-_TOPIC_DOC_DIRECTORIES: tuple[tuple[str, Path], ...] = (
-    ("commands/generic", _DOCS_ROOT / "commands" / "generic"),
-    ("concepts", _DOCS_ROOT / "concepts"),
+
+def _doc_topic(key: str, one_line_description: str, rel_path: str) -> TopicHelpPage:
+    """Build a topic whose body is the markdown file at ``rel_path`` (docs-root-relative).
+
+    The metadata is declared explicitly; the body is the whole file, rendered as
+    markdown at display time -- nothing is inferred by parsing the file.
+    """
+    return TopicHelpPage(
+        key=key,
+        one_line_description=one_line_description,
+        docs_path=rel_path,
+        body_path=_DOCS_ROOT / rel_path,
+    )
+
+
+# mngr's built-in topics, each backed by a markdown doc file under docs/.
+# Keep this list in sync with the topic docs; adding a doc here is what makes it
+# show up in `mngr help`.
+_DOC_TOPICS: tuple[TopicHelpPage, ...] = (
+    _doc_topic("common", "Common Options", "commands/generic/common.md"),
+    _doc_topic("multi_target", "Commands that target from multiple hosts/agents", "commands/generic/multi_target.md"),
+    _doc_topic("resource_cleanup", "Resource Cleanup", "commands/generic/resource_cleanup.md"),
+    _doc_topic("agent_types", "Agent Types", "concepts/agent_types.md"),
+    _doc_topic("agents", "Agents", "concepts/agents.md"),
+    _doc_topic("api", "mngr Plugin API", "concepts/api.md"),
+    _doc_topic("docker_usage", "Using Docker", "concepts/docker_usage.md"),
+    _doc_topic("environment_variables", "Environment Variables", "concepts/environment_variables.md"),
+    _doc_topic("hosts", "Hosts", "concepts/hosts.md"),
+    _doc_topic("idle_detection", "Idle Detection", "concepts/idle_detection.md"),
+    _doc_topic("modal_usage", "Using Modal", "concepts/modal_usage.md"),
+    _doc_topic("plugins", "Plugins", "concepts/plugins.md"),
+    _doc_topic("provider_backends", "Provider Backends", "concepts/provider_backends.md"),
+    _doc_topic("providers", "Provider Instances", "concepts/providers.md"),
+    _doc_topic("provisioning", "Provisioning", "concepts/provisioning.md"),
+    _doc_topic("snapshot", "Snapshots", "concepts/snapshot.md"),
 )
 
-# The address topic is hand-authored (not backed by a docs file) so that it can
-# carry aliases and "See Also" references.
+# The address topic is hand-authored inline (not backed by a docs file) so that
+# it can carry aliases and "See Also" references; its content is preformatted
+# terminal text, shown verbatim in man-page format.
 _ADDRESS_TOPIC = TopicHelpPage(
     key="address",
     one_line_description="Agent address syntax for targeting agents and hosts",
@@ -111,9 +148,6 @@ EXAMPLES
 
 @hookimpl(tryfirst=True)
 def register_help_topics() -> Sequence[TopicHelpPage]:
-    """Register mngr's built-in topic pages (the hand-authored address topic and
-    every markdown file in the generic/ and concepts/ docs directories)."""
-    topics: list[TopicHelpPage] = [_ADDRESS_TOPIC]
-    for path_prefix, directory in _TOPIC_DOC_DIRECTORIES:
-        topics.extend(build_topics_from_directory(path_prefix, directory))
-    return topics
+    """Register mngr's built-in topic pages (the hand-authored address topic plus
+    the doc-backed topics declared in _DOC_TOPICS)."""
+    return (_ADDRESS_TOPIC, *_DOC_TOPICS)

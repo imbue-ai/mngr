@@ -348,16 +348,23 @@ def register_help_topics() -> Sequence[TopicHelpPage] | None:
     nothing. A topic whose key collides with an existing built-in topic is
     skipped, so plugins cannot override mngr's own topics.
 
-    The easiest way to contribute topics is to ship a directory of markdown
-    files and pass it to ``build_topics_from_directory`` (in
-    ``imbue.mngr.interfaces.help_topic``), which turns each ``.md`` file into one
-    topic keyed by its filename stem. For full control (aliases, "See Also"
-    references, inline content) return ``TopicHelpPage`` objects directly. See
-    the plugin docs (``concepts/plugins.md``) for complete examples::
+    Each topic declares its metadata explicitly and provides its body either
+    inline (``content``) or as a markdown file (``body_path``, read lazily and
+    rendered as markdown). To keep long-form prose in a ``.md`` file that ships
+    in the wheel, point ``body_path`` at it. See the plugin docs
+    (``concepts/plugins.md``) for complete examples::
 
         @hookimpl
         def register_help_topics():
-            return build_topics_from_directory("my_plugin", my_docs_dir)
+            # docs/ is shipped inside the package (e.g. via wheel force-include)
+            docs = Path(__file__).parent / "docs"
+            return [
+                TopicHelpPage(
+                    key="my_plugin_topic",
+                    one_line_description="What my plugin adds",
+                    body_path=docs / "my_topic.md",
+                ),
+            ]
     """
 
 

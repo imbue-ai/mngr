@@ -59,6 +59,7 @@ Only after doing all of the above should you begin writing code.
 - If you see a flaky test, YOU MUST HIGHLIGHT THIS IN YOUR RESPONSE. Mark it with `@pytest.mark.flaky` so offload retries it automatically. Then try to fix the underlying flakiness in a separate commit.
 - Do not add TODO or FIXME unless explicitly asked to do so
 - Code must work on both macOS and Linux. It's ok if it doesn't work on Windows.
+- `mngr` is installed by end users from PyPI, so the built wheel must be self-contained: it only packages the `imbue` package (`packages = ["imbue"]`), so files outside it (e.g. the top-level `docs/` tree) are NOT shipped and must not be read at runtime by production code.
 - To reiterate: code correctness and quality is the most important concern when writing code.
 
 # Running tests
