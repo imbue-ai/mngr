@@ -166,8 +166,23 @@ while (( SECONDS < reply_deadline )); do
   EXPECT_SUBSTRING="$EXPECT_SUBSTRING" SEND_AT="$SEND_AT" \
     "$MNGR_BIN" event --provider lima "$AGENT_NAME" --include 'event.type == "assistant_message"' --format json 2>/dev/null \
     | EXPECT_SUBSTRING="$EXPECT_SUBSTRING" SEND_AT="$SEND_AT" python3 -c "
-import json, sys, os
+import json, sys, os, datetime
 expect = os.environ['EXPECT_SUBSTRING']
+send_at = int(os.environ['SEND_AT'])
+clock_skew_slack_seconds = 5
+def event_epoch(evt):
+    for field in ('at', 'timestamp', 'created_at'):
+        v = evt.get(field)
+        if v is None:
+            continue
+        if isinstance(v, (int, float)):
+            return float(v)
+        if isinstance(v, str):
+            try:
+                return datetime.datetime.fromisoformat(v.replace('Z', '+00:00')).timestamp()
+            except ValueError:
+                continue
+    return None
 for line in sys.stdin:
     line = line.strip()
     if not line:
@@ -175,6 +190,9 @@ for line in sys.stdin:
     try:
         evt = json.loads(line)
     except Exception:
+        continue
+    ts = event_epoch(evt)
+    if ts is not None and ts < send_at - clock_skew_slack_seconds:
         continue
     text = json.dumps(evt)
     if expect.lower() in text.lower():
