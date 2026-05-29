@@ -41,12 +41,15 @@ log "waiting for login URL in events log (up to 120s)"
 LOGIN_URL=""
 url_deadline=$((SECONDS + 120))
 while (( SECONDS < url_deadline )); do
-  LOGIN_URL=$(grep -oE 'http://127\.0\.0\.1:[0-9]+/login\?one_time_code=[A-Za-z0-9_-]+' "$EVENTS_LOG" 2>/dev/null | tail -1)
+  LOGIN_URL=$(grep -oE 'http://(127\.0\.0\.1|localhost):[0-9]+/login\?one_time_code=[A-Za-z0-9_-]+' "$EVENTS_LOG" 2>/dev/null | tail -1)
   [[ -n "$LOGIN_URL" ]] && break
   sleep 2
 done
 [[ -n "$LOGIN_URL" ]] || fail "no login URL in $EVENTS_LOG after 120s"
-BASE=$(echo "$LOGIN_URL" | sed -E 's|^(http://[^/]+).*|\1|')
+# Normalize host: backend prints localhost in the URL but we need 127.0.0.1
+# for curl on macOS where localhost may resolve to ::1 and the server only
+# binds 127.0.0.1.
+BASE=$(echo "$LOGIN_URL" | sed -E 's|^http://localhost|http://127.0.0.1|; s|^(http://[^/]+).*|\1|')
 CODE=$(echo "$LOGIN_URL" | sed -E 's|.*one_time_code=||')
 log "base=$BASE"
 
