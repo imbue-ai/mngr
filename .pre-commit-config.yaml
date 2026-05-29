@@ -9,6 +9,19 @@ repos:
         exclude: 'uv.lock'
 -   repo: local
     hooks:
+    -   id: uv-sync-pre-push
+#        Runs FIRST, before the uv-run-based hooks below (ruff/ty/regenerate-cli-docs/
+#        compile-style-guide). `uv run` does not install all workspace members on its own, so a push
+#        that merges origin/main and adds a new workspace member (or changes deps) would otherwise
+#        leave those hooks importing a member missing from the shared .venv and failing with
+#        ModuleNotFoundError. Syncing --all-packages first populates the env. Only runs when the push
+#        touches uv.lock or a pyproject.toml (a newly added member always adds its own pyproject.toml).
+        name: "Sync workspace packages before push (deps changed)"
+        entry: uv sync --all-packages
+        language: system
+        stages: [pre-push]
+        files: '(^|/)(uv\.lock|pyproject\.toml)$'
+        pass_filenames: false
     -   id: ruff
         name: "Python formatter + import sorter (ruff)"
         entry: bash -c 'uv run ruff check --fix --force-exclude --config pyproject.toml "$@" && uv run ruff format --force-exclude --config pyproject.toml "$@"' --

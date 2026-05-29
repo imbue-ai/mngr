@@ -8,7 +8,6 @@ import pytest
 import tomlkit
 from click.testing import CliRunner
 
-from imbue.mngr.cli.config import ConfigScope
 from imbue.mngr.cli.config import _emit_all_paths
 from imbue.mngr.cli.config import _emit_config_list
 from imbue.mngr.cli.config import _emit_config_set_result
@@ -21,6 +20,7 @@ from imbue.mngr.cli.config import _format_value_for_display
 from imbue.mngr.cli.config import _get_nested_value
 from imbue.mngr.cli.config import _unset_nested_value
 from imbue.mngr.cli.config import config
+from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import ConfigKeyNotFoundError
 from imbue.mngr.primitives import OutputFormat
