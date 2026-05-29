@@ -259,3 +259,11 @@ Tiered system-interface restart for the minds recovery flow.
   button is shown for every workspace (Docker, Lima, and remote hosts are all
   reached over SSH) and omitted only in the brief window before discovery has
   surfaced the host's SSH info.
+- When the recovery page's ``mngr list`` host-state lookup does not exit
+  cleanly (e.g. it times out, or a provider is unreachable) and so returns no
+  row for this workspace, the "container running" and "system-services agent
+  registered" diagnostic rows now show the failure reason (``mngr list
+  failed: ...``) in place of a bare "no row", so the user can tell the
+  listing failed rather than concluding the host or agent is genuinely
+  absent. When the listing still returns this workspace's own row despite a
+  non-clean exit, the real row is shown as before.
