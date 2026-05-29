@@ -3,11 +3,12 @@
 Provider backend plugin and CLI for Imbue Cloud (the imbue-team-hosted leasing
 service that talks to `remote_service_connector`).
 
-The plugin owns four concern areas, all reachable only through `mngr` commands:
+The plugin owns these concern areas, all reachable only through `mngr` commands:
 
 - **auth** — SuperTokens session: signup, signin, oauth, refresh, signout, status
 - **hosts** — lease/release/list pre-provisioned pool hosts
 - **keys** — LiteLLM virtual key management (`mngr imbue_cloud keys litellm ...`)
+- **buckets** — R2 bucket + scoped-key management (`mngr imbue_cloud bucket ...`)
 - **tunnels** — Cloudflare tunnel + service + auth-policy management
 - **admin pool** — operator-only pool provisioning (Vultr + Neon)
 
@@ -77,6 +78,33 @@ writes the agent env file (and patches the claude config when an
   `docker stop`s the container on the leased VPS, preserves the lease +
   the on-disk volume, and `mngr start <agent>` brings the same workspace
   back up on the same VPS.
+
+## Buckets
+
+Create an R2 bucket (for storing files remotely) and mint scoped S3 keys for it.
+Requires a paid account. Each bucket is isolated (think one per host); the
+server derives the real R2 name as `<user_id_prefix>--<your-name>`.
+
+```bash
+# Create a bucket; emits {bucket, key} where key includes the one-time secret.
+mngr imbue_cloud bucket create my-backups --account alice@imbue.com
+
+# List / inspect / destroy (destroy refuses a non-empty bucket).
+mngr imbue_cloud bucket list
+mngr imbue_cloud bucket info my-backups
+mngr imbue_cloud bucket destroy my-backups
+
+# Mint additional keys, scoped read-only or read-write, to hand to agents.
+mngr imbue_cloud bucket keys create my-backups --alias agent-ro --access read
+mngr imbue_cloud bucket keys list                # all keys across buckets
+mngr imbue_cloud bucket keys list my-backups     # just this bucket's keys
+mngr imbue_cloud bucket keys destroy <access-key-id>
+```
+
+The emitted credentials (`access_key_id`, `secret_access_key`, `s3_endpoint`,
+`bucket_name`) are standard S3-compatible credentials -- point any S3 client at
+the endpoint. The secret is shown only once at creation and is never stored by
+the service.
 
 ## Pool admin
 
