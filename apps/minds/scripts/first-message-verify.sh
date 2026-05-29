@@ -37,6 +37,10 @@ if [[ ! -x "$MNGR_BIN" ]]; then
   fail "bundled mngr binary missing at $MNGR_BIN"
 fi
 
+# The login URL emitted on stdout is auto-consumed by the Electron frontend on
+# startup; by the time we curl /authenticate the code is USED -> 403. Mint our
+# own VALID code by appending to ~/.minds/auth/one_time_codes.json (read by the
+# auth store on every /authenticate call), then drive auth with that.
 log "waiting for login URL in events log (up to 120s)"
 LOGIN_URL=""
 url_deadline=$((SECONDS + 120))
@@ -50,8 +54,21 @@ done
 # for curl on macOS where localhost may resolve to ::1 and the server only
 # binds 127.0.0.1.
 BASE=$(echo "$LOGIN_URL" | sed -E 's|^http://localhost|http://127.0.0.1|; s|^(http://[^/]+).*|\1|')
-CODE=$(echo "$LOGIN_URL" | sed -E 's|.*one_time_code=||')
 log "base=$BASE"
+
+log "minting fresh one-time code"
+CODES_PATH="$HOME/.minds/auth/one_time_codes.json"
+CODE=$(python3 -c '
+import json, os, secrets, pathlib
+p = pathlib.Path(os.environ["CODES_PATH"])
+existing = json.loads(p.read_text()) if p.exists() else []
+new_code = secrets.token_urlsafe(32)
+existing.append({"code": new_code, "status": "VALID"})
+p.parent.mkdir(parents=True, exist_ok=True)
+p.write_text(json.dumps(existing, indent=2))
+print(new_code)
+' CODES_PATH="$CODES_PATH")
+[[ -n "$CODE" ]] || fail "failed to mint code"
 
 log "authenticating"
 rm -f "$COOKIES"
