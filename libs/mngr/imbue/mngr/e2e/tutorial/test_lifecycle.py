@@ -51,9 +51,7 @@ def test_start_connect(e2e: E2eSession) -> None:
         mngr start my-task --connect
     """)
     _create_my_task(e2e, 100501)
-    expect(
-        e2e.run("mngr start my-task --connect", comment="start and immediately connect")
-    ).to_succeed()
+    expect(e2e.run("mngr start my-task --connect", comment="start and immediately connect")).to_succeed()
 
 
 @pytest.mark.rsync

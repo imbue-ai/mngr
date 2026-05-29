@@ -46,9 +46,7 @@ def test_event_follow(e2e: E2eSession) -> None:
     _create_my_task(e2e, 100701)
     # --follow streams indefinitely; wrap with `timeout 1` so the test
     # confirms the stream started without hanging.
-    expect(
-        e2e.run("timeout 1 mngr event my-task --follow || true", comment="follow events in real time")
-    ).to_succeed()
+    expect(e2e.run("timeout 1 mngr event my-task --follow || true", comment="follow events in real time")).to_succeed()
 
 
 @pytest.mark.rsync

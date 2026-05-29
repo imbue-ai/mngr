@@ -92,9 +92,7 @@ def test_destroy_specific(e2e: E2eSession) -> None:
     """)
     _create_my_task(e2e, 100600)
     # Pipe "y\n" to confirm the destructive prompt that --force would suppress.
-    expect(
-        e2e.run("yes | mngr destroy my-task", comment="destroy a specific agent")
-    ).to_succeed()
+    expect(e2e.run("yes | mngr destroy my-task", comment="destroy a specific agent")).to_succeed()
 
 
 @pytest.mark.rsync

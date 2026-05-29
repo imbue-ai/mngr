@@ -30,9 +30,7 @@ def test_snapshot_create(e2e: E2eSession) -> None:
         mngr snapshot create my-task
     """)
     _create_modal_my_task(e2e)
-    expect(
-        e2e.run("mngr snapshot create my-task", comment="create a snapshot of an agent's host")
-    ).to_succeed()
+    expect(e2e.run("mngr snapshot create my-task", comment="create a snapshot of an agent's host")).to_succeed()
 
 
 @pytest.mark.release
@@ -73,9 +71,7 @@ def test_snapshot_create_all_via_stdin(e2e: E2eSession) -> None:
         mngr list --ids | mngr snapshot create -
     """)
     _create_modal_my_task(e2e)
-    expect(
-        e2e.run("mngr list --ids | mngr snapshot create -", comment="snapshot all agents' hosts")
-    ).to_succeed()
+    expect(e2e.run("mngr list --ids | mngr snapshot create -", comment="snapshot all agents' hosts")).to_succeed()
 
 
 @pytest.mark.release
@@ -97,9 +93,7 @@ def test_snapshot_list_for_agent(e2e: E2eSession) -> None:
         mngr snapshot list my-task
     """)
     _create_modal_my_task(e2e)
-    expect(
-        e2e.run("mngr snapshot list my-task", comment="list snapshots for a specific agent's host")
-    ).to_succeed()
+    expect(e2e.run("mngr snapshot list my-task", comment="list snapshots for a specific agent's host")).to_succeed()
 
 
 @pytest.mark.release
@@ -111,9 +105,7 @@ def test_snapshot_list_limit(e2e: E2eSession) -> None:
         mngr snapshot list my-task --limit 5
     """)
     _create_modal_my_task(e2e)
-    expect(
-        e2e.run("mngr snapshot list my-task --limit 5", comment="limit the number of snapshots shown")
-    ).to_succeed()
+    expect(e2e.run("mngr snapshot list my-task --limit 5", comment="limit the number of snapshots shown")).to_succeed()
 
 
 @pytest.mark.release

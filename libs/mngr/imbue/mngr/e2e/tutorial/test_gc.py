@@ -36,9 +36,7 @@ def test_gc_provider_modal(e2e: E2eSession) -> None:
         # garbage collect for a specific provider only (repeatable if you want multiple providers)
         mngr gc --provider modal
     """)
-    expect(
-        e2e.run("mngr gc --provider modal", comment="garbage collect for a specific provider only")
-    ).to_succeed()
+    expect(e2e.run("mngr gc --provider modal", comment="garbage collect for a specific provider only")).to_succeed()
 
 
 @pytest.mark.release

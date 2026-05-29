@@ -98,9 +98,7 @@ def test_create_docker_volume_start_arg(e2e: E2eSession) -> None:
         # note that all docker hosts have a default volume mounted, which is used so that the host and agent information can be
         # available even when a given "host" (container) is stopped
     """)
-    expect(
-        e2e.run("mkdir -p /tmp/mngr-test-data", comment="ensure host volume source exists")
-    ).to_succeed()
+    expect(e2e.run("mkdir -p /tmp/mngr-test-data", comment="ensure host volume source exists")).to_succeed()
     expect(
         e2e.run(
             'mngr create my-task --provider docker -s "-v /tmp/mngr-test-data:/container/data" --no-connect --no-ensure-clean',
@@ -169,7 +167,7 @@ def test_destroy_all_docker_agents(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            'mngr list --include \'host.provider == "docker"\' --ids | mngr destroy -f',
+            "mngr list --include 'host.provider == \"docker\"' --ids | mngr destroy -f",
             comment="destroy all Docker agents via filter+stdin",
         )
     ).to_succeed()

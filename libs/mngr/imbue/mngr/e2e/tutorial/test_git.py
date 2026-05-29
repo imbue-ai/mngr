@@ -59,9 +59,7 @@ def test_exec_git_status_short(e2e: E2eSession) -> None:
         mngr exec my-task "git status --short"
     """)
     _create_my_task(e2e, 100921)
-    expect(
-        e2e.run('mngr exec my-task "git status --short"', comment="check uncommitted changes")
-    ).to_succeed()
+    expect(e2e.run('mngr exec my-task "git status --short"', comment="check uncommitted changes")).to_succeed()
 
 
 @pytest.mark.rsync
@@ -74,9 +72,7 @@ def test_exec_git_log(e2e: E2eSession) -> None:
         mngr exec my-task "git log --oneline -5"
     """)
     _create_my_task(e2e, 100922)
-    expect(
-        e2e.run('mngr exec my-task "git log --oneline -5"', comment="see recent commits")
-    ).to_succeed()
+    expect(e2e.run('mngr exec my-task "git log --oneline -5"', comment="see recent commits")).to_succeed()
 
 
 @pytest.mark.rsync
@@ -110,7 +106,7 @@ def test_exec_force_commit(e2e: E2eSession) -> None:
     # Allow the commit to fail (nothing to commit / no user.email set in CI);
     # the test only needs to confirm mngr parses the quoted compound command.
     e2e.run(
-        'mngr exec my-task \'git add . && git commit -m "WIP: save agent progress" || true\'',
+        "mngr exec my-task 'git add . && git commit -m \"WIP: save agent progress\" || true'",
         comment="forcibly commit all of it",
     )
 

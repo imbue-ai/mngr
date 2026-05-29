@@ -37,9 +37,7 @@ def test_config_get(e2e: E2eSession) -> None:
         # get a specific config value
         mngr config get commands.create.provider
     """)
-    expect(
-        e2e.run("mngr config get commands.create.provider", comment="get a specific config value")
-    ).to_succeed()
+    expect(e2e.run("mngr config get commands.create.provider", comment="get a specific config value")).to_succeed()
 
 
 @pytest.mark.release
@@ -48,9 +46,7 @@ def test_config_set(e2e: E2eSession) -> None:
         # set a config value (at the default scope)
         mngr config set commands.create.provider modal
     """)
-    expect(
-        e2e.run("mngr config set commands.create.provider modal", comment="set a config value")
-    ).to_succeed()
+    expect(e2e.run("mngr config set commands.create.provider modal", comment="set a config value")).to_succeed()
 
 
 @pytest.mark.release
@@ -59,9 +55,7 @@ def test_config_set_scope(e2e: E2eSession) -> None:
         # set a config value at a specific scope
         mngr config set headless true --scope user
     """)
-    expect(
-        e2e.run("mngr config set headless true --scope user", comment="set at a specific scope")
-    ).to_succeed()
+    expect(e2e.run("mngr config set headless true --scope user", comment="set at a specific scope")).to_succeed()
 
 
 @pytest.mark.release
@@ -70,9 +64,7 @@ def test_config_unset(e2e: E2eSession) -> None:
         # unset a config value
         mngr config unset commands.create.provider
     """)
-    expect(
-        e2e.run("mngr config unset commands.create.provider", comment="unset a config value")
-    ).to_succeed()
+    expect(e2e.run("mngr config unset commands.create.provider", comment="unset a config value")).to_succeed()
 
 
 @pytest.mark.release
@@ -83,9 +75,7 @@ def test_config_edit(e2e: E2eSession) -> None:
     """)
     # `mngr config edit` spawns $EDITOR; force it to /bin/true so the command
     # returns immediately with success.
-    expect(
-        e2e.run("EDITOR=/bin/true mngr config edit", comment="open the config file in your editor")
-    ).to_succeed()
+    expect(e2e.run("EDITOR=/bin/true mngr config edit", comment="open the config file in your editor")).to_succeed()
 
 
 @pytest.mark.release

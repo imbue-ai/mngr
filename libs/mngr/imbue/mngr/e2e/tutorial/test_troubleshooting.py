@@ -81,9 +81,7 @@ def test_troubleshoot_transcript_for_errors(e2e: E2eSession) -> None:
         mngr transcript my-task --tail 10
     """)
     _create_my_task(e2e, 101023)
-    expect(
-        e2e.run("mngr transcript my-task --tail 10", comment="check transcript for error messages")
-    ).to_succeed()
+    expect(e2e.run("mngr transcript my-task --tail 10", comment="check transcript for error messages")).to_succeed()
 
 
 @pytest.mark.rsync

@@ -71,6 +71,4 @@ def test_list_project_field(e2e: E2eSession) -> None:
         # see which projects have agents by looking at the project field
         mngr list --fields "name,project,state"
     """)
-    expect(
-        e2e.run('mngr list --fields "name,project,state"', comment="see which projects have agents")
-    ).to_succeed()
+    expect(e2e.run('mngr list --fields "name,project,state"', comment="see which projects have agents")).to_succeed()

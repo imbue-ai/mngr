@@ -44,14 +44,10 @@ def test_recipe_launch_check_cleanup(e2e: E2eSession) -> None:
     ).to_succeed()
     expect(e2e.run("mngr list --running", comment="2. check what agents are running")).to_succeed()
     expect(e2e.run("mngr transcript fix-bug --tail 3", comment="3. check transcript")).to_succeed()
-    expect(
-        e2e.run('mngr msg fix-bug -m "lint please"', comment="4. send a follow-up message")
-    ).to_succeed()
+    expect(e2e.run('mngr msg fix-bug -m "lint please"', comment="4. send a follow-up message")).to_succeed()
     expect(e2e.run("mngr conn fix-bug", comment="5. connect to review")).to_succeed()
     e2e.run("git merge mngr/fix-bug || true", comment="6. merge the resulting branch")
-    expect(
-        e2e.run("mngr destroy fix-bug -f --remove-created-branch", comment="7. stop and clean up")
-    ).to_succeed()
+    expect(e2e.run("mngr destroy fix-bug -f --remove-created-branch", comment="7. stop and clean up")).to_succeed()
 
 
 @pytest.mark.rsync

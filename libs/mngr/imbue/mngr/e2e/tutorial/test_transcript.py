@@ -38,9 +38,7 @@ def test_transcript_assistant_only(e2e: E2eSession) -> None:
         mngr transcript my-task --role assistant
     """)
     _create_my_task(e2e, 100801)
-    expect(
-        e2e.run("mngr transcript my-task --role assistant", comment="view only assistant messages")
-    ).to_succeed()
+    expect(e2e.run("mngr transcript my-task --role assistant", comment="view only assistant messages")).to_succeed()
 
 
 @pytest.mark.rsync
@@ -66,9 +64,7 @@ def test_transcript_tail_one(e2e: E2eSession) -> None:
         mngr transcript my-task --tail 1
     """)
     _create_my_task(e2e, 100803)
-    expect(
-        e2e.run("mngr transcript my-task --tail 1", comment="quickly peek at most recent message")
-    ).to_succeed()
+    expect(e2e.run("mngr transcript my-task --tail 1", comment="quickly peek at most recent message")).to_succeed()
 
 
 @pytest.mark.rsync
@@ -81,6 +77,4 @@ def test_transcript_format_jsonl(e2e: E2eSession) -> None:
         mngr transcript my-task --format jsonl
     """)
     _create_my_task(e2e, 100804)
-    expect(
-        e2e.run("mngr transcript my-task --format jsonl", comment="output transcript as JSONL")
-    ).to_succeed()
+    expect(e2e.run("mngr transcript my-task --format jsonl", comment="output transcript as JSONL")).to_succeed()

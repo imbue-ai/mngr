@@ -516,7 +516,7 @@ def test_destroy_all_modal_agents(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            'mngr list --include \'host.provider == "modal"\' --ids | mngr destroy -f',
+            "mngr list --include 'host.provider == \"modal\"' --ids | mngr destroy -f",
             comment="destroy all Modal agents via filter+stdin",
         )
     ).to_succeed()
@@ -633,9 +633,7 @@ def test_create_modal_upload_only(e2e: E2eSession) -> None:
         # upload a file to the agent's host during creation
         mngr create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config
     """)
-    expect(
-        e2e.run("mkdir -p ~/.ssh && touch ~/.ssh/config", comment="ensure ssh config exists")
-    ).to_succeed()
+    expect(e2e.run("mkdir -p ~/.ssh && touch ~/.ssh/config", comment="ensure ssh config exists")).to_succeed()
     expect(
         e2e.run(
             "mngr create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config --no-connect --no-ensure-clean",
@@ -716,14 +714,12 @@ def test_create_modal_combined_setup_steps(e2e: E2eSession) -> None:
     expect(e2e.run("echo 'requests==2.32.0' > requirements.txt", comment="write requirements.txt")).to_succeed()
     expect(
         e2e.run(
-            'mngr create my-task --provider modal'
-            ' --upload-file ./requirements.txt:/workspace/requirements.txt'
+            "mngr create my-task --provider modal"
+            " --upload-file ./requirements.txt:/workspace/requirements.txt"
             ' --sudo-command "echo sudo-step"'
             ' --extra-provision-command "echo provision-step"'
-            ' --no-connect --no-ensure-clean',
+            " --no-connect --no-ensure-clean",
             comment="combine upload + sudo + extra-provision (substituted for speed)",
             timeout=_REMOTE_TIMEOUT_CUSTOM_IMAGE,
         )
     ).to_succeed()
-
-

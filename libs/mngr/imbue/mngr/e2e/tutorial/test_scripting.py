@@ -59,7 +59,7 @@ def test_get_json_into_var(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            "AGENT_INFO=$(mngr list --format json) && echo \"${#AGENT_INFO}\"",
+            'AGENT_INFO=$(mngr list --format json) && echo "${#AGENT_INFO}"',
             comment="get JSON output for parsing in scripts",
         )
     ).to_succeed()
@@ -77,7 +77,7 @@ def test_observe_discovery_pipe_python(e2e: E2eSession) -> None:
     # observe blocks indefinitely; wrap with timeout so the while-loop exits.
     expect(
         e2e.run(
-            "timeout 1 bash -c 'mngr observe --discovery-only | while read -r line; do echo \"$line\" | python -c \"import sys, json; d=json.load(sys.stdin); print(d.get(\\\"name\\\", \\\"unknown\\\"))\"; done' || true",
+            'timeout 1 bash -c \'mngr observe --discovery-only | while read -r line; do echo "$line" | python -c "import sys, json; d=json.load(sys.stdin); print(d.get(\\"name\\", \\"unknown\\"))"; done\' || true',
             comment="pipe discovery stream into python (timeout-capped)",
         )
     ).to_succeed()

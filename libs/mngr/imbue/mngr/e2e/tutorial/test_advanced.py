@@ -31,7 +31,7 @@ def test_advanced_fan_out_create(e2e: E2eSession) -> None:
             (
                 'for task in "fix-auth" "add-logging" "update-deps" "write-docs"; do'
                 '   mngr create "$task" --type command --no-ensure-clean --no-connect --message "Work on: $task" -- sleep 101010 ;'
-                ' done'
+                " done"
             ),
             comment="fan-out pattern (substituted for local sleep)",
         )
@@ -91,7 +91,7 @@ def test_advanced_collect_results_loop(e2e: E2eSession) -> None:
             (
                 'for agent in "fix-auth" "add-logging" "update-deps" "write-docs"; do'
                 '   echo "=== $agent ==="; mngr exec "$agent" -- git log --oneline -3 || true;'
-                ' done'
+                " done"
             ),
             comment="collect results from all agents",
         )
@@ -139,9 +139,7 @@ def test_tips_exec_env_inspect(e2e: E2eSession) -> None:
         mngr exec my-task -- env | sort
     """)
     _create_my_task(e2e, 101015)
-    expect(
-        e2e.run("mngr exec my-task -- env | sort", comment="quickly inspect an agent's environment")
-    ).to_succeed()
+    expect(e2e.run("mngr exec my-task -- env | sort", comment="quickly inspect an agent's environment")).to_succeed()
 
 
 @pytest.mark.release

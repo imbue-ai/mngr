@@ -48,9 +48,7 @@ def test_plugin_add_by_path(e2e: E2eSession) -> None:
         # add a plugin from a local path
         mngr plugin add --path /path/to/my-plugin
     """)
-    result = e2e.run(
-        "mngr plugin add --path /path/to/my-plugin", comment="add a plugin from a local path"
-    )
+    result = e2e.run("mngr plugin add --path /path/to/my-plugin", comment="add a plugin from a local path")
     assert result.exit_code != 0
 
 

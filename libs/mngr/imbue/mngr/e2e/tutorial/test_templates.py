@@ -11,9 +11,7 @@ def _write_modal_big_template(e2e: E2eSession) -> None:
     cfg = ".$MNGR_ROOT_NAME/settings.local.toml"
     expect(
         e2e.run(
-            f"echo '' >> {cfg}"
-            f" && echo '[create_templates.modal-big]' >> {cfg}"
-            f" && echo 'transfer = \"none\"' >> {cfg}",
+            f"echo '' >> {cfg} && echo '[create_templates.modal-big]' >> {cfg} && echo 'transfer = \"none\"' >> {cfg}",
             comment="define modal-big template (substituted with transfer=none for the local test)",
         )
     ).to_succeed()

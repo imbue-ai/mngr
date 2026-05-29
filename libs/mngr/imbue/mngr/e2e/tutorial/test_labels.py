@@ -32,7 +32,7 @@ def test_list_filter_by_label_cel(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            'mngr list --include \'labels.priority == "high"\'',
+            "mngr list --include 'labels.priority == \"high\"'",
             comment="filter by label using CEL",
         )
     ).to_succeed()
@@ -47,7 +47,7 @@ def test_list_combine_include_filters(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            'mngr list --include \'labels.team == "backend"\' --include \'state == "RUNNING"\'',
+            "mngr list --include 'labels.team == \"backend\"' --include 'state == \"RUNNING\"'",
             comment="combine multiple --include filters (AND)",
         )
     ).to_succeed()
@@ -62,7 +62,7 @@ def test_list_exclude_filter(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            'mngr list --exclude \'labels.team == "frontend"\'',
+            "mngr list --exclude 'labels.team == \"frontend\"'",
             comment="exclude agents matching a filter",
         )
     ).to_succeed()
@@ -77,7 +77,7 @@ def test_list_combine_exclude_filters(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            'mngr list --exclude \'labels.team == "frontend"\' --exclude \'labels.team == "devops"\'',
+            "mngr list --exclude 'labels.team == \"frontend\"' --exclude 'labels.team == \"devops\"'",
             comment="combine multiple --exclude filters (OR)",
         )
     ).to_succeed()
@@ -137,7 +137,7 @@ def test_destroy_filtered_dry_run(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            'mngr list --include \'labels.team == "backend"\' --include \'state == "STOPPED"\' --ids | mngr destroy - --force --dry-run',
+            "mngr list --include 'labels.team == \"backend\"' --include 'state == \"STOPPED\"' --ids | mngr destroy - --force --dry-run",
             comment="dry-run destroy via filter+stdin",
         )
     ).to_succeed()
