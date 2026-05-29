@@ -67,11 +67,13 @@ def format_topic_help(topic: TopicHelpPage, *, use_ansi: bool, width: int) -> st
     """Format a topic help page for terminal display.
 
     The body (inline or file-backed, markdown either way) is rendered as markdown
-    -- via rich when ``use_ansi`` is True, otherwise emitted as raw markdown. A
-    SEE ALSO section is appended when references are present.
+    -- via rich when ``use_ansi`` is True, otherwise emitted as raw markdown. For
+    a file-backed topic with a known source URL, relative and anchor links are
+    rewritten to absolute URLs so they are clickable in the terminal. A SEE ALSO
+    section is appended when references are present.
     """
     output = StringIO()
-    output.write(render_markdown(topic.load_body(), use_ansi=use_ansi, width=width))
+    output.write(render_markdown(topic.load_body(), use_ansi=use_ansi, width=width, link_base=topic.link_base_url()))
     if not output.getvalue().endswith("\n"):
         output.write("\n")
 

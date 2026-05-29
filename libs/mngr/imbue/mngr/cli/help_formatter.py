@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -6,6 +7,7 @@ import textwrap
 from io import StringIO
 from typing import Any
 from typing import cast
+from urllib.parse import urljoin
 
 import click
 from click_option_group import GroupedOption
@@ -147,16 +149,68 @@ def get_terminal_width() -> int:
     return terminal_size.columns
 
 
-def render_markdown(markdown: str, *, use_ansi: bool, width: int) -> str:
+# Matches a markdown inline-link target: the "(...)" after a "]". The captured
+# group is the link target. Parallels the relative-link rewriting that
+# scripts/make_cli_docs.py applies to the PyPI README, but each target is
+# resolved against the doc's own URL (so sibling/parent/anchor links work too).
+_MARKDOWN_LINK_TARGET_RE = re.compile(r"\]\(([^)]+)\)")
+
+# Matches a leading URL scheme (https:, mailto:, etc.) -- such targets are
+# already absolute and are left untouched.
+_ABSOLUTE_URL_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:")
+
+
+def _rewrite_link_match(base_url: str, match: re.Match[str]) -> str:
+    """Resolve a single matched markdown link target against ``base_url``.
+
+    A target that is already absolute (has a URL scheme like ``https:`` or
+    ``mailto:``) is returned unchanged; anything else (relative path or bare
+    ``#anchor``) is resolved against ``base_url`` via ``urljoin``.
+    """
+    target = match.group(1)
+    if _ABSOLUTE_URL_RE.match(target):
+        return match.group(0)
+    return f"]({urljoin(base_url, target)})"
+
+
+def _rewrite_links_to_absolute(markdown: str, base_url: str) -> str:
+    """Rewrite relative and anchor markdown link targets to absolute URLs.
+
+    Each target is resolved against ``base_url`` (the doc's own canonical URL):
+    ``#anchor`` -> ``base#anchor``, ``sibling.md`` -> the sibling's URL,
+    ``../x.md`` -> the parent's URL. Already-absolute targets are left unchanged.
+    This makes links clickable when rendered as terminal hyperlinks.
+
+    Uses an explicit ``finditer`` splice (rather than ``re.sub`` with a callback)
+    so the per-match logic stays a module-level function -- no nested closure.
+    """
+    pieces: list[str] = []
+    last_end = 0
+    for match in _MARKDOWN_LINK_TARGET_RE.finditer(markdown):
+        pieces.append(markdown[last_end : match.start()])
+        pieces.append(_rewrite_link_match(base_url, match))
+        last_end = match.end()
+    pieces.append(markdown[last_end:])
+    return "".join(pieces)
+
+
+def render_markdown(markdown: str, *, use_ansi: bool, width: int, link_base: str | None = None) -> str:
     """Render a markdown block for terminal display.
 
     When ``use_ansi`` is True, render via rich (tables, bold, code, links,
     wrapped to ``width``). When False, return the markdown unchanged -- this
     preserves plain output for pipes, non-interactive runs, tests, and the doc
     generator, so only interactive terminals get the rich rendering.
+
+    When ``link_base`` is provided (and ``use_ansi`` is True), relative and
+    anchor links are rewritten to absolute URLs resolved against it, so they are
+    clickable terminal hyperlinks rather than dead relative targets. Plain
+    (non-ANSI) output keeps the original relative links untouched.
     """
     if not use_ansi:
         return markdown
+    if link_base is not None:
+        markdown = _rewrite_links_to_absolute(markdown, link_base)
     # Lazy import: keep rich (and its import cost) out of the CLI startup path;
     # it is only needed here, when rendering help for an interactive terminal.
     from imbue.mngr.cli.markdown_render import markdown_to_ansi

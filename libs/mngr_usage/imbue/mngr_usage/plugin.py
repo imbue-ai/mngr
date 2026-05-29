@@ -18,6 +18,7 @@ from imbue.mngr import hookimpl
 from imbue.mngr.config.plugin_registry import register_plugin_config
 from imbue.mngr.interfaces.help_topic import DocFile
 from imbue.mngr.interfaces.help_topic import TopicHelpPage
+from imbue.mngr.interfaces.help_topic import imbue_mngr_doc_url
 from imbue.mngr_usage.cli import usage
 from imbue.mngr_usage.data_types import UsagePluginConfig
 
@@ -55,6 +56,9 @@ def register_help_topics() -> Sequence[TopicHelpPage]:
             key="usage_cron_recipes",
             one_line_description="mngr usage: Cron automation recipes",
             docs_path="cron_recipes.md",
-            body=DocFile(path=_DOCS_DIR / "cron_recipes.md"),
+            body=DocFile(
+                path=_DOCS_DIR / "cron_recipes.md",
+                source_url=imbue_mngr_doc_url("libs/mngr_usage/docs/cron_recipes.md"),
+            ),
         ),
     ]

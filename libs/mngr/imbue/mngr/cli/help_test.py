@@ -166,6 +166,82 @@ def test_format_topic_help_omits_see_also_when_empty() -> None:
 
 
 # =============================================================================
+# Terminal link rewriting
+# =============================================================================
+
+
+def test_builtin_topic_carries_github_source_url() -> None:
+    """Built-in doc topics carry a GitHub blob source_url for their doc file.
+
+    The URL is what relative/anchor links in the body are resolved against for
+    clickable terminal hyperlinks. It points at the imbue-ai/mngr repo and ends
+    with the doc's repo-relative path (libs/mngr/docs/<docs_path>).
+    """
+    topic = get_topic("idle_detection")
+    assert topic is not None
+    assert isinstance(topic.body, DocFile)
+    source_url = topic.body.source_url
+    assert source_url is not None
+    assert source_url.startswith("https://github.com/imbue-ai/mngr/blob/")
+    assert source_url.endswith("/libs/mngr/docs/concepts/idle_detection.md")
+    # link_base_url() surfaces that same URL for the renderer.
+    assert topic.link_base_url() == source_url
+
+
+def test_inline_topic_has_no_link_base() -> None:
+    """An inline-bodied topic has no source location, so no link base."""
+    topic = TopicHelpPage(
+        key="test-topic",
+        one_line_description="A test topic",
+        body=InlineContent(markdown="See [x](../y.md)."),
+    )
+    assert topic.link_base_url() is None
+
+
+def test_format_topic_help_rewrites_relative_links_for_terminal(tmp_path: Path) -> None:
+    """For a terminal, relative/anchor links in a doc topic become absolute GitHub URLs.
+
+    Exercises the full path: format_topic_help reads the doc body and resolves its
+    relative and anchor links against the DocFile's source_url. rich emits each
+    link target as an OSC-8 hyperlink, so the resolved absolute URL appears
+    verbatim in the ANSI output.
+    """
+    md = tmp_path / "cron_recipes.md"
+    md.write_text("See [Waiting](../README.md#waiting-on-a-predicate) and [Section](#user-input-tracking).\n")
+    topic = TopicHelpPage(
+        key="usage_cron_recipes",
+        one_line_description="Cron recipes",
+        body=DocFile(
+            path=md,
+            source_url="https://github.com/imbue-ai/mngr/blob/v9.9.9/libs/mngr_usage/docs/cron_recipes.md",
+        ),
+    )
+    output = format_topic_help(topic, use_ansi=True, width=100)
+    assert "https://github.com/imbue-ai/mngr/blob/v9.9.9/libs/mngr_usage/README.md#waiting-on-a-predicate" in output
+    assert (
+        "https://github.com/imbue-ai/mngr/blob/v9.9.9/libs/mngr_usage/docs/cron_recipes.md#user-input-tracking"
+        in output
+    )
+
+
+def test_format_topic_help_keeps_relative_links_when_not_terminal(tmp_path: Path) -> None:
+    """Non-terminal (plain) output keeps the original relative links untouched."""
+    md = tmp_path / "cron_recipes.md"
+    md.write_text("See [Waiting](../README.md#waiting-on-a-predicate).\n")
+    topic = TopicHelpPage(
+        key="usage_cron_recipes",
+        one_line_description="Cron recipes",
+        body=DocFile(
+            path=md,
+            source_url="https://github.com/imbue-ai/mngr/blob/v9.9.9/libs/mngr_usage/docs/cron_recipes.md",
+        ),
+    )
+    output = format_topic_help(topic, use_ansi=False, width=100)
+    assert "[Waiting](../README.md#waiting-on-a-predicate)" in output
+    assert "github.com" not in output
+
+
+# =============================================================================
 # CLI integration tests (via CliRunner)
 # =============================================================================
 
