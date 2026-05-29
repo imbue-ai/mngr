@@ -37,9 +37,15 @@ if [[ ! -x "$MNGR_BIN" ]]; then
   fail "bundled mngr binary missing at $MNGR_BIN"
 fi
 
-log "extracting login URL from events log"
-LOGIN_URL=$(grep -oE 'http://127\.0\.0\.1:[0-9]+/login\?one_time_code=[A-Za-z0-9_-]+' "$EVENTS_LOG" | tail -1)
-[[ -n "$LOGIN_URL" ]] || fail "no login URL in $EVENTS_LOG"
+log "waiting for login URL in events log (up to 120s)"
+LOGIN_URL=""
+url_deadline=$((SECONDS + 120))
+while (( SECONDS < url_deadline )); do
+  LOGIN_URL=$(grep -oE 'http://127\.0\.0\.1:[0-9]+/login\?one_time_code=[A-Za-z0-9_-]+' "$EVENTS_LOG" 2>/dev/null | tail -1)
+  [[ -n "$LOGIN_URL" ]] && break
+  sleep 2
+done
+[[ -n "$LOGIN_URL" ]] || fail "no login URL in $EVENTS_LOG after 120s"
 BASE=$(echo "$LOGIN_URL" | sed -E 's|^(http://[^/]+).*|\1|')
 CODE=$(echo "$LOGIN_URL" | sed -E 's|.*one_time_code=||')
 log "base=$BASE"
