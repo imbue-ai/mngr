@@ -35,7 +35,7 @@
   <p class="text-sm text-zinc-700 mb-3">
     {% if access == 'WRITE' %}
       Approving will grant {{ ws_name or agent_id }} and its sibling agents
-      <strong>read and write</strong> access (including delete) to the following file:
+      <strong>read and write</strong> access (including delete) to the following file/directory:
     {% else %}
       Approving will grant {{ ws_name or agent_id }} and its sibling agents
       <strong>read-only</strong> access to the following file:
