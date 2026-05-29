@@ -22,11 +22,11 @@ from imbue.mngr.cli.help_formatter import format_git_style_help
 from imbue.mngr.cli.help_formatter import get_all_help_metadata
 from imbue.mngr.cli.help_formatter import get_help_metadata
 from imbue.mngr.cli.help_formatter import run_pager
-from imbue.mngr.cli.help_topics import TopicHelpPage
 from imbue.mngr.cli.help_topics import get_all_topics
 from imbue.mngr.cli.help_topics import get_topic
 from imbue.mngr.cli.help_topics import register_topic
 from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.interfaces.help_topic import TopicHelpPage
 
 # =============================================================================
 # Topic registration

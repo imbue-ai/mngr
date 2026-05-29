@@ -326,7 +326,7 @@ The easiest approach is to ship a directory of markdown files and expose it with
 from pathlib import Path
 
 from imbue.mngr import hookimpl
-from imbue.mngr.cli.help_topics import build_topics_from_directory
+from imbue.mngr.interfaces.help_topic import build_topics_from_directory
 
 @hookimpl
 def register_help_topics():
@@ -336,7 +336,7 @@ def register_help_topics():
 For full control (aliases, "See Also" references, inline content), return `TopicHelpPage` objects directly:
 
 ```python
-from imbue.mngr.cli.help_topics import TopicHelpPage
+from imbue.mngr.interfaces.help_topic import TopicHelpPage
 
 @hookimpl
 def register_help_topics():

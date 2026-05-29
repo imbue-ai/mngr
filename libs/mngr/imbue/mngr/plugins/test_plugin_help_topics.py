@@ -13,10 +13,10 @@ from click.testing import CliRunner
 import imbue.mngr.main
 from imbue.mngr import hookimpl
 from imbue.mngr.cli.help import load_help_topics_from_plugins
-from imbue.mngr.cli.help_topics import TopicHelpPage
-from imbue.mngr.cli.help_topics import build_topics_from_directory
 from imbue.mngr.cli.help_topics import get_topic
 from imbue.mngr.cli.help_topics import preserve_topic_registry
+from imbue.mngr.interfaces.help_topic import TopicHelpPage
+from imbue.mngr.interfaces.help_topic import build_topics_from_directory
 from imbue.mngr.main import cli
 from imbue.mngr.main import reset_plugin_manager
 from imbue.mngr.plugins import hookspecs

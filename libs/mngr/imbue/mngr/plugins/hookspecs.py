@@ -11,10 +11,10 @@ from click_option_group import OptionGroup
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.mngr.cli.help_topics import TopicHelpPage
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.help_topic import TopicHelpPage
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import NewHostOptions
@@ -350,8 +350,8 @@ def register_help_topics() -> Sequence[TopicHelpPage] | None:
 
     The easiest way to contribute topics is to ship a directory of markdown
     files and pass it to ``build_topics_from_directory`` (in
-    ``imbue.mngr.cli.help_topics``), which turns each ``.md`` file into one topic
-    keyed by its filename stem. For full control (aliases, "See Also"
+    ``imbue.mngr.interfaces.help_topic``), which turns each ``.md`` file into one
+    topic keyed by its filename stem. For full control (aliases, "See Also"
     references, inline content) return ``TopicHelpPage`` objects directly. See
     the plugin docs (``concepts/plugins.md``) for complete examples::
 

@@ -17,8 +17,8 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from imbue.mngr import hookimpl
-from imbue.mngr.cli.help_topics import TopicHelpPage
-from imbue.mngr.cli.help_topics import build_topics_from_directory
+from imbue.mngr.interfaces.help_topic import TopicHelpPage
+from imbue.mngr.interfaces.help_topic import build_topics_from_directory
 
 # Docs root relative to this file:
 # this file: libs/mngr/imbue/mngr/cli/builtin_help_topics.py
