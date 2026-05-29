@@ -21,6 +21,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Fixed: `pool_hosts` INSERT now picks up the schema's `host_name` column; every successful pool bake had been dying at the last step with `null value in column "host_name"` and leaking a fully-provisioned VPS.
 - Fixed: Multi-token `mngr exec` commands packed into a single `shlex.join`'d positional string so click no longer eats `--force` as a `mngr exec` option.
+- Fixed: `mngr imbue_cloud auth oauth` no longer hangs for ~300s after a successful browser sign-in. The local callback listener now only records query params for `/oauth/callback` with non-empty params, so secondary browser GETs (favicon, prefetches) can't overwrite the captured callback with `{}`.
 
 ## [v0.2.8] - 2026-05-13
 

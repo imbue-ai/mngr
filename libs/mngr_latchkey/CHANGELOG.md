@@ -30,6 +30,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `minds-api-proxy` gateway extension now authenticates forwarded requests to the upstream Minds API on the agent's behalf — when `LATCHKEY_EXTENSION_MINDS_API_KEY` is set it overwrites the inbound `Authorization` header with `Bearer <key>`, so agents never see the key and cannot spoof one. With the env var unset, the header is forwarded unchanged (used by tests).
 - Changed: The agent baseline permissions file now enforces per-agent Minds API isolation via two cooperating rules — a deny rule for any `/minds-api-proxy/api/v1/agents/<id>/...` whose `<id>` is absent from an allowed-agent `anyOf` list, then a generic allow rule for listed agents — so an agent on one host cannot reach the Minds API on behalf of an agent on another.
 - Changed: `mngr_latchkey/ssh_tunnel.py` is removed; `SSHTunnelManager`, `RemoteSSHInfo`, and `SSHTunnelError` are now imported from `imbue.mngr_forward.ssh_tunnel`, the single monorepo SSH-tunneling implementation (which absorbed latchkey's exponential-backoff repair loop, `agent_id` tagging, and `remove_reverse_tunnels_for_agent`).
+- Changed: `Latchkey.auth_browser` now transparently recovers from latchkey's "Service `<name>` requires preparation first" error by running `latchkey auth browser-prepare <service>` and retrying `latchkey auth browser <service>` once, so callers (e.g. minds' predefined-permission grant flow) succeed on the first user-visible attempt instead of failing with a confusing error.
 
 ### Fixed
 

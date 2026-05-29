@@ -51,6 +51,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Fixed
 
 - Fixed: TMR workflows (`tmr.yml`, `tmr-reintegrate.yml`) now re-assert `mngr tmr`'s exit code via `exit "${PIPESTATUS[0]}"` after the `| tee tmr-report/events.jsonl` pipeline, so a failed run is no longer reported as successful when `pipefail` fails to propagate the left-side failure.
+- Fixed: Dropped the removed `--use-snapshot` flag from `.github/workflows/tmr.yml` so scheduled/manual TMR runs don't fail at invocation (snapshot building on `--provider modal` is automatic now, so behavior is unchanged); also refreshed a stale comment in `.github/workflows/tmr-reintegrate.yml` referencing the same removed flag.
 
 ## 2026-05-13
 
