@@ -152,7 +152,7 @@ def limactl_start_new(
     instance_name: str,
     yaml_path: Path,
     start_args: tuple[str, ...] = (),
-    timeout: float = 600.0,
+    timeout: float = 1800.0,
     on_output: Callable[[str, bool], None] | None = None,
 ) -> None:
     """Create and start a new Lima instance from a YAML config file.
