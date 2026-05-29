@@ -224,11 +224,13 @@ class _FakeClock:
 
     def __init__(self) -> None:
         self.now: float = 0.0
+        self.slept_durations: list[float] = []
 
     def monotonic(self) -> float:
         return self.now
 
     def sleep(self, duration: float) -> None:
+        self.slept_durations.append(duration)
         self.now += duration
 
 
@@ -296,6 +298,29 @@ def test_wait_for_usage_times_out_when_predicate_never_matches() -> None:
     assert result.is_matched is False
     assert result.is_timed_out is True
     assert result.matched_source is None
+
+
+def test_wait_for_usage_caps_sleep_at_remaining_timeout() -> None:
+    """``--timeout`` is a true upper bound: when the interval exceeds the
+    timeout, the inter-poll sleep is shortened so the wait can't overshoot
+    the deadline by (nearly) a whole interval. With timeout=1 and
+    interval=30 the loop sleeps only ~1s before exiting timed out, never the
+    full 30s interval."""
+    clock = _FakeClock()
+    result = wait_for_usage(
+        poll_fn=lambda: [_make_snapshot("claude", used=80.0, resets_at=2000)],
+        until_filters=_compile_until(["five_hour.used_percentage < 50"]),
+        timeout_seconds=1.0,
+        interval_seconds=30.0,
+        now_fn=lambda: 1000,
+        monotonic_fn=clock.monotonic,
+        sleep_fn=clock.sleep,
+    )
+    assert result.is_timed_out is True
+    # No individual sleep may exceed the timeout, and the total wait stays at
+    # the deadline rather than ballooning to a full interval (30s).
+    assert all(duration <= 1.0 for duration in clock.slept_durations)
+    assert result.elapsed_seconds <= 1.0
 
 
 def test_wait_for_usage_source_predicate_in_cel_excludes_non_matching_sources() -> None:
