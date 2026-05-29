@@ -4,4 +4,4 @@ The `antigravity` agent type now uses agy hooks (re-verified working against agy
 - A `PreInvocation`/`Stop` hook pair maintains an `active` marker so antigravity agents now report RUNNING while working and WAITING when idle (previously they had no `active` marker and could not report RUNNING).
 - `auto_allow_permissions = true` is now wired through a `PreToolUse` hook returning `{"decision": "allow"}` instead of the `--dangerously-skip-permissions` CLI flag.
 
-Note: the in-TUI `/hooks` command writes to `~/.gemini/antigravity-cli/hooks.json`, which the runtime does not read (agy bug); mngr writes its own per-agent file via `--add-dir` and does not rely on the TUI.
+Note: the in-TUI `/hooks` command writes to `~/.gemini/antigravity-cli/hooks.json`, which the hook execution engine never runs (it executes hooks only from `~/.gemini/config/hooks.json` and workspace `.agents/`; the TUI path is loaded for display only -- agy bug, reported as antigravity-cli#49). mngr writes its own per-agent file via `--add-dir` and does not rely on the TUI.

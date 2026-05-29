@@ -21,10 +21,12 @@ agent state dir and points agy at it with ``--add-dir``:
   flag, so approval is controlled by one mechanism.
 
 Note: the in-TUI ``/hooks`` command writes ``hooks.json`` to
-``~/.gemini/antigravity-cli/``, which the runtime does NOT read
-(google-antigravity/antigravity-cli#49); only ``~/.gemini/config/hooks.json``
-and per-workspace ``.agents/hooks.json`` are executed. mngr therefore writes
-its own file and never relies on the TUI.
+``~/.gemini/antigravity-cli/``, which the hook-execution engine never runs --
+that file is loaded only for the TUI's display/management view, while only
+``~/.gemini/config/hooks.json`` and per-workspace ``.agents/hooks.json`` are
+actually executed (reported as google-antigravity/antigravity-cli#49). mngr
+therefore writes its own file under an ``--add-dir`` path and never relies on
+the TUI.
 
 Readiness is still signalled purely by the ``InteractiveTuiAgent`` banner-poll:
 agy's hook events (``PreToolUse``/``PostToolUse``/``PreInvocation``/

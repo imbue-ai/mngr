@@ -23,9 +23,15 @@ and the plugin's ``assemble_command``), so the user's global config stays
 untouched and each agent's marker files land in its own state dir. This
 recovers the per-agent isolation that ``mngr_gemini`` got from the
 (now-removed) ``GEMINI_CLI_SYSTEM_SETTINGS_PATH`` env var. Verified against
-``agy`` 1.0.3: the ``/hooks`` TUI writes to ``~/.gemini/antigravity-cli/``,
-which the runtime does NOT read (see google-antigravity/antigravity-cli#49),
-but a ``.agents/hooks.json`` under an ``--add-dir`` path is loaded and executed.
+``agy`` 1.0.3: the ``/hooks`` TUI writes to ``~/.gemini/antigravity-cli/hooks.json``,
+which the hook *execution* engine does not run -- that file is loaded only by
+the management/TUI layer (so it shows in the ``/hooks`` menu) while
+``json_hook_caller`` executes hooks solely from ``~/.gemini/config/hooks.json``
+and per-workspace ``.agents/hooks.json``. The docs list only those two
+locations; the TUI write-path mismatch is reported as
+google-antigravity/antigravity-cli#49 (same class of bug the 1.0.2 changelog
+fixed for ``mcp_config.json``). A ``.agents/hooks.json`` under an ``--add-dir``
+path is loaded and executed.
 """
 
 from __future__ import annotations
