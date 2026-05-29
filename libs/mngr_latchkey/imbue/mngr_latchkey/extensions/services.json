@@ -46,7 +46,7 @@
   "github": [
     {
       "scope": "github-rest-api",
-      "display_name": "GitHub",
+      "display_name": "GitHub (REST API)",
       "permissions": [
         "github-read-all",
         "github-write-all",
@@ -62,6 +62,14 @@
         "github-search",
         "github-read-notifications",
         "github-write-notifications"
+      ]
+    },
+    {
+      "scope": "github-git",
+      "display_name": "GitHub (git)",
+      "permissions": [
+        "github-git-read",
+        "github-git-write"
       ]
     }
   ],
