@@ -27,4 +27,10 @@ jobs:
           echo "--- /Applications/minds.app ---"
           ls -d /Applications/minds.app 2>&1 || echo "  absent"
           echo "--- Minds processes ---"
-          pgrep -x Minds && echo "  STILL RUNNING (bug)" || echo "  none"
+          if pgrep -x Minds >/dev/null; then
+            echo "  STILL RUNNING (bug) - pids:"
+            pgrep -afl Minds || true
+            exit 1
+          else
+            echo "  none"
+          fi
