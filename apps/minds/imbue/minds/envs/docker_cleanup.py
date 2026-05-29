@@ -66,7 +66,11 @@ def read_profile_user_id(mngr_host_dir: Path) -> str | None:
     user_id_path = mngr_host_dir / "profiles" / profile_id / _USER_ID_FILENAME
     if not user_id_path.is_file():
         return None
-    return user_id_path.read_text().strip() or None
+    try:
+        return user_id_path.read_text().strip() or None
+    except OSError as e:
+        logger.warning("Could not read mngr profile user_id {}: {}", user_id_path, e)
+        return None
 
 
 def state_container_name(mngr_prefix: str, user_id: str) -> str:
