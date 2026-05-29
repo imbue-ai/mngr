@@ -2,40 +2,50 @@
 
 This is the reusable "configure backups for host X" operation. It runs
 asynchronously after ``mngr create`` returns the canonical host id (the
-desktop client schedules it on a detached thread, mirroring the
-Cloudflare tunnel-token injection), but nothing here is creation-specific:
-the same entry point can be re-applied to any already-created host later.
+desktop client schedules it on a detached thread, mirroring the Cloudflare
+tunnel-token injection), but nothing here is creation-specific: the same
+entry point can be re-applied to any already-created host later.
 
-For the ``IMBUE_CLOUD`` backup provider it creates (or reuses) a
-per-workspace R2 bucket named after the host id, mints a readwrite key,
-and injects a ``runtime/secrets/restic.env`` pointing restic at that
-bucket. For ``API_KEY`` it writes the user's free-form env block verbatim.
-``CONFIGURE_LATER`` is a no-op. When the chosen encryption method is
-"no password", it also flips ``restic.allow_empty_password`` in the
-host's ``runtime/backup.toml`` so the host_backup service runs restic with
-``--insecure-no-password``.
+The key idea: minds initializes the restic repository itself (from the
+machine running minds) and gives each workspace its own random repository
+password, so the workspace never holds the user's master password and
+carries no repo-init logic. Concretely, enabling backups:
 
-The two on-disk files are the contract consumed by the FCT ``host_backup``
-service: ``runtime/secrets/restic.env`` (repository URL + credentials) and
-``runtime/backup.toml`` (non-secret knobs, here just the empty-password
-toggle).
+1. resolves the repository URL + backend credentials (``IMBUE_CLOUD``:
+   create/reuse a per-workspace R2 bucket + readwrite key; ``API_KEY``:
+   from the user's free-form env block),
+2. generates a random per-workspace ``RESTIC_PASSWORD``,
+3. ``restic init``s the repo using the user's master password (or empty for
+   the ``no_password`` encryption method),
+4. ``restic key add``s the random per-workspace password,
+5. writes the canonical ``restic.env`` (repo + creds + random password) to
+   the minds-side store (see ``backup_env_store``), and
+6. injects that whole file into the workspace at
+   ``runtime/secrets/restic.env`` via ``mngr exec``.
+
+``CONFIGURE_LATER`` is a no-op. Re-provisioning is idempotent: if a
+canonical env already exists for the workspace, minds just re-injects it.
 """
 
 import base64
 import os
+import secrets
 import shlex
 
-import tomlkit
 from loguru import logger
 from pydantic import Field
 from pydantic import SecretStr
-from tomlkit.exceptions import TOMLKitError
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.minds.config.data_types import MNGR_BINARY
+from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client import restic_cli
+from imbue.minds.desktop_client.backup_env_store import parse_restic_env
+from imbue.minds.desktop_client.backup_env_store import read_canonical_env
+from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import R2BucketKeyMaterial
@@ -44,13 +54,15 @@ from imbue.minds.primitives import BackupProvider
 from imbue.mngr.primitives import AgentId
 
 _RESTIC_ENV_REMOTE_PATH = "runtime/secrets/restic.env"
-_BACKUP_TOML_REMOTE_PATH = "runtime/backup.toml"
 _RESTIC_ENV_MODE = "600"
+# Bytes of entropy for the per-workspace repository password.
+_WORKSPACE_PASSWORD_ENTROPY_BYTES = 32
 
-_IMBUE_CLOUD_ENV_HEADER = (
-    "# Managed by minds: restic backup repository + credentials for the\n"
-    "# imbue_cloud bucket created for this workspace. Edit backup.toml for\n"
-    "# non-secret knobs (retention, excludes, allow_empty_password).\n"
+_CANONICAL_ENV_HEADER = (
+    "# Managed by minds. Definitive copy of this workspace's restic backup\n"
+    "# configuration (repository + credentials + the workspace's random\n"
+    "# password). The copy inside the workspace is injected from this file;\n"
+    "# edit here and re-inject rather than editing the workspace copy.\n"
 )
 
 
@@ -61,14 +73,17 @@ class BackupSetupRequest(FrozenModel):
     master_password: SecretStr | None = Field(
         default=None,
         description=(
-            "Resolved restic repository passphrase to inject as RESTIC_PASSWORD. None means "
-            "the empty-password path (restic --insecure-no-password). The caller maps the "
-            "encryption-method choice to this value."
+            "The user's master/recovery password used (only) to `restic init` the repo. None means "
+            "the no_password encryption method -- the repo is initialized with an empty password. "
+            "This is never written into the workspace; the workspace gets its own random password."
         ),
     )
     api_key_env_text: str = Field(
         default="",
-        description="For API_KEY: the user's free-form KEY=VALUE block, written verbatim to restic.env.",
+        description=(
+            "For API_KEY: the user's free-form KEY=VALUE block (RESTIC_REPOSITORY + backend creds). "
+            "Must NOT define RESTIC_PASSWORD -- minds assigns each workspace a random one."
+        ),
     )
     account_email: str = Field(
         default="",
@@ -76,17 +91,8 @@ class BackupSetupRequest(FrozenModel):
     )
 
 
-class BackupInjectionPlan(FrozenModel):
-    """The concrete files to write to the host, computed from a request."""
-
-    restic_env_content: str = Field(description="Full contents of runtime/secrets/restic.env")
-    allow_empty_password: bool = Field(
-        description="When true, restic.allow_empty_password is set in backup.toml (empty-password repo)"
-    )
-
-
 # ---------------------------------------------------------------------------
-# Pure plan computation
+# Pure helpers
 # ---------------------------------------------------------------------------
 
 
@@ -100,88 +106,27 @@ def _render_env_pairs(pairs: list[tuple[str, str]]) -> str:
     return "".join(f"{key}={value}\n" for key, value in pairs)
 
 
-def _defined_env_keys(env_text: str) -> set[str]:
-    """Return the set of KEY names assigned in a KEY=VALUE env block.
-
-    Mirrors the envelope contract of host_backup's ``parse_restic_env_file``
-    (supports leading ``export``, ignores comments / blanks / keyless lines).
-    """
-    keys: set[str] = set()
-    for raw_line in env_text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[len("export ") :].lstrip()
-        if "=" not in line:
-            continue
-        key = line.split("=", 1)[0].strip()
-        if key:
-            keys.add(key)
-    return keys
-
-
 def env_text_defines_restic_password(env_text: str) -> bool:
-    """Return whether the env block already assigns RESTIC_PASSWORD."""
-    return "RESTIC_PASSWORD" in _defined_env_keys(env_text)
+    """Return whether a free-form env block assigns RESTIC_PASSWORD."""
+    return "RESTIC_PASSWORD" in parse_restic_env(env_text)
 
 
-def build_imbue_cloud_restic_env(
+def generate_workspace_password() -> str:
+    """Generate a cryptographically random per-workspace restic password."""
+    return secrets.token_urlsafe(_WORKSPACE_PASSWORD_ENTROPY_BYTES)
+
+
+def build_canonical_env_content(
     *,
     repository: str,
-    access_key_id: str,
-    secret_access_key: str,
-    master_password: str | None,
-) -> BackupInjectionPlan:
-    """Build the restic.env plan for an imbue_cloud R2 bucket backup."""
-    pairs: list[tuple[str, str]] = [
-        ("RESTIC_REPOSITORY", repository),
-        ("AWS_ACCESS_KEY_ID", access_key_id),
-        ("AWS_SECRET_ACCESS_KEY", secret_access_key),
-    ]
-    if master_password is not None:
-        pairs.append(("RESTIC_PASSWORD", master_password))
-    content = _IMBUE_CLOUD_ENV_HEADER + _render_env_pairs(pairs)
-    return BackupInjectionPlan(restic_env_content=content, allow_empty_password=master_password is None)
-
-
-def build_api_key_restic_env(*, env_text: str, master_password: str | None) -> BackupInjectionPlan:
-    """Build the restic.env plan for the API_KEY (free-form) provider.
-
-    The textarea is written verbatim. The password it contains (if any)
-    wins: an explicit ``RESTIC_PASSWORD`` in the block is left as-is and the
-    encryption-method choice is ignored. Otherwise ``master_password``
-    governs -- a value is appended as ``RESTIC_PASSWORD``; ``None`` means
-    an empty-password repo.
-    """
-    normalized = env_text if (not env_text or env_text.endswith("\n")) else env_text + "\n"
-    if env_text_defines_restic_password(env_text):
-        return BackupInjectionPlan(restic_env_content=normalized, allow_empty_password=False)
-    if master_password is not None:
-        content = normalized + _render_env_pairs([("RESTIC_PASSWORD", master_password)])
-        return BackupInjectionPlan(restic_env_content=content, allow_empty_password=False)
-    return BackupInjectionPlan(restic_env_content=normalized, allow_empty_password=True)
-
-
-def merge_allow_empty_password_into_backup_toml(existing_text: str, value: bool) -> str:
-    """Return ``existing_text`` with ``[restic] allow_empty_password = value`` set.
-
-    Preserves every other section (snapshot, retention, excludes, ...) that
-    bootstrap wrote. When ``existing_text`` is blank (backup.toml not yet
-    seeded), produces a minimal document with just the ``[restic]`` table;
-    bootstrap fills in ``[snapshot]`` on its next boot/merge.
-    """
-    try:
-        doc = tomlkit.parse(existing_text) if existing_text.strip() else tomlkit.document()
-    except TOMLKitError as e:
-        raise BackupProvisioningError(f"Could not parse existing backup.toml: {e}") from e
-    if "restic" in doc:
-        restic_table = doc["restic"]
-    else:
-        restic_table = tomlkit.table()
-        doc["restic"] = restic_table
-    restic_table["allow_empty_password"] = value
-    return tomlkit.dumps(doc)
+    backend_env: dict[str, str],
+    workspace_password: str,
+) -> str:
+    """Render the canonical restic.env (repo + backend creds + workspace password)."""
+    pairs: list[tuple[str, str]] = [("RESTIC_REPOSITORY", repository)]
+    pairs.extend((key, value) for key, value in backend_env.items())
+    pairs.append(("RESTIC_PASSWORD", workspace_password))
+    return _CANONICAL_ENV_HEADER + _render_env_pairs(pairs)
 
 
 # ---------------------------------------------------------------------------
@@ -233,26 +178,9 @@ def _write_remote_file(
         )
 
 
-def _read_remote_file(
-    agent_id: AgentId,
-    remote_path: str,
-    *,
-    parent_cg: ConcurrencyGroup | None,
-) -> str:
-    """Read ``remote_path`` from the agent work_dir; return "" if it is absent.
-
-    An absent file is a legitimate first-run state and yields ``""`` with a
-    zero exit. A *present* file that cannot be read (e.g. permission denied)
-    is a genuine error: it exits non-zero and raises rather than being
-    masked as empty, which would otherwise let the empty-string path clobber
-    a backup.toml that bootstrap actually wrote.
-    """
-    quoted = shlex.quote(remote_path)
-    command_str = f"if [ -f {quoted} ]; then cat {quoted}; fi"
-    result = _run_mngr_exec(agent_id, command_str, parent_cg=parent_cg)
-    if result.returncode != 0:
-        raise BackupProvisioningError(f"Failed to read {remote_path} on agent {agent_id}: {result.stderr.strip()}")
-    return result.stdout
+def _inject_canonical_env(agent_id: AgentId, content: str, *, parent_cg: ConcurrencyGroup | None) -> None:
+    """Inject the canonical restic.env into the workspace's runtime/secrets/restic.env."""
+    _write_remote_file(agent_id, _RESTIC_ENV_REMOTE_PATH, content, mode=_RESTIC_ENV_MODE, parent_cg=parent_cg)
 
 
 # ---------------------------------------------------------------------------
@@ -301,21 +229,18 @@ def _repository_url_for_bucket(s3_endpoint: str, bucket_name: str) -> str:
     return f"s3:{s3_endpoint.rstrip('/')}/{bucket_name}"
 
 
-def _plan_for_request(
+def _resolve_repository_and_backend_env(
     request: BackupSetupRequest,
     host_id: str,
     *,
     imbue_cloud_cli: ImbueCloudCli | None,
-) -> BackupInjectionPlan | None:
-    """Compute the injection plan for a request, provisioning a bucket if needed.
+) -> tuple[str, dict[str, str]]:
+    """Resolve ``(repository_url, backend_env)`` for the chosen provider.
 
-    Returns None for ``CONFIGURE_LATER`` (nothing to inject).
+    ``backend_env`` is the set of non-password env vars restic needs to reach
+    the backend (e.g. ``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY``); it
+    never includes ``RESTIC_REPOSITORY`` or ``RESTIC_PASSWORD``.
     """
-    master_password = request.master_password.get_secret_value() if request.master_password is not None else None
-    if request.backup_provider is BackupProvider.CONFIGURE_LATER:
-        return None
-    if request.backup_provider is BackupProvider.API_KEY:
-        return build_api_key_restic_env(env_text=request.api_key_env_text, master_password=master_password)
     if request.backup_provider is BackupProvider.IMBUE_CLOUD:
         if imbue_cloud_cli is None:
             raise BackupProvisioningError("imbue_cloud backups require imbue_cloud_cli to be configured")
@@ -324,13 +249,28 @@ def _plan_for_request(
         if not host_id:
             raise BackupProvisioningError("imbue_cloud backups require a host id to name the bucket")
         bucket_name, s3_endpoint, key = _create_or_reuse_bucket(imbue_cloud_cli, request.account_email, host_id)
-        return build_imbue_cloud_restic_env(
-            repository=_repository_url_for_bucket(s3_endpoint, bucket_name),
-            access_key_id=key.access_key_id,
-            secret_access_key=key.secret_access_key.get_secret_value(),
-            master_password=master_password,
-        )
+        repository = _repository_url_for_bucket(s3_endpoint, bucket_name)
+        backend_env = {
+            "AWS_ACCESS_KEY_ID": str(key.access_key_id),
+            "AWS_SECRET_ACCESS_KEY": key.secret_access_key.get_secret_value(),
+        }
+        return repository, backend_env
+    if request.backup_provider is BackupProvider.API_KEY:
+        env = parse_restic_env(request.api_key_env_text)
+        if "RESTIC_PASSWORD" in env:
+            raise BackupProvisioningError(
+                "RESTIC_PASSWORD must not be set for api_key backups; minds assigns each workspace its own password"
+            )
+        repository = env.pop("RESTIC_REPOSITORY", "")
+        if not repository:
+            raise BackupProvisioningError("api_key backups require RESTIC_REPOSITORY to be set in the env block")
+        return repository, env
     raise BackupProvisioningError(f"Unhandled backup provider: {request.backup_provider}")
+
+
+# ---------------------------------------------------------------------------
+# Orchestration
+# ---------------------------------------------------------------------------
 
 
 def configure_backups_for_host(
@@ -339,33 +279,59 @@ def configure_backups_for_host(
     host_id: str,
     request: BackupSetupRequest,
     imbue_cloud_cli: ImbueCloudCli | None,
+    paths: WorkspacePaths,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> None:
-    """Provision + inject restic backup config for a created host.
+    """Provision the repository (from minds) and inject the workspace's restic.env.
 
-    No-op for ``CONFIGURE_LATER``. Raises ``BackupProvisioningError`` on any
-    failure so the caller can surface it (the desktop client turns it into a
-    notification); it is non-fatal to the already-created workspace.
+    No-op for ``CONFIGURE_LATER``. Idempotent: an existing canonical env is
+    just re-injected. Raises ``BackupProvisioningError`` (or the
+    ``ResticNotInstalledError`` subclass) on failure so the caller can
+    surface it as a notification; failure is non-fatal to the workspace.
     """
+    if request.backup_provider is BackupProvider.CONFIGURE_LATER:
+        logger.debug("Backup provider CONFIGURE_LATER for agent {}; nothing to do", agent_id)
+        return
+
     with log_span("Configuring {} backups for agent {}", request.backup_provider.value, agent_id):
-        plan = _plan_for_request(request, host_id, imbue_cloud_cli=imbue_cloud_cli)
-        if plan is None:
-            logger.debug("Backup provider CONFIGURE_LATER for agent {}; nothing to inject", agent_id)
+        # restic must be available on the minds machine to init the repo + add the key.
+        restic_cli.ensure_restic_available()
+
+        # Idempotent re-provision: the canonical env is the source of truth.
+        # If we already have it, the repo + key already exist -- just re-inject.
+        existing_canonical = read_canonical_env(paths, agent_id)
+        if existing_canonical is not None:
+            logger.debug("Reusing existing canonical restic.env for agent {}; re-injecting", agent_id)
+            _inject_canonical_env(agent_id, existing_canonical, parent_cg=parent_cg)
             return
-        _write_remote_file(
-            agent_id,
-            _RESTIC_ENV_REMOTE_PATH,
-            plan.restic_env_content,
-            mode=_RESTIC_ENV_MODE,
+
+        repository, backend_env = _resolve_repository_and_backend_env(
+            request, host_id, imbue_cloud_cli=imbue_cloud_cli
+        )
+        master_password = (
+            request.master_password.get_secret_value() if request.master_password is not None else None
+        )
+        workspace_password = generate_workspace_password()
+
+        # Initialize the repo with the master (or empty) password, then add the
+        # random per-workspace password as an additional key. The workspace only
+        # ever receives the random password.
+        restic_cli.init_repo(
+            repository=repository, backend_env=backend_env, password=master_password, parent_cg=parent_cg
+        )
+        restic_cli.add_password_key(
+            repository=repository,
+            backend_env=backend_env,
+            existing_password=master_password,
+            new_password=workspace_password,
             parent_cg=parent_cg,
         )
-        # Make backup.toml authoritatively reflect the plan's empty-password
-        # value (True or False), not only when it is True. This matters on the
-        # reusable reconfigure path: switching a host from no_password to a
-        # master password must clear a previously-set allow_empty_password,
-        # otherwise the host_backup runner would pass --insecure-no-password
-        # alongside a RESTIC_PASSWORD (a contradictory state).
-        existing_backup_toml = _read_remote_file(agent_id, _BACKUP_TOML_REMOTE_PATH, parent_cg=parent_cg)
-        merged = merge_allow_empty_password_into_backup_toml(existing_backup_toml, plan.allow_empty_password)
-        _write_remote_file(agent_id, _BACKUP_TOML_REMOTE_PATH, merged, mode=None, parent_cg=parent_cg)
+
+        canonical_env = build_canonical_env_content(
+            repository=repository, backend_env=backend_env, workspace_password=workspace_password
+        )
+        # Persist the definitive copy first (so a later injection failure still
+        # leaves minds able to reach the repo / show status), then inject.
+        write_canonical_env(paths, agent_id, canonical_env)
+        _inject_canonical_env(agent_id, canonical_env, parent_cg=parent_cg)
         logger.debug("Injected restic backup config into agent {}", agent_id)

@@ -87,17 +87,19 @@ class BackupProvider(UpperCaseStrEnum):
 
 
 class BackupEncryptionMethod(UpperCaseStrEnum):
-    """How the restic repository for a workspace's backups is encrypted.
+    """Which master/recovery key the workspace's restic repo is initialized with.
 
     Only meaningful when a real backup provider (``IMBUE_CLOUD`` or
-    ``API_KEY``) is selected.
+    ``API_KEY``) is selected. Either way the workspace gets its own random
+    repository password; this only governs the key minds uses to ``restic
+    init`` the repo (a user-controlled recovery key), which never enters the
+    workspace.
 
-    - ``MASTER_PASSWORD`` -- encrypt the repo with a passphrase. The value
-      is established once and stored in a per-user file, shared across all
-      of the user's workspaces.
-    - ``NO_PASSWORD`` -- use an empty-password repo; restic runs with
-      ``--insecure-no-password`` and ``backup.toml`` records
-      ``restic.allow_empty_password = true``.
+    - ``MASTER_PASSWORD`` -- init the repo with a user passphrase, established
+      once and stored in a per-user file shared across all of the user's
+      workspaces.
+    - ``NO_PASSWORD`` -- init the repo with an empty password (restic
+      ``--insecure-no-password``); no recovery passphrase to remember.
     """
 
     MASTER_PASSWORD = auto()

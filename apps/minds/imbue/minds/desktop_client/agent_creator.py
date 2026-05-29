@@ -1417,6 +1417,7 @@ class AgentCreator(MutableModel):
                 host_id=host_id,
                 request=backup_request,
                 imbue_cloud_cli=self.imbue_cloud_cli,
+                paths=self.paths,
                 parent_cg=self.root_concurrency_group,
             )
         except (BackupProvisioningError, ImbueCloudCliError) as exc:

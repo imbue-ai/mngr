@@ -1,9 +1,9 @@
 """Unit tests for the pure / cli-driven logic in backup_provisioning.
 
-These cover the pure plan computation, the bucket idempotency branch, and
-the request->plan dispatch with a canned cli. The remote-injection
-(``mngr exec``) path is not unit-tested here because it requires a live
-agent host.
+The remote-injection (``mngr exec``) and restic-init paths are exercised by
+the local-restic integration test (``restic_cli_test.py``) and release tests
+against a real agent; here we cover the pure helpers, repo/creds resolution,
+and the bucket idempotency branch with a canned cli.
 """
 
 import pytest
@@ -12,14 +12,15 @@ from pydantic import Field
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
+from imbue.minds.desktop_client.backup_env_store import parse_restic_env
 from imbue.minds.desktop_client.backup_provisioning import _create_or_reuse_bucket
-from imbue.minds.desktop_client.backup_provisioning import _plan_for_request
+from imbue.minds.desktop_client.backup_provisioning import _is_bucket_already_exists_error
 from imbue.minds.desktop_client.backup_provisioning import _repository_url_for_bucket
-from imbue.minds.desktop_client.backup_provisioning import build_api_key_restic_env
-from imbue.minds.desktop_client.backup_provisioning import build_imbue_cloud_restic_env
+from imbue.minds.desktop_client.backup_provisioning import _resolve_repository_and_backend_env
+from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
+from imbue.minds.desktop_client.backup_provisioning import build_canonical_env_content
 from imbue.minds.desktop_client.backup_provisioning import env_text_defines_restic_password
-from imbue.minds.desktop_client.backup_provisioning import merge_allow_empty_password_into_backup_toml
+from imbue.minds.desktop_client.backup_provisioning import generate_workspace_password
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import R2BucketCreateResult
@@ -42,12 +43,7 @@ def _fake_key(bucket_name: str) -> R2BucketKeyMaterial:
 
 
 class _FakeImbueCloudCli(ImbueCloudCli):
-    """Canned cli that returns bucket data without spawning subprocesses.
-
-    ``create_error_stderr`` makes ``create_bucket`` raise an
-    ``ImbueCloudCliError`` carrying that stderr (used to exercise both the
-    "already exists" reuse branch and the propagate-other-errors branch).
-    """
+    """Canned cli that returns bucket data without spawning subprocesses."""
 
     create_error_stderr: str | None = Field(default=None)
     created_names: list[str] = Field(default_factory=list)
@@ -96,85 +92,30 @@ def test_env_text_defines_restic_password_ignores_comment_and_absence() -> None:
     assert env_text_defines_restic_password("AWS_ACCESS_KEY_ID=k\n") is False
 
 
-# --- build_imbue_cloud_restic_env ---
+# --- generate_workspace_password ---
 
 
-def test_build_imbue_cloud_with_master_password_sets_password_and_no_empty_flag() -> None:
-    plan = build_imbue_cloud_restic_env(
+def test_generate_workspace_password_is_long_and_unique() -> None:
+    first = generate_workspace_password()
+    second = generate_workspace_password()
+    assert len(first) >= 32
+    assert first != second
+
+
+# --- build_canonical_env_content ---
+
+
+def test_build_canonical_env_content_round_trips() -> None:
+    content = build_canonical_env_content(
         repository="s3:https://acct/u--host-1",
-        access_key_id="AKID",
-        secret_access_key="SECRET",
-        master_password="pw",
+        backend_env={"AWS_ACCESS_KEY_ID": "AK", "AWS_SECRET_ACCESS_KEY": "SK"},
+        workspace_password="rndpw",
     )
-    assert plan.allow_empty_password is False
-    assert "RESTIC_REPOSITORY=s3:https://acct/u--host-1\n" in plan.restic_env_content
-    assert "AWS_ACCESS_KEY_ID=AKID\n" in plan.restic_env_content
-    assert "AWS_SECRET_ACCESS_KEY=SECRET\n" in plan.restic_env_content
-    assert "RESTIC_PASSWORD=pw\n" in plan.restic_env_content
-
-
-def test_build_imbue_cloud_without_master_password_requests_empty_password() -> None:
-    plan = build_imbue_cloud_restic_env(
-        repository="s3:r",
-        access_key_id="AKID",
-        secret_access_key="SECRET",
-        master_password=None,
-    )
-    assert plan.allow_empty_password is True
-    assert "RESTIC_PASSWORD" not in plan.restic_env_content
-
-
-# --- build_api_key_restic_env (password precedence) ---
-
-
-def test_build_api_key_textarea_password_wins_over_master() -> None:
-    plan = build_api_key_restic_env(
-        env_text="RESTIC_REPOSITORY=s3:r\nRESTIC_PASSWORD=fromtextarea\n",
-        master_password="ignored-master",
-    )
-    assert plan.allow_empty_password is False
-    assert "RESTIC_PASSWORD=fromtextarea" in plan.restic_env_content
-    assert "ignored-master" not in plan.restic_env_content
-
-
-def test_build_api_key_appends_master_password_when_textarea_omits_it() -> None:
-    plan = build_api_key_restic_env(env_text="RESTIC_REPOSITORY=s3:r\n", master_password="frommaster")
-    assert plan.allow_empty_password is False
-    assert plan.restic_env_content.endswith("RESTIC_PASSWORD=frommaster\n")
-
-
-def test_build_api_key_empty_password_when_no_password_anywhere() -> None:
-    plan = build_api_key_restic_env(env_text="RESTIC_REPOSITORY=s3:r\n", master_password=None)
-    assert plan.allow_empty_password is True
-    assert "RESTIC_PASSWORD" not in plan.restic_env_content
-
-
-# --- merge_allow_empty_password_into_backup_toml ---
-
-
-def test_merge_preserves_other_sections() -> None:
-    existing = '[snapshot]\nmethod = "DIRECT"\n\n[retention]\nkeep_hourly = 99\n'
-    merged = merge_allow_empty_password_into_backup_toml(existing, True)
-    assert "allow_empty_password = true" in merged
-    assert "[snapshot]" in merged
-    assert "keep_hourly = 99" in merged
-
-
-def test_merge_creates_restic_table_when_input_blank() -> None:
-    merged = merge_allow_empty_password_into_backup_toml("", True)
-    assert "[restic]" in merged
-    assert "allow_empty_password = true" in merged
-
-
-def test_merge_overwrites_existing_flag() -> None:
-    existing = "[restic]\nallow_empty_password = true\n"
-    merged = merge_allow_empty_password_into_backup_toml(existing, False)
-    assert "allow_empty_password = false" in merged
-
-
-def test_merge_raises_on_malformed_toml() -> None:
-    with pytest.raises(BackupProvisioningError):
-        merge_allow_empty_password_into_backup_toml("[snapshot\nbroken", True)
+    parsed = parse_restic_env(content)
+    assert parsed["RESTIC_REPOSITORY"] == "s3:https://acct/u--host-1"
+    assert parsed["AWS_ACCESS_KEY_ID"] == "AK"
+    assert parsed["AWS_SECRET_ACCESS_KEY"] == "SK"
+    assert parsed["RESTIC_PASSWORD"] == "rndpw"
 
 
 # --- _repository_url_for_bucket ---
@@ -182,6 +123,20 @@ def test_merge_raises_on_malformed_toml() -> None:
 
 def test_repository_url_strips_trailing_slash_and_points_at_bucket_root() -> None:
     assert _repository_url_for_bucket(_ENDPOINT + "/", "u--host-1") == f"s3:{_ENDPOINT}/u--host-1"
+
+
+# --- _is_bucket_already_exists_error ---
+
+
+def test_is_bucket_already_exists_error_matches_structured_and_prose() -> None:
+    structured = ImbueCloudCliError("x")
+    structured.stderr = '{"error_class": "ImbueCloudBucketExistsError"}'
+    assert _is_bucket_already_exists_error(structured) is True
+    prose = ImbueCloudCliError("bucket already exists")
+    assert _is_bucket_already_exists_error(prose) is True
+    other = ImbueCloudCliError("internal error")
+    other.stderr = '{"error": "boom"}'
+    assert _is_bucket_already_exists_error(other) is False
 
 
 # --- _create_or_reuse_bucket ---
@@ -201,19 +156,8 @@ def test_create_or_reuse_reuses_existing_bucket_with_fresh_key() -> None:
     cli = _make_cli(create_error_stderr='{"error": "bucket already exists"}')
     bucket_name, _endpoint, key = _create_or_reuse_bucket(cli, "a@b.com", "host-abc")
     assert bucket_name == "u--host-abc"
-    # Falls back to info + a freshly minted key rather than erroring out.
     assert cli.minted_key_names == ["host-abc"]
     assert key.secret_access_key.get_secret_value() == "SECRET"
-
-
-def test_create_or_reuse_reuses_on_structured_error_class_without_prose() -> None:
-    # The plugin reports the bucket-exists condition via the structured
-    # error_class field; reuse must trigger even if the prose detail never
-    # literally says "already exists".
-    cli = _make_cli(create_error_stderr='{"error": "conflict", "error_class": "ImbueCloudBucketExistsError"}')
-    bucket_name, _endpoint, _key = _create_or_reuse_bucket(cli, "a@b.com", "host-abc")
-    assert bucket_name == "u--host-abc"
-    assert cli.minted_key_names == ["host-abc"]
 
 
 def test_create_or_reuse_propagates_non_exists_errors() -> None:
@@ -222,45 +166,48 @@ def test_create_or_reuse_propagates_non_exists_errors() -> None:
         _create_or_reuse_bucket(cli, "a@b.com", "host-abc")
 
 
-# --- _plan_for_request ---
+# --- _resolve_repository_and_backend_env ---
 
 
-def test_plan_for_configure_later_is_none() -> None:
-    request = BackupSetupRequest(backup_provider=BackupProvider.CONFIGURE_LATER)
-    assert _plan_for_request(request, "host-1", imbue_cloud_cli=None) is None
+def test_resolve_imbue_cloud_builds_repo_and_creds() -> None:
+    request = BackupSetupRequest(backup_provider=BackupProvider.IMBUE_CLOUD, account_email="a@b.com")
+    repository, backend_env = _resolve_repository_and_backend_env(request, "host-abc", imbue_cloud_cli=_make_cli())
+    assert repository == f"s3:{_ENDPOINT}/u--host-abc"
+    assert backend_env == {"AWS_ACCESS_KEY_ID": "AKID", "AWS_SECRET_ACCESS_KEY": "SECRET"}
 
 
-def test_plan_for_imbue_cloud_builds_repo_from_bucket() -> None:
-    request = BackupSetupRequest(
-        backup_provider=BackupProvider.IMBUE_CLOUD,
-        master_password=SecretStr("pw"),
-        account_email="a@b.com",
-    )
-    plan = _plan_for_request(request, "host-abc", imbue_cloud_cli=_make_cli())
-    assert plan is not None
-    assert f"RESTIC_REPOSITORY=s3:{_ENDPOINT}/u--host-abc\n" in plan.restic_env_content
-    assert plan.allow_empty_password is False
-
-
-def test_plan_for_imbue_cloud_requires_cli() -> None:
+def test_resolve_imbue_cloud_requires_cli() -> None:
     request = BackupSetupRequest(backup_provider=BackupProvider.IMBUE_CLOUD, account_email="a@b.com")
     with pytest.raises(BackupProvisioningError):
-        _plan_for_request(request, "host-abc", imbue_cloud_cli=None)
+        _resolve_repository_and_backend_env(request, "host-abc", imbue_cloud_cli=None)
 
 
-def test_plan_for_imbue_cloud_requires_account() -> None:
+def test_resolve_imbue_cloud_requires_account() -> None:
     request = BackupSetupRequest(backup_provider=BackupProvider.IMBUE_CLOUD, account_email="")
     with pytest.raises(BackupProvisioningError):
-        _plan_for_request(request, "host-abc", imbue_cloud_cli=_make_cli())
+        _resolve_repository_and_backend_env(request, "host-abc", imbue_cloud_cli=_make_cli())
 
 
-def test_plan_for_api_key_uses_textarea() -> None:
+def test_resolve_api_key_extracts_repo_and_backend_env() -> None:
     request = BackupSetupRequest(
         backup_provider=BackupProvider.API_KEY,
-        api_key_env_text="RESTIC_REPOSITORY=s3:r\n",
-        master_password=None,
+        api_key_env_text="RESTIC_REPOSITORY=s3:r\nAWS_ACCESS_KEY_ID=k\nAWS_SECRET_ACCESS_KEY=s\n",
     )
-    plan = _plan_for_request(request, "host-abc", imbue_cloud_cli=None)
-    assert plan is not None
-    assert "RESTIC_REPOSITORY=s3:r" in plan.restic_env_content
-    assert plan.allow_empty_password is True
+    repository, backend_env = _resolve_repository_and_backend_env(request, "host-abc", imbue_cloud_cli=None)
+    assert repository == "s3:r"
+    assert backend_env == {"AWS_ACCESS_KEY_ID": "k", "AWS_SECRET_ACCESS_KEY": "s"}
+
+
+def test_resolve_api_key_rejects_restic_password() -> None:
+    request = BackupSetupRequest(
+        backup_provider=BackupProvider.API_KEY,
+        api_key_env_text="RESTIC_REPOSITORY=s3:r\nRESTIC_PASSWORD=nope\n",
+    )
+    with pytest.raises(BackupProvisioningError):
+        _resolve_repository_and_backend_env(request, "host-abc", imbue_cloud_cli=None)
+
+
+def test_resolve_api_key_requires_repository() -> None:
+    request = BackupSetupRequest(backup_provider=BackupProvider.API_KEY, api_key_env_text="AWS_ACCESS_KEY_ID=k\n")
+    with pytest.raises(BackupProvisioningError):
+        _resolve_repository_and_backend_env(request, "host-abc", imbue_cloud_cli=None)

@@ -77,7 +77,7 @@
         </div>
       </div>
 
-      {%- set default_restic_env = "# One KEY=VALUE per line; written verbatim to runtime/secrets/restic.env.\n# RESTIC_REPOSITORY=s3:https://<account>.r2.cloudflarestorage.com/<bucket>\n# AWS_ACCESS_KEY_ID=\n# AWS_SECRET_ACCESS_KEY=\n# Other backends read other vars; see the restic docs linked above.\n" -%}
+      {%- set default_restic_env = "# One KEY=VALUE per line. Set RESTIC_REPOSITORY and any backend credentials.\n# Do NOT set RESTIC_PASSWORD -- minds initializes the repo and assigns each\n# workspace its own random password.\n# RESTIC_REPOSITORY=s3:https://<account>.r2.cloudflarestorage.com/<bucket>\n# AWS_ACCESS_KEY_ID=\n# AWS_SECRET_ACCESS_KEY=\n# Other backends read other vars; see the restic docs linked above.\n" -%}
       <div class="flex gap-6 mb-4 items-start">
         <div class="basis-[200px] shrink-0 pt-2.5">
           <label for="backup_provider" class="text-sm text-zinc-900 font-medium block">Backup provider</label>
@@ -99,8 +99,9 @@
           <div id="backup-api-key-row" class="mt-3 hidden">
             <label for="backup_api_key_env" class="text-sm text-zinc-900 font-medium block mb-1">restic environment</label>
             <p class="mb-1 text-xs text-zinc-400">
-              One <code>KEY=VALUE</code> per line, written verbatim to <code>runtime/secrets/restic.env</code>.
-              Set <code>RESTIC_REPOSITORY</code> and any backend credentials. See the
+              One <code>KEY=VALUE</code> per line. Set <code>RESTIC_REPOSITORY</code> and any backend credentials.
+              Do not set <code>RESTIC_PASSWORD</code> -- minds initializes the repo and assigns each workspace its
+              own random password. See the
               <a href="https://restic.readthedocs.io/en/stable/040_backup.html#environment-variables"
                  target="_blank" rel="noopener" class="text-blue-600 hover:underline">restic environment-variable docs</a>.
             </p>

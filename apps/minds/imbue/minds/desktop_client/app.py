@@ -52,6 +52,7 @@ from imbue.minds.desktop_client.backup_password_store import read_saved_backup_p
 from imbue.minds.desktop_client.backup_password_store import save_backup_password_if_absent
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import env_text_defines_restic_password
+from imbue.minds.desktop_client.backup_status import compute_backup_status_for_workspaces
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
@@ -391,6 +392,35 @@ def _handle_landing_page(
     return HTMLResponse(content=html)
 
 
+def _handle_backup_status_api(
+    request: Request,
+    auth_store: AuthStoreDep,
+    backend_resolver: BackendResolverDep,
+) -> Response:
+    """Return per-project backup status (GET /api/backup-status).
+
+    Queries restic (from the minds machine) for every known workspace using
+    its canonical restic.env, in parallel with a per-workspace timeout. The
+    landing page fetches this once on load to fill each tile.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+    paths: WorkspacePaths | None = request.app.state.api_v1_paths
+    if paths is None:
+        return Response(content="{}", media_type="application/json")
+    root_concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
+    agent_ids = backend_resolver.list_known_workspace_ids()
+    status_by_agent_id = compute_backup_status_for_workspaces(paths, agent_ids, parent_cg=root_concurrency_group)
+    payload = {
+        agent_id: {
+            "state": str(status.state),
+            "last_success_at": status.last_success_at.isoformat() if status.last_success_at is not None else None,
+        }
+        for agent_id, status in status_by_agent_id.items()
+    }
+    return Response(content=json.dumps(payload), media_type="application/json")
+
+
 # -- Agent creation route handlers --
 
 
@@ -596,14 +626,18 @@ def _build_backup_request_or_error(
         return None, (
             "imbue_cloud backups require a selected account. Choose an account or pick a different backup provider."
         )
-    # When the api_key textarea already supplies RESTIC_PASSWORD, that value
-    # wins (see build_api_key_restic_env), so the master-password row is moot:
-    # don't resolve or require one.
-    is_password_in_api_key_env = backup_provider is BackupProvider.API_KEY and env_text_defines_restic_password(
-        api_key_env
-    )
+    # The user never sets the repository password: minds initializes the repo
+    # and assigns each workspace its own random RESTIC_PASSWORD, so reject it
+    # if a user puts one in the api_key env block.
+    if backup_provider is BackupProvider.API_KEY and env_text_defines_restic_password(api_key_env):
+        return None, (
+            "Don't set RESTIC_PASSWORD in the backup env -- minds assigns each workspace its own random "
+            "repository password. Provide RESTIC_REPOSITORY and any backend credentials only."
+        )
+    # The master password (or empty, for no_password) is used only to
+    # initialize the repo from the minds machine; it never enters the workspace.
     master_password: SecretStr | None = None
-    if encryption_method is BackupEncryptionMethod.MASTER_PASSWORD and not is_password_in_api_key_env:
+    if encryption_method is BackupEncryptionMethod.MASTER_PASSWORD:
         saved_password = read_saved_backup_password(paths)
         if saved_password is not None:
             master_password = SecretStr(saved_password)
@@ -2904,6 +2938,7 @@ def create_desktop_client(
     # Agent creation routes
     app.get("/create")(_handle_create_page)
     app.post("/create")(_handle_create_form_submit)
+    app.get("/api/backup-status")(_handle_backup_status_api)
     app.post("/api/create-agent")(_handle_create_agent_api)
     app.get("/api/create-agent/{agent_id}/status")(_handle_creation_status_api)
     app.get("/api/create-agent/{agent_id}/logs")(_handle_creation_logs_sse)

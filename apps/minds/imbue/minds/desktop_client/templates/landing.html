@@ -35,6 +35,7 @@
                  data-default-href="{{ mngr_forward_origin }}/goto/{{ agent_id }}/"
                  onclick="window.landingRowClick(this)">
               <span class="flex-1 font-medium text-zinc-900 pl-1">{{ agent_names.get(agent_id | string, agent_id) }}</span>
+              <span class="landing-backup-badge hidden inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"></span>
               <span class="landing-health-badge hidden inline-flex items-center px-2 py-0.5 rounded text-sm font-medium"></span>
               <button class="bg-transparent border border-transparent rounded-md cursor-pointer p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 flex items-center justify-center"
                       onclick="event.stopPropagation(); window.location='/workspace/{{ agent_id }}/settings'"
@@ -312,6 +313,45 @@
           chevron.textContent = willShow ? '▾' : '▸';
         });
       })();
+
+      // Backup status: fetched once on load from /api/backup-status (which
+      // queries restic per project from the minds machine) and rendered into
+      // each row's backup badge. Best-effort -- failures just leave the badge
+      // hidden.
+      function applyBackupBadge(agentId, status) {
+        var row = getRow(agentId);
+        if (!row) return;
+        var badge = row.querySelector('.landing-backup-badge');
+        if (!badge) return;
+        var base = 'landing-backup-badge inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ';
+        var state = status && status.state;
+        var text = '';
+        var tone = 'bg-zinc-100 text-zinc-500';
+        if (state === 'BACKING_UP') {
+          text = 'Backing up…'; tone = 'bg-blue-100 text-blue-800';
+        } else if (state === 'BACKED_UP') {
+          text = 'Backed up ' + relativeAgo(status.last_success_at); tone = 'bg-emerald-100 text-emerald-800';
+        } else if (state === 'NEVER') {
+          text = 'Backup pending'; tone = 'bg-amber-100 text-amber-800';
+        } else if (state === 'UNKNOWN') {
+          text = 'Backup status unknown'; tone = 'bg-zinc-100 text-zinc-600';
+        } else {
+          text = 'No backups'; tone = 'bg-zinc-100 text-zinc-500';
+        }
+        badge.textContent = text;
+        badge.className = base + tone;
+      }
+
+      function loadBackupStatus() {
+        fetch('/api/backup-status').then(function (response) {
+          return response.ok ? response.json() : {};
+        }).then(function (data) {
+          Object.keys(data).forEach(function (agentId) { applyBackupBadge(agentId, data[agentId]); });
+        }).catch(function (err) {
+          console.error('Backup status fetch failed:', err);
+        });
+      }
+      loadBackupStatus();
 
       var es = null;
       function connect() {

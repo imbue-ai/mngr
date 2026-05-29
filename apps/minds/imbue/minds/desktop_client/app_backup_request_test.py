@@ -131,22 +131,17 @@ def test_no_password_leaves_master_password_unset(tmp_path: Path) -> None:
     assert request is not None and request.master_password is None
 
 
-def test_api_key_master_password_not_required_when_textarea_supplies_it(tmp_path: Path) -> None:
-    # The textarea already defines RESTIC_PASSWORD, so picking master_password
-    # encryption must not force the user to also enter a master password --
-    # the textarea password wins.
+def test_api_key_rejects_restic_password_in_textarea(tmp_path: Path) -> None:
+    # The user may not set RESTIC_PASSWORD: minds assigns each workspace its
+    # own random repository password, so a textarea password is an error.
     request, error = _build(
         tmp_path,
         backup_provider=BackupProvider.API_KEY,
-        encryption_method=BackupEncryptionMethod.MASTER_PASSWORD,
-        typed_master_password="",
-        api_key_env="RESTIC_REPOSITORY=s3:r\nRESTIC_PASSWORD=fromtextarea\n",
+        encryption_method=BackupEncryptionMethod.NO_PASSWORD,
+        api_key_env="RESTIC_REPOSITORY=s3:r\nRESTIC_PASSWORD=nope\n",
     )
-    assert error is None
-    assert request is not None
-    # No master password is resolved; the textarea value is used downstream.
-    assert request.master_password is None
-    assert "RESTIC_PASSWORD=fromtextarea" in request.api_key_env_text
+    assert request is None
+    assert error is not None and "RESTIC_PASSWORD" in error
 
 
 def test_api_key_env_text_is_carried_through(tmp_path: Path) -> None:
