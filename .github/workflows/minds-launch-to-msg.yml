@@ -38,20 +38,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
-      TODESKTOP_API_TOKEN: ${{ secrets.TODESKTOP_API_TOKEN }}
+      TODESKTOP_ACCESS_TOKEN: ${{ secrets.TODESKTOP_ACCESS_TOKEN }}
       MINDS_CLIENT_CONFIG_BUNDLE: apps/minds/imbue/minds/config/envs/production/client.toml
       MINDS_ROOT_NAME_BUNDLE: minds
     outputs:
       app_zip_url: ${{ steps.parse.outputs.url }}
       build_id:    ${{ steps.parse.outputs.build_id }}
     steps:
-      - name: check TODESKTOP_API_TOKEN
+      - name: check TODESKTOP_ACCESS_TOKEN
         run: |
-          if [[ -z "${TODESKTOP_API_TOKEN:-}" ]]; then
-            echo "::error::TODESKTOP_API_TOKEN secret is not set on this repo. Add it at Settings -> Secrets -> Actions."
+          if [[ -z "${TODESKTOP_ACCESS_TOKEN:-}" ]]; then
+            echo "::error::TODESKTOP_ACCESS_TOKEN secret is not set on this repo. Add it at Settings -> Secrets -> Actions."
             exit 1
           fi
-          echo "TODESKTOP_API_TOKEN present (length=${#TODESKTOP_API_TOKEN})"
+          echo "TODESKTOP_ACCESS_TOKEN present (length=${#TODESKTOP_ACCESS_TOKEN})"
       - name: checkout @ ${{ inputs.commit_sha }}
         uses: actions/checkout@v6
         with:
