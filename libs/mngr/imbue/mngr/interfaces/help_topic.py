@@ -35,7 +35,9 @@ class DocFile(FrozenModel):
     """A topic body backed by a markdown file, read lazily at display time.
 
     The registrant resolves the absolute path (so the topic model needs no
-    knowledge of any docs root). A missing file degrades to an empty body.
+    knowledge of any docs root). The file is read at display time and must
+    exist -- a missing file raises (a packaging bug) rather than degrading to
+    an empty body.
     """
 
     path: Path = Field(description="Absolute path to the markdown file")
