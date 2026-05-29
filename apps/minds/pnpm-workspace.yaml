@@ -11,4 +11,4 @@ onlyBuiltDependencies:
 minimumReleaseAge: 20160
 minimumReleaseAgeExclude:
   - latchkey
-  - @imbue-ai/detent
+  - "@imbue-ai/detent"
