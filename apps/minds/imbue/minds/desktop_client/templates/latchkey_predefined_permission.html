@@ -33,19 +33,6 @@
 {% extends 'permissions.html' %}
 {% import '_macros.html' as ui %}
 
-{# The service display name (e.g. "Slack") reads better as plain heading #}
-{# text than in a boxed monospace pill, so drop the base's code styling. #}
-{% block header_display_name %}{{ display_name }}{% endblock %}
-
-{# The host-sharing scope is conveyed inline ("and its sibling agents"), #}
-{# so the separate workspace line is dropped to keep the dialog compact. #}
-{% block workspace_line %}{% endblock %}
-
-{# Attribute the rationale to the requesting workspace, e.g. "shimmering-fox says:". #}
-{% block rationale_label %}
-  <p class="text-xs font-medium text-zinc-500 mb-1">{{ ws_name or agent_id }} says:</p>
-{% endblock %}
-
 {% block permissions_form_body %}
   {# Simple (default) view: a read-only summary of the permissions that #}
   {# will be granted on Approve, with no checkboxes. The full checkbox #}
@@ -63,18 +50,25 @@
             </div>
           {% endif %}
         {% endfor %}
+        {# Aligned with the permission rows above so the affordance reads #}
+        {# as part of the same list rather than a detached footer link. #}
+        <button type="button" id="permissions-adjust-link"
+                onclick="showPermissionEditor()"
+                class="text-xs text-blue-600 hover:underline cursor-pointer bg-transparent border-0 p-0">
+          Adjust
+        </button>
       </div>
     {% else %}
       {% call ui.notice(variant='warn') %}
         The agent did not request any specific permissions. Click
         <span class="font-medium">Adjust</span> below to choose what to grant.
       {% endcall %}
+      <button type="button" id="permissions-adjust-link"
+              onclick="showPermissionEditor()"
+              class="mt-3 text-xs text-blue-600 hover:underline cursor-pointer bg-transparent border-0 p-0">
+        Adjust
+      </button>
     {% endif %}
-    <button type="button" id="permissions-adjust-link"
-            onclick="showPermissionEditor()"
-            class="mt-3 text-xs text-blue-600 hover:underline cursor-pointer bg-transparent border-0 p-0">
-      Adjust
-    </button>
   </div>
 
   {# Editor view: the full checkbox list, hidden until the user opts in #}

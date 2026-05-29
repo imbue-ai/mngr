@@ -29,12 +29,18 @@ and how the agent receives the answer.
    right-side requests inbox panel, and surfaces a notification.
 5. **User opens the dialog.** Clicking the card opens
    `/requests/<event_id>`, which renders a single-scope permission dialog:
+   * The dialog header names the service plainly (no monospace pill) and
+     attributes the agent's rationale prominently as
+     "`<workspace>` says:" -- this is the main place the requesting
+     agent's name is surfaced. There is no separate "Workspace:" line.
    * By default the dialog shows a **simple, informative view**: a
-     read-only list of the permissions that will be granted on Approve
-     (no checkboxes), plus only the Approve / Deny buttons. This keeps
-     the common case approachable for non-technical users.
-   * A small **"Adjust permissions"** link reveals the full **editor
-     view**, which exposes a checkbox per [Detent](https://github.com/imbue-ai/detent)
+     single summary sentence ("Approving will grant `<workspace>` and its
+     sibling agents the following permissions:") above a read-only list
+     of the permissions that will be granted on Approve (no checkboxes),
+     plus only the Approve / Deny buttons. This keeps the common case
+     approachable for non-technical users.
+   * A small **"Adjust"** link, rendered inside the permission list, reveals
+     the full **editor view**, which exposes a checkbox per [Detent](https://github.com/imbue-ai/detent)
      permission schema available for that scope. The available schemas
      are fetched from the latchkey gateway's `GET /permissions/available`
      endpoint and cached in process for the lifetime of the desktop
@@ -54,8 +60,8 @@ and how the agent receives the answer.
    * The Approve button stays disabled while zero boxes are checked,
      so if the agent submitted an empty ``permissions`` tuple and the
      user has no prior grants for the scope, the simple view shows a
-     prompt to use "Adjust permissions" and the user must actively pick
-     something there before approving.
+     prompt to use "Adjust" and the user must actively pick something
+     there before approving.
 6. **User approves.** The desktop client:
    1. Runs `latchkey services info <service>` to read `credentialStatus`,
       `authOptions`, and `setCredentialsExample`.

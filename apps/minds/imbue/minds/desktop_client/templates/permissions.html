@@ -25,10 +25,11 @@
                             sign-in flow is happening). Should contain
                             an element with id="permissions-progress"
                             if it wants to be hidden/shown automatically.
-    workspace_meta          Slot for a short note next to the workspace
-                            link explaining the scope of the grant
-                            (e.g. latchkey notes that grants are shared
-                            across every agent on the same host).
+    header_display_name     The display name rendering inside the header
+                            (defaults to plain text). Override to restore
+                            special treatment (e.g. a monospace pill).
+    rationale_label         The label above the agent's rationale
+                            (defaults to a prominent "<workspace> says:").
     permissions_extra_scripts   Optional extra <script> tag for backend-specific
                             client-side wiring (e.g. additional change handlers).
 #}
@@ -41,30 +42,19 @@
   {% call ui.page_container() %}
     <h1 class="text-2xl font-semibold text-zinc-900 leading-tight">
       Permission request:
-      {# Child templates can drop the boxed/monospace treatment when the #}
-      {# display name is a plain service label (e.g. "Slack") rather than #}
-      {# a file path. #}
-      {% block header_display_name %}
-      <code class="bg-zinc-100 rounded px-1.5 py-0.5 font-mono text-[0.95em]">{{ display_name }}</code>
-      {% endblock %}
+      {# Plain heading text: the display name (a service label like #}
+      {# "Slack" or a file path) reads better without a boxed monospace #}
+      {# pill. Children may override to restore special treatment. #}
+      {% block header_display_name %}{{ display_name }}{% endblock %}
     </h1>
-    {# Optional workspace line. Child templates may drop it entirely. #}
-    {% block workspace_line %}
-    <p class="text-sm text-zinc-600 mt-1">
-      Workspace:
-      <a href="{{ mngr_forward_origin }}/goto/{{ agent_id }}/" class="text-blue-600 hover:underline">{{ ws_name or agent_id }}</a>
-      {# Backend-specific scope hint slot (e.g. latchkey notes that grants #}
-      {# are shared across every agent on the host). #}
-      {% block workspace_meta %}{% endblock %}
-    </p>
-    {% endblock %}
 
     {% call ui.card(extra='mt-6') %}
       <div>
+        {# Attribute the rationale prominently to the requesting workspace, #}
+        {# e.g. "shimmering-fox says:". This is the main place the agent's #}
+        {# name is surfaced in the dialog, so keep it visually emphasized. #}
         {% block rationale_label %}
-        <p class="text-xs font-medium uppercase tracking-wide text-zinc-500 mb-1">
-          Reason given by the agent
-        </p>
+        <p class="text-base font-semibold text-zinc-900 mb-1">{{ ws_name or agent_id }} says:</p>
         {% endblock %}
         <p class="text-sm whitespace-pre-wrap">{{ rationale }}</p>
       </div>
