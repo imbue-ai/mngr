@@ -206,9 +206,6 @@ mngr create "$name" claude --from ":$PROJECT_DIR" --label queue=live \
   --message-file "$claimed" --no-connect
 ```
 
-Finished agents are stopped and moved to `queue=in-review`; to see them, run
-`mngr list --label queue=in-review`.
-
 ## Scheduling
 
 `cron` runs with a bare `PATH`, so set one that finds `mngr`, `jq`, and `claude`:
