@@ -2788,10 +2788,9 @@ def register_cli_options(command_name: str) -> Mapping[str, list[OptionStackItem
 @hookimpl
 def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
     """Validate create args when --adopt-session is used: the agent type must
-    resolve to a Claude agent (claude, or any subtype whose ``parent_type``
-    chain reaches it, e.g. config-defined templates like ``write-plus``), and
-    the option is incompatible with cloning via ``--from <agent>`` (both adopt
-    a session into the new agent).
+    resolve to a Claude agent (claude or a subtype of claude), and the option
+    is incompatible with cloning via ``--from <agent>`` (both adopt a session
+    into the new agent).
     """
     adopt_session = args.agent_options.plugin_data.get("adopt_session", ())
     if not adopt_session:
