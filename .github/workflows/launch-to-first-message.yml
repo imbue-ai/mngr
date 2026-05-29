@@ -1,0 +1,46 @@
+name: minds launch-to-first-message
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_zip_url:
+        description: 'ToDesktop .zip URL for the build to verify'
+        required: true
+        default: 'https://dl.todesktop.com/26032588hqdzk/builds/260528yf2ma2jd4/mac/zip/arm64'
+  push:
+    branches: [mngr/mac-runner]
+    paths:
+      - '.github/workflows/launch-to-first-message.yml'
+      - 'apps/minds/scripts/launch-and-verify.sh'
+      - 'apps/minds/scripts/mac-runner-reset.sh'
+
+concurrency:
+  group: mac-runner
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: [self-hosted, macOS, minds-runner]
+    timeout-minutes: 10
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: reset to clean state and install fresh app
+        run: bash apps/minds/scripts/mac-runner-reset.sh "${{ inputs.app_zip_url || 'https://dl.todesktop.com/26032588hqdzk/builds/260528yf2ma2jd4/mac/zip/arm64' }}"
+      - name: launch and wait for backend
+        run: bash apps/minds/scripts/launch-and-verify.sh
+      - name: collect diagnostic artifacts on failure
+        if: failure()
+        run: |
+          mkdir -p artifacts
+          [ -d "$HOME/.minds/logs" ] && cp -R "$HOME/.minds/logs" artifacts/ || true
+          [ -d "$HOME/.minds/events" ] && cp -R "$HOME/.minds/events" artifacts/ || true
+          log show --process Minds --last 5m 2>/dev/null > artifacts/macos-console.log || true
+          ls -la "$HOME/.minds" 2>&1 > artifacts/minds-dir-listing.txt || true
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: launch-to-first-message-${{ github.run_id }}
+          path: artifacts/
+          retention-days: 7
