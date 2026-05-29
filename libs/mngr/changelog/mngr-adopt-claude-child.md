@@ -1,0 +1,1 @@
+The `on_before_create` and `on_before_host_create` plugin hooks now receive the `MngrContext` as a parameter, so plugins can resolve agent types and read config during these hooks. (Foundational plumbing this branch builds on; consumed by the Claude plugin's `--adopt-session` validation.)

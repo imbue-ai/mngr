@@ -19,8 +19,10 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.api.testing import FakeHost
+from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -3174,6 +3176,33 @@ def test_on_before_create_rejects_non_claude_agent_type(temp_mngr_ctx: MngrConte
     )
     with pytest.raises(UserInputError, match="--adopt-session can only be used with the claude agent type"):
         on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
+
+
+def test_on_before_create_passes_with_claude_subtype(temp_mngr_ctx: MngrContext) -> None:
+    """on_before_create should accept a config-defined subtype whose parent_type
+    chain reaches claude (e.g. a ``write-plus`` template), not just the literal
+    ``claude`` type name. This is the centralized "is a claude agent" check via
+    resolve_agent_type, rather than a string comparison against "claude".
+    """
+    subtype = AgentTypeName("write-plus")
+    config_with_subtype = temp_mngr_ctx.config.model_copy_update(
+        to_update(
+            temp_mngr_ctx.config.field_ref().agent_types,
+            {subtype: AgentTypeConfig(parent_type=AgentTypeName("claude"))},
+        ),
+    )
+    mngr_ctx = temp_mngr_ctx.model_copy_update(
+        to_update(temp_mngr_ctx.field_ref().config, config_with_subtype),
+    )
+    args = OnBeforeCreateArgs(
+        agent_options=CreateAgentOptions(
+            agent_type=subtype,
+            plugin_data={"adopt_session": ("some-id",)},
+        ),
+        target_host=NewHostOptions(provider=ProviderInstanceName("local")),
+        create_work_dir=True,
+    )
+    assert on_before_create(args=args, mngr_ctx=mngr_ctx) is None
 
 
 def test_on_before_create_rejects_adopt_session_with_clone_source(
