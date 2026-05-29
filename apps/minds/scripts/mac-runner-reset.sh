@@ -26,7 +26,20 @@ if command -v limactl >/dev/null 2>&1; then
 fi
 
 log "removing ~/.minds and /Applications/minds.app"
-rm -rf "$HOME/.minds"
+# `rm -rf` can race against a not-yet-fully-dead Minds backend process that
+# is still writing to ~/.minds/Cache or ~/.minds/Code Cache. Retry a few
+# times with a short backoff before giving up.
+for attempt in 1 2 3 4 5; do
+  if rm -rf "$HOME/.minds" 2>/dev/null; then
+    break
+  fi
+  log "  rm ~/.minds attempt $attempt failed (likely still being written); waiting 2s"
+  sleep 2
+  if [[ $attempt -eq 5 ]]; then
+    log "  forcing one more pass with verbose errors"
+    rm -rf "$HOME/.minds" || true
+  fi
+done
 sudo rm -rf /Applications/minds.app
 
 URL="${1:-}"
