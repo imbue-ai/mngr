@@ -58,7 +58,7 @@ log "base=$BASE"
 
 log "minting fresh one-time code"
 CODES_PATH="$HOME/.minds/auth/one_time_codes.json"
-CODE=$(python3 -c '
+CODE=$(CODES_PATH="$CODES_PATH" python3 -c '
 import json, os, secrets, pathlib
 p = pathlib.Path(os.environ["CODES_PATH"])
 existing = json.loads(p.read_text()) if p.exists() else []
@@ -67,8 +67,8 @@ existing.append({"code": new_code, "status": "VALID"})
 p.parent.mkdir(parents=True, exist_ok=True)
 p.write_text(json.dumps(existing, indent=2))
 print(new_code)
-' CODES_PATH="$CODES_PATH")
-[[ -n "$CODE" ]] || fail "failed to mint code"
+') || fail "mint code python3 failed"
+[[ -n "$CODE" ]] || fail "mint code produced empty output"
 
 log "authenticating"
 rm -f "$COOKIES"
@@ -83,8 +83,8 @@ log "auth ok"
 api() { curl -s -b "$COOKIES" -X "$1" -H 'Content-Type: application/json' "$BASE$2" "${@:3}"; }
 
 log "POST /api/create-agent host_name=$HOST_NAME launch_mode=LIMA ai_provider=API_KEY"
-BODY=$(python3 -c '
-import json, os, sys
+BODY=$(HOST_NAME="$HOST_NAME" GIT_URL="$GIT_URL" GIT_BRANCH="$GIT_BRANCH" ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" python3 -c '
+import json, os
 print(json.dumps({
     "agent_name": os.environ["HOST_NAME"],
     "host_name": os.environ["HOST_NAME"],
@@ -95,7 +95,7 @@ print(json.dumps({
     "anthropic_api_key": os.environ["ANTHROPIC_API_KEY"],
     "include_env_file": False,
 }))
-' HOST_NAME="$HOST_NAME" GIT_URL="$GIT_URL" GIT_BRANCH="$GIT_BRANCH" ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY")
+') || fail "build create body failed"
 
 CREATE_RESP=$(api POST /api/create-agent -d "$BODY")
 AGENT_ID=$(echo "$CREATE_RESP" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("agent_id",""))')
@@ -143,11 +143,11 @@ REPLY_FILE="/tmp/first-message-reply.txt"
 rm -f "$REPLY_FILE"
 reply_deadline=$((SECONDS + REPLY_TIMEOUT_SECONDS))
 while (( SECONDS < reply_deadline )); do
-  "$MNGR_BIN" event "$AGENT_NAME" --include 'event.type == "assistant_message"' --format json 2>/dev/null \
-    | python3 -c "
+  EXPECT_SUBSTRING="$EXPECT_SUBSTRING" SEND_AT="$SEND_AT" \
+    "$MNGR_BIN" event "$AGENT_NAME" --include 'event.type == "assistant_message"' --format json 2>/dev/null \
+    | EXPECT_SUBSTRING="$EXPECT_SUBSTRING" SEND_AT="$SEND_AT" python3 -c "
 import json, sys, os
 expect = os.environ['EXPECT_SUBSTRING']
-send_at = int(os.environ['SEND_AT'])
 for line in sys.stdin:
     line = line.strip()
     if not line:
@@ -156,14 +156,12 @@ for line in sys.stdin:
         evt = json.loads(line)
     except Exception:
         continue
-    ts = evt.get('timestamp') or evt.get('time') or ''
     text = json.dumps(evt)
-    # any assistant_message that landed after our send and contains the expected text
     if expect.lower() in text.lower():
         print(text)
         sys.exit(0)
 sys.exit(2)
-" EXPECT_SUBSTRING="$EXPECT_SUBSTRING" SEND_AT="$SEND_AT" > "$REPLY_FILE" 2>/dev/null
+" > "$REPLY_FILE" 2>/dev/null
   if [[ -s "$REPLY_FILE" ]]; then
     log "assistant replied:"
     head -1 "$REPLY_FILE" | python3 -c 'import json,sys; d=json.loads(sys.stdin.read()); print("  ", str(d)[:500])' >&2 || true
