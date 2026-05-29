@@ -149,12 +149,7 @@ log "sending message to '$AGENT_NAME': $PROMPT"
 "$MNGR_BIN" message --provider lima "$AGENT_NAME" -m "$PROMPT" 2>&1 | tee /tmp/first-message-mngr-message.txt >&2
 mngr_message_rc=${PIPESTATUS[0]}
 if [[ $mngr_message_rc -ne 0 ]]; then
-  log "mngr message exit=$mngr_message_rc -- trying 'system-services' as fallback"
-  "$MNGR_BIN" message --provider lima system-services -m "$PROMPT" 2>&1 | tee -a /tmp/first-message-mngr-message.txt >&2
-  mngr_message_rc=${PIPESTATUS[0]}
-  if [[ $mngr_message_rc -ne 0 ]]; then
-    fail "mngr message failed (both '$AGENT_NAME' and 'system-services') -- see /tmp/first-message-mngr-message.txt"
-  fi
+  fail "mngr message to '$AGENT_NAME' failed (exit=$mngr_message_rc) -- see /tmp/first-message-mngr-message.txt"
 fi
 SEND_AT=$(date +%s)
 
