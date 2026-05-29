@@ -2,9 +2,34 @@
 
 import json
 import plistlib
+import shutil
+import subprocess
 from pathlib import Path
+from typing import Final
+
+import pytest
 
 APP_ROOT = Path(__file__).resolve().parents[1]
+
+_NODE_BINARY: Final[str | None] = shutil.which("node")
+
+pytestmark = pytest.mark.skipif(
+    _NODE_BINARY is None,
+    reason="evaluating apps/minds/todesktop.js requires a node binary on PATH",
+)
+
+
+def _load_todesktop_config() -> dict:
+    """Evaluate ``apps/minds/todesktop.js`` and return its exported config."""
+    assert _NODE_BINARY is not None
+    result = subprocess.run(
+        [_NODE_BINARY, "-e", "console.log(JSON.stringify(require('./todesktop.js')))"],
+        cwd=APP_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
 
 
 def test_bundled_limactl_is_signed_with_virtualization_entitlement() -> None:
@@ -19,11 +44,11 @@ def test_bundled_limactl_is_signed_with_virtualization_entitlement() -> None:
     also be in ``mac.additionalBinariesToSign`` so ToDesktop signs it
     explicitly with that plist.
     """
-    todesktop = json.loads((APP_ROOT / "todesktop.json").read_text())
+    todesktop = _load_todesktop_config()
     mac = todesktop.get("mac", {})
 
     entitlements_rel = mac.get("entitlements")
-    assert entitlements_rel, "todesktop.json must set mac.entitlements"
+    assert entitlements_rel, "todesktop.js must set mac.entitlements"
     entitlements = plistlib.loads((APP_ROOT / entitlements_rel).read_bytes())
     assert entitlements.get("com.apple.security.virtualization") is True, (
         f"{entitlements_rel} must grant com.apple.security.virtualization -- "
@@ -32,6 +57,6 @@ def test_bundled_limactl_is_signed_with_virtualization_entitlement() -> None:
 
     additional = mac.get("additionalBinariesToSign", [])
     assert any("limactl" in path for path in additional), (
-        "todesktop.json mac.additionalBinariesToSign must include the bundled "
+        "todesktop.js mac.additionalBinariesToSign must include the bundled "
         f"limactl so it is signed with mac.entitlements; got {additional}."
     )
