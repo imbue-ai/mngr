@@ -354,8 +354,13 @@ def configure_backups_for_host(
             mode=_RESTIC_ENV_MODE,
             parent_cg=parent_cg,
         )
-        if plan.allow_empty_password:
-            existing_backup_toml = _read_remote_file(agent_id, _BACKUP_TOML_REMOTE_PATH, parent_cg=parent_cg)
-            merged = merge_allow_empty_password_into_backup_toml(existing_backup_toml, True)
-            _write_remote_file(agent_id, _BACKUP_TOML_REMOTE_PATH, merged, mode=None, parent_cg=parent_cg)
+        # Make backup.toml authoritatively reflect the plan's empty-password
+        # value (True or False), not only when it is True. This matters on the
+        # reusable reconfigure path: switching a host from no_password to a
+        # master password must clear a previously-set allow_empty_password,
+        # otherwise the host_backup runner would pass --insecure-no-password
+        # alongside a RESTIC_PASSWORD (a contradictory state).
+        existing_backup_toml = _read_remote_file(agent_id, _BACKUP_TOML_REMOTE_PATH, parent_cg=parent_cg)
+        merged = merge_allow_empty_password_into_backup_toml(existing_backup_toml, plan.allow_empty_password)
+        _write_remote_file(agent_id, _BACKUP_TOML_REMOTE_PATH, merged, mode=None, parent_cg=parent_cg)
         logger.debug("Injected restic backup config into agent {}", agent_id)
