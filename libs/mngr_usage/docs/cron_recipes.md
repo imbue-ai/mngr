@@ -67,8 +67,8 @@ snapshot="$(mngr usage --format json)"
 #            passes the strict pace line, used% > elapsed%.
 #   KEEP  -- hold the current state (weekly usage between those two lines).
 #   ""    -- no Claude usage data this tick: do nothing.
-# START uses the tapering margin line; STOP the looser strict line -- the gap is
-# hysteresis, so a running agent isn't stopped the moment it nudges past margin.
+# The two lines differ on purpose: the gap is hysteresis, so a running agent isn't
+# stopped the moment it nudges past the START margin.
 status="$(jq -r '
   .sources[]
   | select(.source == "claude")
