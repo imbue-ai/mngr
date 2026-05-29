@@ -38,15 +38,21 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
+from imbue.minds.desktop_client.backup_provisioning import configure_backups_for_host
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.notification import NotificationRequest
+from imbue.minds.desktop_client.notification import NotificationUrgency
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.primitives import AIProvider
+from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
@@ -929,6 +935,7 @@ class AgentCreator(MutableModel):
         anthropic_api_key: str = "",
         gh_token: str = "",
         on_created: Callable[[AgentId], None] | None = None,
+        backup_request: BackupSetupRequest | None = None,
     ) -> CreationId:
         """Start creating an agent from a git URL or local path in a background thread.
 
@@ -1000,6 +1007,7 @@ class AgentCreator(MutableModel):
                 anthropic_api_key,
                 gh_token,
                 on_created,
+                backup_request,
             ),
             daemon=True,
             name="agent-creator-{}".format(creation_id),
@@ -1058,6 +1066,7 @@ class AgentCreator(MutableModel):
         anthropic_api_key: str = "",
         gh_token: str = "",
         on_created: Callable[[AgentId], None] | None = None,
+        backup_request: BackupSetupRequest | None = None,
     ) -> None:
         """Background thread that resolves the repo source and creates an mngr agent.
 
@@ -1337,6 +1346,27 @@ class AgentCreator(MutableModel):
                 if on_created is not None:
                     on_created(canonical_id)
 
+                # Configure restic backups asynchronously on a detached
+                # thread (mirrors the Cloudflare tunnel-token path): bucket
+                # creation + injection is a multi-second round-trip we don't
+                # want to block the redirect on, and a failure here is
+                # non-fatal to the already-created workspace. Skipped (no
+                # thread spawned) for CONFIGURE_LATER.
+                if backup_request is not None and backup_request.backup_provider is not BackupProvider.CONFIGURE_LATER:
+                    self.root_concurrency_group.start_new_thread(
+                        target=self._provision_backups,
+                        kwargs={
+                            "agent_id": canonical_id,
+                            "host_id": str(canonical_host_id),
+                            "backup_request": backup_request,
+                        },
+                        name=f"backup-setup-{canonical_id}",
+                        # is_checked=False so a failing backup task does not
+                        # poison the root CG; failures are surfaced via
+                        # notification + loguru from within _provision_backups.
+                        is_checked=False,
+                    )
+
         except (GitCloneError, GitOperationError, MngrCommandError, ImbueCloudCliError, ValueError, OSError) as e:
             logger.opt(exception=e).error("Failed to create agent for creation {}", creation_id)
             log_queue.put("[minds] ERROR: {}".format(e))
@@ -1367,6 +1397,41 @@ class AgentCreator(MutableModel):
             logger.warning("Failed to materialize latchkey permissions handle: {}", e)
             log_queue.put("[minds] Warning: latchkey wiring skipped: {}".format(e))
             return AgentLatchkeySetup(env={}, opaque_permissions_path=None)
+
+    def _provision_backups(
+        self,
+        *,
+        agent_id: AgentId,
+        host_id: str,
+        backup_request: BackupSetupRequest,
+    ) -> None:
+        """Detached-thread entry point: configure restic backups for the new host.
+
+        Failures are surfaced as an OS notification (a normal error popup)
+        and logged; they are non-fatal to the already-created workspace --
+        the user can configure backups later.
+        """
+        try:
+            configure_backups_for_host(
+                agent_id=agent_id,
+                host_id=host_id,
+                request=backup_request,
+                imbue_cloud_cli=self.imbue_cloud_cli,
+                parent_cg=self.root_concurrency_group,
+            )
+        except (BackupProvisioningError, ImbueCloudCliError) as exc:
+            logger.opt(exception=exc).warning("Failed to configure backups for agent {}", agent_id)
+            self.notification_dispatcher.dispatch(
+                NotificationRequest(
+                    title="Backup setup failed",
+                    message=(
+                        f"Couldn't configure backups for '{str(agent_id)[:8]}'. "
+                        f"The workspace is running; backups are not yet set up. Error: {exc}"
+                    ),
+                    urgency=NotificationUrgency.NORMAL,
+                ),
+                agent_display_name=str(agent_id)[:8],
+            )
 
     def _build_redirect_url(self, agent_id: AgentId) -> str:
         """Build the absolute URL the UI should navigate to after creation.

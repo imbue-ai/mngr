@@ -26,6 +26,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from pydantic import Field
+from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -42,6 +43,10 @@ from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
+from imbue.minds.desktop_client.backup_password_store import has_saved_backup_password
+from imbue.minds.desktop_client.backup_password_store import read_saved_backup_password
+from imbue.minds.desktop_client.backup_password_store import save_backup_password_if_absent
+from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.api_v1 import create_api_v1_router
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -98,6 +103,8 @@ from imbue.minds.desktop_client.templates import workspace_accent
 from imbue.minds.desktop_client.tunnel_token_injection import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.webdav import create_webdav_app
 from imbue.minds.primitives import AIProvider
+from imbue.minds.primitives import BackupEncryptionMethod
+from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
@@ -369,13 +376,18 @@ def _handle_landing_page(
     branch = request.query_params.get("branch", "")
     session_store: MultiAccountSessionStore | None = request.app.state.session_store
     minds_config: MindsConfig | None = request.app.state.minds_config
+    agent_creator: AgentCreator | None = request.app.state.agent_creator
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
+    is_backup_password_saved = (
+        has_saved_backup_password(agent_creator.paths) if agent_creator is not None else False
+    )
     html = render_create_form(
         git_url=git_url,
         branch=branch,
         accounts=accounts,
         default_account_id=default_account_id or "",
+        has_saved_backup_password=is_backup_password_saved,
     )
     return HTMLResponse(content=html)
 
@@ -563,6 +575,51 @@ def _build_on_created_callback(
     )
 
 
+def _build_backup_request_or_error(
+    *,
+    backup_provider: BackupProvider,
+    encryption_method: BackupEncryptionMethod,
+    typed_master_password: str,
+    is_save_password: bool,
+    api_key_env: str,
+    account_email: str,
+    paths: WorkspacePaths,
+) -> tuple[BackupSetupRequest | None, str | None]:
+    """Resolve form backup inputs into a ``BackupSetupRequest`` or an error message.
+
+    Reads / first-time-saves the shared master password as a side effect.
+    Returns ``(request, None)`` on success or ``(None, message)`` for a
+    validation error the caller should re-render on the form.
+    """
+    if backup_provider is BackupProvider.CONFIGURE_LATER:
+        return BackupSetupRequest(backup_provider=BackupProvider.CONFIGURE_LATER), None
+    if backup_provider is BackupProvider.IMBUE_CLOUD and not account_email:
+        return None, (
+            "imbue_cloud backups require a selected account. Choose an account or pick a "
+            "different backup provider."
+        )
+    master_password: SecretStr | None = None
+    if encryption_method is BackupEncryptionMethod.MASTER_PASSWORD:
+        saved_password = read_saved_backup_password(paths)
+        if saved_password is not None:
+            master_password = SecretStr(saved_password)
+        elif typed_master_password:
+            master_password = SecretStr(typed_master_password)
+            if is_save_password:
+                save_backup_password_if_absent(paths, typed_master_password)
+        else:
+            return None, "Enter a backup master password, or set the encryption method to 'no password'."
+    return (
+        BackupSetupRequest(
+            backup_provider=backup_provider,
+            master_password=master_password,
+            api_key_env_text=api_key_env if backup_provider is BackupProvider.API_KEY else "",
+            account_email=account_email,
+        ),
+        None,
+    )
+
+
 async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep) -> Response:
     """Handle form submission to create a new agent."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
@@ -587,6 +644,19 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
     account_id = str(form.get("account_id", "")).strip()
     anthropic_api_key = str(form.get("anthropic_api_key", "")).strip()
     gh_token = str(form.get("gh_token", "")).strip()
+    try:
+        backup_provider = BackupProvider(str(form.get("backup_provider", BackupProvider.CONFIGURE_LATER.value)))
+    except ValueError:
+        backup_provider = BackupProvider.CONFIGURE_LATER
+    try:
+        backup_encryption_method = BackupEncryptionMethod(
+            str(form.get("backup_encryption_method", BackupEncryptionMethod.NO_PASSWORD.value))
+        )
+    except ValueError:
+        backup_encryption_method = BackupEncryptionMethod.NO_PASSWORD
+    backup_master_password = str(form.get("backup_master_password", ""))
+    is_save_backup_password = str(form.get("backup_save_password", "")).strip() != ""
+    backup_api_key_env = str(form.get("backup_api_key_env", ""))
 
     session_store_inst: MultiAccountSessionStore | None = request.app.state.session_store
 
@@ -605,6 +675,10 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
             default_account_id=account_id,
             gh_token=gh_token,
             anthropic_api_key=anthropic_api_key,
+            backup_provider=backup_provider,
+            backup_encryption_method=backup_encryption_method,
+            backup_api_key_env=backup_api_key_env,
+            has_saved_backup_password=has_saved_backup_password(agent_creator.paths),
             error_message=message,
         )
         return HTMLResponse(content=html_body, status_code=status)
@@ -633,13 +707,33 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
     if ai_provider is AIProvider.API_KEY and not anthropic_api_key:
         return _re_render_with_error("An Anthropic API key is required when AI provider is set to api_key.")
 
-    # Resolve the account email when needed (imbue_cloud compute or AI). The
-    # mngr_imbue_cloud plugin owns the SuperTokens session and is responsible
-    # for fetching a fresh access token at the time of each subprocess
-    # invocation, so minds only needs to know which account to ask for.
+    # Resolve the account email when needed (imbue_cloud compute, AI, or
+    # backup). The mngr_imbue_cloud plugin owns the SuperTokens session and
+    # is responsible for fetching a fresh access token at the time of each
+    # subprocess invocation, so minds only needs to know which account to
+    # ask for.
+    is_imbue_cloud_backup = backup_provider is BackupProvider.IMBUE_CLOUD
     account_email = ""
-    if account_id and session_store_inst is not None and (is_imbue_cloud_compute or is_imbue_cloud_ai):
+    if (
+        account_id
+        and session_store_inst is not None
+        and (is_imbue_cloud_compute or is_imbue_cloud_ai or is_imbue_cloud_backup)
+    ):
         account_email = session_store_inst.get_account_email(account_id) or ""
+
+    # Resolve the backup configuration (reads / first-time-saves the shared
+    # master password as a side effect) before kicking off creation.
+    backup_request, backup_error = _build_backup_request_or_error(
+        backup_provider=backup_provider,
+        encryption_method=backup_encryption_method,
+        typed_master_password=backup_master_password,
+        is_save_password=is_save_backup_password,
+        api_key_env=backup_api_key_env,
+        account_email=account_email,
+        paths=agent_creator.paths,
+    )
+    if backup_error is not None:
+        return _re_render_with_error(backup_error)
 
     branch_or_tag = branch
     if is_imbue_cloud_compute and not branch_or_tag:
@@ -664,6 +758,7 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
         anthropic_api_key=anthropic_api_key,
         gh_token=gh_token,
         on_created=on_created,
+        backup_request=backup_request,
     )
 
     creating_url = "/creating/{}".format(creation_id)
@@ -682,13 +777,18 @@ def _handle_create_page(
     branch = request.query_params.get("branch", "")
     session_store: MultiAccountSessionStore | None = request.app.state.session_store
     minds_config: MindsConfig | None = request.app.state.minds_config
+    agent_creator: AgentCreator | None = request.app.state.agent_creator
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
+    is_backup_password_saved = (
+        has_saved_backup_password(agent_creator.paths) if agent_creator is not None else False
+    )
     html = render_create_form(
         git_url=git_url,
         branch=branch,
         accounts=accounts,
         default_account_id=default_account_id or "",
+        has_saved_backup_password=is_backup_password_saved,
     )
     return HTMLResponse(content=html)
 
@@ -732,6 +832,27 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
             content='{"error": "Invalid ai_provider"}',
             media_type="application/json",
         )
+    try:
+        backup_provider = BackupProvider(str(body.get("backup_provider", BackupProvider.CONFIGURE_LATER.value)))
+    except ValueError:
+        return Response(
+            status_code=400,
+            content='{"error": "Invalid backup_provider"}',
+            media_type="application/json",
+        )
+    try:
+        backup_encryption_method = BackupEncryptionMethod(
+            str(body.get("backup_encryption_method", BackupEncryptionMethod.NO_PASSWORD.value))
+        )
+    except ValueError:
+        return Response(
+            status_code=400,
+            content='{"error": "Invalid backup_encryption_method"}',
+            media_type="application/json",
+        )
+    backup_master_password = str(body.get("backup_master_password", ""))
+    is_save_backup_password = bool(body.get("backup_save_password", False))
+    backup_api_key_env = str(body.get("backup_api_key_env", ""))
     anthropic_api_key = str(body.get("anthropic_api_key", "")).strip()
     gh_token = str(body.get("gh_token", "")).strip()
     account_id = str(body.get("account_id", "")).strip()
@@ -770,14 +891,32 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
             media_type="application/json",
         )
 
-    # Resolve the account email when an imbue_cloud field is selected so the
-    # background creation can mint a LiteLLM key / lease a pool host. The
-    # session store is the source of truth for email <-> user_id mapping.
+    # Resolve the account email when an imbue_cloud field is selected (compute,
+    # AI, or backup) so the background creation can mint a LiteLLM key / lease a
+    # pool host / create a backup bucket. The session store is the source of
+    # truth for email <-> user_id mapping.
+    is_imbue_cloud_backup = backup_provider is BackupProvider.IMBUE_CLOUD
     account_email = ""
-    if account_id and (is_imbue_cloud_compute or is_imbue_cloud_ai):
+    if account_id and (is_imbue_cloud_compute or is_imbue_cloud_ai or is_imbue_cloud_backup):
         session_store_inst: MultiAccountSessionStore | None = request.app.state.session_store
         if session_store_inst is not None:
             account_email = session_store_inst.get_account_email(account_id) or ""
+
+    backup_request, backup_error = _build_backup_request_or_error(
+        backup_provider=backup_provider,
+        encryption_method=backup_encryption_method,
+        typed_master_password=backup_master_password,
+        is_save_password=is_save_backup_password,
+        api_key_env=backup_api_key_env,
+        account_email=account_email,
+        paths=agent_creator.paths,
+    )
+    if backup_error is not None:
+        return Response(
+            status_code=400,
+            content=json.dumps({"error": backup_error}),
+            media_type="application/json",
+        )
 
     creation_id = agent_creator.start_creation(
         git_url,
@@ -788,6 +927,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
         account_email=account_email,
         anthropic_api_key=anthropic_api_key,
         gh_token=gh_token,
+        backup_request=backup_request,
     )
     # API contract: the JSON field stays named ``agent_id`` for backwards
     # compatibility with existing API clients, but the value is now a
