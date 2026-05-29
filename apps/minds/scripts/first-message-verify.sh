@@ -20,7 +20,7 @@ CREATE_TIMEOUT_SECONDS=900
 REPLY_TIMEOUT_SECONDS=180
 DESTROY_TIMEOUT_SECONDS=180
 
-MNGR_BIN="/Applications/minds.app/Contents/Resources/pyproject/.venv/bin/mngr"
+MNGR_BIN="$HOME/.minds/.venv/bin/mngr"
 export MNGR_HOST_DIR="$HOME/.minds/mngr"
 export MNGR_PREFIX="minds-"
 
