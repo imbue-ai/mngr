@@ -52,73 +52,63 @@ async function shot(p, n) { try { await p.screenshot({ path: path.join(DIR, `${n
 // Steps 1+2 are in the main shell window (NOT the chat content frame).
 // Search every Electron window. We need a stateful click-progression
 // because the buttons are gated on the previous click landing.
+// Concrete observations from CI dump (run 26692570315):
+//   - Window 1 (Minds chrome shell at /_chrome) has button title="Requests"
+//   - Clicking it spawns Window 2 at /_chrome/requests-panel
+//   - Permission entries and Approve live inside the requests-panel window
 async function openRightPanel(app) {
-  // Step 1: find and click the chatbox icon (anything that opens the
-  // requests panel). Common patterns for icon-only buttons:
-  //   - aria-label match
-  //   - title attr match
-  //   - button containing an svg icon at a known position
-  const candidates = [
-    '[aria-label*="permission" i]',
-    '[aria-label*="request" i]',
-    '[aria-label*="chat" i]',
-    '[title*="permission" i]',
-    '[title*="request" i]',
-    'button[aria-label*="message" i]',
-    // The user said it's an icon -- try common locations
-    'button:has(svg)',
-  ];
   for (const w of app.windows()) {
-    for (const sel of candidates) {
-      try {
-        const all = await w.locator(sel).all();
-        for (const loc of all) {
-          if (!(await loc.isVisible({ timeout: 100 }).catch(() => false))) continue;
-          const aria = await loc.getAttribute('aria-label').catch(() => '');
-          const title = await loc.getAttribute('title').catch(() => '');
-          if (/(permission|request|chat|message)/i.test(`${aria} ${title}`)) {
-            return { locator: loc, selector: sel, window: w, aria, title };
-          }
-        }
-      } catch (_) {}
-    }
+    const loc = w.locator('button[title="Requests"]').first();
+    try {
+      if (await loc.count() > 0 && await loc.isVisible({ timeout: 100 }).catch(() => false)) {
+        return { locator: loc, selector: 'button[title="Requests"]', window: w };
+      }
+    } catch (_) {}
   }
   return null;
 }
+// Find the requests-panel window (created after openRightPanel click).
+function findRequestsPanelWindow(app) {
+  return app.windows().find(w => {
+    try { return w.url().includes('/_chrome/requests-panel'); } catch (_) { return false; }
+  });
+}
 async function findPermissionRequestEntry(app) {
-  for (const w of app.windows()) {
-    for (const sel of [
-      'text=/slack/i',
-      'text=/read.?only/i',
-      'text=/permission/i',
-      '[data-testid*="permission" i]',
-      '[role="listitem"]:has-text("slack")',
-    ]) {
-      try {
-        const loc = w.locator(sel).first();
-        if (await loc.count() > 0 && await loc.isVisible({ timeout: 100 }).catch(() => false)) {
-          return { locator: loc, selector: sel, window: w };
-        }
-      } catch (_) {}
-    }
+  const w = findRequestsPanelWindow(app);
+  if (!w) return null;
+  for (const sel of [
+    'text=/slack/i',
+    'text=/read.?only/i',
+    'text=/permission/i',
+    '[role="listitem"]',
+    'li',
+    'button:has-text("Slack")',
+    '[data-testid*="request" i]',
+  ]) {
+    try {
+      const loc = w.locator(sel).first();
+      if (await loc.count() > 0 && await loc.isVisible({ timeout: 100 }).catch(() => false)) {
+        return { locator: loc, selector: sel, window: w };
+      }
+    } catch (_) {}
   }
   return null;
 }
 async function findApproveButton(app) {
-  for (const w of app.windows()) {
-    for (const sel of [
-      'button:has-text("Approve")',
-      'button:has-text("Allow")',
-      'button:has-text("Grant")',
-      'text=/^\\s*Approve\\s*$/i',
-    ]) {
-      try {
-        const loc = w.locator(sel).first();
-        if (await loc.count() > 0 && await loc.isVisible({ timeout: 100 }).catch(() => false)) {
-          return { locator: loc, selector: sel, window: w };
-        }
-      } catch (_) {}
-    }
+  const w = findRequestsPanelWindow(app);
+  if (!w) return null;
+  for (const sel of [
+    'button:has-text("Approve")',
+    'button:has-text("Allow")',
+    'button:has-text("Grant")',
+    'text=/^\\s*Approve\\s*$/i',
+  ]) {
+    try {
+      const loc = w.locator(sel).first();
+      if (await loc.count() > 0 && await loc.isVisible({ timeout: 100 }).catch(() => false)) {
+        return { locator: loc, selector: sel, window: w };
+      }
+    } catch (_) {}
   }
   return null;
 }
@@ -224,7 +214,7 @@ async function dumpWindows(app, tag) {
 
   // Approval is a 3-step click: chatbox icon -> request entry -> Approve.
   let approvalStage = 0; // 0=need to open panel, 1=need to click request, 2=need to click Approve, 3=done
-  let dumpedOnce = false;
+  const dumpedOnce = [false, false, false];
   for (let i = 0; i < 240; i++) {
     if (approvalStage < 3) {
       if (approvalStage === 0) {
@@ -252,10 +242,15 @@ async function dumpWindows(app, tag) {
           catch (e) { log(`stage2 click failed: ${e.message}`); }
         }
       }
-      if (approvalStage < 3 && !dumpedOnce && i === 15) {
-        log('--- first dump (no progress in 15s): all windows + clickable elements ---');
-        await dumpWindows(app, 'wait15s');
-        dumpedOnce = true;
+      // Dump windows + clickable inventory each time we sit on the same
+      // stage for 10s, but only once per stage.
+      if (approvalStage < 3) {
+        const tag = `stage${approvalStage}-t${i}s`;
+        if (!dumpedOnce[approvalStage] && (i === 10 + approvalStage * 5)) {
+          log(`--- dump: stuck on stage ${approvalStage} at ${i}s ---`);
+          await dumpWindows(app, tag);
+          dumpedOnce[approvalStage] = true;
+        }
       }
     }
 
@@ -276,7 +271,7 @@ async function dumpWindows(app, tag) {
 
     if (i % 15 === 0 && i > 0) {
       const tail = await win.evaluate(() => document.body.innerText.slice(-400));
-      log(`waiting (${i}s) approvalClicked=${approvalClicked} tail: ${JSON.stringify(tail.slice(-200))}`);
+      log(`waiting (${i}s) approvalStage=${approvalStage} tail: ${JSON.stringify(tail.slice(-200))}`);
       await shot(win, `ci-slack-waiting-${i}s`);
     }
     await win.waitForTimeout(1000);
