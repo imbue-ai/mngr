@@ -14,7 +14,7 @@ COOKIES="/tmp/first-message-cookies.txt"
 # `${VAR:-default}` substitutes default for both unset and empty string,
 # so a workflow input that defaulted to '' still falls through to these.
 GIT_URL="${GIT_URL:-https://github.com/imbue-ai/forever-claude-template}"
-GIT_BRANCH="${GIT_BRANCH:-pilot_2}"
+GIT_BRANCH="${GIT_BRANCH:-pilot}"
 HOST_NAME="${HOST_NAME:-firstmsg$(date +%H%M%S)}"
 PROMPT="${PROMPT:-Reply with exactly the four characters: pong}"
 EXPECT_SUBSTRING="${EXPECT_SUBSTRING:-pong}"
@@ -137,13 +137,36 @@ done
 [[ "$last_status" == "DONE" ]] || fail "agent did not reach DONE in ${CREATE_TIMEOUT_SECONDS}s (last=$last_status)"
 log "agent DONE"
 
-# After DONE, the chat agent name == host_name (per minds README:
-# "user's actual chat agent is a separate mngr agent ... named after the host").
-AGENT_NAME="$HOST_NAME"
-
-log "settling 5s then listing what mngr sees (lima provider only)"
-sleep 5
-"$MNGR_BIN" list --provider lima 2>&1 | tee /tmp/first-message-mngr-list.txt >&2 || true
+# After DONE, find the agent mngr actually placed on this host. The
+# minds README claims "chat agent name == host_name", but on FCT pilot
+# the only post-bootstrap agent is the workspace's `system-services`
+# agent named per the template (not the host). Poll mngr list for up
+# to 60s -- the bootstrap that spawns the chat agent runs inside the
+# VM after host READY and can lag the create-flow's DONE event.
+log "settling then polling mngr list for an agent on host=$HOST_NAME (up to 60s)"
+agent_deadline=$((SECONDS + 60))
+AGENT_NAME=""
+while (( SECONDS < agent_deadline )); do
+  "$MNGR_BIN" list --provider lima 2>&1 | tee /tmp/first-message-mngr-list.txt >&2 || true
+  AGENT_NAME=$(HOST_NAME="$HOST_NAME" "$MNGR_BIN" list --provider lima --format json 2>/dev/null | python3 -c '
+import json, os, sys
+host = os.environ["HOST_NAME"]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+agents = data.get("agents", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+for a in agents:
+    host_info = a.get("host") or {}
+    if host_info.get("name") == host or a.get("host_name") == host:
+        print(a.get("name", ""))
+        sys.exit(0)
+' 2>/dev/null)
+  [[ -n "$AGENT_NAME" ]] && break
+  sleep 3
+done
+[[ -n "$AGENT_NAME" ]] || fail "no mngr agent on host $HOST_NAME after 60s"
+log "resolved agent name: $AGENT_NAME"
 
 log "sending message to '$AGENT_NAME': $PROMPT"
 "$MNGR_BIN" message --provider lima "$AGENT_NAME" -m "$PROMPT" 2>&1 | tee /tmp/first-message-mngr-message.txt >&2
