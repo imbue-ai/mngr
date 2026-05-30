@@ -19,7 +19,11 @@ HOST_NAME="${HOST_NAME:-firstmsg$(date +%H%M%S)}"
 PROMPT="${PROMPT:-Reply with exactly the four characters: pong}"
 EXPECT_SUBSTRING="${EXPECT_SUBSTRING:-pong}"
 CREATE_TIMEOUT_SECONDS=900
-REPLY_TIMEOUT_SECONDS=180
+# Cold-start claude (first launch on a fresh CI runner) can take several
+# minutes -- the agent has to settle into the TUI, then claude has to
+# start, auth, and process the prompt. 480s leaves headroom over the
+# ~3-5 min observed locally on cold caches.
+REPLY_TIMEOUT_SECONDS="${REPLY_TIMEOUT_SECONDS:-480}"
 DESTROY_TIMEOUT_SECONDS=180
 # When SKIP_DESTROY=1, leave the agent running so a follow-on step (slack
 # flow, Playwright drive) can reuse it. The follow-on owns teardown.
@@ -251,7 +255,31 @@ sys.exit(2)
   fi
   sleep 3
 done
-[[ -s "$REPLY_FILE" ]] || fail "no assistant reply matching '$EXPECT_SUBSTRING' in ${REPLY_TIMEOUT_SECONDS}s"
+if [[ ! -s "$REPLY_FILE" ]]; then
+  log "no assistant reply matching '$EXPECT_SUBSTRING' in ${REPLY_TIMEOUT_SECONDS}s -- dumping diagnostics"
+  # Find the VM the agent runs in and snapshot its tmux session so we can
+  # tell whether the message arrived, whether claude started, whether it
+  # crashed, etc. The bundled limactl path matches first-message-verify's
+  # PATH prefix.
+  VM_NAME="minds-${HOST_NAME}"
+  TMUX_OUT=/tmp/first-message-agent-tmux.txt
+  AGENT_LOG=/tmp/first-message-agent-mngr-logs.txt
+  log "VM=$VM_NAME; capturing tmux + agent state"
+  limactl shell "$VM_NAME" -- bash -c '
+    echo "=== tmux ls ==="; tmux ls 2>&1 || true
+    for S in $(tmux ls -F "#{session_name}" 2>/dev/null); do
+      echo "=== tmux capture-pane $S ==="
+      tmux capture-pane -t "$S" -pS -500 2>&1 || true
+    done
+    echo "=== agent processes ==="
+    ps auxe 2>&1 | grep -iE "claude|mngr" | grep -v grep | head -20
+    echo "=== claude session dir ==="
+    ls -la ~/.claude/ 2>&1 | head -10
+  ' > "$TMUX_OUT" 2>&1 || true
+  log "tmux/agent diagnostics at $TMUX_OUT (head):"
+  head -50 "$TMUX_OUT" >&2 || true
+  fail "no assistant reply matching '$EXPECT_SUBSTRING' in ${REPLY_TIMEOUT_SECONDS}s"
+fi
 
 log "writing agent info to $AGENT_INFO_PATH (host=$HOST_NAME agent=$AGENT_NAME creation_id=$AGENT_ID)"
 HOST_NAME="$HOST_NAME" AGENT_NAME="$AGENT_NAME" AGENT_ID="$AGENT_ID" BASE="$BASE" python3 -c '

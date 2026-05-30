@@ -386,6 +386,7 @@ jobs:
           for f in /tmp/first-message-*.json /tmp/first-message-*.txt /tmp/first-message-*.html; do
             [ -f "$f" ] && cp "$f" artifacts/ 2>/dev/null || true
           done
+          [ -f /tmp/post-slack-delete.json ] && cp /tmp/post-slack-delete.json artifacts/ 2>/dev/null || true
           [ -d /tmp/slack-mock ] && cp -R /tmp/slack-mock artifacts/ 2>/dev/null || true
           [ -d apps/minds/test/e2e/screenshots ] && cp -R apps/minds/test/e2e/screenshots artifacts/playwright-screenshots 2>/dev/null || true
           [ -d apps/minds/test-results ] && cp -R apps/minds/test-results artifacts/playwright-test-results 2>/dev/null || true
