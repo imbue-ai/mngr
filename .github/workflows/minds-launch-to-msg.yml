@@ -334,7 +334,9 @@ jobs:
             fi
             brew install socat
           fi
-          socat -V | head -1
+          # socat -V writes the banner to stderr; merge then head, and
+          # tolerate SIGPIPE under bash -e.
+          (socat -V 2>&1 || true) | head -1 || true
           # Persist the PATH so downstream steps in this job find socat
           # without re-discovering brew.
           if [[ -n "${HOMEBREW_PREFIX:-}" ]]; then
