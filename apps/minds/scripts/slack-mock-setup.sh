@@ -1,43 +1,40 @@
 #!/usr/bin/env bash
-# Provision a localhost slack mock for a running lima VM agent.
+# Provision a localhost slack mock for a running minds.app agent.
 #
-# Architecture:
+# Architecture: the latchkey gateway runs on the macOS HOST (started by
+# minds.app), not inside the lima VM. The agent connects to 127.0.0.1:1989
+# via a reverse-SSH tunnel into the host's gateway, and the gateway makes
+# the outbound `slack.com` call from the host. So the interception layer
+# lives entirely on the host:
 #
-#   agent (inside lima VM) --[curl https://slack.com/...]--+
+#   agent (in VM) --[SSH tunnel 127.0.0.1:1989]--> macOS host's latchkey gateway
 #                                                          |
-#                              /etc/hosts inside VM --> 192.168.5.2 (host.lima.internal)
+#                       /etc/hosts on host --> 127.0.0.1
 #                                                          |
-#                              macOS host :443 socat ------+
-#                                  (TLS terminate)
-#                                          |
-#                              127.0.0.1:8443 plain HTTP node mock
+#                       socat :443 (TLS) ----> 127.0.0.1:8443 plain HTTP node mock
 #
-# Requires sudo on the macOS host (to bind :443 and run socat) and
-# passwordless sudo inside the lima VM (default for lima ubuntu user).
+# Requires NOPASSWD sudo on the runner (for /etc/hosts, trust-cert install,
+# and socat :443 bind).
 #
-# Inputs:
-#   VM_NAME       lima VM name (required)
-#
-# Outputs (consumed by slack-mock-teardown.sh and CI artifacts):
+# Outputs (consumed by slack-mock-teardown.sh):
 #   /tmp/slack-mock/cert.pem  /tmp/slack-mock/key.pem
 #   /tmp/slack-mock/mock.pid  /tmp/slack-mock/socat.pid
-#   /tmp/slack-mock/mock.log
+#   /tmp/slack-mock/mock.log  /tmp/slack-mock/socat.log
 set -uo pipefail
 
-VM_NAME="${VM_NAME:?VM_NAME is required (lima VM hosting the agent)}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MOCK_SCRIPT="$SCRIPT_DIR/../test/e2e/mocks/slack-mock-server.js"
 STATE_DIR=/tmp/slack-mock
-HOST_LIMA_IP=192.168.5.2
-# Pin to the lima bundled with the .app so its version matches the VM image.
-LIMA_BIN_DIR=/Applications/Minds.app/Contents/Resources/lima/bin
-export PATH="$LIMA_BIN_DIR:$PATH"
+LATCHKEY_BIN=/Applications/Minds.app/Contents/Resources/latchkey/bin/latchkey
+LATCHKEY_DIRECTORY="$HOME/.minds/latchkey"
 
 log() { printf '[slack-mock-setup] %s\n' "$*" >&2; }
 fail() { log "FAIL: $*"; exit 1; }
 
-[[ -f "$MOCK_SCRIPT" ]] || fail "mock script not at $MOCK_SCRIPT"
-command -v limactl >/dev/null || fail "limactl not on PATH"
+[[ -f "$MOCK_SCRIPT" ]]     || fail "mock script not at $MOCK_SCRIPT"
+[[ -x "$LATCHKEY_BIN" ]]    || fail "bundled latchkey not at $LATCHKEY_BIN (minds.app not installed?)"
+[[ -f "$LATCHKEY_DIRECTORY/encryption_key" ]] \
+                            || fail "$LATCHKEY_DIRECTORY/encryption_key missing -- minds.app gateway never started?"
 command -v socat   >/dev/null || fail "socat not on PATH (brew install socat)"
 command -v node    >/dev/null || fail "node not on PATH"
 
@@ -45,7 +42,7 @@ mkdir -p "$STATE_DIR"
 
 # 1. Self-signed cert covering slack.com + files.slack.com.
 if [[ ! -f "$STATE_DIR/cert.pem" ]]; then
-  log "generating self-signed cert"
+  log "generating self-signed cert for slack.com"
   openssl req -x509 -newkey rsa:2048 -nodes \
     -keyout "$STATE_DIR/key.pem" -out "$STATE_DIR/cert.pem" \
     -days 1 -subj "/CN=slack.com" \
@@ -53,34 +50,26 @@ if [[ ! -f "$STATE_DIR/cert.pem" ]]; then
     >/dev/null 2>&1 || fail "openssl req failed"
 fi
 
-# 2. Trust the cert inside the lima VM (system CA bundle).
-log "installing cert in $VM_NAME CA store"
-limactl copy "$STATE_DIR/cert.pem" "$VM_NAME:/tmp/slack-mock-ca.crt" \
-  || fail "limactl copy cert -> $VM_NAME failed"
-limactl shell "$VM_NAME" -- sudo bash -c '
-  set -e
-  cp /tmp/slack-mock-ca.crt /usr/local/share/ca-certificates/slack-mock.crt
-  update-ca-certificates 2>&1 | tail -1
-' || fail "update-ca-certificates failed in $VM_NAME"
+# 2. Trust the cert at the system level (curl-darwinssl uses System keychain).
+log "trusting cert in /Library/Keychains/System.keychain"
+sudo security add-trusted-cert -d -r trustRoot \
+  -k /Library/Keychains/System.keychain "$STATE_DIR/cert.pem" \
+  || fail "security add-trusted-cert failed"
 
-# 3. /etc/hosts inside the VM: slack.com / files.slack.com -> host.lima.internal.
-log "patching /etc/hosts in $VM_NAME"
-limactl shell "$VM_NAME" -- sudo bash -c "
-  set -e
-  marker='# slack-mock'
-  sed -i.bak \"/\$marker/d\" /etc/hosts
-  sed -i \"/^${HOST_LIMA_IP} slack.com /d\" /etc/hosts
-  echo '${HOST_LIMA_IP} slack.com files.slack.com  # slack-mock' >> /etc/hosts
-" || fail "/etc/hosts patch failed in $VM_NAME"
+# 3. /etc/hosts on the host: slack.com / files.slack.com -> 127.0.0.1.
+log "patching /etc/hosts"
+sudo sed -i.bak '/# slack-mock/d' /etc/hosts
+echo '127.0.0.1 slack.com files.slack.com  # slack-mock' \
+  | sudo tee -a /etc/hosts >/dev/null
 
-# 4. Pre-seed latchkey slack creds (so cred-presence check passes).
-log "pre-seeding latchkey slack creds in $VM_NAME"
-limactl shell "$VM_NAME" -- bash -c '
-  set -e
-  latchkey auth set slack -H "Authorization: Bearer xoxc-ci-mock-token"
-' || fail "latchkey auth set failed in $VM_NAME"
+# 4. Pre-seed latchkey slack creds (host-side; gateway picks up on next req).
+log "pre-seeding latchkey slack creds"
+LATCHKEY_DIRECTORY="$LATCHKEY_DIRECTORY" \
+  "$LATCHKEY_BIN" auth set slack \
+    -H "Authorization: Bearer xoxc-ci-mock-token" \
+  || fail "latchkey auth set slack failed"
 
-# 5. Start node mock on host:8443 (plain HTTP).
+# 5. Start node mock on 127.0.0.1:8443 (plain HTTP).
 log "starting node mock on 127.0.0.1:8443"
 SLACK_MOCK_PORT=8443 node "$MOCK_SCRIPT" \
   > "$STATE_DIR/mock.log" 2>&1 &
@@ -89,25 +78,24 @@ sleep 1
 curl -sf http://127.0.0.1:8443/api/auth.test >/dev/null \
   || fail "mock not responding on 127.0.0.1:8443"
 
-# 6. socat: TLS terminate :443 on the lima-visible IP, forward to 127.0.0.1:8443.
-log "starting socat TLS terminator on 0.0.0.0:443 -> 127.0.0.1:8443"
+# 6. socat: TLS terminate :443 on 127.0.0.1, forward to 127.0.0.1:8443.
+log "starting socat TLS terminator on 127.0.0.1:443 -> 127.0.0.1:8443"
 sudo socat -d \
-  OPENSSL-LISTEN:443,bind=0.0.0.0,reuseaddr,fork,verify=0,cert="$STATE_DIR/cert.pem",key="$STATE_DIR/key.pem" \
+  OPENSSL-LISTEN:443,bind=127.0.0.1,reuseaddr,fork,verify=0,cert="$STATE_DIR/cert.pem",key="$STATE_DIR/key.pem" \
   TCP:127.0.0.1:8443 \
   > "$STATE_DIR/socat.log" 2>&1 &
 SOCAT_PID=$!
 echo $SOCAT_PID | sudo tee "$STATE_DIR/socat.pid" >/dev/null
 
-# 7. End-to-end sanity check: agent's perspective.
-log "verifying TLS reach from inside $VM_NAME"
+# 7. End-to-end sanity check from the host's perspective.
+log "verifying TLS reach as the gateway would see it"
 for attempt in 1 2 3 4 5 6 7 8 9 10; do
-  body=$(limactl shell "$VM_NAME" -- curl -sf --max-time 5 \
-    https://slack.com/api/auth.test 2>&1) && break
+  body=$(curl -sf --max-time 5 https://slack.com/api/auth.test 2>&1) && break
   sleep 1
 done
 case "$body" in
-  *Imbue\ CI\ Mock*) log "mock reachable from VM (got team=Imbue CI Mock)";;
-  *)                 fail "mock NOT reachable from VM. Last response: $body";;
+  *Imbue\ CI\ Mock*) log "mock reachable (got team=Imbue CI Mock)";;
+  *)                 fail "mock NOT reachable. Last response: $body";;
 esac
 
 log "OK"

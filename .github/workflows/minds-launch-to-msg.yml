@@ -294,7 +294,12 @@ jobs:
         run: bash apps/minds/scripts/first-message-verify.sh
 
       # --- slack permission flow (uses the agent first-message just left running) ---
-      - name: resolve VM name from agent info
+      # The latchkey gateway runs on the macOS HOST (not inside the lima VM);
+      # the agent reaches it via a reverse-SSH tunnel back to 127.0.0.1:1989,
+      # and the gateway makes the outbound slack.com call from the host.
+      # So all the interception (/etc/hosts, cert, socat, latchkey cred)
+      # belongs on the host, not in the VM.
+      - name: read agent info written by first-message-verify
         id: slack_pre
         if: ${{ inputs.skip_first_message != true && inputs.skip_slack_flow != true }}
         run: |
@@ -303,23 +308,11 @@ jobs:
             echo "::error::$INFO missing -- first-message step did not write agent info"; exit 1
           fi
           HOST_NAME=$(jq -r .host_name "$INFO")
-          AGENT_NAME=$(jq -r .agent_name "$INFO")
           CREATION_ID=$(jq -r .creation_id "$INFO")
           BASE_URL=$(jq -r .base_url "$INFO")
-          # lima VM names are MNGR_PREFIX + host_name; first-message-verify
-          # sets MNGR_PREFIX=minds- via export, so the VM is minds-<host>.
-          VM_NAME="minds-${HOST_NAME}"
-          if ! /Applications/Minds.app/Contents/Resources/lima/bin/limactl list \
-              --format '{{.Name}}' | grep -qx "$VM_NAME"; then
-            echo "::error::lima VM $VM_NAME not found"
-            /Applications/Minds.app/Contents/Resources/lima/bin/limactl list || true
-            exit 1
-          fi
           echo "host_name=$HOST_NAME"     >> "$GITHUB_OUTPUT"
-          echo "agent_name=$AGENT_NAME"   >> "$GITHUB_OUTPUT"
           echo "creation_id=$CREATION_ID" >> "$GITHUB_OUTPUT"
           echo "base_url=$BASE_URL"       >> "$GITHUB_OUTPUT"
-          echo "vm_name=$VM_NAME"         >> "$GITHUB_OUTPUT"
           echo "ok=1"                     >> "$GITHUB_OUTPUT"
 
       - name: install socat (slack mock TLS terminator)
@@ -337,10 +330,8 @@ jobs:
           npm install -g pnpm@10.33.4
           pnpm install --frozen-lockfile
 
-      - name: stand up slack mock + in-VM redirect
+      - name: stand up slack mock on host
         if: ${{ steps.slack_pre.outputs.ok == '1' }}
-        env:
-          VM_NAME: ${{ steps.slack_pre.outputs.vm_name }}
         run: bash apps/minds/scripts/slack-mock-setup.sh
 
       - name: kill running minds.app (Playwright launches its own)
@@ -350,7 +341,6 @@ jobs:
             kill "$P" 2>/dev/null || true
           done
           sleep 2
-          # Make sure ports the new instance wants (8421 + backend) are free.
           for P in $(pgrep -f 'mngr forward' 2>/dev/null || true); do
             kill "$P" 2>/dev/null || true
           done
@@ -365,8 +355,6 @@ jobs:
 
       - name: teardown slack mock
         if: ${{ always() && steps.slack_pre.outputs.ok == '1' }}
-        env:
-          VM_NAME: ${{ steps.slack_pre.outputs.vm_name }}
         run: bash apps/minds/scripts/slack-mock-teardown.sh
 
       - name: destroy agent (post-slack-flow)
