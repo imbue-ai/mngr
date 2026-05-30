@@ -148,12 +148,23 @@ agent_deadline=$((SECONDS + 60))
 AGENT_NAME=""
 while (( SECONDS < agent_deadline )); do
   "$MNGR_BIN" list --provider lima 2>&1 | tee /tmp/first-message-mngr-list.txt >&2 || true
-  AGENT_NAME=$(HOST_NAME="$HOST_NAME" "$MNGR_BIN" list --provider lima --format json 2>/dev/null | python3 -c '
+  # Capture stdout AND stderr so warnings (e.g. RUNNING_UNKNOWN_AGENT_TYPE
+  # noise that mngr can prepend) don't silently break json parsing. The parser
+  # finds the first '{' or '[' in the raw output and parses from there; any
+  # WARNING: prefix lines are stripped naturally.
+  AGENT_NAME=$(HOST_NAME="$HOST_NAME" "$MNGR_BIN" list --provider lima --format json 2>&1 | python3 -c '
 import json, os, sys
 host = os.environ["HOST_NAME"]
+raw = sys.stdin.read()
+# Skip any non-JSON prefix (mngr warnings, log lines, ANSI codes).
+start = next((i for i, ch in enumerate(raw) if ch in "{["), -1)
+if start < 0:
+    print(f"  (no JSON payload in mngr list output, first 200 chars: {raw[:200]!r})", file=sys.stderr)
+    sys.exit(0)
 try:
-    data = json.load(sys.stdin)
-except Exception:
+    data = json.loads(raw[start:])
+except Exception as exc:
+    print(f"  (json parse failed: {exc}; payload[:200]={raw[start:start+200]!r})", file=sys.stderr)
     sys.exit(0)
 agents = data.get("agents", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
 for a in agents:
@@ -161,7 +172,8 @@ for a in agents:
     if host_info.get("name") == host or a.get("host_name") == host:
         print(a.get("name", ""))
         sys.exit(0)
-' 2>/dev/null)
+print(f"  (no agent on host {host!r}; {len(agents)} agents seen)", file=sys.stderr)
+' 2>>/tmp/first-message-mngr-list.txt)
   [[ -n "$AGENT_NAME" ]] && break
   sleep 3
 done
