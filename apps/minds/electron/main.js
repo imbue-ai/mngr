@@ -89,7 +89,9 @@ function isExternalUrl(url) {
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
   const host = parsed.hostname.toLowerCase();
   if (host === 'localhost' || host.endsWith('.localhost')) return false;
-  if (host === '127.0.0.1' || host === '::1') return false;
+  // URL.hostname wraps IPv6 literals in brackets, so the loopback parses as
+  // `[::1]`, not `::1`.
+  if (host === '127.0.0.1' || host === '[::1]') return false;
   return true;
 }
 
