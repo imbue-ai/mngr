@@ -58,7 +58,14 @@ log "waiting for login URL in events log (up to 120s)"
 LOGIN_URL=""
 url_deadline=$((SECONDS + 120))
 while (( SECONDS < url_deadline )); do
-  LOGIN_URL=$(grep -oE 'http://(127\.0\.0\.1|localhost):[0-9]+/login\?one_time_code=[A-Za-z0-9_-]+' "$EVENTS_LOG" 2>/dev/null | tail -1)
+  # The events log contains MULTIPLE login URLs: mngr forward emits its
+  # own on port 8421 ("Login URL (one-time use)") and minds.app's
+  # backend emits the real one on a random high port ("Minds login URL
+  # (one-time use)"). Only the backend's accepts /authenticate; the
+  # forward one returns 403. Match the backend message specifically.
+  LOGIN_URL=$(grep -oE 'Minds login URL \(one-time use\): http://(127\.0\.0\.1|localhost):[0-9]+/login\?one_time_code=[A-Za-z0-9_-]+' "$EVENTS_LOG" 2>/dev/null \
+    | grep -oE 'http://[^[:space:]]+' \
+    | tail -1)
   [[ -n "$LOGIN_URL" ]] && break
   sleep 2
 done
