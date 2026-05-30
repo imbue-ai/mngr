@@ -51,6 +51,7 @@ imbue-mngr = { workspace = true }
 imbue-mngr-forward = { workspace = true }
 imbue-mngr-latchkey = { workspace = true }
 imbue-mngr-ovh = { workspace = true }
+imbue-mngr-sbx = { workspace = true }
 imbue-mngr-vps-docker = { workspace = true }
 imbue-common = { workspace = true }
 
