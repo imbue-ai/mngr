@@ -456,6 +456,8 @@ def _build_mngr_create_command(
     match launch_mode:
         case LaunchMode.DOCKER:
             address = f"{_DEFAULT_AGENT_NAME}@{host_name}.docker"
+        case LaunchMode.SBX:
+            address = f"{_DEFAULT_AGENT_NAME}@{host_name}.sbx"
         case LaunchMode.LIMA:
             address = f"{_DEFAULT_AGENT_NAME}@{host_name}.lima"
         case LaunchMode.CLOUD:
@@ -539,6 +541,9 @@ def _build_mngr_create_command(
     match launch_mode:
         case LaunchMode.DOCKER:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "docker"])
+            mngr_command.extend(_remote_host_env_flags())
+        case LaunchMode.SBX:
+            mngr_command.extend(["--new-host", "--template", "main", "--template", "sbx"])
             mngr_command.extend(_remote_host_env_flags())
         case LaunchMode.LIMA:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "lima"])

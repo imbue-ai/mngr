@@ -1,0 +1,1 @@
+Add "Docker Sandbox (sbx)" as a compute option in the workspace create form. A new `LaunchMode.SBX` maps to the `sbx` mngr provider: the create flow targets `system-services@<host>.sbx` and provisions with `--template main --template sbx`. The option appears in the create-form compute dropdown alongside Docker/Lima/Cloud.
