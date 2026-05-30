@@ -1,0 +1,5 @@
+# Self-hosted Mac runner + launch-to-first-message workflow
+
+- Added `.github/workflows/minds-launch-to-msg.yml`, a `workflow_dispatch` job that (given a minds commit SHA and forever-claude-template ref) either reuses an existing ToDesktop build matching the commit or runs `pnpm dist` to build a fresh draft, then on the self-hosted `minds-runner` macOS host downloads the resulting `.app`, launches it, waits for the backend to come up, and optionally round-trips a real first-message chat against a LIMA agent before cleaning up. Collects diagnostic artifacts on failure.
+- Added `.github/workflows/minds-runner-reset.yml`, a `workflow_dispatch` job to manually reset the self-hosted runner to a clean state (and optionally install a fresh `.app` from a ToDesktop `.zip` URL).
+- Companion infrastructure (the runner Mac itself: Tailscale-tagged, LaunchAgent-installed GitHub Actions runner) lives outside this repo. The runner is registered at the `imbue-ai` org level and is targeted by `runs-on: [self-hosted, macOS, minds-runner]`.
