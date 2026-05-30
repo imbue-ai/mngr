@@ -892,8 +892,8 @@ def test_wrap_text_wraps_long_lines() -> None:
 # render_markdown link rewriting
 # =============================================================================
 
-# Link-target resolution itself (and imbue_mngr_doc_url) is unit-tested in
-# doc_links_test.py; these cover render_markdown's use of it.
+# Link-target resolution is unit-tested in markdown_render_test.py; these cover
+# that render_markdown threads link_base through to the rich renderer.
 _DOC_URL = "https://github.com/imbue-ai/mngr/blob/v1.2.3/libs/mngr_usage/docs/cron_recipes.md"
 
 

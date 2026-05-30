@@ -38,6 +38,10 @@ dependencies = [
     "paramiko>=3.0",
     "pluggy>=1.5.0",
     "pygtail>=0.14.0",
+    # markdown-it-py is rich's own markdown parser; we depend on it directly
+    # because cli/markdown_render.py rewrites link hrefs on rich's parsed token
+    # tree (the >=2.2.0 floor matches rich and guarantees the dict Token.attrs API).
+    "markdown-it-py>=2.2.0",
     "rich>=13.0",
     "tabulate>=0.9.0",
     "tenacity>=8.0",

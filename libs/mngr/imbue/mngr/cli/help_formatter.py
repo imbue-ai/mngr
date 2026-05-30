@@ -15,7 +15,6 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.cli.common_opts import COMMON_OPTIONS_GROUP_NAME
 from imbue.mngr.cli.common_opts import find_option_group
-from imbue.mngr.cli.doc_links import rewrite_links_to_absolute
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.utils.interactive_subprocess import popen_interactive_subprocess
 
@@ -163,13 +162,11 @@ def render_markdown(markdown: str, *, use_ansi: bool, width: int, link_base: str
     """
     if not use_ansi:
         return markdown
-    if link_base is not None:
-        markdown = rewrite_links_to_absolute(markdown, link_base)
     # Lazy import: keep rich (and its import cost) out of the CLI startup path;
     # it is only needed here, when rendering help for an interactive terminal.
     from imbue.mngr.cli.markdown_render import markdown_to_ansi
 
-    return markdown_to_ansi(markdown, width)
+    return markdown_to_ansi(markdown, width, link_base=link_base)
 
 
 @pure
