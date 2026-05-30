@@ -318,10 +318,32 @@ jobs:
       - name: install socat (slack mock TLS terminator)
         if: ${{ steps.slack_pre.outputs.ok == '1' }}
         run: |
+          # The self-hosted minds-runner does not have brew on the bash -e
+          # PATH (Actions step shells don't source the login profile);
+          # find it explicitly. arm64 -> /opt/homebrew, x86_64 -> /usr/local.
+          for BREW in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+            if [[ -x "$BREW" ]]; then
+              export PATH="$(dirname "$BREW"):$PATH"
+              break
+            fi
+          done
           if ! command -v socat >/dev/null; then
+            if ! command -v brew >/dev/null; then
+              echo "::error::neither socat nor brew found on the runner. Install socat manually on minds-runner."
+              exit 1
+            fi
             brew install socat
           fi
           socat -V | head -1
+          # Persist the PATH so downstream steps in this job find socat
+          # without re-discovering brew.
+          if [[ -n "${HOMEBREW_PREFIX:-}" ]]; then
+            echo "$HOMEBREW_PREFIX/bin" >> "$GITHUB_PATH"
+          else
+            for D in /opt/homebrew/bin /usr/local/bin; do
+              [[ -d "$D" ]] && echo "$D" >> "$GITHUB_PATH"
+            done
+          fi
 
       - name: pnpm install (apps/minds dev deps incl. playwright)
         if: ${{ steps.slack_pre.outputs.ok == '1' }}
