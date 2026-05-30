@@ -1,0 +1,1 @@
+Strengthened the `mngr create --branch "main:mngr/*"` e2e test (`test_create_with_base_branch`) to also verify, via `mngr exec`, that the agent's worktree is actually checked out on the new branch and sits at the base branch's commit (not the current/diverged branch's commit).

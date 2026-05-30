@@ -1,0 +1,1 @@
+Strengthened the `mngr create --help` e2e test to assert the command renders its description with no stderr noise, and added a companion test that verifies an unknown flag (e.g. `mngr create --nonexistent-flag`) is rejected with a clear error and a non-zero exit instead of creating an agent.

@@ -1,0 +1,1 @@
+Strengthened the `test_invalid_provider_fails` e2e test so it actually exercises invalid-provider handling: it now passes a valid `--type` so the command reaches provider resolution (previously it failed earlier on a missing default agent type) and asserts that the failure names the unknown provider backend.

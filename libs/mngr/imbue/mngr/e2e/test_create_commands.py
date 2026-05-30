@@ -11,7 +11,6 @@ from imbue.skitwright.expect import expect
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 def test_create_command_agent_runs_post_dash_command_in_agent(e2e: E2eSession) -> None:
     # Use a locally-bound name since we assert on the exact command string below.
     expected_command = "sleep 123456789"
@@ -72,11 +71,27 @@ def test_create_with_idle_mode_and_timeout(e2e: E2eSession) -> None:
     )
     expect(result).to_succeed()
 
+    # Verify the agent was actually created with the requested idle settings and
+    # command. The `run` idle mode tracks the agent's process, so the `sleep`
+    # keeps the host active and `mngr list` can reach it to report live details.
+    list_result = e2e.run(
+        "mngr list --format json",
+        comment="Verify the agent's idle settings and command",
+        timeout=120.0,
+    )
+    expect(list_result).to_succeed()
+    agents = json.loads(list_result.stdout)["agents"]
+    matching = [a for a in agents if a["name"] == "my-task"]
+    assert len(matching) == 1, f"Expected exactly one 'my-task' agent, got: {agents}"
+    agent = matching[0]
+    assert agent["command"] == "sleep 100077", f"Unexpected command: {agent['command']}"
+    assert agent["idle_mode"] == "RUN", f"Unexpected idle_mode: {agent['idle_mode']}"
+    assert agent["idle_timeout_seconds"] == 60, f"Unexpected idle_timeout_seconds: {agent['idle_timeout_seconds']}"
+
 
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 # Flaky: collateral damage from a leaked `mngr observe` process that the
 # system_interface's AgentManager spawns and doesn't always clean up (lives
 # in forever-claude-template/apps/system_interface). session_cleanup
@@ -118,7 +133,6 @@ def test_create_with_extra_tmux_windows(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 def test_create_with_no_ensure_clean(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # by default, mngr aborts the create command if the working tree has uncommitted changes. You can avoid this by doing:
@@ -136,7 +150,13 @@ def test_create_with_no_ensure_clean(e2e: E2eSession) -> None:
         )
     ).to_succeed()
 
-    list_result = e2e.run("mngr list --format json", comment="Verify agent created despite dirty working tree")
+    # The agent runs on the local provider (the tutorial's default), so scope the
+    # verification listing to it. This keeps the test free of any Modal dependency
+    # (a default `mngr list` fans out to every provider, including Modal).
+    list_result = e2e.run(
+        "mngr list --provider local --format json",
+        comment="Verify agent created despite dirty working tree",
+    )
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     agent_names = [a["name"] for a in parsed["agents"]]
@@ -146,7 +166,7 @@ def test_create_with_no_ensure_clean(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_create_with_connect_command(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can use a custom connect command instead of the default (eg, useful for, say, connecting in a new iterm window instead of the current one)
@@ -176,25 +196,49 @@ def test_create_with_connect_command(e2e: E2eSession) -> None:
 
 @pytest.mark.rsync
 @pytest.mark.release
-@pytest.mark.tmux
 @pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_create_with_message(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can send a message when starting the agent (great for scripting):
     mngr create my-task --no-connect --message "Do the thing"
     """)
+    # Create on Modal so the message-delivery path is exercised against a real
+    # remote host (and so the @pytest.mark.modal guard is satisfied). Delivering
+    # the initial message adds several tmux send-keys round-trips on top of
+    # remote provisioning, so this create needs more than the default 10s pytest
+    # timeout (hence the timeout marker above and the explicit per-command
+    # timeout below).
     create_result = e2e.run(
-        'mngr create my-task --type command --no-ensure-clean --no-connect --message "Do the thing" -- sleep 100081',
+        "mngr create my-task --provider modal --type command --no-ensure-clean"
+        ' --no-connect --message "Do the thing" -- sleep 100081',
         comment="you can send a message when starting the agent (great for scripting)",
+        timeout=120.0,
     )
     expect(create_result).to_succeed()
     # Verify the create output confirms the message was sent
     expect(create_result.stderr).to_contain("Sending initial message")
 
-    # Verify the agent was created
+    # Verify the agent was actually created on Modal, running the requested
+    # command. Asserting on the host provider confirms the remote message path
+    # really ran (rather than silently falling back to a local agent).
     list_result = e2e.run("mngr list --format json", comment="Verify agent created with initial message")
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     agents = parsed["agents"]
     matching = [a for a in agents if a["name"] == "my-task"]
     assert len(matching) == 1
+    agent = matching[0]
+    assert agent["command"] == "sleep 100081"
+    assert agent["host"]["provider_name"] == "modal"
+
+    # Verify the message was actually delivered, not just logged. send_message
+    # types the text into the agent's tmux pane; the running `sleep` does not
+    # read stdin, so the terminal echoes the keystrokes and the literal message
+    # is visible in the captured pane content.
+    capture_result = e2e.run(
+        "mngr capture my-task --full",
+        comment="Confirm the initial message landed in the agent's pane",
+    )
+    expect(capture_result).to_succeed()
+    expect(capture_result.stdout).to_contain("Do the thing")

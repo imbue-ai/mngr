@@ -1,0 +1,1 @@
+Fixed the `test_env_var_mngr_headless` e2e release test: added a `@pytest.mark.timeout(120)` marker (the default 10s timeout was too short for the test's three sequential `mngr` CLI invocations) and removed an incorrect `@pytest.mark.modal` marker (the test never exercises the Modal provider, so the resource guard rejected the mark).

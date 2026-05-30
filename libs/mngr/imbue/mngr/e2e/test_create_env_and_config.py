@@ -2,6 +2,7 @@
 
 import json
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -13,6 +14,7 @@ from imbue.skitwright.expect import expect
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(120)
 def test_create_with_env(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can set environment variables for the agent:
@@ -51,7 +53,7 @@ def test_create_with_env(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_create_with_pass_env(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # it is *strongly encouraged* to either use --env-file or --pass-env, especially for any sensitive environment variables (like API keys) rather than --env, because that way they won't end up in your shell history or in your config files by accident. For example:
@@ -80,6 +82,8 @@ def test_create_with_pass_env(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.timeout(120)
 def test_create_with_template_modal_disabled(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can use templates to quickly apply a set of preconfigured options:
@@ -114,9 +118,25 @@ def test_create_with_template_modal_disabled(e2e: E2eSession) -> None:
     )
     # Expect failure because the modal provider is disabled
     expect(result).to_fail()
-    # The error should reference the modal provider being unavailable
+    # The error should reference the modal provider being unavailable. The
+    # message identifies "modal" as the unregistered backend, so require that
+    # the word actually appears rather than matching the looser "provider".
     combined = result.stdout + result.stderr
-    expect(combined).to_match(r"(?i)modal|provider")
+    expect(combined).to_match(r"(?i)modal")
+
+    # Control: the exact same command *without* the template succeeds, which
+    # proves the failure above is caused specifically by the template applying
+    # provider=modal -- not by some unrelated configuration problem. The
+    # default provider is local and does not depend on the disabled modal
+    # plugin. --transfer=none keeps the agent in-place (no rsync needed).
+    control_result = e2e.run(
+        "mngr create my-control --type command --no-ensure-clean --transfer=none -- sleep 100094",
+        comment="without the template, create uses the default provider and succeeds",
+    )
+    expect(control_result).to_succeed()
+    list_result = e2e.run("mngr list", comment="Verify the control agent was created with the default provider")
+    expect(list_result).to_succeed()
+    expect(list_result.stdout).to_contain("my-control")
 
 
 @pytest.mark.release
@@ -142,6 +162,46 @@ def test_create_with_plugin_flags(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
+@pytest.mark.timeout(120)
+def test_create_with_disable_registered_plugin(e2e: E2eSession) -> None:
+    # Happy-path counterpart to test_create_with_plugin_flags: disabling a plugin
+    # that *is* registered must succeed and still create a working agent.
+    e2e.write_tutorial_block("""
+    # you can enable or disable specific plugins:
+    mngr create my-task --plugin my-plugin --disable-plugin other-plugin
+    """)
+    # ``modal`` is a real registered plugin (see the registered-plugins list in the
+    # unhappy-path test's error). Disabling it for a local command agent is a no-op
+    # functionally, but exercises the disable code path without the "not registered" error.
+    # ``--transfer=none`` keeps the agent in-place (no rsync), matching the resource
+    # profile of test_create_in_place_alias_target.
+    sentinel = uuid.uuid4().hex
+    result = e2e.run(
+        "mngr create my-task --disable-plugin modal --transfer=none --type command --no-ensure-clean -- sleep 100195",
+        comment="you can enable or disable specific plugins",
+    )
+    expect(result).to_succeed()
+    combined = result.stdout + result.stderr
+    # The disable must NOT trip the strict "not registered" guard for a real plugin.
+    expect(combined).not_to_match(r"(?i)not registered")
+
+    list_result = e2e.run("mngr list", comment="Verify agent was created with the plugin disabled")
+    expect(list_result).to_succeed()
+    expect(list_result.stdout).to_contain("my-task")
+
+    # Verify the agent is actually alive: exec a command inside it and observe the output.
+    # ``mngr exec`` takes the command as a single trailing argument, so the
+    # ``echo <sentinel>`` must be quoted as one shell word.
+    exec_result = e2e.run(
+        f"mngr exec my-task 'echo {sentinel}'",
+        comment="Verify the agent is running by executing a command inside it",
+    )
+    expect(exec_result).to_succeed()
+    expect(exec_result.stdout).to_contain(sentinel)
+
+
+@pytest.mark.release
+@pytest.mark.tmux
 def test_create_in_place_alias_target(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you should probably use aliases for making little shortcuts for yourself, because many of the commands can get a bit long:
@@ -168,11 +228,18 @@ def test_create_in_place_alias_target(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-def test_config_set_headless(e2e: E2eSession) -> None:
+def test_config_set_headless(e2e: E2eSession, project_config_dir: Path) -> None:
     e2e.write_tutorial_block("""
     # or you can set that option in your config so that it always applies:
     mngr config set headless true
     """)
+    # ``mngr config set`` writes to project scope (.mngr/settings.toml) by default.
+    # Pre-seed that file with the pytest opt-in so the merged config read below
+    # (which loads every scope through the gated loader) accepts it. The gate is a
+    # test-harness safety check that only activates under pytest; a real user never
+    # hits it. ``config set`` loads this file via tomlkit and preserves the flag.
+    (project_config_dir / "settings.toml").write_text("is_allowed_in_pytest = true\n")
+
     result = e2e.run(
         "mngr config set headless true",
         comment="or you can set that option in your config so that it always applies",
@@ -187,7 +254,7 @@ def test_config_set_headless(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_env_var_mngr_headless(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # or you can set it as an environment variable:
@@ -243,7 +310,7 @@ def test_config_set_default_provider(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_create_with_label(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can add labels to organize your agents and tags for host metadata:

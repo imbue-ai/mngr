@@ -1,0 +1,1 @@
+Strengthened the `test_create_with_idle_mode_and_timeout` release test so it verifies the actual effect of `--idle-mode run --idle-timeout 60` on a command agent (via `mngr list --format json`), asserting the reported command, idle mode, and idle timeout, instead of only checking that the create command exited successfully.

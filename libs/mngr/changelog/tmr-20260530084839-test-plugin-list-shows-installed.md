@@ -1,0 +1,1 @@
+Strengthened the `mngr plugin list` e2e test (`test_plugin_list_shows_installed`): it now records the tutorial block, asserts the human table renders the default columns (NAME, VERSION, DESCRIPTION, ENABLED), and verifies the claude plugin appears as a single enabled row instead of only substring-matching "claude".

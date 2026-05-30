@@ -1,0 +1,1 @@
+- e2e tests: strengthened `test_help_succeeds` to assert that `mngr --help` lists every command the tutorial advertises (create, list, destroy, message, connect, clone), and added `test_unknown_command_fails` covering the unhappy path where an unrecognized command exits non-zero and points the user back to `--help`.

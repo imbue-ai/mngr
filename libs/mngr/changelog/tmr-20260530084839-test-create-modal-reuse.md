@@ -1,0 +1,1 @@
+Fixed the `test_create_modal_reuse` release test, which was failing with "No agent type provided" because the e2e fixture sets no default agent type. The test now passes an explicit `--type command` (matching the convention in the other create e2e tests) and verifies that `mngr create --reuse` is genuinely idempotent by running it twice and confirming only a single agent exists.

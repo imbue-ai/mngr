@@ -243,6 +243,7 @@
 
 # TMR output directories (reports + test outputs)
 **/tmr_*/
+**/tmr-report/
 
 # Active session marker file (used to detect interrupted sessions)
 **/.claude/active
@@ -254,6 +255,7 @@
 # Offload caches and local files
 **/.offload/**
 **/test-results
+**/tmr-report/
 
 # Minds deploy-time build artifacts.
 # Ignore contents so we can un-ignore the committed `template/` subtree: git
@@ -337,3 +339,6 @@
 # env serialize. The file itself is empty and cheap to leave around.
 **/.minds-deploy-lock-*.lock
 **/.antigravitycli/
+
+# Test-runner report artifacts (orchestration output)
+tmr-report/

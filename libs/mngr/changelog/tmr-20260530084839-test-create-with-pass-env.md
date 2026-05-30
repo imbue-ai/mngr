@@ -1,0 +1,1 @@
+Fixed the `test_create_with_pass_env` e2e release test: gave it a `@pytest.mark.timeout(120)` so the create + list + verify sequence is not killed by the 10s default pytest timeout, and removed the inaccurate `@pytest.mark.modal` mark (the test creates a local command agent and never exercises Modal, so the resource guard rejected the mark).

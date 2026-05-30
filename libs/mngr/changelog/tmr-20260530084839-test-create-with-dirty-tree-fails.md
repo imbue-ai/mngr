@@ -1,0 +1,1 @@
+- e2e tests: `test_create_with_dirty_tree_fails` now provides an explicit agent type so `mngr create` actually reaches the working-tree cleanliness check, and asserts the failure is specifically due to uncommitted changes (rather than passing on an unrelated "no agent type provided" error).

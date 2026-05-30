@@ -34,8 +34,15 @@ def test_create_docker_start_args(e2e: E2eSession) -> None:
     mngr create my-task --provider docker -s "--gpus all"
     # these args are passed to "docker run", whereas the build args are passed to "docker build".
     """)
+    # `--type command -- sleep ...` stands in for the tutorial's default agent
+    # type: `mngr create` no longer ships a source-coded default (install.sh
+    # writes one into user config), so the isolated e2e profile has none and a
+    # bare create would fail with "No agent type provided". The lightweight
+    # command agent also keeps the container alive (without needing an API key)
+    # so the `mngr exec my-task hostname` readback below can run.
     result = e2e.run(
-        'mngr create my-task --provider docker -s "--hostname=mngr-start-arg-test" --no-connect --no-ensure-clean',
+        'mngr create my-task --provider docker -s "--hostname=mngr-start-arg-test" '
+        "--no-connect --no-ensure-clean --type command -- sleep 1000000",
         comment="some providers (like docker), take start args as well as build args",
         timeout=_REMOTE_TIMEOUT,
     )

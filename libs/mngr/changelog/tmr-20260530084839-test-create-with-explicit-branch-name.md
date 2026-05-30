@@ -1,0 +1,1 @@
+Added an explicit `@pytest.mark.timeout(60)` to the `test_create_with_explicit_branch_name` e2e test so the `mngr create` command is no longer killed by the global 10s pytest timeout. This matches the timeout markers already used by sibling e2e tests in the same module.

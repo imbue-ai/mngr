@@ -1,0 +1,1 @@
+- Removed a stale `@pytest.mark.modal` from the `test_create_with_label` e2e release test. The test only creates a local `command` agent and lists it; since `mngr list` now skips the empty Modal provider (the `ProviderEmptyError` change) it no longer invokes Modal, so the resource guard was failing the test for declaring a Modal mark it never exercised.

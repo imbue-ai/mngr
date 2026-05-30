@@ -1,0 +1,1 @@
+- Added `**/tmr-report/` to the repo `.gitignore` so the testing-agent orchestrator's report directory is not flagged as an untracked change.

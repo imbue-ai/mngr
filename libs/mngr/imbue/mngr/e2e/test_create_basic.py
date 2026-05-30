@@ -46,7 +46,6 @@ def test_create_default(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 def test_create_in_place(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # if you want the default behavior of claude (starting in-place), you can specify that:
@@ -85,7 +84,7 @@ def test_create_in_place(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_create_short_forms(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can name the agent type explicitly as a positional argument, or use the short form for the
@@ -155,7 +154,6 @@ def test_create_codex_agent(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 def test_create_with_agent_args(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can specify the arguments to the *agent* (ie, send args to the agent rather than mngr)
@@ -187,10 +185,44 @@ def test_create_with_agent_args(e2e: E2eSession) -> None:
     assert "--model opus" in matching[0]["command"]
 
 
+@pytest.mark.release
+def test_create_agent_args_require_separator(e2e: E2eSession) -> None:
+    # Unhappy-path counterpart to test_create_with_agent_args for the same
+    # tutorial block: the block teaches that `--` is what routes arguments to
+    # the agent. Without it, an agent-style flag like `--model` is parsed as an
+    # mngr flag, which mngr does not recognize, so create fails at arg-parse
+    # time (before any host/provider/tmux work). No agent is created.
+    e2e.write_tutorial_block("""
+    # you can specify the arguments to the *agent* (ie, send args to the agent rather than mngr)
+    # by using `--` to separate the agent arguments from the mngr arguments:
+    mngr create my-task -- --model opus
+    # that command passes the "--model opus" flag to your default agent (e.g. claude, when claude
+    # is configured as the default)
+    """)
+    # Same flag as the happy path, but WITHOUT the `--` separator: mngr must
+    # reject the unknown `--model` flag instead of silently passing it through.
+    result = e2e.run(
+        "mngr create my-task --model opus",
+        comment="without `--`, agent-style flags are parsed as mngr flags and rejected",
+    )
+    expect(result).to_fail()
+
+    # The failure must be an unrecognized-argument error about --model, not an
+    # unrelated crash (e.g. a traceback). argparse-style errors mention the flag.
+    assert "--model" in result.stderr, f"Expected an error mentioning --model, got stderr:\n{result.stderr}"
+
+    # No agent should have been created by the rejected command.
+    list_result = e2e.run("mngr list --format json", comment="Verify the rejected command created no agent")
+    expect(list_result).to_succeed()
+    agents = json.loads(list_result.stdout)["agents"]
+    matching = [a for a in agents if a["name"] == "my-task"]
+    assert len(matching) == 0, f"Expected no agent named 'my-task', got: {matching}"
+
+
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_create_named_agent(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # when creating agents to accomplish tasks, it's recommended that you give them a name to make it easier to manage them:
@@ -221,7 +253,7 @@ def test_create_named_agent(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_create_with_json_output(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can control output format for scripting:
@@ -245,12 +277,45 @@ def test_create_with_json_output(e2e: E2eSession) -> None:
     agents = parsed["agents"]
     assert len(agents) == 1
     assert agents[0]["name"] == "my-task"
+    # The agent reported by `mngr list` must be the very one that `mngr create`
+    # returned: the ids in the create JSON should match the listed agent/host.
+    assert agents[0]["id"] == create_json["agent_id"]
+    assert agents[0]["host"]["id"] == create_json["host_id"]
+
+
+@pytest.mark.rsync
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.timeout(120)
+def test_create_with_quiet_output(e2e: E2eSession) -> None:
+    e2e.write_tutorial_block("""
+    # you can control output format for scripting:
+    mngr create my-task --no-connect --format json
+    # (--quiet suppresses all output)
+    """)
+    # --quiet must suppress *all* console output, including the result line that
+    # --format json would otherwise print. The agent should still be created.
+    create_result = e2e.run(
+        "mngr create my-task --no-connect --type command --no-ensure-clean --quiet -- sleep 100078",
+        comment="--quiet suppresses all output",
+    )
+    expect(create_result).to_succeed()
+    assert create_result.stdout.strip() == "", f"Expected no stdout with --quiet, got: {create_result.stdout!r}"
+
+    # Despite the silent output, the agent must actually exist.
+    list_result = e2e.run("mngr list --format json", comment="Verify the quiet agent was still created")
+    expect(list_result).to_succeed()
+    parsed = json.loads(list_result.stdout)
+    agents = parsed["agents"]
+    matching = [a for a in agents if a["name"] == "my-task"]
+    assert len(matching) == 1, f"Expected exactly 1 agent named 'my-task', got {len(matching)}"
 
 
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_create_headless(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # mngr is very much meant to be used for scripting and automation, so nothing requires interactivity.

@@ -1,0 +1,1 @@
+- Fixed the `test_create_modal_edit_message` release test. It now passes `--type claude` (the isolated e2e profile has no configured default agent type), points `EDITOR` at `true` so the `--edit-message` editor spawn works without an interactive editor or TTY in the e2e sandbox, and widens the timeout to absorb cold Modal-in-Modal provisioning.

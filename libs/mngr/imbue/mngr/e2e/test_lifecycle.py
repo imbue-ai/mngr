@@ -9,7 +9,10 @@ from imbue.skitwright.expect import expect
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+# The full lifecycle exercises create, exec, stop, start, exec, and destroy in
+# sequence -- well beyond the default 10s per-test budget. Override it like the
+# other multi-operation e2e tests do.
+@pytest.mark.timeout(120)
 def test_full_lifecycle(e2e: E2eSession) -> None:
     # Create
     expect(

@@ -1,0 +1,1 @@
+- Fixed the `test_full_lifecycle` e2e release test: it now overrides the default 10s per-test timeout (the create/exec/stop/start/destroy sequence needs longer) and drops the superfluous `@pytest.mark.modal` mark (the test runs a purely local agent and never invokes Modal, which the resource guard now correctly flags).

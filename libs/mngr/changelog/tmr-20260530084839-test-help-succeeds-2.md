@@ -1,0 +1,1 @@
+Updated the mega tutorial's `mngr --help` overview comment to reference the `git` command instead of the now-removed top-level `push`/`pull` commands (these were consolidated into `mngr git push` / `mngr git pull`). Updated the corresponding `test_help_succeeds` e2e test assertions to match.

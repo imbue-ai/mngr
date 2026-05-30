@@ -418,23 +418,37 @@ def e2e(
     # Add the e2e bin directory to PATH so the connect script is available
     env["PATH"] = f"{_BIN_DIR}:{env.get('PATH', '')}"
 
-    # Configure connect_command for create/start.
-    # Remote providers (Modal, Docker) are left enabled so that e2e tests
-    # exercise the full discovery path. Tests that trigger Modal (via
+    # Configure connect_command for create/start in the PROJECT-scope
+    # settings.toml. Remote providers (Modal, Docker) are left enabled so that
+    # e2e tests exercise the full discovery path. Tests that trigger Modal (via
     # mngr list, mngr destroy --gc, etc.) need @pytest.mark.modal.
-    # is_allowed_in_pytest opts this local-layer config into the pytest run.
-    # Every config file loaded during a pytest run must opt in individually, and
-    # this one is loaded alongside the profile's settings.toml.
-    settings_path = project_config_dir / "settings.local.toml"
-    settings_path.write_text(
+    #
+    # This lives in the project scope (not the local scope) on purpose: ``mngr
+    # config set`` defaults to the project scope, so an e2e test that runs
+    # e.g. ``mngr config set commands.create.provider modal`` writes into this
+    # same file and merges additively with connect_command instead of landing in
+    # a higher-precedence layer that would silently narrow it away.
+    # is_allowed_in_pytest opts this config into the pytest run; every config
+    # file loaded during a pytest run must opt in individually, and tomlkit
+    # preserves the line when ``config set`` rewrites the file.
+    project_settings_path = project_config_dir / "settings.toml"
+    project_settings_path.write_text(
         "is_allowed_in_pytest = true\n"
         "\n"
         "[commands.create]\n"
+        'type = "claude"\n'
         'connect_command = "mngr-e2e-connect"\n'
         "\n"
         "[commands.start]\n"
         'connect_command = "mngr-e2e-connect"\n'
     )
+
+    # Also create an opted-in (but otherwise empty) local-scope settings file.
+    # Several e2e tests append additional sections (templates, disabled plugins)
+    # to settings.local.toml, and that file must already opt into the pytest run
+    # so the appended config can be loaded.
+    settings_path = project_config_dir / "settings.local.toml"
+    settings_path.write_text("is_allowed_in_pytest = true\n")
 
     # Ensure .claude/settings.local.json is gitignored. Remote providers
     # (Modal, Docker) need to write Claude hooks to this file, and the

@@ -271,7 +271,7 @@ mngr create my-task --no-connect --message "Do the thing"
 # tons more arguments for anything you could want! As always, you can learn more via --help
 mngr create --help
 
-# or see the other commands--list, destroy, message, connect, push, pull, clone, and more!  These other commands are covered in their own sections below.
+# or see the other commands--list, destroy, message, connect, git, clone, and more!  These other commands are covered in their own sections below.
 mngr --help
 
 ##############################################################################

@@ -1,6 +1,7 @@
 """Tests for data sources, projects, and git/branch options from the tutorial."""
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,6 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 @pytest.mark.rsync
 def test_create_with_source_path(e2e: E2eSession, tmp_path: Path) -> None:
     e2e.write_tutorial_block("""
@@ -45,7 +45,7 @@ def test_create_with_source_path(e2e: E2eSession, tmp_path: Path) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_create_with_project_label(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # similarly, by default the agent is tagged with a "project" label that matches the name of the current git repo (or folder), but you can specify a different project:
@@ -67,9 +67,37 @@ def test_create_with_project_label(e2e: E2eSession) -> None:
     assert matching[0]["labels"]["project"] == "my-project"
 
 
+@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(120)
+def test_create_with_default_project_label(e2e: E2eSession) -> None:
+    # Happy-path counterpart to test_create_with_project_label: when --project is
+    # omitted, the project label defaults to the name of the current git repo (the
+    # temp_git_repo fixture creates a remote-less repo in a directory named
+    # "git_repo", so the folder name is used).
+    e2e.write_tutorial_block("""
+    # similarly, by default the agent is tagged with a "project" label that matches the name of the current git repo (or folder), but you can specify a different project:
+    mngr create my-task --project my-project
+    """)
+    expect(
+        e2e.run(
+            "mngr create my-task --type command --no-ensure-clean -- sleep 100093",
+            comment="by default the agent is tagged with a project label that matches the name of the current git repo (or folder)",
+        )
+    ).to_succeed()
+
+    list_result = e2e.run("mngr list --format json", comment="Verify the default project label matches the repo name")
+    expect(list_result).to_succeed()
+    parsed = json.loads(list_result.stdout)
+    agents = parsed["agents"]
+    matching = [a for a in agents if a["name"] == "my-task"]
+    assert len(matching) == 1
+    assert matching[0]["labels"]["project"] == "git_repo"
+
+
+@pytest.mark.release
+@pytest.mark.tmux
 @pytest.mark.rsync
 def test_create_with_source_path_no_git(e2e: E2eSession, tmp_path: Path) -> None:
     e2e.write_tutorial_block("""
@@ -93,6 +121,15 @@ def test_create_with_source_path_no_git(e2e: E2eSession, tmp_path: Path) -> None
     expect(list_result).to_succeed()
     expect(list_result.stdout).to_contain("my-task")
 
+    # With a non-git folder source, the project label defaults to the folder's
+    # basename, confirming mngr used the folder itself as the source of truth.
+    json_result = e2e.run("mngr list --format json", comment="Verify project label defaults to the source folder name")
+    expect(json_result).to_succeed()
+    agents = json.loads(json_result.stdout)["agents"]
+    matching = [a for a in agents if a["name"] == "my-task"]
+    assert len(matching) == 1
+    assert matching[0]["labels"]["project"] == source_dir.name
+
     # Verify the source file was actually transferred to the agent's work directory
     cat_result = e2e.run(
         'mngr exec my-task "cat script.py"',
@@ -112,6 +149,16 @@ def test_create_default_branch(e2e: E2eSession) -> None:
     mngr create my-task
     git branch | grep mngr/my-task
     """)
+    # Record the host repo's branch before creating the agent so we can confirm
+    # the agent's branch is created in an isolated worktree without disturbing
+    # the host checkout (the core "so their changes don't conflict" promise).
+    host_branch_before_result = e2e.run(
+        "git rev-parse --abbrev-ref HEAD",
+        comment="Record the host repo's current branch before creating the agent",
+    )
+    expect(host_branch_before_result).to_succeed()
+    host_branch_before = host_branch_before_result.stdout.strip()
+
     expect(
         e2e.run(
             "mngr create my-task --type command --no-ensure-clean -- sleep 100085",
@@ -122,6 +169,16 @@ def test_create_default_branch(e2e: E2eSession) -> None:
     branch_result = e2e.run("git branch", comment="Check that the mngr branch was created")
     expect(branch_result).to_succeed()
     expect(branch_result.stdout).to_contain("mngr/my-task")
+
+    # The host repo must stay on its original branch: the agent's branch lives in
+    # a separate worktree, so creating the agent must not switch the host checkout.
+    host_branch_after_result = e2e.run(
+        "git rev-parse --abbrev-ref HEAD",
+        comment="Verify creating the agent did not change the host repo's branch",
+    )
+    expect(host_branch_after_result).to_succeed()
+    assert host_branch_after_result.stdout.strip() == host_branch_before
+    assert host_branch_after_result.stdout.strip() != "mngr/my-task"
 
     # Verify the agent's worktree is on the new branch
     agent_branch_result = e2e.run(
@@ -148,6 +205,7 @@ def test_create_default_branch(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(120)
 def test_create_with_custom_branch_pattern(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # --branch controls branch creation. The format is "BASE:NEW", where BASE is the branch to start from and NEW is the branch to create.
@@ -175,6 +233,20 @@ def test_create_with_custom_branch_pattern(e2e: E2eSession) -> None:
     )
     expect(worktree_branch).to_succeed()
     expect(worktree_branch.stdout).to_contain("feature/my-task")
+
+    # Omitting BASE (starting with ":") starts the new branch from the current
+    # branch, so feature/my-task must point at the same commit as the current HEAD.
+    head_commit_result = e2e.run(
+        "git rev-parse HEAD",
+        comment="Get current branch commit",
+    )
+    expect(head_commit_result).to_succeed()
+    feature_commit_result = e2e.run(
+        "git rev-parse feature/my-task",
+        comment="Get feature/my-task branch commit",
+    )
+    expect(feature_commit_result).to_succeed()
+    assert head_commit_result.stdout.strip() == feature_commit_result.stdout.strip()
 
 
 @pytest.mark.rsync
@@ -221,10 +293,22 @@ def test_create_with_base_branch(e2e: E2eSession) -> None:
     expect(agent_rev_result).to_succeed()
     assert agent_rev_result.stdout.strip() == main_rev
 
+    # Verify the agent's worktree is actually checked out on the new branch and
+    # sits at the main commit (not the diverged commit). Both checks are done in
+    # a single exec call, since each exec has a non-trivial connection cost.
+    worktree_result = e2e.run(
+        "mngr exec my-task 'git rev-parse --abbrev-ref HEAD && git rev-parse HEAD'",
+        comment="Verify the agent worktree is on mngr/my-task at the main commit",
+    )
+    expect(worktree_result).to_succeed()
+    expect(worktree_result.stdout).to_contain("mngr/my-task")
+    expect(worktree_result.stdout).to_contain(main_rev)
+
 
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(60)
 def test_create_with_explicit_branch_name(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # or set the new branch name explicitly:
@@ -250,10 +334,16 @@ def test_create_with_explicit_branch_name(e2e: E2eSession) -> None:
     expect(agent_branch_result.stdout).to_contain("feature/my-task")
 
 
+# No @pytest.mark.modal: this test creates a purely local git-mirror agent and
+# only runs `mngr create`/`mngr list`/`mngr exec`. None of those invoke the
+# `modal` CLI binary (the only thing the resource guard can detect across the
+# mngr subprocess boundary -- `mngr list` discovers Modal hosts via the SDK, and
+# the Modal environment is never created for a local agent). Adding the mark
+# would trip the guard's NEVER_INVOKED check once the test body passes.
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 @pytest.mark.rsync
+@pytest.mark.timeout(60)
 def test_create_with_transfer_git_mirror(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can create a git mirror instead of a worktree:
@@ -282,8 +372,8 @@ def test_create_with_transfer_git_mirror(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 @pytest.mark.rsync
+@pytest.mark.timeout(60)
 def test_create_git_mirror_with_existing_branch(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can disable new branch creation entirely by omitting the :NEW part:
@@ -319,7 +409,6 @@ def test_create_git_mirror_with_existing_branch(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 @pytest.mark.timeout(60)
 def test_create_with_transfer_none(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
@@ -342,13 +431,18 @@ def test_create_with_transfer_none(e2e: E2eSession) -> None:
     matching = [a for a in agents if a["name"] == "my-task"]
     assert len(matching) == 1
 
-    # With --transfer=none, the agent should run in the source directory (in-place)
+    # With --transfer=none, the agent should run in the source directory (in-place).
+    # Resolve symlinks on both sides so the comparison holds on macOS, where /tmp is
+    # a symlink to /private/tmp and the shell's pwd can differ from the realpath that
+    # mngr records as the work_dir.
     pwd_result = e2e.run("pwd", comment="Get the source directory path")
     expect(pwd_result).to_succeed()
     source_dir = pwd_result.stdout.strip()
-    assert matching[0]["work_dir"] == source_dir
+    assert os.path.realpath(matching[0]["work_dir"]) == os.path.realpath(source_dir)
 
-    # No new branch should be created (--transfer=none implies no new branch)
+    # --transfer=none implies no new branch: the agent runs on the existing branch
+    # in-place, so its initial_branch is null and no mngr/* branch is created.
+    assert matching[0]["initial_branch"] is None
     branch_result = e2e.run("git branch", comment="Verify no mngr/* branch was created")
     expect(branch_result).to_succeed()
     assert "mngr/my-task" not in branch_result.stdout
@@ -357,7 +451,7 @@ def test_create_with_transfer_none(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(180)
 def test_create_from_another_agent(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can clone from an existing agent's work directory:
@@ -368,6 +462,17 @@ def test_create_from_another_agent(e2e: E2eSession) -> None:
         e2e.run(
             "mngr create other-agent --type command --no-ensure-clean -- sleep 100092",
             comment="Create source agent to clone from",
+        )
+    ).to_succeed()
+
+    # Commit a marker file in the source agent's work dir so we can later prove
+    # that the clone actually derives from other-agent's git state (and not, e.g.,
+    # a fresh checkout of the original repo).
+    expect(
+        e2e.run(
+            "mngr exec other-agent 'echo cloned-from-other-agent > clone_marker.txt"
+            ' && git add clone_marker.txt && git commit -q -m "add clone marker"\'',
+            comment="Add a marker commit to the source agent's work directory",
         )
     ).to_succeed()
 
@@ -393,3 +498,12 @@ def test_create_from_another_agent(e2e: E2eSession) -> None:
 
     # Verify the cloned agent got its own branch
     assert agents_by_name["my-task"]["initial_branch"] == "mngr/my-task"
+
+    # Verify the clone actually carried over the source agent's work-directory
+    # contents: the marker committed in other-agent must be present in my-task.
+    marker_result = e2e.run(
+        "mngr exec my-task 'cat clone_marker.txt'",
+        comment="Verify the source agent's committed data was cloned into the new agent",
+    )
+    expect(marker_result).to_succeed()
+    expect(marker_result.stdout).to_contain("cloned-from-other-agent")

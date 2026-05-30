@@ -1,0 +1,1 @@
+Fixed the `test_create_with_env` e2e release test, which was hitting the global 10s pytest timeout while waiting for `mngr create` to spin up a command-type agent. Added a `@pytest.mark.timeout(120)` override matching the other e2e create tests so the agent has enough time to start before assertions run.

@@ -1,0 +1,1 @@
+- Gitignore the `tmr-report/` directory at the repo root, which holds run artifacts produced by the tmr (test map-reduce) orchestrator.

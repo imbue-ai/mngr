@@ -1,0 +1,1 @@
+- Hardened the `test_create_with_custom_branch_pattern` e2e test: added an explicit `@pytest.mark.timeout(120)` so it no longer relies on the offload-only `--timeout` override, and extended it to verify that the `:feature/*` pattern (omitted BASE) starts the new branch from the current branch's commit.

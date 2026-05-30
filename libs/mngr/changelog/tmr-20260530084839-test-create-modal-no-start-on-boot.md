@@ -1,0 +1,1 @@
+Fixed the `test_create_modal_no_start_on_boot` release test, which was failing because `mngr create` now requires an explicit agent type and the e2e fixture configures no default. The test command now pins `--type command` (a lightweight stand-in), and additionally verifies via `mngr list --format json` that the created agent is recorded with `start_on_boot` disabled.

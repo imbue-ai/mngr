@@ -1,0 +1,1 @@
+- `.gitignore`: also ignore `**/tmr-report/` directories (test-runner report output), alongside the existing `**/tmr_*/` pattern.
