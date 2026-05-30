@@ -71,6 +71,28 @@ function toAbsoluteUrl(url) {
   return url;
 }
 
+// Classify a URL as "external" -- i.e. something that should open in the
+// user's default browser rather than inside the app. All in-app navigation
+// (the minds backend, the mngr_forward plugin, and every
+// `agent-<id>.localhost` workspace subdomain) lives on localhost, so anything
+// off-localhost over http(s), plus mail/tel links, is treated as external.
+// Non-web schemes (file:, about:, blob:, data:, devtools:, etc.) are internal
+// app machinery and must never be handed to shell.openExternal.
+function isExternalUrl(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol === 'mailto:' || parsed.protocol === 'tel:') return true;
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+  const host = parsed.hostname.toLowerCase();
+  if (host === 'localhost' || host.endsWith('.localhost')) return false;
+  if (host === '127.0.0.1' || host === '::1') return false;
+  return true;
+}
+
 // Build the auth-bridge URL that, when loaded, installs a session cookie on
 // the agent's subdomain and redirects into the workspace's dockview UI.
 // Returns null if the backend hasn't come up yet.
@@ -439,6 +461,30 @@ function registerShortcutsFor(bundle, wc) {
       openHomeInNewWindow();
       return;
     }
+  });
+}
+
+// Route external links to the user's default browser instead of navigating
+// the in-app view (which would clobber the workspace UI) or spawning a bare
+// chrome-less Electron window. Covers both `target="_blank"` / `window.open`
+// (via setWindowOpenHandler) and ordinary top-level link clicks / JS
+// navigations (via will-navigate). In-app (localhost) navigation is left
+// untouched so workspace, home, and request-page links keep working. The
+// `setImmediate` defer around openExternal follows Electron's security guide.
+function applyExternalLinkHandling(wc) {
+  wc.setWindowOpenHandler(({ url }) => {
+    if (isExternalUrl(url)) {
+      setImmediate(() => { shell.openExternal(url); });
+      return { action: 'deny' };
+    }
+    // Internal popups keep Electron's default behavior (unchanged from before
+    // this handler existed).
+    return { action: 'allow' };
+  });
+  wc.on('will-navigate', (event, url) => {
+    if (!isExternalUrl(url)) return;
+    event.preventDefault();
+    setImmediate(() => { shell.openExternal(url); });
   });
 }
 
@@ -1216,6 +1262,13 @@ async function syncContentCookiesToDefaultSession() {
 }
 
 async function onReady() {
+  // Send external links to the user's default browser for every WebContents
+  // the app ever creates (all four bundle views plus any popup windows),
+  // rather than wiring each view individually. Registered before the first
+  // bundle is created so it covers the initial chrome/content views too.
+  app.on('web-contents-created', (_event, contents) => {
+    applyExternalLinkHandling(contents);
+  });
   installApplicationMenu();
   installDockMenu();
   setupContentPartitionCookieSync();
