@@ -255,6 +255,10 @@ jobs:
             echo "ANTHROPIC_API_KEY is empty — secret not reaching the runner"; exit 1
           fi
           echo "ANTHROPIC_API_KEY present, length=${#ANTHROPIC_API_KEY}"
+      - name: setup node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.15.0'
       - name: resolve build URL
         id: url
         run: |
@@ -325,12 +329,6 @@ jobs:
             brew install socat
           fi
           socat -V | head -1
-
-      - name: setup node 24 for Playwright
-        if: ${{ steps.slack_pre.outputs.ok == '1' }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24.15.0'
 
       - name: pnpm install (apps/minds dev deps incl. playwright)
         if: ${{ steps.slack_pre.outputs.ok == '1' }}
