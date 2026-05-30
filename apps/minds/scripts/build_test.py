@@ -50,6 +50,7 @@ WORKSPACE_PACKAGES = [
     "imbue-mngr-lima",
     "imbue-mngr-modal",
     "imbue-mngr-ovh",
+    "imbue-mngr-sbx",
     "imbue-mngr-vps-docker",
     "imbue-common",
     "concurrency-group",
