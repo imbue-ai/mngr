@@ -15,7 +15,17 @@ const { downloadGit, downloadUv, download } = require('./download-binaries.js');
 const ROOT = path.resolve(__dirname, '..');
 const RESOURCES_DIR = path.join(ROOT, 'resources');
 
-const LIMA_VERSION = '2.1.1';
+// Pinned at 2.0.3 to avoid the gvisor-tap-vsock TCP forwarder regression
+// introduced in lima 2.1.0. Lima 2.1.x's usernet forwarder (the path used
+// when the guest's systemd < 256, which includes Ubuntu 24.04, our FCT
+// base) wedges fresh ssh connections post-VM-READY: TCP-accepted on the
+// host then CLOSE_WAIT, no data flow to the in-VM sshd, no
+// git-receive-pack ever spawns -- mngr create hangs forever at
+// "Transferring git repository...". Root cause is the inetaf/tcpproxy
+// "half-close dance" leaking goroutines in io.Copy; lima a2b52885
+// (gvisor-tap-vsock 0.8.7 -> 0.8.8) is the regression boundary.
+// Tracked upstream as lima-vm/lima#4558 + #5042, no fix in flight yet.
+const LIMA_VERSION = '2.0.3';
 
 const MONOREPO_ROOT = path.resolve(ROOT, '../..');
 
