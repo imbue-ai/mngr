@@ -343,7 +343,11 @@ jobs:
             echo "$HOMEBREW_PREFIX/bin" >> "$GITHUB_PATH"
           else
             for D in /opt/homebrew/bin /usr/local/bin; do
-              [[ -d "$D" ]] && echo "$D" >> "$GITHUB_PATH"
+              # Under bash -e, `[[ ... ]] && cmd` fails the step when the
+              # test is false on the second iteration. Use an if.
+              if [[ -d "$D" ]]; then
+                echo "$D" >> "$GITHUB_PATH"
+              fi
             done
           fi
 
