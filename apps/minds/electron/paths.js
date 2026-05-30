@@ -44,6 +44,24 @@ function getLimaBinDir() {
 }
 
 /**
+ * Path to the bundled restic binary used by the desktop client to
+ * provision and query per-workspace backup repositories.
+ *
+ * Dev mode: requires `restic` on PATH (or the user's normal shell
+ * resolution); we return null so the runtime falls back to
+ * shutil.which("restic").
+ *
+ * Packaged mode: build.js downloads restic per target platform into
+ * `resources/restic/restic` via scripts/download-binaries.js.
+ */
+function getResticPath() {
+  if (isDev()) {
+    return null;
+  }
+  return path.join(getResourcesDir(), 'restic', 'restic');
+}
+
+/**
  * Path to the Latchkey CLI shipped as an npm dependency of this app.
  *
  * Dev mode: pnpm installs the package into ``apps/minds/node_modules`` and
@@ -214,6 +232,7 @@ module.exports = {
   getLimaBinDir,
   getLatchkeyPath,
   getLatchkeyDirectory,
+  getResticPath,
   getMindsRootName,
   getDataDir,
   getMngrHostDir,

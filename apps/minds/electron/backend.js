@@ -245,6 +245,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MNGR_PREFIX: mngrPrefix,
           MINDS_LATCHKEY_BINARY: paths.getLatchkeyPath(),
           MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
+          MINDS_RESTIC_BINARY: paths.getResticPath(),
           // Tell the packaged latchkey shim which Electron binary to use as Node.
           MINDS_ELECTRON_EXEC_PATH: process.execPath,
           // Set VIRTUAL_ENV to the per-user venv so `uv run --active` uses

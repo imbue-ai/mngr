@@ -36,7 +36,19 @@ from imbue.minds.errors import BackupProvisioningError
 
 _T = TypeVar("_T")
 
-_RESTIC_BINARY: Final[str] = "restic"
+def _resolve_restic_binary() -> str:
+    """Resolve the restic CLI path.
+
+    Prefers `MINDS_RESTIC_BINARY` (the desktop client's bundled binary,
+    set by Electron's backend.js -> paths.getResticPath() when running
+    the packaged .app) so the user doesn't need a system-wide restic
+    install. Falls back to `"restic"` (PATH lookup) for dev mode and
+    test contexts that don't set the env var.
+    """
+    return os.environ.get("MINDS_RESTIC_BINARY") or "restic"
+
+
+_RESTIC_BINARY: Final[str] = _resolve_restic_binary()
 # restic treats locks older than 30 minutes as stale and ignores them.
 _LOCK_STALE_SECONDS: Final[float] = 30 * 60.0
 _DEFAULT_TIMEOUT_SECONDS: Final[float] = 60.0

@@ -11,6 +11,9 @@ module.exports = {
   extraResources: [{ from: 'resources/', to: '.' }],
   mac: {
     entitlements: 'entitlements.mac.plist',
-    additionalBinariesToSign: ['resources/lima/bin/limactl'],
+    additionalBinariesToSign: [
+      'resources/lima/bin/limactl',
+      'resources/restic/restic',
+    ],
   },
 };

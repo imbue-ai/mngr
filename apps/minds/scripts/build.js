@@ -10,7 +10,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execSync, execFileSync } = require('child_process');
-const { downloadGit, downloadUv, download } = require('./download-binaries.js');
+const { downloadGit, downloadUv, downloadRestic, download } = require('./download-binaries.js');
 
 const ROOT = path.resolve(__dirname, '..');
 const RESOURCES_DIR = path.join(ROOT, 'resources');
@@ -625,6 +625,7 @@ async function main() {
     downloadUv(RESOURCES_DIR, { platform, arch }),
     downloadLima({ platform, arch }),
     downloadGit(RESOURCES_DIR, { platform }),
+    downloadRestic(RESOURCES_DIR, { platform, arch }),
   ]);
 
   bundleLatchkey();

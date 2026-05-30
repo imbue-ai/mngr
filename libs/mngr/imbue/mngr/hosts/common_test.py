@@ -327,6 +327,8 @@ def test_build_ssh_transport_command_with_known_hosts_uses_strict_checking() -> 
     assert "-p 2222" in result
     assert "-o UserKnownHostsFile=/tmp/known_hosts" in result
     assert "-o StrictHostKeyChecking=yes" in result
+    assert "-o IdentitiesOnly=yes" in result
+    assert "-o IdentityAgent=none" in result
 
 
 def test_build_ssh_transport_command_without_known_hosts_uses_strict_checking() -> None:
@@ -336,6 +338,8 @@ def test_build_ssh_transport_command_without_known_hosts_uses_strict_checking() 
         known_hosts_file=None,
     )
     assert "-o StrictHostKeyChecking=yes" in result
+    assert "-o IdentitiesOnly=yes" in result
+    assert "-o IdentityAgent=none" in result
     assert "UserKnownHostsFile" not in result
 
 
