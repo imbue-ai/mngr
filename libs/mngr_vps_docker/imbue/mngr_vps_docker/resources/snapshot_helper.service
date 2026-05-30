@@ -1,0 +1,16 @@
+[Unit]
+Description=mngr btrfs snapshot helper for the host_backup service
+After=local-fs.target
+Wants=local-fs.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/mngr-snapshot-helper.env
+ExecStart=/usr/local/sbin/snapshot_helper.sh
+Restart=always
+RestartSec=5
+# Helper must run as root to invoke `btrfs subvolume snapshot/delete`.
+User=root
+
+[Install]
+WantedBy=multi-user.target

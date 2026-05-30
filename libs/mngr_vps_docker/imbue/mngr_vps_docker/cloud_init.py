@@ -19,6 +19,11 @@ def generate_cloud_init_user_data(
     by default so this is belt-and-suspenders on cloud-init backends;
     non-cloud-init backends (e.g. OVH) install it from their own
     bootstrap path.
+
+    ``inotify-tools`` and ``jq`` are needed by the per-host
+    ``snapshot_helper.sh`` (installed later, after the btrfs mount is
+    ready) -- pre-baked here so the helper install via SSH only needs
+    to drop files in place, no extra package install round-trips.
     """
     return f"""#cloud-config
 ssh_deletekeys: true
@@ -32,6 +37,8 @@ packages:
   - curl
   - ca-certificates
   - rsync
+  - inotify-tools
+  - jq
 runcmd:
   - curl -fsSL https://get.docker.com | sh
   - systemctl enable docker
