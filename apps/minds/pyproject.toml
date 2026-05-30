@@ -18,6 +18,7 @@ dependencies = [
     "imbue-mngr-forward",
     "imbue-mngr-latchkey",
     "imbue-mngr-ovh",
+    "imbue-mngr-sbx",
     "imbue-mngr-vps-docker",
     "modal>=1.4.3",
     "paramiko>=3.0",
