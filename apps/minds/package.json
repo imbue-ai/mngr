@@ -12,7 +12,8 @@
     "dist": "pnpm build && pnpm exec todesktop build",
     "todesktop:beforeInstall": "./scripts/download-binaries.js",
     "fetch-tailwind": "bash scripts/fetch_tailwind.sh",
-    "postinstall": "bash scripts/fetch_tailwind.sh"
+    "postinstall": "bash scripts/fetch_tailwind.sh",
+    "test:e2e": "playwright test --config=test/e2e/playwright.config.js"
   },
   "dependencies": {
     "@todesktop/runtime": "^1.6.0",
@@ -20,7 +21,9 @@
   },
   "devDependencies": {
     "@todesktop/cli": "^1.8.0",
-    "electron": "40.10.1"
+    "electron": "40.10.1",
+    "@playwright/test": "1.60.0",
+    "playwright": "1.60.0"
   },
   "engines": {
     "node": "24.15.0",
