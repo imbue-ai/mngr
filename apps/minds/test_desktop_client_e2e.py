@@ -101,6 +101,8 @@ def _fct_settings_opted_into_pytest(fct_path: Path) -> Iterator[None]:
 #   start the container; the PATH-injected resource-guard wrapper catches it.
 # - `rsync` is invoked by `mngr create` to overlay the FCT worktree onto
 #   the internal clone; same PATH wrapper.
+# - `node` is invoked by the Electron launcher (`.bin/electron` execs the
+#   bundled node runtime to load `main.js`); same PATH wrapper.
 #
 # Marks we deliberately do *not* carry, and why:
 #
@@ -116,6 +118,7 @@ def _fct_settings_opted_into_pytest(fct_path: Path) -> Iterator[None]:
 @pytest.mark.acceptance
 @pytest.mark.docker
 @pytest.mark.rsync
+@pytest.mark.node
 @pytest.mark.minds_electron
 @pytest.mark.timeout(900)
 def test_create_local_docker_workspace_via_electron(
