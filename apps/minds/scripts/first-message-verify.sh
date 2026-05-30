@@ -21,6 +21,10 @@ EXPECT_SUBSTRING="${EXPECT_SUBSTRING:-pong}"
 CREATE_TIMEOUT_SECONDS=900
 REPLY_TIMEOUT_SECONDS=180
 DESTROY_TIMEOUT_SECONDS=180
+# When SKIP_DESTROY=1, leave the agent running so a follow-on step (slack
+# flow, Playwright drive) can reuse it. The follow-on owns teardown.
+SKIP_DESTROY="${SKIP_DESTROY:-0}"
+AGENT_INFO_PATH="${AGENT_INFO_PATH:-/tmp/first-message-agent-info.json}"
 
 MNGR_BIN="$HOME/.minds/.venv/bin/mngr"
 LIMA_BIN_DIR="/Applications/minds.app/Contents/Resources/lima/bin"
@@ -238,6 +242,23 @@ sys.exit(2)
   sleep 3
 done
 [[ -s "$REPLY_FILE" ]] || fail "no assistant reply matching '$EXPECT_SUBSTRING' in ${REPLY_TIMEOUT_SECONDS}s"
+
+log "writing agent info to $AGENT_INFO_PATH (host=$HOST_NAME agent=$AGENT_NAME creation_id=$AGENT_ID)"
+HOST_NAME="$HOST_NAME" AGENT_NAME="$AGENT_NAME" AGENT_ID="$AGENT_ID" BASE="$BASE" python3 -c '
+import json, os
+print(json.dumps({
+    "host_name":    os.environ["HOST_NAME"],
+    "agent_name":   os.environ["AGENT_NAME"],
+    "creation_id":  os.environ["AGENT_ID"],
+    "base_url":     os.environ["BASE"],
+}))
+' > "$AGENT_INFO_PATH"
+
+if [[ "$SKIP_DESTROY" == "1" ]]; then
+  log "SKIP_DESTROY=1 -- leaving agent running; caller is responsible for cleanup"
+  log "SUCCESS"
+  exit 0
+fi
 
 log "destroying agent"
 DEL=$(curl -s -b "$COOKIES" -o /tmp/first-message-delete.json -w '%{http_code}' \

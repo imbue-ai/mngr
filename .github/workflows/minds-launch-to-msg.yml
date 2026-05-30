@@ -16,6 +16,11 @@ on:
         type: boolean
         required: false
         default: false
+      skip_slack_flow:
+        description: 'Skip the slack-permission-flow Playwright step. Implied true when skip_first_message is true.'
+        type: boolean
+        required: false
+        default: false
       template_ref:
         description: 'forever-claude-template ref (branch / tag / SHA) the agent is created from. Empty -> script default (pilot_2, known-compatible with the bundled mngr). Set to "main" to verify the user-default path.'
         required: false
@@ -239,7 +244,7 @@ jobs:
     # the dist log artifact is preserved either way.
     if: ${{ always() && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
     runs-on: [self-hosted, macOS, minds-runner]
-    timeout-minutes: 25
+    timeout-minutes: 40
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
@@ -281,7 +286,107 @@ jobs:
         env:
           GIT_BRANCH: ${{ inputs.template_ref }}
           GIT_URL:    ${{ inputs.template_url }}
+          SKIP_DESTROY: '1'
         run: bash apps/minds/scripts/first-message-verify.sh
+
+      # --- slack permission flow (uses the agent first-message just left running) ---
+      - name: resolve VM name from agent info
+        id: slack_pre
+        if: ${{ inputs.skip_first_message != true && inputs.skip_slack_flow != true }}
+        run: |
+          INFO=/tmp/first-message-agent-info.json
+          if [[ ! -s "$INFO" ]]; then
+            echo "::error::$INFO missing -- first-message step did not write agent info"; exit 1
+          fi
+          HOST_NAME=$(jq -r .host_name "$INFO")
+          AGENT_NAME=$(jq -r .agent_name "$INFO")
+          CREATION_ID=$(jq -r .creation_id "$INFO")
+          BASE_URL=$(jq -r .base_url "$INFO")
+          # lima VM names are MNGR_PREFIX + host_name; first-message-verify
+          # sets MNGR_PREFIX=minds- via export, so the VM is minds-<host>.
+          VM_NAME="minds-${HOST_NAME}"
+          if ! /Applications/Minds.app/Contents/Resources/lima/bin/limactl list \
+              --format '{{.Name}}' | grep -qx "$VM_NAME"; then
+            echo "::error::lima VM $VM_NAME not found"
+            /Applications/Minds.app/Contents/Resources/lima/bin/limactl list || true
+            exit 1
+          fi
+          echo "host_name=$HOST_NAME"     >> "$GITHUB_OUTPUT"
+          echo "agent_name=$AGENT_NAME"   >> "$GITHUB_OUTPUT"
+          echo "creation_id=$CREATION_ID" >> "$GITHUB_OUTPUT"
+          echo "base_url=$BASE_URL"       >> "$GITHUB_OUTPUT"
+          echo "vm_name=$VM_NAME"         >> "$GITHUB_OUTPUT"
+          echo "ok=1"                     >> "$GITHUB_OUTPUT"
+
+      - name: install socat (slack mock TLS terminator)
+        if: ${{ steps.slack_pre.outputs.ok == '1' }}
+        run: |
+          if ! command -v socat >/dev/null; then
+            brew install socat
+          fi
+          socat -V | head -1
+
+      - name: setup node 24 for Playwright
+        if: ${{ steps.slack_pre.outputs.ok == '1' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.15.0'
+
+      - name: pnpm install (apps/minds dev deps incl. playwright)
+        if: ${{ steps.slack_pre.outputs.ok == '1' }}
+        working-directory: apps/minds
+        run: |
+          npm install -g pnpm@10.33.4
+          pnpm install --frozen-lockfile
+
+      - name: stand up slack mock + in-VM redirect
+        if: ${{ steps.slack_pre.outputs.ok == '1' }}
+        env:
+          VM_NAME: ${{ steps.slack_pre.outputs.vm_name }}
+        run: bash apps/minds/scripts/slack-mock-setup.sh
+
+      - name: kill running minds.app (Playwright launches its own)
+        if: ${{ steps.slack_pre.outputs.ok == '1' }}
+        run: |
+          for P in $(pgrep -f '/Applications/Minds.app/Contents/MacOS/Minds' 2>/dev/null || true); do
+            kill "$P" 2>/dev/null || true
+          done
+          sleep 2
+          # Make sure ports the new instance wants (8421 + backend) are free.
+          for P in $(pgrep -f 'mngr forward' 2>/dev/null || true); do
+            kill "$P" 2>/dev/null || true
+          done
+
+      - name: drive slack flow via Playwright
+        if: ${{ steps.slack_pre.outputs.ok == '1' }}
+        working-directory: apps/minds
+        env:
+          MINDS_WORKSPACE: ${{ steps.slack_pre.outputs.host_name }}
+        run: |
+          node test/e2e/drive-slack-ci.js
+
+      - name: teardown slack mock
+        if: ${{ always() && steps.slack_pre.outputs.ok == '1' }}
+        env:
+          VM_NAME: ${{ steps.slack_pre.outputs.vm_name }}
+        run: bash apps/minds/scripts/slack-mock-teardown.sh
+
+      - name: destroy agent (post-slack-flow)
+        if: ${{ always() && steps.slack_pre.outputs.ok == '1' }}
+        env:
+          CREATION_ID: ${{ steps.slack_pre.outputs.creation_id }}
+          BASE_URL:    ${{ steps.slack_pre.outputs.base_url }}
+        run: |
+          # first-message-verify wrote the session cookie at this path.
+          COOKIES=/tmp/first-message-cookies.txt
+          if [[ ! -s "$COOKIES" ]]; then
+            echo "no cookies; agent will be cleaned by mac-runner-reset"
+            exit 0
+          fi
+          curl -s -b "$COOKIES" -o /tmp/post-slack-delete.json \
+            -w 'delete HTTP %{http_code}\n' \
+            -X POST --max-time 180 "$BASE_URL/workspace/$CREATION_ID/delete" || true
+
       - name: collect diagnostic artifacts on failure
         if: failure()
         run: |
@@ -295,6 +400,9 @@ jobs:
           for f in /tmp/first-message-*.json /tmp/first-message-*.txt /tmp/first-message-*.html; do
             [ -f "$f" ] && cp "$f" artifacts/ 2>/dev/null || true
           done
+          [ -d /tmp/slack-mock ] && cp -R /tmp/slack-mock artifacts/ 2>/dev/null || true
+          [ -d apps/minds/test/e2e/screenshots ] && cp -R apps/minds/test/e2e/screenshots artifacts/playwright-screenshots 2>/dev/null || true
+          [ -d apps/minds/test-results ] && cp -R apps/minds/test-results artifacts/playwright-test-results 2>/dev/null || true
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
