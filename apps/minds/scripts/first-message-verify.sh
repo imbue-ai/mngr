@@ -15,6 +15,10 @@ COOKIES="/tmp/first-message-cookies.txt"
 # so a workflow input that defaulted to '' still falls through to these.
 GIT_URL="${GIT_URL:-https://github.com/imbue-ai/forever-claude-template}"
 GIT_BRANCH="${GIT_BRANCH:-pilot}"
+# Compute provider for the workspace. Defaults preserve the original LIMA path;
+# set LAUNCH_MODE=SBX MNGR_PROVIDER=sbx to drive the Docker Sandbox provider.
+LAUNCH_MODE="${LAUNCH_MODE:-LIMA}"
+MNGR_PROVIDER="${MNGR_PROVIDER:-lima}"
 HOST_NAME="${HOST_NAME:-firstmsg$(date +%H%M%S)}"
 PROMPT="${PROMPT:-Reply with exactly the four characters: pong}"
 EXPECT_SUBSTRING="${EXPECT_SUBSTRING:-pong}"
@@ -100,15 +104,15 @@ log "auth ok"
 
 api() { curl -s -b "$COOKIES" -X "$1" -H 'Content-Type: application/json' "$BASE$2" "${@:3}"; }
 
-log "POST /api/create-agent host_name=$HOST_NAME launch_mode=LIMA ai_provider=API_KEY"
-BODY=$(HOST_NAME="$HOST_NAME" GIT_URL="$GIT_URL" GIT_BRANCH="$GIT_BRANCH" ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" python3 -c '
+log "POST /api/create-agent host_name=$HOST_NAME launch_mode=$LAUNCH_MODE ai_provider=API_KEY"
+BODY=$(HOST_NAME="$HOST_NAME" GIT_URL="$GIT_URL" GIT_BRANCH="$GIT_BRANCH" ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" LAUNCH_MODE="$LAUNCH_MODE" python3 -c '
 import json, os
 print(json.dumps({
     "agent_name": os.environ["HOST_NAME"],
     "host_name": os.environ["HOST_NAME"],
     "git_url": os.environ["GIT_URL"],
     "branch": os.environ["GIT_BRANCH"],
-    "launch_mode": "LIMA",
+    "launch_mode": os.environ["LAUNCH_MODE"],
     "ai_provider": "API_KEY",
     "anthropic_api_key": os.environ["ANTHROPIC_API_KEY"],
     "include_env_file": False,
@@ -151,12 +155,12 @@ log "settling then polling mngr list for an agent on host=$HOST_NAME (up to 60s)
 agent_deadline=$((SECONDS + 60))
 AGENT_NAME=""
 while (( SECONDS < agent_deadline )); do
-  "$MNGR_BIN" list --provider lima 2>&1 | tee /tmp/first-message-mngr-list.txt >&2 || true
+  "$MNGR_BIN" list --provider "$MNGR_PROVIDER" 2>&1 | tee /tmp/first-message-mngr-list.txt >&2 || true
   # Capture stdout AND stderr so warnings (e.g. RUNNING_UNKNOWN_AGENT_TYPE
   # noise that mngr can prepend) don't silently break json parsing. The parser
   # finds the first '{' or '[' in the raw output and parses from there; any
   # WARNING: prefix lines are stripped naturally.
-  AGENT_NAME=$(HOST_NAME="$HOST_NAME" "$MNGR_BIN" list --provider lima --format json 2>&1 | python3 -c '
+  AGENT_NAME=$(HOST_NAME="$HOST_NAME" "$MNGR_BIN" list --provider "$MNGR_PROVIDER" --format json 2>&1 | python3 -c '
 import json, os, sys
 host = os.environ["HOST_NAME"]
 raw = sys.stdin.read()
@@ -185,7 +189,7 @@ done
 log "resolved agent name: $AGENT_NAME"
 
 log "sending message to '$AGENT_NAME': $PROMPT"
-"$MNGR_BIN" message --provider lima "$AGENT_NAME" -m "$PROMPT" 2>&1 | tee /tmp/first-message-mngr-message.txt >&2
+"$MNGR_BIN" message --provider "$MNGR_PROVIDER" "$AGENT_NAME" -m "$PROMPT" 2>&1 | tee /tmp/first-message-mngr-message.txt >&2
 mngr_message_rc=${PIPESTATUS[0]}
 if [[ $mngr_message_rc -ne 0 ]]; then
   fail "mngr message to '$AGENT_NAME' failed (exit=$mngr_message_rc) -- see /tmp/first-message-mngr-message.txt"
@@ -198,7 +202,7 @@ rm -f "$REPLY_FILE"
 reply_deadline=$((SECONDS + REPLY_TIMEOUT_SECONDS))
 while (( SECONDS < reply_deadline )); do
   EXPECT_SUBSTRING="$EXPECT_SUBSTRING" SEND_AT="$SEND_AT" \
-    "$MNGR_BIN" event --provider lima "$AGENT_NAME" --include 'event.type == "assistant_message"' --format json 2>/dev/null \
+    "$MNGR_BIN" event --provider "$MNGR_PROVIDER" "$AGENT_NAME" --include 'event.type == "assistant_message"' --format json 2>/dev/null \
     | EXPECT_SUBSTRING="$EXPECT_SUBSTRING" SEND_AT="$SEND_AT" python3 -c "
 import json, sys, os, datetime
 expect = os.environ['EXPECT_SUBSTRING']

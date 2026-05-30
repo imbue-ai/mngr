@@ -29,6 +29,14 @@ on:
         description: 'Override the FCT git URL (forks). Empty -> https://github.com/imbue-ai/forever-claude-template.'
         required: false
         default: ''
+      launch_mode:
+        description: 'Compute provider for the first-message workspace. LIMA (default) or SBX (Docker Sandboxes). The runner must have the matching CLI installed + authenticated (sbx login for SBX).'
+        type: choice
+        required: false
+        default: 'LIMA'
+        options:
+          - LIMA
+          - SBX
 
 concurrency:
   group: mac-runner
@@ -290,6 +298,8 @@ jobs:
         env:
           GIT_BRANCH: ${{ inputs.template_ref }}
           GIT_URL:    ${{ inputs.template_url }}
+          LAUNCH_MODE: ${{ inputs.launch_mode }}
+          MNGR_PROVIDER: ${{ inputs.launch_mode == 'SBX' && 'sbx' || 'lima' }}
           SKIP_DESTROY: '1'
         run: bash apps/minds/scripts/first-message-verify.sh
 

@@ -1,1 +1,1 @@
-Register the `imbue-mngr-sbx` workspace package in the root coverage config and lockfile, and add `.worktreeinclude` so Claude worktree subagents copy local settings/env files.
+Register the imbue-mngr-sbx workspace package in root coverage + lockfile; add `.worktreeinclude`. Add a `launch_mode` (LIMA/SBX) choice input to the minds launch-to-first-message workflow so the self-hosted runner can verify the Docker Sandbox provider path.
