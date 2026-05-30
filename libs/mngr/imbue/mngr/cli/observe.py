@@ -66,7 +66,10 @@ def observe(ctx: click.Context, **kwargs: Any) -> None:
         events_base_dir = get_default_events_base_dir(mngr_ctx.config)
 
     if opts.discovery_only:
-        run_discovery_stream(mngr_ctx=mngr_ctx)
+        # Pass the same resolved events_base_dir as the full-observer path so
+        # --events-dir is honored consistently across both branches; otherwise
+        # the discovery stream silently falls back to the config default.
+        run_discovery_stream(mngr_ctx=mngr_ctx, events_base_dir=events_base_dir)
         return
 
     # Acquire an exclusive lock per output directory

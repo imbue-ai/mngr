@@ -30,6 +30,7 @@ from imbue.imbue_common.logging import format_nanosecond_iso_timestamp
 from imbue.imbue_common.logging import generate_log_event_id
 from imbue.imbue_common.logging import generate_rotation_timestamp
 from imbue.imbue_common.logging import rotation_lock
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -889,6 +890,7 @@ def _write_unfiltered_full_snapshot_logged(mngr_ctx: MngrContext) -> None:
 
 def run_discovery_stream(
     mngr_ctx: MngrContext,
+    events_base_dir: Path | None = None,
     on_line: Callable[[str], None] | None = None,
 ) -> None:
     """Stream discovery events as JSONL.
@@ -910,7 +912,22 @@ def run_discovery_stream(
 
     If on_line is None, events are written to stdout. Otherwise, the callback
     is called with each deduplicated JSONL line.
+
+    ``events_base_dir`` overrides where discovery events are read and written.
+    When None (default), the path is derived from ``mngr_ctx.config`` via the
+    same default the full observer uses (``default_host_dir``). When set, the
+    override is applied uniformly across the cached-snapshot reader, the
+    tail thread, and the periodic ``_write_unfiltered_full_snapshot`` calls
+    so they all land on the same directory; otherwise the tail thread would
+    read from one path while the snapshot writer wrote to another.
     """
+    if events_base_dir is not None:
+        overridden_config = mngr_ctx.config.model_copy_update(
+            to_update(mngr_ctx.config.field_ref().default_host_dir, events_base_dir),
+        )
+        mngr_ctx = mngr_ctx.model_copy_update(
+            to_update(mngr_ctx.field_ref().config, overridden_config),
+        )
     events_path = get_discovery_events_path(mngr_ctx.config)
     emitted_event_ids: set[str] = set()
     emit_lock = Lock()
