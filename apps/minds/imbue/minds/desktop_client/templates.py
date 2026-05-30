@@ -24,6 +24,8 @@ from imbue.minds.bootstrap import DEFAULT_MINDS_ROOT_NAME
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.primitives import AIProvider
+from imbue.minds.primitives import BackupEncryptionMethod
+from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
@@ -162,6 +164,10 @@ def render_create_form(
     branch: str = "",
     launch_mode: LaunchMode | None = None,
     ai_provider: AIProvider | None = None,
+    backup_provider: BackupProvider | None = None,
+    backup_encryption_method: BackupEncryptionMethod | None = None,
+    backup_api_key_env: str = "",
+    has_saved_backup_password: bool = False,
     accounts: Sequence[object] | None = None,
     default_account_id: str = "",
     gh_token: str = "",
@@ -170,10 +176,16 @@ def render_create_form(
 ) -> str:
     """Render the agent creation form page.
 
-    The compute provider (``launch_mode``) and AI provider are independent.
-    Both default to ``IMBUE_CLOUD`` when an account is selected; without
-    an account we drop them to ``DOCKER`` / ``SUBSCRIPTION`` so the form
-    starts in a valid state for the no-account flow.
+    The compute provider (``launch_mode``), AI provider, and backup provider
+    are independent. The compute / AI providers default to ``IMBUE_CLOUD``
+    when an account is selected; without an account they drop to ``DOCKER`` /
+    ``SUBSCRIPTION``. The backup provider defaults to ``IMBUE_CLOUD`` with an
+    account and ``CONFIGURE_LATER`` without one. The backup encryption method
+    defaults to ``NO_PASSWORD``.
+
+    ``has_saved_backup_password`` toggles the master-password input between a
+    "enter a passphrase" field (no saved password yet) and a read-only
+    "a saved password will be used" indicator.
 
     ``host_name`` is the value of the form's "Name" field; it drives the
     host name on the resulting workspace. (The agent itself is always
@@ -193,6 +205,14 @@ def render_create_form(
         if ai_provider is not None
         else (AIProvider.IMBUE_CLOUD if has_account else AIProvider.SUBSCRIPTION)
     )
+    effective_backup_provider = (
+        backup_provider
+        if backup_provider is not None
+        else (BackupProvider.IMBUE_CLOUD if has_account else BackupProvider.CONFIGURE_LATER)
+    )
+    effective_backup_encryption = (
+        backup_encryption_method if backup_encryption_method is not None else BackupEncryptionMethod.NO_PASSWORD
+    )
     template = JINJA_ENV.get_template("create.html")
     return template.render(
         git_url=effective_url,
@@ -202,6 +222,12 @@ def render_create_form(
         selected_launch_mode=effective_launch_mode.value,
         ai_providers=list(AIProvider),
         selected_ai_provider=effective_ai_provider.value,
+        backup_providers=list(BackupProvider),
+        selected_backup_provider=effective_backup_provider.value,
+        backup_encryption_methods=list(BackupEncryptionMethod),
+        selected_backup_encryption_method=effective_backup_encryption.value,
+        backup_api_key_env=backup_api_key_env,
+        has_saved_backup_password=has_saved_backup_password,
         accounts=accounts or [],
         default_account_id=default_account_id,
         gh_token=gh_token,

@@ -53,6 +53,7 @@ from imbue.mngr.providers.ssh_utils import wait_for_sshd
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr_lima.config import LimaProviderConfig
 from imbue.mngr_lima.constants import CLOUD_INIT_TIMEOUT_SECONDS
+from imbue.mngr_lima.constants import lima_host_data_disk_name
 from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_lima.errors import LimaHostCreationError
 from imbue.mngr_lima.errors import LimaHostRenameError
@@ -67,6 +68,8 @@ from imbue.mngr_lima.lima_yaml import write_lima_yaml
 from imbue.mngr_lima.limactl import LimaSshConfig
 from imbue.mngr_lima.limactl import lima_instance_name
 from imbue.mngr_lima.limactl import limactl_delete
+from imbue.mngr_lima.limactl import limactl_disk_create
+from imbue.mngr_lima.limactl import limactl_disk_delete
 from imbue.mngr_lima.limactl import limactl_list
 from imbue.mngr_lima.limactl import limactl_shell
 from imbue.mngr_lima.limactl import limactl_show_ssh
@@ -396,8 +399,20 @@ sudo poweroff
         instance_name = lima_instance_name(name, self.mngr_ctx.config.prefix)
         logger.info("Creating Lima VM host {} ({}) ...", name, instance_name)
 
-        # Create the persistent volume directory
-        volume_dir = self._ensure_host_volume_dir(host_id)
+        # Resolve the host_dir layout once and lock it in on the host record.
+        # is_host_data_volume_exposed=True (default) keeps the historical 9p
+        # bind-mount layout. False switches to an in-VM btrfs additionalDisk
+        # and omits the bind mount entirely.
+        is_host_data_volume_exposed = self.config.is_host_data_volume_exposed
+        host_data_disk_name = None if is_host_data_volume_exposed else lima_host_data_disk_name(host_id)
+
+        # Create the persistent volume directory only in bind-mount mode; the
+        # btrfs path has no host-side directory to expose.
+        volume_dir: Path | None
+        if is_host_data_volume_exposed:
+            volume_dir = self._ensure_host_volume_dir(host_id)
+        else:
+            volume_dir = None
 
         # Generate the sshd host keypair to inject into the VM and record in known_hosts.
         host_private_key_pem, host_public_key_openssh = self._ensure_host_keypair(host_id)
@@ -413,6 +428,8 @@ sudo poweroff
                 config_image_url_x86_64=self.config.default_image_url_x86_64,
                 host_private_key_pem=host_private_key_pem,
                 host_public_key_openssh=host_public_key_openssh,
+                host_data_disk_name=host_data_disk_name,
+                host_data_disk_size=self.config.host_data_disk_size if host_data_disk_name else None,
             )
             lima_config = merge_lima_yaml(base_config, user_config)
         else:
@@ -425,6 +442,8 @@ sudo poweroff
                 config_image_url_x86_64=self.config.default_image_url_x86_64,
                 host_private_key_pem=host_private_key_pem,
                 host_public_key_openssh=host_public_key_openssh,
+                host_data_disk_name=host_data_disk_name,
+                host_data_disk_size=self.config.host_data_disk_size if host_data_disk_name else None,
             )
 
         # Write the YAML config to a temp file
@@ -433,12 +452,24 @@ sudo poweroff
         effective_start_args = tuple(self.config.default_start_args) + tuple(start_args or ())
 
         try:
+            # Pre-create the Lima-managed additional disk in btrfs mode.
+            # `additionalDisks` with `format: true` only auto-formats an
+            # already-existing disk; without this pre-create, `limactl start`
+            # fails with "could not load disk ... no such file or directory".
+            if host_data_disk_name is not None:
+                limactl_disk_create(
+                    self.mngr_ctx.concurrency_group,
+                    host_data_disk_name,
+                    self.config.host_data_disk_size,
+                )
+
             # Create and start the Lima instance
             limactl_start_new(
                 self.mngr_ctx.concurrency_group,
                 instance_name,
                 yaml_path,
                 start_args=effective_start_args,
+                timeout=self.config.vm_start_timeout_seconds,
             )
 
             # Wait for cloud-init to complete
@@ -464,6 +495,17 @@ sudo poweroff
                 logger.debug(
                     "Failed to clean up Lima instance {} during error recovery: {}", instance_name, cleanup_err
                 )
+            # Also clean up the orphaned btrfs additional disk so a retry with
+            # the same host_id can re-create it without colliding.
+            if host_data_disk_name is not None:
+                try:
+                    limactl_disk_delete(self.mngr_ctx.concurrency_group, host_data_disk_name, force=True)
+                except (LimaCommandError, OSError) as cleanup_err:
+                    logger.debug(
+                        "Failed to clean up Lima disk {} during error recovery: {}",
+                        host_data_disk_name,
+                        cleanup_err,
+                    )
             self._save_failed_host_record(
                 host_id=host_id,
                 host_name=name,
@@ -502,6 +544,8 @@ sudo poweroff
             instance_name=instance_name,
             start_args=effective_start_args,
             image_url=str(image) if image else None,
+            is_host_data_volume_exposed=is_host_data_volume_exposed,
+            host_data_disk_name=host_data_disk_name,
         )
 
         # Read configured resources from Lima config
@@ -682,6 +726,20 @@ sudo poweroff
                 limactl_delete(self.mngr_ctx.concurrency_group, host_record.config.instance_name, force=True)
             except LimaCommandError as e:
                 logger.warning("Error deleting Lima instance: {}", e)
+            # Remove the Lima-managed btrfs additional disk for hosts that
+            # were created with is_host_data_volume_exposed=False. The disk
+            # lives under ~/.lima/_disks/ and is otherwise orphaned because
+            # `limactl delete` only removes the VM definition, not named
+            # disks it referenced. Tolerate the disk already being absent.
+            if host_record.config.host_data_disk_name is not None:
+                try:
+                    limactl_disk_delete(
+                        self.mngr_ctx.concurrency_group,
+                        host_record.config.host_data_disk_name,
+                        force=True,
+                    )
+                except LimaCommandError as e:
+                    logger.warning("Error deleting Lima additional disk: {}", e)
 
         # Mark as destroyed in host record
         if host_record is not None:
@@ -700,10 +758,30 @@ sudo poweroff
         host_id = host.id
         logger.info("Deleting Lima host records: {}", host_id)
 
+        # If the host was created in btrfs mode and its Lima disk somehow
+        # outlived destroy_host (e.g. destroy never ran or the disk-delete
+        # call previously raised), clean it up as a safety net before we
+        # forget about it. Tolerates "not found" via limactl_disk_delete.
+        host_record = self._host_store.read_host_record(host_id, use_cache=False)
+        if (
+            host_record is not None
+            and host_record.config is not None
+            and host_record.config.host_data_disk_name is not None
+        ):
+            try:
+                limactl_disk_delete(
+                    self.mngr_ctx.concurrency_group,
+                    host_record.config.host_data_disk_name,
+                    force=True,
+                )
+            except LimaCommandError as e:
+                logger.warning("Error deleting Lima additional disk during delete_host: {}", e)
+
         # Delete host record from store
         self._host_store.delete_host_record(host_id)
 
-        # Delete volume directory
+        # Delete volume directory (no-op in btrfs mode: the directory was
+        # never created because is_host_data_volume_exposed=False).
         volume_dir = self._get_host_volume_dir(host_id)
         if volume_dir.exists():
             shutil.rmtree(volume_dir, ignore_errors=True)
@@ -889,7 +967,14 @@ sudo poweroff
     # =========================================================================
 
     def list_volumes(self) -> list[VolumeInfo]:
-        """List all volumes managed by this provider."""
+        """List all volumes managed by this provider.
+
+        Only hosts created with is_host_data_volume_exposed=True (today's
+        default) have a host-side volume directory worth listing. btrfs-mode
+        hosts (is_host_data_volume_exposed=False) deliberately have no
+        host-side directory, so they do not appear here even though their
+        data still exists on the in-VM btrfs disk.
+        """
         volumes: list[VolumeInfo] = []
         if not self._volumes_dir.exists():
             return volumes
@@ -928,8 +1013,20 @@ sudo poweroff
         raise MngrError(f"Volume not found: {volume_id}")
 
     def get_volume_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
-        """Get the host volume for a given host."""
+        """Get the host volume for a given host.
+
+        Returns None for hosts created with is_host_data_volume_exposed=False:
+        in that mode host_dir lives only on an in-VM btrfs disk, so the
+        host machine has no direct read path. Callers
+        (libs/mngr/imbue/mngr/api/events.py, mngr_claude's
+        on_before_host_destroy hook, mngr_tmr, mngr_file) already handle
+        None gracefully by skipping or falling back to online-host SSH.
+        """
         host_id = host.id if isinstance(host, HostInterface) else host
+        host_record = self._host_store.read_host_record(host_id)
+        if host_record is not None and host_record.config is not None:
+            if not host_record.config.is_host_data_volume_exposed:
+                return None
         volume_dir = self._get_host_volume_dir(host_id)
         if not volume_dir.exists():
             return None

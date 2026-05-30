@@ -70,7 +70,21 @@ values are fine -- the deploy skips them when pushing to Modal).
 
 **paid-accounts.sh** holds the paid-feature email allowlist (kept as its own Modal secret so the allowlist can be rotated without touching SuperTokens / OAuth credentials):
 
-- `PAID_ACCOUNT_SUFFIXES` (optional): comma-separated list of email-suffix matches that gate the "paid" routes -- pool host leases (`/hosts/*`) and LiteLLM virtual keys (`/keys/*`). When set, only accounts whose verified SuperTokens email ends with one of these suffixes can use those routes; everyone else gets 403. Cloudflare forwarding (`/tunnels/*`) is intentionally NOT gated by this -- any email-verified account can still create tunnels and forward services. When unset (or empty), the paid routes are disabled for everyone. Match is case-insensitive and uses `endswith`, so include the leading `@` when you want to require an exact domain (e.g. `@imbue.com,@example.org,bob@gmail.com`).
+- `PAID_ACCOUNT_SUFFIXES` (optional): comma-separated list of email-suffix matches that gate the "paid" routes -- pool host leases (`/hosts/*`), LiteLLM virtual keys (`/keys/*`), and R2 buckets (`/buckets/*`, `/bucket-keys/*`). When set, only accounts whose verified SuperTokens email ends with one of these suffixes can use those routes; everyone else gets 403. Cloudflare forwarding (`/tunnels/*`) is intentionally NOT gated by this -- any email-verified account can still create tunnels and forward services. When unset (or empty), the paid routes are disabled for everyone. Match is case-insensitive and uses `endswith`, so include the leading `@` when you want to require an exact domain (e.g. `@imbue.com,@example.org,bob@gmail.com`).
+
+### Cloudflare token requirements for R2
+
+The R2 bucket routes require `CLOUDFLARE_API_TOKEN` to be an **account-owned** token (`cfat_`) -- not a user-owned token (`cfut_`) -- because the connector mints account-owned per-bucket R2 tokens on the user's behalf. The token needs these permissions:
+
+- `Cloudflare Tunnel: Edit`
+- `DNS: Edit` (on the tier zone)
+- `Access: Apps and Policies: Edit`
+- `Access: Service Tokens: Edit`
+- `Workers KV Storage: Edit`
+- `Workers R2 Storage: Edit` (R2 buckets)
+- `Account API Tokens: Edit` (mint/revoke per-bucket R2 keys)
+
+**R2 must also be enabled on the Cloudflare account** (a one-time dashboard action; until then the API returns `code 10042 "Please enable R2 through the Cloudflare Dashboard"`). Existing tiers shipped with a user-owned tunnel/DNS token and must be migrated (create the account-owned token with the permissions above, replace `CLOUDFLARE_API_TOKEN` in Vault, then redeploy) before the bucket routes work.
 
 ### 2. Deploy the Modal app
 
@@ -129,6 +143,21 @@ When `CLOUDFLARE_ALLOWED_IDPS` is set, Access Applications created for forwarded
 - `PUT /tunnels/{tunnel_name}/services/{service_name}/auth` -- Set/override the auth policy for a specific service.
 
 When a default auth policy is set on a tunnel, new services automatically get a Cloudflare Access Application with that policy applied. Per-service overrides replace the inherited policy entirely.
+
+### Buckets (admin only, paid)
+
+R2 buckets give an account remote object storage. Each bucket is isolated (one per host the user makes); isolation is per-bucket, not per-prefix. Buckets are named `<user_id_prefix>--<slug>` where `user_id_prefix` is the caller's 16-hex SuperTokens prefix; the server re-checks that prefix in code (not just via the R2 `name_contains` filter) so a crafted name cannot grant cross-user access. All routes require admin auth + a paid account.
+
+- `POST /buckets` -- Create a bucket and mint its default key. Body: `{"name": "...", "access": "read"|"readwrite"}`. Returns `{bucket, key}` where `key` includes the one-time `secret_access_key`. Errors `409` if the derived bucket already exists or the per-account cap (50) is reached, `400` on an invalid derived name.
+- `GET /buckets` -- List the caller's buckets.
+- `GET /buckets/{name}` -- Bucket metadata (full R2 name + S3 endpoint). Keys come from the key routes.
+- `DELETE /buckets/{name}` -- Destroy a bucket. Returns `409` if the bucket is not empty (empty it first); on success, cascades -- revokes all of the bucket's keys and deletes their rows.
+- `POST /buckets/{name}/keys` -- Mint an additional scoped key. Body: `{"alias": "...", "access": "read"|"readwrite"}`. Returns the key material (with the one-time secret).
+- `GET /buckets/{name}/keys` -- List the caller's keys for one bucket (no secrets).
+- `GET /bucket-keys` -- List all of the caller's keys across every bucket (no secrets).
+- `DELETE /bucket-keys/{access_key_id}` -- Revoke a key by its Access Key ID and drop its row.
+
+Each key is an account-owned Cloudflare API token scoped to the one bucket; the S3 Access Key ID is the token id and the Secret Access Key is the SHA-256 of the token value (returned once, never stored). Only key *metadata* (access key id, owner, bucket, scope, alias, created_at) is persisted, in the `r2_keys` table; buckets themselves are listed straight from the R2 API.
 
 ### Auth
 

@@ -4,6 +4,7 @@ import pytest
 
 from imbue.mngr.api.create import _create_new_host
 from imbue.mngr.api.create import _generate_unique_host_name
+from imbue.mngr.api.create import _run_post_host_create_commands
 from imbue.mngr.api.create import _write_host_env_vars
 from imbue.mngr.api.create import resolve_target_host
 from imbue.mngr.config.data_types import EnvVar
@@ -15,6 +16,7 @@ from imbue.mngr.interfaces.host import HostEnvironmentOptions
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
+from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostNameStyle
 from imbue.mngr.primitives import ProviderInstanceName
@@ -93,6 +95,56 @@ def test_write_host_env_vars_skips_when_empty(
     # The host env file should not exist (no env vars written)
     host_env = local_host.get_env_vars()
     assert host_env == {}
+
+
+# =============================================================================
+# _run_post_host_create_commands Tests
+# =============================================================================
+
+
+def test_run_post_host_create_commands_no_op_on_empty_tuple(
+    local_host: Host,
+    temp_host_dir: Path,
+) -> None:
+    """An empty commands tuple is a no-op (no exec, no error)."""
+    _run_post_host_create_commands(local_host, ())
+
+
+def test_run_post_host_create_commands_runs_each_command_in_order(
+    local_host: Host,
+    temp_host_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Each command runs in order; we observe order via append-to-file side effect."""
+    marker = tmp_path / "order.txt"
+    _run_post_host_create_commands(
+        local_host,
+        (
+            CommandString(f"echo first >> {marker}"),
+            CommandString(f"echo second >> {marker}"),
+            CommandString(f"echo third >> {marker}"),
+        ),
+    )
+    assert marker.read_text().splitlines() == ["first", "second", "third"]
+
+
+def test_run_post_host_create_commands_raises_on_first_failure(
+    local_host: Host,
+    temp_host_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """A non-zero exit raises MngrError, and subsequent commands do not run."""
+    marker = tmp_path / "after_failure.txt"
+    with pytest.raises(MngrError, match="post-host-create command failed"):
+        _run_post_host_create_commands(
+            local_host,
+            (
+                CommandString("false"),
+                CommandString(f"echo unreached >> {marker}"),
+            ),
+        )
+    # The second command must not have executed.
+    assert not marker.exists()
 
 
 # =============================================================================

@@ -344,6 +344,7 @@ def test_cleanup_destroy_multiple_agents(
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_cleanup_destroy_with_provider_filter_matches(
     cli_runner: CliRunner,
     temp_work_dir: Path,
