@@ -32,20 +32,8 @@ while (( SECONDS < deadline )); do
   if [[ -s "$EVENTS_LOG" ]]; then
     log "backend up after $((SECONDS))s, head of events log:"
     head -5 "$EVENTS_LOG"
-    SCREENSHOT_DIR="${SCREENSHOT_DIR:-/tmp/first-message-screenshots}"
-    mkdir -p "$SCREENSHOT_DIR"
-    if command -v screencapture >/dev/null 2>&1; then
-      ts=$(date +%H%M%S)
-      out="$SCREENSHOT_DIR/${ts}-00-app-launched.png"
-      screencapture -x "$out" 2>"$out.err" || true
-      if [[ -s "$out" ]]; then
-        log "  snap[00-app-launched] -> $out ($(stat -f %z "$out") bytes)"
-      else
-        log "  snap[00-app-launched] FAILED: screencapture stderr: $(cat "$out.err" 2>/dev/null)"
-        rm -f "$out"
-      fi
-      rm -f "$out.err"
-    fi
+    # No screencapture: self-hosted runner has no Aqua session.
+    # Visible-flow shots come from the Playwright phase later.
     exit 0
   fi
   sleep 2

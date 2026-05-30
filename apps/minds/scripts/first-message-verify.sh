@@ -13,31 +13,15 @@ EVENTS_LOG="$HOME/.minds/logs/minds-events.jsonl"
 COOKIES="/tmp/first-message-cookies.txt"
 SCREENSHOT_DIR="${SCREENSHOT_DIR:-/tmp/first-message-screenshots}"
 mkdir -p "$SCREENSHOT_DIR"
-snap() {
-  local name="$1"
-  local ts
-  ts=$(date +%H%M%S)
-  local out="$SCREENSHOT_DIR/${ts}-${name}.png"
-  if ! command -v screencapture >/dev/null 2>&1; then
-    log "  snap[$name]: screencapture not on PATH"
-    return
-  fi
-  # `screencapture -x` (no sound) is enough; on a headless launchd
-  # context it returns silently with no file, which is why earlier
-  # runs landed an empty SCREENSHOT_DIR. Log the outcome so artifact
-  # postmortem can show whether the runner's session can grab the
-  # display at all.
-  screencapture -x "$out" 2>"$out.err" || true
-  if [[ -s "$out" ]]; then
-    log "  snap[$name] -> $out ($(stat -f %z "$out") bytes)"
-  else
-    local err
-    err=$(cat "$out.err" 2>/dev/null || true)
-    log "  snap[$name] FAILED: no/empty file written (screencapture stderr: ${err:-<empty>})"
-    rm -f "$out"
-  fi
-  rm -f "$out.err"
-}
+# No-op snap: macOS `screencapture` requires an Aqua session and our
+# self-hosted minds-runner is launchd-managed with no GUI display
+# (returns "could not create image from display"). Visible-flow
+# screenshots are taken later by the Playwright phase (drive-slack-ci.js)
+# which captures the chat panel after first-message-verify lands, so the
+# "agent creation worked + first message worked" view is preserved
+# via 07a-chat-with-first-message-reply. Keep this stub so callers
+# don't have to change shape if a future runner gets GUI access.
+snap() { :; }
 # `${VAR:-default}` substitutes default for both unset and empty string,
 # so a workflow input that defaulted to '' still falls through to these.
 GIT_URL="${GIT_URL:-https://github.com/imbue-ai/forever-claude-template}"
@@ -254,7 +238,11 @@ VM_NAME="minds-${HOST_NAME}"
 TMUX_SESSION="minds-${AGENT_NAME}"
 reply_deadline=$((SECONDS + REPLY_TIMEOUT_SECONDS))
 while (( SECONDS < reply_deadline )); do
-  pane=$(limactl shell "$VM_NAME" -- tmux capture-pane -t "=$TMUX_SESSION" -pS -500 2>/dev/null || echo "")
+  # `-t =<session>:` -- = forces exact-match (satisfies ratchet), the
+  # trailing : tells tmux to pick the default window+pane of that
+  # session. Bare `=session` alone fails capture-pane target parsing
+  # ("can't find pane: =session").
+  pane=$(limactl shell "$VM_NAME" -- tmux capture-pane -t "=${TMUX_SESSION}:" -pS -500 2>/dev/null || echo "")
   if [[ -n "$pane" ]]; then
     # Look for the expected substring as a model reply. The user's
     # prompt is also echoed in the pane (after the `❯` prompt), so a
@@ -287,7 +275,7 @@ if [[ ! -s "$REPLY_FILE" ]]; then
     echo "=== tmux ls ==="; tmux ls 2>&1 || true
     for S in $(tmux ls -F "#{session_name}" 2>/dev/null); do
       echo "=== tmux capture-pane $S ==="
-      tmux capture-pane -t "=$S" -pS -500 2>&1 || true
+      tmux capture-pane -t "=${S}:" -pS -500 2>&1 || true
     done
     echo "=== agent processes ==="
     ps auxe 2>&1 | grep -iE "claude|mngr" | grep -v grep | head -20

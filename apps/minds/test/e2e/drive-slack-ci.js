@@ -247,6 +247,11 @@ async function dumpWindows(app, tag) {
     'textarea, [contenteditable="true"]',
     { timeout: 60_000 }
   );
+  // Snapshot the chat panel BEFORE sending the slack prompt -- the
+  // prior "pong" reply from first-message-verify should be visible
+  // here, which proves the launch + agent-create + first-message
+  // round trip worked end-to-end.
+  await shot(win, '07a-chat-with-first-message-reply');
   const beforeText = await win.evaluate(() => document.body.innerText.toLowerCase());
   const oldCannedOcc = beforeText.split(CANNED_BODY_LC).length - 1;
   log(`pre-send canned-body occurrences: ${oldCannedOcc}`);
