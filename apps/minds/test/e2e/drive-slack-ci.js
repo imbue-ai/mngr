@@ -133,6 +133,11 @@ async function dumpWindows(app, tag) {
     try {
       await shot(w, `dump-${tag}-${i}`);
     } catch (_) {}
+    // Dump the body innerText so we can see empty-state, error, etc.
+    try {
+      const body = await w.evaluate(() => (document.body && document.body.innerText || '').slice(0, 800));
+      console.log(`    body: ${JSON.stringify(body)}`);
+    } catch (_) {}
     // Dump the visible button + aria-labeled elements for selector mining
     try {
       const info = await w.evaluate(() => {
@@ -241,17 +246,22 @@ async function dumpWindows(app, tag) {
   log('typed + sent; watching for approval UI and canned body');
 
   // Approval is up to 3 clicks: chatbox icon (if panel not open) ->
-  // request entry -> Approve. Skip stage 0 if the requests-panel
-  // window is already open (minds.app sometimes auto-opens it).
-  let approvalStage = findRequestsPanelWindow(app) ? 1 : 0;
-  log(`starting approvalStage=${approvalStage} (requests-panel ${approvalStage === 1 ? 'already open' : 'closed'})`);
-  const dumpedOnce = [false, false, false];
+  // request entry -> Approve. Re-check each loop -- the panel can
+  // open later when the agent triggers it via the gateway, so the
+  // initial state isn't sticky.
+  let approvalStage = 0;
   for (let i = 0; i < 240; i++) {
     if (approvalStage < 3) {
+      // If the requests-panel auto-opened (sometimes minds.app opens
+      // it when a request lands), skip stage 0.
+      if (approvalStage === 0 && findRequestsPanelWindow(app)) {
+        log(`requests-panel auto-opened; jumping to stage 1`);
+        approvalStage = 1;
+      }
       if (approvalStage === 0) {
         const open = await openRightPanel(app);
         if (open) {
-          log(`opening right panel via "${open.selector}" (aria="${open.aria}" title="${open.title}")`);
+          log(`opening right panel via "${open.selector}"`);
           await shot(open.window, `approval-stage0-${i}s`);
           try { await open.locator.click({ timeout: 3_000 }); approvalStage = 1; }
           catch (e) { log(`stage0 click failed: ${e.message}`); }
