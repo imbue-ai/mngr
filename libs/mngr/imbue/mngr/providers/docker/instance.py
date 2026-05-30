@@ -433,13 +433,22 @@ class DockerProviderInstance(BaseProviderInstance):
     ) -> tuple[int, str]:
         """Execute a command in a Docker container via docker exec.
 
+        Forces ``workdir="/"`` so the exec succeeds regardless of whether
+        the image's declared ``WORKDIR`` exists at exec time. Mngr's
+        first container exec is its own sshd setup -- which runs *before*
+        any ``post_host_create_command`` hook -- so a ``WORKDIR`` like
+        ``/mngr/code/`` that the image expects to be populated by a
+        first-boot seed step won't be on disk yet. None of mngr's
+        automated setup commands depend on the image's WORKDIR; they
+        all use absolute paths.
+
         Returns (exit_code, output). For detached commands, returns (0, "").
         """
         if detach:
-            container.exec_run(["sh", "-c", command], detach=True)
+            container.exec_run(["sh", "-c", command], detach=True, workdir="/")
             return 0, ""
 
-        exit_code, output = container.exec_run(["sh", "-c", command])
+        exit_code, output = container.exec_run(["sh", "-c", command], workdir="/")
         output_str = output.decode("utf-8") if isinstance(output, bytes) else str(output)
         return exit_code, output_str
 
