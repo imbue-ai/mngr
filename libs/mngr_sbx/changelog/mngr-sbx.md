@@ -1,0 +1,1 @@
+Add the `sbx` (Docker Sandboxes) provider backend plugin. Creates and manages mngr hosts inside Docker Sandboxes by installing sshd in each sandbox and bridging it over `sbx ports`, with a per-host keeper subprocess that holds the sandbox alive across mngr invocations. Rebased onto current main and aligned the ratchet tests with the current `imbue_common.ratchet_testing` API.
