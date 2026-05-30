@@ -32,10 +32,7 @@ fi
 log "removing slack-mock /etc/hosts entry"
 sudo sed -i.bak '/# slack-mock/d' /etc/hosts 2>/dev/null || true
 
-# 4. Remove trusted cert. -c matches by common name.
-log "removing trusted cert (CN=slack.com)"
-sudo security delete-certificate -c "slack.com" \
-  /Library/Keychains/System.keychain 2>/dev/null || true
+# 4. Keychain is untouched in the brew-curl approach -- nothing to remove.
 
 # 5. Clear pre-seeded latchkey slack cred so it doesn't bleed across runs.
 log "clearing latchkey slack auth"

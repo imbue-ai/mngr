@@ -53,21 +53,19 @@ if [[ ! -f "$STATE_DIR/cert.pem" ]]; then
     >/dev/null 2>&1 || fail "openssl req failed"
 fi
 
-# 2. Trust the cert at the system level (curl-darwinssl uses System keychain).
-# On non-interactive macOS, `security add-trusted-cert -d` triggers the
-# auth-prompt code path even with sudo and fails with
-#   "SecTrustSettingsSetTrustSettings: ... no user interaction was possible"
-# unless we pre-grant trust-settings.admin in the authorization DB.
-log "trusting cert in /Library/Keychains/System.keychain"
-sudo security authorizationdb write com.apple.trust-settings.admin allow \
-  >/dev/null 2>&1 || true
-sudo security add-trusted-cert -d -r trustRoot \
-  -k /Library/Keychains/System.keychain "$STATE_DIR/cert.pem" \
-  || fail "security add-trusted-cert failed (authorization DB pre-grant didn't take?)"
-# Revert the authorization DB to its default. Best-effort -- losing the
-# default is annoying but not a teardown blocker.
-sudo security authorizationdb remove com.apple.trust-settings.admin \
-  >/dev/null 2>&1 || true
+# 2. Install brew curl (OpenSSL build) so we can pass --cacert.
+# macOS system curl is built against SecureTransport and ignores both
+# --cacert and CURL_CA_BUNDLE -- we'd have to install the cert in the
+# System keychain, which requires interactive auth even with sudo. The
+# brew curl (Homebrew/curl formula) is built with OpenSSL and honors
+# CURL_CA_BUNDLE. Latchkey's gateway spawns plain `curl`; we make it
+# pick up brew curl by prepending /opt/homebrew/opt/curl/bin to PATH in
+# the Playwright minds.app launch (see drive-slack-ci.js).
+log "ensuring brew curl is installed"
+if [[ ! -x /opt/homebrew/opt/curl/bin/curl ]]; then
+  brew install curl >/dev/null
+fi
+/opt/homebrew/opt/curl/bin/curl -V 2>&1 | head -1
 
 # 3. /etc/hosts on the host: slack.com / files.slack.com -> 127.0.0.1.
 log "patching /etc/hosts"
@@ -100,10 +98,12 @@ sudo socat -d \
 SOCAT_PID=$!
 echo $SOCAT_PID | sudo tee "$STATE_DIR/socat.pid" >/dev/null
 
-# 7. End-to-end sanity check from the host's perspective.
+# 7. End-to-end sanity check from the gateway's perspective -- use brew
+# curl with the cacert just like Playwright will launch minds.app to do.
 log "verifying TLS reach as the gateway would see it"
 for attempt in 1 2 3 4 5 6 7 8 9 10; do
-  body=$(curl -sf --max-time 5 https://slack.com/api/auth.test 2>&1) && break
+  body=$(CURL_CA_BUNDLE="$STATE_DIR/cert.pem" /opt/homebrew/opt/curl/bin/curl \
+    -sf --max-time 5 https://slack.com/api/auth.test 2>&1) && break
   sleep 1
 done
 case "$body" in

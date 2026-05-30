@@ -73,7 +73,17 @@ async function findApprovalUi(win) {
   log(`workspace=${WORKSPACE} nonce=${NONCE}`);
   log(`asserting canned body: "${CANNED_BODY}"`);
 
-  const app = await electron.launch({ executablePath: exec, env: process.env });
+  // Inject brew curl + cacert so the latchkey gateway (running inside
+  // this Electron process) makes outbound calls via OpenSSL-built curl
+  // that honors --cacert. Macos system curl is SecureTransport-built
+  // and would require installing the cert in the System keychain,
+  // which needs interactive auth (impossible on a non-TTY runner).
+  const env = {
+    ...process.env,
+    PATH: '/opt/homebrew/opt/curl/bin:' + (process.env.PATH || ''),
+    CURL_CA_BUNDLE: '/tmp/slack-mock/cert.pem',
+  };
+  const app = await electron.launch({ executablePath: exec, env });
   const win = await app.firstWindow({ timeout: 60_000 });
   const origin = await win.evaluate(() => location.origin);
   await win.goto(origin + '/');
