@@ -1,13 +1,20 @@
-// Shared Playwright fixtures for minds.app UI tests.
+// Playwright fixture: launches the installed /Applications/Minds.app.
 //
-// `mindsApp` launches the installed /Applications/Minds.app binary under an
-// isolated MINDS_ROOT_NAME so the user's live `~/.minds/` state is neither
-// destroyed nor inherited. Yields { app, mainWindow, hostDir } and tears the
-// Electron app down on test exit.
+// Note on isolation: the signed bundle's `getMindsRootName()` reads the
+// baked-in `resources/pyproject/imbue/minds/config/envs/_bundled/root_name`
+// file, which takes precedence over MINDS_ROOT_NAME from the environment
+// (paths.js:148-164). So we cannot isolate state via env var alone for the
+// shipped CEO build. Tests run against the user's live `~/.minds/` state.
+// Specs are responsible for cleaning up any workspaces they create
+// (`mngr destroy` or the destroy button) before exiting.
+//
+// To run cleanly, quit any user-launched minds.app first -- Playwright's
+// `electron.launch()` will deadlock-exit silently on Electron's
+// requestSingleInstanceLock if a prior Minds is still alive (we hit this
+// in early iterations: PID 28024 lingered after Cmd-Q).
 
 const path = require('path');
 const fs = require('fs');
-const os = require('os');
 const { _electron: electron } = require('playwright');
 const base = require('@playwright/test');
 
@@ -23,38 +30,30 @@ const test = base.test.extend({
       );
     }
 
-    // Per-run isolated host dir + a sentinel MINDS_ROOT_NAME so paths.js
-    // resolves ~/.minds-playwright-<runId>/ for cookies, venv, mngr state.
-    // The sentinel must match `minds(-<env-name>)?` (paths.js regex), so a
-    // hex run id keeps it valid.
-    const runId = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-    const rootName = `minds-pw-${runId}`;
-    const hostDir = path.join(os.homedir(), `.${rootName}`);
-
     const app = await electron.launch({
       executablePath: execPath,
-      env: {
-        ...process.env,
-        MINDS_ROOT_NAME: rootName,
-        MINDS_TEST_MODE: '1',
-      },
+      env: { ...process.env },
       timeout: 5 * 60 * 1000,
     });
 
-    // The chat-chrome window is the first/only top-level BrowserWindow.
     const mainWindow = await app.firstWindow({ timeout: 5 * 60 * 1000 });
 
-    await use({ app, mainWindow, hostDir, rootName });
+    await use({ app, mainWindow });
 
-    // Capture Electron stdout/stderr to the test output dir on failure.
+    // Save minds.log snapshot on failure for postmortem. Be defensive --
+    // the outputDir may not exist if the test failed before any Playwright
+    // assertion fired (e.g. fixture-level setup error).
     if (testInfo.status !== 'passed') {
-      const evtLog = path.join(hostDir, 'logs', 'minds-events.jsonl');
-      const mainLog = path.join(hostDir, 'logs', 'minds.log');
-      for (const src of [evtLog, mainLog]) {
-        if (fs.existsSync(src)) {
-          const dst = path.join(testInfo.outputDir, path.basename(src));
-          fs.copyFileSync(src, dst);
+      try {
+        const mainLog = path.join(process.env.HOME, '.minds', 'logs', 'minds.log');
+        if (fs.existsSync(mainLog)) {
+          fs.mkdirSync(testInfo.outputDir, { recursive: true });
+          const content = fs.readFileSync(mainLog, 'utf-8');
+          const tail = content.split('\n').slice(-500).join('\n');
+          fs.writeFileSync(path.join(testInfo.outputDir, 'minds.log.tail'), tail);
         }
+      } catch (e) {
+        console.error('[fixture] failed to capture minds.log:', e.message);
       }
     }
 
