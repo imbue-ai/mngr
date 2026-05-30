@@ -74,8 +74,17 @@ echo '127.0.0.1 slack.com files.slack.com  # slack-mock' \
   | sudo tee -a /etc/hosts >/dev/null
 
 # 4. Pre-seed latchkey slack creds (host-side; gateway picks up on next req).
+# The bundled latchkey shim normally fetches the encryption key from the
+# macOS keychain. In a non-interactive Actions step shell that lookup
+# returns "no encryption key available" because the bash subprocess has
+# no security session. minds.app's running gateway already wrote the
+# resolved key to disk at ~/.minds/latchkey/encryption_key; read it
+# directly and pass via LATCHKEY_ENCRYPTION_KEY env var.
 log "pre-seeding latchkey slack creds"
+KEY_FILE="$LATCHKEY_DIRECTORY/encryption_key"
+[[ -f "$KEY_FILE" ]] || fail "$KEY_FILE missing -- minds.app gateway didn't start?"
 LATCHKEY_DIRECTORY="$LATCHKEY_DIRECTORY" \
+LATCHKEY_ENCRYPTION_KEY="$(cat "$KEY_FILE")" \
   "$LATCHKEY_BIN" auth set slack \
     -H "Authorization: Bearer xoxc-ci-mock-token" \
   || fail "latchkey auth set slack failed"

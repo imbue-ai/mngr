@@ -36,8 +36,12 @@ sudo sed -i.bak '/# slack-mock/d' /etc/hosts 2>/dev/null || true
 
 # 5. Clear pre-seeded latchkey slack cred so it doesn't bleed across runs.
 log "clearing latchkey slack auth"
-LATCHKEY_DIRECTORY="$HOME/.minds/latchkey" \
-  "$LATCHKEY_BIN" auth clear slack 2>/dev/null || true
+KEY_FILE="$HOME/.minds/latchkey/encryption_key"
+if [[ -f "$KEY_FILE" ]]; then
+  LATCHKEY_DIRECTORY="$HOME/.minds/latchkey" \
+  LATCHKEY_ENCRYPTION_KEY="$(cat "$KEY_FILE")" \
+    "$LATCHKEY_BIN" auth clear slack 2>/dev/null || true
+fi
 
 # 6. Leave cert + logs for artifact upload; only remove on explicit purge.
 if [[ "${PURGE:-0}" == "1" ]]; then
