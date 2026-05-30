@@ -15,6 +15,7 @@ Two related concerns, both kept out of the plugin-facing ``interfaces`` layer
 """
 
 import re
+from functools import cache
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version
 from urllib.parse import urljoin
@@ -22,16 +23,24 @@ from urllib.parse import urljoin
 _IMBUE_MNGR_REPO_URL = "https://github.com/imbue-ai/mngr"
 
 
+@cache
 def _imbue_mngr_release_ref() -> str:
     """The git ref to pin doc links to: the installed mngr release's tag, else ``main``.
 
-    Released wheels ship their docs in lockstep with their version tag (e.g.
-    ``v0.2.9``), so links pinned to that tag resolve to exactly the docs the user
-    has installed. Falls back to ``main`` when the distribution version can't be
-    read (e.g. mngr isn't installed as a package). Caveat: in a source checkout
-    whose version predates a not-yet-released doc, that doc's link can 404 until
-    the next release -- inherent to version-pinning, and harmless for real
-    installs (where version and shipped docs always match).
+    Released wheels ship their docs in lockstep with their version tag, so links
+    pinned to that tag resolve to exactly the docs the user has installed. Falls
+    back to ``main`` when the distribution version can't be read (e.g. mngr isn't
+    installed as a package).
+
+    Assumes the release tag is literally ``v`` + the distribution version (the
+    repo's convention, e.g. version ``0.2.9`` -> tag ``v0.2.9``); a tag-convention
+    change would silently produce 404 links. Caveat: in a source checkout whose
+    version predates a not-yet-released doc, that doc's link can 404 until the
+    next release -- inherent to version-pinning, harmless for real installs.
+
+    Cached: the version is fixed for the process, and this is hit once per
+    built-in topic at registration (on every CLI startup), so we read the
+    distribution metadata only once.
     """
     try:
         return f"v{version('imbue-mngr')}"
@@ -83,8 +92,11 @@ def rewrite_links_to_absolute(markdown: str, base_url: str) -> str:
     ``../x.md`` -> the parent's URL. Already-absolute targets are left unchanged.
     This makes links clickable when rendered as terminal hyperlinks.
 
-    Uses an explicit ``finditer`` splice (rather than ``re.sub`` with a callback)
-    so the per-match logic stays a module-level function -- no nested closure.
+    Uses an explicit ``finditer`` splice rather than ``re.sub`` with a callback:
+    a callback resolving each target needs to close over ``base_url``, which
+    would be either a nested function or a partial-application wrapper -- both
+    barred by repo ratchets. The splice keeps the per-match logic a plain
+    module-level function (:func:`_rewrite_link_match`).
     """
     pieces: list[str] = []
     last_end = 0
