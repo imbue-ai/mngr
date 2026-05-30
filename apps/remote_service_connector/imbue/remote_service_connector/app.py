@@ -14,6 +14,7 @@ import base64
 import binascii
 import contextlib
 import functools
+import hashlib
 import io
 import json
 import logging
@@ -225,6 +226,65 @@ class InvalidHostNameError(ValueError):
         super().__init__(f"host_name must be alphanumeric (with dashes/underscores allowed in the middle): {value!r}")
 
 
+class InvalidR2BucketNameError(ValueError):
+    """Raised when a derived R2 bucket name violates Cloudflare's naming rules."""
+
+    def __init__(self, value: object) -> None:
+        self.value = value
+        super().__init__(
+            f"R2 bucket name must be 3-63 lowercase alphanumeric/hyphen chars with no leading/trailing hyphen: {value!r}"
+        )
+
+
+class InvalidR2AccessError(ValueError):
+    """Raised when a key access scope is neither 'read' nor 'readwrite'."""
+
+    def __init__(self, value: object) -> None:
+        self.value = value
+        super().__init__(f"access must be 'read' or 'readwrite', got {value!r}")
+
+
+class R2BucketExistsError(RuntimeError):
+    """Raised when creating a bucket whose derived name already exists for the user."""
+
+    def __init__(self, bucket_name: str) -> None:
+        self.bucket_name = bucket_name
+        super().__init__(f"Bucket already exists: {bucket_name}")
+
+
+class R2BucketNotFoundError(KeyError):
+    """Raised when a bucket the caller referenced does not exist (or is not theirs)."""
+
+    def __init__(self, bucket_name: str) -> None:
+        self.bucket_name = bucket_name
+        super().__init__(f"Bucket not found: {bucket_name}")
+
+
+class R2BucketNotEmptyError(RuntimeError):
+    """Raised when destroying a bucket that still has objects in it."""
+
+    def __init__(self, bucket_name: str) -> None:
+        self.bucket_name = bucket_name
+        super().__init__(f"Bucket is not empty: {bucket_name}. Empty it before destroying.")
+
+
+class R2BucketOwnershipError(PermissionError):
+    """Raised when a bucket name does not carry the caller's ownership prefix."""
+
+    def __init__(self, bucket_name: str, username: str) -> None:
+        self.bucket_name = bucket_name
+        self.username = username
+        super().__init__(f"User '{username}' does not own bucket '{bucket_name}'")
+
+
+class R2BucketLimitError(RuntimeError):
+    """Raised when an account is already at the per-account bucket cap."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        super().__init__(f"Account is at the maximum of {limit} buckets; destroy one before creating another.")
+
+
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
@@ -407,6 +467,58 @@ class UpdateBudgetRequest(BaseModel):
 
 class DeleteKeyResponse(BaseModel):
     status: str = Field(description="Deletion status")
+
+
+# -- R2 bucket models --
+
+_R2_ACCESS_VALUES = ("read", "readwrite")
+
+
+def _validate_r2_access(value: str) -> str:
+    """Field validator: constrain the per-key access scope to read/readwrite."""
+    if value not in _R2_ACCESS_VALUES:
+        raise InvalidR2AccessError(value)
+    return value
+
+
+class CreateBucketRequest(BaseModel):
+    name: str = Field(description="User's short bucket name (the server prefixes it with the owner id)")
+    access: str = Field(default="readwrite", description="Access scope for the default key: 'read' or 'readwrite'")
+
+    _validate_access = field_validator("access")(_validate_r2_access)
+
+
+class BucketInfo(BaseModel):
+    bucket_name: str = Field(description="Full R2 bucket name (<user_id_prefix>--<slug>)")
+    s3_endpoint: str = Field(description="S3-compatible endpoint for this account")
+
+
+class R2KeyMaterial(BaseModel):
+    access_key_id: str = Field(description="S3 Access Key ID (= the Cloudflare token id)")
+    secret_access_key: str = Field(description="S3 Secret Access Key (sha256 of the token value); shown once")
+    s3_endpoint: str = Field(description="S3-compatible endpoint for this account")
+    bucket_name: str = Field(description="Full R2 bucket name this key is scoped to")
+    access: str = Field(description="Access scope: 'read' or 'readwrite'")
+
+
+class CreateBucketResponse(BaseModel):
+    bucket: BucketInfo = Field(description="The created bucket")
+    key: R2KeyMaterial = Field(description="The default key minted alongside the bucket")
+
+
+class CreateR2KeyRequest(BaseModel):
+    alias: str | None = Field(default=None, description="Optional human-readable alias for the key")
+    access: str = Field(default="readwrite", description="Access scope: 'read' or 'readwrite'")
+
+    _validate_access = field_validator("access")(_validate_r2_access)
+
+
+class R2KeyInfo(BaseModel):
+    access_key_id: str = Field(description="S3 Access Key ID (= the Cloudflare token id)")
+    bucket_name: str = Field(description="Full R2 bucket name this key is scoped to")
+    access: str = Field(description="Access scope: 'read' or 'readwrite'")
+    alias: str | None = Field(default=None, description="Human-readable alias")
+    created_at: str = Field(description="ISO 8601 timestamp when the key was created")
 
 
 # ---------------------------------------------------------------------------
@@ -636,6 +748,97 @@ def cf_delete_service_token(client: httpx.Client, account_id: str, token_id: str
     cf_check(client.delete(f"/accounts/{account_id}/access/service_tokens/{token_id}"))
 
 
+# --- R2 bucket + account-token operations ---
+
+
+_R2_READ_PERMISSION_GROUP_NAME = "Workers R2 Storage Bucket Item Read"
+_R2_WRITE_PERMISSION_GROUP_NAME = "Workers R2 Storage Bucket Item Write"
+
+
+def _is_bucket_not_empty_error(exc: CloudflareApiError) -> bool:
+    """Detect Cloudflare's 'bucket not empty' rejection from a delete error."""
+    for err in exc.cf_errors:
+        if "not empty" in str(err.get("message", "")).lower():
+            return True
+        if err.get("code") == 10040:
+            return True
+    return False
+
+
+def cf_create_bucket(client: httpx.Client, account_id: str, name: str) -> dict[str, Any]:
+    response = client.post(f"/accounts/{account_id}/r2/buckets", json={"name": name})
+    return cf_check(response)["result"]
+
+
+def cf_list_buckets(client: httpx.Client, account_id: str, name_contains: str = "") -> list[dict[str, Any]]:
+    all_results: list[dict[str, Any]] = []
+    cursor = ""
+    is_more_pages = True
+    while is_more_pages:
+        params: dict[str, str] = {"per_page": "1000"}
+        if name_contains:
+            params["name_contains"] = name_contains
+        if cursor:
+            params["cursor"] = cursor
+        response = client.get(f"/accounts/{account_id}/r2/buckets", params=params)
+        data = cf_check(response)
+        result = data["result"]
+        buckets = result.get("buckets", []) if isinstance(result, dict) else result
+        all_results.extend(buckets)
+        result_info = data.get("result_info")
+        cursor = result_info.get("cursor", "") if isinstance(result_info, dict) else ""
+        is_more_pages = bool(cursor)
+    return all_results
+
+
+def cf_delete_bucket(client: httpx.Client, account_id: str, name: str) -> None:
+    """Delete an R2 bucket. Raises R2BucketNotEmptyError / R2BucketNotFoundError on the matching CF errors."""
+    response = client.delete(f"/accounts/{account_id}/r2/buckets/{name}")
+    try:
+        cf_check(response)
+    except CloudflareApiError as exc:
+        if exc.status_code == 404:
+            raise R2BucketNotFoundError(name) from exc
+        if _is_bucket_not_empty_error(exc):
+            raise R2BucketNotEmptyError(name) from exc
+        raise
+
+
+def cf_list_token_permission_groups(client: httpx.Client, account_id: str) -> list[dict[str, Any]]:
+    response = client.get(f"/accounts/{account_id}/tokens/permission_groups")
+    return cf_check(response)["result"]
+
+
+def cf_create_account_token(
+    client: httpx.Client, account_id: str, name: str, policies: list[dict[str, Any]]
+) -> dict[str, Any]:
+    response = client.post(f"/accounts/{account_id}/tokens", json={"name": name, "policies": policies})
+    return cf_check(response)["result"]
+
+
+def cf_delete_account_token(client: httpx.Client, account_id: str, token_id: str) -> None:
+    cf_check(client.delete(f"/accounts/{account_id}/tokens/{token_id}"))
+
+
+def build_r2_bucket_token_policies(
+    account_id: str, bucket_name: str, permission_group_id: str
+) -> list[dict[str, Any]]:
+    """Build the account-token policy list scoping a token to one R2 bucket.
+
+    The resource key mirrors Cloudflare's R2 bucket resource identifier. The
+    ``default`` segment is the (default) jurisdiction; revisit if non-default
+    jurisdictions are ever exposed.
+    """
+    resource_key = f"com.cloudflare.edge.r2.bucket.{account_id}_default_{bucket_name}"
+    return [
+        {
+            "effect": "allow",
+            "permission_groups": [{"id": permission_group_id}],
+            "resources": {resource_key: "*"},
+        }
+    ]
+
+
 # --- Workers KV operations ---
 
 
@@ -829,6 +1032,19 @@ class CloudflareOps(Protocol):
     def list_service_tokens(self) -> list[dict[str, Any]]: ...
     def delete_service_token(self, token_id: str) -> None: ...
 
+    # R2 bucket + bucket-scoped-token operations. These are folded into the
+    # CloudflareOps surface (rather than a parallel R2Ops abstraction) because
+    # they are just more Cloudflare REST calls sharing the same authenticated
+    # client + account_id; the genuinely-different concern (the key-metadata DB)
+    # lives behind the separate KeyStore abstraction below.
+    account_id: str
+
+    def create_bucket(self, name: str) -> dict[str, Any]: ...
+    def list_buckets(self, name_contains: str = "") -> list[dict[str, Any]]: ...
+    def delete_bucket(self, name: str) -> None: ...
+    def create_bucket_token(self, bucket_name: str, access: str, token_name: str) -> dict[str, Any]: ...
+    def delete_bucket_token(self, token_id: str) -> None: ...
+
 
 class HttpCloudflareOps:
     """CloudflareOps implementation backed by real Cloudflare HTTP API calls."""
@@ -842,6 +1058,10 @@ class HttpCloudflareOps:
         self.account_id = account_id
         self.zone_id = zone_id
         self._kv_namespace_id: str | None = None
+        # Per-container cache of R2 permission-group UUIDs, looked up lazily.
+        # Looked up at runtime (not hard-coded) because the connector runs
+        # against different Cloudflare accounts across deploy environments.
+        self._r2_permission_group_id_by_access: dict[str, str] = {}
 
     def _ensure_kv_namespace(self) -> str:
         if self._kv_namespace_id is None:
@@ -922,6 +1142,34 @@ class HttpCloudflareOps:
 
     def delete_service_token(self, token_id: str) -> None:
         cf_delete_service_token(self.client, self.account_id, token_id)
+
+    def _r2_permission_group_id(self, access: str) -> str:
+        if access not in self._r2_permission_group_id_by_access:
+            wanted = _R2_WRITE_PERMISSION_GROUP_NAME if access == "readwrite" else _R2_READ_PERMISSION_GROUP_NAME
+            groups = cf_list_token_permission_groups(self.client, self.account_id)
+            for group in groups:
+                if group.get("name") == wanted:
+                    self._r2_permission_group_id_by_access[access] = group["id"]
+                    break
+            else:
+                raise CloudflareApiError(500, [{"message": f"R2 permission group not found: {wanted}"}])
+        return self._r2_permission_group_id_by_access[access]
+
+    def create_bucket(self, name: str) -> dict[str, Any]:
+        return cf_create_bucket(self.client, self.account_id, name)
+
+    def list_buckets(self, name_contains: str = "") -> list[dict[str, Any]]:
+        return cf_list_buckets(self.client, self.account_id, name_contains=name_contains)
+
+    def delete_bucket(self, name: str) -> None:
+        cf_delete_bucket(self.client, self.account_id, name)
+
+    def create_bucket_token(self, bucket_name: str, access: str, token_name: str) -> dict[str, Any]:
+        policies = build_r2_bucket_token_policies(self.account_id, bucket_name, self._r2_permission_group_id(access))
+        return cf_create_account_token(self.client, self.account_id, token_name, policies)
+
+    def delete_bucket_token(self, token_id: str) -> None:
+        cf_delete_account_token(self.client, self.account_id, token_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1476,6 +1724,18 @@ def raise_as_http(exc: Exception) -> NoReturn:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if isinstance(exc, TunnelComponentTooLongError):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if isinstance(exc, InvalidR2BucketNameError):
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if isinstance(exc, R2BucketOwnershipError):
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    if isinstance(exc, R2BucketNotFoundError):
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if isinstance(exc, R2BucketNotEmptyError):
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if isinstance(exc, R2BucketExistsError):
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if isinstance(exc, R2BucketLimitError):
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     logger.error("Unexpected error in endpoint handler", exc_info=exc)
     raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -2118,6 +2378,380 @@ def delete_litellm_key(request: Request, key_id: str) -> dict[str, object]:
         _litellm_request("POST", "/key/delete", json_body={"keys": [key_id]})
 
         return DeleteKeyResponse(status="deleted").model_dump()
+
+
+# ---------------------------------------------------------------------------
+# R2 bucket naming + ownership helpers
+# ---------------------------------------------------------------------------
+
+
+_MAX_BUCKETS_PER_ACCOUNT = 50
+_R2_BUCKET_NAME_SEP = "--"
+_R2_BUCKET_MIN_LENGTH = 3
+_R2_BUCKET_MAX_LENGTH = 63
+_R2_BUCKET_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+_DEFAULT_R2_KEY_ALIAS = "default"
+
+
+def slugify_r2_name(value: str) -> str:
+    """Lowercase + collapse non-alphanumeric runs into single hyphens; strip edge hyphens."""
+    lowered = value.strip().lower()
+    return re.sub(r"[^a-z0-9]+", "-", lowered).strip("-")
+
+
+def _validate_r2_bucket_name(name: str) -> None:
+    if not (_R2_BUCKET_MIN_LENGTH <= len(name) <= _R2_BUCKET_MAX_LENGTH) or not _R2_BUCKET_NAME_RE.match(name):
+        raise InvalidR2BucketNameError(name)
+
+
+def bucket_owner_prefix(username: str) -> str:
+    return f"{username}{_R2_BUCKET_NAME_SEP}"
+
+
+def make_bucket_name(username: str, short_name: str) -> str:
+    """Derive the full R2 bucket name from the owner prefix and the user's short name."""
+    name = f"{bucket_owner_prefix(username)}{slugify_r2_name(short_name)}"
+    _validate_r2_bucket_name(name)
+    return name
+
+
+def verify_bucket_ownership(bucket_name: str, username: str) -> None:
+    if not bucket_name.startswith(bucket_owner_prefix(username)):
+        raise R2BucketOwnershipError(bucket_name, username)
+
+
+def r2_s3_endpoint(account_id: str) -> str:
+    return f"https://{account_id}.r2.cloudflarestorage.com"
+
+
+def derive_s3_secret_access_key(token_value: str) -> str:
+    """R2 derives the S3 Secret Access Key as the SHA-256 hex digest of the API token value."""
+    return hashlib.sha256(token_value.encode()).hexdigest()
+
+
+def _r2_token_name(bucket_name: str, alias: str | None) -> str:
+    return f"mngr-r2:{bucket_name}:{alias or _DEFAULT_R2_KEY_ALIAS}"
+
+
+# ---------------------------------------------------------------------------
+# R2 key-metadata store (DB)
+#
+# Tracks the *existence* of each bucket-scoped key (access key id, owner,
+# bucket, scope, alias) so the connector can list + revoke them. The secret
+# (sha256 of the token value) is never persisted -- only the non-secret access
+# key id is stored.
+# ---------------------------------------------------------------------------
+
+
+_R2_KEY_COLUMNS = "access_key_id, owner_user_id, bucket_name, access, alias, created_at"
+
+
+def _r2_key_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "access_key_id": row[0],
+        "owner_user_id": row[1],
+        "bucket_name": row[2],
+        "access": row[3],
+        "alias": row[4],
+        "created_at": str(row[5]) if row[5] is not None else "",
+    }
+
+
+class KeyStore(Protocol):
+    """Abstraction over the r2_keys table so endpoints are unit-testable."""
+
+    def add_key(
+        self, access_key_id: str, owner_user_id: str, bucket_name: str, access: str, alias: str | None
+    ) -> None: ...
+    def list_keys(self, owner_user_id: str, bucket_name: str | None = None) -> list[dict[str, Any]]: ...
+    def get_key(self, access_key_id: str) -> dict[str, Any] | None: ...
+    def delete_key(self, access_key_id: str) -> None: ...
+    def delete_keys_for_bucket(self, owner_user_id: str, bucket_name: str) -> list[dict[str, Any]]: ...
+
+
+class PostgresKeyStore:
+    """KeyStore backed by the connector's existing Neon DB (same DB as pool_hosts)."""
+
+    def add_key(
+        self, access_key_id: str, owner_user_id: str, bucket_name: str, access: str, alias: str | None
+    ) -> None:
+        conn = _get_pool_db_connection()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO r2_keys (access_key_id, owner_user_id, bucket_name, access, alias) "
+                        "VALUES (%s, %s, %s, %s, %s)",
+                        (access_key_id, owner_user_id, bucket_name, access, alias),
+                    )
+        finally:
+            conn.close()
+
+    def list_keys(self, owner_user_id: str, bucket_name: str | None = None) -> list[dict[str, Any]]:
+        conn = _get_pool_db_connection()
+        try:
+            with conn.cursor() as cur:
+                if bucket_name is None:
+                    cur.execute(
+                        f"SELECT {_R2_KEY_COLUMNS} FROM r2_keys WHERE owner_user_id = %s ORDER BY created_at",
+                        (owner_user_id,),
+                    )
+                else:
+                    cur.execute(
+                        f"SELECT {_R2_KEY_COLUMNS} FROM r2_keys "
+                        "WHERE owner_user_id = %s AND bucket_name = %s ORDER BY created_at",
+                        (owner_user_id, bucket_name),
+                    )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [_r2_key_row_to_dict(row) for row in rows]
+
+    def get_key(self, access_key_id: str) -> dict[str, Any] | None:
+        conn = _get_pool_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT {_R2_KEY_COLUMNS} FROM r2_keys WHERE access_key_id = %s", (access_key_id,))
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        return _r2_key_row_to_dict(row) if row is not None else None
+
+    def delete_key(self, access_key_id: str) -> None:
+        conn = _get_pool_db_connection()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM r2_keys WHERE access_key_id = %s", (access_key_id,))
+        finally:
+            conn.close()
+
+    def delete_keys_for_bucket(self, owner_user_id: str, bucket_name: str) -> list[dict[str, Any]]:
+        conn = _get_pool_db_connection()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"DELETE FROM r2_keys WHERE owner_user_id = %s AND bucket_name = %s RETURNING {_R2_KEY_COLUMNS}",
+                        (owner_user_id, bucket_name),
+                    )
+                    rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [_r2_key_row_to_dict(row) for row in rows]
+
+
+@functools.cache
+def get_key_store() -> KeyStore:
+    return PostgresKeyStore()
+
+
+# ---------------------------------------------------------------------------
+# R2 bucket endpoints
+# ---------------------------------------------------------------------------
+
+
+def _list_owned_buckets(ops: CloudflareOps, username: str) -> list[dict[str, Any]]:
+    """List the caller's buckets: R2 name_contains filter, then re-verify the prefix in code."""
+    prefix = bucket_owner_prefix(username)
+    return [b for b in ops.list_buckets(name_contains=prefix) if str(b.get("name", "")).startswith(prefix)]
+
+
+def _owned_bucket_exists(ops: CloudflareOps, username: str, full_name: str) -> bool:
+    return any(b.get("name") == full_name for b in _list_owned_buckets(ops, username))
+
+
+def _best_effort_revoke_token(ops: CloudflareOps, token_id: str) -> None:
+    try:
+        ops.delete_bucket_token(token_id)
+    except (CloudflareApiError, httpx.HTTPError) as exc:
+        logger.warning("Failed to revoke R2 token %s: %s", token_id, exc)
+
+
+def _best_effort_delete_bucket(ops: CloudflareOps, bucket_name: str) -> None:
+    try:
+        ops.delete_bucket(bucket_name)
+    except (CloudflareApiError, R2BucketNotEmptyError, R2BucketNotFoundError, httpx.HTTPError) as exc:
+        logger.warning("Failed to roll back bucket %s: %s", bucket_name, exc)
+
+
+def _key_info_from_row(row: dict[str, Any]) -> R2KeyInfo:
+    return R2KeyInfo(
+        access_key_id=row["access_key_id"],
+        bucket_name=row["bucket_name"],
+        access=row["access"],
+        alias=row["alias"],
+        created_at=row["created_at"],
+    )
+
+
+def _mint_and_record_key(
+    ops: CloudflareOps,
+    store: KeyStore,
+    owner_user_id: str,
+    bucket_name: str,
+    access: str,
+    alias: str | None,
+    rollback_bucket: bool,
+) -> R2KeyMaterial:
+    """Mint a bucket-scoped Cloudflare token, record its metadata, and return the S3 material.
+
+    On any failure, best-effort revokes a partially-created token and (when
+    ``rollback_bucket``) deletes the just-created bucket so ``bucket create``
+    stays atomic.
+    """
+    created_token_id: str | None = None
+    try:
+        token_result = ops.create_bucket_token(bucket_name, access, _r2_token_name(bucket_name, alias))
+        access_key_id = str(token_result["id"])
+        created_token_id = access_key_id
+        secret_access_key = derive_s3_secret_access_key(str(token_result["value"]))
+        store.add_key(access_key_id, owner_user_id, bucket_name, access, alias)
+        return R2KeyMaterial(
+            access_key_id=access_key_id,
+            secret_access_key=secret_access_key,
+            s3_endpoint=r2_s3_endpoint(ops.account_id),
+            bucket_name=bucket_name,
+            access=access,
+        )
+    except (CloudflareApiError, httpx.HTTPError, psycopg2.Error) as exc:
+        if created_token_id is not None:
+            _best_effort_revoke_token(ops, created_token_id)
+        if rollback_bucket:
+            _best_effort_delete_bucket(ops, bucket_name)
+        raise HTTPException(status_code=502, detail=f"Failed to provision bucket key: {exc}") from exc
+
+
+@web_app.post("/buckets")
+def create_bucket_endpoint(request: Request, body: CreateBucketRequest) -> dict[str, object]:
+    """Create an R2 bucket for the caller and mint its default key (returned inline)."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
+        ops = get_ctx().ops
+        full_name = make_bucket_name(admin.username, body.name)
+        owned = _list_owned_buckets(ops, admin.username)
+        if any(b.get("name") == full_name for b in owned):
+            raise R2BucketExistsError(full_name)
+        if len(owned) >= _MAX_BUCKETS_PER_ACCOUNT:
+            raise R2BucketLimitError(_MAX_BUCKETS_PER_ACCOUNT)
+        ops.create_bucket(full_name)
+        material = _mint_and_record_key(
+            ops, get_key_store(), owner_user_id, full_name, body.access, _DEFAULT_R2_KEY_ALIAS, rollback_bucket=True
+        )
+        return CreateBucketResponse(
+            bucket=BucketInfo(bucket_name=full_name, s3_endpoint=r2_s3_endpoint(ops.account_id)),
+            key=material,
+        ).model_dump()
+
+
+@web_app.get("/buckets")
+def list_buckets_endpoint(request: Request) -> list[dict[str, object]]:
+    """List all R2 buckets owned by the caller."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        ops = get_ctx().ops
+        endpoint = r2_s3_endpoint(ops.account_id)
+        return [
+            BucketInfo(bucket_name=str(b["name"]), s3_endpoint=endpoint).model_dump()
+            for b in _list_owned_buckets(ops, admin.username)
+        ]
+
+
+@web_app.get("/buckets/{name}")
+def get_bucket_endpoint(request: Request, name: str) -> dict[str, object]:
+    """Return metadata for one of the caller's buckets (keys come from the keys endpoints)."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        ops = get_ctx().ops
+        full_name = make_bucket_name(admin.username, name)
+        if not _owned_bucket_exists(ops, admin.username, full_name):
+            raise R2BucketNotFoundError(full_name)
+        return BucketInfo(bucket_name=full_name, s3_endpoint=r2_s3_endpoint(ops.account_id)).model_dump()
+
+
+@web_app.delete("/buckets/{name}")
+def delete_bucket_endpoint(request: Request, name: str) -> dict[str, str]:
+    """Destroy one of the caller's buckets (refuses non-empty) and cascade-revoke its keys."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
+        ops = get_ctx().ops
+        full_name = make_bucket_name(admin.username, name)
+        verify_bucket_ownership(full_name, admin.username)
+        ops.delete_bucket(full_name)
+        revoked = get_key_store().delete_keys_for_bucket(owner_user_id, full_name)
+        for row in revoked:
+            _best_effort_revoke_token(ops, str(row["access_key_id"]))
+        return {"status": "deleted"}
+
+
+@web_app.post("/buckets/{name}/keys")
+def create_bucket_key_endpoint(request: Request, name: str, body: CreateR2KeyRequest) -> dict[str, object]:
+    """Mint an additional bucket-scoped key for one of the caller's buckets."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
+        ops = get_ctx().ops
+        full_name = make_bucket_name(admin.username, name)
+        if not _owned_bucket_exists(ops, admin.username, full_name):
+            raise R2BucketNotFoundError(full_name)
+        material = _mint_and_record_key(
+            ops, get_key_store(), owner_user_id, full_name, body.access, body.alias, rollback_bucket=False
+        )
+        return material.model_dump()
+
+
+@web_app.get("/buckets/{name}/keys")
+def list_bucket_keys_endpoint(request: Request, name: str) -> list[dict[str, object]]:
+    """List the caller's keys scoped to one bucket."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
+        full_name = make_bucket_name(admin.username, name)
+        rows = get_key_store().list_keys(owner_user_id, full_name)
+        return [_key_info_from_row(row).model_dump() for row in rows]
+
+
+@web_app.get("/bucket-keys")
+def list_all_bucket_keys_endpoint(request: Request) -> list[dict[str, object]]:
+    """List all of the caller's bucket keys across every bucket."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
+        rows = get_key_store().list_keys(owner_user_id, None)
+        return [_key_info_from_row(row).model_dump() for row in rows]
+
+
+@web_app.delete("/bucket-keys/{access_key_id}")
+def delete_bucket_key_endpoint(request: Request, access_key_id: str) -> dict[str, str]:
+    """Revoke one of the caller's bucket keys (by Access Key ID) and drop its DB row."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
+        store = get_key_store()
+        row = store.get_key(access_key_id)
+        if row is None or row["owner_user_id"] != owner_user_id:
+            raise HTTPException(status_code=404, detail="Key not found")
+        get_ctx().ops.delete_bucket_token(access_key_id)
+        store.delete_key(access_key_id)
+        return {"status": "deleted"}
 
 
 # ---------------------------------------------------------------------------

@@ -76,3 +76,29 @@ class VpsDockerProviderConfig(ProviderInstanceConfig):
             "optional, only forwarded when set)."
         ),
     )
+    btrfs_mount_path: Path = Field(
+        default=Path("/mngr-btrfs"),
+        description=(
+            "Path on the outer where the loop-mounted btrfs filesystem holding the per-host "
+            "unified docker volume is mounted. The per-host subvolume lives at "
+            "``<btrfs_mount_path>/<host_id_hex>`` and is bound into the agent container via "
+            "``docker volume create --opt device=...``."
+        ),
+    )
+    btrfs_loop_file_path: Path = Field(
+        default=Path("/var/lib/mngr-btrfs.img"),
+        description=(
+            "Path on the outer's root filesystem where the loop-backed btrfs image file is "
+            "stored. Allocated with ``fallocate`` and mounted via an ``/etc/fstab`` entry so "
+            "it survives VPS reboots."
+        ),
+    )
+    outer_disk_reserved_gb: int = Field(
+        default=20,
+        description=(
+            "Gigabytes of free space on the outer's root filesystem to hold back from the "
+            "btrfs loop file at provisioning time. Loop file size is computed as "
+            "``free_gb - outer_disk_reserved_gb``; ``VpsProvisioningError`` is raised when "
+            "the result is not positive."
+        ),
+    )

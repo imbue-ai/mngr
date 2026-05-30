@@ -53,6 +53,12 @@ class MindsConfigError(MindError):
     ...
 
 
+class BackupProvisioningError(MindError):
+    """Raised when configuring restic backups for a workspace fails."""
+
+    ...
+
+
 class TelegramError(MindError):
     """Base exception for all telegram-related errors."""
 

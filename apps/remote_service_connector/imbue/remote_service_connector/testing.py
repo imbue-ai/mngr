@@ -30,6 +30,8 @@ from supertokens_python.types.base import AccountInfoInput
 
 from imbue.remote_service_connector.app import CloudflareApiError
 from imbue.remote_service_connector.app import ForwardingCtx
+from imbue.remote_service_connector.app import R2BucketNotEmptyError
+from imbue.remote_service_connector.app import R2BucketNotFoundError
 
 
 class FakeCloudflareOps:
@@ -46,6 +48,13 @@ class FakeCloudflareOps:
         self._next_record_id = 1
         self._next_access_app_id = 1
         self._next_policy_id = 1
+        # R2 state
+        self.account_id = "test-account"
+        self.buckets: dict[str, dict[str, Any]] = {}
+        # Per-bucket object lists; tests append to mark a bucket non-empty.
+        self.bucket_objects: dict[str, list[str]] = {}
+        self.account_tokens: dict[str, dict[str, Any]] = {}
+        self._next_r2_token_id = 1
 
     def create_tunnel(self, name: str) -> dict[str, Any]:
         tunnel_id = f"tunnel-{self._next_tunnel_id}"
@@ -171,6 +180,91 @@ class FakeCloudflareOps:
 
     def delete_service_token(self, token_id: str) -> None:
         pass
+
+    # -- R2 bucket + token operations --
+
+    def create_bucket(self, name: str) -> dict[str, Any]:
+        if name in self.buckets:
+            raise CloudflareApiError(status_code=400, errors=[{"message": f"bucket already exists: {name}"}])
+        bucket = {"name": name}
+        self.buckets[name] = bucket
+        self.bucket_objects.setdefault(name, [])
+        return bucket
+
+    def list_buckets(self, name_contains: str = "") -> list[dict[str, Any]]:
+        return [bucket for name, bucket in self.buckets.items() if name_contains in name]
+
+    def delete_bucket(self, name: str) -> None:
+        if name not in self.buckets:
+            raise R2BucketNotFoundError(name)
+        if self.bucket_objects.get(name):
+            raise R2BucketNotEmptyError(name)
+        del self.buckets[name]
+        self.bucket_objects.pop(name, None)
+
+    def create_bucket_token(self, bucket_name: str, access: str, token_name: str) -> dict[str, Any]:
+        token_id = f"r2tok-{self._next_r2_token_id}"
+        self._next_r2_token_id += 1
+        self.account_tokens[token_id] = {
+            "id": token_id,
+            "name": token_name,
+            "bucket_name": bucket_name,
+            "access": access,
+        }
+        return {"id": token_id, "value": f"token-value-{token_id}"}
+
+    def delete_bucket_token(self, token_id: str) -> None:
+        self.account_tokens.pop(token_id, None)
+
+
+class InMemoryKeyStore:
+    """In-memory KeyStore implementation for testing the bucket-key endpoints."""
+
+    def __init__(self) -> None:
+        # access_key_id -> stored row dict
+        self.keys_by_access_key_id: dict[str, dict[str, Any]] = {}
+        self._created_counter = 0
+
+    def add_key(
+        self, access_key_id: str, owner_user_id: str, bucket_name: str, access: str, alias: str | None
+    ) -> None:
+        self._created_counter += 1
+        self.keys_by_access_key_id[access_key_id] = {
+            "access_key_id": access_key_id,
+            "owner_user_id": owner_user_id,
+            "bucket_name": bucket_name,
+            "access": access,
+            "alias": alias,
+            "created_at": f"2026-01-01T00:00:{self._created_counter:02d}+00:00",
+        }
+
+    def list_keys(self, owner_user_id: str, bucket_name: str | None = None) -> list[dict[str, Any]]:
+        rows = [r for r in self.keys_by_access_key_id.values() if r["owner_user_id"] == owner_user_id]
+        if bucket_name is not None:
+            rows = [r for r in rows if r["bucket_name"] == bucket_name]
+        return sorted(rows, key=lambda r: r["created_at"])
+
+    def get_key(self, access_key_id: str) -> dict[str, Any] | None:
+        row = self.keys_by_access_key_id.get(access_key_id)
+        return dict(row) if row is not None else None
+
+    def delete_key(self, access_key_id: str) -> None:
+        self.keys_by_access_key_id.pop(access_key_id, None)
+
+    def delete_keys_for_bucket(self, owner_user_id: str, bucket_name: str) -> list[dict[str, Any]]:
+        removed = [
+            r
+            for r in self.keys_by_access_key_id.values()
+            if r["owner_user_id"] == owner_user_id and r["bucket_name"] == bucket_name
+        ]
+        for row in removed:
+            del self.keys_by_access_key_id[row["access_key_id"]]
+        return removed
+
+
+def make_fake_key_store() -> InMemoryKeyStore:
+    """Construct an empty in-memory KeyStore for tests."""
+    return InMemoryKeyStore()
 
 
 class FakeForwardingCtx(ForwardingCtx):
