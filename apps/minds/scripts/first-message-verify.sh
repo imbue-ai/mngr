@@ -11,6 +11,16 @@ set -uo pipefail
 
 EVENTS_LOG="$HOME/.minds/logs/minds-events.jsonl"
 COOKIES="/tmp/first-message-cookies.txt"
+SCREENSHOT_DIR="${SCREENSHOT_DIR:-/tmp/first-message-screenshots}"
+mkdir -p "$SCREENSHOT_DIR"
+snap() {
+  local name="$1"
+  local ts
+  ts=$(date +%H%M%S)
+  if command -v screencapture >/dev/null 2>&1; then
+    screencapture -x "$SCREENSHOT_DIR/${ts}-${name}.png" 2>/dev/null || true
+  fi
+}
 # `${VAR:-default}` substitutes default for both unset and empty string,
 # so a workflow input that defaulted to '' still falls through to these.
 GIT_URL="${GIT_URL:-https://github.com/imbue-ai/forever-claude-template}"
@@ -151,6 +161,7 @@ while (( SECONDS < deadline )); do
 done
 [[ "$last_status" == "DONE" ]] || fail "agent did not reach DONE in ${CREATE_TIMEOUT_SECONDS}s (last=$last_status)"
 log "agent DONE"
+snap "02-agent-DONE"
 
 # After DONE, find the agent mngr actually placed on this host. The
 # minds README claims "chat agent name == host_name", but on FCT pilot
@@ -205,6 +216,7 @@ done
 [[ -n "$AGENT_NAME" ]] || fail "no mngr agent on host $HOST_NAME after 60s"
 log "resolved agent name: $AGENT_NAME"
 
+snap "03-before-first-message"
 log "sending message to '$AGENT_NAME': $PROMPT"
 "$MNGR_BIN" message --provider lima "$AGENT_NAME" -m "$PROMPT" 2>&1 | tee /tmp/first-message-mngr-message.txt >&2
 mngr_message_rc=${PIPESTATUS[0]}
@@ -270,6 +282,7 @@ if [[ ! -s "$REPLY_FILE" ]]; then
   fail "no assistant reply matching '$EXPECT_SUBSTRING' in ${REPLY_TIMEOUT_SECONDS}s"
 fi
 
+snap "04-after-first-reply"
 log "writing agent info to $AGENT_INFO_PATH (host=$HOST_NAME agent=$AGENT_NAME creation_id=$AGENT_ID)"
 HOST_NAME="$HOST_NAME" AGENT_NAME="$AGENT_NAME" AGENT_ID="$AGENT_ID" BASE="$BASE" python3 -c '
 import json, os

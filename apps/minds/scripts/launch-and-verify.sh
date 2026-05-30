@@ -32,6 +32,14 @@ while (( SECONDS < deadline )); do
   if [[ -s "$EVENTS_LOG" ]]; then
     log "backend up after $((SECONDS))s, head of events log:"
     head -5 "$EVENTS_LOG"
+    # Snapshot the live screen so the artifact has a "00-app-launched"
+    # entry alongside the first-message-verify ones.
+    SCREENSHOT_DIR="${SCREENSHOT_DIR:-/tmp/first-message-screenshots}"
+    mkdir -p "$SCREENSHOT_DIR"
+    if command -v screencapture >/dev/null 2>&1; then
+      ts=$(date +%H%M%S)
+      screencapture -x "$SCREENSHOT_DIR/${ts}-00-app-launched.png" 2>/dev/null || true
+    fi
     exit 0
   fi
   sleep 2

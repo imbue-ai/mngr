@@ -426,10 +426,21 @@ jobs:
             -w 'delete HTTP %{http_code}\n' \
             -X POST --max-time 180 "$BASE_URL/workspace/$CREATION_ID/delete" || true
 
-      - name: collect diagnostic artifacts on failure
-        if: failure()
+      - name: collect screenshots + diagnostics
+        if: always()
         run: |
           mkdir -p artifacts
+          # Screenshots from BOTH the bash phase (launch-and-verify.sh +
+          # first-message-verify.sh via `screencapture -x`) and the
+          # Playwright phase (drive-slack-ci.js via `page.screenshot`).
+          # Numbered 00..12 so they sort in flow order in the GH UI.
+          if [ -d /tmp/first-message-screenshots ]; then
+            cp -R /tmp/first-message-screenshots artifacts/screenshots-shell 2>/dev/null || true
+          fi
+          if [ -d apps/minds/test/e2e/screenshots ]; then
+            cp -R apps/minds/test/e2e/screenshots artifacts/screenshots-playwright 2>/dev/null || true
+          fi
+          # Diagnostic logs (also useful on success for tuning).
           [ -d "$HOME/.minds/logs" ] && cp -R "$HOME/.minds/logs" artifacts/ || true
           [ -d "$HOME/.minds/events" ] && cp -R "$HOME/.minds/events" artifacts/ || true
           [ -d "$HOME/.minds/mngr" ] && cp -R "$HOME/.minds/mngr"/*/events artifacts/agent-events 2>/dev/null || true
@@ -441,19 +452,16 @@ jobs:
           done
           [ -f /tmp/post-slack-delete.json ] && cp /tmp/post-slack-delete.json artifacts/ 2>/dev/null || true
           [ -d /tmp/slack-mock ] && cp -R /tmp/slack-mock artifacts/ 2>/dev/null || true
-          # Capture latchkey gateway state to see whether permission
-          # requests reached the on-disk store but failed to surface in
-          # the panel. Exclude the encryption_key from the artifact.
+          # Latchkey gateway state (encryption_key excluded by directory selection).
           if [ -d "$HOME/.minds/latchkey" ]; then
             mkdir -p artifacts/latchkey
             cp -R "$HOME/.minds/latchkey/mngr_latchkey" artifacts/latchkey/ 2>/dev/null || true
             cp "$HOME/.minds/latchkey/latchkey_gateway.log" artifacts/latchkey/ 2>/dev/null || true
             cp "$HOME/.minds/latchkey/latchkey_ensure_browser.log" artifacts/latchkey/ 2>/dev/null || true
           fi
-          [ -d apps/minds/test/e2e/screenshots ] && cp -R apps/minds/test/e2e/screenshots artifacts/playwright-screenshots 2>/dev/null || true
           [ -d apps/minds/test-results ] && cp -R apps/minds/test-results artifacts/playwright-test-results 2>/dev/null || true
       - uses: actions/upload-artifact@v4
-        if: failure()
+        if: always()
         with:
           name: launch-to-first-message-${{ github.run_id }}
           path: artifacts/

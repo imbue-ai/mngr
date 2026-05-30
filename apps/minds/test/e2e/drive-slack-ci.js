@@ -202,6 +202,7 @@ async function dumpWindows(app, tag) {
   delete env.ELECTRON_RUN_AS_NODE;
   const app = await electron.launch({ executablePath: exec, env });
   const win = await app.firstWindow({ timeout: 60_000 });
+  await shot(win, '05-electron-launched');
   const origin = await win.evaluate(() => location.origin);
 
   // The relaunched minds.app may have lost the session that
@@ -220,10 +221,12 @@ async function dumpWindows(app, tag) {
   log(`minted fresh one-time code (head ${fresh.slice(0, 12)})`);
   await win.goto(origin + '/authenticate?one_time_code=' + fresh);
   log(`auth navigated; final URL=${win.url()}`);
+  await shot(win, '06-after-auth');
 
   // Now the home page should show the workspace tile.
   await win.goto(origin + '/');
   await win.waitForSelector(`text=${WORKSPACE}`, { timeout: 60_000 });
+  await shot(win, '07-home-with-workspace-tile');
   await win.click(`text=${WORKSPACE}`, { timeout: 5_000 });
 
   let chatUrl = '';
@@ -250,7 +253,7 @@ async function dumpWindows(app, tag) {
 
   await input.fill(PROMPT);
   await input.press('Enter');
-  await shot(win, 'ci-slack-sent');
+  await shot(win, '08-slack-prompt-sent');
   log('typed + sent; watching for approval UI and canned body');
 
   // Approval is up to 3 clicks: chatbox icon (if panel not open) ->
@@ -289,7 +292,7 @@ async function dumpWindows(app, tag) {
         const open = await openRightPanel(app);
         if (open) {
           log(`opening right panel via "${open.selector}"`);
-          await shot(open.window, `approval-stage0-${i}s`);
+          await shot(open.window, `09-stage0-requests-button-clicked-t${i}s`);
           try { await open.locator.click({ timeout: 3_000 }); approvalStage = 1; }
           catch (e) { log(`stage0 click failed: ${e.message}`); }
         }
@@ -297,7 +300,7 @@ async function dumpWindows(app, tag) {
         const entry = await findPermissionRequestEntry(app);
         if (entry) {
           log(`clicking permission request via "${entry.selector}"`);
-          await shot(entry.window, `approval-stage1-${i}s`);
+          await shot(entry.window, `10-stage1-permission-entry-clicked-t${i}s`);
           try { await entry.locator.click({ timeout: 3_000 }); approvalStage = 2; }
           catch (e) { log(`stage1 click failed: ${e.message}`); }
         }
@@ -305,7 +308,7 @@ async function dumpWindows(app, tag) {
         const approve = await findApproveButton(app);
         if (approve) {
           log(`clicking Approve via "${approve.selector}"`);
-          await shot(approve.window, `approval-stage2-${i}s`);
+          await shot(approve.window, `11-stage2-approve-clicked-t${i}s`);
           try {
             await approve.locator.click({ timeout: 3_000 });
             approvalStage = 3;
@@ -340,7 +343,7 @@ async function dumpWindows(app, tag) {
     const newCannedOcc = body.split(CANNED_BODY_LC).length - 1;
     if (newCannedOcc > oldCannedOcc) {
       log(`PASS: canned body appeared at t=${i}s (occ ${oldCannedOcc} -> ${newCannedOcc})`);
-      await shot(win, 'ci-slack-pass');
+      await shot(win, '12-PASS-canned-body-in-reply');
       const ctx = await win.evaluate((needle) => {
         const text = document.body.innerText.toLowerCase();
         const idx = text.lastIndexOf(needle);
@@ -359,7 +362,7 @@ async function dumpWindows(app, tag) {
     await win.waitForTimeout(1000);
   }
   log('TIMEOUT (4 min)');
-  await shot(win, 'ci-slack-timeout');
+  await shot(win, '99-TIMEOUT-no-canned-body');
   await app.close();
   process.exit(3);
 })().catch(e => {
