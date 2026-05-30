@@ -467,10 +467,12 @@ function registerShortcutsFor(bundle, wc) {
 // Route external links to the user's default browser instead of navigating
 // the in-app view (which would clobber the workspace UI) or spawning a bare
 // chrome-less Electron window. Covers both `target="_blank"` / `window.open`
-// (via setWindowOpenHandler) and ordinary top-level link clicks / JS
-// navigations (via will-navigate). In-app (localhost) navigation is left
-// untouched so workspace, home, and request-page links keep working. The
-// `setImmediate` defer around openExternal follows Electron's security guide.
+// (via setWindowOpenHandler) and ordinary link clicks / JS navigations (via
+// will-frame-navigate, which -- unlike will-navigate -- also fires for clicks
+// inside the iframes that the workspace UI embeds agent content in). In-app
+// (localhost) navigation is left untouched so workspace, home, and
+// request-page links keep working. The `setImmediate` defer around
+// openExternal follows Electron's security guide.
 function applyExternalLinkHandling(wc) {
   wc.setWindowOpenHandler(({ url }) => {
     if (isExternalUrl(url)) {
@@ -481,10 +483,14 @@ function applyExternalLinkHandling(wc) {
     // this handler existed).
     return { action: 'allow' };
   });
-  wc.on('will-navigate', (event, url) => {
-    if (!isExternalUrl(url)) return;
-    event.preventDefault();
-    setImmediate(() => { shell.openExternal(url); });
+  // Use will-frame-navigate (not will-navigate) so external link clicks inside
+  // embedded iframes are caught too. It is a superset of will-navigate -- it
+  // fires for the main frame as well -- so listening to both would double-fire
+  // and open two browser tabs for a top-level external navigation.
+  wc.on('will-frame-navigate', (details) => {
+    if (!isExternalUrl(details.url)) return;
+    details.preventDefault();
+    setImmediate(() => { shell.openExternal(details.url); });
   });
 }
 
