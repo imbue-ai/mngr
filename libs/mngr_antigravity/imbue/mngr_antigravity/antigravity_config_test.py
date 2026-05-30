@@ -143,7 +143,7 @@ def test_hooks_config_always_emits_active_marker_via_preinvocation_and_stop() ->
     loop terminates (agent idle), so this pair flips the marker at the right
     boundaries.
     """
-    config = build_antigravity_hooks_config(auto_allow_permissions=False)
+    config = build_antigravity_hooks_config()
 
     mngr = config["mngr"]
     # PreInvocation/Stop use the flat handler-list shape (no matcher wrapper).
@@ -153,38 +153,21 @@ def test_hooks_config_always_emits_active_marker_via_preinvocation_and_stop() ->
     assert stop == [{"type": "command", "command": f'rm -f "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'}]
 
 
-def test_hooks_config_omits_pretooluse_when_auto_allow_disabled() -> None:
-    """Without auto-allow there is no PreToolUse hook -- tool calls prompt normally."""
-    config = build_antigravity_hooks_config(auto_allow_permissions=False)
-    assert "PreToolUse" not in config["mngr"]
+def test_hooks_config_never_emits_pretooluse() -> None:
+    """No PreToolUse hook is generated: auto-approval uses the CLI flag, not a hook.
 
-
-def test_hooks_config_auto_allow_emits_pretooluse_allow_decision() -> None:
-    """auto_allow_permissions adds a match-all PreToolUse hook returning decision=allow.
-
-    PreToolUse uses the matcher-group shape; the command echoes the JSON
-    decision agy reads from stdout to suppress the permission dialog.
+    agy's documented PreToolUse {"decision": "allow"} output does not actually
+    gate the run_command confirmation dialog (verified live against agy 1.0.3),
+    so permission auto-approval is wired through --dangerously-skip-permissions
+    in assemble_command instead. The hooks file only carries lifecycle markers.
     """
-    config = build_antigravity_hooks_config(auto_allow_permissions=True)
-
-    pre_tool_use = config["mngr"]["PreToolUse"]
-    assert len(pre_tool_use) == 1
-    group = pre_tool_use[0]
-    assert group["matcher"] == "*"
-    assert group["hooks"] == [{"type": "command", "command": 'echo \'{"decision":"allow"}\''}]
-
-
-def test_hooks_config_auto_allow_decision_is_valid_json_allow() -> None:
-    """The echoed payload must parse to exactly {"decision": "allow"} so agy honors it."""
-    config = build_antigravity_hooks_config(auto_allow_permissions=True)
-    command = config["mngr"]["PreToolUse"][0]["hooks"][0]["command"]
-    # Strip the surrounding `echo '...'` to recover the JSON payload.
-    payload = command[len("echo '") : -len("'")]
-    assert json.loads(payload) == {"decision": "allow"}
+    config = build_antigravity_hooks_config()
+    assert "PreToolUse" not in config["mngr"]
+    assert set(config["mngr"]) == {"PreInvocation", "Stop"}
 
 
 def test_serialize_antigravity_hooks_round_trips() -> None:
-    config = build_antigravity_hooks_config(auto_allow_permissions=True)
+    config = build_antigravity_hooks_config()
     serialized = serialize_antigravity_hooks(config)
     assert json.loads(serialized) == config
     assert "  " in serialized

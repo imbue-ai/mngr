@@ -14,8 +14,11 @@ it with ``--add-dir`` (agy 1.0.3 loads and executes hooks discovered this way):
   ``BaseAgent.get_lifecycle_state`` reads this marker to report RUNNING while
   the agent works and WAITING when it's idle; agy maintains no such marker on
   its own.
-* When ``auto_allow_permissions`` is set, a ``PreToolUse`` hook returns
-  ``{"decision": "allow"}`` so tool calls never block on a permission dialog.
+
+``auto_allow_permissions`` is handled by the ``--dangerously-skip-permissions``
+CLI flag, NOT a hook: agy's documented ``PreToolUse`` ``{"decision": "allow"}``
+output does not actually gate the ``run_command`` confirmation dialog (verified
+live against agy 1.0.3 -- the hook runs but the dialog still appears).
 
 The in-TUI ``/hooks`` command writes ``hooks.json`` to
 ``~/.gemini/antigravity-cli/``, which the execution engine never runs -- that
@@ -95,6 +98,13 @@ _AGY_HOOKS_DIR_NAME: Final[str] = "agy_hooks"
 # /tmp wipes self-repair.
 _AGY_HOOKS_SYMLINK_PARENT: Final[str] = "/tmp/mngr_antigravity_hooks"
 
+# Top-level CLI flag exposed by `agy --help`; auto-approves every tool call.
+# Same spelling as Claude Code's flag. Used (rather than a PreToolUse hook)
+# for ``auto_allow_permissions`` because agy's documented hook allow-decision
+# does not actually gate the run_command confirmation dialog -- see the
+# ``auto_allow_permissions`` field comment and ``build_antigravity_hooks_config``.
+_DANGEROUSLY_SKIP_PERMISSIONS_FLAG: Final[str] = "--dangerously-skip-permissions"
+
 _COMMON_TRANSCRIPT_SCRIPT_NAME: Final[str] = "common_transcript.sh"
 _RAW_TRANSCRIPT_SCRIPT_NAME: Final[str] = "stream_transcript.sh"
 
@@ -148,10 +158,11 @@ class AntigravityAgentConfig(AgentTypeConfig):
         default=(),
         description="Additional CLI arguments to pass to the antigravity agent.",
     )
-    # auto_allow_permissions emits a match-all ``PreToolUse`` hook returning
-    # ``{"decision": "allow"}`` (see ``build_antigravity_hooks_config``), so
-    # tool calls are approved without a dialog. Routing approval through a hook
-    # keeps it under one mechanism and leaves room for per-tool control.
+    # auto_allow_permissions adds agy's ``--dangerously-skip-permissions`` flag
+    # (see ``assemble_command``). It is NOT a hook: agy's documented
+    # ``PreToolUse`` ``{"decision": "allow"}`` output does not actually gate the
+    # ``run_command`` confirmation dialog (verified live against agy 1.0.3), so
+    # the flag is the only mechanism that reliably auto-approves.
     auto_allow_permissions: bool = Field(
         default=False,
         description="When True, auto-approve every tool call without prompting.",
@@ -333,7 +344,7 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         intermediate ``agy_hooks/.agents/`` directories. The matching
         ``--add-dir`` arg is appended in ``assemble_command``.
         """
-        hooks_config = build_antigravity_hooks_config(self.agent_config.auto_allow_permissions)
+        hooks_config = build_antigravity_hooks_config()
         hooks_path = self._get_agy_hooks_file_path()
         with log_span("Installing antigravity hooks at {}", hooks_path):
             host.write_text_file(hooks_path, serialize_antigravity_hooks(hooks_config))
@@ -602,9 +613,11 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
            symlink, so agy's "project: using project ..." log line names the
            symlink path (not the resolved dotted target).
         5. ``agy <user_args> --log-file <state>/logs/agy_cli.log
-           --add-dir <hooks_symlink>`` -- foreground process. The ``--add-dir``
-           makes agy load and execute the per-agent ``hooks.json`` (active
-           marker + optional auto-allow); see ``build_antigravity_hooks_config``.
+           --add-dir <hooks_symlink> [--dangerously-skip-permissions]`` --
+           foreground process. The ``--add-dir`` makes agy load and execute the
+           per-agent ``hooks.json`` (the active marker; see
+           ``build_antigravity_hooks_config``). The flag is appended only when
+           ``auto_allow_permissions`` is set.
 
         Bash precedence note: ``A & B && C && D && E`` parses as ``A &``
         followed by ``B && C && D && E``. The supervisor's subshell is
@@ -624,15 +637,18 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         hooks_agents_dir = self._get_agy_hooks_file_path().parent
         hooks_symlink_path = self._get_agy_hooks_symlink_path()
         # agy loads .agents/hooks.json from each --add-dir workspace and runs
-        # the hooks (active marker + optional auto-allow). It must be the /tmp
-        # symlink, not hooks_dir itself: agy rejects --add-dir paths with a
-        # dot-prefixed segment (hooks_dir is under ~/.mngr/), so pointing it
-        # straight at hooks_dir silently loads nothing. The symlink resolves to
-        # hooks_dir.
+        # the active-marker hooks. It must be the /tmp symlink, not hooks_dir
+        # itself: agy rejects --add-dir paths with a dot-prefixed segment
+        # (hooks_dir is under ~/.mngr/), so pointing it straight at hooks_dir
+        # silently loads nothing. The symlink resolves to hooks_dir.
         extra_args: list[str] = [
             f"--log-file {shlex.quote(str(log_file_path))}",
             f"--add-dir {shlex.quote(hooks_symlink_path)}",
         ]
+        # Auto-approval goes through the flag, not a hook (the hook allow-decision
+        # does not gate run_command confirmations; see the config field comment).
+        if self.agent_config.auto_allow_permissions:
+            extra_args.append(_DANGEROUSLY_SKIP_PERMISSIONS_FLAG)
         base_command = super().assemble_command(host, agent_args, command_override, initial_message)
         background_cmd = self._build_background_tasks_command()
 

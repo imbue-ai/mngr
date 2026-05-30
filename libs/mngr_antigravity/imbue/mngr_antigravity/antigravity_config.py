@@ -27,6 +27,12 @@ The in-TUI ``/hooks`` command instead writes to
 run -- that path is loaded only for the TUI's display, while hooks execute only
 from ``~/.gemini/config/hooks.json`` and per-workspace ``.agents/hooks.json``
 (google-antigravity/antigravity-cli#49). mngr therefore does not use the TUI.
+
+The hooks here only maintain the lifecycle ``active`` marker. Permission
+auto-approval is NOT done via a hook -- agy's documented ``PreToolUse``
+``{"decision": "allow"}`` output does not gate the ``run_command`` confirmation
+dialog -- so the plugin uses the ``--dangerously-skip-permissions`` CLI flag
+instead (see the plugin's ``assemble_command``).
 """
 
 from __future__ import annotations
@@ -148,42 +154,31 @@ ACTIVE_MARKER_FILENAME: str = "active"
 _SET_ACTIVE_COMMAND: str = f'touch "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'
 _CLEAR_ACTIVE_COMMAND: str = f'rm -f "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'
 
-# A ``PreToolUse`` hook that returns ``{"decision": "allow"}`` auto-approves
-# every tool call: the decision tells agy to skip the permission dialog it
-# would otherwise show.
-_AUTO_ALLOW_COMMAND: str = 'echo \'{"decision":"allow"}\''
-
-# Matcher that matches every tool (agy treats "" or "*" as match-all).
-_MATCH_ALL: str = "*"
-
 
 @pure
-def build_antigravity_hooks_config(auto_allow_permissions: bool) -> dict[str, Any]:
+def build_antigravity_hooks_config() -> dict[str, Any]:
     """Build the per-agent ``hooks.json`` body for the antigravity agent.
 
-    Always includes the ``active``-marker hooks (``PreInvocation`` sets,
-    ``Stop`` clears); ``BaseAgent.get_lifecycle_state`` reads that marker to
-    report RUNNING while the agent works and WAITING when it's idle. agy
-    maintains no such marker on its own.
+    Emits the ``active``-marker hooks: ``PreInvocation`` touches the marker
+    and ``Stop`` removes it. ``BaseAgent.get_lifecycle_state`` reads that
+    marker to report RUNNING while the agent works and WAITING when it's idle;
+    agy maintains no such marker on its own.
 
-    When ``auto_allow_permissions`` is True, also emits a ``PreToolUse`` hook
-    returning ``{"decision": "allow"}`` so tool calls never block on a
-    permission dialog.
+    Auto-approval of tool permissions is NOT a hook: agy's documented
+    ``PreToolUse`` ``{"decision": "allow"}`` output does not actually gate the
+    ``run_command`` confirmation dialog (verified live against agy 1.0.3 -- the
+    hook runs but the dialog still appears). The plugin routes
+    ``auto_allow_permissions`` through the ``--dangerously-skip-permissions``
+    CLI flag instead (see ``assemble_command``).
 
-    Note the schema differs by event: ``PreToolUse``/``PostToolUse`` take
-    matcher groups (``{"matcher", "hooks": [...]}``), while ``PreInvocation``
-    and ``Stop`` take a flat list of handlers (their matcher is ignored). The
-    file is mngr-owned and rewritten from scratch each provision, so no
-    merge-with-existing-content logic is needed.
+    ``PreInvocation``/``Stop`` take a flat list of handlers (their matcher is
+    ignored). The file is mngr-owned and rewritten from scratch each provision,
+    so no merge-with-existing-content logic is needed.
     """
     mngr_hook: dict[str, Any] = {
         "PreInvocation": [{"type": "command", "command": _SET_ACTIVE_COMMAND}],
         "Stop": [{"type": "command", "command": _CLEAR_ACTIVE_COMMAND}],
     }
-    if auto_allow_permissions:
-        mngr_hook["PreToolUse"] = [
-            {"matcher": _MATCH_ALL, "hooks": [{"type": "command", "command": _AUTO_ALLOW_COMMAND}]}
-        ]
     return {_MNGR_HOOK_NAME: mngr_hook}
 
 

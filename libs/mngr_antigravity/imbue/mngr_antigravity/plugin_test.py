@@ -248,17 +248,26 @@ def test_assemble_command_appends_user_agent_args(antigravity_agent: Antigravity
     assert "agy --add-dir /tmp --log-file" in command
 
 
-def test_assemble_command_never_uses_dangerously_skip_permissions_flag(
+def test_assemble_command_omits_dangerously_skip_permissions_when_auto_allow_disabled(
+    antigravity_agent: AntigravityAgent,
+) -> None:
+    """Default config does not auto-approve, so the flag is absent."""
+    command = str(antigravity_agent.assemble_command(antigravity_agent.host, (), command_override=None))
+    assert "--dangerously-skip-permissions" not in command
+
+
+def test_assemble_command_adds_dangerously_skip_permissions_when_auto_allow_enabled(
     antigravity_agent_auto_allow: AntigravityAgent,
 ) -> None:
-    """The CLI flag is never emitted, even with auto_allow_permissions=True -- approval goes through a PreToolUse hook.
+    """auto_allow_permissions appends the CLI flag.
 
-    The auto-allow case is the strongest check: it is the only mode that could
-    plausibly carry the flag, so asserting its absence there covers both modes.
+    Auto-approval goes through the flag, NOT a PreToolUse hook: agy's
+    {"decision": "allow"} hook output does not gate the run_command
+    confirmation dialog (verified live against agy 1.0.3).
     """
     agent = antigravity_agent_auto_allow
     command = str(agent.assemble_command(agent.host, (), command_override=None))
-    assert "--dangerously-skip-permissions" not in command
+    assert "--dangerously-skip-permissions" in command
 
 
 def test_assemble_command_adds_hooks_via_nondotted_tmp_symlink(antigravity_agent: AntigravityAgent) -> None:
@@ -831,24 +840,21 @@ def test_provision_hooks_json_sets_active_marker_on_preinvocation_and_clears_on_
     assert mngr["Stop"][0]["command"] == 'rm -f "$MNGR_AGENT_STATE_DIR/active"'
 
 
-def test_provision_hooks_json_omits_pretooluse_when_auto_allow_disabled(
-    antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path
-) -> None:
-    """Default (no auto-allow): no PreToolUse hook, so tool calls prompt normally."""
-    agent = antigravity_agent_auto_dismiss
-    _provision(agent)
-    assert "PreToolUse" not in _read_hooks_json(agent)["mngr"]
-
-
-def test_provision_hooks_json_adds_pretooluse_allow_when_auto_allow_enabled(
+def test_provision_hooks_json_never_includes_pretooluse(
     antigravity_agent_auto_allow_and_dismiss: AntigravityAgent, isolated_home: Path
 ) -> None:
-    """auto_allow_permissions=True provisions the PreToolUse allow hook that auto-approves tool calls."""
+    """The provisioned hooks.json carries only lifecycle markers, never a PreToolUse hook.
+
+    Even with auto_allow_permissions=True, auto-approval is the
+    --dangerously-skip-permissions flag (see assemble_command), not a hook --
+    agy's {"decision": "allow"} hook output does not gate the run_command
+    dialog.
+    """
     agent = antigravity_agent_auto_allow_and_dismiss
     _provision(agent)
-    pre_tool_use = _read_hooks_json(agent)["mngr"]["PreToolUse"]
-    assert pre_tool_use[0]["matcher"] == "*"
-    assert pre_tool_use[0]["hooks"][0]["command"] == 'echo \'{"decision":"allow"}\''
+    mngr = _read_hooks_json(agent)["mngr"]
+    assert "PreToolUse" not in mngr
+    assert set(mngr) == {"PreInvocation", "Stop"}
 
 
 def test_provision_does_not_write_hooks_into_work_dir(
