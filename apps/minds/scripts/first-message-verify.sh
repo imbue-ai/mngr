@@ -156,7 +156,8 @@ while (( SECONDS < agent_deadline )); do
   # noise that mngr can prepend) don't silently break json parsing. The parser
   # finds the first '{' or '[' in the raw output and parses from there; any
   # WARNING: prefix lines are stripped naturally.
-  AGENT_NAME=$(HOST_NAME="$HOST_NAME" "$MNGR_BIN" list --provider lima --format json 2>&1 | python3 -c '
+  AGENT_NAME=$(HOST_NAME="$HOST_NAME" "$MNGR_BIN" list --provider lima --format json 2>&1 \
+    | HOST_NAME="$HOST_NAME" python3 -c '
 import json, os, sys
 host = os.environ["HOST_NAME"]
 raw = sys.stdin.read()
@@ -171,11 +172,20 @@ except Exception as exc:
     print(f"  (json parse failed: {exc}; payload[:200]={raw[start:start+200]!r})", file=sys.stderr)
     sys.exit(0)
 agents = data.get("agents", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
-for a in agents:
-    host_info = a.get("host") or {}
-    if host_info.get("name") == host or a.get("host_name") == host:
-        print(a.get("name", ""))
-        sys.exit(0)
+# Prefer the chat agent (name == host) over the workspace `system-services`
+# agent (which is RUNNING_UNKNOWN_AGENT_TYPE under the pilot FCT and
+# mngr message would route through BaseAgent rather than the TUI agent).
+chat = next((a for a in agents if a.get("name") == host), None)
+if chat is None:
+    chat = next(
+        (a for a in agents
+         if (a.get("host") or {}).get("name") == host
+         or a.get("host_name") == host),
+        None,
+    )
+if chat is not None:
+    print(chat.get("name", ""))
+    sys.exit(0)
 print(f"  (no agent on host {host!r}; {len(agents)} agents seen)", file=sys.stderr)
 ' 2>>/tmp/first-message-mngr-list.txt)
   [[ -n "$AGENT_NAME" ]] && break

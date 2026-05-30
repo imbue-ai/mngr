@@ -4,6 +4,7 @@ set -uo pipefail
 
 STATE_DIR=/tmp/slack-mock
 LATCHKEY_BIN=/Applications/Minds.app/Contents/Resources/latchkey/bin/latchkey
+export MINDS_ELECTRON_EXEC_PATH=/Applications/Minds.app/Contents/MacOS/Minds
 
 log() { printf '[slack-mock-teardown] %s\n' "$*" >&2; }
 

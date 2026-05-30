@@ -27,6 +27,9 @@ MOCK_SCRIPT="$SCRIPT_DIR/../test/e2e/mocks/slack-mock-server.js"
 STATE_DIR=/tmp/slack-mock
 LATCHKEY_BIN=/Applications/Minds.app/Contents/Resources/latchkey/bin/latchkey
 LATCHKEY_DIRECTORY="$HOME/.minds/latchkey"
+# The bundled latchkey shim runs Electron-as-node and needs the .app's
+# Electron binary path to resolve `process.execPath`.
+export MINDS_ELECTRON_EXEC_PATH=/Applications/Minds.app/Contents/MacOS/Minds
 
 log() { printf '[slack-mock-setup] %s\n' "$*" >&2; }
 fail() { log "FAIL: $*"; exit 1; }
