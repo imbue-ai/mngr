@@ -24,6 +24,7 @@ from imbue.mngr.utils.git_utils import is_git_url
 from imbue.mngr.utils.git_utils import parse_project_name_from_url
 from imbue.mngr.utils.git_utils import parse_worktree_git_file
 from imbue.mngr.utils.git_utils import resolve_project_filter_values
+from imbue.mngr.utils.git_utils import rsync_worktree_over_clone
 
 
 def test_github_https_url() -> None:
@@ -759,3 +760,59 @@ def test_clone_git_url_to_managed_dir_raises_on_invalid_url(
     # The failed-clone destination should not be left behind.
     if base_dir.exists():
         assert list(base_dir.iterdir()) == []
+
+
+@pytest.mark.rsync
+def test_rsync_worktree_over_clone_overlays_uncommitted_files(
+    cg: ConcurrencyGroup, tmp_path: Path, temp_git_repo: Path
+) -> None:
+    """The overlay rsync delivers uncommitted worktree edits onto a clone of HEAD."""
+    # Make an uncommitted edit in the worktree on top of HEAD content.
+    (temp_git_repo / "tracked.txt").write_text("HEAD\n")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=temp_git_repo, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "x"],
+        cwd=temp_git_repo,
+        check=True,
+    )
+    (temp_git_repo / "tracked.txt").write_text("DIRTY\n")
+    (temp_git_repo / "untracked.txt").write_text("hello\n")
+
+    # Clone HEAD into a sibling dir (mirrors what mngr_vps_docker does for a
+    # worktree build context).
+    clone_dir = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", f"file://{temp_git_repo}", str(clone_dir)],
+        check=True,
+    )
+    assert (clone_dir / "tracked.txt").read_text() == "HEAD\n"
+    assert not (clone_dir / "untracked.txt").exists()
+
+    rsync_worktree_over_clone(temp_git_repo, clone_dir, cg=cg)
+
+    assert (clone_dir / "tracked.txt").read_text() == "DIRTY\n"
+    assert (clone_dir / "untracked.txt").read_text() == "hello\n"
+    # The clone's .git was not clobbered (the worktree's .git -- a file --
+    # would have broken it).
+    assert (clone_dir / ".git").is_dir()
+
+
+@pytest.mark.rsync
+def test_rsync_worktree_over_clone_skips_default_excludes(
+    cg: ConcurrencyGroup, tmp_path: Path, temp_git_repo: Path
+) -> None:
+    """Default excludes (.venv, __pycache__, node_modules, ...) don't pollute the clone."""
+    (temp_git_repo / ".venv").mkdir()
+    (temp_git_repo / ".venv" / "ghost.txt").write_text("nope\n")
+    (temp_git_repo / "__pycache__").mkdir()
+    (temp_git_repo / "__pycache__" / "x.pyc").write_text("nope\n")
+    (temp_git_repo / "kept.txt").write_text("yes\n")
+
+    clone_dir = tmp_path / "clone"
+    subprocess.run(["git", "clone", f"file://{temp_git_repo}", str(clone_dir)], check=True)
+
+    rsync_worktree_over_clone(temp_git_repo, clone_dir, cg=cg)
+
+    assert (clone_dir / "kept.txt").read_text() == "yes\n"
+    assert not (clone_dir / ".venv").exists()
+    assert not (clone_dir / "__pycache__").exists()
