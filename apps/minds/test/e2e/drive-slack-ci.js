@@ -276,8 +276,16 @@ async function dumpWindows(app, tag) {
       // gateway storage shows "Requests (0)" with no re-render.
       if (waitingForAgentRequest) {
         const chatBody = await win.evaluate(() => document.body.innerText).catch(() => '');
-        if (/requested.*slack|slack permission|wait.*your approval/i.test(chatBody)) {
-          log(`agent emitted permission request; opening panel now`);
+        // Catch the many phrasings the agent uses for "I've made the
+        // request, waiting for you" -- covers "requested read permission",
+        // "permission request submitted", "waiting for approval", etc.
+        // Plus a structural signal: if the requests-panel WINDOW exists
+        // already, the request must have landed (the panel auto-opens
+        // on incoming).
+        const panelOpen = !!findRequestsPanelWindow(app);
+        if (panelOpen
+            || /requested.*slack|slack permission|permission request|wait.*approval|awaiting.*approval|approval.*proceed/i.test(chatBody)) {
+          log(`agent emitted permission request (panelOpen=${panelOpen}); opening panel now`);
           waitingForAgentRequest = false;
           // Small wait so the gateway has time to persist the request
           // entry before the panel mounts.
