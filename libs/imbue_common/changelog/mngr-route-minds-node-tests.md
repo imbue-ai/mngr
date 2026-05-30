@@ -1,1 +1,0 @@
-Added a repo-wide `node_required` pytest marker to the shared marker list (`conftest_hooks.py`), so any project can mark Python tests that shell out to a Node.js runtime. Like `acceptance`/`release`/`flaky`, it is registered for every project automatically. Tests carrying it are routed to the dedicated `test-node` CI job and excluded from the Node-less offload sandboxes.

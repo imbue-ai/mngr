@@ -23,6 +23,9 @@ dependencies = [
 [project.entry-points.mngr]
 latchkey = "imbue.mngr_latchkey.plugin"
 
+[project.entry-points.resource_guards]
+node = "imbue.mngr_latchkey.register_guards:register_node_guard"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

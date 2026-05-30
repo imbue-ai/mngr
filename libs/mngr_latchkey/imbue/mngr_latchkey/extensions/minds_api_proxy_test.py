@@ -12,15 +12,16 @@ this file drives it from the outside:
    the proxy returned and the request shape the upstream Minds API
    observed.
 
-These tests are marked ``node_required`` because the only external
-dependency is Node, which is already a hard runtime requirement for the
-``latchkey gateway`` subprocess we ship alongside the extension. The
-marker routes them to the Node-equipped ``test-node`` CI job and keeps
-them out of the Node-less offload sandboxes.
+Node is a hard runtime requirement for the ``latchkey gateway``
+subprocess we ship alongside the extension, so the node-driving fixtures
+declare ``@fixture_uses_resources("node")`` and the tests carry
+``@pytest.mark.node`` (the node resource guard). That routes them to the
+Node-equipped ``test-node`` CI job and keeps them out of the Node-less
+offload sandboxes.
 """
 
 import json
-import shutil
+import os
 import socket
 import subprocess
 import threading
@@ -38,10 +39,7 @@ from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
-
-# Resolved to an absolute path: the Node driver runs with a restricted
-# PATH (env={"PATH": "/usr/bin:/bin"}), so a bare "node" would not be found.
-_NODE_BINARY: Final[str | None] = shutil.which("node")
+from imbue.resource_guards.resource_guards import fixture_uses_resources
 
 _EXTENSION_PATH: Final[Path] = Path(__file__).resolve().parent / "minds_api_proxy.mjs"
 
@@ -51,7 +49,7 @@ _NODE_READY_TIMEOUT_SECONDS: Final[float] = 15.0
 _POLL_INTERVAL_SECONDS: Final[float] = 0.02
 
 
-pytestmark = pytest.mark.node_required
+pytestmark = pytest.mark.node
 
 
 class _RecordedRequest(FrozenModel):
@@ -240,19 +238,19 @@ _INJECTED_API_KEY: Final[str] = "central-api-key-fixture-value"
 
 
 @pytest.fixture
+@fixture_uses_resources("node")
 def node_proxy(
     fake_minds_api: tuple[ThreadingHTTPServer, _FakeMindsApiState, str],
 ) -> Generator[tuple[str, _FakeMindsApiState], None, None]:
     """Spawn the Node proxy driver pointed at the fake Minds API; yield its URL + state."""
     _server, state, upstream_base_url = fake_minds_api
-    assert _NODE_BINARY is not None
     script = _build_node_driver_script()
     process = subprocess.Popen(
-        [_NODE_BINARY, "--input-type=module", "-e", script],
+        ["node", "--input-type=module", "-e", script],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env={"LATCHKEY_EXTENSION_MINDS_API_URL": upstream_base_url, "PATH": "/usr/bin:/bin"},
+        env={**os.environ, "LATCHKEY_EXTENSION_MINDS_API_URL": upstream_base_url},
         text=True,
     )
     try:
@@ -269,6 +267,7 @@ def node_proxy(
 
 
 @pytest.fixture
+@fixture_uses_resources("node")
 def node_proxy_with_api_key(
     fake_minds_api: tuple[ThreadingHTTPServer, _FakeMindsApiState, str],
 ) -> Generator[tuple[str, _FakeMindsApiState], None, None]:
@@ -280,17 +279,16 @@ def node_proxy_with_api_key(
     (which is its own pinned behaviour: pass-through Authorization).
     """
     _server, state, upstream_base_url = fake_minds_api
-    assert _NODE_BINARY is not None
     script = _build_node_driver_script()
     process = subprocess.Popen(
-        [_NODE_BINARY, "--input-type=module", "-e", script],
+        ["node", "--input-type=module", "-e", script],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env={
+            **os.environ,
             "LATCHKEY_EXTENSION_MINDS_API_URL": upstream_base_url,
             "LATCHKEY_EXTENSION_MINDS_API_KEY": _INJECTED_API_KEY,
-            "PATH": "/usr/bin:/bin",
         },
         text=True,
     )
@@ -490,14 +488,14 @@ def test_non_proxy_paths_return_404(
 
 def test_proxy_returns_503_when_env_var_unset() -> None:
     """Without ``LATCHKEY_EXTENSION_MINDS_API_URL``, the proxy must 503 deterministically."""
-    assert _NODE_BINARY is not None
     script = _build_node_driver_script()
+    env = {key: value for key, value in os.environ.items() if not key.startswith("LATCHKEY_EXTENSION_MINDS_")}
     process = subprocess.Popen(
-        [_NODE_BINARY, "--input-type=module", "-e", script],
+        ["node", "--input-type=module", "-e", script],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env={"PATH": "/usr/bin:/bin"},
+        env=env,
         text=True,
     )
     try:

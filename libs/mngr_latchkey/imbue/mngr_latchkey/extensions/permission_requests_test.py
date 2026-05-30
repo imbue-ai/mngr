@@ -12,13 +12,15 @@ this file follows the same pattern as ``minds_api_proxy_test.py``:
    plus on the on-disk side effects in the temporary
    ``LATCHKEY_DIRECTORY`` we point the child at.
 
-Marked ``node_required`` (routed to the ``test-node`` CI job), mirroring
-the minds-api-proxy test module.
+The node-driving fixture declares ``@fixture_uses_resources("node")`` and
+the tests carry ``@pytest.mark.node`` (the node resource guard), routing
+them to the ``test-node`` CI job -- mirroring the minds-api-proxy test
+module.
 """
 
 import json
+import os
 import re
-import shutil
 import socket
 import subprocess
 import threading
@@ -31,9 +33,7 @@ from typing import Final
 
 import pytest
 
-# Resolved to an absolute path: the Node driver runs with a restricted
-# PATH (env={"PATH": "/usr/bin:/bin"}), so a bare "node" would not be found.
-_NODE_BINARY: Final[str | None] = shutil.which("node")
+from imbue.resource_guards.resource_guards import fixture_uses_resources
 
 _EXTENSION_PATH: Final[Path] = Path(__file__).resolve().parent / "permission_requests.mjs"
 
@@ -69,7 +69,7 @@ _FILE_SHARING_WRITE_METHODS: Final[tuple[str, ...]] = (
 )
 
 
-pytestmark = pytest.mark.node_required
+pytestmark = pytest.mark.node
 
 
 def _file_sharing_permission_name(path: str, access: str) -> str:
@@ -153,6 +153,7 @@ def _wait_for_port(host: str, port: int, timeout: float = 5.0) -> bool:
 
 
 @pytest.fixture
+@fixture_uses_resources("node")
 def node_extension(tmp_path: Path) -> Generator[tuple[str, Path, Path], None, None]:
     """Spawn the Node driver pointed at a fresh LATCHKEY_DIRECTORY + target path.
 
@@ -160,20 +161,19 @@ def node_extension(tmp_path: Path) -> Generator[tuple[str, Path, Path], None, No
     tests can both hit the HTTP endpoints and inspect the on-disk
     files the extension created.
     """
-    assert _NODE_BINARY is not None
     latchkey_directory = tmp_path / "latchkey"
     latchkey_directory.mkdir()
     permissions_config_path = tmp_path / "permissions.json"
     script = _build_node_driver_script()
     process = subprocess.Popen(
-        [_NODE_BINARY, "--input-type=module", "-e", script],
+        ["node", "--input-type=module", "-e", script],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env={
+            **os.environ,
             "LATCHKEY_DIRECTORY": str(latchkey_directory),
             "TEST_PERMISSIONS_CONFIG_PATH": str(permissions_config_path),
-            "PATH": "/usr/bin:/bin",
         },
         text=True,
     )

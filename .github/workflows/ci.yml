@@ -356,8 +356,9 @@ jobs:
         # `just test-offload-minds-snapshot <image-id>` instead.
         run: PYTEST_MAX_DURATION_SECONDS=600 uv run pytest -n 0 --timeout 300 --no-cov --cov-fail-under=0 -v --tb=short -m '(docker or docker_sdk) and not release and not minds_electron and not minds_snapshot_resume'
 
-  # Python tests that shell out to a Node.js runtime (`node_required`). They
-  # need only `node` on PATH -- no pnpm / Electron native deps / xvfb / Docker
+  # Python tests that shell out to a Node.js runtime (`@pytest.mark.node`,
+  # the node resource guard). They need only `node` on PATH -- no pnpm /
+  # Electron native deps / xvfb / Docker
   # -- so they get a lightweight dedicated runner rather than riding the
   # heavier test-docker-electron job. The shared mngr Modal image has no Node,
   # so these are excluded from offload (see offload-modal.toml).
@@ -387,7 +388,7 @@ jobs:
         run: uv sync --all-packages
 
       - name: Run tests that need Node
-        run: env PYTEST_MAX_DURATION_SECONDS=300 uv run pytest --timeout 60 -m 'node_required and not release' --no-cov --cov-fail-under=0 -v --tb=short
+        run: env PYTEST_MAX_DURATION_SECONDS=300 uv run pytest --timeout 60 -m 'node and not release' --no-cov --cov-fail-under=0 -v --tb=short
 
   # Sibling to `test-docker` for the single minds Electron e2e test. Split
   # out because the test (~2 min end-to-end: docker pull + container start
