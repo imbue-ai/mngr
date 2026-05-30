@@ -19,6 +19,9 @@ GIT_BRANCH="${GIT_BRANCH:-pilot}"
 # set LAUNCH_MODE=SBX MNGR_PROVIDER=sbx to drive the Docker Sandbox provider.
 LAUNCH_MODE="${LAUNCH_MODE:-LIMA}"
 MNGR_PROVIDER="${MNGR_PROVIDER:-lima}"
+# AI_PROVIDER=API_KEY uses ANTHROPIC_API_KEY; AI_PROVIDER=SUBSCRIPTION uses the
+# host's logged-in Claude subscription (no key needed).
+AI_PROVIDER="${AI_PROVIDER:-API_KEY}"
 HOST_NAME="${HOST_NAME:-firstmsg$(date +%H%M%S)}"
 PROMPT="${PROMPT:-Reply with exactly the four characters: pong}"
 EXPECT_SUBSTRING="${EXPECT_SUBSTRING:-pong}"
@@ -40,8 +43,8 @@ log() { printf '[first-msg] %s\n' "$*" >&2; }
 fail() { log "FAIL: $*"; exit 1; }
 
 log "template repo: $GIT_URL @ $GIT_BRANCH"
-if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-  fail "ANTHROPIC_API_KEY is empty"
+if [[ "$AI_PROVIDER" == "API_KEY" && -z "${ANTHROPIC_API_KEY:-}" ]]; then
+  fail "ANTHROPIC_API_KEY is empty (required when AI_PROVIDER=API_KEY)"
 fi
 if [[ ! -s "$EVENTS_LOG" ]]; then
   fail "$EVENTS_LOG not found or empty -- launch the app first"
@@ -104,17 +107,18 @@ log "auth ok"
 
 api() { curl -s -b "$COOKIES" -X "$1" -H 'Content-Type: application/json' "$BASE$2" "${@:3}"; }
 
-log "POST /api/create-agent host_name=$HOST_NAME launch_mode=$LAUNCH_MODE ai_provider=API_KEY"
-BODY=$(HOST_NAME="$HOST_NAME" GIT_URL="$GIT_URL" GIT_BRANCH="$GIT_BRANCH" ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" LAUNCH_MODE="$LAUNCH_MODE" python3 -c '
+log "POST /api/create-agent host_name=$HOST_NAME launch_mode=$LAUNCH_MODE ai_provider=$AI_PROVIDER"
+BODY=$(HOST_NAME="$HOST_NAME" GIT_URL="$GIT_URL" GIT_BRANCH="$GIT_BRANCH" ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" LAUNCH_MODE="$LAUNCH_MODE" AI_PROVIDER="$AI_PROVIDER" python3 -c '
 import json, os
+provider = os.environ["AI_PROVIDER"]
 print(json.dumps({
     "agent_name": os.environ["HOST_NAME"],
     "host_name": os.environ["HOST_NAME"],
     "git_url": os.environ["GIT_URL"],
     "branch": os.environ["GIT_BRANCH"],
     "launch_mode": os.environ["LAUNCH_MODE"],
-    "ai_provider": "API_KEY",
-    "anthropic_api_key": os.environ["ANTHROPIC_API_KEY"],
+    "ai_provider": provider,
+    "anthropic_api_key": os.environ["ANTHROPIC_API_KEY"] if provider == "API_KEY" else None,
     "include_env_file": False,
 }))
 ') || fail "build create body failed"
