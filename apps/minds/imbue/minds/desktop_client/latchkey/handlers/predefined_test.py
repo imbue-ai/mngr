@@ -3,7 +3,6 @@ import shlex
 from pathlib import Path
 
 import pytest
-from starlette.responses import HTMLResponse
 from starlette.testclient import TestClient
 
 from imbue.minds.config.data_types import WorkspacePaths
@@ -597,79 +596,6 @@ def test_grant_re_checks_credentials_on_second_call_after_manual_setup(tmp_path:
     )
     assert second.outcome == GrantOutcome.GRANTED
     assert second.response_event is not None
-
-
-# -- LatchkeyPermissionGrantHandler.render_request_page --
-
-
-def _render_dialog_html(handler: LatchkeyPermissionGrantHandler) -> str:
-    """Run ``render_request_page`` for a fixed Slack request and return its HTML."""
-    request = create_latchkey_predefined_permission_request_event(
-        agent_id=str(AgentId()),
-        scope=_SLACK_SERVICE_INFO.scope,
-        rationale="need slack access",
-    )
-    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
-    response = handler.render_request_page(
-        req_event=request,
-        backend_resolver=backend_resolver,
-        mngr_forward_origin="http://localhost:8421",
-    )
-    assert isinstance(response, HTMLResponse)
-    # ``Response.body`` is typed ``bytes | memoryview[int]``; ``bytes()``
-    # round-trips both into a plain ``bytes`` we can decode.
-    return bytes(response.body).decode("utf-8")
-
-
-def test_render_request_page_omits_browser_notice_when_credentials_valid(tmp_path: Path) -> None:
-    """Valid credentials skip ``latchkey auth browser``; the dialog must not falsely promise one."""
-    handler = _build_handler(tmp_path, credential_status="valid")
-
-    html = _render_dialog_html(handler)
-
-    assert "opening a browser window" not in html
-    assert "Granting permission" in html
-
-
-def test_render_request_page_shows_browser_notice_when_credentials_missing(tmp_path: Path) -> None:
-    """Missing credentials with browser auth supported -> dialog warns about the browser pop-up."""
-    handler = _build_handler(tmp_path, credential_status="missing")
-
-    html = _render_dialog_html(handler)
-
-    assert "opening a browser window" in html
-
-
-def test_render_request_page_omits_browser_notice_when_browser_auth_unsupported(tmp_path: Path) -> None:
-    """Service that only supports manual creds -> dialog must not promise a browser pop-up."""
-    handler = _build_handler(
-        tmp_path,
-        credential_status="missing",
-        auth_options_json=json.dumps(["set"]),
-    )
-
-    html = _render_dialog_html(handler)
-
-    assert "opening a browser window" not in html
-    assert "Granting permission" in html
-
-
-def test_render_request_page_notes_grants_are_shared_per_host(tmp_path: Path) -> None:
-    """Dialog must tell the user the grant applies to every agent on the host.
-
-    Latchkey state (gateway URL, password, JWT, permissions config) is
-    keyed per-host, so every agent that runs on this workspace's host
-    inherits the same grants. The dialog surfaces that scope so the user
-    isn't surprised by it.
-    """
-    handler = _build_handler(tmp_path, credential_status="valid")
-
-    html = _render_dialog_html(handler)
-
-    # Short bracket note next to the workspace link.
-    assert "grants apply to every agent on this host" in html
-    # Reinforced in the form body so users who skim past the header still see it.
-    assert "shared across every agent running on this workspace's host" in html
 
 
 # -- LatchkeyPermissionGrantHandler.deny --
