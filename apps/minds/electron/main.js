@@ -476,9 +476,16 @@ function registerShortcutsFor(bundle, wc) {
 // request-page links keep working. The `setImmediate` defer around
 // openExternal follows Electron's security guide.
 function applyExternalLinkHandling(wc) {
+  // Defer per Electron's security guide. shell.openExternal returns a Promise;
+  // swallow rejections (e.g. the OS has no handler for the scheme) so a failed
+  // open degrades to a no-op instead of becoming an unhandled rejection, which
+  // terminates the main process under the bundled Node runtime.
+  const openInBrowser = (url) => {
+    setImmediate(() => { shell.openExternal(url).catch(() => {}); });
+  };
   wc.setWindowOpenHandler(({ url }) => {
     if (isExternalUrl(url)) {
-      setImmediate(() => { shell.openExternal(url); });
+      openInBrowser(url);
       return { action: 'deny' };
     }
     // Internal popups keep Electron's default behavior (unchanged from before
@@ -492,7 +499,7 @@ function applyExternalLinkHandling(wc) {
   wc.on('will-frame-navigate', (details) => {
     if (!isExternalUrl(details.url)) return;
     details.preventDefault();
-    setImmediate(() => { shell.openExternal(details.url); });
+    openInBrowser(details.url);
   });
 }
 
