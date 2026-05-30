@@ -51,12 +51,14 @@ from imbue.minds.config.loader import EnvConfigError
 from imbue.minds.config.loader import load_client_config
 from imbue.minds.config.loader import load_deploy_config
 from imbue.minds.config.loader import repo_tier_client_config_path
+from imbue.minds.envs.docker_cleanup import cleanup_env_state_container
 from imbue.minds.envs.generation import delete_generation_id as real_delete_generation_id
 from imbue.minds.envs.generation import ensure_generation_id as real_ensure_generation_id
 from imbue.minds.envs.health_check import await_apps_healthy as real_await_apps_healthy
 from imbue.minds.envs.local_store import env_root_exists
 from imbue.minds.envs.migrations import apply_pool_hosts_migrations as real_apply_pool_hosts_migrations
-from imbue.minds.envs.mngr_agent_cleanup import real_destroy_mngr_agent
+from imbue.minds.envs.mngr_agent_cleanup import destroy_all_mngr_agents_in_env
+from imbue.minds.envs.mngr_agent_cleanup import real_destroy_mngr_agents
 from imbue.minds.envs.paths import active_env_name_or_none
 from imbue.minds.envs.paths import client_config_file
 from imbue.minds.envs.paths import env_root_dir
@@ -303,6 +305,10 @@ def _delete_generation_id_for_provider(tier_vault_prefix: str, cg: ConcurrencyGr
     real_delete_generation_id(tier_vault_prefix, parent_concurrency_group=cg)
 
 
+def _cleanup_state_container_for_provider(name: DevEnvName, cg: ConcurrencyGroup) -> None:
+    cleanup_env_state_container(name, parent_concurrency_group=cg)
+
+
 def _list_cloudflare_tunnels_for_env_for_provider(
     name: DevEnvName, account_id: str, api_token: SecretStr
 ) -> tuple[str, ...]:
@@ -346,7 +352,8 @@ def _build_real_providers() -> Providers:
         resolve_neon_default_branch_id=_resolve_neon_default_branch_id_for_provider,
         verify_neon_token_has_restore_scope=_verify_neon_token_has_restore_scope_for_provider,
         await_apps_healthy=_await_apps_healthy_for_provider,
-        destroy_mngr_agent=real_destroy_mngr_agent,
+        destroy_mngr_agents=real_destroy_mngr_agents,
+        cleanup_state_container=_cleanup_state_container_for_provider,
         wipe_supertokens_app_data=_wipe_supertokens_for_provider,
         wipe_neon_db_schema=_wipe_neon_db_schema_for_provider,
         ensure_generation_id=_ensure_generation_id_for_provider,
@@ -854,6 +861,27 @@ def _try_run_generation_check(*, env_name: str, client_config_path: Path, env_ro
     )
 
 
+def _destroy_agents_and_state_container_for_wipe(env_name: str) -> None:
+    """Destroy the env's mngr agents + remove its Docker state container.
+
+    Run from the activate-time auto-wipe, *before* the local profile is
+    rmtree'd, so the freed Docker resources (host containers, the singleton
+    state container) don't outlive the env. Errors are NOT swallowed: a
+    teardown failure must surface so the operator can fix it instead of
+    silently leaking containers.
+    """
+    dev_env_name = DevEnvName(env_name)
+    with ConcurrencyGroup(name=f"minds-env-wipe-{env_name}") as cg:
+        destroyed_count = destroy_all_mngr_agents_in_env(
+            dev_env_name,
+            destroy_agents=real_destroy_mngr_agents,
+            parent_concurrency_group=cg,
+        )
+        if destroyed_count:
+            logger.info("Destroyed {} mngr agent(s) during wipe of env {!r}", destroyed_count, env_name)
+        cleanup_env_state_container(dev_env_name, parent_concurrency_group=cg)
+
+
 def _check_generation_id_and_wipe_local_state_on_mismatch(
     *,
     env_name: str,
@@ -915,6 +943,12 @@ def _check_generation_id_and_wipe_local_state_on_mismatch(
             current,
             env_root,
         )
+        # Tear down the env's now-stale mngr agents + its Docker state
+        # container BEFORE wiping the local profile: destroying agents removes
+        # their host containers (and build images) via mngr, and the state
+        # container must be removed while the profile it derives user_id from
+        # still exists.
+        _destroy_agents_and_state_container_for_wipe(env_name)
         for subdir in _AUTO_WIPED_LOCAL_STATE_SUBDIRS:
             target = env_root / subdir
             if target.exists():
