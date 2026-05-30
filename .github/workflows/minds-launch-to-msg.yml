@@ -340,10 +340,23 @@ jobs:
           for P in $(pgrep -f '/Applications/Minds.app/Contents/MacOS/Minds' 2>/dev/null || true); do
             kill "$P" 2>/dev/null || true
           done
-          sleep 2
           for P in $(pgrep -f 'mngr forward' 2>/dev/null || true); do
             kill "$P" 2>/dev/null || true
           done
+          # Wait for the singleton lock to actually release; new
+          # Playwright Electron launch silently exits if the lock is held.
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if ! pgrep -f '/Applications/Minds.app/Contents/MacOS/Minds' >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          # Stale singleton socket / lock file -- Electron uses a Unix
+          # domain socket under Application Support keyed by the app
+          # bundle id. Removing it is safe once no process holds it.
+          rm -f "$HOME/Library/Application Support/Minds/SingletonSocket"     2>/dev/null || true
+          rm -f "$HOME/Library/Application Support/Minds/SingletonLock"       2>/dev/null || true
+          rm -f "$HOME/Library/Application Support/Minds/SingletonCookie"     2>/dev/null || true
 
       - name: drive slack flow via Playwright
         if: ${{ steps.slack_pre.outputs.ok == '1' }}
