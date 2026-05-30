@@ -287,8 +287,22 @@ async function dumpWindows(app, tag) {
         if (approve) {
           log(`clicking Approve via "${approve.selector}"`);
           await shot(approve.window, `approval-stage2-${i}s`);
-          try { await approve.locator.click({ timeout: 3_000 }); approvalStage = 3; }
-          catch (e) { log(`stage2 click failed: ${e.message}`); }
+          try {
+            await approve.locator.click({ timeout: 3_000 });
+            approvalStage = 3;
+            // Click lands and the gateway grants the permission, but
+            // claude won't retry the gated tool call on its own --
+            // it's still parked on "waiting for approval". Send a kick
+            // to make it retry.
+            await win.waitForTimeout(2000);
+            try {
+              await input.fill('Permission approved. Please retry the read-only Slack read now and respond with the prefix "TOK ' + NONCE + ':" followed by the message text.');
+              await input.press('Enter');
+              log('sent post-approval kick to agent');
+            } catch (e) {
+              log(`post-approval kick failed: ${e.message}`);
+            }
+          } catch (e) { log(`stage2 click failed: ${e.message}`); }
         }
       }
       // Dump windows + clickable inventory periodically per stage so we
