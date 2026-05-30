@@ -2020,6 +2020,37 @@ def test_run_restart_sequence_fails_when_stop_command_errors(tmp_path: Path) -> 
     assert "Stop step" in (tracker.get_last_restart_error(workspace_agent) or "")
 
 
+def test_run_restart_sequence_fails_when_stop_command_cannot_launch(tmp_path: Path) -> None:
+    """A launch failure (missing ``mngr`` binary) surfaces as RESTART_FAILED naming the stop step.
+
+    Exercises the path where ``_run_mngr`` lets the ``OSError`` propagate and the
+    restart sequence catches it at the call site -- rather than the prior
+    behavior of laundering the exception into a ``MngrRun.failure_reason``.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    tracker.mark_restarting(workspace_agent)
+    resolver = _resolver_with_system_services(workspace_agent, services_agent)
+    missing_binary = str(tmp_path / "definitely_not_a_real_mngr")
+
+    with ConcurrencyGroup(name="test-restart") as cg:
+        _run_restart_sequence(
+            workspace_agent_id=workspace_agent,
+            is_host_restart=False,
+            tracker=tracker,
+            backend_resolver=resolver,
+            mngr_binary=missing_binary,
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            mngr_forward_port=0,
+            mngr_forward_preauth_cookie=None,
+        )
+
+    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
+    assert "Stop step" in (tracker.get_last_restart_error(workspace_agent) or "")
+
+
 def test_run_restart_sequence_recovers_on_clean_dispatch_without_plugin(tmp_path: Path) -> None:
     """Clean stop+start with no plugin route to probe through recovers the agent to HEALTHY."""
     tracker = SystemInterfaceHealthTracker()
