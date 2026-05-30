@@ -273,6 +273,7 @@ jobs:
           [ -d "$HOME/.minds/mngr" ] && cp -R "$HOME/.minds/mngr"/*/events artifacts/agent-events 2>/dev/null || true
           log show --process Minds --last 5m 2>/dev/null > artifacts/macos-console.log || true
           ls -la "$HOME/.minds" > artifacts/minds-dir-listing.txt 2>&1 || true
+          [ -f /tmp/minds-electron.log ] && cp /tmp/minds-electron.log artifacts/ || true
           for f in /tmp/first-message-*.json /tmp/first-message-*.txt /tmp/first-message-*.html; do
             [ -f "$f" ] && cp "$f" artifacts/ 2>/dev/null || true
           done

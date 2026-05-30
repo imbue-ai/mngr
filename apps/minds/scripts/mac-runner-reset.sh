@@ -25,6 +25,14 @@ if command -v limactl >/dev/null 2>&1; then
   limactl delete --all >/dev/null 2>&1 || true
 fi
 
+log "wiping leftover /tmp diagnostic artifacts from prior runs"
+# The CI verify job's "collect diagnostic artifacts" step copies
+# /tmp/first-message-*.{txt,json,html} and /tmp/minds-electron.log
+# into the uploaded bundle. Without this, stale files from prior
+# runs get mixed in with the current run's output and obscure the
+# real failure signal.
+rm -f /tmp/first-message-*.txt /tmp/first-message-*.json /tmp/first-message-*.html /tmp/minds-electron.log 2>/dev/null || true
+
 log "removing ~/.minds and /Applications/minds.app"
 # `rm -rf` can race against a not-yet-fully-dead Minds backend process that
 # is still writing to ~/.minds/Cache or ~/.minds/Code Cache. Retry a few

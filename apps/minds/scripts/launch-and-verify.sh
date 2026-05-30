@@ -5,6 +5,7 @@
 set -uo pipefail
 
 EVENTS_LOG="$HOME/.minds/logs/minds-events.jsonl"
+ELECTRON_LOG="${ELECTRON_LOG:-/tmp/minds-electron.log}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-120}"
 
 log() { printf '[verify] %s\n' "$*" >&2; }
@@ -14,8 +15,16 @@ if [[ ! -d /Applications/minds.app ]]; then
   exit 2
 fi
 
-log "launching /Applications/minds.app"
-open /Applications/minds.app
+# Launch the binary directly so we can capture Electron's stdout/stderr
+# (the desktop_client backend uvicorn process is a child of Electron's
+# main process; its stderr is the only place a startup crash or hanging
+# `uv run` surfaces). `open /Applications/minds.app` discards that.
+# Quarantine was already cleared in mac-runner-reset.sh.
+: > "$ELECTRON_LOG"
+log "launching Minds binary, stdout/stderr -> $ELECTRON_LOG"
+nohup /Applications/minds.app/Contents/MacOS/Minds >"$ELECTRON_LOG" 2>&1 &
+ELECTRON_PID=$!
+log "  pid=$ELECTRON_PID"
 
 log "waiting up to ${TIMEOUT_SECONDS}s for ${EVENTS_LOG}"
 deadline=$(( SECONDS + TIMEOUT_SECONDS ))
@@ -31,6 +40,12 @@ done
 log "FAIL: backend did not write events log within ${TIMEOUT_SECONDS}s"
 log "Minds processes still alive:"
 pgrep -afl '/Applications/minds.app/Contents/' || echo "  (none)"
+log "Electron stdout/stderr ($ELECTRON_LOG):"
+if [[ -s "$ELECTRON_LOG" ]]; then
+  tail -100 "$ELECTRON_LOG"
+else
+  echo "  (empty)"
+fi
 log "Recent macOS unified-log entries from the Minds process:"
 /usr/bin/log show --process Minds --last 3m 2>/dev/null | tail -40 || true
 exit 1
