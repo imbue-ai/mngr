@@ -368,19 +368,18 @@ jobs:
           # SIGTERM the main process, give the clean-shutdown chain 8s,
           # then SIGKILL anything still alive (main + all child processes
           # incl. mngr forward, uv-spawned backend, latchkey gateway).
-          for P in $(pgrep -f '/Applications/Minds.app/Contents/MacOS/Minds' 2>/dev/null || true); do
+          # Note the case: macOS file system is case-insensitive but
+          # pgrep -f matches literal argv, and the actual install path
+          # in CI is /Applications/minds.app/ (lowercase). Match either.
+          for P in $(pgrep -fi '/Applications/minds\.app/Contents/MacOS/Minds' 2>/dev/null || true); do
             kill "$P" 2>/dev/null || true
           done
           for P in $(pgrep -f 'mngr forward' 2>/dev/null || true); do
             kill "$P" 2>/dev/null || true
           done
           sleep 8
-          # Anything still alive: hammer it. We also kill any process
-          # whose parent or argv mentions the bundle path -- main.js's
-          # singleton lock is held by the Electron main process, but
-          # macOS may also reserve a Mach port via Launch Services that
-          # only fully releases when the whole process tree is gone.
-          pkill -KILL -f '/Applications/Minds.app/Contents/MacOS/Minds' 2>/dev/null || true
+          pkill -KILL -fi '/Applications/minds\.app/Contents/MacOS/Minds' 2>/dev/null || true
+          pkill -KILL -fi '/Applications/minds\.app/Contents/Frameworks/Minds Helper' 2>/dev/null || true
           pkill -KILL -f 'mngr forward'                                 2>/dev/null || true
           pkill -KILL -f 'mngr observe'                                 2>/dev/null || true
           pkill -KILL -f 'mngr event'                                   2>/dev/null || true
@@ -390,14 +389,14 @@ jobs:
             -kill 2>/dev/null || true
           # Best-effort wait, longer this time.
           for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-            if ! pgrep -f '/Applications/Minds.app/Contents/MacOS/Minds' >/dev/null; then
+            if ! pgrep -fi '/Applications/minds\.app/Contents/MacOS/Minds' >/dev/null; then
               break
             fi
             sleep 1
           done
           # Echo what's left so we can see in CI if anything lingers.
           echo "--- remaining Minds processes after kill ---"
-          pgrep -afl 'Minds|mngr forward' 2>/dev/null || echo "(none)"
+          pgrep -afli 'minds\.app|mngr forward' 2>/dev/null || echo "(none)"
 
       - name: drive slack flow via Playwright
         if: ${{ steps.slack_pre.outputs.ok == '1' }}
