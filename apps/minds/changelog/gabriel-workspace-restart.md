@@ -132,15 +132,20 @@ Tiered system-interface restart for the minds recovery flow.
   Electron checks that set; if the id is not there, the existing
   recovery flow handles the unresponsive workspace via the
   ``system_interface_status`` SSE event, with no nav.
-- Minds now caches the workspace-agent → system-services-agent mapping
-  to a persistent ``system_services_agent_cache.json`` under the data
-  directory whenever discovery surfaces both agents on the same host.
-  ``get_system_services_agent_id`` falls back to the cache when live
-  discovery has lost the pair (the SSH-dead failure mode), so a restart
-  can still address the system-services agent for ``mngr stop`` /
-  ``mngr start``. Without this, a restart attempted while the docker
-  provider could not enumerate agents would fail with "Could not locate
-  the system-services agent for this workspace."
+- Minds now records the last-good per-host agent topology to a persistent
+  ``last_good_agent_topology.json`` under the data directory, updated
+  whenever discovery completely enumerates a host (its system-services
+  agent is present). ``get_system_services_agent_id`` runs the same
+  host-and-name search over the live snapshot first and falls back to this
+  topology when live discovery has lost the host (the SSH-dead failure
+  mode), so a restart can still address the system-services agent for
+  ``mngr stop`` / ``mngr start``. Without this, a restart attempted while
+  the docker provider could not enumerate agents would fail with "Could
+  not locate the system-services agent for this workspace." A host whose
+  enumeration is incomplete -- or that has dropped out of discovery
+  entirely -- keeps its last complete record, so a partial or empty
+  snapshot never erases a still-needed pairing (e.g. one wedged workspace
+  among several healthy ones).
 - Recovery diagnostics rewritten as a flat probe list. The host-health
   endpoint now returns ``probes: [{question, command, output, answer},
   ...]`` plus a derived ``dispatch_tier`` enum
