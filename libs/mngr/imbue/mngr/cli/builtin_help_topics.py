@@ -17,9 +17,9 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from imbue.mngr import hookimpl
+from imbue.mngr.cli.doc_links import imbue_mngr_doc_url
 from imbue.mngr.interfaces.help_topic import DocFile
 from imbue.mngr.interfaces.help_topic import TopicHelpPage
-from imbue.mngr.interfaces.help_topic import imbue_mngr_doc_url
 
 # Docs root resolution. In a wheel the docs are force-included under the package
 # at imbue/mngr/docs (parents[1]); in a source/editable checkout they live at

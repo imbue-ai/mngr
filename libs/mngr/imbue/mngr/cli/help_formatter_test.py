@@ -9,7 +9,6 @@ from click_option_group import optgroup
 
 from imbue.mngr.cli.common_opts import COMMON_OPTIONS_GROUP_NAME
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
-from imbue.mngr.cli.help_formatter import _rewrite_links_to_absolute
 from imbue.mngr.cli.help_formatter import _run_pager_with_subprocess
 from imbue.mngr.cli.help_formatter import _wrap_text
 from imbue.mngr.cli.help_formatter import _write_to_stdout
@@ -24,7 +23,6 @@ from imbue.mngr.cli.help_formatter import render_markdown
 from imbue.mngr.cli.help_formatter import run_pager
 from imbue.mngr.cli.help_formatter import show_help_with_pager
 from imbue.mngr.config.data_types import MngrConfig
-from imbue.mngr.interfaces.help_topic import imbue_mngr_doc_url
 from imbue.mngr.main import BUILTIN_COMMANDS
 from imbue.mngr.main import PLUGIN_COMMANDS
 from imbue.mngr.main import cli
@@ -891,40 +889,12 @@ def test_wrap_text_wraps_long_lines() -> None:
 
 
 # =============================================================================
-# Terminal link rewriting
+# render_markdown link rewriting
 # =============================================================================
 
+# Link-target resolution itself (and imbue_mngr_doc_url) is unit-tested in
+# doc_links_test.py; these cover render_markdown's use of it.
 _DOC_URL = "https://github.com/imbue-ai/mngr/blob/v1.2.3/libs/mngr_usage/docs/cron_recipes.md"
-
-
-def test_rewrite_links_anchor_resolves_against_same_file() -> None:
-    """An anchor-only target resolves to the doc's own URL plus the fragment."""
-    result = _rewrite_links_to_absolute("[Sec](#user-input-tracking)", _DOC_URL)
-    assert result == f"[Sec]({_DOC_URL}#user-input-tracking)"
-
-
-def test_rewrite_links_sibling_resolves_in_same_dir() -> None:
-    """A bare relative target resolves against the doc's directory."""
-    result = _rewrite_links_to_absolute("[Other](other.md)", _DOC_URL)
-    assert result == "[Other](https://github.com/imbue-ai/mngr/blob/v1.2.3/libs/mngr_usage/docs/other.md)"
-
-
-def test_rewrite_links_parent_dir_resolves_upward() -> None:
-    """A '../' target resolves up out of the doc's directory."""
-    result = _rewrite_links_to_absolute("[Readme](../README.md#x)", _DOC_URL)
-    assert result == "[Readme](https://github.com/imbue-ai/mngr/blob/v1.2.3/libs/mngr_usage/README.md#x)"
-
-
-def test_rewrite_links_absolute_url_unchanged() -> None:
-    """An already-absolute https link is left untouched."""
-    text = "[Site](https://example.com/page)"
-    assert _rewrite_links_to_absolute(text, _DOC_URL) == text
-
-
-def test_rewrite_links_mailto_unchanged() -> None:
-    """A mailto: link (has a scheme) is left untouched."""
-    text = "[Mail](mailto:a@b.com)"
-    assert _rewrite_links_to_absolute(text, _DOC_URL) == text
 
 
 def test_render_markdown_passthrough_when_not_ansi() -> None:
@@ -937,18 +907,6 @@ def test_render_markdown_rewrites_links_when_ansi() -> None:
     """With ANSI and a link_base, relative links are rewritten to absolute URLs."""
     output = render_markdown("[x](../README.md#y)", use_ansi=True, width=80, link_base=_DOC_URL)
     assert "https://github.com/imbue-ai/mngr/blob/v1.2.3/libs/mngr_usage/README.md#y" in output
-
-
-def test_imbue_mngr_doc_url_builds_pinned_blob_url() -> None:
-    """imbue_mngr_doc_url builds an imbue-ai/mngr blob URL ending in the repo-relative path."""
-    url = imbue_mngr_doc_url("libs/mngr/docs/concepts/idle_detection.md")
-    assert url.startswith("https://github.com/imbue-ai/mngr/blob/")
-    assert url.endswith("/libs/mngr/docs/concepts/idle_detection.md")
-    # The ref is either the installed release tag (vX.Y.Z) or the "main" fallback.
-    ref = url.removeprefix("https://github.com/imbue-ai/mngr/blob/").removesuffix(
-        "/libs/mngr/docs/concepts/idle_detection.md"
-    )
-    assert ref == "main" or ref.startswith("v")
 
 
 # =============================================================================
