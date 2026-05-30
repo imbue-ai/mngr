@@ -66,7 +66,7 @@ from imbue.minds.envs.local_store import env_root_exists
 from imbue.minds.envs.local_store import read_client_config_file
 from imbue.minds.envs.local_store import write_client_config
 from imbue.minds.envs.local_store import write_secrets_file
-from imbue.minds.envs.mngr_agent_cleanup import DestroyMngrAgentFn
+from imbue.minds.envs.mngr_agent_cleanup import DestroyMngrAgentsFn
 from imbue.minds.envs.mngr_agent_cleanup import destroy_all_mngr_agents_in_env
 from imbue.minds.envs.paths import client_config_file
 from imbue.minds.envs.paths import env_root_dir
@@ -294,6 +294,10 @@ ListCloudflareTunnelsFn = Callable[[DevEnvName, str, SecretStr], tuple[str, ...]
 # (tunnel_ids, account_id, api_token) -> None. Deletes the listed tunnels.
 DeleteCloudflareTunnelsFn = Callable[[tuple[str, ...], str, SecretStr], None]
 ReadPerEnvSecretValuesFn = Callable[[str, str, dict[str, str], ConcurrencyGroup], dict[str, str]]
+# (name, cg) -> None. Removes the env's mngr Docker state container +
+# backing volume, targeting the one exact container by name. No-op when
+# there is no Docker daemon. Real impl lives in ``envs.docker_cleanup``.
+CleanupStateContainerFn = Callable[[DevEnvName, ConcurrencyGroup], None]
 
 
 class Providers(FrozenModel):
@@ -376,11 +380,19 @@ class Providers(FrozenModel):
             "definitive failure or timeout."
         ),
     )
-    destroy_mngr_agent: DestroyMngrAgentFn = Field(
+    destroy_mngr_agents: DestroyMngrAgentsFn = Field(
         description=(
-            "(agent_id, mngr_host_dir, mngr_prefix, cg) -> `mngr destroy <agent_id>` "
+            "(agent_ids, mngr_host_dir, mngr_prefix, cg) -> single `mngr destroy -f <ids...>` "
             "with the env's MNGR_* vars exported. Used before cloud teardown so the env's "
             "agents stop cleanly before their resources go away."
+        ),
+    )
+    cleanup_state_container: CleanupStateContainerFn = Field(
+        description=(
+            "(name, cg) -> remove the env's mngr Docker state container + backing volume. "
+            "Targets the one exact container by name; no-op when there is no Docker daemon. "
+            "Run right after the mngr-agent teardown so the singleton state container "
+            "(which `mngr destroy` does not touch) doesn't outlive the env."
         ),
     )
     wipe_supertokens_app_data: WipeSuperTokensAppFn = Field(
@@ -1180,7 +1192,8 @@ def destroy_env(
     # resources they reference.
     if keep_agents:
         logger.warning(
-            "minds env destroy {!r}: --keep-agents passed; skipping mngr-agent teardown. "
+            "minds env destroy {!r}: --keep-agents passed; skipping mngr-agent teardown "
+            "(and the Docker state-container cleanup, since kept agents still rely on it). "
             "Run `mngr destroy <agent>` manually for any agents bound to this env.",
             str(name),
         )
@@ -1188,11 +1201,19 @@ def destroy_env(
         with info_span("Destroying mngr agents under env {!r}", str(name)):
             destroyed_count = destroy_all_mngr_agents_in_env(
                 name,
-                destroy_agent=providers.destroy_mngr_agent,
+                destroy_agents=providers.destroy_mngr_agents,
                 parent_concurrency_group=parent_concurrency_group,
             )
             if destroyed_count:
                 logger.info("Destroyed {} mngr agent(s) under env {!r}", destroyed_count, str(name))
+
+        # Step 1b: remove the env's mngr Docker state container + backing
+        # volume. The singleton state container is independent of individual
+        # agents (it is not torn down by `mngr destroy`), so it must be removed
+        # explicitly -- before the env root, and the profile it derives user_id
+        # from, are gone. Skipped under keep_agents since kept agents need it.
+        with info_span("Cleaning up Docker state container for env {!r}", str(name)):
+            providers.cleanup_state_container(name, parent_concurrency_group)
 
     # Step 2: OVH VPSes tagged with this env.
     with info_span("Cleaning up OVH VPSes tagged for env {!r}", str(name)):

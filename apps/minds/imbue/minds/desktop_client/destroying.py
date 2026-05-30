@@ -196,12 +196,15 @@ def _build_destroy_command(agent_id: AgentId, host_id: str | None, mngr_binary: 
     Without a host_id (lookup failed before spawn), falls back to
     single-agent destroy.
 
-    Lease release is intentionally NOT chained here. For imbue_cloud
-    agents the lease lifecycle is owned by
-    ``mngr_imbue_cloud.instance.delete_host``, called by mngr's GC after
-    the destroyed-host grace period. Eagerly chaining
-    ``mngr imbue_cloud hosts release`` from minds was duplicating that
-    responsibility in two places.
+    Lease release is not chained explicitly because ``mngr destroy`` now
+    handles it: when the last agent on a host is destroyed, ``mngr
+    destroy`` calls ``provider.destroy_host`` which (for ``imbue_cloud``)
+    wipes the on-VPS data and releases the lease back to the pool. The
+    destroyed-host grace period (``destroyed_host_persisted_seconds``)
+    then only retains historical state -- the cloud-side resources
+    (lease, VPS, btrfs subvolume, ...) are gone the moment this command
+    returns. The same chain runs again if ``mngr delete`` is called later
+    by GC; it's idempotent on an already-released lease.
     """
     if host_id is not None:
         # ``mngr list ... --ids`` writes one id per line; ``mngr destroy -f -`` reads

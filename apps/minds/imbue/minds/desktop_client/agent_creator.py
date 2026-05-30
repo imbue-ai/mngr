@@ -38,15 +38,21 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
+from imbue.minds.desktop_client.backup_provisioning import configure_backups_for_host
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.notification import NotificationRequest
+from imbue.minds.desktop_client.notification import NotificationUrgency
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.primitives import AIProvider
+from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
@@ -55,6 +61,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.utils.git_utils import rsync_worktree_over_clone
 from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
@@ -376,42 +383,16 @@ def _rsync_worktree_over_clone(
     *,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> None:
-    """Rsync a worktree's working directory over a shallow clone.
+    """Rsync a worktree's working directory over a fresh clone.
 
-    Copies all files from the worktree into the clone, preserving the
-    clone's ``.git`` directory (which is a proper standalone git dir,
-    unlike the worktree's ``.git`` file). This ensures uncommitted
-    changes in the worktree are present in the clone.
+    Thin wrapper around :func:`imbue.mngr.utils.git_utils.rsync_worktree_over_clone`
+    that owns the per-call ``rsync-worktree`` child CG. The shared helper
+    is also what ``mngr_vps_docker`` uses for its docker-build-context
+    assembly, so the two paths can't drift again.
     """
-    logger.debug("Rsyncing worktree {} over clone {}", worktree_dir, clone_dir)
-    command = [
-        "rsync",
-        "-a",
-        "--delete",
-        "--exclude=.git",
-        "--exclude=__pycache__",
-        "--exclude=.venv",
-        "--exclude=node_modules",
-        "--exclude=.mypy_cache",
-        "--exclude=.ruff_cache",
-        "--exclude=.pytest_cache",
-        "--exclude=.test_output",
-        f"{worktree_dir}/",
-        f"{clone_dir}/",
-    ]
     cg = _make_child_cg("rsync-worktree", parent_cg)
     with cg:
-        result = cg.run_process_to_completion(
-            command=command,
-            is_checked_after=False,
-            on_output=on_output,
-        )
-    if result.returncode != 0:
-        logger.warning(
-            "rsync worktree over clone exited with code {}: {}",
-            result.returncode,
-            result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
-        )
+        rsync_worktree_over_clone(worktree_dir, clone_dir, cg=cg, on_output=on_output)
 
 
 # Constant agent name for every minds-created agent. Minds runs one agent
@@ -959,6 +940,7 @@ class AgentCreator(MutableModel):
         anthropic_api_key: str = "",
         gh_token: str = "",
         on_created: Callable[[AgentId], None] | None = None,
+        backup_request: BackupSetupRequest | None = None,
     ) -> CreationId:
         """Start creating an agent from a git URL or local path in a background thread.
 
@@ -1030,6 +1012,7 @@ class AgentCreator(MutableModel):
                 anthropic_api_key,
                 gh_token,
                 on_created,
+                backup_request,
             ),
             daemon=True,
             name="agent-creator-{}".format(creation_id),
@@ -1088,6 +1071,7 @@ class AgentCreator(MutableModel):
         anthropic_api_key: str = "",
         gh_token: str = "",
         on_created: Callable[[AgentId], None] | None = None,
+        backup_request: BackupSetupRequest | None = None,
     ) -> None:
         """Background thread that resolves the repo source and creates an mngr agent.
 
@@ -1151,6 +1135,7 @@ class AgentCreator(MutableModel):
                         # container's bare receiver also rejects shallow source
                         # packs with "shallow update not allowed". Cloning
                         # deeply avoids both. Local file:// clones are cheap.
+                        # Use a stable path based on repo name so Docker layer caching works.
                         log_queue.put("[minds] Cloning local worktree: {}".format(resolved_path))
                         repo_name = extract_repo_name(repo_source)
                         clone_target = Path(tempfile.gettempdir()) / "minds-clone-{}".format(repo_name)
@@ -1371,6 +1356,27 @@ class AgentCreator(MutableModel):
                 if on_created is not None:
                     on_created(canonical_id)
 
+                # Configure restic backups asynchronously on a detached
+                # thread (mirrors the Cloudflare tunnel-token path): bucket
+                # creation + injection is a multi-second round-trip we don't
+                # want to block the redirect on, and a failure here is
+                # non-fatal to the already-created workspace. Skipped (no
+                # thread spawned) for CONFIGURE_LATER.
+                if backup_request is not None and backup_request.backup_provider is not BackupProvider.CONFIGURE_LATER:
+                    self.root_concurrency_group.start_new_thread(
+                        target=self._provision_backups,
+                        kwargs={
+                            "agent_id": canonical_id,
+                            "host_id": str(canonical_host_id),
+                            "backup_request": backup_request,
+                        },
+                        name=f"backup-setup-{canonical_id}",
+                        # is_checked=False so a failing backup task does not
+                        # poison the root CG; failures are surfaced via
+                        # notification + loguru from within _provision_backups.
+                        is_checked=False,
+                    )
+
         except (GitCloneError, GitOperationError, MngrCommandError, ImbueCloudCliError, ValueError, OSError) as e:
             logger.opt(exception=e).error("Failed to create agent for creation {}", creation_id)
             log_queue.put("[minds] ERROR: {}".format(e))
@@ -1401,6 +1407,42 @@ class AgentCreator(MutableModel):
             logger.warning("Failed to materialize latchkey permissions handle: {}", e)
             log_queue.put("[minds] Warning: latchkey wiring skipped: {}".format(e))
             return AgentLatchkeySetup(env={}, opaque_permissions_path=None)
+
+    def _provision_backups(
+        self,
+        *,
+        agent_id: AgentId,
+        host_id: str,
+        backup_request: BackupSetupRequest,
+    ) -> None:
+        """Detached-thread entry point: configure restic backups for the new host.
+
+        Failures are surfaced as an OS notification (a normal error popup)
+        and logged; they are non-fatal to the already-created workspace --
+        the user can configure backups later.
+        """
+        try:
+            configure_backups_for_host(
+                agent_id=agent_id,
+                host_id=host_id,
+                request=backup_request,
+                imbue_cloud_cli=self.imbue_cloud_cli,
+                paths=self.paths,
+                parent_cg=self.root_concurrency_group,
+            )
+        except (BackupProvisioningError, ImbueCloudCliError) as exc:
+            logger.opt(exception=exc).warning("Failed to configure backups for agent {}", agent_id)
+            self.notification_dispatcher.dispatch(
+                NotificationRequest(
+                    title="Backup setup failed",
+                    message=(
+                        f"Couldn't configure backups for '{str(agent_id)[:8]}'. "
+                        f"The workspace is running; backups are not yet set up. Error: {exc}"
+                    ),
+                    urgency=NotificationUrgency.NORMAL,
+                ),
+                agent_display_name=str(agent_id)[:8],
+            )
 
     def _build_redirect_url(self, agent_id: AgentId) -> str:
         """Build the absolute URL the UI should navigate to after creation.

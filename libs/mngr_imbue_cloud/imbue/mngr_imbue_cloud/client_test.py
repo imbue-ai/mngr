@@ -18,6 +18,10 @@ from imbue.mngr_imbue_cloud.client import _parse_auth_policy
 from imbue.mngr_imbue_cloud.data_types import AuthPolicy
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketExistsError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketLimitError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotEmptyError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotFoundError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 
@@ -182,3 +186,170 @@ def test_parse_auth_policy_ignores_unknown_include_types() -> None:
         }
     )
     assert parsed == AuthPolicy(emails=("a@b.com",))
+
+
+# -- R2 buckets --
+#
+# Same MockTransport approach as above, but patched through a single loop so the
+# monkeypatch ratchet counts one occurrence regardless of how many HTTP verbs
+# the bucket routes exercise.
+
+
+def _install_mock_httpx(
+    monkeypatch: pytest.MonkeyPatch,
+    handler,
+) -> ImbueCloudConnectorClient:
+    transport = httpx.MockTransport(handler)
+
+    def _make(method_name: str):
+        def _call(*args, **kwargs):
+            with httpx.Client(transport=transport) as inner:
+                return inner.request(method_name, *args, **kwargs)
+
+        return _call
+
+    for method_name in ("POST", "GET", "DELETE", "PUT"):
+        monkeypatch.setattr(httpx, method_name.lower(), _make(method_name))
+    return ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
+
+
+def _bucket_create_response() -> dict:
+    endpoint = "https://acct.r2.cloudflarestorage.com"
+    return {
+        "bucket": {"bucket_name": "u--data", "s3_endpoint": endpoint},
+        "key": {
+            "access_key_id": "akid1",
+            "secret_access_key": "deadbeef",
+            "s3_endpoint": endpoint,
+            "bucket_name": "u--data",
+            "access": "readwrite",
+        },
+    }
+
+
+def test_create_bucket_parses_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/buckets"
+        assert _json.loads(request.content) == {"name": "data", "access": "readwrite"}
+        return httpx.Response(200, json=_bucket_create_response())
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    result = client.create_bucket(SecretStr("tok"), "data", "readwrite")
+    assert result.bucket.bucket_name == "u--data"
+    assert result.key.access_key_id == "akid1"
+    assert result.key.secret_access_key.get_secret_value() == "deadbeef"
+    assert result.key.access == "readwrite"
+
+
+def test_create_bucket_exists_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"detail": "Bucket already exists: u--data"})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudBucketExistsError):
+        client.create_bucket(SecretStr("tok"), "data", "readwrite")
+
+
+def test_create_bucket_limit_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"detail": "Account is at the maximum of 50 buckets; destroy one first."})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudBucketLimitError):
+        client.create_bucket(SecretStr("tok"), "data", "readwrite")
+
+
+def test_destroy_bucket_not_empty_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"detail": "Bucket is not empty: u--data. Empty it before destroying."})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudBucketNotEmptyError):
+        client.destroy_bucket(SecretStr("tok"), "data")
+
+
+def test_get_bucket_info_not_found_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"detail": "Bucket not found: u--data"})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudBucketNotFoundError):
+        client.get_bucket_info(SecretStr("tok"), "data")
+
+
+def test_list_buckets_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/buckets"
+        return httpx.Response(
+            200, json=[{"bucket_name": "u--a", "s3_endpoint": "https://acct.r2.cloudflarestorage.com"}]
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    items = client.list_buckets(SecretStr("tok"))
+    assert [b.bucket_name for b in items] == ["u--a"]
+
+
+def test_create_bucket_key_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/buckets/data/keys"
+        assert _json.loads(request.content) == {"access": "read", "alias": "ro"}
+        return httpx.Response(
+            200,
+            json={
+                "access_key_id": "akid2",
+                "secret_access_key": "s2",
+                "s3_endpoint": "https://acct.r2.cloudflarestorage.com",
+                "bucket_name": "u--data",
+                "access": "read",
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    material = client.create_bucket_key(SecretStr("tok"), "data", "ro", "read")
+    assert material.access == "read"
+    assert material.secret_access_key.get_secret_value() == "s2"
+
+
+def test_list_bucket_keys_account_wide_uses_bucket_keys_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        return httpx.Response(200, json=[])
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    client.list_bucket_keys(SecretStr("tok"), None)
+    assert seen["path"] == "/bucket-keys"
+
+
+def test_list_bucket_keys_per_bucket_uses_scoped_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "access_key_id": "akid",
+                    "bucket_name": "u--data",
+                    "access": "readwrite",
+                    "alias": "default",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                }
+            ],
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    items = client.list_bucket_keys(SecretStr("tok"), "data")
+    assert seen["path"] == "/buckets/data/keys"
+    assert items[0].access_key_id == "akid"
+
+
+def test_destroy_bucket_key_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/bucket-keys/akid1"
+        return httpx.Response(200, json={"status": "deleted"})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    client.destroy_bucket_key(SecretStr("tok"), "akid1")

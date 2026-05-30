@@ -18,3 +18,4 @@ minimumReleaseAge: 20160
 minimumReleaseAgeExclude:
   - latchkey
   - electron
+  - "@imbue-ai/detent"

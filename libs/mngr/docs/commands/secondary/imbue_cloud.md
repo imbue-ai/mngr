@@ -324,6 +324,141 @@ mngr imbue_cloud keys litellm delete [OPTIONS] KEY_ID
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
 
+## mngr imbue_cloud bucket
+
+**Usage:**
+
+```text
+mngr imbue_cloud bucket [OPTIONS] COMMAND [ARGS]...
+```
+**Options:**
+
+
+## mngr imbue_cloud bucket create
+
+**Usage:**
+
+```text
+mngr imbue_cloud bucket create [OPTIONS] NAME
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--access` | choice (`read` &#x7C; `readwrite`) | Access scope for the default key minted with the bucket | `readwrite` |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud bucket list
+
+**Usage:**
+
+```text
+mngr imbue_cloud bucket list [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud bucket info
+
+**Usage:**
+
+```text
+mngr imbue_cloud bucket info [OPTIONS] NAME
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud bucket destroy
+
+**Usage:**
+
+```text
+mngr imbue_cloud bucket destroy [OPTIONS] NAME
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud bucket keys
+
+**Usage:**
+
+```text
+mngr imbue_cloud bucket keys [OPTIONS] COMMAND [ARGS]...
+```
+**Options:**
+
+
+## mngr imbue_cloud bucket keys create
+
+**Usage:**
+
+```text
+mngr imbue_cloud bucket keys create [OPTIONS] BUCKET_NAME
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--alias` | text | Optional human-readable alias for the key | None |
+| `--access` | choice (`read` &#x7C; `readwrite`) | Access scope for the key | `readwrite` |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud bucket keys list
+
+**Usage:**
+
+```text
+mngr imbue_cloud bucket keys list [OPTIONS] [BUCKET_NAME]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud bucket keys destroy
+
+**Usage:**
+
+```text
+mngr imbue_cloud bucket keys destroy [OPTIONS] ACCESS_KEY_ID
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
 ## mngr imbue_cloud tunnels
 
 **Usage:**
