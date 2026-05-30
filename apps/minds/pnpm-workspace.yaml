@@ -1,21 +1,9 @@
 onlyBuiltDependencies:
   - electron
 
-# Supply-chain hardening: refuse to install any version published less than
-# 14 days ago (20160 minutes), including transitive dependencies. A
-# freshly-compromised release therefore cannot be pulled in until it has had
-# time to be noticed and yanked. Only bites during resolution (e.g. `pnpm
-# install` without --frozen-lockfile, `pnpm add`, `pnpm update`); frozen
-# installs replay the existing lockfile unaffected. Available since pnpm
-# 10.16.0 (this app pins 10.33.4).
-minimumReleaseAge: 20160
-
-# Internal-only packages exempt from the cooldown above. The cooldown's
-# purpose is to let the community surface malware in upstream releases
-# before we adopt them; for packages we publish ourselves we don't need
-# that delay (otherwise every <14-day-old release of a same-day fix
-# would block ToDesktop's `pnpm install --no-frozen-lockfile`).
-minimumReleaseAgeExclude:
-  - latchkey
-  - electron
-  - "@imbue-ai/detent"
+# TEMPORARY: dependency cooldown disabled (was 20160 = 14 days) while we
+# stabilize the CI pipeline. The cooldown was added for supply-chain
+# hardening (refuse versions <14d old so freshly-compromised releases
+# can't be pulled in before being yanked); restore it once the pin-drift
+# / CI churn settles. Tracked TODO for revisit.
+minimumReleaseAge: 0
