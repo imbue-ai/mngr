@@ -82,9 +82,15 @@ from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
 # How long `minds run` waits for the spawned `mngr forward` plugin to report
 # its bound port via a `listening` envelope before treating startup as failed.
-# The plugin emits this from its FastAPI lifespan startup, so the wait only
-# needs to cover the subprocess's own interpreter start and imports.
-_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS: Final[float] = 5.0
+# The plugin emits this from its FastAPI lifespan startup, so on a warm
+# install the wait only needs to cover the subprocess's own interpreter
+# start and imports. On a cold install (vanilla Mac, no `~/.minds/.venv`),
+# uv has to download the python toolchain + install the venv + load
+# plugins first; that can take 30-60s on a fresh machine. A 5s budget was
+# tight enough to deterministically fail every first-time-user launch on
+# a clean Mac (proven via Tart VM). Give it 120s to comfortably cover
+# cold-install while still surfacing a real wedge before the user gives up.
+_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS: Final[float] = 120.0
 
 # Env var read by the bundled ``minds-api-proxy`` gateway extension to
 # decide where to forward inbound proxy requests. Published to the
