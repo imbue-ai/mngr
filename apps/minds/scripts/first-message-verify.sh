@@ -237,7 +237,7 @@ VM_NAME="minds-${HOST_NAME}"
 TMUX_SESSION="minds-${AGENT_NAME}"
 reply_deadline=$((SECONDS + REPLY_TIMEOUT_SECONDS))
 while (( SECONDS < reply_deadline )); do
-  pane=$(limactl shell "$VM_NAME" -- tmux capture-pane -t "$TMUX_SESSION" -pS -500 2>/dev/null || echo "")
+  pane=$(limactl shell "$VM_NAME" -- tmux capture-pane -t "=$TMUX_SESSION" -pS -500 2>/dev/null || echo "")
   if [[ -n "$pane" ]]; then
     # Look for the expected substring as a model reply. The user's
     # prompt is also echoed in the pane (after the `❯` prompt), so a
@@ -270,7 +270,7 @@ if [[ ! -s "$REPLY_FILE" ]]; then
     echo "=== tmux ls ==="; tmux ls 2>&1 || true
     for S in $(tmux ls -F "#{session_name}" 2>/dev/null); do
       echo "=== tmux capture-pane $S ==="
-      tmux capture-pane -t "$S" -pS -500 2>&1 || true
+      tmux capture-pane -t "=$S" -pS -500 2>&1 || true
     done
     echo "=== agent processes ==="
     ps auxe 2>&1 | grep -iE "claude|mngr" | grep -v grep | head -20

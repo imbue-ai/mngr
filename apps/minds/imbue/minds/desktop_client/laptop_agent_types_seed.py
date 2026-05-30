@@ -14,6 +14,7 @@ mapping there lets every laptop-side mngr resolve `type=main` -> ClaudeAgent
 without affecting the system-wide ``~/.mngr/`` install used outside minds.
 """
 
+import os
 from pathlib import Path
 
 from loguru import logger
@@ -21,6 +22,11 @@ from loguru import logger
 from imbue.mngr.config.loader import get_or_create_profile_dir
 
 _AGENT_TYPES_MAIN_MARKER = "[agent_types.main]"
+
+# When this file is seeded inside a pytest run, mngr's config loader
+# refuses to read it unless this key is set, by design (configs in
+# pytest are explicit opt-in to keep prod state out of test runs).
+_PYTEST_OPT_IN_LINE = "is_allowed_in_pytest = true\n"
 
 _SEED_BLOCK = """
 # Seeded by minds.app at startup so laptop-side mngr (cwd=$HOME) can
@@ -55,5 +61,10 @@ def seed_laptop_agent_types_for_minds(host_dir: Path) -> None:
     existing = settings_path.read_text() if settings_path.exists() else ""
     if _AGENT_TYPES_MAIN_MARKER in existing:
         return
-    settings_path.write_text(existing + _SEED_BLOCK)
+    pytest_opt_in = (
+        _PYTEST_OPT_IN_LINE
+        if "PYTEST_CURRENT_TEST" in os.environ and _PYTEST_OPT_IN_LINE.strip() not in existing
+        else ""
+    )
+    settings_path.write_text(existing + pytest_opt_in + _SEED_BLOCK)
     logger.info("seeded [agent_types.main] into {}", settings_path)
