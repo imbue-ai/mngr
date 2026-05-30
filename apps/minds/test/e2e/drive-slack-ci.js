@@ -104,20 +104,28 @@ async function findPermissionRequestEntry(app) {
   return null;
 }
 async function findApproveButton(app) {
-  const w = findRequestsPanelWindow(app);
-  if (!w) return null;
-  for (const sel of [
-    'button:has-text("Approve")',
-    'button:has-text("Allow")',
-    'button:has-text("Grant")',
-    'text=/^\\s*Approve\\s*$/i',
-  ]) {
-    try {
-      const loc = w.locator(sel).first();
-      if (await loc.count() > 0 && await loc.isVisible({ timeout: 100 }).catch(() => false)) {
-        return { locator: loc, selector: sel, window: w };
-      }
-    } catch (_) {}
+  // Approve lives in the per-request detail window opened by clicking
+  // the request entry: /requests/<id>, title="Permission request: ...".
+  // Fall back to scanning all windows in case the layout changes.
+  const windows = app.windows();
+  const ordered = [
+    ...windows.filter(w => { try { return /\/requests\/[a-f0-9-]+/.test(w.url()); } catch (_) { return false; } }),
+    ...windows,
+  ];
+  for (const w of ordered) {
+    for (const sel of [
+      'button:has-text("Approve")',
+      'button:has-text("Allow")',
+      'button:has-text("Grant")',
+      'text=/^\\s*Approve\\s*$/i',
+    ]) {
+      try {
+        const loc = w.locator(sel).first();
+        if (await loc.count() > 0 && await loc.isVisible({ timeout: 100 }).catch(() => false)) {
+          return { locator: loc, selector: sel, window: w };
+        }
+      } catch (_) {}
+    }
   }
   return null;
 }
