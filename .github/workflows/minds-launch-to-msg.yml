@@ -187,6 +187,24 @@ jobs:
             echo "- url: ${URL:-<none>}"
             echo "- dashboard: https://app.todesktop.com/apps/${APP_ID}/builds/${BID}"
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: cancel ToDesktop build if workflow cancelled or build job failed
+        # Fires on user-cancelled workflow or on pnpm-dist failure once an
+        # upload has happened. The buildId is only known after the upload
+        # step prints "Retrieved build ID: ...", which lives in
+        # /tmp/minds-dist.log; if the pre-upload phase failed there will
+        # be no id to cancel and this is a clean no-op.
+        if: ${{ always() && (cancelled() || failure()) && steps.existing.outputs.url == '' }}
+        run: |
+          BUILD_ID=$(grep -oE 'Retrieved build ID: [a-z0-9]+' /tmp/minds-dist.log 2>/dev/null | awk '{print $NF}' | tail -1 || true)
+          if [[ -z "$BUILD_ID" ]]; then
+            echo "no build ID in /tmp/minds-dist.log -- ToDesktop upload didn't happen, nothing to cancel"
+            exit 0
+          fi
+          echo "cancelling orphaned ToDesktop build $BUILD_ID"
+          bash apps/minds/scripts/cancel-todesktop-build.sh "$APP_ID" "$BUILD_ID" || {
+            echo "::warning::cancel-todesktop-build.sh failed (build may have already completed/failed); see logs"
+            exit 0
+          }
       - name: upload build log
         if: always()
         uses: actions/upload-artifact@v4
