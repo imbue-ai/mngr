@@ -310,10 +310,13 @@ def test_assemble_command_premakes_hooks_agents_dir(antigravity_agent: Antigravi
 def test_assemble_command_preserves_user_args_when_auto_allow_enabled(
     antigravity_agent_auto_allow: AntigravityAgent,
 ) -> None:
-    """User-supplied agent_args still land right after `agy`, before the appended flags."""
+    """User-supplied agent_args land right after `agy`, with the auto-allow flag still appended after."""
     agent = antigravity_agent_auto_allow
     command = str(agent.assemble_command(agent.host, ("--add-dir", "/tmp"), command_override=None))
     assert "agy --add-dir /tmp --log-file" in command
+    # The user args do not displace the appended auto-allow flag.
+    assert "--dangerously-skip-permissions" in command
+    assert command.index("agy --add-dir /tmp") < command.index("--dangerously-skip-permissions")
 
 
 def test_assemble_command_launches_background_tasks_supervisor(antigravity_agent: AntigravityAgent) -> None:
