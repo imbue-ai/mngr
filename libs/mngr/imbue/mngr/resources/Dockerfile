@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nano \
     openssh-server \
     procps \
+    restic \
     ripgrep \
     rsync \
     tini \
