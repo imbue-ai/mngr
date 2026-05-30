@@ -356,12 +356,9 @@ jobs:
         # `just test-offload-minds-snapshot <image-id>` instead.
         run: PYTEST_MAX_DURATION_SECONDS=600 uv run pytest -n 0 --timeout 300 --no-cov --cov-fail-under=0 -v --tb=short -m '(docker or docker_sdk) and not release and not minds_electron and not minds_snapshot_resume'
 
-  # Python tests that shell out to a Node.js runtime (`@pytest.mark.node`,
-  # the node resource guard). They need only `node` on PATH -- no pnpm /
-  # Electron native deps / xvfb / Docker
-  # -- so they get a lightweight dedicated runner rather than riding the
-  # heavier test-docker-electron job. The shared mngr Modal image has no Node,
-  # so these are excluded from offload (see offload-modal.toml).
+  # The `node`-marked tests need only a Node runtime, not the
+  # Electron/docker/xvfb rig of test-docker-electron. Offload's Modal image
+  # has no Node, so they run here instead.
   test-node:
     if: github.ref != 'refs/heads/release'
     runs-on: ubuntu-latest
