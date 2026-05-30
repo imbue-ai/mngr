@@ -254,12 +254,31 @@ async function dumpWindows(app, tag) {
   log('typed + sent; watching for approval UI and canned body');
 
   // Approval is up to 3 clicks: chatbox icon (if panel not open) ->
-  // request entry -> Approve. Re-check each loop -- the panel can
-  // open later when the agent triggers it via the gateway, so the
-  // initial state isn't sticky.
+  // request entry -> Approve.
+  // Wait for the agent to emit its "requested permission" signal in
+  // the chat panel before opening the requests-panel. Opening it
+  // before the gateway has stored the request leaves the panel
+  // showing "Requests (0)" with no re-render when the entry lands.
   let approvalStage = 0;
+  let waitingForAgentRequest = true;
   for (let i = 0; i < 240; i++) {
     if (approvalStage < 3) {
+      // Gate stage 0 on the agent having actually requested permission
+      // in chat. Opening the panel before the request reaches the
+      // gateway storage shows "Requests (0)" with no re-render.
+      if (waitingForAgentRequest) {
+        const chatBody = await win.evaluate(() => document.body.innerText).catch(() => '');
+        if (/requested.*slack|slack permission|wait.*your approval/i.test(chatBody)) {
+          log(`agent emitted permission request; opening panel now`);
+          waitingForAgentRequest = false;
+          // Small wait so the gateway has time to persist the request
+          // entry before the panel mounts.
+          await win.waitForTimeout(2000);
+        }
+      }
+      if (waitingForAgentRequest) {
+        // Don't try to click yet; the panel would just be empty.
+      } else {
       // If the requests-panel auto-opened (sometimes minds.app opens
       // it when a request lands), skip stage 0.
       if (approvalStage === 0 && findRequestsPanelWindow(app)) {
@@ -305,6 +324,7 @@ async function dumpWindows(app, tag) {
           } catch (e) { log(`stage2 click failed: ${e.message}`); }
         }
       }
+      } // close `else (waitingForAgentRequest)`
       // Dump windows + clickable inventory periodically per stage so we
       // see how the requests-panel evolves (entries appear when the
       // agent's permission request lands -- can take 20-60s after the
