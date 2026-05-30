@@ -76,6 +76,7 @@ function findRequestsPanelWindow(app) {
 async function findPermissionRequestEntry(app) {
   const w = findRequestsPanelWindow(app);
   if (!w) return null;
+  // Try specific selectors first, then generic clickables.
   for (const sel of [
     'text=/slack/i',
     'text=/read.?only/i',
@@ -84,11 +85,19 @@ async function findPermissionRequestEntry(app) {
     'li',
     'button:has-text("Slack")',
     '[data-testid*="request" i]',
+    // Generic: any clickable item in the panel body.
+    'button',
+    '[role="button"]',
+    'div[onclick], div[role="button"]',
   ]) {
     try {
       const loc = w.locator(sel).first();
       if (await loc.count() > 0 && await loc.isVisible({ timeout: 100 }).catch(() => false)) {
-        return { locator: loc, selector: sel, window: w };
+        const text = (await loc.innerText().catch(() => '')).trim();
+        // Skip clearly-irrelevant generic buttons (close, back, etc.)
+        if (/^(close|back|forward|home|projects|sign in|log in|requests|cancel)$/i.test(text)) continue;
+        if (text.length === 0 && sel === 'button') continue; // skip empty icon-only buttons
+        return { locator: loc, selector: sel, window: w, text };
       }
     } catch (_) {}
   }
@@ -261,15 +270,14 @@ async function dumpWindows(app, tag) {
           catch (e) { log(`stage2 click failed: ${e.message}`); }
         }
       }
-      // Dump windows + clickable inventory each time we sit on the same
-      // stage for 10s, but only once per stage.
-      if (approvalStage < 3) {
+      // Dump windows + clickable inventory periodically per stage so we
+      // see how the requests-panel evolves (entries appear when the
+      // agent's permission request lands -- can take 20-60s after the
+      // tool call fires).
+      if (approvalStage < 3 && i > 0 && i % 30 === 0) {
         const tag = `stage${approvalStage}-t${i}s`;
-        if (!dumpedOnce[approvalStage] && (i === 10 + approvalStage * 5)) {
-          log(`--- dump: stuck on stage ${approvalStage} at ${i}s ---`);
-          await dumpWindows(app, tag);
-          dumpedOnce[approvalStage] = true;
-        }
+        log(`--- dump: stuck on stage ${approvalStage} at ${i}s ---`);
+        await dumpWindows(app, tag);
       }
     }
 
