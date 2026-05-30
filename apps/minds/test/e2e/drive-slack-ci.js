@@ -45,25 +45,120 @@ fs.mkdirSync(DIR, { recursive: true });
 function log(m) { console.log(`[${Math.floor((Date.now()-T0)/1000)}s] ${m}`); }
 async function shot(p, n) { try { await p.screenshot({ path: path.join(DIR, `${n}.png`) }); } catch (_) {} }
 
-async function findApprovalUi(win) {
+// User's described flow:
+//   1. Click chatbox icon in the right side panel (opens the panel).
+//   2. Click the permission request entry inside that panel.
+//   3. Click "Approve". The panel auto-closes.
+// Steps 1+2 are in the main shell window (NOT the chat content frame).
+// Search every Electron window. We need a stateful click-progression
+// because the buttons are gated on the previous click landing.
+async function openRightPanel(app) {
+  // Step 1: find and click the chatbox icon (anything that opens the
+  // requests panel). Common patterns for icon-only buttons:
+  //   - aria-label match
+  //   - title attr match
+  //   - button containing an svg icon at a known position
   const candidates = [
-    'button:has-text("Approve")',
-    'button:has-text("Allow")',
-    'button:has-text("Grant")',
-    'a:has-text("Approve")',
-    'a:has-text("Allow")',
-    '[data-action*="approve" i]',
-    '[data-action*="allow" i]',
+    '[aria-label*="permission" i]',
+    '[aria-label*="request" i]',
+    '[aria-label*="chat" i]',
+    '[title*="permission" i]',
+    '[title*="request" i]',
+    'button[aria-label*="message" i]',
+    // The user said it's an icon -- try common locations
+    'button:has(svg)',
   ];
-  for (const sel of candidates) {
-    try {
-      const loc = win.locator(sel).first();
-      if (await loc.count() > 0 && await loc.isVisible({ timeout: 100 })) {
-        return { locator: loc, selector: sel };
-      }
-    } catch (_) {}
+  for (const w of app.windows()) {
+    for (const sel of candidates) {
+      try {
+        const all = await w.locator(sel).all();
+        for (const loc of all) {
+          if (!(await loc.isVisible({ timeout: 100 }).catch(() => false))) continue;
+          const aria = await loc.getAttribute('aria-label').catch(() => '');
+          const title = await loc.getAttribute('title').catch(() => '');
+          if (/(permission|request|chat|message)/i.test(`${aria} ${title}`)) {
+            return { locator: loc, selector: sel, window: w, aria, title };
+          }
+        }
+      } catch (_) {}
+    }
   }
   return null;
+}
+async function findPermissionRequestEntry(app) {
+  for (const w of app.windows()) {
+    for (const sel of [
+      'text=/slack/i',
+      'text=/read.?only/i',
+      'text=/permission/i',
+      '[data-testid*="permission" i]',
+      '[role="listitem"]:has-text("slack")',
+    ]) {
+      try {
+        const loc = w.locator(sel).first();
+        if (await loc.count() > 0 && await loc.isVisible({ timeout: 100 }).catch(() => false)) {
+          return { locator: loc, selector: sel, window: w };
+        }
+      } catch (_) {}
+    }
+  }
+  return null;
+}
+async function findApproveButton(app) {
+  for (const w of app.windows()) {
+    for (const sel of [
+      'button:has-text("Approve")',
+      'button:has-text("Allow")',
+      'button:has-text("Grant")',
+      'text=/^\\s*Approve\\s*$/i',
+    ]) {
+      try {
+        const loc = w.locator(sel).first();
+        if (await loc.count() > 0 && await loc.isVisible({ timeout: 100 }).catch(() => false)) {
+          return { locator: loc, selector: sel, window: w };
+        }
+      } catch (_) {}
+    }
+  }
+  return null;
+}
+async function dumpWindows(app, tag) {
+  const wins = app.windows();
+  console.log(`[dump:${tag}] ${wins.length} windows`);
+  for (let i = 0; i < wins.length; i++) {
+    const w = wins[i];
+    let url = '?', title = '?';
+    try { url = w.url(); } catch (_) {}
+    try { title = await w.title(); } catch (_) {}
+    console.log(`  [${tag}/${i}] title=${JSON.stringify(title)} url=${url}`);
+    try {
+      await shot(w, `dump-${tag}-${i}`);
+    } catch (_) {}
+    // Dump the visible button + aria-labeled elements for selector mining
+    try {
+      const info = await w.evaluate(() => {
+        const acc = [];
+        for (const el of document.querySelectorAll('button, [role="button"], [aria-label], a')) {
+          const r = el.getBoundingClientRect();
+          if (r.width === 0 || r.height === 0) continue;
+          acc.push({
+            tag: el.tagName.toLowerCase(),
+            aria: el.getAttribute('aria-label') || '',
+            title: el.getAttribute('title') || '',
+            text: (el.innerText || '').trim().slice(0, 80),
+            x: Math.round(r.x), y: Math.round(r.y),
+          });
+        }
+        return acc.slice(0, 50);
+      });
+      for (const e of info) {
+        if (!e.aria && !e.title && !e.text) continue;
+        console.log(`    <${e.tag}> aria=${JSON.stringify(e.aria)} title=${JSON.stringify(e.title)} text=${JSON.stringify(e.text)} at(${e.x},${e.y})`);
+      }
+    } catch (e) {
+      console.log(`    dump error: ${e.message}`);
+    }
+  }
 }
 
 (async () => {
@@ -127,19 +222,40 @@ async function findApprovalUi(win) {
   await shot(win, 'ci-slack-sent');
   log('typed + sent; watching for approval UI and canned body');
 
-  let approvalClicked = false;
+  // Approval is a 3-step click: chatbox icon -> request entry -> Approve.
+  let approvalStage = 0; // 0=need to open panel, 1=need to click request, 2=need to click Approve, 3=done
+  let dumpedOnce = false;
   for (let i = 0; i < 240; i++) {
-    if (!approvalClicked) {
-      const approval = await findApprovalUi(win);
-      if (approval) {
-        log(`approval UI: "${approval.selector}"; clicking`);
-        await shot(win, `ci-slack-approval-${i}s`);
-        try {
-          await approval.locator.click({ timeout: 3_000 });
-          approvalClicked = true;
-        } catch (e) {
-          log(`approval click failed: ${e.message}`);
+    if (approvalStage < 3) {
+      if (approvalStage === 0) {
+        const open = await openRightPanel(app);
+        if (open) {
+          log(`opening right panel via "${open.selector}" (aria="${open.aria}" title="${open.title}")`);
+          await shot(open.window, `approval-stage0-${i}s`);
+          try { await open.locator.click({ timeout: 3_000 }); approvalStage = 1; }
+          catch (e) { log(`stage0 click failed: ${e.message}`); }
         }
+      } else if (approvalStage === 1) {
+        const entry = await findPermissionRequestEntry(app);
+        if (entry) {
+          log(`clicking permission request via "${entry.selector}"`);
+          await shot(entry.window, `approval-stage1-${i}s`);
+          try { await entry.locator.click({ timeout: 3_000 }); approvalStage = 2; }
+          catch (e) { log(`stage1 click failed: ${e.message}`); }
+        }
+      } else if (approvalStage === 2) {
+        const approve = await findApproveButton(app);
+        if (approve) {
+          log(`clicking Approve via "${approve.selector}"`);
+          await shot(approve.window, `approval-stage2-${i}s`);
+          try { await approve.locator.click({ timeout: 3_000 }); approvalStage = 3; }
+          catch (e) { log(`stage2 click failed: ${e.message}`); }
+        }
+      }
+      if (approvalStage < 3 && !dumpedOnce && i === 15) {
+        log('--- first dump (no progress in 15s): all windows + clickable elements ---');
+        await dumpWindows(app, 'wait15s');
+        dumpedOnce = true;
       }
     }
 
