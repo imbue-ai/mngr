@@ -84,6 +84,8 @@ Only after doing all of the above should you begin writing code.
 
 Each project has a `test_ratchets.py` file containing automated code quality checks ("ratchets"). Each ratchet tracks a count of violations for a specific anti-pattern (e.g. raising built-in exceptions, using monkeypatch.setattr). The count can only stay the same or decrease -- increasing it fails the test. To add or modify ratchets, use `/writing-ratchet-tests`.
 
+When your change *reduces* a ratchet's violations, lock in the improvement by tightening its recorded count: run `uv run pytest --inline-snapshot=trim <path/to/test_ratchets.py>` (scoped to the affected file(s), and without xdist so inline-snapshot stays enabled).
+
 Ratchets are guidance and reminders about good code, not rules to be blindly obeyed. When a ratchet fires on your code:
 
 1. Understand *why* the ratchet exists by reading its `rule_description`. It explains the principle behind the check.
@@ -130,13 +132,17 @@ If instructed not to commit:
 
 # Changelog
 
-Every PR must include a changelog entry file. CI will fail if it is missing.
+Every PR must include one changelog entry file **per project it touches**. CI will fail if any are missing.
 
-- Create the file at `changelog/<branch-name>.md`, where slashes in the branch name are replaced with dashes.
-  - Example: branch `mngr/add-feature` -> `changelog/mngr-add-feature.md`
-- The file should briefly describe the user-visible changes in the PR.
-- A nightly agent consolidates entries into `UNABRIDGED_CHANGELOG.md` (full verbatim entries) and `CHANGELOG.md` (concise AI-generated summary).
+- A "project" is a directory under `libs/` or `apps/` (e.g. `mngr`, `minds`), or the synthetic top-level `dev/` directory for root-level files (`scripts/`, `.github/`, `justfile`, repo-root docs, top-level config).
+- Each project holds its own changelog artifacts inside its own directory: `<project_dir>/changelog/` (per-PR entries), `<project_dir>/CHANGELOG.md` (concise summary), `<project_dir>/UNABRIDGED_CHANGELOG.md` (verbatim).
+- For each project a PR touches, create one entry file at `<project_dir>/changelog/<branch-name>.md`, where slashes in the branch name are replaced with dashes.
+  - Example: branch `mngr/add-mngr-feature-and-minds-fix` touches `libs/mngr` and `apps/minds`, so create both `libs/mngr/changelog/mngr-add-mngr-feature-and-minds-fix.md` and `apps/minds/changelog/mngr-add-mngr-feature-and-minds-fix.md`.
+  - A PR that only edits `scripts/` and CI workflows is a `dev`-only PR: `dev/changelog/<branch>.md`.
+- Each file should briefly describe the user-visible changes in the PR that pertain to *that* project. Same-PR entries can repeat shared context if it helps readers of each project's changelog.
+- A nightly agent fans each project's entries into that project's `<project_dir>/UNABRIDGED_CHANGELOG.md` (full verbatim entries) and `<project_dir>/CHANGELOG.md` (concise AI-generated summary).
 - The changelog consolidation agent's own PRs (`mngr/changelog-consolidation-*`) are exempt from this requirement.
+- There is no separate "this file is a changelog file, so it doesn't count" exemption: adding a `<project_dir>/changelog/<branch>.md` entry is itself an edit under that project, and inherently satisfies the requirement. A PR that *only* touches a project's consolidated `CHANGELOG.md` (e.g. a manual correction) still owes a per-PR entry describing the correction.
 
 # Silly error workarounds
 

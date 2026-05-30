@@ -66,11 +66,22 @@ test-offload-acceptance args="":
     : "${MODAL_TOKEN_ID:?must be set}"
     : "${MODAL_TOKEN_SECRET:?must be set}"
     just _generate-dockerignore
-    trap "rm -f .dockerignore" EXIT
+    # Pre-create a single shared Modal environment for this offload run so
+    # every fanned-out sandbox lands in the same env (Modal caps workspaces
+    # at 1500 envs; without this, a single run mints dozens to hundreds).
+    # The shared env name matches mngr_test-YYYY-MM-DD-HH-MM-SS-* so the
+    # hourly cleanup script will sweep it if the trap below ever fails.
+    SHARED_ENV="mngr_test-$(date -u +%Y-%m-%d-%H-%M-%S)-shared-$(uuidgen | tr 'A-Z' 'a-z' | tr -d '-' | cut -c1-12)"
+    # Install the trap *before* `modal environment create` so a SIGINT
+    # between create and the next line still cleans up; '|| true' on delete
+    # absorbs the not-found case if the env is already gone.
+    trap 'uv run modal environment delete "$SHARED_ENV" --yes >/dev/null 2>&1 || true; rm -f .dockerignore' EXIT
+    uv run modal environment create "$SHARED_ENV"
     # MODAL_IMAGE_BUILDER_VERSION=2025.06 is required for enable_docker support (Docker-in-Docker alpha).
     MODAL_IMAGE_BUILDER_VERSION=2025.06 offload -c offload-modal-acceptance.toml run --trace \
         --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" \
         --env "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" \
+        --env "MNGR_TEST_SHARED_MODAL_ENV_NAME=$SHARED_ENV" \
         --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
         --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" {{args}} || [[ $? -eq 2 ]]
 
@@ -86,14 +97,53 @@ test-offload-release args="":
     # so the two stay in sync.
     just _generate-release-dockerfile
     just _generate-dockerignore
-    trap "rm -f .dockerignore" EXIT
+    # Pre-create a single shared Modal environment for this offload run.
+    # See `test-offload-acceptance` for the full rationale.
+    SHARED_ENV="mngr_test-$(date -u +%Y-%m-%d-%H-%M-%S)-shared-$(uuidgen | tr 'A-Z' 'a-z' | tr -d '-' | cut -c1-12)"
+    trap 'uv run modal environment delete "$SHARED_ENV" --yes >/dev/null 2>&1 || true; rm -f .dockerignore' EXIT
+    uv run modal environment create "$SHARED_ENV"
 
     # MODAL_IMAGE_BUILDER_VERSION=2025.06 is required for enable_docker support (Docker-in-Docker alpha).
     MODAL_IMAGE_BUILDER_VERSION=2025.06 offload -c offload-modal-release.toml run --trace \
         --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" \
         --env "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" \
         --env "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" \
+        --env "MNGR_TEST_SHARED_MODAL_ENV_NAME=$SHARED_ENV" \
         --env "IS_RELEASE=1" \
+        --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
+        --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" {{args}} || [[ $? -eq 2 ]]
+
+    # Copy results to the main worktree so new worktrees inherit baselines via COPY mode.
+    MAIN_WORKTREE=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
+    if [ -f test-results/junit.xml ] && [ -n "$MAIN_WORKTREE" ] && [ "$MAIN_WORKTREE" != "$(pwd)" ]; then
+        mkdir -p "$MAIN_WORKTREE/test-results"
+        cp test-results/junit.xml "$MAIN_WORKTREE/test-results/junit.xml"
+    fi
+
+# Run the minds-snapshot-resume test suite against a pre-built Modal
+# image produced by ``scripts/snapshot_minds_e2e_state.py``.
+# Usage:
+#     just test-offload-minds-snapshot im-01...    # required: snapshot image id
+#     just test-offload-minds-snapshot im-01... '--filter test_foo'
+# The snapshot image already has the entire mngr checkout, the FCT
+# workspace's Docker container (in a stopped state), and dockerd's
+# /var/lib/docker tree baked in -- so offload skips its normal image-
+# setup phase entirely and boots straight from the snapshot via
+# ``--override-image-id`` (offload v0.9.6+).
+test-offload-minds-snapshot snapshot_image_id args="":
+    #!/bin/bash
+    set -ueo pipefail
+    : "${MODAL_TOKEN_ID:?must be set}"
+    : "${MODAL_TOKEN_SECRET:?must be set}"
+    if [ -z "{{snapshot_image_id}}" ]; then
+        echo "Usage: just test-offload-minds-snapshot <snapshot-image-id> [args...]" >&2
+        echo "Generate the image id by running: uv run python scripts/snapshot_minds_e2e_state.py" >&2
+        exit 2
+    fi
+    just _generate-dockerignore
+    trap "rm -f .dockerignore" EXIT
+    offload -c offload-modal-minds-snapshot.toml run --trace \
+        --override-image-id "{{snapshot_image_id}}" \
         --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
         --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" {{args}} || [[ $? -eq 2 ]]
 
@@ -110,7 +160,7 @@ _parallel := "-n 4 --dist=worksteal --max-worker-restart=0"
 # Default mark filter for local unit + integration recipes. Kept out of
 # pyproject addopts because it would collide with offload-modal-acceptance
 # (which runs the opposite filter). A later -m on CLI overrides this.
-_skip_acceptance_and_release := "-m 'not acceptance and not release and not minds_deployment and not minds_services'"
+_skip_acceptance_and_release := "-m 'not acceptance and not release and not minds_deployment and not minds_services and not minds_snapshot_resume'"
 
 test-unit:
   uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --cov-report=html --ignore-glob="**/test_*.py" --cov-fail-under=36
@@ -177,6 +227,14 @@ minds-test-services-against env_name *tests:
 # No shared env stand-up, no mail.tm account -- fast iteration for the deploy tests.
 minds-test-deployment-only *tests:
   uv run python apps/minds/scripts/test_deployments.py deployment-only {{tests}}
+
+# End-to-end acceptance test that drives the real Electron minds app to create
+# a local Docker workspace from forever-claude-template. Wraps the invocation
+# with `xvfb-run` so it works on headless Linux CI runners. macOS users with
+# a real display can run the underlying pytest directly without xvfb-run.
+# Requires apps/minds/node_modules/ to be installed (`cd apps/minds && pnpm install`).
+minds-test-electron *args:
+  xvfb-run -a uv run pytest apps/minds/test_desktop_client_e2e.py::test_create_local_docker_workspace_via_electron -v --no-cov --cov-fail-under=0 {{args}}
 
 # Download the Tailwind Play CDN JS bundle for the minds desktop client.
 # Idempotent and SHA-pinned via apps/minds/scripts/fetch_tailwind.sh -- the

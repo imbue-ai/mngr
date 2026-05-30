@@ -5,13 +5,13 @@ description = "Latchkey integration plugin for mngr - manages a shared latchkey 
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "imbue-mngr==0.2.6",
+    "imbue-mngr==0.2.8",
     # Source of the bidirectional socket/channel relay used by the
     # reverse-tunnel paramiko handler; sharing the upstream copy keeps
     # the half-closed-channel fix in a single place.
     "imbue-mngr-forward==0.1.0",
-    "imbue-common==0.1.15",
-    "concurrency-group==0.1.15",
+    "imbue-common==0.1.17",
+    "concurrency-group==0.1.17",
     "click>=8.0",
     "loguru>=0.7",
     "paramiko>=3.0",

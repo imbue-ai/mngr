@@ -115,7 +115,7 @@ def cg() -> Generator[ConcurrencyGroup, None, None]:
 def stub_mngr_log_sh() -> str:
     """A no-op mngr_log.sh stub for testing shell scripts that source it.
 
-    Background scripts in mngr_claude/resources and mngr_gemini/resources
+    Background scripts in mngr_claude/resources and mngr_antigravity/resources
     source $MNGR_AGENT_STATE_DIR/commands/mngr_log.sh for logging helpers.
     In production the file is provisioned by Host.provision_agent(); tests
     write this stub to the same path so the script under test can source it
@@ -233,7 +233,9 @@ def disable_remote_providers_for_subprocesses(
     the test environment, or would create Docker state containers that leak.
     """
     settings_path = project_config_dir / "settings.local.toml"
-    settings_path.write_text("[providers.modal]\nis_enabled = false\n\n[providers.docker]\nis_enabled = false\n")
+    settings_path.write_text(
+        "is_allowed_in_pytest = true\n\n[providers.modal]\nis_enabled = false\n\n[providers.docker]\nis_enabled = false\n"
+    )
     monkeypatch.chdir(temp_git_repo)
     return settings_path
 

@@ -1,0 +1,90 @@
+# Unabridged Changelog - mngr_claude
+
+Full, unedited changelog entries consolidated nightly from individual files in `libs/mngr_claude/changelog/`.
+
+For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
+
+## 2026-05-28
+
+# Adopt-session test opts into the pytest config guard
+
+`mngr`'s `is_allowed_in_pytest` config field now defaults to `False`, so a
+config loaded during a pytest run must opt in. The `mngr_claude`
+adopt-session tests hand-roll a trusted-subprocess profile and load it, so the
+`trusted_subprocess_env` fixture now writes `is_allowed_in_pytest = true` into
+that profile's settings.local.toml. Test-only change; no user-facing behavior
+change.
+
+# Dropped redundant per-project ty/ruff ratchet tests
+
+Removed this project's `test_no_type_errors` and `test_no_ruff_errors` from its
+`test_ratchets.py`. ty resolves the uv workspace root and ruff (run from the repo
+root) both scan across projects, so the per-project copies just re-ran the same
+checks. The single repo-wide equivalents now live in `test_meta_ratchets.py`
+(`test_no_type_errors` and `test_no_ruff_errors`).
+
+No user-facing behavior change.
+
+## 2026-05-27
+
+# Ratchet count tightening
+
+- Tightened the violation counts recorded in `test_ratchets.py` to their current exact values (via `uv run pytest --inline-snapshot=trim`), locking in previously-unrecorded reductions. No source-code or behavior change.
+
+## 2026-05-26
+
+- Pruned non-notable entries (test-only changes, internal refactors, and doc-only tweaks with no user-facing effect) from this project's CHANGELOG.md, per the new notable-only changelog policy.
+
+- `ClaudeAgentConfig.merge_with` follows mngr's new assign-by-default semantics: an override's `cli_args` replaces the base's (rather than concatenating). To opt back into additive layering, use the `__extend` operator with an explicit list value, e.g. `cli_args__extend = ["--verbose"]`; the string-shorthand form that the bare `cli_args` field accepts (which the validator splits via shlex) is not accepted by the `__extend` resolver. See the `mngr` changelog entry for the full breaking-change writeup.
+
+Update Claude plugin to use the structured `TmuxWindowTarget` type for tmux
+pane targeting. `_send_enter_and_validate` and `_preflight_send_message` now
+take `tmux_target: TmuxWindowTarget` instead of a bare string, matching the
+`BaseAgent` API change in `libs/mngr` that fixes stale `WAITING` lifecycle
+state caused by tmux session-name prefix matching.
+
+Fix `claude_background_tasks.sh` to use the `=` exact-match prefix in its
+`tmux has-session` polling loop. Without `=`, the loop would never exit
+when a Claude agent's session was killed but a sibling session whose name
+shares this name as a prefix was still alive, leaking the transcript
+streamer and common-transcript converter for stopped agents.
+
+## 2026-05-21
+
+Fix the intro in `UNABRIDGED_CHANGELOG.md` so it references the correct entries directory. The path was `changelog/<project>/` (which never existed); the actual layout is `<project_dir>/changelog/`.
+
+`resolve_shared_claude_config_dir()` (used when a claude agent opts into `use_env_config_dir=True`) now falls back to `~/.claude/` when `$CLAUDE_CONFIG_DIR` is unset, instead of raising. The fallback matches claude's own default, so callers can treat that flag as a pure "don't touch the config dir" knob even on machines where the user never sets `CLAUDE_CONFIG_DIR`. Also drops `ORIGINAL_CLAUDE_CONFIG_DIR` from the agent env in the `mngr uncapped-claude` flow so credential sync reads from the live `$CLAUDE_CONFIG_DIR` (matters when uncapped-claude is invoked from inside another mngr claude agent).
+
+## 2026-05-20
+
+Project now participates in the per-project changelog layout: a `changelog/` subdirectory holds per-PR entry files, and `CHANGELOG.md` / `UNABRIDGED_CHANGELOG.md` at the project root hold the consolidated history. See the full rationale in `dev/changelog/mngr-changelog-per-project.md`.
+
+`ClaudeAgent` now satisfies the new `HasTranscriptMixin` and
+`HasCommonTranscriptMixin` mixins on `AgentInterface` (introduced to give every
+agent type a shared transcript-capture contract). The user-visible behavior of
+`mngr transcript <claude-agent>` is unchanged.
+
+## 2026-05-14
+
+- Fixed: a cloned claude agent now actually resumes the source agent's conversation (the model sees and acts on the source's history), not just inherits the session JSONL on disk. Previously, after #1598's cross-host plugin/ rsync, claude on the destination would still start fresh because the JSONL was filed under the *source's* encoded work_dir, the rsynced ``sessions-index.json`` pointed at source paths, and ``claude_session_id`` was wrong. ``_adopt_cloned_session`` now renames the project subdir to the destination's realpath-resolved encoding (handles the ``/mngr/projects/agent-X`` → ``/__modal/volumes/<vol-id>/projects/agent-X`` symlink on Modal), drops the stale index, writes ``claude_session_id`` to the JSONL filename's stem (the ground truth — the source's own ``claude_session_id`` file holds the agent UUID from the SessionStart hook default rather than the real id), and carries forward ``claude_session_id_history``. The ``--adopt-session`` flow shares the same finalize step.
+
+Add a `use_env_config_dir` option on the `claude` agent type config. When set
+to `true`, local Claude agents share the user's `$CLAUDE_CONFIG_DIR` instead of
+provisioning a per-agent config dir, and mngr does not write to the user's
+Claude config (no trust additions, dialog dismissal, per-agent settings, or
+keychain provisioning). Only supported for local hosts; `$CLAUDE_CONFIG_DIR`
+must be set. The user is responsible for one-time interactive `claude` setup.
+See `libs/mngr_claude/README.md` for details.
+
+## 2026-05-06
+
+- Stop the `claude plugin update` SessionStart hook from hanging Modal-launched
+  agents at an `ssh` first-contact (TOFU) prompt for github.com. The plugin
+  updater shells out to `git pull`, which uses `ssh` -- on a fresh sandbox
+  with no `~/.ssh/known_hosts` entry, ssh blocks on a "Are you sure you
+  want to continue connecting" prompt that Claude Code's bypass-permissions
+  setting does not cover. `scripts/claude_update_plugin.sh` now prefixes
+  the update with `GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new
+  -o BatchMode=yes'`, which writes the first-seen host key to known_hosts
+  and exits non-interactively if anything goes wrong (matching the
+  script's existing `2>/dev/null || true` failure tolerance).

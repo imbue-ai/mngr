@@ -20,7 +20,7 @@ and how the agent receives the answer.
    * 403 with `Error: Request not permitted by the user.`: the user has
      authenticated but has not allowed this kind of request.
 3. **Agent writes a request event.** On any of the blocked outcomes, the
-   agent appends a `LatchkeyPermissionRequestEvent` to
+   agent appends a `LatchkeyPredefinedPermissionRequestEvent` to
    `$MNGR_AGENT_STATE_DIR/events/requests/events.jsonl` with the latchkey
    service name and a one-paragraph rationale, then ends its turn and goes
    idle.
@@ -103,6 +103,40 @@ latchkey 2.8.0 features:
   symlink to see those grants. This indirection lets minds mint and
   inject the JWT before the agent id is known, eliminating a
   previously-fragile post-create injection step.
+
+## Minds API access through the gateway
+
+Minds itself exposes a small REST API on the desktop-client bare
+origin (`/api/v1/...`: agent notifications, Telegram bot setup, the
+WebDAV file-sharing mount). Agents reach it through the same latchkey
+gateway they use for every other outbound HTTP call, via the bundled
+`minds-api-proxy` extension at `/minds-api-proxy/api/v1/...`. There is
+no per-agent reverse SSH tunnel for the Minds API anymore.
+
+Authentication uses one central `MINDS_API_KEY` per `minds run`,
+freshly generated in memory at startup and never handed to agents.
+The `minds-api-proxy` extension reads it from the
+`LATCHKEY_EXTENSION_MINDS_API_KEY` env var (published to the supervisor
+by `minds run`, which restarts the supervisor on every startup so the
+current key always wins) and injects `Authorization: Bearer <key>` on
+every forwarded request, overwriting any header the agent supplied.
+The desktop client matches the same value on the inbound side. The
+key rotates per minds startup; nothing else in the monorepo reads it
+from disk, so there is no on-disk copy to keep in sync.
+
+Per-agent isolation comes from the latchkey gateway's permissions
+file. The agent baseline grants every agent one shared call --
+`POST /minds-api-proxy/api/v1/agents/<...>/notifications` -- so any
+workspace the desktop client created can always notify the user. For
+the other routes (Telegram setup, future `/api/v1/agents/<id>/*` endpoints,
+the WebDAV mount), agent creation installs a *per-agent* rule + inline
+schemas in the host's permissions file: the scope schema
+`minds-api-self-<agent_id>` mirrors `latchkey-self.invalid` and the
+permission schema `minds-api-proxy-call-<agent_id>` pins the URL
+path to `/minds-api-proxy/api/v1/agents/<agent_id>/...`. Because the
+file is keyed per host, an agent on host A cannot reach the API on
+behalf of an agent on host B: host A's permissions file does not list
+B's agent id at all.
 
 The gateway's *default* permissions config
 (`~/.minds/latchkey_default_permissions.json`) is materialized with

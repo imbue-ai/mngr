@@ -17,8 +17,9 @@ Usage:
     uv run scripts/release.py --retry                  # rerun failed jobs and watch
 
 The script refuses to cut a release while there are unconsolidated entries in
-``changelog/`` (those bullets would otherwise be omitted from the version's
-release notes). When the gate fires it prints the on-demand invocation of the
+any project's ``<project_dir>/changelog/`` (those bullets would otherwise be
+omitted from the version's release notes). When the gate fires it prints the
+on-demand invocation of the
 ``changelog-consolidation`` schedule on stderr; run that, land the resulting
 PR, then re-run this script. ``--dry-run`` downgrades the gate to a warning
 so the preview still works.
@@ -29,11 +30,13 @@ import json
 import subprocess
 import sys
 from collections import deque
+from datetime import date
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 from pathlib import Path
-from typing import Any
 from typing import Final
 from typing import TextIO
-from typing import cast
 
 import httpx
 import semver
@@ -55,7 +58,11 @@ from imbue.mngr.utils.polling import poll_for_value
 
 BUMP_KINDS: Final[tuple[str, ...]] = ("major", "minor", "patch")
 BUMP_LEVEL_ORDER: Final[dict[str, int]] = {"patch": 0, "minor": 1, "major": 2}
-CHANGELOG_FILE: Final[Path] = REPO_ROOT / "CHANGELOG.md"
+
+# Supply-chain cooldown window: the resolver only adopts registry releases that
+# have been public at least this long. Enforced via the root `[tool.uv]
+# exclude-newer` cutoff, which a release advances to (release date - this window).
+DEPENDENCY_COOLDOWN: Final[timedelta] = timedelta(weeks=2)
 
 PUBLISH_WORKFLOW: Final[str] = "publish.yml"
 ACTIONS_URL: Final[str] = "https://github.com/imbue-ai/mngr/actions/workflows/publish.yml"
@@ -273,7 +280,7 @@ def _write_version(pkg_pypi_name: str, new_version: str) -> None:
     """Update the version field in a package's pyproject.toml."""
     pkg = PACKAGE_BY_PYPI_NAME[pkg_pypi_name]
     doc = tomlkit.loads(pkg.pyproject_path.read_text())
-    project = cast(dict[str, Any], doc["project"])
+    project = doc["project"]
     project["version"] = new_version
     pkg.pyproject_path.write_text(tomlkit.dumps(doc))
 
@@ -288,7 +295,7 @@ def update_internal_dep_pins(all_versions: dict[str, str]) -> list[str]:
         if not pkg.internal_deps:
             continue
         doc = tomlkit.loads(pkg.pyproject_path.read_text())
-        project = cast(dict[str, Any], doc["project"])
+        project = doc["project"]
         # Modify the tomlkit array in-place to preserve formatting and comments
         deps = project["dependencies"]
         is_changed = False
@@ -305,6 +312,39 @@ def update_internal_dep_pins(all_versions: dict[str, str]) -> list[str]:
             pkg.pyproject_path.write_text(tomlkit.dumps(doc))
             modified.append(pkg.pypi_name)
     return modified
+
+
+def update_exclude_newer(pyproject_path: Path, release_date: date) -> str | None:
+    """Advance the root ``[tool.uv] exclude-newer`` cutoff, forward-only.
+
+    The cutoff is the supply-chain cooldown boundary: uv refuses to consider any
+    package uploaded after it when resolving, so we only adopt registry releases
+    that have been public long enough for the community to flag malware. We move
+    it to ``release_date`` minus the cooldown window, but never backward -- if the
+    current cutoff is still younger than the window (e.g. it was set recently to
+    admit a freshly-pinned, deliberately-trusted dep), pushing it back would
+    re-exclude that dep and break resolution. So the new cutoff is the later
+    of the current value and ``release_date - DEPENDENCY_COOLDOWN``.
+
+    The cutoff is anchored at midnight UTC, matching the UTC upload-times uv
+    compares it against. The committed value is therefore identical regardless of
+    who cuts the release, and the time-of-day is immaterial for a two-week boundary.
+
+    Returns the new cutoff string if it changed, or ``None`` if the current cutoff
+    already wins (in which case no write is performed).
+    """
+    doc = tomlkit.loads(pyproject_path.read_text())
+    uv_config = doc["tool"]["uv"]
+    current = datetime.fromisoformat(str(uv_config["exclude-newer"]))
+    candidate_date = release_date - DEPENDENCY_COOLDOWN
+    candidate = datetime(candidate_date.year, candidate_date.month, candidate_date.day, tzinfo=timezone.utc)
+    new_cutoff = max(current, candidate)
+    if new_cutoff == current:
+        return None
+    new_value = new_cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
+    uv_config["exclude-newer"] = new_value
+    pyproject_path.write_text(tomlkit.dumps(doc))
+    return new_value
 
 
 def gh_is_available() -> bool:
@@ -512,8 +552,9 @@ def _print_on_demand_consolidation_command(file: TextIO) -> None:
 def _gate_release_on_pending_changelog_entries(repo_root: Path, dry_run: bool) -> bool:
     """Block a release until pending changelog entries are consolidated.
 
-    Operates on ``repo_root``'s ``changelog/`` directory directly. Taking
-    the path as a parameter (rather than always reading the module-level
+    Walks each known project's ``<project_dir>/changelog/`` directory
+    under ``repo_root`` via ``pending_changelog_entries``. Taking the
+    path as a parameter (rather than always reading the module-level
     ``REPO_ROOT``) is the production contract -- the gate's job is to
     inspect a particular repo -- and conveniently lets tests pass a
     ``tmp_path`` populated with synthetic entries.
@@ -547,8 +588,8 @@ def _gate_release_on_pending_changelog_entries(repo_root: Path, dry_run: bool) -
     print(file=sys.stderr)
     print(f"ERROR: cannot release with {len(entries)} pending changelog {entry_word}.", file=sys.stderr)
     print(file=sys.stderr)
-    print("The following entries in changelog/ haven't been consolidated into", file=sys.stderr)
-    print("CHANGELOG.md's [Unreleased] section yet:", file=sys.stderr)
+    print("The following entries in per-project changelog/ dirs haven't been consolidated into", file=sys.stderr)
+    print("their projects' CHANGELOG.md [Unreleased] sections yet:", file=sys.stderr)
     print(_format_pending_changelog_list(entries, repo_root), file=sys.stderr)
     print(file=sys.stderr)
     print(
@@ -629,11 +670,11 @@ def main() -> None:
             print(f"ERROR: Must be on main branch (currently on {branch})", file=sys.stderr)
             sys.exit(1)
 
-    # Refuse to release while there are unconsolidated entries in
-    # changelog/. Otherwise the [Unreleased] section we're about to
-    # finalize would be missing those entries' bullets. In --dry-run we
-    # warn rather than block so the user can still preview what would
-    # be released.
+    # Refuse to release while any project has unconsolidated entries in
+    # its <project_dir>/changelog/ directory. Otherwise the per-package
+    # [Unreleased] sections we're about to finalize would be missing
+    # those entries' bullets. In --dry-run we warn rather than block so
+    # the user can still preview what would be released.
     if not _gate_release_on_pending_changelog_entries(REPO_ROOT, dry_run=args.dry_run):
         sys.exit(1)
 
@@ -781,25 +822,58 @@ def main() -> None:
     if pin_modified:
         print(f"Updated dependency pins in: {', '.join(pin_modified)}")
 
+    # Advance the supply-chain cooldown cutoff before re-locking so the
+    # regenerated uv.lock records the new `[options] exclude-newer`. Forward-only:
+    # a release run while the cutoff is still younger than the window leaves it
+    # untouched (see update_exclude_newer). Anchored to UTC (today's date) to match
+    # the UTC upload-times uv compares it against -- deliberately independent of the
+    # Pacific changelog date used below.
+    new_cutoff = update_exclude_newer(REPO_ROOT / "pyproject.toml", datetime.now(timezone.utc).date())
+    if new_cutoff is not None:
+        print(f"Advanced exclude-newer cooldown cutoff to {new_cutoff}")
+
     print("Regenerating uv.lock...")
     run("uv", "lock")
 
-    # Finalize CHANGELOG.md: rename [Unreleased] -> [v<version>] - <date>
+    # Finalize each released package's per-project CHANGELOG.md: rename its
+    # [Unreleased] section to [v<package-version>] - <date> and insert a
+    # fresh empty [Unreleased] above it. Covers both bumped packages (use
+    # the new version) and confirmed first-time publications (use the
+    # current version, since these publish without a bump). apps/<name>/
+    # and dev/ changelogs are not versioned and stay untouched -- their
+    # entries accumulate in [Unreleased] indefinitely (the consolidator
+    # keeps appending there).
     release_date = today_pacific()
-    had_content = finalize_changelog_unreleased(CHANGELOG_FILE, new_mngr_version, release_date)
-    if had_content:
-        print(f"Finalized CHANGELOG.md: [Unreleased] -> [v{new_mngr_version}] - {release_date}")
-    else:
-        print(f"WARNING: [Unreleased] was empty; emitted empty [v{new_mngr_version}] section.")
+    finalized_paths: list[Path] = []
+    versions_to_finalize: dict[str, str] = {
+        **{name: current_versions[name] for name in confirmed_new},
+        **new_versions,
+    }
+    for pypi_name, version in versions_to_finalize.items():
+        pkg = PACKAGE_BY_PYPI_NAME[pypi_name]
+        pkg_changelog = REPO_ROOT / "libs" / pkg.dir_name / "CHANGELOG.md"
+        if not pkg_changelog.exists():
+            print(f"WARNING: {pkg.dir_name} has no CHANGELOG.md; skipping finalize.")
+            continue
+        had_content = finalize_changelog_unreleased(pkg_changelog, version, release_date)
+        rel = pkg_changelog.relative_to(REPO_ROOT)
+        if had_content:
+            print(f"Finalized {rel}: [Unreleased] -> [v{version}] - {release_date}")
+        else:
+            print(f"WARNING: [Unreleased] empty in {rel}; emitted empty [v{version}] section.")
+        finalized_paths.append(pkg_changelog)
 
     # Commit, tag, push
     all_released_names = sorted(set(new_versions.keys()) | confirmed_new)
     commit_msg = f"Release {tag} ({', '.join(all_released_names)})"
 
     files_to_add = [
+        # Root pyproject.toml carries the `[tool.uv] exclude-newer` cutoff that
+        # update_exclude_newer may have advanced above.
+        "pyproject.toml",
         *[str(pkg.pyproject_path.relative_to(REPO_ROOT)) for pkg in PACKAGES],
         "uv.lock",
-        str(CHANGELOG_FILE.relative_to(REPO_ROOT)),
+        *[str(p.relative_to(REPO_ROOT)) for p in finalized_paths],
     ]
     run("git", "add", *files_to_add)
     run("git", "commit", "-m", commit_msg)

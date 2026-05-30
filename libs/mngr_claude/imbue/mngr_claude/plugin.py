@@ -47,6 +47,7 @@ from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import is_macos
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.data_types import FileTransferSpec
@@ -1392,7 +1393,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
             _CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAME: _load_claude_resource_script(_CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAME)
         }
 
-    def _send_enter_and_validate(self, tmux_target: str) -> None:
+    def _send_enter_and_validate(self, tmux_target: TmuxWindowTarget) -> None:
         # Claude wires a UserPromptSubmit hook that fires `tmux wait-for -S`
         # on the per-session channel; wait for it. If the hook misfires
         # (occasionally happens while another message is being processed),
@@ -1434,8 +1435,8 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
 
         When ``use_env_config_dir=True``: resolve to the value of
         ``$CLAUDE_CONFIG_DIR`` (the user's shared config dir), so multiple
-        agents share a single directory. Raises ``UserInputError`` if the env
-        var is unset.
+        agents share a single directory. When the env var is unset, falls
+        back to ``~/.claude/`` so the agent uses claude's own default.
         """
         if self.agent_config.use_env_config_dir:
             return resolve_shared_claude_config_dir()
@@ -1486,7 +1487,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         CostThresholdDialogIndicator(),
     )
 
-    def _preflight_send_message(self, tmux_target: str) -> None:
+    def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
         """Check for blocking dialogs before sending a message.
 
         Checks the permissions_waiting file (set by the PermissionRequest hook)
@@ -1646,9 +1647,9 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         Interactive and auto-approve runs skip these checks because
         provision() will handle them.
 
-        In ``use_env_config_dir`` mode: enforce local-only + require
-        $CLAUDE_CONFIG_DIR to be set, and skip the dialog-dismissal
-        validation entirely (user is responsible for their own config).
+        In ``use_env_config_dir`` mode: enforce local-only, and skip the
+        dialog-dismissal validation entirely (user is responsible for their
+        own config; mngr makes no writes to it).
         """
         config = self.agent_config
 
@@ -1659,9 +1660,6 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
                     "this agent targets a non-local host. Disable use_env_config_dir "
                     "or move the agent to a local host."
                 )
-            # Side-effect: raises if $CLAUDE_CONFIG_DIR is unset, surfacing the
-            # error inside on_before_provisioning's normal error path.
-            resolve_shared_claude_config_dir()
         # Validate dialogs for non-interactive local runs so we fail early with
         # a clear message. Skip when auto_dismiss_dialogs is True because
         # provision() will auto-dismiss all dialogs in that case. Skip entirely
@@ -1754,7 +1752,8 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         settings_path = self.work_dir / settings_relative
 
         # Check gitignore. During create(), preflight_check already verified
-        # this on the source, but this covers other code paths (e.g. mngr provision).
+        # this on the source; this check runs on the destination as a defense
+        # in depth.
         _check_settings_local_gitignored(host, self.work_dir, require_repo_rule=False)
 
         hooks_config = build_readiness_hooks_config()

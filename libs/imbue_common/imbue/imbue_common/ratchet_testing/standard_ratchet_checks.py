@@ -6,6 +6,7 @@ from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_ASYNCIO_I
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BARE_EXCEPT
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BARE_GENERIC_TYPES
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BARE_PRINT
+from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BARE_TMUX_TARGETS
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BARE_URWID_TTY_SIGNAL_KEYS
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BASE_EXCEPTION_CATCH
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BROAD_EXCEPTION_CATCH
@@ -55,6 +56,8 @@ from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_WHILE_TRU
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_YAML_USAGE
 from imbue.imbue_common.ratchet_testing.common_ratchets import RegexRatchetRule
 from imbue.imbue_common.ratchet_testing.common_ratchets import check_ratchet_rule
+from imbue.imbue_common.ratchet_testing.common_ratchets import check_ratchet_rule_all_files
+from imbue.imbue_common.ratchet_testing.core import BINARY_FILE_EXCLUSION
 from imbue.imbue_common.ratchet_testing.ratchets import TEST_FILE_PATTERNS
 from imbue.imbue_common.ratchet_testing.ratchets import _is_test_file
 from imbue.imbue_common.ratchet_testing.ratchets import find_assert_isinstance_usages
@@ -318,6 +321,20 @@ def check_os_fork(source_dir: Path, max_count: int) -> None:
 def check_bare_urwid_tty_signal_keys(source_dir: Path, max_count: int) -> None:
     chunks = check_ratchet_rule(PREVENT_BARE_URWID_TTY_SIGNAL_KEYS, source_dir, _SELF_EXCLUSION + ("urwid_utils.py",))
     assert len(chunks) <= max_count, PREVENT_BARE_URWID_TTY_SIGNAL_KEYS.format_failure(chunks)
+
+
+def check_bare_tmux_targets(source_dir: Path, max_count: int) -> None:
+    # Scan all tracked file types (not just .py): shell scripts and other
+    # non-Python files routinely construct tmux commands too, and they need
+    # the same exact-match enforcement.
+    #
+    # Exclude changelog artifacts: per-PR entries under `changelog/` and the
+    # consolidated `CHANGELOG.md` / `UNABRIDGED_CHANGELOG.md` they get fanned
+    # into all quote the previous buggy form as historical context, which the
+    # regex would otherwise flag.
+    excluded = _SELF_EXCLUSION + ("changelog/*", "CHANGELOG.md", "UNABRIDGED_CHANGELOG.md") + BINARY_FILE_EXCLUSION
+    chunks = check_ratchet_rule_all_files(PREVENT_BARE_TMUX_TARGETS, source_dir, excluded)
+    assert len(chunks) <= max_count, PREVENT_BARE_TMUX_TARGETS.format_failure(chunks)
 
 
 def check_direct_subprocess(

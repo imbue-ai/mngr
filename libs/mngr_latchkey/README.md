@@ -45,8 +45,18 @@ HOST_ENV_ARGS=$(jq -r '.env | to_entries[] | "--host-env \(.key)=\(.value)"' /tm
 # the same gateway wiring.
 CREATED=$(mngr create my-template $HOST_ENV_ARGS --format json)
 HOST_ID=$(echo "$CREATED" | jq -r .host_id)
+AGENT_ID=$(echo "$CREATED" | jq -r .agent_id)
 
+# Finalize the opaque permissions handle: swing its symlink to the
+# canonical host-keyed permissions path.
 mngr latchkey link-permissions --host-id "$HOST_ID" --opaque-path "$OPAQUE_PATH"
+
+# Register this agent for the host so it can reach the Minds API proxy.
+# The baseline rule rejects every ``/minds-api-proxy/api/v1/agents/<id>/...``
+# request whose ``<id>`` is not in the host's allowed-agent enum, so
+# every minds agent that wants to call the Minds API must be registered
+# here. Idempotent: re-running for an already-registered agent is a no-op.
+mngr latchkey register-agent --host-id "$HOST_ID" --agent-id "$AGENT_ID"
 ```
 
 ### Settings
@@ -100,7 +110,7 @@ from imbue.mngr_latchkey.discovery import (
     LatchkeyDiscoveryHandler,
     LatchkeyDestructionHandler,
 )
-from imbue.mngr_latchkey.ssh_tunnel import SSHTunnelManager
+from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 
 latchkey = Latchkey(
     latchkey_binary="/path/to/latchkey",  # default: "latchkey" on PATH
@@ -146,8 +156,8 @@ written directly via `imbue.mngr_latchkey.store.save_permissions`.
 
 ## Gateway HTTP extensions
 
-`mngr latchkey forward` drops two `.mjs` extensions into
-`<latchkey-directory>/extensions/`. Both expose plain HTTP endpoints
+`mngr latchkey forward` drops three `.mjs` extensions into
+`<latchkey-directory>/extensions/`. All expose plain HTTP endpoints
 on the gateway's listen port and authenticate the caller via two
 headers:
 
@@ -170,25 +180,79 @@ auth=(-H "X-Latchkey-Gateway-Password: $GATEWAY_PASSWORD" -H "X-Latchkey-Gateway
 
 A pending-permission queue. Agents submit a request when they hit a
 blocked service; UIs (the minds desktop client, your own front-end)
-consume the stream and DELETE on resolution.
+consume the stream and approve/delete on resolution.
 
 * `POST /permission-requests` with body
-  `{"agent_id": "...", "scope": "...", "permissions": ["...", ...], "rationale": "..."}`.
-  The extension generates a `request_id` server-side and returns the
-  full record. Available to agents.
+  `{"agent_id": "...", "rationale": "...", "type": "...", "payload": {...}}`.
+  Two `type` values are accepted:
+  * `"predefined"` -- detent scope/permission grant, with payload
+    `{"scope": "...", "permissions": ["...", ...]}`.
+  * `"file-sharing"` -- single-file access through the `minds-api-proxy`
+    extension, with payload `{"path": "<absolute-path>"}`. The path
+    must be absolute and free of `..` segments.
+
+  The extension generates a `request_id` server-side, stores the
+  caller-supplied fields plus the `target` permissions.json (taken
+  from the extension context) and a precomputed `effect`
+  (`{rules?, schemas?}`) that an approval would splice into
+  `target`, and returns the full persisted record. Available to
+  agents.
 * `GET /permission-requests` returns the current queue as
-  newline-delimited JSON. Add `?follow=true` to keep the connection
-  open and stream every newly-POSTed request as it arrives.
-  Available to the admin.
+  newline-delimited JSON. Each line carries the full persisted
+  shape. Add `?follow=true` to keep the connection open and stream
+  every newly-POSTed request as it arrives. Available to the admin.
+* `POST /permission-requests/approve/<request_id>` approves the
+  named request: the extension reads it, splices its `effect` into
+  its `target` permissions.json (creating the file if missing,
+  merging rules by scope key and schemas by name), then removes the
+  pending request file. Returns `200` with `{request_id, target,
+  applied}` where `applied` is the freshly-rewritten permissions
+  file. Available to the admin.
 * `DELETE /permission-requests/<request_id>` removes a single pending
-  request. UIs call this on grant or deny so a fresh `?follow=true`
-  consumer never sees the resolved request again. Available to
-  the admin.
+  request without applying its effect. UIs call this on deny so a
+  fresh `?follow=true` consumer never sees the resolved request
+  again. Available to the admin.
 
 Pending requests are stored as one JSON file per request under
-`<latchkey-directory>/permission_requests/v1/`. The `v1` segment is
-part of the on-disk schema version, so any pre-v1 files that happen
-to live in the parent directory are ignored.
+`<latchkey-directory>/permission_requests/v2/`. The `v2` segment is
+the on-disk schema version; future shape changes get a new directory
+rather than trying to migrate files in place.
+
+### `minds-api-proxy` extension
+
+Transparent HTTP reverse proxy from the gateway to an embedder-supplied
+"Minds API" base URL.
+
+* `ANY /minds-api-proxy` forwards to `<minds-api>/`.
+* `ANY /minds-api-proxy/<rest>...` forwards to
+  `<minds-api>/<rest>...`, preserving the inbound method, query
+  string, headers (minus hop-by-hop entries and the gateway-internal
+  password / permissions-override headers), and body. The upstream
+  response status, headers, and body stream straight back.
+
+The upstream base URL is read from the
+`LATCHKEY_EXTENSION_MINDS_API_URL` env var on every request. If the
+var is unset/empty/unparseable the proxy responds 503 with a JSON
+error body. There is no in-process cache to invalidate: an embedder
+that needs to repoint the proxy at a new upstream simply respawns
+the gateway (or the `mngr latchkey forward` supervisor that owns it)
+with a fresh value for the env var.
+
+The proxy authenticates *to* the upstream Minds API on behalf of the
+agent. When `LATCHKEY_EXTENSION_MINDS_API_KEY` is set, the proxy
+overwrites the inbound `Authorization` header with
+`Bearer <LATCHKEY_EXTENSION_MINDS_API_KEY>` before forwarding. Agents
+therefore never see the key, and an agent that tries to spoof an
+`Authorization` header has its value dropped on the floor. When the
+env var is unset, the inbound `Authorization` value is forwarded
+unchanged (useful for tests / local fixtures that do not bother
+stubbing the key; the upstream will simply 401 the request).
+
+Other than the `Authorization` overwrite, the extension performs no
+authentication of its own beyond the gateway's normal permission
+check (against the synthetic `latchkey-self.invalid` URL). Restricting
+which paths an agent can reach through the proxy is therefore a job
+for the agent's `latchkey_permissions.json`.
 
 ### `permissions` extension
 

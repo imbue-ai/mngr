@@ -1,70 +1,53 @@
-"""API key generation, hashing, and lookup for agent authentication.
+"""Generation + constant-time verification of the central ``MINDS_API_KEY``.
 
-Each agent receives a UUID4 API key at creation time. Only the SHA-256
-hash is stored on disk, keyed by agent ID. On each request the server
-hashes the provided key and scans hash files to identify the caller.
+There is one ``MINDS_API_KEY`` per ``minds run``, freshly generated in
+memory on every startup and handed to:
+
+* the latchkey gateway's bundled ``minds-api-proxy`` extension (via the
+  ``LATCHKEY_EXTENSION_MINDS_API_KEY`` env var on the
+  ``mngr latchkey forward`` supervisor, which ``minds run`` always
+  restarts) so the proxy can inject ``Authorization: Bearer <key>`` on
+  every forwarded request, and
+* the desktop client's own ``/api/v1/...`` bearer-auth gate (via
+  ``app.state.minds_api_key``) so it recognizes the key the proxy just
+  injected.
+
+The key is *not* persisted: the supervisor is restarted on every minds
+startup and gets the current value in its env, the bare-origin server
+sees the same in-memory value, and nothing else in the monorepo reads
+the key from disk. Letting it rotate per-startup removes a long-lived
+secret from the filesystem and shrinks the window of a compromised key
+to a single minds session.
+
+The agent's identity, when relevant to a route, comes from the URL
+path segment (e.g. ``/api/v1/agents/<agent_id>/...``), which the
+latchkey gateway's per-host permissions file constrains to agent ids
+that actually live on the caller's host.
 """
 
-import hashlib
-import uuid
-from pathlib import Path
+import hmac
+import secrets
+from typing import Final
 
-from loguru import logger
-
-from imbue.minds.primitives import ApiKeyHash
-from imbue.mngr.primitives import AgentId
+# Length in bytes of the random secret used as the API key. 32 bytes
+# (256 bits) of entropy via ``secrets.token_urlsafe`` is comfortably
+# more than the 122 bits of a UUID4 and avoids the dash-separated UUID
+# shape (which is visually noisy when copy-pasted into shell env exports).
+_API_KEY_BYTES: Final[int] = 32
 
 
 def generate_api_key() -> str:
-    """Generate a new UUID4 API key string."""
-    return str(uuid.uuid4())
+    """Generate a fresh URL-safe random API key."""
+    return secrets.token_urlsafe(_API_KEY_BYTES)
 
 
-def hash_api_key(key: str) -> ApiKeyHash:
-    """Compute the SHA-256 hex digest of an API key."""
-    return ApiKeyHash(hashlib.sha256(key.encode()).hexdigest())
+def is_valid_minds_api_key(presented: str, expected: str) -> bool:
+    """Constant-time comparison of a presented bearer token against the central key.
 
-
-def _api_key_hash_path(data_dir: Path, agent_id: AgentId) -> Path:
-    return data_dir / "agents" / str(agent_id) / "api_key_hash"
-
-
-def save_api_key_hash(
-    data_dir: Path,
-    agent_id: AgentId,
-    key_hash: ApiKeyHash,
-) -> None:
-    """Write the API key hash to the per-agent hash file."""
-    hash_path = _api_key_hash_path(data_dir, agent_id)
-    hash_path.parent.mkdir(parents=True, exist_ok=True)
-    hash_path.write_text(key_hash)
-
-
-def find_agent_by_api_key(data_dir: Path, key: str) -> AgentId | None:
-    """Hash the key and scan all per-agent hash files for a match.
-
-    Returns the matching AgentId, or None if no match is found.
+    Use this from request-handling code rather than ``==`` so a
+    malicious caller cannot side-channel a guessing attack against
+    the per-byte string comparison.
     """
-    key_hash = hash_api_key(key)
-    agents_dir = data_dir / "agents"
-    if not agents_dir.is_dir():
-        return None
-    for agent_dir in agents_dir.iterdir():
-        if not agent_dir.is_dir():
-            continue
-        hash_file = agent_dir / "api_key_hash"
-        if not hash_file.is_file():
-            continue
-        try:
-            agent_id = AgentId(agent_dir.name)
-        except ValueError:
-            logger.debug("Skipping non-agent directory in agents/: {}", agent_dir.name)
-            continue
-        try:
-            stored_hash = hash_file.read_text().strip()
-        except OSError as e:
-            logger.debug("Failed to read API key hash file {}: {}", hash_file, e)
-            continue
-        if stored_hash == key_hash:
-            return agent_id
-    return None
+    if not presented or not expected:
+        return False
+    return hmac.compare_digest(presented, expected)

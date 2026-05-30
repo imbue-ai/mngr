@@ -62,7 +62,7 @@ def _agent(agent_id: AgentId, host_id: HostId = _HOST_ID, labels: dict[str, str]
 
 
 def _serialize(event_obj: object) -> str:
-    return json.dumps(event_obj.model_dump(mode="json"))  # type: ignore[attr-defined]
+    return json.dumps(event_obj.model_dump(mode="json"))  # ty: ignore[unresolved-attribute]
 
 
 @pytest.fixture

@@ -1,21 +1,18 @@
-"""Unit tests for tmr CLI."""
+"""Unit tests for the ``mngr tmr`` CLI wrapper.
 
-from pathlib import Path
+The bulk of the CLI logic (option parsing, emit helpers, modal-snapshot
+disable) lives in ``imbue.mngr_mapreduce.cli`` and is tested there. This
+file only covers the TMR-specific glue: ``_TmrCommand``'s ``--`` separator
+trick and the help-text surface contract.
+"""
+
 from typing import Any
 
 import click
 from click.testing import CliRunner
 from click.testing import Result
 
-from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.config.data_types import OutputOptions
-from imbue.mngr.primitives import OutputFormat
 from imbue.mngr_tmr.cli import _TmrCommand
-from imbue.mngr_tmr.cli import _disable_modal_initial_snapshot
-from imbue.mngr_tmr.cli import _emit_agents_launched
-from imbue.mngr_tmr.cli import _emit_integrator_branch
-from imbue.mngr_tmr.cli import _emit_report_path
-from imbue.mngr_tmr.cli import _emit_test_count
 from imbue.mngr_tmr.cli import tmr
 
 
@@ -38,76 +35,26 @@ def test_cli_help_contains_provider_env_label_options(cli_runner: CliRunner) -> 
     assert "--provider" in result.output
     assert "--env" in result.output
     assert "--label" in result.output
-    assert "--prompt-suffix" in result.output
-    assert "--use-snapshot" in result.output
+
+
+def test_cli_help_drops_removed_options(cli_runner: CliRunner) -> None:
+    """The integrator-specific flags and --use-snapshot are gone.
+
+    The integrator (reducer) follows --provider and the mapper agent-type;
+    snapshot building is automatic when the provider supports it.
+    """
+    result = cli_runner.invoke(tmr, ["--help"])
+    assert "--integrator-provider" not in result.output
+    assert "--integrator-type" not in result.output
+    assert "--integrator-template" not in result.output
+    assert "--use-snapshot" not in result.output
 
 
 def test_cli_help_contains_timeout_options(cli_runner: CliRunner) -> None:
     result = cli_runner.invoke(tmr, ["--help"])
     assert "--timeout" in result.output
-    assert "--integrator-timeout" in result.output
+    assert "--reducer-timeout" in result.output
     assert "--max-parallel-agents" in result.output
-
-
-def _human_output_opts() -> OutputOptions:
-    return OutputOptions(output_format=OutputFormat.HUMAN)
-
-
-def test_emit_test_count_human(capsys: object) -> None:
-    _emit_test_count(5, _human_output_opts())
-
-
-def test_emit_agents_launched_human(capsys: object) -> None:
-    _emit_agents_launched(3, _human_output_opts())
-
-
-def test_emit_report_path_human(capsys: object, tmp_path: object) -> None:
-    _emit_report_path(Path("/tmp/report.html"), _human_output_opts())
-
-
-def test_emit_test_count_json() -> None:
-    _emit_test_count(10, OutputOptions(output_format=OutputFormat.JSON))
-
-
-def test_emit_agents_launched_jsonl() -> None:
-    _emit_agents_launched(7, OutputOptions(output_format=OutputFormat.JSONL))
-
-
-def test_emit_report_path_json() -> None:
-    _emit_report_path(Path("/tmp/report.html"), OutputOptions(output_format=OutputFormat.JSON))
-
-
-def test_emit_report_path_jsonl() -> None:
-    _emit_report_path(Path("/tmp/report.html"), OutputOptions(output_format=OutputFormat.JSONL))
-
-
-def test_emit_test_count_jsonl() -> None:
-    _emit_test_count(3, OutputOptions(output_format=OutputFormat.JSONL))
-
-
-def test_emit_agents_launched_json() -> None:
-    _emit_agents_launched(5, OutputOptions(output_format=OutputFormat.JSON))
-
-
-def test_emit_integrator_branch_human() -> None:
-    _emit_integrator_branch("mngr-tmr/integrated-abc123", _human_output_opts())
-
-
-def test_emit_integrator_branch_json() -> None:
-    _emit_integrator_branch("mngr-tmr/integrated-abc123", OutputOptions(output_format=OutputFormat.JSON))
-
-
-def test_emit_integrator_branch_jsonl(capsys: Any) -> None:
-    _emit_integrator_branch("mngr-tmr/integrated-abc123", OutputOptions(output_format=OutputFormat.JSONL))
-    captured = capsys.readouterr()
-    assert '"event": "integrator_branch"' in captured.out
-    assert '"branch_name": "mngr-tmr/integrated-abc123"' in captured.out
-
-
-def test_emit_integrator_branch_none_emits_nothing(capsys: Any) -> None:
-    _emit_integrator_branch(None, OutputOptions(output_format=OutputFormat.JSONL))
-    captured = capsys.readouterr()
-    assert captured.out == ""
 
 
 def _invoke_tmr_command(
@@ -167,22 +114,3 @@ def test_tmr_command_options_before_separator() -> None:
     assert captured["pytest_args"] == ("tests/",)
     assert captured["testing_flags"] == ("-m", "release")
     assert captured["provider"] == "docker"
-
-
-def test_disable_modal_initial_snapshot_skips_non_modal_providers(temp_mngr_ctx: MngrContext) -> None:
-    """Non-modal provider names leave config.providers untouched."""
-    before = dict(temp_mngr_ctx.config.providers)
-    _disable_modal_initial_snapshot(temp_mngr_ctx, ("local", "docker"))
-    assert dict(temp_mngr_ctx.config.providers) == before
-
-
-def test_disable_modal_initial_snapshot_silent_when_modal_backend_unregistered(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """With --provider modal but no modal backend registered (the tmr test
-    fixture only registers local + ssh), the helper silently no-ops; the
-    caller will surface the UnknownBackendError later when it tries to
-    actually use modal."""
-    before = dict(temp_mngr_ctx.config.providers)
-    _disable_modal_initial_snapshot(temp_mngr_ctx, ("modal", "modal"))
-    assert dict(temp_mngr_ctx.config.providers) == before

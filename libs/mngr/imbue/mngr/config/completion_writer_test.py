@@ -45,6 +45,23 @@ def test_get_completion_cache_dir_falls_back_to_default_host_dir(
     assert result.exists()
 
 
+def test_get_completion_cache_dir_ignores_double_underscore_form(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Only ``MNGR_COMPLETION_CACHE_DIR`` is recognised; the ``MNGR__*`` form is ignored.
+
+    The completion cache dir is read by a lightweight pre-reader path that
+    intentionally skips full config loading, so it is one of the "special"
+    single-underscore env vars (like MNGR_ROOT_NAME / MNGR_PREFIX /
+    MNGR_HOST_DIR), not a parsed MngrConfig field.
+    """
+    monkeypatch.delenv("MNGR_COMPLETION_CACHE_DIR", raising=False)
+    monkeypatch.setenv("MNGR__COMPLETION_CACHE_DIR", str(tmp_path / "double_underscore"))
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path / "default_host"))
+    result = get_completion_cache_dir()
+    assert result == tmp_path / "default_host"
+
+
 def test_write_cli_completions_cache_handles_oserror(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """write_cli_completions_cache should silently handle OSError."""
     # Monkeypatch atomic_write to simulate a write failure. We can't use chmod

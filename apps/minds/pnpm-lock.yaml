@@ -12,15 +12,15 @@ importers:
         specifier: ^1.6.0
         version: 1.6.4
       latchkey:
-        specifier: ^2.11.1
-        version: 2.11.1
+        specifier: ^2.12.2
+        version: 2.12.2
     devDependencies:
       '@todesktop/cli':
         specifier: ^1.8.0
         version: 1.23.2
       electron:
-        specifier: 35.7.5
-        version: 35.7.5
+        specifier: 40.10.1
+        version: 40.10.1
 
 packages:
 
@@ -728,8 +728,8 @@ packages:
   '@types/mysql@2.15.27':
     resolution: {integrity: sha512-YfWiV16IY0OeBfBCk8+hXKmdTKrKlwKN1MNKAPBu5JYxLwBEZl7QzeEpGnlZb3VMGJrrGmB84gXiH+ofs/TezA==}
 
-  '@types/node@22.19.17':
-    resolution: {integrity: sha512-wGdMcf+vPYM6jikpS/qhg6WiqSV/OhG+jeeHT/KlVqxYfD40iYJf9/AE1uQxVWFvU7MipKRkRv8NSHiCGgPr8Q==}
+  '@types/node@24.12.4':
+    resolution: {integrity: sha512-GUUEShf+PBCGW2KaXwcIt3Yk+e3pkKwWKb9GSyM9WQVE+ep2jzmHdGsHzu4wgcZy5fN9FBdVzjpBQsYlpfpgLA==}
 
   '@types/node@25.5.2':
     resolution: {integrity: sha512-tO4ZIRKNC+MDWV4qKVZe3Ql/woTnmHDr5JD8UI5hn2pwBrHEwOEMZK7WlNb5RKB6EoJ02gwmQS9OrjuFnZYdpg==}
@@ -1195,8 +1195,8 @@ packages:
   electron-updater@4.6.5:
     resolution: {integrity: sha512-kdTly8O9mSZfm9fslc1mnCY+mYOeaYRy7ERa2Fed240u01BKll3aiupzkd07qKw69KvhBSzuHroIW3mF0D8DWA==}
 
-  electron@35.7.5:
-    resolution: {integrity: sha512-dnL+JvLraKZl7iusXTVTGYs10TKfzUi30uEDTqsmTm0guN9V2tbOjTzyIZbh9n3ygUjgEYyo+igAwMRXIi3IPw==}
+  electron@40.10.1:
+    resolution: {integrity: sha512-F2Iy16vLBV4NodRVf2dGRESUW03AdFlCmOjaF1fhc3FupmTwEGWmKsYXvORkUYLPBSrKP7r08e8PHiImoe8woQ==}
     engines: {node: '>= 12.20.55'}
     hasBin: true
 
@@ -1661,8 +1661,8 @@ packages:
   keyv@4.5.4:
     resolution: {integrity: sha512-oxVHkHR/EJf2CNXnWxRLW6mg7JyCCUcG0DtEGmL2ctUo1PNTin1PUil+r/+4r5MpVgC/fn1kjsx7mjSujKqIpw==}
 
-  latchkey@2.11.1:
-    resolution: {integrity: sha512-FIqtGXLH4fU6XA2h8Zy38EK7AGiStcWoyz4rrBRUkJ919JSuU1H/nlK+6H1Df7cU4ux24W/YyHregoH/2DglPA==}
+  latchkey@2.12.2:
+    resolution: {integrity: sha512-Rr/1p4CSdUNPccUZ7QcEw/EggjoYRUzweZqjjfMIOxm05utVFPocMUJrhTwu2nEbAa8w1vmYp0dbDLRrxGOciA==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -2345,8 +2345,8 @@ packages:
     resolution: {integrity: sha512-t0rzBq87m3fVcduHDUFhKmyyX+9eo6WQjZvf51Ea/M0Q7+T374Jp1aUiyUl0GKxp8M/OETVHSDvmkyPgvX+X2w==}
     engines: {node: '>=10'}
 
-  undici-types@6.21.0:
-    resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==}
+  undici-types@7.16.0:
+    resolution: {integrity: sha512-Zz+aZWSj8LE6zoxD+xrjh4VfkIG8Ya6LvYkZqtUQGJPZjYl53ypCaUwWqo7eI0x66KBGeRo+mlBEkMSeSZ38Nw==}
 
   undici-types@7.18.2:
     resolution: {integrity: sha512-AsuCzffGHJybSaRrmr5eHr81mwJU3kjw6M+uprWvCXiNeN9SOGwQ3Jn8jb8m3Z6izVgknn1R0FTCEAP2QrLY/w==}
@@ -3415,15 +3415,15 @@ snapshots:
 
   '@types/keyv@3.1.4':
     dependencies:
-      '@types/node': 22.19.17
+      '@types/node': 25.5.2
 
   '@types/mysql@2.15.27':
     dependencies:
       '@types/node': 25.5.2
 
-  '@types/node@22.19.17':
+  '@types/node@24.12.4':
     dependencies:
-      undici-types: 6.21.0
+      undici-types: 7.16.0
 
   '@types/node@25.5.2':
     dependencies:
@@ -3441,7 +3441,7 @@ snapshots:
 
   '@types/responselike@1.0.3':
     dependencies:
-      '@types/node': 22.19.17
+      '@types/node': 25.5.2
 
   '@types/semver@7.7.1': {}
 
@@ -3897,10 +3897,10 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  electron@35.7.5:
+  electron@40.10.1:
     dependencies:
       '@electron/get': 2.0.3
-      '@types/node': 22.19.17
+      '@types/node': 24.12.4
       extract-zip: 2.0.1
     transitivePeerDependencies:
       - supports-color
@@ -4448,7 +4448,7 @@ snapshots:
     dependencies:
       json-buffer: 3.0.1
 
-  latchkey@2.11.1:
+  latchkey@2.12.2:
     dependencies:
       '@imbue-ai/detent': 1.2.0
       '@napi-rs/keyring': 1.2.0
@@ -5112,7 +5112,7 @@ snapshots:
 
   type-fest@0.21.3: {}
 
-  undici-types@6.21.0: {}
+  undici-types@7.16.0: {}
 
   undici-types@7.18.2: {}
 

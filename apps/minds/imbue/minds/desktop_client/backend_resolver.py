@@ -4,6 +4,7 @@ from abc import ABC
 from abc import abstractmethod
 from collections.abc import Callable
 from collections.abc import Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import Final
 
@@ -13,10 +14,13 @@ from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
 from imbue.minds.primitives import ServiceName
+from imbue.mngr.api.discovery_events import DiscoveredProvider
+from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 SERVICES_EVENT_SOURCE_NAME: Final[str] = "services"
 REQUESTS_EVENT_SOURCE_NAME: Final[str] = "requests"
@@ -269,6 +273,14 @@ class MngrCliBackendResolver(BackendResolverInterface):
     _agents_result: ParsedAgentsResult = PrivateAttr(default_factory=ParsedAgentsResult)
     _services_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
     _initial_discovery_done: bool = PrivateAttr(default=False)
+    _providers: tuple[DiscoveredProvider, ...] = PrivateAttr(default=())
+    _error_by_provider_name: dict[ProviderInstanceName, DiscoveryError] = PrivateAttr(default_factory=dict)
+    # Timestamp (UTC) of the most recently received discovery event of any kind.
+    # Used by the providers panel's "time since last discovery event" counter.
+    _last_event_at: datetime | None = PrivateAttr(default=None)
+    # Timestamp (UTC) of the most recently received FullDiscoverySnapshotEvent.
+    # Used by the providers panel's "time since last full discovery event" counter.
+    _last_full_snapshot_at: datetime | None = PrivateAttr(default=None)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _on_change_callbacks: list[Callable[[], None]] = PrivateAttr(default_factory=list)
     _on_request_callbacks: list[Callable[[str, str], None]] = PrivateAttr(default_factory=list)
@@ -328,6 +340,47 @@ class MngrCliBackendResolver(BackendResolverInterface):
             self._initial_discovery_done = True
         self._fire_on_change()
 
+    def update_providers(
+        self,
+        providers: tuple[DiscoveredProvider, ...],
+        error_by_provider_name: Mapping[ProviderInstanceName, DiscoveryError],
+        last_full_snapshot_at: datetime,
+    ) -> None:
+        """Replace provider state from a FullDiscoverySnapshotEvent. Thread-safe.
+
+        Updates both ``_last_event_at`` and ``_last_full_snapshot_at`` to
+        ``last_full_snapshot_at`` since a full snapshot is also a discovery
+        event. Incremental events update ``_last_event_at`` only, via
+        :meth:`record_discovery_event_received`.
+        """
+        with self._lock:
+            self._providers = tuple(providers)
+            self._error_by_provider_name = dict(error_by_provider_name)
+            self._last_full_snapshot_at = last_full_snapshot_at
+            self._last_event_at = last_full_snapshot_at
+        self._fire_on_change()
+
+    def record_discovery_event_received(self, event_at: datetime) -> None:
+        """Bump ``_last_event_at`` for an incremental (non-snapshot) discovery event."""
+        with self._lock:
+            self._last_event_at = event_at
+        self._fire_on_change()
+
+    def list_providers(self) -> tuple[DiscoveredProvider, ...]:
+        """Return the providers from the most recent full discovery snapshot."""
+        with self._lock:
+            return self._providers
+
+    def get_provider_errors(self) -> dict[ProviderInstanceName, DiscoveryError]:
+        """Return errored providers keyed by provider name."""
+        with self._lock:
+            return dict(self._error_by_provider_name)
+
+    def get_freshness_timestamps(self) -> tuple[datetime | None, datetime | None]:
+        """Return ``(last_event_at, last_full_snapshot_at)`` for the providers panel."""
+        with self._lock:
+            return self._last_event_at, self._last_full_snapshot_at
+
     def update_services(self, agent_id: AgentId, services: dict[str, str]) -> None:
         """Replace the known services for a single agent. Thread-safe."""
         with self._lock:
@@ -347,6 +400,18 @@ class MngrCliBackendResolver(BackendResolverInterface):
     def list_known_agent_ids(self) -> tuple[AgentId, ...]:
         with self._lock:
             return self._agents_result.agent_ids
+
+    def list_discovered_agents(self) -> tuple[DiscoveredAgent, ...]:
+        """Return the full ``DiscoveredAgent`` records from the latest discovery snapshot.
+
+        Unlike :meth:`list_known_agent_ids`, this exposes the typed
+        ``host_id`` / ``agent_name`` / ``labels`` alongside each id so
+        callers that need to act on agent-host pairs (e.g. the latchkey
+        auto-register callback) do not have to do N+1 lookups via
+        :meth:`get_agent_display_info` and re-parse stringified ids.
+        """
+        with self._lock:
+            return self._agents_result.discovered_agents
 
     def list_known_workspace_ids(self) -> tuple[AgentId, ...]:
         """Return agent IDs that are primary workspace agents.

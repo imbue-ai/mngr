@@ -85,7 +85,10 @@ if [ -d '{host_dir}/agents' ]; then
         echo "START_MTIME=$(stat -c %Y "${{agent_dir}}activity/start" 2>/dev/null)"
         agent_name=$(jq -r '.name // empty' "$data_file" 2>/dev/null)
         session_name='{prefix}'"$agent_name"
-        tmux_info=$(tmux list-panes -t "${{session_name}}:0" -F '#{{pane_dead}}|#{{pane_current_command}}|#{{pane_pid}}' 2>/dev/null | head -n 1)
+        # `=$session:0` mirrors TmuxWindowTarget; required for list-panes since `-t`
+        # resolves as target-window/-pane (a bare `=name` would be parsed as a literal
+        # window/pane name).
+        tmux_info=$(tmux list-panes -t "=${{session_name}}:0" -F '#{{pane_dead}}|#{{pane_current_command}}|#{{pane_pid}}' 2>/dev/null | head -n 1)
         echo "TMUX_INFO=$tmux_info"
         if [ -f "${{agent_dir}}active" ]; then
             echo "ACTIVE=true"

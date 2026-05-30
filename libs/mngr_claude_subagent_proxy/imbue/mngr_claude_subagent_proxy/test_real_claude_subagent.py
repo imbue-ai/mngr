@@ -276,7 +276,10 @@ def _build_mngr_subprocess_env(
     profile_dir = mngr_root / "profiles" / profile_name
     profile_dir.mkdir(parents=True, exist_ok=True)
     (mngr_root / "config.toml").write_text(f'profile = "{profile_name}"\n')
-    settings_toml = "[providers.modal]\nis_enabled = false\n"
+    # is_allowed_in_pytest opts this hand-rolled profile into the pytest run (the
+    # field defaults to False); it must precede the [providers.modal] section
+    # since it is a top-level key.
+    settings_toml = "is_allowed_in_pytest = true\n\n[providers.modal]\nis_enabled = false\n"
     if extra_settings_toml:
         settings_toml += "\n" + extra_settings_toml
     (profile_dir / "settings.toml").write_text(settings_toml)

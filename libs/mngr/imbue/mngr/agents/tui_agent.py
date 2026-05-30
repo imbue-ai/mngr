@@ -19,6 +19,7 @@ from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.tui_utils import DEFAULT_ENTER_SUBMISSION_WAIT_FOR_TIMEOUT_SECONDS
 from imbue.mngr.agents.tui_utils import wait_for_paste_visible
 from imbue.mngr.agents.tui_utils import wait_for_tui_ready
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentConfigT
 
 
@@ -39,10 +40,10 @@ class InteractiveTuiAgent(BaseAgent[AgentConfigT]):
       reappears after submission), or ``send_enter_best_effort`` (for agents
       with no reliable confirmation surface).
 
-    Interactive coding TUIs (Claude Code, Gemini CLI, pi) have complex input
-    handlers that can misinterpret Enter as a literal newline when it arrives
-    too quickly after the message text, so ``send_message`` waits for the
-    paste to render in the pane before invoking ``_send_enter_and_validate``.
+    Interactive coding TUIs (Claude Code, Antigravity CLI, pi) have complex
+    input handlers that can misinterpret Enter as a literal newline when it
+    arrives too quickly after the message text, so ``send_message`` waits for
+    the paste to render in the pane before invoking ``_send_enter_and_validate``.
     """
 
     TUI_READY_INDICATOR: ClassVar[str]
@@ -56,7 +57,7 @@ class InteractiveTuiAgent(BaseAgent[AgentConfigT]):
         return self.TUI_READY_INDICATOR
 
     @abstractmethod
-    def _send_enter_and_validate(self, tmux_target: str) -> None:
+    def _send_enter_and_validate(self, tmux_target: TmuxWindowTarget) -> None:
         """Send Enter to submit the pasted message, then confirm submission.
 
         Implementations should call one of the strategy helpers in

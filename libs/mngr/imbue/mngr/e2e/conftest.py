@@ -11,6 +11,7 @@ from datetime import timezone
 from pathlib import Path
 from uuid import uuid4
 
+import pluggy
 import pytest
 import tomlkit
 from loguru import logger
@@ -52,7 +53,7 @@ class E2eSession(Session):
             (f"mngr exec {agent_name} 'tmux list-sessions 2>&1'", "tmux sessions"),
             (
                 f'mngr exec {agent_name} \'SESSION=$(tmux list-sessions -F "#{{session_name}}" 2>/dev/null | head -1);'
-                f' tmux capture-pane -p -t "$SESSION" 2>&1 || echo no-pane\'',
+                f' tmux capture-pane -p -t "=$SESSION" 2>&1 || echo no-pane\'',
                 "claude pane",
             ),
             (
@@ -161,7 +162,9 @@ _e2e_test_failed: dict[str, bool] = {}
 
 
 @pytest.hookimpl(tryfirst=True, hookwrapper=True)
-def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) -> Generator[None, None, None]:
+def pytest_runtest_makereport(
+    item: pytest.Item, call: pytest.CallInfo[None]
+) -> Generator[None, pluggy.Result[pytest.TestReport], None]:
     """Track whether the test call phase failed, for use in e2e fixture teardown."""
     outcome = yield
     rep = outcome.get_result()
@@ -253,6 +256,12 @@ def _setup_test_profile(host_dir: Path) -> str:
     # Write config.toml pointing to this profile
     config_path = host_dir / ROOT_CONFIG_FILENAME
     config_path.write_text(f'profile = "{profile_id}"\n')
+
+    # Opt this profile's config into pytest runs. The subprocess mngr inherits
+    # PYTEST_CURRENT_TEST and loads this profile's settings.toml, so without
+    # is_allowed_in_pytest = true (it defaults to False) the config loader would
+    # refuse to run.
+    (profile_dir / "settings.toml").write_text("is_allowed_in_pytest = true\n")
 
     # Build a user_id that produces a Modal environment name matching the
     # mngr_test-YYYY-MM-DD-HH-MM-SS-{identifier} pattern (recognized by
@@ -413,8 +422,13 @@ def e2e(
     # Remote providers (Modal, Docker) are left enabled so that e2e tests
     # exercise the full discovery path. Tests that trigger Modal (via
     # mngr list, mngr destroy --gc, etc.) need @pytest.mark.modal.
+    # is_allowed_in_pytest opts this local-layer config into the pytest run.
+    # Every config file loaded during a pytest run must opt in individually, and
+    # this one is loaded alongside the profile's settings.toml.
     settings_path = project_config_dir / "settings.local.toml"
     settings_path.write_text(
+        "is_allowed_in_pytest = true\n"
+        "\n"
         "[commands.create]\n"
         'connect_command = "mngr-e2e-connect"\n'
         "\n"

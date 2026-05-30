@@ -8,7 +8,6 @@ import pytest
 import tomlkit
 from click.testing import CliRunner
 
-from imbue.mngr.cli.config import ConfigScope
 from imbue.mngr.cli.config import _emit_all_paths
 from imbue.mngr.cli.config import _emit_config_list
 from imbue.mngr.cli.config import _emit_config_set_result
@@ -19,9 +18,9 @@ from imbue.mngr.cli.config import _emit_single_path
 from imbue.mngr.cli.config import _flatten_config
 from imbue.mngr.cli.config import _format_value_for_display
 from imbue.mngr.cli.config import _get_nested_value
-from imbue.mngr.cli.config import _parse_value
 from imbue.mngr.cli.config import _unset_nested_value
 from imbue.mngr.cli.config import config
+from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import ConfigKeyNotFoundError
 from imbue.mngr.primitives import OutputFormat
@@ -30,51 +29,10 @@ from imbue.mngr.utils.toml_config import save_config_file
 from imbue.mngr.utils.toml_config import set_nested_value
 from imbue.mngr.utils.toml_config import set_plugin_enabled
 
-
-def test_parse_value_parses_true_as_boolean() -> None:
-    result = _parse_value("true")
-    assert result is True
-    assert isinstance(result, bool)
-
-
-def test_parse_value_parses_false_as_boolean() -> None:
-    result = _parse_value("false")
-    assert result is False
-    assert isinstance(result, bool)
-
-
-def test_parse_value_parses_integer() -> None:
-    result = _parse_value("42")
-    assert result == 42
-    assert isinstance(result, int)
-
-
-def test_parse_value_parses_float() -> None:
-    result = _parse_value("3.14")
-    assert result == 3.14
-    assert isinstance(result, float)
-
-
-def test_parse_value_parses_array() -> None:
-    result = _parse_value('["a", "b", "c"]')
-    assert result == ["a", "b", "c"]
-
-
-def test_parse_value_parses_object() -> None:
-    result = _parse_value('{"key": "value"}')
-    assert result == {"key": "value"}
-
-
-def test_parse_value_returns_string_for_plain_text() -> None:
-    result = _parse_value("hello world")
-    assert result == "hello world"
-    assert isinstance(result, str)
-
-
-def test_parse_value_returns_string_for_unquoted_string() -> None:
-    result = _parse_value("my-prefix-")
-    assert result == "my-prefix-"
-    assert isinstance(result, str)
+# Value-parsing semantics (boolean, integer, JSON array, etc.) are exercised in
+# the dedicated key_resolver_test suite that owns ``parse_scalar_value``; we
+# don't re-test them here since ``mngr config set/extend`` now call that
+# shared helper directly rather than through a per-callsite wrapper.
 
 
 def test_format_value_for_display_formats_true() -> None:

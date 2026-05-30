@@ -5,38 +5,49 @@ ephemeral Modal sandbox. The schedule creates a fresh worktree at
 directory you must operate in. Execute the following steps in order,
 exactly. Do not deviate. Do not ask questions.
 
-Your **final assistant message must be a single JSON object** matching
-the schema below — nothing before it, nothing after it, no markdown
-code fence, no commentary. The cron framework parses your final message
-to determine outcome.
+Your **final assistant message must be a single JSON object** — nothing
+before it, nothing after it, no markdown code fence, no commentary. The
+cron framework parses your final message to determine outcome. Emit the
+shape that matches what happened:
 
 ```
-{
-  "status": "done" | "skipped-no-entries" | "failed",
-  "pr_url": "<url>" | null,
-  "notes": "<freeform human-readable string; multi-line ok>"
-}
+{"status": "done", "pr_url": "<url>"}
+{"status": "skipped-no-entries"}
+{"status": "failed", "notes": "<failing step number + error detail>"}
 ```
 
-If any step fails, your final message must be a `failed` JSON object
-with the failing step number and error detail in `notes`.
+If any step fails, emit the `failed` shape with the failing step number
+and error detail in `notes`.
+
+Background: this repo uses an in-project changelog layout. Each project
+under `libs/`, `apps/`, plus the synthetic top-level `dev/` directory,
+owns three artifacts at its root: a `changelog/` directory for per-PR
+entry files (`<project_dir>/changelog/<branch>.md`), a `CHANGELOG.md`
+for the consolidated summary, and an `UNABRIDGED_CHANGELOG.md` for the
+verbatim per-date sections. Your job is to fan each pending entry into
+the right project's consolidated files.
 
 1. `cd "$MNGR_AGENT_WORK_DIR"`. Verify with `git rev-parse --abbrev-ref
    HEAD` that you are on a `mngr/changelog-consolidation-*` branch (not
    `HEAD`). If you are on detached HEAD, the schedule topology has
-   drifted from the assumption above; emit a `failed` JSON object
-   with `pwd` + branch state in `notes`.
+   drifted from the assumption above; emit a `failed` JSON object with
+   `pwd` + branch state in `notes`.
 
 2. Run `python3 scripts/consolidate_changelog.py`. Capture stdout. If
    stdout contains the literal string "No changelog entries", emit
-   `{"status": "skipped-no-entries", "pr_url": null, "notes": ""}` and
-   stop. Otherwise stdout contains a `Sections added: YYYY-MM-DD,
-   YYYY-MM-DD, ...` line (newest first) — these are the date headings
-   the consolidator just inserted at the top of `UNABRIDGED_CHANGELOG.md`.
+   `{"status": "skipped-no-entries"}` and stop.
+   Otherwise stdout contains one or more `SECTION <project> <YYYY-MM-DD>`
+   lines — each one is a `## YYYY-MM-DD` section the
+   consolidator just inserted at the top of
+   `<project_dir>/UNABRIDGED_CHANGELOG.md`, where `<project_dir>` is
+   `libs/<project>` for libs, `apps/<project>` for apps, and `dev/` for
+   the synthetic dev bucket (the same directory that holds the project's
+   `changelog/` entries dir).
 
-3. For each date in `Sections added`, read its bullet content from
-   `UNABRIDGED_CHANGELOG.md` (the section is between `## <date>` and the
-   next `## ` line) and generate a few concise, human-friendly bullets.
+3. For each `SECTION <project> <date>` line: read that section's bullets
+   from the project's `UNABRIDGED_CHANGELOG.md` (the section sits
+   between `## <date>` and the next `## ` line) and generate a few
+   concise, human-friendly bullets for that project's `CHANGELOG.md`.
    Each bullet MUST start with one of these Keep-a-Changelog categories
    followed by `: ` and the description, e.g.:
 
@@ -48,30 +59,56 @@ with the failing step number and error detail in `notes`.
 
    The allowed categories are exactly: `Added`, `Changed`, `Deprecated`,
    `Removed`, `Fixed`, `Security`. Use `Changed` as the catch-all for
-   internal refactors, doc edits, or test-only tweaks that don't fit
-   the other categories. One change → one bullet; merge near-duplicate
-   bullets across dates if they describe the same user-visible effect.
+   internal refactors or doc edits that don't fit the other categories.
+   Merge near-duplicate bullets (within the same project) if they
+   describe the same user-visible effect.
 
-4. In `CHANGELOG.md`, locate the `## [Unreleased]` heading (it sits
-   directly below the file header — `scripts/release.py` guarantees it
-   is always present after each release, and the initial one was added
-   manually). If it is *not* present, the invariant has been broken;
-   emit a `failed` JSON object with "missing [Unreleased] heading in
-   CHANGELOG.md" in `notes` and stop. Group the bullets you generated
-   in step 3 (across all dates) by category and merge them into the
+   `CHANGELOG.md` is a notable-only summary: if a change isn't notable,
+   omit it from `CHANGELOG.md` entirely rather than forcing a bullet for
+   it. The canonical example is a change that only affects tests rather
+   than user-facing behavior — skip it. For a library project, public
+   API changes count as user-facing: they affect consumers even when
+   end-user behavior is unchanged. Major internal refactors are
+   in scope too, even when in theory they leave the public surface and
+   end-user behavior unchanged: in practice a large restructuring can
+   introduce regressions, and a reader scanning the changelog to work out
+   what might have caused a problem should be able to see it. Only minor
+   or obviously no-op refactors may be omitted. If none of a project's
+   entries are notable, it is fine to produce no `CHANGELOG.md` bullets
+   for it at all.
+
+   Exception for the `dev` project: its audience is the repo's own
+   developers, so judge `dev` entries by developer/maintainer impact — a
+   CI, build, release, or tooling change that affects how the repo is
+   built, tested, or released is notable even though it isn't
+   end-user-facing.
+
+4. For each project that had at least one `SECTION` line: open that
+   project's `CHANGELOG.md` (resolve `<project_dir>` as in step 2).
+   Locate the `## [Unreleased]` heading (it sits directly below the
+   file header — `scripts/release.py` guarantees it is always present
+   after each release, and the initial one is created when the project's
+   changelog is set up). If it is *not* present, the invariant has been
+   broken for that project; emit a `failed` JSON object with "missing
+   [Unreleased] heading in <project_dir>/CHANGELOG.md" in `notes` and stop.
+
+   Group the bullets you generated in step 3 for that project (across
+   all dates for that project) by category and merge them into the
    `[Unreleased]` section under `### <Category>` subheadings, in the
    canonical order: Added, Changed, Deprecated, Removed, Fixed,
    Security. Append to any existing bullets under each subheading; do
    not delete or rewrite pre-existing bullets. (`scripts/release.py`
    renames `[Unreleased]` to `[vX.Y.Z] - YYYY-MM-DD` at release time
-   and inserts a fresh empty `[Unreleased]` above it, so the section
-   accumulates across consolidation runs within a release window.)
+   and inserts a fresh empty `[Unreleased]` above it, so each
+   project's section accumulates across consolidation runs within a
+   release window.)
 
-5. Refinement pass on `[Unreleased]`: re-read just that section as you
-   wrote it. Tighten any wordy bullets (cut filler words; keep names
-   of changed APIs/files); merge bullets that describe the same
-   user-visible change; confirm every bullet has a category prefix in
-   the exact `- <Category>: <description>` format.
+5. Refinement pass: re-read just the `[Unreleased]` section of each
+   `CHANGELOG.md` you touched. Tighten any wordy bullets (cut filler
+   words; keep names of changed APIs/files); merge bullets that
+   describe the same user-visible change within that project; confirm
+   every bullet has a category prefix in the exact `- <Category>:
+   <description>` format.
 
 6. Configure git: `git config user.email "bot@imbue.com"`,
    `git config user.name "Changelog Bot"`, `gh auth setup-git`.
@@ -79,28 +116,57 @@ with the failing step number and error detail in `notes`.
 7. Capture today's date in Pacific time: `RUN_DATE=$(TZ=America/Los_Angeles
    date +%Y-%m-%d)`. This identifies *when this consolidation run
    happened*, distinct from the per-entry `## YYYY-MM-DD` section
-   headings in `UNABRIDGED_CHANGELOG.md` (which identify when each
+   headings in each `UNABRIDGED_CHANGELOG.md` (which identify when each
    entry was written). `git add -A` and `git commit -m "Consolidate
    changelog entries (run <RUN_DATE>)"`.
 
-8. Capture the current branch name with `BRANCH=$(git rev-parse
+8. Run a changelog accuracy review on the bullets you just added, to
+   guard against stale or inaccurate entries. Spawn one or more
+   `general-purpose` reviewer subagents (fresh contexts, so they review
+   the bullets with eyes that did not write them), using the Task tool,
+   and **partition the projects you added `[Unreleased]` bullets to in
+   step 4 across them however you judge best** -- you have full
+   discretion. Balance overhead against context load: a single trivial
+   change that touched many packages can be reviewed by one subagent
+   covering all of them; a large run, or a project with many substantial
+   bullets, is better split across several subagents so no one subagent is
+   overloaded. Assign each project to **exactly one** subagent (disjoint
+   partitions, so no two subagents touch the same file). Spawn them **in
+   parallel** (issue all the Task calls in a single batch). Give each
+   subagent exactly this prompt, with the project directory or directories
+   you assigned it substituted in: "Read
+   `scripts/changelog_accuracy_reviewer.md` and follow its instructions
+   exactly. You are assigned these project(s): `<project_dirs>`." You MUST
+   explicitly wait for **all** of the subagents to finish before
+   continuing. Each verifies its assigned projects' newly-added bullets
+   against the actual code, corrects or removes inaccurate ones (and may
+   collapse a bullet that another materially supersedes), edits only its
+   assigned `CHANGELOG.md` files, and commits its own corrections (staging
+   only those files). If a subagent cannot run or errors out, you may
+   retry it if that seems worthwhile; either way, do NOT fail the whole
+   run on its account -- the consolidation commit is still valid.
+
+9. Capture the current branch name with `BRANCH=$(git rev-parse
    --abbrev-ref HEAD)` and push it: `git push --set-upstream origin
    "$BRANCH"`. The schedule's auto-merge step ran `git fetch && checkout
    && merge origin/main` before this agent started, so the per-run
    branch is forked off current `origin/main` and the eventual PR diff
-   contains only the consolidation commit.
+   contains only this run's commits (the consolidation commit plus any
+   per-project accuracy-review correction commits).
 
-9. Open a PR with `gh pr create --base main --title "Changelog
-   consolidation (run <RUN_DATE>)" --body "Automated changelog
-   consolidation run on <RUN_DATE>."`. Capture the URL from stdout
-   into `PR_URL` while diverting stderr to a temp file, e.g.
+10. Open a PR with `gh pr create --base main`. Title: `Changelog
+   consolidation (run <RUN_DATE>)`. Body: describe this automated
+   changelog consolidation run (run <RUN_DATE>); what else to surface --
+   e.g. anything notable the accuracy reviewers reported -- is up to you.
+   Capture the PR URL from stdout into `PR_URL` while diverting stderr to
+   a temp file, e.g.
    `PR_URL=$(gh pr create --base main --title "..." --body "..." 2>/tmp/gh_stderr)`.
    **Do not** fold stderr in via `2>&1` — `gh pr create` writes progress
-   lines (e.g. "Creating pull request for X into Y in Z") to stderr
-   that would mangle the captured URL. If `gh pr create` exits
-   non-zero, read `/tmp/gh_stderr` and emit a `failed` JSON object
-   with that stderr content in `notes`.
+   lines (e.g. "Creating pull request for X into Y in Z") to stderr that
+   would mangle the captured URL. If `gh pr create` exits non-zero, read
+   `/tmp/gh_stderr`; if the error is something you can fix (e.g. a
+   malformed invocation), correct it and retry, otherwise emit a `failed`
+   JSON object with that stderr content in `notes`.
 
-10. Emit your final JSON object: `{"status": "done", "pr_url":
-    "<PR_URL>", "notes": "Opened PR <PR_URL> for branch <BRANCH>."}`,
-    substituting the values from steps 8 and 9.
+11. Emit your final JSON object: `{"status": "done", "pr_url":
+    "<PR_URL>"}`, substituting the PR URL from step 10.

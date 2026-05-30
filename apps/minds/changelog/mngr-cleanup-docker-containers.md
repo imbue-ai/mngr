@@ -1,0 +1,3 @@
+- Resetting or destroying an env no longer leaves its mngr Docker state container (`<MNGR_PREFIX>docker-state-<user_id>`) running forever. Both `minds env destroy` and the activate-time generation-mismatch auto-wipe now remove that env's exact state container and its backing volume.
+- The auto-wipe now also destroys the env's mngr agents (in a single `mngr destroy` call) before wiping local state, so their Docker host containers and build images are cleaned up too.
+- Env-teardown agent destruction now uses one batched `mngr destroy` call instead of one call per agent.

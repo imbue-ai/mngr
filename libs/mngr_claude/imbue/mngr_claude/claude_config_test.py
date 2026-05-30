@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from imbue.mngr.errors import UserInputError
 from imbue.mngr_claude.claude_config import ClaudeDirectoryNotTrustedError
 from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
 from imbue.mngr_claude.claude_config import acknowledge_cost_threshold
@@ -766,17 +765,16 @@ def test_resolve_shared_claude_config_dir_returns_env_value(tmp_path: Path, monk
     assert resolve_shared_claude_config_dir() == target
 
 
-def test_resolve_shared_claude_config_dir_raises_when_unset() -> None:
-    """Without CLAUDE_CONFIG_DIR, raises UserInputError naming the flag."""
-    with pytest.raises(UserInputError, match="use_env_config_dir"):
-        resolve_shared_claude_config_dir()
+def test_resolve_shared_claude_config_dir_falls_back_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without CLAUDE_CONFIG_DIR, falls back to ``~/.claude/`` (claude's own default)."""
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    assert resolve_shared_claude_config_dir() == Path.home() / ".claude"
 
 
-def test_resolve_shared_claude_config_dir_raises_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Empty CLAUDE_CONFIG_DIR is treated the same as unset."""
+def test_resolve_shared_claude_config_dir_falls_back_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Empty CLAUDE_CONFIG_DIR is treated the same as unset and falls back to ``~/.claude/``."""
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "")
-    with pytest.raises(UserInputError, match="use_env_config_dir"):
-        resolve_shared_claude_config_dir()
+    assert resolve_shared_claude_config_dir() == Path.home() / ".claude"
 
 
 # Tests for find_user_claude_config

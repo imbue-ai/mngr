@@ -719,8 +719,10 @@ def test_paramiko_handler_routes_expected_messages(
     sink_level: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Enable paramiko logging so DEBUG-level messages are routed to TRACE
-    monkeypatch.setenv("MNGR_ENABLE_PARAMIKO_LOGGING", "1")
+    # Enable paramiko TRACE forwarding. The toggle is a module-level flag set
+    # by setup_logging() from LoggingConfig.enable_paramiko_logging; bypass the
+    # full setup for this test by overriding the module attribute directly.
+    monkeypatch.setattr(mngr_logging_module, "_paramiko_logging_enabled", True)
     handler = _ParamikoToLoguruHandler()
     messages: list[str] = []
     handler_id = logger.add(lambda msg: messages.append(msg), level=sink_level)
@@ -830,7 +832,7 @@ def test_paramiko_transport_log_patch_joins_list_messages() -> None:
 
 def _get_paramiko_traceback() -> types.TracebackType:
     try:
-        cast(Any, paramiko.channel.Channel._send)(None, b"test", None)
+        cast(Any, paramiko.channel.Channel._send)(None, b"test", None)  # ty: ignore[unresolved-attribute]
     except (AttributeError, TypeError, OSError) as e:
         assert e.__traceback__ is not None
         return e.__traceback__

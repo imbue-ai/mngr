@@ -301,7 +301,7 @@ mngr list --active
 # you can make any of those filters the default for "mngr list" by setting it in your config.
 # for example, to hide agents from dead/destroyed hosts by default:
 mngr config set commands.list.active true
-# to opt out for a single call, override the env var: MNGR_COMMANDS_LIST_ACTIVE=false mngr list
+# to opt out for a single call, override the env var: MNGR__COMMANDS__LIST__ACTIVE=false mngr list
 
 # note: --active only excludes hosts in CRASHED/FAILED/DESTROYED state and archived agents,
 # *not* STOPPED or DONE agents. if you want to also hide STOPPED and DONE agents from the default,
@@ -454,7 +454,8 @@ mngr exec -a --on-error continue "git log --oneline -5"
 #   sync your local changes to an agent's workspace.
 ##############################################################################
 
-# "push" is an experimental command. See "mngr push --help" for current usage.
+# Use "mngr rsync <local> <agent>" to push files. See "mngr rsync --help".
+# Use "mngr git push <agent>" to push git commits. See "mngr git push --help".
 
 ##############################################################################
 # PULLING FILES FROM AGENTS
@@ -462,7 +463,8 @@ mngr exec -a --on-error continue "git log --oneline -5"
 #   This is how you retrieve an agent's work.
 ##############################################################################
 
-# "pull" is an experimental command. See "mngr pull --help" for current usage.
+# Use "mngr rsync <agent> <local>" to pull files. See "mngr rsync --help".
+# Use "mngr git pull <agent>" to pull git commits. See "mngr git pull --help".
 
 ##############################################################################
 # PAIRING WITH AGENTS
@@ -622,8 +624,8 @@ mngr snapshot destroy my-task --all-snapshots --dry-run
 
 ##############################################################################
 # MANAGING AGENT LIMITS
-#   Configure idle timeouts, activity tracking, permissions, and other
-#   runtime limits for agents and hosts.
+#   Configure idle timeouts, activity tracking, and other runtime limits
+#   for agents and hosts.
 ##############################################################################
 
 # "limit" is an experimental command. See "mngr limit --help" for current usage.
@@ -902,7 +904,7 @@ git fetch --all && git merge mngr/my-task
 
 # TODO: give an example of how to use a stop hook to automatically push for the agent
 
-# TODO: add some more example with mngr pull for how to merge work back in
+# TODO: add some more example with mngr git pull for how to merge work back in
 
 # when destroying, clean up the branch that was originally created when the agent was created
 mngr destroy my-task --force --remove-created-branch
@@ -952,7 +954,7 @@ mngr list --format jsonl | jq --unbuffered 'select(.labels.priority == "high")'
 ##############################################################################
 # CREATE TEMPLATES
 #   Define reusable presets that bundle common options (provider, build
-#   args, permissions, environment, etc.) into a single template name.
+#   args, environment, etc.) into a single template name.
 ##############################################################################
 
 # templates are defined in your config (user, project, or local scope).
@@ -976,7 +978,7 @@ mngr create my-task --template modal-big --template with-tests
 ##############################################################################
 # CUSTOM AGENT TYPES
 #   Define your own agent types in config, or use the built-in `command` type
-#   to run any shell command. Wrap existing tools with custom defaults and permissions.
+#   to run any shell command. Wrap existing tools with custom defaults.
 ##############################################################################
 
 # mngr supports multiple agent types out of the box (claude, codex, etc.)
@@ -1030,7 +1032,7 @@ mngr create my-task --provider modal --pass-host-env MODAL_TOKEN_ID --pass-host-
 
 # control mngr itself via environment variables. All config options can be set this way, use double-underscore ("__")
 # in order to index into the nested config structure. For example, to set the provider to "modal" for a create command:
-export MNGR_COMMANDS__CREATE__PROVIDER=modal
+export MNGR__COMMANDS__CREATE__PROVIDER=modal
 mngr create my-task
 
 ##############################################################################
@@ -1283,7 +1285,7 @@ mngr create my-task --provider modal \
   --sudo-command "apt-get update && apt-get install -y build-essential" \
   --extra-provision-command "pip install -r /workspace/requirements.txt"
 
-# TODO: also show how you can use "mngr push" or "mngr exec" after starting the agent, just as nice alternatives
+# TODO: also show how you can use "mngr rsync" or "mngr exec" after starting the agent, just as nice alternatives
 
 ##############################################################################
 # ADVANCED WORKFLOWS
