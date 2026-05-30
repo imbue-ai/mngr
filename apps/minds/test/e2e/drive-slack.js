@@ -19,7 +19,12 @@ const path = require('path');
 const WORKSPACE = process.env.MINDS_WORKSPACE || 'weishi30';
 const NONCE = Math.random().toString(36).slice(2, 10);
 const PROMPT = process.env.MINDS_SLACK_PROMPT
-  || 'Read 1 recent message from any Slack channel I am a member of, then reply with just the sender name and the first 80 characters of the message. Tag the reply with the prefix "TOK ' + NONCE + ':"';
+  || ('Read-only Slack task. DO NOT post, send, or write any message '
+    + 'anywhere. Use only read-style Slack tool calls (list_messages, '
+    + 'channel_history, etc). After reading, respond ONLY here in this '
+    + 'chat panel (no Slack post) with the prefix "TOK ' + NONCE + ':" '
+    + 'followed by the sender name and the first 80 characters of one '
+    + 'recent message you read.');
 const EXPECT_PREFIX = (process.env.MINDS_SLACK_EXPECT || `tok ${NONCE}:`).toLowerCase();
 const DIR = path.join(__dirname, 'screenshots');
 const T0 = Date.now();
