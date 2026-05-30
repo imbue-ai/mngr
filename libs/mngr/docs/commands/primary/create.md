@@ -262,6 +262,17 @@ Provider: ovh
   Example: -b --vps-plan=vps-2025-model1 -b --file=Dockerfile -b .
   Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
 
+Provider: sbx
+  Supported build arguments for the sbx provider:
+    --workspace PATH           Primary host workspace mounted into the sandbox.
+                               Defaults to the current working directory.
+    --extra-workspace SPEC     Additional workspace mount spec (e.g. /path:ro).
+                               Can be specified multiple times.
+    --template IMAGE           Override the sbx container image (overrides provider default).
+
+  Other arguments are passed through to 'sbx create'.
+  Start args are passed directly to 'sbx create' (e.g. --cpus, --memory).
+
 Provider: ssh
   The SSH provider does not support creating hosts dynamically.
   Hosts must be pre-configured in the mngr config file.
