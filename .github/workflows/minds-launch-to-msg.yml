@@ -441,6 +441,15 @@ jobs:
           done
           [ -f /tmp/post-slack-delete.json ] && cp /tmp/post-slack-delete.json artifacts/ 2>/dev/null || true
           [ -d /tmp/slack-mock ] && cp -R /tmp/slack-mock artifacts/ 2>/dev/null || true
+          # Capture latchkey gateway state to see whether permission
+          # requests reached the on-disk store but failed to surface in
+          # the panel. Exclude the encryption_key from the artifact.
+          if [ -d "$HOME/.minds/latchkey" ]; then
+            mkdir -p artifacts/latchkey
+            cp -R "$HOME/.minds/latchkey/mngr_latchkey" artifacts/latchkey/ 2>/dev/null || true
+            cp "$HOME/.minds/latchkey/latchkey_gateway.log" artifacts/latchkey/ 2>/dev/null || true
+            cp "$HOME/.minds/latchkey/latchkey_ensure_browser.log" artifacts/latchkey/ 2>/dev/null || true
+          fi
           [ -d apps/minds/test/e2e/screenshots ] && cp -R apps/minds/test/e2e/screenshots artifacts/playwright-screenshots 2>/dev/null || true
           [ -d apps/minds/test-results ] && cp -R apps/minds/test-results artifacts/playwright-test-results 2>/dev/null || true
       - uses: actions/upload-artifact@v4

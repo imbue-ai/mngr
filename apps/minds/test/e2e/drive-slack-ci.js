@@ -240,8 +240,11 @@ async function dumpWindows(app, tag) {
   await shot(win, 'ci-slack-sent');
   log('typed + sent; watching for approval UI and canned body');
 
-  // Approval is a 3-step click: chatbox icon -> request entry -> Approve.
-  let approvalStage = 0; // 0=need to open panel, 1=need to click request, 2=need to click Approve, 3=done
+  // Approval is up to 3 clicks: chatbox icon (if panel not open) ->
+  // request entry -> Approve. Skip stage 0 if the requests-panel
+  // window is already open (minds.app sometimes auto-opens it).
+  let approvalStage = findRequestsPanelWindow(app) ? 1 : 0;
+  log(`starting approvalStage=${approvalStage} (requests-panel ${approvalStage === 1 ? 'already open' : 'closed'})`);
   const dumpedOnce = [false, false, false];
   for (let i = 0; i < 240; i++) {
     if (approvalStage < 3) {
