@@ -17,9 +17,26 @@ snap() {
   local name="$1"
   local ts
   ts=$(date +%H%M%S)
-  if command -v screencapture >/dev/null 2>&1; then
-    screencapture -x "$SCREENSHOT_DIR/${ts}-${name}.png" 2>/dev/null || true
+  local out="$SCREENSHOT_DIR/${ts}-${name}.png"
+  if ! command -v screencapture >/dev/null 2>&1; then
+    log "  snap[$name]: screencapture not on PATH"
+    return
   fi
+  # `screencapture -x` (no sound) is enough; on a headless launchd
+  # context it returns silently with no file, which is why earlier
+  # runs landed an empty SCREENSHOT_DIR. Log the outcome so artifact
+  # postmortem can show whether the runner's session can grab the
+  # display at all.
+  screencapture -x "$out" 2>"$out.err" || true
+  if [[ -s "$out" ]]; then
+    log "  snap[$name] -> $out ($(stat -f %z "$out") bytes)"
+  else
+    local err
+    err=$(cat "$out.err" 2>/dev/null || true)
+    log "  snap[$name] FAILED: no/empty file written (screencapture stderr: ${err:-<empty>})"
+    rm -f "$out"
+  fi
+  rm -f "$out.err"
 }
 # `${VAR:-default}` substitutes default for both unset and empty string,
 # so a workflow input that defaulted to '' still falls through to these.

@@ -357,7 +357,8 @@ async function dumpWindows(app, tag) {
     if (i % 15 === 0 && i > 0) {
       const tail = await win.evaluate(() => document.body.innerText.slice(-400));
       log(`waiting (${i}s) approvalStage=${approvalStage} tail: ${JSON.stringify(tail.slice(-200))}`);
-      await shot(win, `ci-slack-waiting-${i}s`);
+      // Suffix with stage so artifact list shows progress mid-flow.
+      await shot(win, `13-waiting-stage${approvalStage}-t${String(i).padStart(3, '0')}s`);
     }
     await win.waitForTimeout(1000);
   }
