@@ -303,100 +303,161 @@ def test_get_system_services_agent_id_returns_none_when_not_discovered() -> None
     assert resolver.get_system_services_agent_id(AgentId.generate()) is None
 
 
-def test_services_agent_id_cache_persists_pair_seen_during_discovery(tmp_path: Path) -> None:
-    """First time discovery surfaces both agents on a host, the cache is written through to disk."""
-    cache_path = tmp_path / "system_services_agent_cache.json"
-    resolver = MngrCliBackendResolver(services_agent_cache_path=cache_path)
+def _pair_snapshot(
+    host: HostId, workspace_agent: AgentId, services_agent: AgentId
+) -> tuple[DiscoveredAgent, DiscoveredAgent]:
+    """A complete two-agent host snapshot: a claude workspace agent + its system-services agent."""
+    return (
+        _discovered_agent(host, workspace_agent, "my-claude-agent"),
+        _discovered_agent(host, services_agent, "system-services"),
+    )
+
+
+def test_last_good_topology_persists_and_reloads_across_restart(tmp_path: Path) -> None:
+    """A complete host enumeration is written to disk and resolves from a fresh resolver.
+
+    Covers the cross-minds-restart case: the in-memory topology starts empty
+    on a new process, so the persisted file is the only source.
+    """
+    topology_path = tmp_path / "last_good_agent_topology.json"
     host = HostId.generate()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
+
+    resolver = MngrCliBackendResolver(last_good_agents_path=topology_path)
     resolver.update_agents(
         ParsedAgentsResult(
             agent_ids=(workspace_agent, services_agent),
-            discovered_agents=(
-                _discovered_agent(host, workspace_agent, "my-claude-agent"),
-                _discovered_agent(host, services_agent, "system-services"),
-            ),
+            discovered_agents=_pair_snapshot(host, workspace_agent, services_agent),
         )
     )
+    assert topology_path.exists()
 
-    assert cache_path.exists()
-    persisted = json.loads(cache_path.read_text(encoding="utf-8"))
-    assert persisted == {str(workspace_agent): str(services_agent)}
+    reloaded = MngrCliBackendResolver(last_good_agents_path=topology_path)
+    assert reloaded.get_system_services_agent_id(workspace_agent) == services_agent
 
 
-def test_services_agent_id_cache_falls_back_when_discovery_loses_the_pair(tmp_path: Path) -> None:
-    """After the cache has seen the pair, discovery losing both agents still resolves via the cache.
+def test_last_good_topology_falls_back_when_discovery_loses_the_host(tmp_path: Path) -> None:
+    """After a complete enumeration, discovery losing the whole host still resolves via last-good.
 
     Reproduces the SSH-dead failure mode: the docker provider's enumeration
     falls over and ``update_agents`` is called with an empty agent list. The
     restart path must still be able to address the system-services agent so
     a host restart can proceed.
     """
-    cache_path = tmp_path / "system_services_agent_cache.json"
-    resolver = MngrCliBackendResolver(services_agent_cache_path=cache_path)
+    topology_path = tmp_path / "last_good_agent_topology.json"
+    host = HostId.generate()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = MngrCliBackendResolver(last_good_agents_path=topology_path)
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(workspace_agent, services_agent),
+            discovered_agents=_pair_snapshot(host, workspace_agent, services_agent),
+        )
+    )
+    # SSH dies; discovery loses every agent on the host.
+    resolver.update_agents(ParsedAgentsResult())
+
+    assert resolver.get_system_services_agent_id(workspace_agent) == services_agent
+
+
+def test_last_good_topology_preserves_other_host_on_partial_discovery_loss() -> None:
+    """A snapshot missing one host must not erase that host's remembered pairing.
+
+    Two workspaces on two hosts are both seen; then a later snapshot enumerates
+    only host A (host B's SSH died). Host B's pairing must survive in last-good
+    even though A produced a fresh, non-empty snapshot -- otherwise the very
+    workspace a user is trying to restart loses its services agent the moment
+    any sibling workspace reports in.
+    """
+    resolver = MngrCliBackendResolver()
+    host_a = HostId.generate()
+    host_b = HostId.generate()
+    workspace_a, services_a = AgentId.generate(), AgentId.generate()
+    workspace_b, services_b = AgentId.generate(), AgentId.generate()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(workspace_a, services_a, workspace_b, services_b),
+            discovered_agents=(
+                *_pair_snapshot(host_a, workspace_a, services_a),
+                *_pair_snapshot(host_b, workspace_b, services_b),
+            ),
+        )
+    )
+    # Host B drops out; only host A is enumerated this round.
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(workspace_a, services_a),
+            discovered_agents=_pair_snapshot(host_a, workspace_a, services_a),
+        )
+    )
+
+    # Host A resolves from the live snapshot; host B resolves from the last-good fallback.
+    assert resolver.get_system_services_agent_id(workspace_a) == services_a
+    assert resolver.get_system_services_agent_id(workspace_b) == services_b
+
+
+def test_last_good_topology_ignores_incomplete_host_enumeration() -> None:
+    """A host snapshot lacking the system-services agent must not clobber the remembered pairing.
+
+    Models a within-host partial discovery loss: the workspace agent is still
+    visible but its system-services agent dropped. Since the enumeration is
+    incomplete (no system-services agent on the host), last-good keeps the
+    prior complete record and the fallback still resolves the services agent.
+    """
+    resolver = MngrCliBackendResolver()
     host = HostId.generate()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
     resolver.update_agents(
         ParsedAgentsResult(
             agent_ids=(workspace_agent, services_agent),
-            discovered_agents=(
-                _discovered_agent(host, workspace_agent, "my-claude-agent"),
-                _discovered_agent(host, services_agent, "system-services"),
-            ),
+            discovered_agents=_pair_snapshot(host, workspace_agent, services_agent),
         )
     )
-    # SSH dies; discovery loses both agents.
-    resolver.update_agents(ParsedAgentsResult())
-
-    assert resolver.get_system_services_agent_id(workspace_agent) == services_agent
-
-
-def test_services_agent_id_cache_loads_from_disk_on_construction(tmp_path: Path) -> None:
-    """A persisted cache from a previous minds run is loaded at construction time."""
-    cache_path = tmp_path / "system_services_agent_cache.json"
-    workspace_agent = AgentId.generate()
-    services_agent = AgentId.generate()
-    cache_path.write_text(
-        json.dumps({str(workspace_agent): str(services_agent)}),
-        encoding="utf-8",
+    # Only the workspace agent remains visible; the system-services agent dropped.
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(workspace_agent,),
+            discovered_agents=(_discovered_agent(host, workspace_agent, "my-claude-agent"),),
+        )
     )
 
-    resolver = MngrCliBackendResolver(services_agent_cache_path=cache_path)
-
-    # No live discovery has happened yet, so the cache is the only source.
     assert resolver.get_system_services_agent_id(workspace_agent) == services_agent
 
 
-def test_services_agent_id_cache_ignores_malformed_persisted_file(tmp_path: Path) -> None:
-    """A garbage cache file is treated as empty rather than crashing minds startup."""
-    cache_path = tmp_path / "system_services_agent_cache.json"
-    cache_path.write_text("not json {{{", encoding="utf-8")
+def test_last_good_topology_ignores_malformed_persisted_file(tmp_path: Path) -> None:
+    """A garbage topology file is treated as empty rather than crashing minds startup."""
+    topology_path = tmp_path / "last_good_agent_topology.json"
+    topology_path.write_text("not json {{{", encoding="utf-8")
 
-    resolver = MngrCliBackendResolver(services_agent_cache_path=cache_path)
+    resolver = MngrCliBackendResolver(last_good_agents_path=topology_path)
     assert resolver.get_system_services_agent_id(AgentId.generate()) is None
 
 
-def test_services_agent_id_cache_prefers_live_discovery_when_pair_present(tmp_path: Path) -> None:
-    """The cache is a fallback, not an override: live discovery wins when both agents are visible."""
-    cache_path = tmp_path / "system_services_agent_cache.json"
+def test_last_good_topology_prefers_live_discovery_when_host_present(tmp_path: Path) -> None:
+    """Last-good is a fallback, not an override: live discovery wins when the host is visible."""
+    topology_path = tmp_path / "last_good_agent_topology.json"
+    host = HostId.generate()
     workspace_agent = AgentId.generate()
     stale_services_agent = AgentId.generate()
     current_services_agent = AgentId.generate()
-    cache_path.write_text(
-        json.dumps({str(workspace_agent): str(stale_services_agent)}),
-        encoding="utf-8",
+
+    # Seed the persisted topology with a now-stale services agent via a first resolver.
+    seed = MngrCliBackendResolver(last_good_agents_path=topology_path)
+    seed.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(workspace_agent, stale_services_agent),
+            discovered_agents=_pair_snapshot(host, workspace_agent, stale_services_agent),
+        )
     )
-    resolver = MngrCliBackendResolver(services_agent_cache_path=cache_path)
-    host = HostId.generate()
+
+    resolver = MngrCliBackendResolver(last_good_agents_path=topology_path)
     resolver.update_agents(
         ParsedAgentsResult(
             agent_ids=(workspace_agent, current_services_agent),
-            discovered_agents=(
-                _discovered_agent(host, workspace_agent, "my-claude-agent"),
-                _discovered_agent(host, current_services_agent, "system-services"),
-            ),
+            discovered_agents=_pair_snapshot(host, workspace_agent, current_services_agent),
         )
     )
 

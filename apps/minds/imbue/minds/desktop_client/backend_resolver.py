@@ -3,6 +3,7 @@ import threading
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Callable
+from collections.abc import Iterable
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
@@ -18,7 +19,9 @@ from imbue.minds.primitives import ServiceName
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
@@ -280,74 +283,99 @@ def parse_service_log_records(text: str) -> list[ServiceLogRecord | ServiceDereg
     return records
 
 
-# -- Services-agent-id cache helpers --
+# -- Last-good agent topology (system-services fallback) --
 
 
-def _services_pairs_from_agents(agents: tuple[DiscoveredAgent, ...]) -> dict[str, str]:
-    """Map each workspace agent id to the system-services agent id on its host.
+class _AgentRecord(FrozenModel):
+    """The minimal agent-topology fields needed to resolve the system-services agent.
 
-    Skips hosts that contain only one of the two. Returns ``{}`` when no pair
-    can be observed in the current discovery snapshot.
+    A trimmed projection of ``DiscoveredAgent`` (id, host, name) -- the only
+    fields ``get_system_services_agent_id`` consults. Kept small so the
+    persisted last-good snapshot carries no more than the fallback needs.
     """
-    services_by_host: dict[str, str] = {}
-    workspaces_by_host: dict[str, list[str]] = {}
-    for agent in agents:
-        host_id_str = str(agent.host_id)
-        if str(agent.agent_name) == SYSTEM_SERVICES_AGENT_NAME:
-            services_by_host[host_id_str] = str(agent.agent_id)
-        else:
-            workspaces_by_host.setdefault(host_id_str, []).append(str(agent.agent_id))
-    pairs: dict[str, str] = {}
-    for host_id_str, workspace_ids in workspaces_by_host.items():
-        services_id = services_by_host.get(host_id_str)
-        if services_id is None:
-            continue
-        for workspace_id in workspace_ids:
-            pairs[workspace_id] = services_id
-    return pairs
+
+    agent_id: AgentId = Field(description="The agent's id")
+    host_id: HostId = Field(description="The id of the host the agent runs on")
+    agent_name: AgentName = Field(description="The agent's name (the system-services agent is constant-named)")
 
 
-def _read_services_agent_id_cache(path: Path) -> dict[str, str]:
-    """Read the persisted ``{workspace_id: services_id}`` map from ``path``.
+class _LastGoodAgentTopology(FrozenModel):
+    """The most recent *complete* per-host agent topology, persisted to disk.
 
-    Returns an empty dict for a missing file, a malformed JSON file, or any
-    JSON whose top level is not an object of string-keyed string values; we
-    never want a corrupt cache to break minds startup. The next successful
-    discovery snapshot rewrites the file.
+    Maps host id -> the agents discovered on that host, recorded only for
+    hosts whose snapshot included the system-services agent (a complete
+    enumeration). Hosts whose enumeration was incomplete -- or that dropped
+    out of discovery entirely (the SSH-dead failure mode) -- retain their
+    last complete record rather than being clobbered by a partial view. This
+    is what lets the system-services fallback survive a discovery loss.
+    """
+
+    agents_by_host: Mapping[str, tuple[_AgentRecord, ...]] = Field(
+        default_factory=dict, description="Host id -> the agents last seen on that host with a complete enumeration"
+    )
+
+
+def _to_agent_record(agent: DiscoveredAgent) -> _AgentRecord:
+    """Trim a ``DiscoveredAgent`` down to the topology fields the fallback needs."""
+    return _AgentRecord(agent_id=agent.agent_id, host_id=agent.host_id, agent_name=agent.agent_name)
+
+
+def _find_system_services_agent(records: Iterable[_AgentRecord], workspace_agent_id: AgentId) -> AgentId | None:
+    """Resolve the system-services agent that shares the workspace agent's host.
+
+    The single lookup behind both the live-snapshot and last-good-fallback
+    paths: locate the workspace agent to learn its host, then return the
+    system-services agent on that same host. ``None`` if either is absent.
+    """
+    records = tuple(records)
+    host_id: HostId | None = next(
+        (record.host_id for record in records if record.agent_id == workspace_agent_id), None
+    )
+    if host_id is None:
+        return None
+    for record in records:
+        if record.host_id == host_id and str(record.agent_name) == SYSTEM_SERVICES_AGENT_NAME:
+            return record.agent_id
+    return None
+
+
+def _read_last_good_agent_topology(path: Path) -> _LastGoodAgentTopology:
+    """Read the persisted last-good topology from ``path``.
+
+    Returns an empty topology for a missing file, a malformed file, or any
+    content that fails validation; we never want a corrupt cache to break
+    minds startup. The next complete discovery snapshot rewrites the file.
     """
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return {}
+        return _LastGoodAgentTopology()
     except OSError as exc:
-        logger.warning("Could not read services-agent-id cache from {}: {}", path, exc)
-        return {}
+        logger.warning("Could not read last-good agent topology from {}: {}", path, exc)
+        return _LastGoodAgentTopology()
     try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        logger.warning("Services-agent-id cache at {} is not valid JSON: {}", path, exc)
-        return {}
-    if not isinstance(payload, dict):
-        return {}
-    return {str(k): str(v) for k, v in payload.items() if isinstance(k, str) and isinstance(v, str)}
+        return _LastGoodAgentTopology.model_validate_json(raw)
+    except ValueError as exc:
+        logger.warning("Last-good agent topology at {} is not valid: {}", path, exc)
+        return _LastGoodAgentTopology()
 
 
-def _write_services_agent_id_cache(path: Path, cache: dict[str, str]) -> None:
-    """Persist the ``{workspace_id: services_id}`` map atomically to ``path``.
+def _write_last_good_agent_topology(path: Path, topology: _LastGoodAgentTopology) -> None:
+    """Persist the last-good topology atomically to ``path``.
 
     Writes to a sibling ``.tmp`` file then renames to defend against a crash
     mid-write leaving a truncated file. A write failure logs a warning but
-    does not propagate -- the cache is a best-effort fallback, and crashing
+    does not propagate -- the topology is a best-effort fallback, and crashing
     the discovery thread over a transient I/O error would be worse than
     losing one update.
     """
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(cache, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.write_text(topology.model_dump_json(indent=2), encoding="utf-8")
         tmp.replace(path)
     except OSError as exc:
-        logger.warning("Could not write services-agent-id cache to {}: {}", path, exc)
+        logger.warning("Could not write last-good agent topology to {}: {}", path, exc)
 
 
 # -- MngrCliBackendResolver --
@@ -363,13 +391,14 @@ class MngrCliBackendResolver(BackendResolverInterface):
     All reads are thread-safe via an internal lock.
     """
 
-    services_agent_cache_path: Path | None = Field(
+    last_good_agents_path: Path | None = Field(
         default=None,
         description=(
-            "Optional JSON file recording each workspace agent's paired system-services "
-            "agent id. Populated as discovery surfaces both agents on the same host; "
-            "consulted by ``get_system_services_agent_id`` when live discovery has "
-            "transiently dropped the pair. When None, the cache is in-memory only."
+            "Optional JSON file recording the last-good per-host agent topology. "
+            "Updated as discovery completely enumerates a host (the system-services "
+            "agent is present); consulted by ``get_system_services_agent_id`` when "
+            "live discovery has dropped the host (the SSH-dead failure mode). When "
+            "None, the topology is in-memory only."
         ),
     )
 
@@ -388,16 +417,18 @@ class MngrCliBackendResolver(BackendResolverInterface):
     _on_change_callbacks: list[Callable[[], None]] = PrivateAttr(default_factory=list)
     _on_request_callbacks: list[Callable[[str, str], None]] = PrivateAttr(default_factory=list)
     _on_refresh_callbacks: list[Callable[[str, str], None]] = PrivateAttr(default_factory=list)
-    # workspace_agent_id_str -> services_agent_id_str. Populated under _lock by
-    # update_agents whenever discovery surfaces both agents on the same host.
-    # Read by get_system_services_agent_id as a fallback when live discovery
-    # has lost the pair.
-    _services_agent_id_cache: dict[str, str] = PrivateAttr(default_factory=dict)
+    # host_id_str -> the agents last completely enumerated on that host (the
+    # in-memory image of the persisted last-good topology). Updated under
+    # _lock by update_agents; read by get_system_services_agent_id as the
+    # fallback when live discovery has lost the host.
+    _last_good_agents_by_host: dict[str, tuple[_AgentRecord, ...]] = PrivateAttr(default_factory=dict)
 
     def model_post_init(self, __context: object) -> None:
-        """Load the persisted services-agent-id cache from disk, if configured."""
-        if self.services_agent_cache_path is not None:
-            self._services_agent_id_cache = _read_services_agent_id_cache(self.services_agent_cache_path)
+        """Load the persisted last-good agent topology from disk, if configured."""
+        if self.last_good_agents_path is not None:
+            self._last_good_agents_by_host = dict(
+                _read_last_good_agent_topology(self.last_good_agents_path).agents_by_host
+            )
 
     def add_on_change_callback(self, callback: Callable[[], None]) -> None:
         """Register a callback invoked whenever agent or service data changes.
@@ -450,31 +481,47 @@ class MngrCliBackendResolver(BackendResolverInterface):
     def update_agents(self, result: ParsedAgentsResult) -> None:
         """Replace the known agent list and SSH info. Thread-safe.
 
-        Also refreshes the services-agent-id cache from the new agent list: each
-        workspace agent that shares a host with a ``system-services`` agent
-        gets an entry written through to the on-disk cache (if configured).
-        Existing cache entries are preserved when the current snapshot can't
-        observe the pair (e.g. transient discovery loss); that is the entire
-        point of the cache.
+        Also folds the new agent list into the last-good per-host topology:
+        each host whose snapshot includes the ``system-services`` agent (a
+        complete enumeration) has its record refreshed and written through to
+        the on-disk topology (if configured). Hosts with an incomplete view --
+        or absent from the snapshot entirely (transient discovery loss) --
+        keep their last complete record; that is the entire point of the
+        topology.
         """
-        path_to_write: Path | None = None
-        cache_to_write: dict[str, str] | None = None
+        path = self.last_good_agents_path
+        topology_to_write: _LastGoodAgentTopology | None = None
         with self._lock:
             self._agents_result = result
             self._initial_discovery_done = True
-            new_pairs = _services_pairs_from_agents(result.discovered_agents)
-            if new_pairs:
-                changed = False
-                for workspace_id_str, services_id_str in new_pairs.items():
-                    if self._services_agent_id_cache.get(workspace_id_str) != services_id_str:
-                        self._services_agent_id_cache[workspace_id_str] = services_id_str
-                        changed = True
-                if changed and self.services_agent_cache_path is not None:
-                    path_to_write = self.services_agent_cache_path
-                    cache_to_write = dict(self._services_agent_id_cache)
-        if path_to_write is not None and cache_to_write is not None:
-            _write_services_agent_id_cache(path_to_write, cache_to_write)
+            if self._merge_last_good_topology_locked(result.discovered_agents) and path is not None:
+                topology_to_write = _LastGoodAgentTopology(agents_by_host=dict(self._last_good_agents_by_host))
+        if path is not None and topology_to_write is not None:
+            _write_last_good_agent_topology(path, topology_to_write)
         self._fire_on_change()
+
+    def _merge_last_good_topology_locked(self, agents: tuple[DiscoveredAgent, ...]) -> bool:
+        """Fold a fresh discovery snapshot into the last-good per-host topology.
+
+        Only hosts whose snapshot includes the system-services agent are
+        treated as completely enumerated and overwrite their prior record;
+        hosts with an incomplete view (or absent from the snapshot) keep their
+        last complete record. Must be called with ``self._lock`` held.
+
+        Returns True if any host record changed (so the caller persists).
+        """
+        agents_by_host: dict[str, list[DiscoveredAgent]] = {}
+        for agent in agents:
+            agents_by_host.setdefault(str(agent.host_id), []).append(agent)
+        changed = False
+        for host_id_str, host_agents in agents_by_host.items():
+            if not any(str(agent.agent_name) == SYSTEM_SERVICES_AGENT_NAME for agent in host_agents):
+                continue
+            new_records = tuple(_to_agent_record(agent) for agent in host_agents)
+            if self._last_good_agents_by_host.get(host_id_str) != new_records:
+                self._last_good_agents_by_host[host_id_str] = new_records
+                changed = True
+        return changed
 
     def update_providers(
         self,
@@ -578,26 +625,21 @@ class MngrCliBackendResolver(BackendResolverInterface):
         """Return the ``system-services`` agent sharing the workspace agent's host.
 
         The workspace (claude) agent and the system-services agent run in the
-        same container, so they share a host id. The lookup uses the current
-        discovery snapshot first; if that snapshot does not contain the pair,
-        falls back to the persisted services-agent-id cache so a restart can
-        still address the system-services agent.
+        same container, so they share a host id. The lookup runs the same
+        host-and-name search over the current discovery snapshot first; if that
+        snapshot does not contain the host, it runs the identical search over
+        the persisted last-good topology so a restart can still address the
+        system-services agent.
         """
-        workspace_id_str = str(workspace_agent_id)
         with self._lock:
-            host_id: str | None = None
-            for agent in self._agents_result.discovered_agents:
-                if agent.agent_id == workspace_agent_id:
-                    host_id = str(agent.host_id)
-                    break
-            if host_id is not None:
-                for agent in self._agents_result.discovered_agents:
-                    if str(agent.host_id) == host_id and str(agent.agent_name) == SYSTEM_SERVICES_AGENT_NAME:
-                        return agent.agent_id
-            cached = self._services_agent_id_cache.get(workspace_id_str)
-            if cached is not None:
-                return AgentId(cached)
-            return None
+            live = _find_system_services_agent(
+                (_to_agent_record(agent) for agent in self._agents_result.discovered_agents),
+                workspace_agent_id,
+            )
+            if live is not None:
+                return live
+            last_good = (record for records in self._last_good_agents_by_host.values() for record in records)
+            return _find_system_services_agent(last_good, workspace_agent_id)
 
     def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
         """Return display info from discovered agent data."""
