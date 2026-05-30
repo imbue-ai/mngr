@@ -1,2 +1,3 @@
+- minds-launch-to-msg.yml: build job moves from `ubuntu-latest` to the self-hosted `minds-runner` Mac. Required to bundle Mac-native uv/git/lima into the resulting .app (the Linux runner shipped ELF binaries that crashed the desktop client at `uv` exec). Build and verify now serialize on the same runner.
 - repo: `.gitignore` now also ignores `**/scripts/*.local.sh` (one-off local test harnesses), `apps/minds_workspace_server/package-lock.json`, and `**/.DS_Store`.
 - specs: update `specs/electron-desktop-app/` (spec + concise) to reflect the shipped minds desktop-app architecture.

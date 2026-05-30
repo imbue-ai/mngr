@@ -1422,6 +1422,7 @@ async function runStartupSequence(bundle) {
       }
     });
   } catch (err) {
+    console.error('[startup] env-setup failed:', err.message);
     showErrorInAllWindows(
       'Setup failed -- you may not be connected to the internet',
       err.message,

@@ -35,7 +35,11 @@ jobs:
     # When both are empty, skip; `verify` will resolve the latest released
     # build via the electron-updater feed instead.
     if: ${{ inputs.commit_sha != '' && inputs.app_zip_url == '' }}
-    runs-on: ubuntu-latest
+    # MUST be macOS: scripts/download-binaries.js uses `xcrun --find git`
+    # for the darwin git bundle, and bundling uv/lima needs the target's
+    # native binary. Linux runners produce ELF binaries that the shipped
+    # .app can't exec on Mac.
+    runs-on: [self-hosted, macOS, minds-runner]
     timeout-minutes: 25
     env:
       TODESKTOP_ACCESS_TOKEN: ${{ secrets.TODESKTOP_ACCESS_TOKEN }}
