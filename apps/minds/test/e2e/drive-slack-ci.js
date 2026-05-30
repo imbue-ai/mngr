@@ -181,6 +181,25 @@ async function dumpWindows(app, tag) {
   const app = await electron.launch({ executablePath: exec, env });
   const win = await app.firstWindow({ timeout: 60_000 });
   const origin = await win.evaluate(() => location.origin);
+
+  // The relaunched minds.app may have lost the session that
+  // first-message-verify established (Cookies persistence varies with
+  // when kill landed in shutdown sequence). Mint a fresh one-time code
+  // and authenticate explicitly so the chrome shell renders with the
+  // Requests button.
+  const ONE_TIME_CODES = path.join(process.env.HOME, '.minds', 'auth', 'one_time_codes.json');
+  let codes = [];
+  try { codes = JSON.parse(fs.readFileSync(ONE_TIME_CODES, 'utf8')); } catch (_) {}
+  const crypto = require('crypto');
+  const fresh = crypto.randomBytes(32).toString('base64url');
+  codes.push({ code: fresh, status: 'VALID' });
+  fs.mkdirSync(path.dirname(ONE_TIME_CODES), { recursive: true });
+  fs.writeFileSync(ONE_TIME_CODES, JSON.stringify(codes, null, 2));
+  log(`minted fresh one-time code (head ${fresh.slice(0, 12)})`);
+  await win.goto(origin + '/authenticate?one_time_code=' + fresh);
+  log(`auth navigated; final URL=${win.url()}`);
+
+  // Now the home page should show the workspace tile.
   await win.goto(origin + '/');
   await win.waitForSelector(`text=${WORKSPACE}`, { timeout: 60_000 });
   await win.click(`text=${WORKSPACE}`, { timeout: 5_000 });
