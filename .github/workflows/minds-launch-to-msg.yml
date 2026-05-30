@@ -365,26 +365,39 @@ jobs:
       - name: kill running minds.app (Playwright launches its own)
         if: ${{ steps.slack_pre.outputs.ok == '1' }}
         run: |
+          # SIGTERM the main process, give the clean-shutdown chain 8s,
+          # then SIGKILL anything still alive (main + all child processes
+          # incl. mngr forward, uv-spawned backend, latchkey gateway).
           for P in $(pgrep -f '/Applications/Minds.app/Contents/MacOS/Minds' 2>/dev/null || true); do
             kill "$P" 2>/dev/null || true
           done
           for P in $(pgrep -f 'mngr forward' 2>/dev/null || true); do
             kill "$P" 2>/dev/null || true
           done
-          # Wait for the singleton lock to actually release; new
-          # Playwright Electron launch silently exits if the lock is held.
-          for i in 1 2 3 4 5 6 7 8 9 10; do
+          sleep 8
+          # Anything still alive: hammer it. We also kill any process
+          # whose parent or argv mentions the bundle path -- main.js's
+          # singleton lock is held by the Electron main process, but
+          # macOS may also reserve a Mach port via Launch Services that
+          # only fully releases when the whole process tree is gone.
+          pkill -KILL -f '/Applications/Minds.app/Contents/MacOS/Minds' 2>/dev/null || true
+          pkill -KILL -f 'mngr forward'                                 2>/dev/null || true
+          pkill -KILL -f 'mngr observe'                                 2>/dev/null || true
+          pkill -KILL -f 'mngr event'                                   2>/dev/null || true
+          # Belt+braces: also tell macOS Launch Services to clear any
+          # cached "running" state for the bundle.
+          /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister \
+            -kill 2>/dev/null || true
+          # Best-effort wait, longer this time.
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
             if ! pgrep -f '/Applications/Minds.app/Contents/MacOS/Minds' >/dev/null; then
               break
             fi
             sleep 1
           done
-          # Stale singleton socket / lock file -- Electron uses a Unix
-          # domain socket under Application Support keyed by the app
-          # bundle id. Removing it is safe once no process holds it.
-          rm -f "$HOME/Library/Application Support/Minds/SingletonSocket"     2>/dev/null || true
-          rm -f "$HOME/Library/Application Support/Minds/SingletonLock"       2>/dev/null || true
-          rm -f "$HOME/Library/Application Support/Minds/SingletonCookie"     2>/dev/null || true
+          # Echo what's left so we can see in CI if anything lingers.
+          echo "--- remaining Minds processes after kill ---"
+          pgrep -afl 'Minds|mngr forward' 2>/dev/null || echo "(none)"
 
       - name: drive slack flow via Playwright
         if: ${{ steps.slack_pre.outputs.ok == '1' }}
