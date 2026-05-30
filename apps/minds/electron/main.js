@@ -19,7 +19,19 @@ const { startBackend, shutdown, getBackendProcess } = require('./backend');
 // it. Skipping init keeps dev launches working; the auto-updater is
 // never useful in dev anyway.
 if (app.isPackaged) {
-  todesktop.init();
+  // @todesktop/runtime defaults `showInstallAndRestartPrompt: "never"`,
+  // which leaves a downloaded update silently staged on disk with no UI
+  // surfacing -- users see the initial "Update found. Downloading in
+  // the background. You will be prompted to restart when it is ready."
+  // dialog, the download completes, and they are never prompted again.
+  // Set to "always" so the runtime shows a native "Install on next
+  // launch / Install now and restart" dialog as soon as the staged
+  // bundle is ready.
+  todesktop.init({
+    updateReadyAction: {
+      showInstallAndRestartPrompt: 'always',
+    },
+  });
 } else {
   console.log('[update] Skipping ToDesktop init (dev build -- not packaged)');
 }
