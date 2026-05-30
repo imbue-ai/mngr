@@ -153,6 +153,15 @@ jobs:
         id: dist
         if: steps.existing.outputs.url == ''
         working-directory: apps/minds
+        # build.js::bundleLatchkey smoke-tests the bundled CLI via
+        # `latchkey --version`. Latchkey tries to read/init an encryption
+        # key from the macOS keychain at startup; on the headless CI
+        # runner the keychain is locked and the call exits 1. Provide a
+        # throwaway random key just for the smoke test -- the shipped
+        # .app uses the end-user's own keychain at runtime, so the
+        # value chosen here never leaves CI.
+        env:
+          LATCHKEY_ENCRYPTION_KEY: ci-throwaway-build-smoketest-key-not-used-at-runtime
         run: |
           set -o pipefail
           pnpm dist 2>&1 | tee /tmp/minds-dist.log
