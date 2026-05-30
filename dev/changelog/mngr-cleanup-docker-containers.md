@@ -1,0 +1,1 @@
+- Added a design spec under `specs/docker-cleanup-state-and-images/` documenting the Docker build-image and state-container cleanup work.
