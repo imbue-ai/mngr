@@ -1,2 +1,3 @@
 Add "Docker Sandbox (sbx)" as a compute option in the workspace create form. A new `LaunchMode.SBX` maps to the `sbx` mngr provider: the create flow targets `system-services@<host>.sbx` and provisions with `--template main --template sbx`. The option appears in the create-form compute dropdown alongside Docker/Lima/Cloud.
 Parameterized `scripts/first-message-verify.sh` by `LAUNCH_MODE`/`MNGR_PROVIDER` (defaults LIMA/lima, unchanged) so the launch-to-first-message CI path can target the sbx provider.
+Add imbue-mngr-sbx to the minds app dependencies so the packaged ToDesktop build registers the sbx (Docker Sandboxes) provider backend; without it the bundled mngr reported 'Unknown provider backend: sbx'.
