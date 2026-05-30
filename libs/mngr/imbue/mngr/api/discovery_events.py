@@ -621,21 +621,15 @@ class _ResolutionMaps(MutableModel):
     name_by_agent_id: dict[str, str] = Field(default_factory=dict)
     # agent_id -> host_id
     host_id_by_agent_id: dict[str, str] = Field(default_factory=dict)
-    # host_id -> host_name
-    host_name_by_host_id: dict[str, str] = Field(default_factory=dict)
     # agent ids known to be destroyed
     destroyed_agent_ids: set[str] = Field(default_factory=set)
-    # host ids known to be destroyed
-    destroyed_host_ids: set[str] = Field(default_factory=set)
 
     def reset(self) -> None:
         """Clear every map -- used when a full snapshot supersedes prior state."""
         self.provider_by_agent_id.clear()
         self.name_by_agent_id.clear()
         self.host_id_by_agent_id.clear()
-        self.host_name_by_host_id.clear()
         self.destroyed_agent_ids.clear()
-        self.destroyed_host_ids.clear()
 
 
 def _record_agent(maps: _ResolutionMaps, agent: DiscoveredAgent) -> None:
@@ -645,13 +639,6 @@ def _record_agent(maps: _ResolutionMaps, agent: DiscoveredAgent) -> None:
     maps.name_by_agent_id[id_str] = str(agent.agent_name)
     maps.host_id_by_agent_id[id_str] = str(agent.host_id)
     maps.destroyed_agent_ids.discard(id_str)
-
-
-def _record_host(maps: _ResolutionMaps, host: DiscoveredHost) -> None:
-    """Record a single discovered host into the resolution maps."""
-    host_id_str = str(host.host_id)
-    maps.host_name_by_host_id[host_id_str] = str(host.host_name)
-    maps.destroyed_host_ids.discard(host_id_str)
 
 
 def _replay_discovery_events_into_maps(events_path: Path) -> _ResolutionMaps:
@@ -678,18 +665,16 @@ def _replay_discovery_events_into_maps(events_path: Path) -> _ResolutionMaps:
                 maps.reset()
                 for agent in event.agents:
                     _record_agent(maps, agent)
-                for host in event.hosts:
-                    _record_host(maps, host)
             elif isinstance(event, AgentDiscoveryEvent):
                 _record_agent(maps, event.agent)
-            elif isinstance(event, HostDiscoveryEvent):
-                _record_host(maps, event.host)
             elif isinstance(event, AgentDestroyedEvent):
                 maps.destroyed_agent_ids.add(str(event.agent_id))
-            elif isinstance(event, HostDestroyedEvent):
-                maps.destroyed_host_ids.add(str(event.host_id))
             else:
-                # SSH info and error events are not relevant for resolution
+                # Host, SSH info, and error events are not relevant for
+                # resolution. Host existence is confirmed against a live
+                # SSH-free scan in resolve_hosts_for_identifiers, so a
+                # destroyed/vanished host is caught there rather than by
+                # replaying host events here.
                 pass
 
     return maps
@@ -832,8 +817,9 @@ def resolve_hosts_for_identifiers(
 
     This deliberately avoids :func:`discover_hosts_and_agents` / the base
     ``discover_agents`` path, which reads each host's agent directory over SSH
-    and therefore fails when a container is running but its sshd is dead --
-    the exact situation ``mngr stop --stop-host`` exists to recover from.
+    and therefore fails when a host is up but unreachable over SSH (e.g. a dead
+    sshd) -- one of the cases ``mngr stop --stop-host`` is meant to handle,
+    though not the only reason the flag exists.
 
     Returns a map from each input identifier to its :class:`ResolvedAgentHost`.
 
@@ -889,8 +875,6 @@ def resolve_hosts_for_identifiers(
             host_id_str = maps.host_id_by_agent_id.get(agent_id_str)
             provider_str = maps.provider_by_agent_id.get(agent_id_str)
             if host_id_str is None or provider_str is None:
-                continue
-            if host_id_str in maps.destroyed_host_ids:
                 continue
             discovered_host = host_scan.get(host_id_str)
             if discovered_host is None:
