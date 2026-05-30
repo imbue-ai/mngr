@@ -9,3 +9,6 @@ onlyBuiltDependencies:
 # installs replay the existing lockfile unaffected. Available since pnpm
 # 10.16.0 (this app pins 10.33.4).
 minimumReleaseAge: 20160
+minimumReleaseAgeExclude:
+  - latchkey
+  - "@imbue-ai/detent"
