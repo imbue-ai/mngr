@@ -259,3 +259,13 @@ Tiered system-interface restart for the minds recovery flow.
   listing failed rather than concluding the host or agent is genuinely
   absent. When the listing still returns this workspace's own row despite a
   non-clean exit, the real row is shown as before.
+- Internal: the ``mngr`` subprocess helper that drives the restart steps and
+  the host-health probe no longer converts launch failures (``OSError`` on
+  fork/exec, ``ConcurrencyGroupError`` on group setup) into a return value.
+  Those genuine exceptions now propagate with their normal traceback and are
+  caught at each call site that knows how to surface them -- a restart step
+  still marks the workspace "Restart failed" with the reason, and the
+  host-health probe still threads the reason into its response. A process that
+  actually ran (clean, timed out, or nonzero exit) stays a returned outcome, so
+  the partial ``mngr list --on-error continue`` output is still used. No
+  user-visible behavior change.
