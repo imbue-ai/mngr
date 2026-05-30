@@ -54,10 +54,20 @@ if [[ ! -f "$STATE_DIR/cert.pem" ]]; then
 fi
 
 # 2. Trust the cert at the system level (curl-darwinssl uses System keychain).
+# On non-interactive macOS, `security add-trusted-cert -d` triggers the
+# auth-prompt code path even with sudo and fails with
+#   "SecTrustSettingsSetTrustSettings: ... no user interaction was possible"
+# unless we pre-grant trust-settings.admin in the authorization DB.
 log "trusting cert in /Library/Keychains/System.keychain"
+sudo security authorizationdb write com.apple.trust-settings.admin allow \
+  >/dev/null 2>&1 || true
 sudo security add-trusted-cert -d -r trustRoot \
   -k /Library/Keychains/System.keychain "$STATE_DIR/cert.pem" \
-  || fail "security add-trusted-cert failed"
+  || fail "security add-trusted-cert failed (authorization DB pre-grant didn't take?)"
+# Revert the authorization DB to its default. Best-effort -- losing the
+# default is annoying but not a teardown blocker.
+sudo security authorizationdb remove com.apple.trust-settings.admin \
+  >/dev/null 2>&1 || true
 
 # 3. /etc/hosts on the host: slack.com / files.slack.com -> 127.0.0.1.
 log "patching /etc/hosts"
