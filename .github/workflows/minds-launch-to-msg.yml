@@ -40,7 +40,12 @@ jobs:
     # native binary. Linux runners produce ELF binaries that the shipped
     # .app can't exec on Mac.
     runs-on: [self-hosted, macOS, minds-runner]
-    timeout-minutes: 25
+    # 40 min covers a cold-cache install + a full pnpm dist that waits on
+    # ToDesktop's per-target cloud build (sign + notarize all 3 archs).
+    # 25 min was too tight: cache-miss installs + arm64 signing repeatedly
+    # grazed the deadline. The post-failure cancel step then tore down
+    # ToDesktop's in-flight build, wasting both sides.
+    timeout-minutes: 40
     env:
       TODESKTOP_ACCESS_TOKEN: ${{ secrets.TODESKTOP_ACCESS_TOKEN }}
       TODESKTOP_EMAIL:        ${{ secrets.TODESKTOP_EMAIL }}

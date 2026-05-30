@@ -36,6 +36,7 @@ from imbue.minds.errors import BackupProvisioningError
 
 _T = TypeVar("_T")
 
+
 def _resolve_restic_binary() -> str:
     """Resolve the restic CLI path.
 
