@@ -78,11 +78,21 @@ async function findApprovalUi(win) {
   // that honors --cacert. Macos system curl is SecureTransport-built
   // and would require installing the cert in the System keychain,
   // which needs interactive auth (impossible on a non-TTY runner).
+  //
+  // Crucially: strip ELECTRON_RUN_AS_NODE from the env. The latchkey
+  // shim sets it to run minds.app's binary as a node interpreter, and
+  // a runner with that env var set globally (e.g. via .zshenv) would
+  // make Electron treat OUR launch as a node script too -- main.js
+  // would finish synchronously and the process would exit ~0.2s after
+  // `Debugger attached`, with exitCode=0 and no BrowserWindow ever
+  // created.
   const env = {
     ...process.env,
     PATH: '/opt/homebrew/opt/curl/bin:' + (process.env.PATH || ''),
     CURL_CA_BUNDLE: '/tmp/slack-mock/cert.pem',
+    ELECTRON_RUN_AS_NODE: '',
   };
+  delete env.ELECTRON_RUN_AS_NODE;
   const app = await electron.launch({ executablePath: exec, env });
   const win = await app.firstWindow({ timeout: 60_000 });
   const origin = await win.evaluate(() => location.origin);
