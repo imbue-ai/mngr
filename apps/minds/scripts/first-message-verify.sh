@@ -209,51 +209,33 @@ SEND_AT=$(date +%s)
 log "waiting for assistant reply (timeout ${REPLY_TIMEOUT_SECONDS}s)"
 REPLY_FILE="/tmp/first-message-reply.txt"
 rm -f "$REPLY_FILE"
+# Capture the agent's tmux pane inside the lima VM and grep for the
+# expected substring. The chat agent's tmux session name is
+# `${MNGR_PREFIX}${AGENT_NAME}`. capture-pane -p prints the pane text
+# to stdout; -S -500 grabs the last 500 lines of scrollback so we can
+# see the claude reply even if the screen has scrolled.
+VM_NAME="minds-${HOST_NAME}"
+TMUX_SESSION="minds-${AGENT_NAME}"
 reply_deadline=$((SECONDS + REPLY_TIMEOUT_SECONDS))
 while (( SECONDS < reply_deadline )); do
-  EXPECT_SUBSTRING="$EXPECT_SUBSTRING" SEND_AT="$SEND_AT" \
-    "$MNGR_BIN" event --provider lima "$AGENT_NAME" --include 'event.type == "assistant_message"' --format json 2>/dev/null \
-    | EXPECT_SUBSTRING="$EXPECT_SUBSTRING" SEND_AT="$SEND_AT" python3 -c "
-import json, sys, os, datetime
-expect = os.environ['EXPECT_SUBSTRING']
-send_at = int(os.environ['SEND_AT'])
-clock_skew_slack_seconds = 5
-def event_epoch(evt):
-    for field in ('at', 'timestamp', 'created_at'):
-        v = evt.get(field)
-        if v is None:
-            continue
-        if isinstance(v, (int, float)):
-            return float(v)
-        if isinstance(v, str):
-            try:
-                return datetime.datetime.fromisoformat(v.replace('Z', '+00:00')).timestamp()
-            except ValueError:
-                continue
-    return None
-for line in sys.stdin:
-    line = line.strip()
-    if not line:
-        continue
-    try:
-        evt = json.loads(line)
-    except Exception:
-        continue
-    ts = event_epoch(evt)
-    if ts is not None and ts < send_at - clock_skew_slack_seconds:
-        continue
-    text = json.dumps(evt)
-    if expect.lower() in text.lower():
-        print(text)
-        sys.exit(0)
-sys.exit(2)
-" > "$REPLY_FILE" 2>/dev/null
-  if [[ -s "$REPLY_FILE" ]]; then
-    log "assistant replied:"
-    head -1 "$REPLY_FILE" | python3 -c 'import json,sys; d=json.loads(sys.stdin.read()); print("  ", str(d)[:500])' >&2 || true
-    break
+  pane=$(limactl shell "$VM_NAME" -- tmux capture-pane -t "$TMUX_SESSION" -pS -500 2>/dev/null || echo "")
+  if [[ -n "$pane" ]]; then
+    # Look for the expected substring as a model reply. The user's
+    # prompt is also echoed in the pane (after the `❯` prompt), so a
+    # naive substring match would false-positive on the prompt itself.
+    # The model's reply is on its own line after a `●` bullet marker.
+    if echo "$pane" | grep -qE "^[[:space:]]*●[[:space:]]+.*${EXPECT_SUBSTRING}" \
+       || echo "$pane" | grep -qE "${EXPECT_SUBSTRING}[[:space:]]*$"; then
+      echo "$pane" | grep -B 1 -A 3 "$EXPECT_SUBSTRING" > "$REPLY_FILE" 2>/dev/null
+      log "assistant replied (from tmux pane):"
+      head -10 "$REPLY_FILE" | sed 's/^/  /' >&2
+      break
+    fi
   fi
-  sleep 3
+  if (( (SECONDS - reply_deadline + REPLY_TIMEOUT_SECONDS) % 30 == 0 )); then
+    log "  still waiting ($((reply_deadline - SECONDS))s remaining)"
+  fi
+  sleep 5
 done
 if [[ ! -s "$REPLY_FILE" ]]; then
   log "no assistant reply matching '$EXPECT_SUBSTRING' in ${REPLY_TIMEOUT_SECONDS}s -- dumping diagnostics"
