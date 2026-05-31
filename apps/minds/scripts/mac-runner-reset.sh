@@ -26,11 +26,16 @@ if command -v limactl >/dev/null 2>&1; then
 fi
 
 if [[ "${WIPE_LIMA_CACHES:-}" == "1" ]]; then
-  # Cold-cache benchmark mode: wipe Lima's downloaded Ubuntu cloudimg
-  # (~600MB) so the next agent creation does a full first-run download.
-  # Without this the runner stays warm across CI runs.
-  log "WIPE_LIMA_CACHES=1 set; nuking ~/.lima and prefetch caches"
+  # Cold-cache benchmark mode: wipe everything a fresh-install user
+  # wouldn't have. Without these wipes the runner stays warm across
+  # CI runs and our numbers are useless for the cold-start UX.
+  #   ~/.lima            - per-VM state (cleaned by limactl delete anyway)
+  #   ~/Library/Caches/lima/download - Lima's by-url-sha256 cloudimg cache (~600MB)
+  #   ~/.minds/template-cache         - first_launch_prefetch's FCT mirror
+  #   /tmp/minds-clone-*              - per-create-agent staging clones
+  log "WIPE_LIMA_CACHES=1 set; nuking ~/.lima + lima image cache + prefetch state"
   rm -rf "$HOME/.lima" 2>/dev/null || true
+  rm -rf "$HOME/Library/Caches/lima" 2>/dev/null || true
   rm -rf "$HOME/.minds/template-cache" 2>/dev/null || true
   rm -rf /tmp/minds-clone-* 2>/dev/null || true
 fi
