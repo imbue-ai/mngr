@@ -114,8 +114,16 @@ def _activate_minds() -> None:
     )
 
 
+def _dismiss_screensaver() -> None:
+    """Kill any active ScreenSaverEngine so the next screencapture
+    sees the app, not the screensaver wallpaper. Belt-and-braces to
+    the long-running ``caffeinate -dimsu`` we start in ``amain``."""
+    subprocess.run(["killall", "ScreenSaverEngine"], check=False, capture_output=True, timeout=3)
+
+
 def snap(name: str) -> None:
     """Whole-desktop screencapture. Silently no-ops when no Aqua session."""
+    _dismiss_screensaver()
     _activate_minds()
     out = SCREENSHOT_DIR / f"{name}.png"
     err = SCREENSHOT_DIR / f"{name}.err"
@@ -478,8 +486,18 @@ async def find_chat_window(ctx: BrowserContext) -> Page | None:
 
 
 async def amain() -> int:
-    # 0. brew curl + cert (needed even if no slack flow, since we want
-    # them ready and they're cheap)
+    # 0. Keep the runner display awake + dismiss any active screensaver
+    # for the whole run. -d=display awake, -i=idle sleep off, -m=disk
+    # sleep off, -s=system sleep off, -u=declare user active (this is
+    # what dismisses an already-running ScreenSaverEngine).
+    caffeinate_proc = subprocess.Popen(
+        ["caffeinate", "-dimsu"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    _dismiss_screensaver()
+    logger.info("caffeinate pid={} (display kept awake for run)", caffeinate_proc.pid)
+
     brew_curl = ensure_brew_curl()
     cert = ensure_cert()
     logger.info("brew curl: {}", brew_curl)
@@ -694,6 +712,9 @@ async def amain() -> int:
         minds_proc.terminate()
         with contextlib.suppress(Exception):
             minds_proc.wait(timeout=10)
+    caffeinate_proc.terminate()
+    with contextlib.suppress(Exception):
+        caffeinate_proc.wait(timeout=5)
     return 0
 
 
