@@ -259,6 +259,16 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '24.15.0'
+      - name: setup uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: latest
+      - name: setup Python via uv
+        run: uv python install 3.12
+      - name: install minds workspace + playwright python
+        run: |
+          uv sync --package minds --frozen 2>&1 | tail -5 || uv sync --all-packages --frozen
+          uv run --package minds python -c "import playwright; print('playwright', playwright.__version__)"
       - name: resolve build URL
         id: url
         run: |
