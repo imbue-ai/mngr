@@ -473,11 +473,6 @@ async def amain() -> int:
         **os.environ,
         "PATH": f"{brew_curl.parent}:" + os.environ.get("PATH", ""),
         "CURL_CA_BUNDLE": str(cert),
-        # Pre-fill the Create form so clicking "Create" POSTs a valid
-        # body. Without these, the form is empty and creation hangs.
-        "MINDS_WORKSPACE_GIT_URL": GIT_URL,
-        "MINDS_WORKSPACE_NAME": HOST_NAME,
-        "MINDS_WORKSPACE_BRANCH": GIT_BRANCH,
     }
     env.pop("ELECTRON_RUN_AS_NODE", None)
     logger.info("launching {} --remote-debugging-port={}", MINDS_APP_PATH, cdp_port)
@@ -518,29 +513,74 @@ async def amain() -> int:
         await snap_page(win, "02-home-after-auth")
 
         if not SKIP_FIRST_MESSAGE:
-            # 4. Create agent via UI. Click "Create" which on the Projects
-            # page immediately POSTs /api/create-agent with the form's
-            # current values (we set MINDS_WORKSPACE_* env so the form
-            # is prefilled with FCT + the host_name we want). The URL
-            # then settles at /creating/<id>.
-            await win.click("text=Create")
+            # 4. Create agent via API (not the form): the prod-tier form
+            # defaults to compute=DOCKER without an Imbue Cloud account,
+            # which a vanilla mac runner can't provision. POSTing /api
+            # /create-agent directly with launch_mode=LIMA mirrors the
+            # old bash flow (first-message-verify.sh) and is deterministic.
+            # fetch() runs inside the auth'd page so the session cookie is
+            # attached automatically.
+            anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+            if not anthropic_key:
+                raise RuntimeError("ANTHROPIC_API_KEY not set; can't create LIMA agent")
+            create_body = {
+                "agent_name": HOST_NAME,
+                "host_name": HOST_NAME,
+                "git_url": GIT_URL,
+                "branch": GIT_BRANCH,
+                "launch_mode": "LIMA",
+                "ai_provider": "API_KEY",
+                "anthropic_api_key": anthropic_key,
+                "include_env_file": False,
+            }
+            resp = await win.evaluate(
+                """async (body) => {
+                    const r = await fetch('/api/create-agent', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(body),
+                    });
+                    return {status: r.status, body: await r.text()};
+                }""",
+                create_body,
+            )
+            if resp["status"] != 200:
+                raise RuntimeError(f"create-agent HTTP {resp['status']}: {resp['body']}")
+            creation_id = json.loads(resp["body"]).get("agent_id", "")
+            if not creation_id:
+                raise RuntimeError(f"no agent_id in create-agent response: {resp['body']}")
+            logger.info("creation_id={}", creation_id)
             await snap_page(win, "03-create-agent-submitted")
 
-            # 5. Wait for the agent to be ready. The chat panel opens
-            # in a NEW Electron WebContentsView (page) at the
-            # `agent-<id>.localhost` URL, not in `win`. Poll all pages
-            # in the CDP context until one matches.
+            # 5. Poll /api/create-agent/<id>/status until DONE. While polling,
+            # keep an eye on ctx.pages -- the chat panel opens in a new
+            # WebContentsView at `agent-<id>.localhost` when ready.
             deadline = time.time() + CREATE_TIMEOUT
             chat_win: Page | None = None
-            log_every = 0
+            last_status = ""
             while time.time() < deadline:
                 chat_win = await find_chat_window(ctx)
                 if chat_win is not None:
                     break
-                if log_every % 6 == 0:
-                    urls = ", ".join(p.url for p in all_pages(ctx))
-                    logger.info("waiting for agent ready (pages=[{}])", urls)
-                log_every += 1
+                stat = await win.evaluate(
+                    """async (id) => {
+                        const r = await fetch('/api/create-agent/' + id + '/status');
+                        return {status: r.status, body: await r.text()};
+                    }""",
+                    creation_id,
+                )
+                payload = {}
+                with contextlib.suppress(Exception):
+                    payload = json.loads(stat["body"])
+                state = payload.get("status", "")
+                if state != last_status:
+                    logger.info("creation status: {} -> {}", last_status or "(none)", state)
+                    last_status = state
+                if state == "DONE":
+                    # Chat may take a beat to materialise in CDP; loop will pick it up.
+                    pass
+                elif state == "FAILED":
+                    raise RuntimeError(f"creation FAILED: {payload.get('error', stat['body'])}")
                 await asyncio.sleep(5)
             if chat_win is None:
                 for p in all_pages(ctx):
@@ -549,7 +589,7 @@ async def amain() -> int:
                 if EVENTS_LOG.exists():
                     tail = EVENTS_LOG.read_text(errors="ignore").splitlines()[-60:]
                     logger.error("minds-events.jsonl tail:\n{}", "\n".join(tail))
-                raise RuntimeError(f"no agent-*.localhost page after {CREATE_TIMEOUT}s")
+                raise RuntimeError(f"no agent-*.localhost page after {CREATE_TIMEOUT}s (last status={last_status})")
             win = chat_win
             logger.info("agent DONE; chat URL={}", win.url)
             await snap_page(win, "04-agent-DONE")
