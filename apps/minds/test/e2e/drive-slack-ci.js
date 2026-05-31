@@ -360,8 +360,16 @@ async function dumpWindows(app, tag) {
             // to make it retry.
             await win.waitForTimeout(2000);
             try {
-              await input.fill('Permission approved. Please retry the read-only Slack read now and respond with the prefix "TOK ' + NONCE + ':" followed by the message text.');
-              await input.press('Enter');
+              // Re-query the chat input -- the original handle from
+              // before the approval clicks is stale ("Element is not
+              // attached to the DOM"). The chat panel may have
+              // re-rendered while we were clicking.
+              const kickInput = await win.waitForSelector(
+                'textarea, [contenteditable="true"]',
+                { timeout: 10_000 }
+              );
+              await kickInput.fill('Permission approved. Please retry the read-only Slack read now and respond with the prefix "TOK ' + NONCE + ':" followed by the message text.');
+              await kickInput.press('Enter');
               log('sent post-approval kick to agent');
             } catch (e) {
               log(`post-approval kick failed: ${e.message}`);
