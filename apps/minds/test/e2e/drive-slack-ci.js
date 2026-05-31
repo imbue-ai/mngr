@@ -381,7 +381,11 @@ async function dumpWindows(app, tag) {
       }
     }
 
-    const body = await win.evaluate(() => document.body.innerText.toLowerCase());
+    // Tolerate transient page-navigation: stage 1's permission-entry
+    // click navigates the requests-panel window, so the next poll on
+    // `win` can throw "Execution context was destroyed". Skip this
+    // iteration on that.
+    const body = await win.evaluate(() => document.body.innerText.toLowerCase()).catch(() => '');
     const newCannedOcc = body.split(CANNED_BODY_LC).length - 1;
     if (newCannedOcc > oldCannedOcc) {
       log(`PASS: canned body appeared at t=${i}s (occ ${oldCannedOcc} -> ${newCannedOcc})`);
@@ -397,7 +401,7 @@ async function dumpWindows(app, tag) {
     }
 
     if (i % 15 === 0 && i > 0) {
-      const tail = await win.evaluate(() => document.body.innerText.slice(-400));
+      const tail = await win.evaluate(() => document.body.innerText.slice(-400)).catch(() => '');
       log(`waiting (${i}s) approvalStage=${approvalStage} tail: ${JSON.stringify(tail.slice(-200))}`);
       // Suffix with stage so artifact list shows progress mid-flow.
       await shot(win, `13-waiting-stage${approvalStage}-t${String(i).padStart(3, '0')}s`);
