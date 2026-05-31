@@ -523,23 +523,34 @@ async def amain() -> int:
             await win.click("text=Create")
             await snap_page(win, "03-create-agent-submitted")
 
-            # 5. Wait for agent DONE. The /creating/<id> page redirects
-            # to a tab with the host_name in the title when ready.
+            # 5. Wait for the agent to be ready. The /creating/<id> page
+            # does NOT auto-redirect to the chat URL; we have to go back
+            # to the projects list and click the workspace tile. Poll
+            # by going home and clicking the tile -- it'll only navigate
+            # to /agent-*.localhost once the agent is ready.
             chat_url_re = re.compile(r"agent-[a-f0-9]+\.localhost")
+            origin_url = origin
             deadline = time.time() + CREATE_TIMEOUT
+            log_every = 0
             while time.time() < deadline:
                 if chat_url_re.search(win.url):
                     break
-                await asyncio.sleep(3)
-            else:
+                # Go home and try to click the tile.
+                with contextlib.suppress(Exception):
+                    await win.goto(origin_url + "/", timeout=10_000)
+                with contextlib.suppress(Exception):
+                    await win.click(f"text={HOST_NAME}", timeout=3_000)
+                if log_every % 6 == 0:  # every ~30s at 5s sleep
+                    logger.info("waiting for agent ready (URL={})", win.url)
+                log_every += 1
+                await asyncio.sleep(5)
+            if not chat_url_re.search(win.url):
+                await snap_page(win, "99-create-timeout")
                 raise RuntimeError(f"agent didn't reach chat panel in {CREATE_TIMEOUT}s (last URL={win.url})")
             logger.info("agent DONE; chat URL={}", win.url)
             await snap_page(win, "04-agent-DONE")
 
             # 6. Send first message, wait for "pong" reply
-            with contextlib.suppress(Exception):
-                # Tab/title may or may not be clickable; safe to skip.
-                await win.click(f"text={HOST_NAME}", timeout=2_000)
             inp = await win.wait_for_selector('textarea, [contenteditable="true"]', timeout=60_000)
             await inp.fill(FIRST_PROMPT)
             await inp.press("Enter")
