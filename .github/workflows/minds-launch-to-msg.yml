@@ -381,14 +381,6 @@ jobs:
           fi
           run_dir="$work/runs/${{ github.run_id }}"
           mkdir -p "$run_dir"
-          # Publish the bash-phase desktop shots (00 launch, 01 auth,
-          # 02 agent DONE, 03 pre-msg, 04 reply) IF they exist
-          # (require an Aqua-session runner).
-          if [ -d /tmp/launch-to-msg-screenshots ]; then
-              [ -f "$png" ] || continue
-              cp "$png" "$run_dir/" 2>/dev/null || true
-            done
-          fi
           # Publish Playwright-phase headline shots. Prefer
           # `<name>.desktop.png` (full-desktop screencapture) when
           # available, falling back to `<name>.png` (single-window

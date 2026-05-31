@@ -388,7 +388,6 @@ def latchkey_clear_slack() -> None:
 
 def wait_backend_url() -> str:
     """Return the http://127.0.0.1:<port> of the backend, from the events log."""
-    import re
 
     deadline = time.time() + LAUNCH_BACKEND_TIMEOUT
     pattern = re.compile(
@@ -448,7 +447,6 @@ def all_pages(ctx: BrowserContext) -> list[Page]:
 
 async def find_chat_window(ctx: BrowserContext) -> Page | None:
     """Find the WebContentsView whose URL matches the chat URL (agent-*localhost)."""
-    import re
 
     pat = re.compile(r"agent-[a-f0-9]+\.localhost")
     for w in all_pages(ctx):
@@ -523,30 +521,28 @@ async def amain() -> int:
             await win.click("text=Create")
             await snap_page(win, "03-create-agent-submitted")
 
-            # 5. Wait for the agent to be ready. The /creating/<id> page
-            # does NOT auto-redirect to the chat URL; we have to go back
-            # to the projects list and click the workspace tile. Poll
-            # by going home and clicking the tile -- it'll only navigate
-            # to /agent-*.localhost once the agent is ready.
-            chat_url_re = re.compile(r"agent-[a-f0-9]+\.localhost")
-            origin_url = origin
+            # 5. Wait for the agent to be ready. The chat panel opens
+            # in a NEW Electron WebContentsView (page) at the
+            # `agent-<id>.localhost` URL, not in `win`. Poll all pages
+            # in the CDP context until one matches.
             deadline = time.time() + CREATE_TIMEOUT
+            chat_win: Page | None = None
             log_every = 0
             while time.time() < deadline:
-                if chat_url_re.search(win.url):
+                chat_win = await find_chat_window(ctx)
+                if chat_win is not None:
                     break
-                # Go home and try to click the tile.
-                with contextlib.suppress(Exception):
-                    await win.goto(origin_url + "/", timeout=10_000)
-                with contextlib.suppress(Exception):
-                    await win.click(f"text={HOST_NAME}", timeout=3_000)
-                if log_every % 6 == 0:  # every ~30s at 5s sleep
-                    logger.info("waiting for agent ready (URL={})", win.url)
+                if log_every % 6 == 0:
+                    urls = ", ".join(p.url for p in all_pages(ctx))
+                    logger.info("waiting for agent ready (pages=[{}])", urls)
                 log_every += 1
                 await asyncio.sleep(5)
-            if not chat_url_re.search(win.url):
-                await snap_page(win, "99-create-timeout")
-                raise RuntimeError(f"agent didn't reach chat panel in {CREATE_TIMEOUT}s (last URL={win.url})")
+            if chat_win is None:
+                for p in all_pages(ctx):
+                    with contextlib.suppress(Exception):
+                        await snap_page(p, f"99-create-timeout-{p.url.split('/')[-1] or 'root'}")
+                raise RuntimeError(f"no agent-*.localhost page after {CREATE_TIMEOUT}s")
+            win = chat_win
             logger.info("agent DONE; chat URL={}", win.url)
             await snap_page(win, "04-agent-DONE")
 
