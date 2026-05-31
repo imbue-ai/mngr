@@ -268,7 +268,7 @@ jobs:
       - name: install minds workspace + playwright python
         run: |
           uv sync --package minds --frozen 2>&1 | tail -5 || uv sync --all-packages --frozen
-          uv run --package minds python -c "import playwright; print('playwright', playwright.__version__)"
+          uv run --package minds python -c "from playwright.async_api import async_playwright; print('playwright imports OK')"
       - name: resolve build URL
         id: url
         run: |
