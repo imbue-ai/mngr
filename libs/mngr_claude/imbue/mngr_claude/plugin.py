@@ -1652,7 +1652,18 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         if base_tokens and base_tokens[0] == _CLAUDE_SHIM_INSTALLED_NAME:
             launch_rest = "".join(f" {shlex.quote(token)}" for token in base_tokens[1:])
             launch_cmd = f'"$_MNGR_REAL_CLAUDE"{launch_rest}'
-            shim_prelude = f'_MNGR_REAL_CLAUDE="$(command -v {_CLAUDE_SHIM_INSTALLED_NAME})" && {shim_path_export}'
+            # Resolve the real binary before the shim is on PATH. If `claude` is
+            # not found, abort with a clear message: without the explicit guard
+            # the failed assignment would short-circuit the `&&` chain straight
+            # into the trailing `|| create_cmd` fallback, which would then run
+            # with an empty $_MNGR_REAL_CLAUDE (a confusing ` --session-id ...`).
+            # The `;` (not `&&`) before the PATH export keeps the guard's failure
+            # from being swallowed by that same fallback.
+            shim_prelude = (
+                f'_MNGR_REAL_CLAUDE="$(command -v {_CLAUDE_SHIM_INSTALLED_NAME})" || '
+                '{ echo "mngr: could not find a claude binary on PATH; cannot start agent" >&2; exit 127; }; '
+                f"{shim_path_export}"
+            )
         else:
             # `base` is a custom binary / absolute path the shim does not shadow;
             # launch it directly, but still prepend the shim so nested bare

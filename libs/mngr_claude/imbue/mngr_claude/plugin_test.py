@@ -2,6 +2,7 @@ import importlib.resources
 import json
 import os
 import shlex
+import shutil
 import subprocess
 from contextlib import contextmanager
 from datetime import datetime
@@ -134,10 +135,13 @@ def _sid_export_for(uuid: UUID) -> str:
 
 
 # The shim prelude assemble_command emits when `base` is the bare `claude`
-# binary: resolve the real claude (before the shim is on PATH), then prepend the
-# per-agent shim dir so nested `claude` invocations get scrubbed.
+# binary: resolve the real claude (before the shim is on PATH, aborting cleanly
+# if it is absent), then prepend the per-agent shim dir so nested `claude`
+# invocations get scrubbed.
 _SHIM_PRELUDE_FOR_CLAUDE: str = (
-    '_MNGR_REAL_CLAUDE="$(command -v claude)" && export PATH="$MNGR_AGENT_STATE_DIR/claude_shim:$PATH"'
+    '_MNGR_REAL_CLAUDE="$(command -v claude)" || '
+    '{ echo "mngr: could not find a claude binary on PATH; cannot start agent" >&2; exit 127; }; '
+    'export PATH="$MNGR_AGENT_STATE_DIR/claude_shim:$PATH"'
 )
 # The shim prelude when `base` is a custom binary the shim does not shadow:
 # just prepend the shim dir (the main launch uses `base` directly).
@@ -639,6 +643,47 @@ def test_claude_agent_assemble_command_scrubs_session_id_for_nested_claude_only(
         "Expected the main launch to keep MAIN_CLAUDE_SESSION_ID and the nested "
         f"`claude` (via the shim) to have it scrubbed, got {recorded!r}."
     )
+
+
+def test_claude_agent_assemble_command_errors_clearly_when_claude_absent(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """When `claude` is not on PATH, the launch must fail with a clear message.
+
+    Without the explicit guard in the shim prelude, a failed `command -v claude`
+    would short-circuit into the trailing `|| create_cmd` fallback and run it
+    with an empty $_MNGR_REAL_CLAUDE (a confusing ` --session-id ...`). The guard
+    instead aborts with exit 127 and a diagnostic on stderr.
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    state_dir = tmp_path / "agent-state"
+    (state_dir / "commands").mkdir(parents=True)
+    bg_script = state_dir / "commands" / "claude_background_tasks.sh"
+    bg_script.write_text("#!/bin/bash\nexit 0\n")
+    bg_script.chmod(0o755)
+
+    # PATH with bash/env (so the pipeline can run) but deliberately no `claude`.
+    tools_dir = tmp_path / "tools_bin"
+    tools_dir.mkdir()
+    for tool in ("bash", "env"):
+        host_tool = shutil.which(tool)
+        assert host_tool is not None
+        os.symlink(host_tool, tools_dir / tool)
+
+    command = agent.assemble_command(host=host, agent_args=(), command_override=None)
+    env = {
+        "PATH": str(tools_dir),
+        "CLAUDE_CONFIG_DIR": str(tmp_path / "claude-config"),
+        "MNGR_AGENT_STATE_DIR": str(state_dir),
+        "HOME": str(tmp_path),
+    }
+    result = subprocess.run(["bash", "-c", str(command)], env=env, capture_output=True, text=True, timeout=30)
+
+    assert result.returncode == 127, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert "could not find a claude binary on PATH" in result.stderr
+    # The empty-binary create fallback must NOT have been attempted.
+    assert "--session-id" not in result.stderr
 
 
 # =============================================================================
