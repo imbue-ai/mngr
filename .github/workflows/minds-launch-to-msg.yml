@@ -467,36 +467,85 @@ jobs:
           path: artifacts/
           retention-days: 7
 
+      - name: publish flow screenshots to ci-screenshots branch
+        if: always()
+        env:
+          GH_TOKEN_FOR_SCREENSHOTS: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # GitHub's HTML sanitizer strips data: URIs from <img src> in
+          # step summary, so inline base64 doesn't render. Workaround:
+          # publish screenshots to a side branch and reference via
+          # raw.githubusercontent.com URLs, which do render in summary.
+          shots_dir=artifacts/screenshots-playwright
+          [ -d "$shots_dir" ] || { echo "no screenshots to publish"; exit 0; }
+          work=/tmp/ci-screenshots-work
+          rm -rf "$work"
+          repo_url="https://x-access-token:$GH_TOKEN_FOR_SCREENSHOTS@github.com/${{ github.repository }}.git"
+          if git ls-remote --exit-code "$repo_url" refs/heads/ci-screenshots >/dev/null 2>&1; then
+            git clone --depth 1 --branch ci-screenshots "$repo_url" "$work"
+          else
+            mkdir -p "$work"
+            git -C "$work" init -q
+            git -C "$work" checkout -q --orphan ci-screenshots
+            git -C "$work" remote add origin "$repo_url"
+            echo "# CI Screenshots" > "$work/README.md"
+            echo "Per-run snapshots from minds-launch-to-msg.yml. Auto-pruned (TBD)." >> "$work/README.md"
+            git -C "$work" add README.md
+            git -C "$work" -c user.name=ci-bot -c user.email=ci@noreply.github.com commit -q -m "init ci-screenshots branch"
+          fi
+          run_dir="$work/runs/${{ github.run_id }}"
+          mkdir -p "$run_dir"
+          # Publish only the headline (no .winN suffix) shots for the
+          # numbered flow steps. Per-window duplicates and dump-* stay
+          # in the artifact for postmortem.
+          for prefix in 05 06 07 07a 08 09 10 11 12 99; do
+            for png in "$shots_dir"/${prefix}-*.png; do
+              [ -f "$png" ] || continue
+              case "$png" in
+                *.win[0-9]*.png) continue ;;
+              esac
+              cp "$png" "$run_dir/" 2>/dev/null || true
+            done
+          done
+          cd "$work"
+          git add runs/
+          if git diff --staged --quiet; then
+            echo "no new screenshots"
+          else
+            git -c user.name=ci-bot -c user.email=ci@noreply.github.com commit -q \
+              -m "screenshots for run ${{ github.run_id }} [skip ci]"
+            git push -q origin ci-screenshots
+          fi
+
       - name: embed flow screenshots in job summary
         if: always()
         run: |
-          # Render the key Playwright screenshots inline in the Actions
-          # UI via base64 data URLs so the user doesn't have to download
-          # the artifact to see the flow. Limited to the numbered
-          # flow-progression shots; dump-* and 13-waiting-* are
-          # debug-only and stay in the artifact.
           shots_dir=artifacts/screenshots-playwright
           if [ ! -d "$shots_dir" ]; then
-            echo "(no screenshots-playwright dir, nothing to embed)" >> "$GITHUB_STEP_SUMMARY"
+            echo "(no screenshots to embed)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+          base="https://raw.githubusercontent.com/${{ github.repository }}/ci-screenshots/runs/${{ github.run_id }}"
           {
             echo "## Flow screenshots (Playwright phase)"
             echo ""
-            echo "Numbered to sort in flow order. Hover the artifact above to download all (including the dump-* debug shots)."
+            echo "Numbered to sort in flow order. Per-window duplicates (.winN) and dump-* shots are in the downloadable artifact above."
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
-          for png in "$shots_dir"/05-*.png "$shots_dir"/06-*.png "$shots_dir"/07-*.png "$shots_dir"/07a-*.png "$shots_dir"/08-*.png "$shots_dir"/10-*.png "$shots_dir"/11-*.png "$shots_dir"/12-*.png "$shots_dir"/99-*.png; do
-            [ -f "$png" ] || continue
-            label=$(basename "$png" .png)
-            b64=$(base64 < "$png" | tr -d '\n')
-            {
-              echo ""
-              echo "### $label"
-              echo ""
-              echo "<img src=\"data:image/png;base64,$b64\" width=\"800\" alt=\"$label\">"
-              echo ""
-            } >> "$GITHUB_STEP_SUMMARY"
+          for prefix in 05 06 07 07a 08 09 10 11 12 99; do
+            for png in "$shots_dir"/${prefix}-*.png; do
+              [ -f "$png" ] || continue
+              case "$png" in
+                *.win[0-9]*.png) continue ;;
+              esac
+              label=$(basename "$png" .png)
+              {
+                echo "### $label"
+                echo ""
+                echo "![$label]($base/$(basename "$png"))"
+                echo ""
+              } >> "$GITHUB_STEP_SUMMARY"
+            done
           done
       - name: post-test cleanup (best effort)
         if: always()
