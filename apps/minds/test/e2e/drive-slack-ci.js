@@ -311,6 +311,21 @@ async function dumpWindows(app, tag) {
 
   await input.fill(PROMPT);
   await input.press('Enter');
+  // Wait for the prompt to render in the chat panel (the user message
+  // bubble). Without this, the screenshot is taken before the React
+  // UI scrolled to show the new bubble -- the chat looks like just
+  // the "pong" first-message state.
+  const promptMarker = `TOK ${NONCE}`;
+  try {
+    await win.waitForFunction(
+      (m) => document.body.innerText.includes(m),
+      promptMarker,
+      { timeout: 10_000 },
+    );
+  } catch (_) {}
+  // Scroll to bottom so the latest message is visible in the viewport.
+  try { await win.evaluate(() => window.scrollTo(0, document.body.scrollHeight)); } catch (_) {}
+  await win.waitForTimeout(500);
   await shotAll(app, '08-slack-prompt-sent', /agent-[a-f0-9]+\.localhost/);
   log('typed + sent; watching for approval UI and canned body');
 
@@ -432,6 +447,9 @@ async function dumpWindows(app, tag) {
     const newCannedOcc = body.split(CANNED_BODY_LC).length - 1;
     if (newCannedOcc > oldCannedOcc) {
       log(`PASS: canned body appeared at t=${i}s (occ ${oldCannedOcc} -> ${newCannedOcc})`);
+      // Scroll to bottom so the canned body + TOK reply are visible.
+      try { await win.evaluate(() => window.scrollTo(0, document.body.scrollHeight)); } catch (_) {}
+      await win.waitForTimeout(500);
       await shotAll(app, '12-PASS-canned-body-in-reply', /agent-[a-f0-9]+\.localhost/);
       const ctx = await win.evaluate((needle) => {
         const text = document.body.innerText.toLowerCase();
