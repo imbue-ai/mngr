@@ -384,15 +384,21 @@ async function dumpWindows(app, tag) {
             // to make it retry.
             await win.waitForTimeout(2000);
             try {
-              // The Approve click can navigate `win` away from the
-              // chat panel (back to /) or invalidate the input handle.
-              // Find the still-alive chat-content window by URL.
-              const chatWin = app.windows().find(w => {
+              // The Approve click can close the chat WebContentsView
+              // entirely. Find an existing chat-URL window first; if
+              // none, re-navigate the first available window to the
+              // captured chatUrl so the chat view re-mounts.
+              let chatWin = app.windows().find(w => {
                 try { return /agent-[a-f0-9]+\.localhost/.test(w.url()); } catch (_) { return false; }
-              }) || win;
+              });
+              if (!chatWin) {
+                log(`no chat-URL window found; re-navigating win to ${chatUrl}`);
+                try { await win.goto(chatUrl, { timeout: 15_000 }); } catch (e) { log(`re-nav failed: ${e.message}`); }
+                chatWin = win;
+              }
               const kickInput = await chatWin.waitForSelector(
                 'textarea, [contenteditable="true"]',
-                { timeout: 10_000 }
+                { timeout: 15_000 }
               );
               await kickInput.fill('Permission approved. Please retry the read-only Slack read now and respond with the prefix "TOK ' + NONCE + ':" followed by the message text.');
               await kickInput.press('Enter');
