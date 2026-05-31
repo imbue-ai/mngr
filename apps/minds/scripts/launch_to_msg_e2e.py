@@ -734,16 +734,17 @@ async def _advance_approval(ctx: BrowserContext, win: Page, stage: int, state: d
             logger.info("requests-panel auto-opened; advancing to stage 1")
             state["stage"] = 1
             return
-        # Wait for the agent to emit its request signal first.
-        body = await win.evaluate("document.body.innerText")
+        # Wait for the agent to emit its request signal first. Case-fold
+        # because Claude rephrases the message each run (eg "Waiting"
+        # vs "awaiting" vs "wait for").
+        body = (await win.evaluate("document.body.innerText")).lower()
         if not any(
             s in body
             for s in (
-                "requested read-only Slack",
-                "Permission request submitted",
-                "awaiting your approval",
-                "wait for your approval",
-                "wait for the user's approval",
+                "permission request",
+                "requested read",
+                "approval",  # catches "Waiting for your approval", "awaiting", etc.
+                "approve",
             )
         ):
             return  # not ready yet
