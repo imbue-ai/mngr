@@ -6,12 +6,17 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: New `mngr imbue_cloud bucket` command group for creating, listing, inspecting, and destroying R2 buckets (one per host, paid accounts only), plus `bucket keys create/list/destroy` for minting and revoking scoped S3 keys (read-only or read-write) to hand to different agents. `bucket create` returns S3-compatible credentials (access key id, secret access key, endpoint, bucket name) as JSON; the secret is shown only once and is never stored by the service. `bucket destroy` refuses a non-empty bucket and, on success, revokes all of that bucket's keys.
+
 ### Changed
 
 - Changed: `mngr imbue_cloud admin pool create` is now provider-generic — drops `MINDS_ROOT_NAME` env detection, adds a required `--region REGION` and repeatable `--tag KEY=VALUE`, defaults to `--template main --template ovh` with `@host.ovh` + `--provider ovh`, and installs + configures `ufw` on every leased VPS before the row hits `pool_hosts`.
 - Changed: `ImbueCloudProvider.create_host` now SFTPs into the leased container after the host-key scan and rewrites `/mngr/data.json`'s `host_name` field to the user-supplied `HostName`, so the FCT bootstrap's `_maybe_create_initial_chat` uses the user's chosen name instead of the bake's placeholder.
 - Changed: The bake's services agent now uses the constant name `system-services` (was per-bake `pool-<hex>` UUID); the bake also destroys the FCT-bootstrap-created chat agent and `rm -f`'s `/code/runtime/initial_chat_created` so the user's first start re-fires the bootstrap cleanly.
 - Changed: `_get_agent_info` now takes `host_name` as a keyword arg and filters by both `name` and `host.name`, so the operator's local mngr state accumulating one `system-services` agent per bake no longer routes subsequent calls to the wrong VPS.
+- Changed: `mngr destroy <agent>` against an imbue_cloud-leased pool host is now *terminal* rather than a soft `docker stop`. The new flow stops + removes the workspace container, drops the per-host docker named volume, deletes the per-host btrfs subvolume under `/mngr-btrfs/`, runs `docker system prune -a -f --volumes`, wipes `/root` + `/tmp` (preserving `/root/.ssh/authorized_keys`), releases the lease back to the pool, then cleans up local per-host state. The agent's data is gone before the connector flips the row to `released`. Use `mngr stop <agent>` to stop the container without releasing the lease. `mngr delete <agent>` (the GC path) runs the same flow and is a safe no-op against an already-released lease. The wipe script (`build_pool_host_wipe_script`) is exposed as a pure free function so the rendered shell can be unit-tested without standing up SSH.
 
 ### Removed
 
@@ -21,6 +26,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Fixed: `pool_hosts` INSERT now picks up the schema's `host_name` column; every successful pool bake had been dying at the last step with `null value in column "host_name"` and leaking a fully-provisioned VPS.
 - Fixed: Multi-token `mngr exec` commands packed into a single `shlex.join`'d positional string so click no longer eats `--force` as a `mngr exec` option.
+- Fixed: `mngr imbue_cloud auth oauth` no longer hangs until the 300s timeout after the browser has returned the OAuth code — the local callback listener now only records query params when the request is for `/oauth/callback` and carries non-empty params, so secondary browser GETs (favicon, prefetches) can no longer overwrite the captured callback with `{}`.
 
 ## [v0.2.8] - 2026-05-13
 

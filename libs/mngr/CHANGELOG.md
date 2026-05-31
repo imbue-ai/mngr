@@ -6,6 +6,22 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `mngr create --post-host-create-command`, a repeatable flag that runs one or more shell commands inside a newly-created host synchronously after the host is online but before any agent `work_dir` is touched. Stackable from `create_templates.<name>` via `post_host_create_command__extend = [...]`. Replaces the FCT-specific `use_image_default_cmd` opt-out (reverted in the same commit) for image first-boot setup that must complete before mngr's git mirror push.
+
+### Changed
+
+- Changed: Regenerated the CLI reference docs to include the new `mngr imbue_cloud bucket` command group (R2 bucket + scoped-key management).
+- Changed: Installed `restic` in the mngr Docker image (`libs/mngr/imbue/mngr/resources/Dockerfile`) so the offload test image has it on hand; needed because the minds app now requires `restic` on the host running it and its tests exercise a real local restic repository.
+
+### Fixed
+
+- Fixed: The default `discover_hosts_and_agents` now tolerates per-host SSH failures during provider agent enumeration. `HostConnectionError` (and its `HostAuthenticationError` / `HostOfflineError` subclasses) are now caught per host, the broken host's agents are recovered from the provider's offline view (`to_offline_host(host_id).discover_agents()`), and `self.on_connection_error(host_id)` is called so providers drop the wedged entry. Previously a single unreachable host turned a `DISCOVERY_FULL` event into `agents=[] / hosts=[]` for the whole provider, taking down every workspace served through the `mngr_forward` plugin.
+- Fixed: Docker provider per-host build image (`mngr-build-<host_id>`) is now untagged when a host is destroyed (and again, defensively, when it is deleted), so built images no longer pile up in `docker images`. Snapshot images are unaffected.
+- Fixed: `mngr destroy` now actually destroys the host when the last agent on it is destroyed, regardless of how recently the host was created. The partition step escalates to host-level destruction (`provider.destroy_host`) when every matched agent is a "ghost" (returned by discovery but absent from the host's own `get_agents()`), and a post-loop sweep re-checks `host.get_agents()` for each host that had an agent destroyed in the same invocation and calls `provider.destroy_host` directly if empty — bypassing the GC's `min_online_host_age_seconds` filter. Cloud-side resources are released the moment `mngr destroy` returns; the destroyed-host grace period now only retains historical state.
+- Fixed: `build_check_and_install_packages_command` (in `providers/ssh_host_setup.py`) now `mkdir -p`s the symlink target before creating the `host_dir` symlink, so the new docker_vps unified-volume layout (which seeds `<volume>/host_dir` before pointing `/mngr` at it) works.
+
 ## [v0.2.9] - 2026-05-28
 
 ### Added

@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Opt-in btrfs host-data volume mode on `LimaProviderConfig` (`is_host_data_volume_exposed: bool = True`). When `False`, the provider attaches a Lima-managed btrfs `additionalDisk` (`mngr-<host_id_hex>-data`, 100 GiB default, sparse qcow2) and symlinks `host_dir` directly to Lima's auto-mount path for that disk; the 9p mount is omitted entirely, making `host_dir` snapshottable as a single consistent btrfs filesystem. `get_volume_for_host()` returns `None` in this mode; existing callers degrade gracefully. The chosen value is locked on the per-host record at create time; records that predate the field default to `True` (today's 9p behavior). New `host_data_disk_size` config field (default `"100GiB"`) and `limactl_disk_create` / `limactl_disk_delete` helpers in `limactl.py`. `destroy_host` and `delete_host` also remove the named Lima disk when a host was created in btrfs mode.
+
 ## [v0.1.2] - 2026-05-28
 
 ### Changed

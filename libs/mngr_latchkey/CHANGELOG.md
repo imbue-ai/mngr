@@ -35,6 +35,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Fixed: Race condition in per-directory encryption-key resolution where a concurrent caller could read the on-disk key file mid-write; the file is now published atomically via temp file + `fsync` + `os.link` so the final path only ever exists with complete contents.
 - Fixed: `POST /permission-requests/approve/<id>` no longer replaces a symlinked `permissions.json` target with a regular file. The atomic-write helper now `lstat`s the target and resolves symlinks via `realpath` before the temp-file rename, so per-agent symlinks (e.g. those swung in by `mngr latchkey link-permissions`) stay intact and shared canonical permissions remain in sync.
+- Fixed: `Latchkey.auth_browser` now transparently recovers from latchkey's "Service `<name>` requires preparation first" error — when it sees that message it runs `latchkey auth browser-prepare <service>` and retries `latchkey auth browser <service>` once, so callers (e.g. minds' predefined-permission grant flow) succeed on the first user-visible attempt instead of failing with a confusing error. Failures of either the prepare step or the retry are surfaced as the usual `(False, message)` result.
 
 ## [v0.2.8] - 2026-05-13
 
