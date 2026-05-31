@@ -12,4 +12,4 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Fixed
 
-- Fixed: Post-finalize `stop_agent_on_host` calls are now routed through a new `_BackgroundStopper` helper instead of running synchronously on the polling loop's main thread, with a bounded 60s drain at context exit. SSH stops blocked on the kernel's TCP retransmit timeout (observed at ~16 minutes per call when the underlying remote sandbox has already been torn down) no longer serialize the polling loop. Previously a TMR run could hit the 4-hour GHA cap with ~50 of 80 mappers unfinalized.
+- Fixed: Post-finalize `stop_agent_on_host` calls are now routed through a new `AgentStopper` context-manager helper (in `agent_stopper.py`) instead of running synchronously on the polling loop's main thread, with a bounded 60s drain at context exit. SSH stops blocked on the kernel's TCP retransmit timeout (observed at ~16 minutes per call when the underlying remote sandbox has already been torn down) no longer serialize the polling loop. Previously a TMR run could hit the 4-hour GHA cap with ~50 of 80 mappers unfinalized.
