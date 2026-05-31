@@ -34,6 +34,7 @@ import contextlib
 import http.server
 import json
 import os
+import re
 import secrets
 import socket
 import socketserver
@@ -514,28 +515,31 @@ async def amain() -> int:
         await snap_page(win, "02-home-after-auth")
 
         if not SKIP_FIRST_MESSAGE:
-            # 4. Create agent via UI
+            # 4. Create agent via UI. Click "Create" which on the Projects
+            # page immediately POSTs /api/create-agent with the form's
+            # current values (we set MINDS_WORKSPACE_* env so the form
+            # is prefilled with FCT + the host_name we want). The URL
+            # then settles at /creating/<id>.
             await win.click("text=Create")
-            await snap_page(win, "03-create-form")
-            # Fill in workspace name + branch (FCT defaults if not overridden)
-            # The form has different field names depending on the build;
-            # fall back to a few selectors.
-            for sel, val in (
-                ("input[name=agent_name]", HOST_NAME),
-                ("input[name=host_name]", HOST_NAME),
-                ("input[name=git_url]", GIT_URL),
-                ("input[name=branch]", GIT_BRANCH),
-            ):
-                with contextlib.suppress(Exception):
-                    await win.fill(sel, val)
-            await win.click("button:has-text('Create')")
+            await snap_page(win, "03-create-agent-submitted")
 
-            # 5. Wait for agent DONE; tab title shows host_name when ready.
-            await win.wait_for_selector(f"text={HOST_NAME}", timeout=CREATE_TIMEOUT * 1000)
+            # 5. Wait for agent DONE. The /creating/<id> page redirects
+            # to a tab with the host_name in the title when ready.
+            chat_url_re = re.compile(r"agent-[a-f0-9]+\.localhost")
+            deadline = time.time() + CREATE_TIMEOUT
+            while time.time() < deadline:
+                if chat_url_re.search(win.url):
+                    break
+                await asyncio.sleep(3)
+            else:
+                raise RuntimeError(f"agent didn't reach chat panel in {CREATE_TIMEOUT}s (last URL={win.url})")
+            logger.info("agent DONE; chat URL={}", win.url)
             await snap_page(win, "04-agent-DONE")
 
             # 6. Send first message, wait for "pong" reply
-            await win.click(f"text={HOST_NAME}")
+            with contextlib.suppress(Exception):
+                # Tab/title may or may not be clickable; safe to skip.
+                await win.click(f"text={HOST_NAME}", timeout=2_000)
             inp = await win.wait_for_selector('textarea, [contenteditable="true"]', timeout=60_000)
             await inp.fill(FIRST_PROMPT)
             await inp.press("Enter")
