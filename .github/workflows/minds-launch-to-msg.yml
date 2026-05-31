@@ -466,6 +466,38 @@ jobs:
           name: launch-to-first-message-${{ github.run_id }}
           path: artifacts/
           retention-days: 7
+
+      - name: embed flow screenshots in job summary
+        if: always()
+        run: |
+          # Render the key Playwright screenshots inline in the Actions
+          # UI via base64 data URLs so the user doesn't have to download
+          # the artifact to see the flow. Limited to the numbered
+          # flow-progression shots; dump-* and 13-waiting-* are
+          # debug-only and stay in the artifact.
+          shots_dir=artifacts/screenshots-playwright
+          if [ ! -d "$shots_dir" ]; then
+            echo "(no screenshots-playwright dir, nothing to embed)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "## Flow screenshots (Playwright phase)"
+            echo ""
+            echo "Numbered to sort in flow order. Hover the artifact above to download all (including the dump-* debug shots)."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+          for png in "$shots_dir"/05-*.png "$shots_dir"/06-*.png "$shots_dir"/07-*.png "$shots_dir"/07a-*.png "$shots_dir"/08-*.png "$shots_dir"/10-*.png "$shots_dir"/11-*.png "$shots_dir"/12-*.png "$shots_dir"/99-*.png; do
+            [ -f "$png" ] || continue
+            label=$(basename "$png" .png)
+            b64=$(base64 < "$png" | tr -d '\n')
+            {
+              echo ""
+              echo "### $label"
+              echo ""
+              echo "<img src=\"data:image/png;base64,$b64\" width=\"800\" alt=\"$label\">"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+          done
       - name: post-test cleanup (best effort)
         if: always()
         run: |
