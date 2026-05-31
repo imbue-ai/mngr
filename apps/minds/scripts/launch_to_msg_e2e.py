@@ -712,13 +712,14 @@ async def amain() -> int:
                 approval_stage = 0
                 deadline = time.time() + DRIVE_SLACK_TIMEOUT
                 clicked_at = {}
+                approved_request_urls: set[str] = set()
                 while time.time() < deadline:
                     chat_now = await find_chat_window(ctx)
                     if chat_now is not None:
                         win = chat_now
                     # Check for canned body in chat (PASS).
                     body = await win.evaluate("document.body.innerText")
-                    if CANNED_BODY.lower() in body.lower() and approval_stage == 3:
+                    if CANNED_BODY.lower() in body.lower() and approval_stage >= 3:
                         logger.info("PASS: canned body in reply")
                         await snap_page(win, "08-PASS-canned-body")
                         break
@@ -726,6 +727,21 @@ async def amain() -> int:
                     if approval_stage < 3:
                         await _advance_approval(ctx, win, approval_stage, clicked_at)
                         approval_stage = clicked_at.get("stage", approval_stage)
+
+                    # After the first approval, the latchkey gateway often
+                    # re-gates the next slack API call separately -- the
+                    # agent submits a NEW /requests/<id>. Auto-approve any
+                    # follow-up requests so Claude can complete its retry.
+                    if approval_stage >= 3:
+                        for p in all_pages(ctx):
+                            with contextlib.suppress(Exception):
+                                if "/requests/" not in p.url or p.url in approved_request_urls:
+                                    continue
+                                btn = p.locator('button:has-text("Approve")').first
+                                if await btn.count() > 0 and await btn.is_visible():
+                                    logger.info("auto-approving follow-up request at {}", p.url)
+                                    await btn.click()
+                                    approved_request_urls.add(p.url)
 
                     await asyncio.sleep(2)
                 else:
