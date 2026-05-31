@@ -229,7 +229,7 @@ async function dumpWindows(app, tag) {
   };
   delete env.ELECTRON_RUN_AS_NODE;
   const app = await electron.launch({ executablePath: exec, env });
-  const win = await app.firstWindow({ timeout: 60_000 });
+  let win = await app.firstWindow({ timeout: 60_000 });
   await shotAll(app, '05-electron-launched');
   const origin = await win.evaluate(() => location.origin);
 
@@ -360,17 +360,22 @@ async function dumpWindows(app, tag) {
             // to make it retry.
             await win.waitForTimeout(2000);
             try {
-              // Re-query the chat input -- the original handle from
-              // before the approval clicks is stale ("Element is not
-              // attached to the DOM"). The chat panel may have
-              // re-rendered while we were clicking.
-              const kickInput = await win.waitForSelector(
+              // The Approve click can navigate `win` away from the
+              // chat panel (back to /) or invalidate the input handle.
+              // Find the still-alive chat-content window by URL.
+              const chatWin = app.windows().find(w => {
+                try { return /agent-[a-f0-9]+\.localhost/.test(w.url()); } catch (_) { return false; }
+              }) || win;
+              const kickInput = await chatWin.waitForSelector(
                 'textarea, [contenteditable="true"]',
                 { timeout: 10_000 }
               );
               await kickInput.fill('Permission approved. Please retry the read-only Slack read now and respond with the prefix "TOK ' + NONCE + ':" followed by the message text.');
               await kickInput.press('Enter');
-              log('sent post-approval kick to agent');
+              log(`sent post-approval kick to agent on ${chatWin.url()}`);
+              // Switch the main `win` reference to the chat window so
+              // the subsequent body-poll/PASS-shot all target it.
+              win = chatWin;
             } catch (e) {
               log(`post-approval kick failed: ${e.message}`);
             }
