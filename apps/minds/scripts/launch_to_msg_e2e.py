@@ -74,7 +74,7 @@ FIRST_PROMPT = "Reply with exactly the four characters: pong"
 FIRST_EXPECT = "pong"
 CREATE_TIMEOUT = 900
 REPLY_TIMEOUT = 480
-DRIVE_SLACK_TIMEOUT = 240
+DRIVE_SLACK_TIMEOUT = 360
 LAUNCH_BACKEND_TIMEOUT = 120
 
 # Canned slack-mock body the agent should quote back.
@@ -703,10 +703,19 @@ async def amain() -> int:
 
                 # 9. Wait for agent to emit permission request; click
                 # Requests button -> entry -> Approve.
+                #
+                # After Approve, the requests-panel window closes and
+                # Electron may shuffle the BrowserWindow z-order; ``win``
+                # can end up pointing at the Projects page. Re-resolve
+                # the chat panel each iteration so the canned-body check
+                # always reads from the right window.
                 approval_stage = 0
                 deadline = time.time() + DRIVE_SLACK_TIMEOUT
                 clicked_at = {}
                 while time.time() < deadline:
+                    chat_now = await find_chat_window(ctx)
+                    if chat_now is not None:
+                        win = chat_now
                     # Check for canned body in chat (PASS).
                     body = await win.evaluate("document.body.innerText")
                     if CANNED_BODY.lower() in body.lower() and approval_stage == 3:
@@ -721,6 +730,12 @@ async def amain() -> int:
                     await asyncio.sleep(2)
                 else:
                     await snap_page(win, "99-TIMEOUT-no-canned-body")
+                    # Dump every page's URL + first 200 chars of body so we
+                    # can tell whether the chat panel was alive somewhere.
+                    for p in all_pages(ctx):
+                        with contextlib.suppress(Exception):
+                            preview = (await p.evaluate("document.body.innerText"))[:200].replace("\n", " ")
+                            logger.error("  page url={} body=...{!r}", p.url, preview)
                     raise RuntimeError(
                         f"canned body not in chat after {DRIVE_SLACK_TIMEOUT}s (approval_stage={approval_stage})"
                     )

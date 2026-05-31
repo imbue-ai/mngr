@@ -309,17 +309,23 @@ def clone_git_repo(
     *,
     is_shallow: bool = False,
     parent_cg: ConcurrencyGroup | None = None,
+    reference_repo: Path | None = None,
 ) -> None:
     """Clone a git repository into the specified directory.
 
     The clone_dir must not already exist -- git clone will create it.
     When is_shallow is True, clones with --depth 1 to skip history.
+    When reference_repo points at a local pre-fetched bare-or-full clone
+    of the same repo, ``--reference`` reuses its objects so the network
+    fetch is small (just the delta from the prefetch point).
     Raises GitCloneError if the clone fails.
     """
     logger.debug("Cloning {} to {}", _redact_url_credentials(str(git_url)), clone_dir)
     command = ["git", "clone"]
     if is_shallow:
         command.extend(["--depth", "1"])
+    if reference_repo is not None and (reference_repo / ".git").is_dir():
+        command.extend(["--reference-if-able", str(reference_repo)])
     command.extend([str(git_url), str(clone_dir)])
 
     # Wrap the caller's on_output so git's per-line stdout/stderr is scrubbed
@@ -1170,12 +1176,18 @@ class AgentCreator(MutableModel):
                     # Full clone (no --depth=1): a shallow clone only pulls
                     # the default branch, so the subsequent `git checkout
                     # <branch>` for any non-default target branch fails with
-                    # `pathspec did not match`.
+                    # `pathspec did not match`. When the first-launch
+                    # prefetch left a warm copy of FCT under
+                    # ``data_dir/template-cache/forever-claude-template``,
+                    # pass it as ``--reference-if-able`` so we reuse those
+                    # objects and the network fetch shrinks to the delta.
+                    ref_repo = self.paths.data_dir / "template-cache" / "forever-claude-template"
                     clone_git_repo(
                         GitUrl(repo_source),
                         clone_target,
                         on_output=emit_log,
                         parent_cg=self.root_concurrency_group,
+                        reference_repo=ref_repo,
                     )
                     workspace_dir = clone_target
 
