@@ -56,12 +56,14 @@ async function shot(p, n) {
 }
 // Take a shot of EVERY visible Electron window so the artifact has
 // the full UI even when the relevant content is in a different
-// WebContentsView than `firstWindow`. The first matching the
-// `prefer` URL filter (if any) becomes the "headline" shot (no suffix);
-// the others get window-index suffixes.
+// WebContentsView than `firstWindow`. The window matching the
+// `prefer` URL filter becomes the "headline" shot (no suffix); if
+// no filter or no match, window[0] becomes the headline. The others
+// get window-index suffixes.
 async function shotAll(app, n, prefer) {
   const wins = app.windows();
-  let headlineIdx = -1;
+  if (wins.length === 0) return;
+  let headlineIdx = 0;
   if (prefer) {
     for (let i = 0; i < wins.length; i++) {
       try { if (prefer.test(wins[i].url())) { headlineIdx = i; break; } } catch (_) {}
@@ -249,12 +251,16 @@ async function dumpWindows(app, tag) {
   log(`minted fresh one-time code (head ${fresh.slice(0, 12)})`);
   await win.goto(origin + '/authenticate?one_time_code=' + fresh);
   log(`auth navigated; final URL=${win.url()}`);
-  await shotAll(app, '06-after-auth', /_chrome$/);
+  // Screenshot `win` itself -- it's the content view that received
+  // the auth redirect, showing whatever landed (home, welcome, etc).
+  // The chrome shell is a SEPARATE window and would show an empty
+  // dark frame here.
+  await shot(win, '06-after-auth');
 
   // Now the home page should show the workspace tile.
   await win.goto(origin + '/');
   await win.waitForSelector(`text=${WORKSPACE}`, { timeout: 60_000 });
-  await shotAll(app, '07-home-with-workspace-tile', /_chrome$/);
+  await shot(win, '07-home-with-workspace-tile');
   await win.click(`text=${WORKSPACE}`, { timeout: 5_000 });
 
   let chatUrl = '';
