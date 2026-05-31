@@ -13,15 +13,19 @@ EVENTS_LOG="$HOME/.minds/logs/minds-events.jsonl"
 COOKIES="/tmp/first-message-cookies.txt"
 SCREENSHOT_DIR="${SCREENSHOT_DIR:-/tmp/first-message-screenshots}"
 mkdir -p "$SCREENSHOT_DIR"
-# No-op snap: macOS `screencapture` requires an Aqua session and our
-# self-hosted minds-runner is launchd-managed with no GUI display
-# (returns "could not create image from display"). Visible-flow
-# screenshots are taken later by the Playwright phase (drive-slack-ci.js)
-# which captures the chat panel after first-message-verify lands, so the
-# "agent creation worked + first message worked" view is preserved
-# via 07a-chat-with-first-message-reply. Keep this stub so callers
-# don't have to change shape if a future runner gets GUI access.
-snap() { :; }
+snap() {
+  local name="$1"
+  local out="$SCREENSHOT_DIR/${name}.png"
+  command -v screencapture >/dev/null 2>&1 || return
+  screencapture -x "$out" 2>"$out.err" || true
+  if [[ -s "$out" ]]; then
+    log "  snap[$name] -> $(stat -f %z "$out") bytes"
+  else
+    log "  snap[$name] FAILED: $(cat "$out.err" 2>/dev/null)"
+    rm -f "$out"
+  fi
+  rm -f "$out.err"
+}
 # `${VAR:-default}` substitutes default for both unset and empty string,
 # so a workflow input that defaulted to '' still falls through to these.
 GIT_URL="${GIT_URL:-https://github.com/imbue-ai/forever-claude-template}"

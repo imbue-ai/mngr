@@ -495,15 +495,34 @@ jobs:
           fi
           run_dir="$work/runs/${{ github.run_id }}"
           mkdir -p "$run_dir"
-          # Publish only the headline (no .winN suffix) shots for the
-          # numbered flow steps. Per-window duplicates and dump-* stay
-          # in the artifact for postmortem.
+          # Publish the bash-phase desktop shots (00 launch, 01 auth,
+          # 02 agent DONE, 03 pre-msg, 04 reply) IF they exist
+          # (require an Aqua-session runner).
+          if [ -d /tmp/first-message-screenshots ]; then
+            for png in /tmp/first-message-screenshots/0*.png; do
+              [ -f "$png" ] || continue
+              cp "$png" "$run_dir/" 2>/dev/null || true
+            done
+          fi
+          # Publish Playwright-phase headline shots. Prefer
+          # `<name>.desktop.png` (full-desktop screencapture) when
+          # available, falling back to `<name>.png` (single-window
+          # Playwright shot).
           for prefix in 05 06 07 07a 08 09 10 11 12 99; do
+            for desktop in "$shots_dir"/${prefix}-*.desktop.png; do
+              [ -f "$desktop" ] || continue
+              # Copy desktop shot as the headline name (drop .desktop suffix).
+              base=$(basename "$desktop" .desktop.png)
+              cp "$desktop" "$run_dir/${base}.png" 2>/dev/null || true
+            done
             for png in "$shots_dir"/${prefix}-*.png; do
               [ -f "$png" ] || continue
               case "$png" in
-                *.win[0-9]*.png) continue ;;
+                *.win[0-9]*.png|*.desktop.png) continue ;;
               esac
+              base=$(basename "$png" .png)
+              # Don't overwrite a desktop-headline we already copied.
+              [ -f "$run_dir/${base}.png" ] && continue
               cp "$png" "$run_dir/" 2>/dev/null || true
             done
           done
@@ -532,20 +551,24 @@ jobs:
             echo "Numbered to sort in flow order. Per-window duplicates (.winN) and dump-* shots are in the downloadable artifact above."
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
-          for prefix in 05 06 07 07a 08 09 10 11 12 99; do
-            for png in "$shots_dir"/${prefix}-*.png; do
-              [ -f "$png" ] || continue
-              case "$png" in
-                *.win[0-9]*.png) continue ;;
-              esac
-              label=$(basename "$png" .png)
-              {
-                echo "### $label"
-                echo ""
-                echo "![$label]($base/$(basename "$png"))"
-                echo ""
-              } >> "$GITHUB_STEP_SUMMARY"
-            done
+          # Walk the published files (run_dir on the ci-screenshots
+          # branch is whatever we published above -- desktop-preferred
+          # headlines + bash-phase 00-04 if present). Use the cloned
+          # working tree's runs/<id> as the source of truth for what
+          # we'll surface.
+          run_dir=/tmp/ci-screenshots-work/runs/${{ github.run_id }}
+          if [ ! -d "$run_dir" ]; then
+            echo "(no published run_dir, nothing to embed)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          for png in $(ls "$run_dir"/*.png 2>/dev/null | sort); do
+            label=$(basename "$png" .png)
+            {
+              echo "### $label"
+              echo ""
+              echo "![$label]($base/$(basename "$png"))"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
           done
       - name: post-test cleanup (best effort)
         if: always()

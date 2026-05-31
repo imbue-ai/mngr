@@ -26,6 +26,7 @@
 const { _electron: electron } = require('playwright');
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('child_process');
 
 const WORKSPACE = process.env.MINDS_WORKSPACE
   || (() => { throw new Error('MINDS_WORKSPACE is required'); })();
@@ -52,6 +53,23 @@ async function shot(p, n) {
   try {
     try { await p.setViewportSize({ width: 1280, height: 800 }); } catch (_) {}
     await p.screenshot({ path: path.join(DIR, `${n}.png`), fullPage: true });
+  } catch (_) {}
+  // Also grab a whole-desktop screenshot via macOS `screencapture` so
+  // we get the user's actual view (including the menubar and any
+  // off-electron UI). Fails silently if the runner has no display.
+  deskShot(n);
+}
+// Whole-desktop screenshot via macOS `screencapture`. Writes to the
+// same DIR so it sorts alongside the Playwright shots. Suffixed
+// `.desktop.png` so the embed step can pick the desktop version
+// preferentially when present.
+function deskShot(n) {
+  try {
+    const out = path.join(DIR, `${n}.desktop.png`);
+    const result = spawnSync('screencapture', ['-x', out], { stdio: 'ignore' });
+    if (result.status !== 0 || !fs.existsSync(out) || fs.statSync(out).size === 0) {
+      try { fs.unlinkSync(out); } catch (_) {}
+    }
   } catch (_) {}
 }
 // Take a shot of EVERY visible Electron window so the artifact has
