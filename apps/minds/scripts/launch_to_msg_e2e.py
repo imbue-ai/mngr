@@ -46,7 +46,12 @@ from pathlib import Path
 from typing import Any
 
 from loguru import logger
-from playwright.async_api import ElectronApplication
+
+# Playwright-Python has no Electron binding (only Node has _electron.launch).
+# Attach via CDP instead: launch minds.app ourselves with
+# `--remote-debugging-port=<N>` so its Chromium DevTools endpoint is reachable,
+# then `chromium.connect_over_cdp()`. Same API for pages, locators, etc.
+from playwright.async_api import BrowserContext
 from playwright.async_api import Page
 from playwright.async_api import async_playwright
 
@@ -412,12 +417,40 @@ def mint_one_time_code() -> str:
     return code
 
 
-async def find_chat_window(app: ElectronApplication) -> Page | None:
+def _free_port() -> int:
+    """Reserve an ephemeral port for minds.app's CDP endpoint."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+async def _wait_cdp(port: int, timeout: float = 60.0) -> str:
+    """Wait until http://127.0.0.1:<port>/json/version is reachable."""
+    import urllib.request
+
+    deadline = time.time() + timeout
+    last_err: Exception | None = None
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=2) as resp:
+                if resp.status == 200:
+                    return f"http://127.0.0.1:{port}"
+        except Exception as e:
+            last_err = e
+        await asyncio.sleep(0.5)
+    raise RuntimeError(f"CDP not reachable on :{port} after {timeout}s: {last_err}")
+
+
+def all_pages(ctx: BrowserContext) -> list[Page]:
+    return list(ctx.pages)
+
+
+async def find_chat_window(ctx: BrowserContext) -> Page | None:
     """Find the WebContentsView whose URL matches the chat URL (agent-*localhost)."""
     import re
 
     pat = re.compile(r"agent-[a-f0-9]+\.localhost")
-    for w in app.windows:
+    for w in all_pages(ctx):
         with contextlib.suppress(Exception):
             if pat.search(w.url):
                 return w
@@ -434,22 +467,38 @@ async def amain() -> int:
     cert = ensure_cert()
     logger.info("brew curl: {}", brew_curl)
 
-    # 1. Launch minds.app via Playwright Electron
+    # 1. Launch minds.app ourselves with --remote-debugging-port so Playwright
+    # can attach via CDP. Use a free port to avoid clashes.
+    cdp_port = _free_port()
     env = {
         **os.environ,
         "PATH": f"{brew_curl.parent}:" + os.environ.get("PATH", ""),
         "CURL_CA_BUNDLE": str(cert),
     }
     env.pop("ELECTRON_RUN_AS_NODE", None)
-    logger.info("launching {}", MINDS_APP_PATH)
+    logger.info("launching {} --remote-debugging-port={}", MINDS_APP_PATH, cdp_port)
+    minds_proc = subprocess.Popen(
+        [str(MINDS_APP_PATH), f"--remote-debugging-port={cdp_port}"],
+        env=env,
+        stdout=open("/tmp/minds-electron.log", "w"),
+        stderr=subprocess.STDOUT,
+    )
 
     async with async_playwright() as p:
-        app = await p._electron.launch(
-            executable_path=str(MINDS_APP_PATH),
-            env=env,
-            timeout=60_000,
-        )
-        win = await app.first_window(timeout=60_000)
+        # Wait for CDP endpoint to be reachable
+        cdp_url = await _wait_cdp(cdp_port)
+        logger.info("attaching via CDP at {}", cdp_url)
+        browser = await p.chromium.connect_over_cdp(cdp_url, timeout=60_000)
+        # Single Electron context wraps all WebContentsViews as pages.
+        ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
+        # Wait for first page (chrome shell or splash) to materialise.
+        for _ in range(60):
+            if ctx.pages:
+                break
+            await asyncio.sleep(0.5)
+        if not ctx.pages:
+            raise RuntimeError("no Electron windows after 30s")
+        win = ctx.pages[0]
         await snap_page(win, "00-app-launched")
 
         # 2. Wait for backend, auth via OTC
@@ -526,7 +575,7 @@ async def amain() -> int:
                         break
 
                     if approval_stage < 3:
-                        await _advance_approval(app, win, approval_stage, clicked_at)
+                        await _advance_approval(ctx, win, approval_stage, clicked_at)
                         approval_stage = clicked_at.get("stage", approval_stage)
 
                     await asyncio.sleep(2)
@@ -543,18 +592,21 @@ async def amain() -> int:
                 stop_socat()
                 mock.shutdown()
 
-        await app.close()
+        await browser.close()
+        minds_proc.terminate()
+        with contextlib.suppress(Exception):
+            minds_proc.wait(timeout=10)
     return 0
 
 
-async def _advance_approval(app: ElectronApplication, win: Page, stage: int, state: dict) -> None:
+async def _advance_approval(ctx: BrowserContext, win: Page, stage: int, state: dict) -> None:
     """One step of the 3-stage approval click. Updates state['stage']."""
     # Stage 0: click Requests button to open the panel (skipped if
     # panel already auto-opened).
     if stage == 0:
         # Check if requests-panel window already exists.
         panel = None
-        for w in app.windows:
+        for w in all_pages(ctx):
             with contextlib.suppress(Exception):
                 if "/_chrome/requests-panel" in w.url:
                     panel = w
@@ -577,7 +629,7 @@ async def _advance_approval(app: ElectronApplication, win: Page, stage: int, sta
         ):
             return  # not ready yet
         # Find the Requests button on any window.
-        for w in app.windows:
+        for w in all_pages(ctx):
             try:
                 btn = w.locator('button[title="Requests"]')
                 if await btn.count() > 0 and await btn.first.is_visible():
@@ -592,7 +644,7 @@ async def _advance_approval(app: ElectronApplication, win: Page, stage: int, sta
     # Stage 1: click the slack entry in the requests-panel.
     elif stage == 1:
         panel = None
-        for w in app.windows:
+        for w in all_pages(ctx):
             with contextlib.suppress(Exception):
                 if "/_chrome/requests-panel" in w.url:
                     panel = w
@@ -616,7 +668,7 @@ async def _advance_approval(app: ElectronApplication, win: Page, stage: int, sta
 
     # Stage 2: click Approve in the per-request detail window.
     elif stage == 2:
-        for w in app.windows:
+        for w in all_pages(ctx):
             try:
                 if "/requests/" not in w.url:
                     continue
@@ -628,7 +680,7 @@ async def _advance_approval(app: ElectronApplication, win: Page, stage: int, sta
                     state["stage"] = 3
                     await asyncio.sleep(2)
                     # Kick the agent to retry.
-                    chat = await find_chat_window(app)
+                    chat = await find_chat_window(ctx)
                     if chat is not None:
                         kick = await chat.wait_for_selector('textarea, [contenteditable="true"]', timeout=15_000)
                         await kick.fill(
