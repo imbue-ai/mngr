@@ -473,6 +473,11 @@ async def amain() -> int:
         **os.environ,
         "PATH": f"{brew_curl.parent}:" + os.environ.get("PATH", ""),
         "CURL_CA_BUNDLE": str(cert),
+        # Pre-fill the Create form so clicking "Create" POSTs a valid
+        # body. Without these, the form is empty and creation hangs.
+        "MINDS_WORKSPACE_GIT_URL": GIT_URL,
+        "MINDS_WORKSPACE_NAME": HOST_NAME,
+        "MINDS_WORKSPACE_BRANCH": GIT_BRANCH,
     }
     env.pop("ELECTRON_RUN_AS_NODE", None)
     logger.info("launching {} --remote-debugging-port={}", MINDS_APP_PATH, cdp_port)
@@ -541,6 +546,9 @@ async def amain() -> int:
                 for p in all_pages(ctx):
                     with contextlib.suppress(Exception):
                         await snap_page(p, f"99-create-timeout-{p.url.split('/')[-1] or 'root'}")
+                if EVENTS_LOG.exists():
+                    tail = EVENTS_LOG.read_text(errors="ignore").splitlines()[-60:]
+                    logger.error("minds-events.jsonl tail:\n{}", "\n".join(tail))
                 raise RuntimeError(f"no agent-*.localhost page after {CREATE_TIMEOUT}s")
             win = chat_win
             logger.info("agent DONE; chat URL={}", win.url)
