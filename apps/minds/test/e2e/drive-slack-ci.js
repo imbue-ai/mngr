@@ -43,7 +43,35 @@ const T0 = Date.now();
 
 fs.mkdirSync(DIR, { recursive: true });
 function log(m) { console.log(`[${Math.floor((Date.now()-T0)/1000)}s] ${m}`); }
-async function shot(p, n) { try { await p.screenshot({ path: path.join(DIR, `${n}.png`) }); } catch (_) {} }
+// Take a fullPage screenshot at a fixed viewport. Default viewport on
+// headless Electron is whatever the BrowserWindow happens to be sized
+// to (the chrome shell's tab bar is ~2400x76, so screenshotting it
+// gives a useless tab-bar-only image). Force a viewport that fits a
+// normal app window.
+async function shot(p, n) {
+  try {
+    try { await p.setViewportSize({ width: 1280, height: 800 }); } catch (_) {}
+    await p.screenshot({ path: path.join(DIR, `${n}.png`), fullPage: true });
+  } catch (_) {}
+}
+// Take a shot of EVERY visible Electron window so the artifact has
+// the full UI even when the relevant content is in a different
+// WebContentsView than `firstWindow`. The first matching the
+// `prefer` URL filter (if any) becomes the "headline" shot (no suffix);
+// the others get window-index suffixes.
+async function shotAll(app, n, prefer) {
+  const wins = app.windows();
+  let headlineIdx = -1;
+  if (prefer) {
+    for (let i = 0; i < wins.length; i++) {
+      try { if (prefer.test(wins[i].url())) { headlineIdx = i; break; } } catch (_) {}
+    }
+  }
+  for (let i = 0; i < wins.length; i++) {
+    const suffix = i === headlineIdx ? '' : `.win${i}`;
+    await shot(wins[i], `${n}${suffix}`);
+  }
+}
 
 // User's described flow:
 //   1. Click chatbox icon in the right side panel (opens the panel).
@@ -202,7 +230,7 @@ async function dumpWindows(app, tag) {
   delete env.ELECTRON_RUN_AS_NODE;
   const app = await electron.launch({ executablePath: exec, env });
   const win = await app.firstWindow({ timeout: 60_000 });
-  await shot(win, '05-electron-launched');
+  await shotAll(app, '05-electron-launched');
   const origin = await win.evaluate(() => location.origin);
 
   // The relaunched minds.app may have lost the session that
@@ -221,12 +249,12 @@ async function dumpWindows(app, tag) {
   log(`minted fresh one-time code (head ${fresh.slice(0, 12)})`);
   await win.goto(origin + '/authenticate?one_time_code=' + fresh);
   log(`auth navigated; final URL=${win.url()}`);
-  await shot(win, '06-after-auth');
+  await shotAll(app, '06-after-auth', /_chrome$/);
 
   // Now the home page should show the workspace tile.
   await win.goto(origin + '/');
   await win.waitForSelector(`text=${WORKSPACE}`, { timeout: 60_000 });
-  await shot(win, '07-home-with-workspace-tile');
+  await shotAll(app, '07-home-with-workspace-tile', /_chrome$/);
   await win.click(`text=${WORKSPACE}`, { timeout: 5_000 });
 
   let chatUrl = '';
@@ -250,15 +278,16 @@ async function dumpWindows(app, tag) {
   // Snapshot the chat panel BEFORE sending the slack prompt -- the
   // prior "pong" reply from first-message-verify should be visible
   // here, which proves the launch + agent-create + first-message
-  // round trip worked end-to-end.
-  await shot(win, '07a-chat-with-first-message-reply');
+  // round trip worked end-to-end. The chat content lives in the
+  // `agent-<id>.localhost:8421` window, not the chrome shell.
+  await shotAll(app, '07a-chat-with-first-message-reply', /agent-[a-f0-9]+\.localhost/);
   const beforeText = await win.evaluate(() => document.body.innerText.toLowerCase());
   const oldCannedOcc = beforeText.split(CANNED_BODY_LC).length - 1;
   log(`pre-send canned-body occurrences: ${oldCannedOcc}`);
 
   await input.fill(PROMPT);
   await input.press('Enter');
-  await shot(win, '08-slack-prompt-sent');
+  await shotAll(app, '08-slack-prompt-sent', /agent-[a-f0-9]+\.localhost/);
   log('typed + sent; watching for approval UI and canned body');
 
   // Approval is up to 3 clicks: chatbox icon (if panel not open) ->
@@ -305,7 +334,7 @@ async function dumpWindows(app, tag) {
         const open = await openRightPanel(app);
         if (open) {
           log(`opening right panel via "${open.selector}"`);
-          await shot(open.window, `09-stage0-requests-button-clicked-t${i}s`);
+          await shotAll(app, `09-stage0-requests-button-clicked-t${i}s`, /_chrome$/);
           try { await open.locator.click({ timeout: 3_000 }); approvalStage = 1; }
           catch (e) { log(`stage0 click failed: ${e.message}`); }
         }
@@ -313,7 +342,7 @@ async function dumpWindows(app, tag) {
         const entry = await findPermissionRequestEntry(app);
         if (entry) {
           log(`clicking permission request via "${entry.selector}"`);
-          await shot(entry.window, `10-stage1-permission-entry-clicked-t${i}s`);
+          await shotAll(app, `10-stage1-permission-entry-clicked-t${i}s`, /requests-panel/);
           try { await entry.locator.click({ timeout: 3_000 }); approvalStage = 2; }
           catch (e) { log(`stage1 click failed: ${e.message}`); }
         }
@@ -321,7 +350,7 @@ async function dumpWindows(app, tag) {
         const approve = await findApproveButton(app);
         if (approve) {
           log(`clicking Approve via "${approve.selector}"`);
-          await shot(approve.window, `11-stage2-approve-clicked-t${i}s`);
+          await shotAll(app, `11-stage2-approve-clicked-t${i}s`, /\/requests\/[a-f0-9-]+/);
           try {
             await approve.locator.click({ timeout: 3_000 });
             approvalStage = 3;
@@ -356,7 +385,7 @@ async function dumpWindows(app, tag) {
     const newCannedOcc = body.split(CANNED_BODY_LC).length - 1;
     if (newCannedOcc > oldCannedOcc) {
       log(`PASS: canned body appeared at t=${i}s (occ ${oldCannedOcc} -> ${newCannedOcc})`);
-      await shot(win, '12-PASS-canned-body-in-reply');
+      await shotAll(app, '12-PASS-canned-body-in-reply', /agent-[a-f0-9]+\.localhost/);
       const ctx = await win.evaluate((needle) => {
         const text = document.body.innerText.toLowerCase();
         const idx = text.lastIndexOf(needle);
@@ -376,7 +405,7 @@ async function dumpWindows(app, tag) {
     await win.waitForTimeout(1000);
   }
   log('TIMEOUT (4 min)');
-  await shot(win, '99-TIMEOUT-no-canned-body');
+  await shotAll(app, '99-TIMEOUT-no-canned-body', /agent-[a-f0-9]+\.localhost/);
   await app.close();
   process.exit(3);
 })().catch(e => {
