@@ -593,8 +593,12 @@ async def amain() -> int:
             # user normally clicks the tile on the home page. Once
             # status=DONE we do the same: navigate home, click the
             # tile, then wait for the chat-URL page to materialise.
+            # Wall-clock per phase transition gets stitched into the
+            # /tmp/launch-to-msg-timings.json artifact at end of script.
             deadline = time.time() + CREATE_TIMEOUT
             last_status = ""
+            phase_started_at = time.monotonic()
+            phase_durations: dict[str, float] = {}
             done = False
             while time.time() < deadline and not done:
                 stat = await win.evaluate(
@@ -609,14 +613,34 @@ async def amain() -> int:
                     payload = json.loads(stat["body"])
                 state = payload.get("status", "")
                 if state != last_status:
-                    logger.info("creation status: {} -> {}", last_status or "(none)", state)
+                    now = time.monotonic()
+                    if last_status:
+                        phase_durations[last_status] = round(now - phase_started_at, 2)
+                        logger.info(
+                            "creation status: {} -> {} (prev took {:.1f}s)",
+                            last_status,
+                            state,
+                            phase_durations[last_status],
+                        )
+                    else:
+                        logger.info("creation status: (none) -> {}", state)
                     last_status = state
+                    phase_started_at = now
                 if state == "DONE":
+                    phase_durations[state] = round(time.monotonic() - phase_started_at, 2)
                     done = True
                     break
                 if state == "FAILED":
                     raise RuntimeError(f"creation FAILED: {payload.get('error', stat['body'])}")
                 await asyncio.sleep(5)
+            # Emit a per-phase summary line + persist to artifact JSON.
+            total_create_s = sum(phase_durations.values())
+            logger.info("creation phase timings: {} (total={:.1f}s)", phase_durations, total_create_s)
+            timings_artifact = SCREENSHOT_DIR / "launch-to-msg-timings.json"
+            with contextlib.suppress(Exception):
+                timings_artifact.write_text(
+                    json.dumps({"phase_durations_s": phase_durations, "total_create_s": total_create_s}, indent=2)
+                )
             if not done:
                 if EVENTS_LOG.exists():
                     tail = EVENTS_LOG.read_text(errors="ignore").splitlines()[-60:]

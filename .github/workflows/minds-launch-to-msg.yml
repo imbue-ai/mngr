@@ -29,6 +29,11 @@ on:
         description: 'Override the FCT git URL (forks). Empty -> https://github.com/imbue-ai/forever-claude-template.'
         required: false
         default: ''
+      wipe_lima_caches:
+        description: 'Cold-cache benchmark mode: wipe ~/.lima (Ubuntu cloudimg cache, ~600MB) before the run. Simulates fresh-install user experience.'
+        type: boolean
+        required: false
+        default: false
 
 concurrency:
   group: mac-runner
@@ -292,6 +297,8 @@ jobs:
             echo "- Source: $SRC"
           } >> "$GITHUB_STEP_SUMMARY"
       - name: reset to clean state and install fresh app
+        env:
+          WIPE_LIMA_CACHES: ${{ inputs.wipe_lima_caches && '1' || '0' }}
         run: bash apps/minds/scripts/mac-runner-reset.sh "${{ steps.url.outputs.url }}"
 
       - name: ensure socat (slack mock TLS terminator)

@@ -25,6 +25,16 @@ if command -v limactl >/dev/null 2>&1; then
   limactl delete --all >/dev/null 2>&1 || true
 fi
 
+if [[ "${WIPE_LIMA_CACHES:-}" == "1" ]]; then
+  # Cold-cache benchmark mode: wipe Lima's downloaded Ubuntu cloudimg
+  # (~600MB) so the next agent creation does a full first-run download.
+  # Without this the runner stays warm across CI runs.
+  log "WIPE_LIMA_CACHES=1 set; nuking ~/.lima and prefetch caches"
+  rm -rf "$HOME/.lima" 2>/dev/null || true
+  rm -rf "$HOME/.minds/template-cache" 2>/dev/null || true
+  rm -rf /tmp/minds-clone-* 2>/dev/null || true
+fi
+
 log "wiping leftover /tmp diagnostic artifacts from prior runs"
 # The CI verify job's "collect diagnostic artifacts" step copies
 # /tmp/first-message-*.{txt,json,html} and /tmp/minds-electron.log
