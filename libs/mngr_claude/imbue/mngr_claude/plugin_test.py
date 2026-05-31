@@ -1,3 +1,4 @@
+import importlib.resources
 import json
 import os
 import shlex
@@ -130,6 +131,19 @@ def _sid_export_for(uuid: UUID) -> str:
         f'_MNGR_READ_SID=$(cat "$MNGR_AGENT_STATE_DIR/claude_session_id" 2>/dev/null || true);'
         f' export MAIN_CLAUDE_SESSION_ID="${{_MNGR_READ_SID:-{uuid}}}"'
     )
+
+
+# The shim prelude assemble_command emits when `base` is the bare `claude`
+# binary: resolve the real claude (before the shim is on PATH), then prepend the
+# per-agent shim dir so nested `claude` invocations get scrubbed.
+_SHIM_PRELUDE_FOR_CLAUDE: str = (
+    '_MNGR_REAL_CLAUDE="$(command -v claude)" && export PATH="$MNGR_AGENT_STATE_DIR/claude_shim:$PATH"'
+)
+# The shim prelude when `base` is a custom binary the shim does not shadow:
+# just prepend the shim dir (the main launch uses `base` directly).
+_SHIM_PRELUDE_FOR_CUSTOM: str = 'export PATH="$MNGR_AGENT_STATE_DIR/claude_shim:$PATH"'
+# How the main launch refers to the real binary when `base` is bare `claude`.
+_REAL_CLAUDE: str = '"$_MNGR_REAL_CLAUDE"'
 
 
 def _init_git_with_gitignore(work_dir: Path) -> None:
@@ -337,7 +351,7 @@ def test_claude_agent_assemble_command_with_no_args(
     sid_export = _sid_export_for(uuid)
     # Local hosts should NOT have IS_SANDBOX set
     assert command == CommandString(
-        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude --session-id {uuid}'
+        f'{background_cmd} {_SHIM_PRELUDE_FOR_CLAUDE} && {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && {_REAL_CLAUDE} --resume "$MAIN_CLAUDE_SESSION_ID" ) || {_REAL_CLAUDE} --session-id {uuid}'
     )
 
 
@@ -355,7 +369,7 @@ def test_claude_agent_assemble_command_with_agent_args(
     background_cmd = agent._build_background_tasks_command(session_name)
     sid_export = _sid_export_for(uuid)
     assert command == CommandString(
-        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" --model opus ) || claude --session-id {uuid} --model opus'
+        f'{background_cmd} {_SHIM_PRELUDE_FOR_CLAUDE} && {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && {_REAL_CLAUDE} --resume "$MAIN_CLAUDE_SESSION_ID" --model opus ) || {_REAL_CLAUDE} --session-id {uuid} --model opus'
     )
 
 
@@ -378,7 +392,7 @@ def test_claude_agent_assemble_command_with_cli_args_and_agent_args(
     background_cmd = agent._build_background_tasks_command(session_name)
     sid_export = _sid_export_for(uuid)
     assert command == CommandString(
-        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" --verbose --model opus ) || claude --session-id {uuid} --verbose --model opus'
+        f'{background_cmd} {_SHIM_PRELUDE_FOR_CLAUDE} && {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && {_REAL_CLAUDE} --resume "$MAIN_CLAUDE_SESSION_ID" --verbose --model opus ) || {_REAL_CLAUDE} --session-id {uuid} --verbose --model opus'
     )
 
 
@@ -400,7 +414,7 @@ def test_claude_agent_assemble_command_with_command_override(
     background_cmd = agent._build_background_tasks_command(session_name)
     sid_export = _sid_export_for(uuid)
     assert command == CommandString(
-        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && custom-claude --resume "$MAIN_CLAUDE_SESSION_ID" --model opus ) || custom-claude --session-id {uuid} --model opus'
+        f'{background_cmd} {_SHIM_PRELUDE_FOR_CUSTOM} && {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && custom-claude --resume "$MAIN_CLAUDE_SESSION_ID" --model opus ) || custom-claude --session-id {uuid} --model opus'
     )
 
 
@@ -440,7 +454,7 @@ def test_claude_agent_assemble_command_sets_is_sandbox_for_remote_host(
     sid_export = _sid_export_for(uuid)
     # Remote hosts SHOULD have IS_SANDBOX set
     assert command == CommandString(
-        f'{background_cmd} export IS_SANDBOX=1 && {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude --session-id {uuid}'
+        f'{background_cmd} {_SHIM_PRELUDE_FOR_CLAUDE} && export IS_SANDBOX=1 && {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && {_REAL_CLAUDE} --resume "$MAIN_CLAUDE_SESSION_ID" ) || {_REAL_CLAUDE} --session-id {uuid}'
     )
 
 
@@ -541,6 +555,89 @@ def test_claude_agent_assemble_command_resume_branch_runs_when_session_jsonl_exi
     )
     assert target_session_id in invocation_args, (
         f"Expected adopted session id {target_session_id!r} in claude argv, got {invocation_args!r}."
+    )
+
+
+def test_claude_agent_assemble_command_scrubs_session_id_for_nested_claude_only(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """End-to-end: the main launch keeps MAIN_CLAUDE_SESSION_ID; nested `claude` loses it.
+
+    This is the core guarantee of the claude shim. A nested `claude -p` spawned
+    by an agent must NOT have its session adopted into the parent's transcript /
+    state, which mngr enforces by scrubbing MAIN_CLAUDE_SESSION_ID (the variable
+    every readiness hook is guarded on) from nested invocations -- while leaving
+    the main session's environment untouched.
+
+    The test executes the real assembled command against a stub `claude` that
+    (1) records whether MAIN_CLAUDE_SESSION_ID is set in its environment, and
+    (2) on its first (main) invocation, re-invokes bare `claude` once. The bare
+    re-invocation resolves the shim (prepended to PATH by the assembled command),
+    so the recorded environments must be:
+
+      - first line  (main launch, via the real binary): variable SET
+      - second line (nested launch, via the shim):       variable UNSET
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    state_dir = tmp_path / "agent-state"
+    (state_dir / "commands").mkdir(parents=True)
+
+    # Make MAIN_CLAUDE_SESSION_ID resolve to a concrete value (not the uuid
+    # fallback) so the "SET" assertion is unambiguous.
+    main_sid = "main-session-abc123"
+    (state_dir / "claude_session_id").write_text(main_sid)
+
+    # Install the real shim (named `claude`) into the dir the assembled command
+    # prepends to PATH.
+    shim_dir = state_dir / "claude_shim"
+    shim_dir.mkdir()
+    shim_src = importlib.resources.files("imbue.mngr_claude.resources").joinpath("claude_shim.sh")
+    shim_installed = shim_dir / "claude"
+    shim_installed.write_text(shim_src.read_text())
+    shim_installed.chmod(0o755)
+
+    # Stub the background-tasks script (runs backgrounded; just needs to exist).
+    bg_script = state_dir / "commands" / "claude_background_tasks.sh"
+    bg_script.write_text("#!/bin/bash\nexit 0\n")
+    bg_script.chmod(0o755)
+
+    # Stub "real" claude: record MAIN_CLAUDE_SESSION_ID, then on the first
+    # invocation re-invoke bare `claude` exactly once (which resolves the shim).
+    env_log = tmp_path / "claude_env.log"
+    stub_dir = tmp_path / "stub_bin"
+    stub_dir.mkdir()
+    stub_claude = stub_dir / "claude"
+    stub_claude.write_text(
+        "#!/bin/bash\n"
+        f'printf "sid=%s\\n" "${{MAIN_CLAUDE_SESSION_ID:-UNSET}}" >> {shlex.quote(str(env_log))}\n'
+        'if [ -z "${STUB_NESTED:-}" ]; then\n'
+        "  export STUB_NESTED=1\n"
+        "  claude --print nested-call >/dev/null 2>&1 || true\n"
+        "fi\n"
+        "exit 0\n"
+    )
+    stub_claude.chmod(0o755)
+
+    # No session jsonl is planted, so the resume guard's `find` fails and the
+    # `|| create` branch launches the stub via "$_MNGR_REAL_CLAUDE".
+    command = agent.assemble_command(host=host, agent_args=(), command_override=None)
+
+    env = {
+        "PATH": f"{stub_dir}:{os.environ.get('PATH', '')}",
+        "CLAUDE_CONFIG_DIR": str(tmp_path / "claude-config"),
+        "MNGR_AGENT_STATE_DIR": str(state_dir),
+        "HOME": str(tmp_path),
+    }
+    result = subprocess.run(["bash", "-c", str(command)], env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, (
+        f"Assembled pipeline failed with exit {result.returncode}.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+
+    recorded = [line for line in env_log.read_text().splitlines() if line.strip()]
+    assert recorded == [f"sid={main_sid}", "sid=UNSET"], (
+        "Expected the main launch to keep MAIN_CLAUDE_SESSION_ID and the nested "
+        f"`claude` (via the shim) to have it scrubbed, got {recorded!r}."
     )
 
 

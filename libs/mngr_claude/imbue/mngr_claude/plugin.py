@@ -1103,6 +1103,36 @@ _CLAUDE_ALWAYS_PROVISIONED_SCRIPT_NAMES: Final[tuple[str, ...]] = (
     "sync_keychain_credentials.py",
 )
 
+# The per-agent `claude` shim. Installed as an executable named `claude` inside
+# _CLAUDE_SHIM_DIR_NAME, a directory that assemble_command prepends to PATH so
+# that *nested* `claude` invocations (e.g. `claude -p` run via the agent's Bash
+# tool) get MAIN_CLAUDE_SESSION_ID scrubbed -- making mngr's readiness/transcript
+# hooks (all guarded on that var) correctly no-op for those child sessions. The
+# shim lives in its own directory so prepending it to PATH shadows only `claude`,
+# not the other scripts in commands/. The main launch bypasses the shim via an
+# absolute path. See resources/claude_shim.sh.
+_CLAUDE_SHIM_RESOURCE_NAME: Final[str] = "claude_shim.sh"
+_CLAUDE_SHIM_DIR_NAME: Final[str] = "claude_shim"
+_CLAUDE_SHIM_INSTALLED_NAME: Final[str] = "claude"
+
+
+def _provision_claude_shim(
+    host: OnlineHostInterface,
+    agent_state_dir: Path,
+) -> None:
+    """Install the per-agent ``claude`` shim.
+
+    Writes ``resources/claude_shim.sh`` to
+    ``$MNGR_AGENT_STATE_DIR/claude_shim/claude`` (mode 0755). The shim scrubs
+    ``MAIN_CLAUDE_SESSION_ID`` from nested ``claude`` invocations so the parent
+    agent's readiness/transcript hooks do not adopt child sessions. See
+    :func:`ClaudeAgent.assemble_command` for how it is wired onto PATH.
+    """
+    shim_dir = agent_state_dir / _CLAUDE_SHIM_DIR_NAME
+    host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(shim_dir))}", timeout_seconds=5.0)
+    content = _load_claude_resource_script(_CLAUDE_SHIM_RESOURCE_NAME)
+    host.write_file(shim_dir / _CLAUDE_SHIM_INSTALLED_NAME, content.encode(), "0755")
+
 
 def _provision_claude_always_on_scripts(
     host: OnlineHostInterface,
@@ -1602,6 +1632,34 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
             f' export MAIN_CLAUDE_SESSION_ID="${{_MNGR_READ_SID:-{agent_uuid}}}"'
         )
 
+        # Put the per-agent `claude` shim on PATH so that *nested* `claude`
+        # invocations spawned by this session (e.g. `claude -p` run via the Bash
+        # tool) get MAIN_CLAUDE_SESSION_ID scrubbed. Without it, a child session
+        # inherits that variable and mngr's readiness/transcript hooks (all
+        # guarded on it) wrongly attribute the child's messages and lifecycle
+        # state to this agent. See _provision_claude_shim / claude_shim.sh.
+        #
+        # The shim shadows only the bare name `claude`, so when `base` is the
+        # bare claude binary the *main* launch would hit the shim too. Resolve
+        # the real binary BEFORE the shim is on PATH and launch through its
+        # absolute path ($_MNGR_REAL_CLAUDE) so the main session's environment --
+        # and therefore /clear, /compact, and resume -- stay untouched. The PATH
+        # mutation lives in the launch command (not the shared env file), so it
+        # is scoped to this claude process tree; tmux does not propagate it to
+        # other agents (PATH is not in tmux's default update-environment).
+        shim_path_export = f'export PATH="$MNGR_AGENT_STATE_DIR/{_CLAUDE_SHIM_DIR_NAME}:$PATH"'
+        base_tokens = shlex.split(base)
+        if base_tokens and base_tokens[0] == _CLAUDE_SHIM_INSTALLED_NAME:
+            launch_rest = "".join(f" {shlex.quote(token)}" for token in base_tokens[1:])
+            launch_cmd = f'"$_MNGR_REAL_CLAUDE"{launch_rest}'
+            shim_prelude = f'_MNGR_REAL_CLAUDE="$(command -v {_CLAUDE_SHIM_INSTALLED_NAME})" && {shim_path_export}'
+        else:
+            # `base` is a custom binary / absolute path the shim does not shadow;
+            # launch it directly, but still prepend the shim so nested bare
+            # `claude` calls made by this session are scrubbed.
+            launch_cmd = base
+            shim_prelude = shim_path_export
+
         # Build both command variants using the dynamic session ID.
         # Use $CLAUDE_CONFIG_DIR (set in the agent's env file) to find session files
         # in the per-agent config dir rather than ~/.claude/. Session files on disk
@@ -1610,8 +1668,8 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         # the end of assemble_command would spawn a fresh `claude --session-id
         # <agent_uuid>` without surfacing any error -- so an adopted session
         # would appear to do nothing.
-        resume_cmd = f'( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && {base} --resume "$MAIN_CLAUDE_SESSION_ID"'
-        create_cmd = f"{base} --session-id {agent_uuid}"
+        resume_cmd = f'( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && {launch_cmd} --resume "$MAIN_CLAUDE_SESSION_ID"'
+        create_cmd = f"{launch_cmd} --session-id {agent_uuid}"
 
         # Append additional args to both commands if present
         if args_str:
@@ -1626,9 +1684,13 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         session_name = f"{self.mngr_ctx.config.prefix}{self.name}"
         background_cmd = self._build_background_tasks_command(session_name)
 
-        # Combine: start background tasks, export env (including session ID), then run the main command (and make sure we get rid of the session started marker on each run so that wait_for_ready_signal works correctly for both new and resumed sessions)
+        # Combine: start background tasks, resolve the real claude + install the
+        # shim on PATH, export env (including session ID), then run the main
+        # command (and make sure we get rid of the session started marker on each
+        # run so that wait_for_ready_signal works correctly for both new and
+        # resumed sessions)
         return CommandString(
-            f"{background_cmd} {env_exports} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( {resume_cmd} ) || {create_cmd}"
+            f"{background_cmd} {shim_prelude} && {env_exports} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( {resume_cmd} ) || {create_cmd}"
         )
 
     def on_before_provisioning(
@@ -2013,6 +2075,9 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
                 _provision_claude_always_on_scripts,
                 (host, self._get_agent_dir(), concurrency_group),
             )
+            # Install the per-agent `claude` shim that scrubs MAIN_CLAUDE_SESSION_ID
+            # from nested `claude` invocations (see assemble_command).
+            _provision_claude_shim(host, self._get_agent_dir())
             provision_raw_transcript_scripts(self, host, self._get_agent_dir(), concurrency_group)
             maybe_provision_common_transcript_scripts(self, host, self._get_agent_dir(), concurrency_group)
 
