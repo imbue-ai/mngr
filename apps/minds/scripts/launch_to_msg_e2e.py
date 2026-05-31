@@ -552,16 +552,15 @@ async def amain() -> int:
             logger.info("creation_id={}", creation_id)
             await snap_page(win, "03-create-agent-submitted")
 
-            # 5. Poll /api/create-agent/<id>/status until DONE. While polling,
-            # keep an eye on ctx.pages -- the chat panel opens in a new
-            # WebContentsView at `agent-<id>.localhost` when ready.
+            # 5. Poll /api/create-agent/<id>/status until DONE. The chat
+            # panel does NOT auto-open when creation completes -- the
+            # user normally clicks the tile on the home page. Once
+            # status=DONE we do the same: navigate home, click the
+            # tile, then wait for the chat-URL page to materialise.
             deadline = time.time() + CREATE_TIMEOUT
-            chat_win: Page | None = None
             last_status = ""
-            while time.time() < deadline:
-                chat_win = await find_chat_window(ctx)
-                if chat_win is not None:
-                    break
+            done = False
+            while time.time() < deadline and not done:
                 stat = await win.evaluate(
                     """async (id) => {
                         const r = await fetch('/api/create-agent/' + id + '/status');
@@ -577,19 +576,41 @@ async def amain() -> int:
                     logger.info("creation status: {} -> {}", last_status or "(none)", state)
                     last_status = state
                 if state == "DONE":
-                    # Chat may take a beat to materialise in CDP; loop will pick it up.
-                    pass
-                elif state == "FAILED":
+                    done = True
+                    break
+                if state == "FAILED":
                     raise RuntimeError(f"creation FAILED: {payload.get('error', stat['body'])}")
                 await asyncio.sleep(5)
-            if chat_win is None:
-                for p in all_pages(ctx):
-                    with contextlib.suppress(Exception):
-                        await snap_page(p, f"99-create-timeout-{p.url.split('/')[-1] or 'root'}")
+            if not done:
                 if EVENTS_LOG.exists():
                     tail = EVENTS_LOG.read_text(errors="ignore").splitlines()[-60:]
                     logger.error("minds-events.jsonl tail:\n{}", "\n".join(tail))
-                raise RuntimeError(f"no agent-*.localhost page after {CREATE_TIMEOUT}s (last status={last_status})")
+                raise RuntimeError(f"creation didn't reach DONE in {CREATE_TIMEOUT}s (last={last_status})")
+            logger.info("creation DONE; opening chat panel by clicking the tile")
+            await win.goto(origin + "/")
+            with contextlib.suppress(Exception):
+                await win.click(f"text={HOST_NAME}", timeout=15_000)
+            # Tile click may navigate `win` to the chat URL OR open a new
+            # WebContentsView. Look at both.
+            chat_win: Page | None = None
+            chat_deadline = time.time() + 60
+            chat_url_re = re.compile(r"agent-[a-f0-9]+\.localhost")
+            while time.time() < chat_deadline:
+                if chat_url_re.search(win.url):
+                    chat_win = win
+                    break
+                cand = await find_chat_window(ctx)
+                if cand is not None:
+                    chat_win = cand
+                    break
+                await asyncio.sleep(1)
+            if chat_win is None:
+                for p in all_pages(ctx):
+                    with contextlib.suppress(Exception):
+                        await snap_page(p, f"99-no-chat-{p.url.split('/')[-1] or 'root'}")
+                raise RuntimeError(
+                    f"agent DONE but no chat-URL page opened after tile click (pages={[p.url for p in all_pages(ctx)]})"
+                )
             win = chat_win
             logger.info("agent DONE; chat URL={}", win.url)
             await snap_page(win, "04-agent-DONE")
