@@ -103,8 +103,20 @@ if SCREENSHOT_DIR.exists():
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _activate_minds() -> None:
+    """Bring the Minds window forward before snapping so screencapture
+    sees the app, not just the wallpaper. Best-effort; silent on failure."""
+    subprocess.run(
+        ["osascript", "-e", 'tell application "Minds" to activate'],
+        check=False,
+        capture_output=True,
+        timeout=5,
+    )
+
+
 def snap(name: str) -> None:
     """Whole-desktop screencapture. Silently no-ops when no Aqua session."""
+    _activate_minds()
     out = SCREENSHOT_DIR / f"{name}.png"
     err = SCREENSHOT_DIR / f"{name}.err"
     subprocess.run(
