@@ -385,7 +385,7 @@ jobs:
           # `<name>.desktop.png` (full-desktop screencapture) when
           # available, falling back to `<name>.png` (single-window
           # Playwright shot).
-          for prefix in 05 06 07 07a 08 09 10 11 12 99; do
+          for prefix in 00 01 02 03 04 05 06 07 07a 08 09 10 11 12 99; do
             for desktop in "$shots_dir"/${prefix}-*.desktop.png; do
               [ -f "$desktop" ] || continue
               # Copy desktop shot as the headline name (drop .desktop suffix).

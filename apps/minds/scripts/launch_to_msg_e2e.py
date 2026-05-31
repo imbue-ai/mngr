@@ -62,7 +62,7 @@ MINDS_APP_PATH = Path(os.environ.get("MINDS_APP_PATH", "/Applications/Minds.app/
 MINDS_HOME = Path(os.environ.get("HOME", "/Users/macrunner")) / ".minds"
 EVENTS_LOG = MINDS_HOME / "logs" / "minds-events.jsonl"
 ONE_TIME_CODES = MINDS_HOME / "auth" / "one_time_codes.json"
-SCREENSHOT_DIR = Path("/tmp/launch-to-msg-screenshots")
+SCREENSHOT_DIR = Path(os.environ.get("LAUNCH_TO_MSG_SHOTS_DIR", "/tmp/launch-to-msg-screenshots"))
 SLACK_MOCK_STATE = Path("/tmp/slack-mock")
 SLACK_MOCK_PORT = 8443  # plain HTTP; socat terminates TLS on :443
 LATCHKEY_DIR = MINDS_HOME / "latchkey"
@@ -94,6 +94,12 @@ SKIP_SLACK_FLOW = os.environ.get("SKIP_SLACK_FLOW", "0") == "1"
 
 # --- snap helpers ---
 
+if SCREENSHOT_DIR.exists():
+    # Self-hosted runner persists /tmp; stale shots from past runs would
+    # be re-published into this run's side-branch dir otherwise.
+    for stale in SCREENSHOT_DIR.iterdir():
+        with contextlib.suppress(Exception):
+            stale.unlink()
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
 
