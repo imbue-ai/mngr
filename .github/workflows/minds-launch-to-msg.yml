@@ -283,148 +283,27 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - name: reset to clean state and install fresh app
         run: bash apps/minds/scripts/mac-runner-reset.sh "${{ steps.url.outputs.url }}"
-      - name: launch and wait for backend
-        run: bash apps/minds/scripts/launch-and-verify.sh
-      - name: first message round-trip
-        if: ${{ inputs.skip_first_message != true }}
-        env:
-          GIT_BRANCH: ${{ inputs.template_ref }}
-          GIT_URL:    ${{ inputs.template_url }}
-          SKIP_DESTROY: '1'
-        run: bash apps/minds/scripts/first-message-verify.sh
 
-      # --- slack permission flow (uses the agent first-message just left running) ---
-      # The latchkey gateway runs on the macOS HOST (not inside the lima VM);
-      # the agent reaches it via a reverse-SSH tunnel back to 127.0.0.1:1989,
-      # and the gateway makes the outbound slack.com call from the host.
-      # So all the interception (/etc/hosts, cert, socat, latchkey cred)
-      # belongs on the host, not in the VM.
-      - name: read agent info written by first-message-verify
-        id: slack_pre
-        if: ${{ inputs.skip_first_message != true && inputs.skip_slack_flow != true }}
+      - name: ensure socat (slack mock TLS terminator)
         run: |
-          INFO=/tmp/first-message-agent-info.json
-          if [[ ! -s "$INFO" ]]; then
-            echo "::error::$INFO missing -- first-message step did not write agent info"; exit 1
-          fi
-          HOST_NAME=$(jq -r .host_name "$INFO")
-          CREATION_ID=$(jq -r .creation_id "$INFO")
-          BASE_URL=$(jq -r .base_url "$INFO")
-          echo "host_name=$HOST_NAME"     >> "$GITHUB_OUTPUT"
-          echo "creation_id=$CREATION_ID" >> "$GITHUB_OUTPUT"
-          echo "base_url=$BASE_URL"       >> "$GITHUB_OUTPUT"
-          echo "ok=1"                     >> "$GITHUB_OUTPUT"
-
-      - name: install socat (slack mock TLS terminator)
-        if: ${{ steps.slack_pre.outputs.ok == '1' }}
-        run: |
-          # The self-hosted minds-runner does not have brew on the bash -e
-          # PATH (Actions step shells don't source the login profile);
-          # find it explicitly. arm64 -> /opt/homebrew, x86_64 -> /usr/local.
           for BREW in /opt/homebrew/bin/brew /usr/local/bin/brew; do
-            if [[ -x "$BREW" ]]; then
-              export PATH="$(dirname "$BREW"):$PATH"
-              break
-            fi
+            [[ -x "$BREW" ]] && export PATH="$(dirname "$BREW"):$PATH" && break
           done
           if ! command -v socat >/dev/null; then
-            if ! command -v brew >/dev/null; then
-              echo "::error::neither socat nor brew found on the runner. Install socat manually on minds-runner."
-              exit 1
-            fi
             brew install socat
           fi
-          # socat -V writes the banner to stderr; merge then head, and
-          # tolerate SIGPIPE under bash -e.
           (socat -V 2>&1 || true) | head -1 || true
-          # Persist the PATH so downstream steps in this job find socat
-          # without re-discovering brew.
-          if [[ -n "${HOMEBREW_PREFIX:-}" ]]; then
-            echo "$HOMEBREW_PREFIX/bin" >> "$GITHUB_PATH"
-          else
-            for D in /opt/homebrew/bin /usr/local/bin; do
-              # Under bash -e, `[[ ... ]] && cmd` fails the step when the
-              # test is false on the second iteration. Use an if.
-              if [[ -d "$D" ]]; then
-                echo "$D" >> "$GITHUB_PATH"
-              fi
-            done
-          fi
-
-      - name: pnpm install (apps/minds dev deps incl. playwright)
-        if: ${{ steps.slack_pre.outputs.ok == '1' }}
-        working-directory: apps/minds
-        run: |
-          npm install -g pnpm@10.33.4
-          pnpm install --frozen-lockfile
-
-      - name: stand up slack mock on host
-        if: ${{ steps.slack_pre.outputs.ok == '1' }}
-        run: bash apps/minds/scripts/slack-mock-setup.sh
-
-      - name: kill running minds.app (Playwright launches its own)
-        if: ${{ steps.slack_pre.outputs.ok == '1' }}
-        run: |
-          # SIGTERM the main process, give the clean-shutdown chain 8s,
-          # then SIGKILL anything still alive (main + all child processes
-          # incl. mngr forward, uv-spawned backend, latchkey gateway).
-          # Note the case: macOS file system is case-insensitive but
-          # pgrep -f matches literal argv, and the actual install path
-          # in CI is /Applications/minds.app/ (lowercase). Match either.
-          for P in $(pgrep -fi '/Applications/minds\.app/Contents/MacOS/Minds' 2>/dev/null || true); do
-            kill "$P" 2>/dev/null || true
+          for D in /opt/homebrew/bin /usr/local/bin; do
+            if [[ -d "$D" ]]; then echo "$D" >> "$GITHUB_PATH"; fi
           done
-          for P in $(pgrep -f 'mngr forward' 2>/dev/null || true); do
-            kill "$P" 2>/dev/null || true
-          done
-          sleep 8
-          pkill -KILL -fi '/Applications/minds\.app/Contents/MacOS/Minds' 2>/dev/null || true
-          pkill -KILL -fi '/Applications/minds\.app/Contents/Frameworks/Minds Helper' 2>/dev/null || true
-          pkill -KILL -f 'mngr forward'                                 2>/dev/null || true
-          pkill -KILL -f 'mngr observe'                                 2>/dev/null || true
-          pkill -KILL -f 'mngr event'                                   2>/dev/null || true
-          # Belt+braces: also tell macOS Launch Services to clear any
-          # cached "running" state for the bundle.
-          /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister \
-            -kill 2>/dev/null || true
-          # Best-effort wait, longer this time.
-          for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-            if ! pgrep -fi '/Applications/minds\.app/Contents/MacOS/Minds' >/dev/null; then
-              break
-            fi
-            sleep 1
-          done
-          # Echo what's left so we can see in CI if anything lingers.
-          echo "--- remaining Minds processes after kill ---"
-          pgrep -afli 'minds\.app|mngr forward' 2>/dev/null || echo "(none)"
 
-      - name: drive slack flow via Playwright
-        if: ${{ steps.slack_pre.outputs.ok == '1' }}
-        working-directory: apps/minds
+      - name: launch-to-msg + slack flow (Python)
         env:
-          MINDS_WORKSPACE: ${{ steps.slack_pre.outputs.host_name }}
-        run: |
-          node test/e2e/drive-slack-ci.js
-
-      - name: teardown slack mock
-        if: ${{ always() && steps.slack_pre.outputs.ok == '1' }}
-        run: bash apps/minds/scripts/slack-mock-teardown.sh
-
-      - name: destroy agent (post-slack-flow)
-        if: ${{ always() && steps.slack_pre.outputs.ok == '1' }}
-        env:
-          CREATION_ID: ${{ steps.slack_pre.outputs.creation_id }}
-          BASE_URL:    ${{ steps.slack_pre.outputs.base_url }}
-        run: |
-          # first-message-verify wrote the session cookie at this path.
-          COOKIES=/tmp/first-message-cookies.txt
-          if [[ ! -s "$COOKIES" ]]; then
-            echo "no cookies; agent will be cleaned by mac-runner-reset"
-            exit 0
-          fi
-          curl -s -b "$COOKIES" -o /tmp/post-slack-delete.json \
-            -w 'delete HTTP %{http_code}\n' \
-            -X POST --max-time 180 "$BASE_URL/workspace/$CREATION_ID/delete" || true
+          GIT_BRANCH:         ${{ inputs.template_ref }}
+          GIT_URL:            ${{ inputs.template_url }}
+          SKIP_FIRST_MESSAGE: ${{ inputs.skip_first_message && '1' || '0' }}
+          SKIP_SLACK_FLOW:    ${{ inputs.skip_slack_flow    && '1' || '0' }}
+        run: uv run --package minds python apps/minds/scripts/launch_to_msg_e2e.py
 
       - name: collect screenshots + diagnostics
         if: always()
@@ -434,11 +313,8 @@ jobs:
           # first-message-verify.sh via `screencapture -x`) and the
           # Playwright phase (drive-slack-ci.js via `page.screenshot`).
           # Numbered 00..12 so they sort in flow order in the GH UI.
-          if [ -d /tmp/first-message-screenshots ]; then
-            cp -R /tmp/first-message-screenshots artifacts/screenshots-shell 2>/dev/null || true
-          fi
-          if [ -d apps/minds/test/e2e/screenshots ]; then
-            cp -R apps/minds/test/e2e/screenshots artifacts/screenshots-playwright 2>/dev/null || true
+          if [ -d /tmp/launch-to-msg-screenshots ]; then
+            cp -R /tmp/launch-to-msg-screenshots artifacts/screenshots 2>/dev/null || true
           fi
           # Diagnostic logs (also useful on success for tuning).
           [ -d "$HOME/.minds/logs" ] && cp -R "$HOME/.minds/logs" artifacts/ || true
@@ -476,7 +352,7 @@ jobs:
           # step summary, so inline base64 doesn't render. Workaround:
           # publish screenshots to a side branch and reference via
           # raw.githubusercontent.com URLs, which do render in summary.
-          shots_dir=artifacts/screenshots-playwright
+          shots_dir=artifacts/screenshots
           [ -d "$shots_dir" ] || { echo "no screenshots to publish"; exit 0; }
           work=/tmp/ci-screenshots-work
           rm -rf "$work"
@@ -498,8 +374,7 @@ jobs:
           # Publish the bash-phase desktop shots (00 launch, 01 auth,
           # 02 agent DONE, 03 pre-msg, 04 reply) IF they exist
           # (require an Aqua-session runner).
-          if [ -d /tmp/first-message-screenshots ]; then
-            for png in /tmp/first-message-screenshots/0*.png; do
+          if [ -d /tmp/launch-to-msg-screenshots ]; then
               [ -f "$png" ] || continue
               cp "$png" "$run_dir/" 2>/dev/null || true
             done
@@ -539,7 +414,7 @@ jobs:
       - name: embed flow screenshots in job summary
         if: always()
         run: |
-          shots_dir=artifacts/screenshots-playwright
+          shots_dir=artifacts/screenshots
           if [ ! -d "$shots_dir" ]; then
             echo "(no screenshots to embed)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
