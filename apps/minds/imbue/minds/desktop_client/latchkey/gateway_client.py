@@ -192,6 +192,16 @@ class StreamedPermissionRequest(FrozenModel):
     )
 
 
+class AvailablePermission(FrozenModel):
+    """A single grantable permission schema and its plain-English summary."""
+
+    name: str = Field(min_length=1, description="Detent permission schema name (e.g. ``slack-read-all``).")
+    description: str = Field(
+        default="",
+        description="Plain-English summary of the permission (detent's ``$comment``).",
+    )
+
+
 class AvailableServiceEntry(FrozenModel):
     """Single scope entry within a service's ``GET /permissions/available`` value.
 
@@ -206,21 +216,20 @@ class AvailableServiceEntry(FrozenModel):
     (:mod:`services_catalog`) injects it client-side as an opt-in
     choice.
 
-    ``descriptions`` carries detent's per-schema ``$comment`` summaries
-    (keyed by detent schema name, covering the scope itself and each
-    permission). It is optional so older catalogs without the field
-    still validate.
+    ``description`` carries detent's ``$comment`` summary for the scope,
+    and each :class:`AvailablePermission` carries its own. Both are
+    optional so older catalogs without them still validate.
     """
 
     scope: str = Field(min_length=1, description="Detent scope schema name (e.g. ``slack-api``).")
     display_name: str = Field(min_length=1, description="Human-readable label shown in the dialog header.")
-    permissions: tuple[str, ...] = Field(
-        default=(),
-        description="Detent permission schemas the user can grant for this scope.",
+    description: str = Field(
+        default="",
+        description="Plain-English summary of the scope (detent's ``$comment``).",
     )
-    descriptions: Mapping[str, str] = Field(
-        default_factory=dict,
-        description="Plain-English summary for the scope and each permission, keyed by detent schema name.",
+    permissions: tuple[AvailablePermission, ...] = Field(
+        default=(),
+        description="Permissions the user can grant for this scope, each with its plain-English summary.",
     )
 
 

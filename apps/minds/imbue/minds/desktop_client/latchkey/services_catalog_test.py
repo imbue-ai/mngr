@@ -19,7 +19,7 @@ def test_catalog_get_returns_entry_for_known_service() -> None:
                 {
                     "scope": "slack-api",
                     "display_name": "Slack",
-                    "permissions": ["slack-read-all", "slack-write-all"],
+                    "permissions": [{"name": "slack-read-all"}, {"name": "slack-write-all"}],
                 },
             ],
         },
@@ -44,8 +44,8 @@ def test_catalog_get_returns_all_entries_for_multi_scope_service() -> None:
     catalog = _make_catalog(
         {
             "google": [
-                {"scope": "google-gmail-api", "display_name": "Gmail", "permissions": ["gmail-read"]},
-                {"scope": "google-drive-api", "display_name": "Drive", "permissions": ["drive-read"]},
+                {"scope": "google-gmail-api", "display_name": "Gmail", "permissions": [{"name": "gmail-read"}]},
+                {"scope": "google-drive-api", "display_name": "Drive", "permissions": [{"name": "drive-read"}]},
             ],
         },
     )
@@ -94,7 +94,7 @@ def test_catalog_dedups_explicit_any_in_permissions() -> None:
                 {
                     "scope": "demo-api",
                     "display_name": "Demo",
-                    "permissions": ["any", "demo-read"],
+                    "permissions": [{"name": "any"}, {"name": "demo-read"}],
                 },
             ],
         },

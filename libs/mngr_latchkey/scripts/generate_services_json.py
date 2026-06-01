@@ -16,8 +16,9 @@ exactly as detent does (only the top-level ``aws`` schema is a scope; the
 service-specific ``aws-s3`` etc. double as permissions inside it).
 
 detent's recent ``$comment`` annotations on each schema are carried over into
-the catalog under the friendlier ``descriptions`` key (a map from schema name
-to its plain-English summary), covering both the scope and each permission.
+the catalog under the friendlier ``description`` key: the scope's summary sits
+on the scope entry, and each permission becomes a ``{"name", "description"}``
+object so its summary is colocated with its name.
 
 Display names and the service ordering are editorial metadata that detent does
 not carry, so they live here as curated constants. A scope without a curated
@@ -50,9 +51,6 @@ _BUILTIN_SCHEMAS_SUBPATH: Final[str] = "src/schemas/builtin"
 _DEFAULT_OUTPUT_PATH: Final[Path] = (
     Path(__file__).resolve().parent.parent / "imbue" / "mngr_latchkey" / "extensions" / "services.json"
 )
-
-# detent's ``$comment`` annotations are surfaced under this catalog key.
-_DESCRIPTION_KEY: Final[str] = "descriptions"
 
 # The detent ``$comment`` field name we copy descriptions out of.
 _COMMENT_KEY: Final[str] = "$comment"
@@ -143,14 +141,21 @@ class DetentSchemasNotFoundError(GenerateServicesError, FileNotFoundError):
     ...
 
 
+class _CatalogPermission(FrozenModel):
+    """A single grantable permission schema and its plain-English summary."""
+
+    name: str = Field(description="Detent permission schema name (e.g. ``slack-read-all``).")
+    description: str = Field(description="Plain-English summary of the permission (detent's ``$comment``).")
+
+
 class _ScopeCatalogEntry(FrozenModel):
     """One scope a service exposes, plus the permissions grantable under it."""
 
     scope: str = Field(description="Detent scope schema name (e.g. ``slack-api``).")
     display_name: str = Field(description="Human-readable label shown in the permission dialog.")
-    permissions: tuple[str, ...] = Field(description="Detent permission schema names grantable under the scope.")
-    descriptions: dict[str, str] = Field(
-        description="Plain-English summary for the scope and each permission, keyed by detent schema name.",
+    description: str = Field(description="Plain-English summary of the scope (detent's ``$comment``).")
+    permissions: tuple[_CatalogPermission, ...] = Field(
+        description="Permissions grantable under the scope, each with its plain-English summary.",
     )
 
 
@@ -199,10 +204,10 @@ def _display_name_for_scope(scope_name: str, service_name: str) -> str:
     return fallback_name
 
 
-def _description_for_schema(schema: Mapping[str, object]) -> str | None:
-    """Return a schema's ``$comment`` annotation, if present."""
+def _description_for_schema(schema: Mapping[str, object]) -> str:
+    """Return a schema's ``$comment`` annotation, or an empty string when absent."""
     comment = schema.get(_COMMENT_KEY)
-    return comment if isinstance(comment, str) and len(comment) > 0 else None
+    return comment if isinstance(comment, str) else ""
 
 
 def _build_scope_entries_for_service(
@@ -223,21 +228,24 @@ def _build_scope_entries_for_service(
         owning_scope = _select_scope_for_permission(schema_name, scopes_in_order)
         permission_names_by_scope[owning_scope].append(schema_name)
 
-    # Assemble one catalog entry per scope, carrying over descriptions.
+    # Assemble one catalog entry per scope, colocating each permission's
+    # description with its name and the scope's description on the entry.
     entries: list[_ScopeCatalogEntry] = []
     for scope_name in scopes_in_order:
         permission_names = permission_names_by_scope[scope_name]
-        description_by_schema_name: dict[str, str] = {}
-        for schema_name in (scope_name, *permission_names):
-            description = _description_for_schema(schemas_by_name[schema_name])
-            if description is not None:
-                description_by_schema_name[schema_name] = description
+        permissions = tuple(
+            _CatalogPermission(
+                name=permission_name,
+                description=_description_for_schema(schemas_by_name[permission_name]),
+            )
+            for permission_name in permission_names
+        )
         entries.append(
             _ScopeCatalogEntry(
                 scope=scope_name,
                 display_name=_display_name_for_scope(scope_name, service_name),
-                permissions=tuple(permission_names),
-                descriptions=description_by_schema_name,
+                description=_description_for_schema(schemas_by_name[scope_name]),
+                permissions=permissions,
             )
         )
     return entries

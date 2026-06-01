@@ -267,10 +267,10 @@ root is rejected with HTTP 403.
   a JSON object keyed by raw service name. Each value is an array of
   scope entries (a single service may expose more than one scope), each
   with the shape `{"scope": "<schema_name>", "display_name": "...",
-  "permissions": ["...", ...], "descriptions": {"<schema_name>": "...",
-  ...}}`. The optional `descriptions` map carries detent's per-schema
-  `$comment` summaries (keyed by detent schema name, covering the scope
-  itself and each permission).
+  "description": "...", "permissions": [{"name": "<schema_name>",
+  "description": "..."}, ...]}`. The scope-level `description` and each
+  permission's `description` carry detent's per-schema `$comment`
+  summaries (both optional).
 * `GET /permissions/available/<service_name>` returns the permission
   catalog entries for `<service_name>` (e.g. `slack`, `google-gmail`)
   as an array, using the same value shape, or 404 if the service is

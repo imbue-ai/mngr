@@ -160,9 +160,9 @@ _TEST_SERVICES_CATALOG_PAYLOAD: dict[str, object] = {
             "scope": "slack-api",
             "display_name": "Slack",
             "permissions": [
-                "slack-read-all",
-                "slack-write-all",
-                "slack-chat-read",
+                {"name": "slack-read-all"},
+                {"name": "slack-write-all"},
+                {"name": "slack-chat-read"},
             ],
         },
     ],
@@ -170,7 +170,7 @@ _TEST_SERVICES_CATALOG_PAYLOAD: dict[str, object] = {
         {
             "scope": "github-rest-api",
             "display_name": "GitHub",
-            "permissions": ["github-read-all"],
+            "permissions": [{"name": "github-read-all"}],
         },
     ],
 }

@@ -82,7 +82,7 @@ def _service_info_from_entry(name: str, entry: AvailableServiceEntry) -> Service
     pre-checked default.
     """
     permission_schemas: tuple[str, ...] = (_ALWAYS_AVAILABLE_PERMISSION,) + tuple(
-        p for p in entry.permissions if p != _ALWAYS_AVAILABLE_PERMISSION
+        permission.name for permission in entry.permissions if permission.name != _ALWAYS_AVAILABLE_PERMISSION
     )
     return ServicePermissionInfo(
         name=name,
