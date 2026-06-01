@@ -240,6 +240,17 @@ class OnboardingApplier(MutableModel):
             info = self.agent_creator.get_creation_info(creation_id)
             host_name = info.host_name if info is not None else ""
 
+            # Q2 (initial problem) is applied before Q3 (permissions
+            # preference): it is the answer the user most cares about, and Q3's
+            # wait for the canonical agent id can run long, so delivering Q2
+            # first avoids letting a slow Q3 hold up the user's problem
+            # statement.
+            if answers.initial_problem.strip():
+                if host_name:
+                    self._send_initial_problem(host_name, answers.initial_problem)
+                else:
+                    logger.warning("Cannot send initial problem for creation {}: unknown host name", creation_id)
+
             if answers.permissions_preference.strip():
                 agent_id = self._wait_for_canonical_agent_id(creation_id)
                 if agent_id is not None:
@@ -249,12 +260,6 @@ class OnboardingApplier(MutableModel):
                         "Gave up writing permissions preference for creation {}: no canonical agent id",
                         creation_id,
                     )
-
-            if answers.initial_problem.strip():
-                if host_name:
-                    self._send_initial_problem(host_name, answers.initial_problem)
-                else:
-                    logger.warning("Cannot send initial problem for creation {}: unknown host name", creation_id)
 
     def _run_user_context_scan(self, creation_id: CreationId) -> None:
         """Resolve the user's name and write the per-creation user-context JSON file."""
