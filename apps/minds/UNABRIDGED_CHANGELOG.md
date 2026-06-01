@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-01
+
+The latchkey services catalog now maps each raw service name to a list of scope entries instead of a single entry, so one service can expose more than one detent scope. `LatchkeyGatewayClient.get_available_services` now returns `dict[str, tuple[AvailableServiceEntry, ...]]`, and `ServicesCatalog.get` / `ServicesCatalog.as_mapping` now return a tuple of `ServicePermissionInfo` per service. Per-scope lookup via `ServicesCatalog.get_by_scope` is unchanged.
+
 ## 2026-05-29
 
 Exclude the Latchkey dependency from the minimum age check (we are co-developing Latchkey together with Minds).
