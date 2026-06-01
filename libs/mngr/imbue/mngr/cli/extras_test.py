@@ -316,23 +316,33 @@ def test_extras_completion_yes_flag(cli_runner: CliRunner) -> None:
 
 
 def test_extras_claude_plugin_yes_flag(cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The 'extras claude-plugin -y' subcommand auto-installs without error.
+    """'extras claude-plugin -y' installs exactly the not-yet-installed plugins.
 
-    Prepend a stub ``claude`` that exits 0 for every subcommand to PATH, so
-    the command deterministically exercises the real auto-install plumbing
-    (marketplace add + install per plugin) without a network round-trip or a
-    dependency on whether the real marketplace is reachable. ``claude plugin
-    list`` returns empty output, so both plugins are treated as not-yet-
-    installed and get installed.
+    Prepend a stub ``claude`` to PATH so the command deterministically
+    exercises the real auto-install plumbing (marketplace add + install per
+    plugin) without a network round-trip or a dependency on whether the real
+    marketplace is reachable. The stub reports imbue-code-guardian as already
+    installed via ``claude plugin list``, so only imbue-mngr-skills should be
+    installed -- letting us assert that the already-installed plugin is left
+    untouched.
     """
     stub_claude = tmp_path / "claude"
-    stub_claude.write_text("#!/usr/bin/env bash\nexit 0\n")
+    stub_claude.write_text(
+        "#!/usr/bin/env bash\n"
+        "# Report imbue-code-guardian as already installed; succeed for everything else.\n"
+        'if [ "$1" = "plugin" ] && [ "$2" = "list" ]; then\n'
+        '  echo "imbue-code-guardian@imbue-code-guardian"\n'
+        "fi\n"
+        "exit 0\n"
+    )
     stub_claude.chmod(0o755)
     monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
 
     result = cli_runner.invoke(extras, ["claude-plugin", "-y"])
     assert result.exit_code == 0
+    # Only the not-yet-installed plugin is installed; code-guardian is untouched.
     assert "Installed imbue-mngr-skills." in result.output
+    assert "imbue-code-guardian" not in result.output
 
 
 def test_read_current_default_agent_type_returns_value() -> None:
