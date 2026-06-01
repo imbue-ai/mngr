@@ -83,26 +83,32 @@ def test_resolve_local_user_name_is_non_empty() -> None:
     assert resolve_local_user_name() != ""
 
 
-def _make_applier(tmp_path: Path) -> OnboardingApplier:
+def _make_applier(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> OnboardingApplier:
     paths = WorkspacePaths(data_dir=tmp_path)
-    cg = ConcurrencyGroup(name="onboarding-test")
-    cg.__enter__()
     agent_creator = AgentCreator(
         paths=paths,
-        root_concurrency_group=cg,
-        notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
     )
     return OnboardingApplier(
         agent_creator=agent_creator,
         paths=paths,
         message_sender=MngrMessageSender(mngr_binary="mngr"),
-        root_concurrency_group=cg,
+        root_concurrency_group=root_concurrency_group,
     )
 
 
-def test_user_context_scan_writes_json_file(tmp_path: Path) -> None:
-    applier = _make_applier(tmp_path)
+def test_user_context_scan_writes_json_file(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    applier = _make_applier(tmp_path, root_concurrency_group, notification_dispatcher)
     creation_id = CreationId()
 
     applier._run_user_context_scan(creation_id)
@@ -114,8 +120,12 @@ def test_user_context_scan_writes_json_file(tmp_path: Path) -> None:
     assert document["details"] == USER_CONTEXT_PLACEHOLDER_DETAILS
 
 
-def test_start_apply_noop_writes_nothing(tmp_path: Path) -> None:
-    applier = _make_applier(tmp_path)
+def test_start_apply_noop_writes_nothing(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    applier = _make_applier(tmp_path, root_concurrency_group, notification_dispatcher)
     creation_id = CreationId()
 
     applier.start_apply(creation_id, OnboardingAnswers(data_preference=UserDataPreference.CONTROL))
