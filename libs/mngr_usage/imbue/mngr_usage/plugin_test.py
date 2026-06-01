@@ -16,3 +16,9 @@ def test_register_help_topics_exposes_cron_recipes() -> None:
     cron_recipes = by_key["usage_cron_recipes"]
     assert cron_recipes.one_line_description == "mngr usage: Cron automation recipes"
     assert "cron" in cron_recipes.load_body().lower()
+    # The topic carries a GitHub source_url so its relative links render as
+    # clickable absolute URLs in the terminal.
+    link_base = cron_recipes.link_base_url()
+    assert link_base is not None
+    assert link_base.startswith("https://github.com/imbue-ai/mngr/blob/")
+    assert link_base.endswith("/libs/mngr_usage/docs/cron_recipes.md")
