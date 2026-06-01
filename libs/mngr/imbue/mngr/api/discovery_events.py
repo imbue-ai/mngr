@@ -222,6 +222,7 @@ def discovered_agent_from_agent_details(agent_details: AgentDetails) -> Discover
             "create_time": agent_details.create_time.isoformat(),
             "start_on_boot": agent_details.start_on_boot,
             "labels": agent_details.labels,
+            "plugin": dict(agent_details.plugin),
         },
     )
 
