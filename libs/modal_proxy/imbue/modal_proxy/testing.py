@@ -308,6 +308,9 @@ class TestingModalInterface(ModalInterface):
     up automatically.
     """
 
+    # Tell pytest not to collect this as a test class (its name starts with "Test").
+    __test__ = False
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     root_dir: Path = Field(description="Root directory for volume storage")
