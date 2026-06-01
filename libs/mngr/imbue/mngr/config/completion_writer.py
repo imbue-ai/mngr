@@ -23,7 +23,8 @@ from imbue.mngr.utils.pydantic_utils import unwrap_optional
 # Maps command name -> list of source identifier lists per position.
 # Each inner list contains source names for that position (empty = freeform).
 # For variadic commands (nargs=None), the last entry repeats.
-# Source identifiers: "agent_names", "host_names", "plugin_names", "config_keys"
+# Source identifiers: "agent_names", "host_names", "plugin_names", "config_keys",
+# "help_targets"
 _POSITIONAL_COMPLETION_SPEC: Final[dict[str, list[list[str]]]] = {
     "archive": [["agent_names"]],
     "capture": [["agent_names"]],
@@ -32,6 +33,7 @@ _POSITIONAL_COMPLETION_SPEC: Final[dict[str, list[list[str]]]] = {
     "exec": [["agent_names"]],
     "limit": [["agent_names"]],
     "event": [["agent_names", "host_names"], []],
+    "help": [["help_targets"]],
     "label": [["agent_names"]],
     "message": [["agent_names"]],
     "pair": [["agent_names"]],
@@ -321,6 +323,7 @@ def write_cli_completions_cache(
     cli_group: click.Group,
     mngr_ctx: MngrContext | None = None,
     registered_agent_types: list[str] | None = None,
+    topic_names: list[str] | None = None,
 ) -> None:
     """Write all CLI commands, options, and choices to the completions cache (best-effort).
 
@@ -335,6 +338,11 @@ def write_cli_completions_cache(
     When mngr_ctx is provided, runtime-derived completion values (agent types,
     templates, providers, plugin names, config keys) are extracted and injected
     into the cache.
+
+    topic_names are the registered ``mngr help`` topic keys; combined with the
+    command names they form the completion candidates for the ``mngr help``
+    positional argument. The caller passes these because help topics live in the
+    cli layer, which this (config-layer) writer must not import.
 
     Catches OSError from cache writes so filesystem failures do not break
     CLI commands. Other exceptions are allowed to propagate.
@@ -410,6 +418,12 @@ def write_cli_completions_cache(
             if dotted_key.split(".")[0] in canonical_names:
                 positional_completions[dotted_key] = entries
 
+        # Candidates for `mngr help <arg>`: every top-level command plus every
+        # registered help topic key. Only meaningful if the help command exists.
+        help_targets: list[str] = []
+        if "help" in canonical_names:
+            help_targets = sorted(canonical_names | set(topic_names or []))
+
         # Inject dynamic choice values from runtime context (config, registries)
         dynamic = _build_dynamic_completions(mngr_ctx, registered_agent_types or []) if mngr_ctx is not None else None
         if dynamic is not None:
@@ -434,6 +448,7 @@ def write_cli_completions_cache(
             positional_nargs_by_command=positional_nargs_by_command,
             positional_completions=positional_completions,
             config_value_choices=dynamic.config_value_choices if dynamic is not None else {},
+            help_targets=help_targets,
         )
 
         cache_path = get_completion_cache_dir() / COMPLETION_CACHE_FILENAME

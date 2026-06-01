@@ -55,3 +55,6 @@ class CompletionCacheData(NamedTuple):
     positional_nargs_by_command: dict[str, int | None] = {}
     positional_completions: dict[str, list[list[str]]] = {}
     config_value_choices: dict[str, list[str]] = {}
+    # Candidates for the `mngr help` positional arg: every top-level command name
+    # plus every registered help topic key.
+    help_targets: list[str] = []
