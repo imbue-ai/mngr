@@ -640,11 +640,18 @@ async def amain() -> int:
                     and not any(SCREENSHOT_DIR.glob("04b-*"))
                     and time.monotonic() - phase_started_at >= 60
                 ):
-                    # Navigate to /creating/<id> so the snap shows the
-                    # actual progress UI instead of the unchanged form.
-                    with contextlib.suppress(Exception):
-                        await win.goto(f"{origin}/creating/{creation_id}", timeout=10_000)
-                    await snap_page(win, "04b-creating-workspace-mid")
+                    # Open a SECOND page just for the mid-snap and point
+                    # it at /creating/<id>. Touching `win` here breaks the
+                    # status-polling fetch chain we run from it next
+                    # iteration (last verified failure mode: WAITING_FOR_READY
+                    # transitioned to empty status, never reached DONE).
+                    try:
+                        midpage = await ctx.new_page()
+                        await midpage.goto(f"{origin}/creating/{creation_id}", timeout=10_000)
+                        await snap_page(midpage, "04b-creating-workspace-mid")
+                        await midpage.close()
+                    except Exception as exc:
+                        logger.warning("04b mid-snap failed: {}", exc)
                 await asyncio.sleep(5)
             # Emit a per-phase summary line + persist to artifact JSON.
             total_create_s = sum(phase_durations.values())
