@@ -64,11 +64,22 @@ class ServicePermissionInfo(FrozenModel):
     name: str = Field(description="Raw service name (e.g. 'slack', 'google-gmail').")
     scope: str = Field(description="Detent scope schema; matches the request event's ``scope`` field.")
     display_name: str = Field(description="Human-readable label shown in the dialog header.")
+    description: str = Field(
+        default="",
+        description="Plain-English summary of the scope (detent's ``$comment``); empty when unknown.",
+    )
     permission_schemas: tuple[str, ...] = Field(
         description=(
             "Detent permission schemas the user can grant for this scope. The catch-all "
             "``any`` schema is always injected at index 0 as an available option (not "
             "pre-checked) so the user can opt into unrestricted access if they want."
+        ),
+    )
+    description_by_permission_name: Mapping[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Plain-English summary per permission schema name (detent's ``$comment``). "
+            "Permissions without a summary are omitted; the injected ``any`` never has one."
         ),
     )
 
@@ -79,16 +90,22 @@ def _service_info_from_entry(name: str, entry: AvailableServiceEntry) -> Service
     Prepends the catch-all ``any`` schema as the first available option,
     deduplicating in case the gateway lists it explicitly (harmless but
     redundant). The dialog renders it as an opt-in choice, not a
-    pre-checked default.
+    pre-checked default. Detent's per-schema descriptions are carried
+    over so the dialog can show them next to each permission.
     """
     permission_schemas: tuple[str, ...] = (_ALWAYS_AVAILABLE_PERMISSION,) + tuple(
         permission.name for permission in entry.permissions if permission.name != _ALWAYS_AVAILABLE_PERMISSION
     )
+    description_by_permission_name = {
+        permission.name: permission.description for permission in entry.permissions if len(permission.description) > 0
+    }
     return ServicePermissionInfo(
         name=name,
         scope=entry.scope,
         display_name=entry.display_name,
+        description=entry.description,
         permission_schemas=permission_schemas,
+        description_by_permission_name=description_by_permission_name,
     )
 
 

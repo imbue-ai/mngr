@@ -85,8 +85,9 @@ _SLACK_AVAILABLE_PAYLOAD: dict[str, object] = {
         {
             "scope": "slack-api",
             "display_name": "Slack",
+            "description": "Any interaction with the Slack API.",
             "permissions": [
-                {"name": "slack-read-all"},
+                {"name": "slack-read-all", "description": "All read operations across the Slack API."},
                 {"name": "slack-write-all"},
                 {"name": "slack-chat-read"},
             ],
@@ -672,6 +673,18 @@ def test_render_request_page_notes_grants_are_shared_per_host(tmp_path: Path) ->
     assert "grants apply to every agent on this host" in html
     # Reinforced in the form body so users who skim past the header still see it.
     assert "shared across every agent running on this workspace's host" in html
+
+
+def test_render_request_page_shows_descriptions_when_present(tmp_path: Path) -> None:
+    """Detent's scope and per-permission descriptions are shown on the dialog when present."""
+    handler = _build_handler(tmp_path, credential_status="valid")
+
+    html = _render_dialog_html(handler)
+
+    # The scope-level summary and the read-all permission's summary both
+    # come from the catalog fixture's ``description`` fields.
+    assert "Any interaction with the Slack API." in html
+    assert "All read operations across the Slack API." in html
 
 
 # -- LatchkeyPermissionGrantHandler.deny --

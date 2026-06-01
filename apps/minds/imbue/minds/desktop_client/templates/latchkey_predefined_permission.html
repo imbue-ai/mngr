@@ -19,6 +19,11 @@
                           available option, but is not pre-checked).
     checked_permissions   Set of schema names that should be ticked
                           on first render (the union described above).
+    scope_description     Optional plain-English summary of the scope,
+                          shown under the intro when non-empty.
+    description_by_permission_name
+                          Mapping of schema name to its plain-English
+                          summary; shown under each checkbox when present.
 #}
 {% extends 'permissions.html' %}
 {% import '_macros.html' as ui %}
@@ -41,13 +46,22 @@
     untick to revoke or narrow.
     Permissions are shared across every agent running on this workspace's host.
   </p>
+  {% if scope_description %}
+    <p class="text-xs text-zinc-500 mb-3">{{ scope_description }}</p>
+  {% endif %}
   <div class="bg-white border border-zinc-200 rounded-xl p-4 space-y-2">
     {% for permission in permission_schemas %}
       <label class="flex items-start gap-2 cursor-pointer">
         <input type="checkbox" name="permissions" value="{{ permission }}"
                class="mt-0.5"
                {% if permission in checked_permissions %}checked{% endif %}>
-        <code class="text-sm font-mono text-zinc-900">{{ permission }}</code>
+        <span class="min-w-0">
+          <code class="text-sm font-mono text-zinc-900">{{ permission }}</code>
+          {% set permission_description = description_by_permission_name.get(permission) %}
+          {% if permission_description %}
+            <span class="block text-xs text-zinc-500 mt-0.5">{{ permission_description }}</span>
+          {% endif %}
+        </span>
       </label>
     {% endfor %}
   </div>

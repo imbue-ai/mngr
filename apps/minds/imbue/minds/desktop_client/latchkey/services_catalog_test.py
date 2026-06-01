@@ -39,6 +39,32 @@ def test_catalog_get_returns_entry_for_known_service() -> None:
     assert "slack-write-all" in info.permission_schemas
 
 
+def test_catalog_exposes_scope_and_permission_descriptions() -> None:
+    """Detent's scope and per-permission descriptions are carried onto the dialog-facing record."""
+    catalog = _make_catalog(
+        {
+            "slack": [
+                {
+                    "scope": "slack-api",
+                    "display_name": "Slack",
+                    "description": "Any interaction with the Slack API.",
+                    "permissions": [
+                        {"name": "slack-read-all", "description": "All read operations."},
+                        {"name": "slack-write-all"},
+                    ],
+                },
+            ],
+        },
+    )
+
+    info = catalog.get("slack")[0]
+
+    assert info.description == "Any interaction with the Slack API."
+    # Permissions without a description are omitted from the map; the
+    # injected ``any`` never has one either.
+    assert info.description_by_permission_name == {"slack-read-all": "All read operations."}
+
+
 def test_catalog_get_returns_all_entries_for_multi_scope_service() -> None:
     """A service that exposes more than one scope yields one entry per scope."""
     catalog = _make_catalog(
