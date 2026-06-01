@@ -608,11 +608,19 @@ def test_pr_has_changelog_entry() -> None:
 def test_every_project_has_changelog_layout() -> None:
     """Ensure every project (libs/<name>, apps/<name>, and the synthetic dev)
     has the full changelog layout: ``CHANGELOG.md``, ``UNABRIDGED_CHANGELOG.md``,
-    and a ``changelog/`` directory for per-PR entries.
+    and a ``changelog/`` directory (with a ``.gitkeep``) for per-PR entries.
 
     Mirrors ``test_every_project_has_test_ratchets_file`` and
     ``test_every_project_has_pypi_readme``: a symmetric requirement that
     every project participates in the consolidation flow uniformly.
+
+    The ``.gitkeep`` requirement matters because git does not track empty
+    directories. The consolidation agent periodically drains a project's
+    pending entry files into its ``UNABRIDGED_CHANGELOG.md``; without a
+    ``.gitkeep`` the now-empty ``changelog/`` directory would vanish from git
+    entirely. Requiring the ``.gitkeep`` here means a missing placeholder is
+    caught when a project is first added, rather than silently later when that
+    project happens to be consolidated.
     """
     missing: list[str] = []
     for project in all_known_projects(_REPO_ROOT):
@@ -624,12 +632,16 @@ def test_every_project_has_changelog_layout() -> None:
         entries = project_entries_dir(project, _REPO_ROOT)
         if not entries.is_dir():
             missing.append(f"{entries.relative_to(_REPO_ROOT)}/ (directory)")
+        elif not (entries / ".gitkeep").exists():
+            missing.append(str((entries / ".gitkeep").relative_to(_REPO_ROOT)))
 
     assert not missing, (
         "The following projects are missing required changelog-layout files:\n"
         + "\n".join(f"  - {m}" for m in missing)
         + "\n\nEvery project must have CHANGELOG.md (with an '## [Unreleased]' heading), "
-        "UNABRIDGED_CHANGELOG.md, and a changelog/ directory."
+        "UNABRIDGED_CHANGELOG.md, and a changelog/ directory containing a .gitkeep "
+        "(git does not track empty directories, so the .gitkeep keeps the directory "
+        "alive once consolidation drains its pending entries)."
     )
 
 
