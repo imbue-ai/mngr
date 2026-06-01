@@ -112,6 +112,13 @@ def _stop_hosts_for_addresses(
     # them concurrently rather than serializing on the slowest host. Futures are
     # iterated in submission order so output (and any re-raised exception)
     # remains deterministic regardless of completion order.
+    #
+    # Note this changes partial-failure behavior versus the old sequential loop:
+    # the executor's context manager joins every submitted task before exit, so
+    # *all* targeted hosts are stopped even if one raises -- only the output (and
+    # the first re-raised error) stops at the failing future. The old loop
+    # aborted on the first failure, leaving later hosts running. Stopping every
+    # targeted host is the desired end state here, so this is an improvement.
     futures: list[Future[str]] = []
     with mngr_executor(parent_cg=mngr_ctx.concurrency_group, name="stop_hosts", max_workers=32) as executor:
         for resolved, host in hosts_to_stop.values():
