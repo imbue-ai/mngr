@@ -388,24 +388,28 @@ jobs:
           fi
           run_dir="$work/runs/${{ github.run_id }}"
           mkdir -p "$run_dir"
-          # Publish full-desktop screencapture shots (the bare `.png` from
-          # screencapture -x) as the headline `<name>.png`. The per-page
-          # Playwright `.win.png` outputs come along as `<name>.win.png`
-          # for forensic value but are no longer the embedded summary
-          # default -- the user prefers seeing the whole desktop.
+          # Publish per-window Playwright shots (`.win.png`) as the headline
+          # `<name>.png`, and the full-desktop `screencapture -x` shots as
+          # the `.desktop.png` forensic dupe. macOS WindowServer z-order is
+          # not driven by CDP page activation, so the full-desktop captures
+          # routinely show the unauthenticated /welcome BrowserWindow even
+          # when the chat / projects / approval pages are active. The
+          # Playwright per-page screenshot bypasses WindowServer entirely
+          # (DOM -> raster via CDP) and always shows the page we asked it
+          # to snap, which is what makes the headline shots verifiable.
           for prefix in 00 01 02 03 04 04b 05 06 07 07a 07b 07c 07d 08 09 10 11 12 99; do
+            for win in "$shots_dir"/${prefix}-*.win.png; do
+              [ -f "$win" ] || continue
+              base=$(basename "$win" .win.png)
+              cp "$win" "$run_dir/${base}.png" 2>/dev/null || true
+            done
             for desk in "$shots_dir"/${prefix}-*.png; do
               [ -f "$desk" ] || continue
               case "$desk" in
                 *.win.png) continue ;;
               esac
               base=$(basename "$desk" .png)
-              cp "$desk" "$run_dir/${base}.png" 2>/dev/null || true
-            done
-            for win in "$shots_dir"/${prefix}-*.win.png; do
-              [ -f "$win" ] || continue
-              base=$(basename "$win" .win.png)
-              cp "$win" "$run_dir/${base}.win.png" 2>/dev/null || true
+              cp "$desk" "$run_dir/${base}.desktop.png" 2>/dev/null || true
             done
           done
           cd "$work"
@@ -453,9 +457,9 @@ jobs:
 
           # ---- Flow screenshots block ------------------------------------
           {
-            echo "## Flow screenshots (full-desktop)"
+            echo "## Flow screenshots"
             echo ""
-            echo "Full-screen captures via macOS \`screencapture -x\` at each milestone. Per-window Playwright dupes (\`.win.png\`) are in the downloadable artifact above."
+            echo "Per-window Playwright captures at each milestone. CDP screenshots reflect the actual page we asked Electron to show; macOS \`screencapture -x\` \`.desktop.png\` dupes are in the downloadable artifact above for reference (note: full-desktop shots may show whichever BrowserWindow WindowServer happened to have on top, which is often the unauthenticated /welcome window)."
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
           run_dir=/tmp/ci-screenshots-work/runs/${{ github.run_id }}
@@ -463,11 +467,9 @@ jobs:
             echo "(no published run_dir, nothing to embed)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          # Embed headline shots (.png) -- skip `.win.png` per-window
-          # forensic dupes; user prefers the full-desktop capture.
           for png in $(ls "$run_dir"/*.png 2>/dev/null | sort); do
             case "$png" in
-              *.win.png) continue ;;
+              *.desktop.png) continue ;;
             esac
             label=$(basename "$png" .png)
             {
