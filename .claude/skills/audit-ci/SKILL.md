@@ -3,9 +3,9 @@ name: audit-ci
 description: Audit recent CI runs for anomalies (warnings, uncached docker builds, flaky/slow tests, regressions).
 ---
 
-Find anomalies in recent CI runs -- especially the kind a human won't notice without poring over the logs of *passing* jobs. Hard failures already get human attention; the value here is the subtler stuff: warnings, wasteful rebuilds, flaky tests that recovered on retry, slow steps, and failures quietly recurring across many PRs. Identify and report; don't fix. If you fan out with subagents, ensure they follow the guidelines below (they don't inherit this file), and verify load-bearing claims at the source yourself.
+Find the things that are subtly degrading CI -- the anomalies a human won't notice without poring over the logs of *passing* jobs (hard failures already get human attention): warnings, wasteful rebuilds, flaky tests that recovered on retry, slow steps, and failures quietly recurring across many PRs. Identify and report; don't fix. If you fan out with subagents, ensure they follow the guidelines below (they don't inherit this file), and verify load-bearing claims at the source yourself.
 
-## Where results live (counterintuitive)
+## Where results live
 
 In `.github/workflows/ci.yml`, the release tests run only on `release`-branch pushes, so a normal PR/main audit never sees them.
 
