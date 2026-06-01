@@ -16,7 +16,7 @@ def _reset_loguru() -> Generator[None, None, None]:
 
 @pytest.fixture()
 def test_concurrency_group() -> Generator[ConcurrencyGroup, None, None]:
-    """Provide a real ConcurrencyGroup for tests that use ConcurrencyGroupExecutor."""
+    """Provide a real ConcurrencyGroup for tests that need one (e.g. provision_mngr_for_agent)."""
     cg = ConcurrencyGroup(name="test")
     with cg:
         yield cg
