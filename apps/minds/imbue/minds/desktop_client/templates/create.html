@@ -218,8 +218,8 @@
           {name: 'compute', label: COMPUTE_LABELS[launchSelect.value] || launchSelect.value},
           {name: 'tokens', label: AI_LABELS[aiProviderSelect.value] || aiProviderSelect.value}
         ];
-        // "Configure later" isn't a destination, so it reads as its own clause
-        // rather than "via ...".
+        // "Configure later" isn't a destination, so backups are simply
+        // omitted from the summary in that case.
         var isBackupDeferred = backupSelect.value === 'CONFIGURE_LATER';
         if (!isBackupDeferred) {
           facets.push({name: 'backups', label: BACKUP_LABELS[backupSelect.value] || backupSelect.value});
@@ -239,9 +239,6 @@
         var sentences = labelOrder.map(function (label) {
           return capitalize(joinNames(namesByLabel[label]) + ' via ' + label);
         });
-        if (isBackupDeferred) {
-          sentences.push('Backups can be configured later');
-        }
         summaryEl.textContent = sentences.join('. ') + '.';
       }
 

@@ -101,7 +101,7 @@
   is prefilled with ``preset`` and its value is the answer. Visual state is
   driven by the ``opt-selected`` class, toggled by creating.js.
 #}
-{% macro opt(val, title, desc, editable=false, selected=false, preset='', placeholder='') -%}
+{% macro opt(val, title, desc, editable=false, selected=false, preset='', placeholder='', rows=2) -%}
   <div class="opt{% if editable %} opt-editable{% endif %}{% if selected %} opt-selected{% endif %}"
        data-val="{{ val }}"{% if editable %} data-editable="1"{% endif %}>
     <span class="opt-radio"></span>
@@ -111,7 +111,7 @@
       {% if editable %}
         <div class="opt-edit mt-2">
           <textarea class="opt-text w-full px-3 py-2 text-[13px] rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15 leading-snug"
-                    rows="2" placeholder="{{ placeholder }}">{{ preset }}</textarea>
+                    rows="{{ rows }}" placeholder="{{ placeholder }}">{{ preset }}</textarea>
         </div>
       {% endif %}
     </div>

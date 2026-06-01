@@ -4,13 +4,14 @@
 {% block body_class %}bg-zinc-50 text-zinc-900 font-sans antialiased page-workspace flex items-center justify-center min-h-screen p-6{% endblock %}
 {% block body_style %}--workspace-accent: {{ accent }};{% endblock %}
 {% block content %}
+  {%- set _card = "screen mx-auto w-full max-w-[640px] bg-white border border-zinc-200 rounded-xl shadow-sm p-6" -%}
   <main id="onboarding"
-        class="w-full max-w-[520px] bg-white border border-zinc-200 rounded-xl shadow-sm p-6"
+        class="w-full"
         data-agent-id="{{ agent_id }}"
         data-expected-duration-seconds="{{ expected_duration_seconds }}">
 
     {# ---- Question 1: data preference (static descriptions) ---- #}
-    <section class="screen" data-screen="q1" data-question="data_preference">
+    <section class="{{ _card }}" data-screen="q1" data-question="data_preference">
       <div class="flex items-center justify-between mb-4">
         <span class="flex items-center gap-2 text-xs text-zinc-400">
           <span class="inline-block w-1.5 h-1.5 rounded-full bg-blue-600 animate-pulse"></span>Creating workspace
@@ -30,7 +31,7 @@
     </section>
 
     {# ---- Question 2: what to start with (editable options) ---- #}
-    <section class="screen hidden" data-screen="q2" data-question="initial_problem">
+    <section class="{{ _card }} hidden" data-screen="q2" data-question="initial_problem">
       <div class="flex items-center justify-between mb-4">
         <span class="flex items-center gap-2 text-xs text-zinc-400">
           <span class="inline-block w-1.5 h-1.5 rounded-full bg-blue-600 animate-pulse"></span>Creating workspace
@@ -55,7 +56,7 @@
     </section>
 
     {# ---- Question 3: permissions preference (editable options) ---- #}
-    <section class="screen hidden" data-screen="q3" data-question="permissions_preference">
+    <section class="{{ _card }} hidden" data-screen="q3" data-question="permissions_preference">
       <div class="flex items-center justify-between mb-4">
         <span class="flex items-center gap-2 text-xs text-zinc-400">
           <span class="inline-block w-1.5 h-1.5 rounded-full bg-blue-600 animate-pulse"></span>Creating workspace
@@ -64,8 +65,8 @@
       </div>
       <h2 class="text-lg font-semibold leading-snug mb-4">How do you want to deal with permissions?</h2>
       <div class="flex flex-col gap-2.5">
-        {{ ui.opt('safety', 'I want safety', 'Access only the minimal information you need to accomplish my goals, and always ask me before doing anything potentially dangerous.', editable=true, selected=true, preset='Access only the minimal information you need to accomplish my goals, and always ask me before doing anything potentially dangerous.') }}
-        {{ ui.opt('convenience', 'I want convenience', "Default to broader permissions so you can work more autonomously -- I'll be careful about what I give you access to.", editable=true, preset="Default to broader permissions so you can work more autonomously -- I'll be careful about what I give you access to.") }}
+        {{ ui.opt('safety', 'I want safety', 'Access only the minimal information you need to accomplish my goals, and always ask me before doing anything potentially dangerous.', editable=true, selected=true, rows=4, preset='Access only the minimal information you need to accomplish my goals, and always ask me before doing anything potentially dangerous.') }}
+        {{ ui.opt('convenience', 'I want convenience', "Default to broader permissions so you can work more autonomously -- I'll be careful about what I give you access to.", editable=true, rows=4, preset="Default to broader permissions so you can work more autonomously -- I'll be careful about what I give you access to.") }}
       </div>
       <div class="flex items-center justify-between mt-6">
         {{ ui.btn_button('Back', variant='ghost', extra='js-back') }}
@@ -73,8 +74,8 @@
       </div>
     </section>
 
-    {# ---- Loading screen (shown only if creation hasn't finished) ---- #}
-    <section class="screen hidden" data-screen="loading">
+    {# ---- Loading screen: full-width, not constrained to the question card ---- #}
+    <section class="screen hidden w-full" data-screen="loading">
       <div class="text-center pt-2 pb-1">
         <div class="text-lg font-semibold mb-1.5">Setting up your workspace</div>
         <p id="tip" class="text-[13px] text-zinc-500 min-h-[34px] leading-snug transition-opacity"></p>
