@@ -2,14 +2,20 @@
 name: wait-for-agent
 argument-hint: [agent_name] [instructions...]
 description: Wait for another agent to enter WAITING state, then execute follow-up instructions
-allowed-tools: Bash(uv run mngr list *), Bash(while true; do*), Skill(find-agent)
+allowed-tools: Bash(uv run mngr list *), Bash(while true; do*), Skill(imbue-mngr-skills:find-agent)
 ---
 
 The user's message contains an agent name and optional follow-up instructions. Extract the agent name (the first word) and treat everything after it as follow-up instructions.
 
 ## Agent Name Resolution
 
-Use the `/find-agent` skill with the first word of the user's input to resolve it to an exact agent name.
+First try the first word of the user's input as an exact agent name. List the agents and check for an exact match:
+
+```
+uv run mngr list --format '{name}'
+```
+
+If the first word exactly matches one of the listed agent names, use it directly as the target -- do not invoke any other skill. Only if there is no exact match (for example the user pasted a branch name like `mngr/foo` or gave a description rather than a name) should you fall back to the `/imbue-mngr-skills:find-agent` skill to resolve it.
 
 ## Polling
 

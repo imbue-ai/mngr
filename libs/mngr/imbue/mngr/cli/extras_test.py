@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+from imbue.mngr.cli.extras import _CLAUDE_CODE_PLUGINS
 from imbue.mngr.cli.extras import _completion_status
 from imbue.mngr.cli.extras import _detect_shell
 from imbue.mngr.cli.extras import _generate_completion_script
@@ -153,44 +154,108 @@ def test_install_completion_picker_skip_writes_nothing(tmp_path: Path) -> None:
     assert "_mngr_complete" not in rc.read_text()
 
 
+def _all_installed() -> tuple[bool, dict[str, bool]]:
+    return True, {plugin.key: True for plugin in _CLAUDE_CODE_PLUGINS}
+
+
+def _none_installed() -> tuple[bool, dict[str, bool]]:
+    return True, {plugin.key: False for plugin in _CLAUDE_CODE_PLUGINS}
+
+
 def test_install_claude_plugin_returns_false_when_claude_missing() -> None:
     """When claude is not on PATH, _install_claude_plugin returns False."""
-    assert _install_claude_plugin(auto=True, status_fn=lambda: (False, False)) is False
+    assert _install_claude_plugin(auto=True, status_fn=lambda: (False, {})) is False
 
 
 def test_install_claude_plugin_returns_true_when_already_installed() -> None:
-    """When the plugin is already installed, _install_claude_plugin short-circuits to True."""
-    assert _install_claude_plugin(auto=True, status_fn=lambda: (True, True)) is True
+    """When every plugin is already installed, _install_claude_plugin short-circuits to True."""
+    assert _install_claude_plugin(auto=True, status_fn=_all_installed) is True
+
+
+def test_install_claude_plugin_auto_installs_all_missing() -> None:
+    """With auto=True, every not-yet-installed plugin is installed."""
+    installed: list[str] = []
+    result = _install_claude_plugin(
+        auto=True,
+        status_fn=_none_installed,
+        install_fn=lambda plugin: installed.append(plugin.key) or True,
+    )
+    assert result is True
+    assert installed == [plugin.key for plugin in _CLAUDE_CODE_PLUGINS]
+
+
+def test_install_claude_plugin_auto_only_installs_missing() -> None:
+    """With auto=True, plugins that are already installed are not reinstalled."""
+    keys = [plugin.key for plugin in _CLAUDE_CODE_PLUGINS]
+    installed: list[str] = []
+    result = _install_claude_plugin(
+        auto=True,
+        # First plugin already present; only the rest should be installed.
+        status_fn=lambda: (True, {key: (key == keys[0]) for key in keys}),
+        install_fn=lambda plugin: installed.append(plugin.key) or True,
+    )
+    assert result is True
+    assert installed == keys[1:]
 
 
 def test_install_claude_plugin_skips_without_tty() -> None:
     """Without an interactive terminal, _install_claude_plugin skips and returns False.
 
-    The confirm_fn would install if reached, but the is_interactive_fn
+    The select_fn would install if reached, but the is_interactive_fn
     gate fires first.
     """
+    installed: list[str] = []
     assert (
         _install_claude_plugin(
             auto=False,
-            status_fn=lambda: (True, False),
+            status_fn=_none_installed,
             is_interactive_fn=lambda: False,
-            confirm_fn=lambda: True,
+            select_fn=lambda candidates: candidates,
+            install_fn=lambda plugin: installed.append(plugin.key) or True,
         )
         is False
     )
+    assert installed == []
 
 
 def test_install_claude_plugin_picker_skip_returns_false() -> None:
-    """When the picker confirm returns False, the plugin is not installed and returns False."""
+    """When the picker returns no selection, nothing is installed and it returns False."""
+    installed: list[str] = []
     assert (
         _install_claude_plugin(
             auto=False,
-            status_fn=lambda: (True, False),
+            status_fn=_none_installed,
             is_interactive_fn=lambda: True,
-            confirm_fn=lambda: False,
+            select_fn=lambda candidates: (),
+            install_fn=lambda plugin: installed.append(plugin.key) or True,
         )
         is False
     )
+    assert installed == []
+
+
+def test_install_claude_plugin_picker_installs_selected_subset() -> None:
+    """When the picker selects a subset, only those plugins are installed."""
+    installed: list[str] = []
+    result = _install_claude_plugin(
+        auto=False,
+        status_fn=_none_installed,
+        is_interactive_fn=lambda: True,
+        select_fn=lambda candidates: (candidates[0],),
+        install_fn=lambda plugin: installed.append(plugin.key) or True,
+    )
+    assert result is True
+    assert installed == [_CLAUDE_CODE_PLUGINS[0].key]
+
+
+def test_install_claude_plugin_returns_false_when_install_fails() -> None:
+    """When a selected install fails, _install_claude_plugin returns False."""
+    result = _install_claude_plugin(
+        auto=True,
+        status_fn=_none_installed,
+        install_fn=lambda plugin: False,
+    )
+    assert result is False
 
 
 def test_plugins_status_returns_string() -> None:
@@ -222,7 +287,7 @@ def test_extras_interactive_mode(cli_runner: CliRunner) -> None:
     assert result.exit_code == 0
     assert "Plugins" in result.output
     assert "Shell Completion" in result.output
-    assert "Claude Code Plugin" in result.output
+    assert "Claude Code Plugins" in result.output
 
 
 def test_extras_help(cli_runner: CliRunner) -> None:

@@ -1,0 +1,10 @@
+{
+  "name": "imbue-mngr-skills",
+  "version": "0.1.0",
+  "description": "Skills for coordinating mngr agents: message a peer agent, wait for one to finish, and resolve agent names.",
+  "author": {
+    "name": "Imbue"
+  },
+  "repository": "https://github.com/imbue-ai/mngr",
+  "keywords": ["mngr", "agents", "coordination", "messaging"]
+}

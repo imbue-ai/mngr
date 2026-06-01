@@ -1,0 +1,16 @@
+{
+  "name": "imbue-mngr",
+  "owner": {
+    "name": "Imbue"
+  },
+  "metadata": {
+    "description": "Claude Code plugins published from the mngr monorepo"
+  },
+  "plugins": [
+    {
+      "name": "imbue-mngr-skills",
+      "source": "./plugins/imbue-mngr-skills",
+      "description": "Skills for coordinating mngr agents: message a peer agent, wait for one to finish, and resolve agent names."
+    }
+  ]
+}
