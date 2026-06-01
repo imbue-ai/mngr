@@ -1026,6 +1026,38 @@ class FakeCursor:
                     row.released_at = "2026-01-02T00:00:00+00:00"
                     break
 
+        elif "from paid_emails" in query_lower and "select 1" in query_lower:
+            entry = self._backend.paid_emails.get(params[0])
+            if entry is not None and entry["is_paid"]:
+                self._results = [(1,)]
+
+        elif "from paid_domains" in query_lower and "select 1" in query_lower:
+            entry = self._backend.paid_domains.get(params[0])
+            if entry is not None and entry["is_paid"]:
+                self._results = [(1,)]
+
+        elif "from paid_emails" in query_lower and "select email" in query_lower:
+            self._results = self._backend.list_paid_entries(
+                self._backend.paid_emails, paid_only="is_paid = true" in query_lower
+            )
+
+        elif "from paid_domains" in query_lower and "select domain" in query_lower:
+            self._results = self._backend.list_paid_entries(
+                self._backend.paid_domains, paid_only="is_paid = true" in query_lower
+            )
+
+        elif "insert into paid_emails" in query_lower:
+            self._backend.activate_paid_entry(self._backend.paid_emails, params[0])
+
+        elif "insert into paid_domains" in query_lower:
+            self._backend.activate_paid_entry(self._backend.paid_domains, params[0])
+
+        elif "update paid_emails set is_paid = false" in query_lower:
+            self._backend.deactivate_paid_entry(self._backend.paid_emails, params[0])
+
+        elif "update paid_domains set is_paid = false" in query_lower:
+            self._backend.deactivate_paid_entry(self._backend.paid_domains, params[0])
+
         else:
             pass
 
@@ -1078,11 +1110,58 @@ def _make_fake_connection(backend: "FakePoolBackend") -> FakeConnection:
     return conn
 
 
+_PAID_ENTRY_CREATED_AT = "2026-01-01T00:00:00+00:00"
+_PAID_ENTRY_UPDATED_AT = "2026-01-02T00:00:00+00:00"
+
+
 class FakePoolBackend:
-    """In-memory pool database replacement for testing host pool endpoints."""
+    """In-memory pool database replacement for testing host pool + paid-list endpoints."""
 
     pool_rows: list[FakePoolRow]
     append_key_calls: list[tuple[str, int, str, str, str]]
+    # Paid-list stores: value -> {"is_paid", "created_at", "updated_at"}.
+    paid_domains: dict[str, dict[str, Any]]
+    paid_emails: dict[str, dict[str, Any]]
+
+    def add_paid_domain(self, domain: str, is_paid: bool = True) -> None:
+        """Seed a paid-domains row (lowercased), defaulting to active."""
+        self.paid_domains[domain.lower()] = {
+            "is_paid": is_paid,
+            "created_at": _PAID_ENTRY_CREATED_AT,
+            "updated_at": _PAID_ENTRY_UPDATED_AT,
+        }
+
+    def add_paid_email(self, email: str, is_paid: bool = True) -> None:
+        """Seed a paid-emails row (lowercased), defaulting to active."""
+        self.paid_emails[email.lower()] = {
+            "is_paid": is_paid,
+            "created_at": _PAID_ENTRY_CREATED_AT,
+            "updated_at": _PAID_ENTRY_UPDATED_AT,
+        }
+
+    def list_paid_entries(self, store: dict[str, dict[str, Any]], paid_only: bool) -> list[tuple[Any, ...]]:
+        """Return ``(value, is_paid, created_at, updated_at)`` rows, sorted by value."""
+        return [
+            (value, entry["is_paid"], entry["created_at"], entry["updated_at"])
+            for value, entry in sorted(store.items())
+            if entry["is_paid"] or not paid_only
+        ]
+
+    def activate_paid_entry(self, store: dict[str, dict[str, Any]], value: str) -> None:
+        """Upsert ``value`` to is_paid=true, keeping created_at on reactivation."""
+        existing = store.get(value)
+        store[value] = {
+            "is_paid": True,
+            "created_at": existing["created_at"] if existing else _PAID_ENTRY_CREATED_AT,
+            "updated_at": _PAID_ENTRY_UPDATED_AT,
+        }
+
+    def deactivate_paid_entry(self, store: dict[str, dict[str, Any]], value: str) -> None:
+        """Soft-delete ``value`` (is_paid=false). No-op when absent."""
+        existing = store.get(value)
+        if existing is not None:
+            existing["is_paid"] = False
+            existing["updated_at"] = _PAID_ENTRY_UPDATED_AT
 
     def install_on_app_module(self, app_mod: Any, monkeypatch: pytest.MonkeyPatch) -> None:
         """Swap DB and SSH functions on the app module with fakes.
@@ -1170,8 +1249,10 @@ class FakePoolBackend:
 
 
 def make_fake_pool_backend() -> FakePoolBackend:
-    """Construct an empty in-memory pool backend."""
+    """Construct an empty in-memory pool backend (no pool rows, empty paid lists)."""
     backend = FakePoolBackend()
     backend.pool_rows = []
     backend.append_key_calls = []
+    backend.paid_domains = {}
+    backend.paid_emails = {}
     return backend

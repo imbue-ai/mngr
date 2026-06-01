@@ -27,6 +27,7 @@ from imbue.mngr_imbue_cloud.data_types import LeaseResult
 from imbue.mngr_imbue_cloud.data_types import LeasedHostInfo
 from imbue.mngr_imbue_cloud.data_types import LiteLLMKeyInfo
 from imbue.mngr_imbue_cloud.data_types import LiteLLMKeyMaterial
+from imbue.mngr_imbue_cloud.data_types import PaidListEntry
 from imbue.mngr_imbue_cloud.data_types import R2BucketCreateResult
 from imbue.mngr_imbue_cloud.data_types import R2BucketInfo
 from imbue.mngr_imbue_cloud.data_types import R2KeyInfo
@@ -42,6 +43,7 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotFoundError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudKeyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudPaidListError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudTunnelError
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
@@ -580,6 +582,55 @@ class ImbueCloudConnectorClient(MutableModel):
         )
         self._check_bucket(response)
 
+    # ------------------------------------------------------------------
+    # Paid lists (admin-key authenticated)
+    # ------------------------------------------------------------------
+    #
+    # These take the fixed paid-list admin API key (NOT a SuperTokens
+    # session token); the connector authenticates them against
+    # ``MINDS_PAID_ADMIN_KEY`` and rejects user / tunnel tokens.
+
+    def _list_paid_entries(
+        self, admin_api_key: SecretStr, path: str, value_key: str, paid_only: bool
+    ) -> list[PaidListEntry]:
+        response = httpx.get(
+            self._url(path),
+            headers=self._bearer(admin_api_key),
+            params={"paid_only": "true" if paid_only else "false"},
+            timeout=self.timeout_seconds,
+        )
+        body = self._check(response, ImbueCloudPaidListError)
+        if not isinstance(body, list):
+            return []
+        return [_parse_paid_list_entry(entry, value_key) for entry in body if isinstance(entry, dict)]
+
+    def _post_paid_entry(self, admin_api_key: SecretStr, path: str, value: str) -> dict[str, Any]:
+        response = httpx.post(
+            self._url(path),
+            headers=self._bearer(admin_api_key),
+            json={"value": value},
+            timeout=self.timeout_seconds,
+        )
+        return self._check(response, ImbueCloudPaidListError)
+
+    def list_paid_domains(self, admin_api_key: SecretStr, paid_only: bool) -> list[PaidListEntry]:
+        return self._list_paid_entries(admin_api_key, "/paid/domains", "domain", paid_only)
+
+    def add_paid_domain(self, admin_api_key: SecretStr, domain: str) -> dict[str, Any]:
+        return self._post_paid_entry(admin_api_key, "/paid/domains/add", domain)
+
+    def remove_paid_domain(self, admin_api_key: SecretStr, domain: str) -> dict[str, Any]:
+        return self._post_paid_entry(admin_api_key, "/paid/domains/remove", domain)
+
+    def list_paid_emails(self, admin_api_key: SecretStr, paid_only: bool) -> list[PaidListEntry]:
+        return self._list_paid_entries(admin_api_key, "/paid/emails", "email", paid_only)
+
+    def add_paid_email(self, admin_api_key: SecretStr, email: str) -> dict[str, Any]:
+        return self._post_paid_entry(admin_api_key, "/paid/emails/add", email)
+
+    def remove_paid_email(self, admin_api_key: SecretStr, email: str) -> dict[str, Any]:
+        return self._post_paid_entry(admin_api_key, "/paid/emails/remove", email)
+
 
 def _detail_from_response(response: httpx.Response) -> str:
     """Extract the connector's ``detail`` error message, falling back to the raw body."""
@@ -594,6 +645,21 @@ def _detail_from_response(response: httpx.Response) -> str:
         if detail is not None:
             return str(detail)
     return response.text[:300]
+
+
+def _parse_paid_list_entry(raw: dict[str, Any], value_key: str) -> PaidListEntry:
+    """Coerce a connector paid-list row into a ``PaidListEntry``.
+
+    ``value_key`` is ``"domain"`` or ``"email"`` -- the connector names the
+    value column differently for each table; this maps it onto the generic
+    ``value`` field.
+    """
+    return PaidListEntry(
+        value=str(raw.get(value_key, "")),
+        is_paid=bool(raw.get("is_paid", False)),
+        created_at=str(raw.get("created_at", "")),
+        updated_at=str(raw.get("updated_at", "")),
+    )
 
 
 def _parse_tunnel_info(raw: dict[str, Any]) -> TunnelInfo:

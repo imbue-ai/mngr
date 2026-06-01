@@ -13,7 +13,6 @@ services = [
     "cloudflare",
     "litellm",
     "neon",
-    "paid-accounts",
     "pool-ssh",
     "supertokens",
 ]

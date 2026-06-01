@@ -15,6 +15,21 @@ from imbue.mngr_imbue_cloud.primitives import R2BucketAccess
 from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
 
 
+class PaidListEntry(FrozenModel):
+    """One row of a connector paid-list table (a domain or an email).
+
+    ``value`` holds the domain (e.g. ``imbue.com``) or full email; the
+    connector normalizes it to lowercase on write. Rows are never hard
+    deleted -- ``is_paid`` flips to False on removal and ``updated_at``
+    records when that happened.
+    """
+
+    value: str = Field(description="The allowed domain or email (lowercased)")
+    is_paid: bool = Field(description="Whether this entry currently grants paid access")
+    created_at: str = Field(description="When the row was first inserted")
+    updated_at: str = Field(description="When is_paid was last changed")
+
+
 class LeaseAttributes(FrozenModel):
     """Attributes describing what kind of pool host a request needs.
 

@@ -29,6 +29,10 @@ class ImbueCloudTunnelError(ImbueCloudError):
     """Raised when a Cloudflare tunnel operation fails."""
 
 
+class ImbueCloudPaidListError(ImbueCloudError):
+    """Raised when a paid-list (paid domains / emails) admin operation fails."""
+
+
 class PoolHostNotMatchedError(ImbueCloudError):
     """Raised when create_agent is invoked on a leased host that has no pre-baked agent or has more than one."""
 

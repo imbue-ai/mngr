@@ -15,12 +15,15 @@ import binascii
 import contextlib
 import functools
 import hashlib
+import hmac
 import io
 import json
 import logging
 import os
 import re
 import shlex
+import threading
+import time
 from collections.abc import Callable
 from collections.abc import Iterator
 from typing import Any
@@ -226,6 +229,14 @@ class InvalidHostNameError(ValueError):
         super().__init__(f"host_name must be alphanumeric (with dashes/underscores allowed in the middle): {value!r}")
 
 
+class InvalidPaidListEntryError(ValueError):
+    """Raised when a paid-list domain or email entry is malformed."""
+
+    def __init__(self, value: object, reason: str) -> None:
+        self.value = value
+        super().__init__(f"Invalid paid-list entry {value!r}: {reason}")
+
+
 class InvalidR2BucketNameError(ValueError):
     """Raised when a derived R2 bucket name violates Cloudflare's naming rules."""
 
@@ -334,9 +345,9 @@ class AdminAuth(BaseModel):
     username: str
     # Verified email associated with the SuperTokens user, looked up at auth
     # time so that paid-feature endpoints (host pool, LiteLLM keys) can gate
-    # access by ``PAID_ACCOUNT_SUFFIXES``. ``None`` when the SuperTokens
-    # user record has no email or when the lookup failed -- in that case the
-    # paid-feature gate denies access.
+    # access against the ``paid_emails`` / ``paid_domains`` tables. ``None``
+    # when the SuperTokens user record has no email or when the lookup
+    # failed -- in that case the paid-feature gate denies access.
     email: str | None = None
 
 
@@ -1641,55 +1652,177 @@ def require_tunnel_access(auth: AuthResult, tunnel_name: str) -> str:
     return extract_username_from_tunnel_name(tunnel_name)
 
 
-_PAID_ACCOUNT_SUFFIXES_ENV = "PAID_ACCOUNT_SUFFIXES"
+# Env var holding the cache TTL (in seconds) for paid-status lookups. The
+# paid gate consults two Neon tables (``paid_emails`` / ``paid_domains``)
+# on every gated request; this in-memory cache bounds how often that DB
+# round-trip happens per container. Set to ``0`` to disable caching
+# entirely (every gated request hits the DB) -- useful in tests. Unset
+# falls back to ``_DEFAULT_PAID_LIST_CACHE_TTL_SECONDS``. Each Modal
+# container caches independently, so a CRUD change to the lists takes up
+# to the TTL to be reflected everywhere.
+_PAID_LIST_CACHE_TTL_ENV = "MINDS_PAID_LIST_CACHE_TTL_SECONDS"
+_DEFAULT_PAID_LIST_CACHE_TTL_SECONDS = 60.0
+
+# Process-local cache mapping a lowercased email -> (expiry_monotonic, is_paid).
+# Guarded by a lock since uvicorn serves requests from a thread pool.
+_paid_status_cache: dict[str, tuple[float, bool]] = {}
+_paid_status_cache_lock = threading.Lock()
 
 
-def _parse_paid_account_suffixes(raw: str) -> tuple[str, ...]:
-    """Split a ``PAID_ACCOUNT_SUFFIXES`` value into a normalized tuple of suffixes."""
-    return tuple(s.strip().lower() for s in raw.split(",") if s.strip())
+def clear_paid_status_cache() -> None:
+    """Drop every cached paid-status entry (called after a CRUD write, and in tests)."""
+    with _paid_status_cache_lock:
+        _paid_status_cache.clear()
 
 
-def is_email_in_paid_account_allowlist(email: str | None, raw_suffixes: str) -> bool:
-    """Pure helper: does ``email`` match any of the comma-separated suffixes?
+def _paid_list_cache_ttl_seconds() -> float:
+    """Resolve the paid-status cache TTL from the environment.
 
-    Suffix matching is case-insensitive. An empty/missing suffix list always
-    returns ``False`` (no email is allowed), and a missing email always
-    returns ``False``.
+    Falls back to the default on an unset/empty value and on an
+    unparseable one (logging a warning in the latter case) so a typo'd
+    Modal secret degrades to "cache normally" rather than crashing the
+    gate.
     """
-    suffixes = _parse_paid_account_suffixes(raw_suffixes)
-    if not suffixes:
-        return False
-    if not email:
-        return False
-    email_lower = email.lower()
-    return any(email_lower.endswith(suffix) for suffix in suffixes)
-
-
-def require_paid_account(auth: AdminAuth) -> None:
-    """Enforce the ``PAID_ACCOUNT_SUFFIXES`` allowlist for paid features.
-
-    Raises ``HTTPException(403)`` when the env var is unset/empty (paid
-    features disabled on this server) or when ``auth.email`` does not end
-    with any of the configured suffixes. ``/tunnels/*`` (Cloudflare
-    forwarding) intentionally does NOT call this gate -- email-verified
-    accounts can still use forwarding regardless of the allowlist.
-    """
-    raw = os.environ.get(_PAID_ACCOUNT_SUFFIXES_ENV, "")
-    if not _parse_paid_account_suffixes(raw):
-        raise HTTPException(
-            status_code=403,
-            detail="Paid features (host pool, LiteLLM keys) are not enabled on this server",
+    raw = os.environ.get(_PAID_LIST_CACHE_TTL_ENV)
+    if raw is None or not raw.strip():
+        return _DEFAULT_PAID_LIST_CACHE_TTL_SECONDS
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        logger.warning(
+            "Invalid %s=%r; falling back to %.0fs",
+            _PAID_LIST_CACHE_TTL_ENV,
+            raw,
+            _DEFAULT_PAID_LIST_CACHE_TTL_SECONDS,
         )
+        return _DEFAULT_PAID_LIST_CACHE_TTL_SECONDS
+
+
+def _email_domain(email: str) -> str:
+    """Return the lowercased domain (part after the last ``@``) of an email, or ``""``."""
+    return email.strip().lower().rpartition("@")[2]
+
+
+def is_email_paid_in_db(
+    email: str,
+    connection_factory: Callable[[], Any] | None = None,
+) -> bool:
+    """Return whether ``email`` is paid per the ``paid_emails`` / ``paid_domains`` tables.
+
+    Paid when either an exact (lowercased) full-email match exists in
+    ``paid_emails`` with ``is_paid = true``, OR the email's exact domain
+    matches a ``paid_domains`` row with ``is_paid = true``. ``connection_factory``
+    is injected so unit tests can supply an in-memory backend; it defaults
+    to :func:`_get_pool_db_connection` (resolved lazily because that helper
+    is defined further down this module).
+
+    Raises ``psycopg2.Error`` on any database failure; the caller
+    (:func:`require_paid_account`) converts that into a fail-closed 403.
+    """
+    factory = connection_factory if connection_factory is not None else _get_pool_db_connection
+    email_lower = email.strip().lower()
+    domain = _email_domain(email_lower)
+    conn = factory()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM paid_emails WHERE email = %s AND is_paid = TRUE", (email_lower,))
+            if cur.fetchone() is not None:
+                return True
+            if domain:
+                cur.execute("SELECT 1 FROM paid_domains WHERE domain = %s AND is_paid = TRUE", (domain,))
+                if cur.fetchone() is not None:
+                    return True
+        return False
+    finally:
+        conn.close()
+
+
+def is_email_paid(
+    email: str,
+    db_lookup: Callable[[str], bool] = is_email_paid_in_db,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> bool:
+    """Cached wrapper around :func:`is_email_paid_in_db`.
+
+    Honors the ``MINDS_PAID_LIST_CACHE_TTL_SECONDS`` TTL: a non-positive
+    TTL bypasses the cache entirely, otherwise both positive and negative
+    results are cached for the TTL window. ``db_lookup`` / ``monotonic``
+    are injected for tests.
+    """
+    email_lower = email.strip().lower()
+    ttl_seconds = _paid_list_cache_ttl_seconds()
+    if ttl_seconds <= 0:
+        return db_lookup(email_lower)
+    now = monotonic()
+    with _paid_status_cache_lock:
+        cached = _paid_status_cache.get(email_lower)
+        if cached is not None and cached[0] > now:
+            return cached[1]
+    is_paid = db_lookup(email_lower)
+    with _paid_status_cache_lock:
+        _paid_status_cache[email_lower] = (now + ttl_seconds, is_paid)
+    return is_paid
+
+
+def require_paid_account(
+    auth: AdminAuth,
+    paid_checker: Callable[[str], bool] = is_email_paid,
+) -> None:
+    """Gate paid features on the caller's email appearing in the paid lists.
+
+    Raises ``HTTPException(403)`` when the caller has no verified email,
+    when their email is not in the ``paid_emails`` / ``paid_domains``
+    tables, or when the database lookup fails (fail closed). ``/tunnels/*``
+    (Cloudflare forwarding) intentionally does NOT call this gate --
+    email-verified accounts can still use forwarding regardless.
+    ``paid_checker`` is injected for tests; production callers use the
+    cached, table-backed default.
+    """
     if not auth.email:
         raise HTTPException(
             status_code=403,
             detail="Account email unavailable; cannot authorize paid feature access",
         )
-    if not is_email_in_paid_account_allowlist(auth.email, raw):
+    try:
+        is_paid = paid_checker(auth.email)
+    except psycopg2.Error as exc:
+        logger.warning("Paid-status lookup failed for %s: %s", auth.email, exc)
+        raise HTTPException(
+            status_code=403,
+            detail="Could not verify paid-feature access (database error); please try again",
+        ) from exc
+    if not is_paid:
         raise HTTPException(
             status_code=403,
             detail="Account is not authorized for paid features",
         )
+
+
+# Env var holding the single fixed API key that authenticates the paid-list
+# CRUD endpoints (``/paid/*``). Distinct from the SuperTokens / tunnel-token
+# auth used by every other route: those routes reject this key, and the
+# ``/paid/*`` routes reject SuperTokens JWTs / tunnel tokens. Folded into the
+# ``supertokens-<env>`` Modal secret (see .minds/template/supertokens.sh).
+_PAID_ADMIN_KEY_ENV = "MINDS_PAID_ADMIN_KEY"
+
+
+def require_paid_admin_key(request: Request) -> None:
+    """Authenticate a paid-list CRUD request against the fixed admin API key.
+
+    Expects ``Authorization: Bearer <MINDS_PAID_ADMIN_KEY>`` and compares
+    in constant time. Raises ``HTTPException(403)`` when the server has no
+    key configured (the paid-list admin API is disabled), and
+    ``HTTPException(401)`` when credentials are missing or wrong.
+    """
+    expected = os.environ.get(_PAID_ADMIN_KEY_ENV, "")
+    if not expected:
+        raise HTTPException(status_code=403, detail="Paid-list admin API is not enabled on this server")
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing Bearer credentials")
+    provided = auth_header[len("bearer ") :]
+    if not hmac.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail="Invalid paid-list admin API key")
 
 
 # ---------------------------------------------------------------------------
@@ -1723,6 +1856,8 @@ def raise_as_http(exc: Exception) -> NoReturn:
     if isinstance(exc, InvalidTunnelComponentError):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if isinstance(exc, TunnelComponentTooLongError):
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if isinstance(exc, InvalidPaidListEntryError):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if isinstance(exc, InvalidR2BucketNameError):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2174,6 +2309,162 @@ def list_leased_hosts(request: Request) -> list[dict[str, object]]:
             ).model_dump()
             for r in rows
         ]
+
+
+# ---------------------------------------------------------------------------
+# Paid-list CRUD (admin-key authenticated)
+# ---------------------------------------------------------------------------
+
+
+class PaidListEntryRequest(BaseModel):
+    value: str = Field(description="The domain or email to add/remove (normalized to lowercase server-side)")
+
+
+class PaidDomainInfo(BaseModel):
+    domain: str = Field(description="The allowed domain (lowercased)")
+    is_paid: bool = Field(description="Whether this domain currently grants paid access")
+    created_at: str = Field(description="When the row was first inserted")
+    updated_at: str = Field(description="When is_paid was last changed")
+
+
+class PaidEmailInfo(BaseModel):
+    email: str = Field(description="The allowed email (lowercased)")
+    is_paid: bool = Field(description="Whether this email currently grants paid access")
+    created_at: str = Field(description="When the row was first inserted")
+    updated_at: str = Field(description="When is_paid was last changed")
+
+
+def _normalize_paid_domain(value: str) -> str:
+    """Lowercase + validate a domain entry (no ``@``, no internal whitespace, non-empty)."""
+    normalized = value.strip().lower()
+    if not normalized:
+        raise InvalidPaidListEntryError(value, "domain must not be empty")
+    if "@" in normalized:
+        raise InvalidPaidListEntryError(value, "domain must not contain '@' (use the email list for full addresses)")
+    if any(character.isspace() for character in normalized):
+        raise InvalidPaidListEntryError(value, "domain must not contain whitespace")
+    return normalized
+
+
+def _normalize_paid_email(value: str) -> str:
+    """Lowercase + validate an email entry (exactly one ``@`` with non-empty local + domain parts)."""
+    normalized = value.strip().lower()
+    local, separator, domain = normalized.partition("@")
+    if not separator or not local or not domain or "@" in domain or any(c.isspace() for c in normalized):
+        raise InvalidPaidListEntryError(value, "email must be of the form 'local@domain'")
+    return normalized
+
+
+def _list_paid_entries(table: str, value_column: str, paid_only: bool) -> list[tuple[str, bool, str, str]]:
+    """Return all rows of a paid-list table as ``(value, is_paid, created_at, updated_at)`` tuples."""
+    where_clause = " WHERE is_paid = TRUE" if paid_only else ""
+    conn = _get_pool_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT {value_column}, is_paid, created_at, updated_at FROM {table}{where_clause} "
+                f"ORDER BY {value_column} ASC"
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    return [(row[0], bool(row[1]), str(row[2]), str(row[3])) for row in rows]
+
+
+def _activate_paid_entry(table: str, value_column: str, value: str) -> None:
+    """Upsert a paid-list entry to ``is_paid = true`` (reactivating in place, keeping created_at)."""
+    conn = _get_pool_db_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"INSERT INTO {table} ({value_column}, is_paid, created_at, updated_at) "
+                    "VALUES (%s, TRUE, NOW(), NOW()) "
+                    f"ON CONFLICT ({value_column}) DO UPDATE SET is_paid = TRUE, updated_at = NOW()",
+                    (value,),
+                )
+    finally:
+        conn.close()
+    clear_paid_status_cache()
+
+
+def _deactivate_paid_entry(table: str, value_column: str, value: str) -> None:
+    """Soft-delete a paid-list entry (``is_paid = false``). A no-op when the row is absent."""
+    conn = _get_pool_db_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE {table} SET is_paid = FALSE, updated_at = NOW() WHERE {value_column} = %s",
+                    (value,),
+                )
+    finally:
+        conn.close()
+    clear_paid_status_cache()
+
+
+@web_app.get("/paid/domains")
+def list_paid_domains(request: Request, paid_only: bool = False) -> list[dict[str, object]]:
+    """List paid-domain rows. ``paid_only=true`` filters to currently-active entries."""
+    with handle_endpoint_errors():
+        require_paid_admin_key(request)
+        rows = _list_paid_entries("paid_domains", "domain", paid_only)
+        return [
+            PaidDomainInfo(domain=value, is_paid=is_paid, created_at=created_at, updated_at=updated_at).model_dump()
+            for (value, is_paid, created_at, updated_at) in rows
+        ]
+
+
+@web_app.post("/paid/domains/add")
+def add_paid_domain(request: Request, body: PaidListEntryRequest) -> dict[str, object]:
+    """Add (or reactivate) a paid domain. Idempotent."""
+    with handle_endpoint_errors():
+        require_paid_admin_key(request)
+        domain = _normalize_paid_domain(body.value)
+        _activate_paid_entry("paid_domains", "domain", domain)
+        return {"status": "added", "domain": domain}
+
+
+@web_app.post("/paid/domains/remove")
+def remove_paid_domain(request: Request, body: PaidListEntryRequest) -> dict[str, object]:
+    """Soft-remove a paid domain (set is_paid=false). Idempotent."""
+    with handle_endpoint_errors():
+        require_paid_admin_key(request)
+        domain = _normalize_paid_domain(body.value)
+        _deactivate_paid_entry("paid_domains", "domain", domain)
+        return {"status": "removed", "domain": domain}
+
+
+@web_app.get("/paid/emails")
+def list_paid_emails(request: Request, paid_only: bool = False) -> list[dict[str, object]]:
+    """List paid-email rows. ``paid_only=true`` filters to currently-active entries."""
+    with handle_endpoint_errors():
+        require_paid_admin_key(request)
+        rows = _list_paid_entries("paid_emails", "email", paid_only)
+        return [
+            PaidEmailInfo(email=value, is_paid=is_paid, created_at=created_at, updated_at=updated_at).model_dump()
+            for (value, is_paid, created_at, updated_at) in rows
+        ]
+
+
+@web_app.post("/paid/emails/add")
+def add_paid_email(request: Request, body: PaidListEntryRequest) -> dict[str, object]:
+    """Add (or reactivate) a paid email. Idempotent."""
+    with handle_endpoint_errors():
+        require_paid_admin_key(request)
+        email = _normalize_paid_email(body.value)
+        _activate_paid_entry("paid_emails", "email", email)
+        return {"status": "added", "email": email}
+
+
+@web_app.post("/paid/emails/remove")
+def remove_paid_email(request: Request, body: PaidListEntryRequest) -> dict[str, object]:
+    """Soft-remove a paid email (set is_paid=false). Idempotent."""
+    with handle_endpoint_errors():
+        require_paid_admin_key(request)
+        email = _normalize_paid_email(body.value)
+        _deactivate_paid_entry("paid_emails", "email", email)
+        return {"status": "removed", "email": email}
 
 
 # ---------------------------------------------------------------------------
@@ -3378,7 +3669,6 @@ def _init_supertokens() -> None:
         modal.Secret.from_name(f"neon-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
         modal.Secret.from_name(f"pool-ssh-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
         modal.Secret.from_name(f"litellm-connector-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
-        modal.Secret.from_name(f"paid-accounts-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
         modal.Secret.from_dict({"MNGR_DEPLOY_ENV": _DEPLOY_ENV, _MINDS_DEPLOY_ID_ENV_VAR: _MINDS_DEPLOY_ID}),
     ],
     # Warm-pool size driven by ``_MIN_CONTAINERS`` at the top of this
