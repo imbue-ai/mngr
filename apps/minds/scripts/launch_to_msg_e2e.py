@@ -635,10 +635,16 @@ async def amain() -> int:
                 # Mid-creation snapshot so the "creating" UI is captured
                 # in CI -- fires once when CREATING_WORKSPACE has been
                 # running for ~60s so the progress dialog is on-screen.
-                if state == "CREATING_WORKSPACE" and "04b" not in [p.name for p in SCREENSHOT_DIR.glob("04b-*")]:
-                    elapsed_in_phase = time.monotonic() - phase_started_at
-                    if elapsed_in_phase >= 60:
-                        await snap_page(win, "04b-creating-workspace-mid")
+                if (
+                    state == "CREATING_WORKSPACE"
+                    and not any(SCREENSHOT_DIR.glob("04b-*"))
+                    and time.monotonic() - phase_started_at >= 60
+                ):
+                    # Navigate to /creating/<id> so the snap shows the
+                    # actual progress UI instead of the unchanged form.
+                    with contextlib.suppress(Exception):
+                        await win.goto(f"{origin}/creating/{creation_id}", timeout=10_000)
+                    await snap_page(win, "04b-creating-workspace-mid")
                 await asyncio.sleep(5)
             # Emit a per-phase summary line + persist to artifact JSON.
             total_create_s = sum(phase_durations.values())
@@ -771,20 +777,24 @@ async def amain() -> int:
                         KICK_INTERVAL = 30
                         now = time.monotonic()
                         if now - first_approve_at >= KICK_DELAY and now - last_kick_at >= KICK_INTERVAL:
-                            chat = await find_chat_window(ctx)
-                            if chat is not None:
-                                with contextlib.suppress(Exception):
-                                    inp = await chat.wait_for_selector(
-                                        'textarea, [contenteditable="true"]', timeout=5_000
-                                    )
-                                    await inp.fill(
-                                        "Slack permission approved. Please retry the read-only Slack "
-                                        f'read now and respond with the prefix "TOK {NONCE}:" '
-                                        "followed by the message text."
-                                    )
-                                    await inp.press("Enter")
-                                    logger.info("sent post-approval kick #{}", 1 + int(last_kick_at > 0))
-                                    last_kick_at = now
+                            # Try the chat panel first; fall back to the
+                            # current `win` (which we keep re-resolving).
+                            target = await find_chat_window(ctx) or win
+                            kick_msg = (
+                                "Slack permission approved. Please retry the read-only Slack "
+                                f'read now and respond with the prefix "TOK {NONCE}:" '
+                                "followed by the message text."
+                            )
+                            try:
+                                inp = await target.wait_for_selector(
+                                    'textarea, [contenteditable="true"]', timeout=5_000
+                                )
+                                await inp.fill(kick_msg)
+                                await inp.press("Enter")
+                                logger.info("sent post-approval kick (target={})", target.url)
+                                last_kick_at = now
+                            except Exception as exc:
+                                logger.warning("kick attempt failed on {}: {}", target.url, exc)
 
                     await asyncio.sleep(2)
                 else:
