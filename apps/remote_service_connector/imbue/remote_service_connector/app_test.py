@@ -2093,6 +2093,15 @@ def test_paid_crud_requires_admin_key(monkeypatch: pytest.MonkeyPatch) -> None:
     assert client.get("/paid/domains", headers=_admin_headers()).status_code == 401
 
 
+def test_paid_crud_rejects_non_ascii_bearer_token_with_401(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-ASCII bearer credential is a clean 401, not a 500 (compare over bytes)."""
+    client, _backend = _make_paid_crud_test_client(monkeypatch)
+    # HTTP header values are latin-1; pass raw bytes so the non-ASCII octets
+    # reach the handler (httpx would otherwise reject a non-ASCII str header).
+    resp = client.get("/paid/domains", headers={"Authorization": "Bearer wröng-kéy".encode("latin-1")})
+    assert resp.status_code == 401
+
+
 def test_paid_crud_returns_403_when_admin_key_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _backend = _make_pool_test_client(monkeypatch)
     monkeypatch.delenv("MINDS_PAID_ADMIN_KEY", raising=False)

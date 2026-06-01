@@ -1821,7 +1821,11 @@ def require_paid_admin_key(request: Request) -> None:
     if not auth_header.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Missing Bearer credentials")
     provided = auth_header[len("bearer ") :]
-    if not hmac.compare_digest(provided, expected):
+    # Compare over UTF-8 bytes: hmac.compare_digest raises TypeError on str
+    # operands containing non-ASCII characters, and HTTP header values can
+    # legitimately carry non-ASCII bytes. Encoding keeps the comparison both
+    # total (a malformed key cleanly yields 401, not a 500) and constant-time.
+    if not hmac.compare_digest(provided.encode(), expected.encode()):
         raise HTTPException(status_code=401, detail="Invalid paid-list admin API key")
 
 
