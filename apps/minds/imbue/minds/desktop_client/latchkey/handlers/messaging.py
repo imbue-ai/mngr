@@ -31,6 +31,19 @@ class MngrMessageSender(MutableModel):
     mngr_binary: str = Field(default=MNGR_BINARY, frozen=True, description="Path to mngr binary.")
 
     def send(self, agent_id: AgentId, text: str) -> None:
+        is_delivered = self.try_send(str(agent_id), text)
+        if not is_delivered:
+            logger.warning("mngr message to agent {} was not delivered", agent_id)
+
+    def try_send(self, target: str, text: str) -> bool:
+        """Send a message to ``target`` (an agent id or name); return whether it succeeded.
+
+        ``target`` is matched by ``mngr message`` against agent ids and
+        names, so onboarding can address the bootstrap-created chat agent
+        by its host name before its canonical id is known. Returns ``True``
+        when the subprocess exits 0; logs the failure and returns ``False``
+        otherwise so pollers can retry.
+        """
         cg = ConcurrencyGroup(name="mngr-message")
         with cg:
             result = cg.run_process_to_completion(
@@ -39,14 +52,16 @@ class MngrMessageSender(MutableModel):
                 # passing the text as a positional would be parsed as a second
                 # agent and the actual message content would be read from
                 # stdin (silently empty in this subprocess context).
-                command=[self.mngr_binary, "message", "-m", text, "--", str(agent_id)],
+                command=[self.mngr_binary, "message", "-m", text, "--", target],
                 timeout=_MNGR_MESSAGE_TIMEOUT_SECONDS,
                 is_checked_after=False,
             )
         if result.returncode != 0:
             logger.warning(
-                "mngr message to agent {} exited {}: {}",
-                agent_id,
+                "mngr message to target {} exited {}: {}",
+                target,
                 result.returncode,
                 result.stderr.strip(),
             )
+            return False
+        return True

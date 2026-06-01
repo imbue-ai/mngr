@@ -208,6 +208,14 @@ class AgentCreationInfo(FrozenModel):
             "mode-aware status captions without a separate lookup."
         ),
     )
+    host_name: str = Field(
+        default="",
+        description=(
+            "Resolved workspace/host name for this creation (the form's Name field, or a "
+            "repo-derived fallback). Carried so onboarding can address the bootstrap-created "
+            "chat agent (named after the host) without re-deriving it."
+        ),
+    )
     redirect_url: str | None = Field(default=None, description="URL to redirect to when creation is done")
     error: str | None = Field(default=None, description="Error message, set when status is FAILED")
 
@@ -919,6 +927,7 @@ class AgentCreator(MutableModel):
     _redirect_urls: dict[str, str] = PrivateAttr(default_factory=dict)
     _errors: dict[str, str] = PrivateAttr(default_factory=dict)
     _launch_modes: dict[str, LaunchMode] = PrivateAttr(default_factory=dict)
+    _host_names: dict[str, str] = PrivateAttr(default_factory=dict)
     _log_queues: dict[str, queue.Queue[str]] = PrivateAttr(default_factory=dict)
     _threads: list[threading.Thread] = PrivateAttr(default_factory=list)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
@@ -990,6 +999,7 @@ class AgentCreator(MutableModel):
         with self._lock:
             self._statuses[str(creation_id)] = AgentCreationStatus.INITIALIZING
             self._launch_modes[str(creation_id)] = launch_mode
+            self._host_names[str(creation_id)] = effective_name
             self._log_queues[str(creation_id)] = log_queue
 
         thread = threading.Thread(
@@ -1043,6 +1053,7 @@ class AgentCreator(MutableModel):
                 agent_id=self._canonical_agent_ids.get(cid_str),
                 status=status,
                 launch_mode=self._launch_modes.get(cid_str, LaunchMode.DOCKER),
+                host_name=self._host_names.get(cid_str, ""),
                 redirect_url=self._redirect_urls.get(cid_str),
                 error=self._errors.get(cid_str),
             )

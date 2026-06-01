@@ -22,6 +22,7 @@ from imbue.imbue_common.pure import pure
 from imbue.minds.bootstrap import DEFAULT_MINDS_ROOT_NAME
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
+from imbue.minds.desktop_client.onboarding import expected_creation_duration_seconds
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupEncryptionMethod
 from imbue.minds.primitives import BackupProvider
@@ -302,6 +303,9 @@ def render_creating_page(
         agent_id=creation_id,
         status_text=status_text,
         accent=workspace_accent(str(creation_id)),
+        # Drives the client-side time-based progress bar on the loading
+        # screen (eases toward ~80% over this duration).
+        expected_duration_seconds=expected_creation_duration_seconds(info.launch_mode),
     )
 
 
