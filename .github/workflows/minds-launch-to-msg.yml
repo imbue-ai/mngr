@@ -360,83 +360,19 @@ jobs:
           path: artifacts/
           retention-days: 7
 
-      - name: publish flow screenshots to ci-screenshots branch
-        if: always()
-        env:
-          GH_TOKEN_FOR_SCREENSHOTS: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # GitHub's HTML sanitizer strips data: URIs from <img src> in
-          # step summary, so inline base64 doesn't render. Workaround:
-          # publish screenshots to a side branch and reference via
-          # raw.githubusercontent.com URLs, which do render in summary.
-          shots_dir=artifacts/screenshots
-          [ -d "$shots_dir" ] || { echo "no screenshots to publish"; exit 0; }
-          work=/tmp/ci-screenshots-work
-          rm -rf "$work"
-          repo_url="https://x-access-token:$GH_TOKEN_FOR_SCREENSHOTS@github.com/${{ github.repository }}.git"
-          if git ls-remote --exit-code "$repo_url" refs/heads/ci-screenshots >/dev/null 2>&1; then
-            git clone --depth 1 --branch ci-screenshots "$repo_url" "$work"
-          else
-            mkdir -p "$work"
-            git -C "$work" init -q
-            git -C "$work" checkout -q --orphan ci-screenshots
-            git -C "$work" remote add origin "$repo_url"
-            echo "# CI Screenshots" > "$work/README.md"
-            echo "Per-run snapshots from minds-launch-to-msg.yml. Auto-pruned (TBD)." >> "$work/README.md"
-            git -C "$work" add README.md
-            git -C "$work" -c user.name=ci-bot -c user.email=ci@noreply.github.com commit -q -m "init ci-screenshots branch"
-          fi
-          run_dir="$work/runs/${{ github.run_id }}"
-          mkdir -p "$run_dir"
-          # Publish per-window Playwright shots (`.win.png`) as the headline
-          # `<name>.png`, and the full-desktop `screencapture -x` shots as
-          # the `.desktop.png` forensic dupe. macOS WindowServer z-order is
-          # not driven by CDP page activation, so the full-desktop captures
-          # routinely show the unauthenticated /welcome BrowserWindow even
-          # when the chat / projects / approval pages are active. The
-          # Playwright per-page screenshot bypasses WindowServer entirely
-          # (DOM -> raster via CDP) and always shows the page we asked it
-          # to snap, which is what makes the headline shots verifiable.
-          for prefix in 00 01 02 03 04 04b 05 06 07 07a 07b 07c 07d 08 09 10 11 12 99; do
-            for win in "$shots_dir"/${prefix}-*.win.png; do
-              [ -f "$win" ] || continue
-              base=$(basename "$win" .win.png)
-              cp "$win" "$run_dir/${base}.png" 2>/dev/null || true
-            done
-            for desk in "$shots_dir"/${prefix}-*.png; do
-              [ -f "$desk" ] || continue
-              case "$desk" in
-                *.win.png) continue ;;
-              esac
-              base=$(basename "$desk" .png)
-              cp "$desk" "$run_dir/${base}.desktop.png" 2>/dev/null || true
-            done
-          done
-          cd "$work"
-          git add runs/
-          if git diff --staged --quiet; then
-            echo "no new screenshots"
-          else
-            git -c user.name=ci-bot -c user.email=ci@noreply.github.com commit -q \
-              -m "screenshots for run ${{ github.run_id }} [skip ci]"
-            git push -q origin ci-screenshots
-          fi
-
-      - name: embed flow screenshots in job summary
+      - name: write timing + screenshot summary
         if: always()
         run: |
           shots_dir=artifacts/screenshots
           if [ ! -d "$shots_dir" ]; then
-            echo "(no screenshots to embed)" >> "$GITHUB_STEP_SUMMARY"
+            echo "(no screenshots to summarize)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          base="https://raw.githubusercontent.com/${{ github.repository }}/ci-screenshots/runs/${{ github.run_id }}"
 
           # ---- Timing metrics block --------------------------------------
           # Read launch-to-msg-timings.json (written by the e2e script) and
           # surface the per-phase wall-clocks at the very top of the
-          # summary so creation time is visible at a glance. jq formats
-          # the one-line total + per-phase breakdown.
+          # summary so creation time is visible at a glance.
           timings_json="$shots_dir/launch-to-msg-timings.json"
           if [ -f "$timings_json" ]; then
             total=$(jq -r '.total_create_s' "$timings_json")
@@ -455,29 +391,35 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-          # ---- Flow screenshots block ------------------------------------
+          # ---- Flow screenshot manifest ----------------------------------
+          # Screenshots are not committed to git (an orphan branch of
+          # binary PNGs bloated every clone). They ride in the
+          # `launch-to-first-message-<run_id>` artifact attached to this
+          # run; download + open locally to view. The per-window `.win.png`
+          # shots show the page Playwright asked Electron to render; the
+          # `.desktop.png` shots are full-desktop dupes (often show
+          # whichever BrowserWindow WindowServer had on top -- usually
+          # /welcome -- since CDP page activation does not move OS
+          # z-order).
+          artifact_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts"
           {
             echo "## Flow screenshots"
             echo ""
-            echo "Per-window Playwright captures at each milestone. CDP screenshots reflect the actual page we asked Electron to show; macOS \`screencapture -x\` \`.desktop.png\` dupes are in the downloadable artifact above for reference (note: full-desktop shots may show whichever BrowserWindow WindowServer happened to have on top, which is often the unauthenticated /welcome window)."
+            echo "Screenshots ride in the [\`launch-to-first-message-${{ github.run_id }}\` artifact]($artifact_url) (download + open locally)."
             echo ""
+            echo "| Milestone | Per-window (.win.png) | Full-desktop (.desktop.png) |"
+            echo "|---|---|---|"
           } >> "$GITHUB_STEP_SUMMARY"
-          run_dir=/tmp/ci-screenshots-work/runs/${{ github.run_id }}
-          if [ ! -d "$run_dir" ]; then
-            echo "(no published run_dir, nothing to embed)" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          for png in $(ls "$run_dir"/*.png 2>/dev/null | sort); do
-            case "$png" in
-              *.desktop.png) continue ;;
-            esac
-            label=$(basename "$png" .png)
-            {
-              echo "### $label"
-              echo ""
-              echo "![$label]($base/$(basename "$png"))"
-              echo ""
-            } >> "$GITHUB_STEP_SUMMARY"
+          for prefix in 00 01 02 03 04 04b 05 06 07 07a 07b 07c 07d 08 09 10 11 12 99; do
+            for win in "$shots_dir"/${prefix}-*.win.png; do
+              [ -f "$win" ] || continue
+              base=$(basename "$win" .win.png)
+              desk="$shots_dir/${base}.png"
+              win_cell="\`${base}.win.png\`"
+              desk_cell="—"
+              [ -f "$desk" ] && desk_cell="\`${base}.png\`"
+              echo "| $base | $win_cell | $desk_cell |" >> "$GITHUB_STEP_SUMMARY"
+            done
           done
       - name: post-test cleanup (best effort)
         if: always()
