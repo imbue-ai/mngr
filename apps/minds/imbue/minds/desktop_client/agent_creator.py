@@ -401,6 +401,18 @@ def _rsync_worktree_over_clone(
 # constant so callers can pass it to ``mngr`` without re-validating.
 _DEFAULT_AGENT_NAME: Final[AgentName] = AgentName("system-services")
 
+# imbue_cloud create-path knobs forwarded as ``-b fast_mode=<value>``. ``require``
+# adopts an exact-attribute pre-baked pool host (fast); ``prevent`` leases any
+# available host and rebuilds it from the FCT Dockerfile (slow).
+_FAST_MODE_REQUIRE: Final[str] = "require"
+_FAST_MODE_PREVENT: Final[str] = "prevent"
+
+# Substring of the imbue_cloud provider's ``FastPathUnavailableError`` that
+# appears in ``mngr create``'s stderr traceback when ``fast_mode=require`` finds
+# no exact-attribute pool match. minds matches this to fall back to the slow
+# path. Kept in sync with ``imbue.mngr_imbue_cloud.errors.FastPathUnavailableError``.
+_FAST_PATH_UNAVAILABLE_MARKER: Final[str] = "FastPathUnavailableError"
+
 
 def _build_mngr_create_command(
     launch_mode: LaunchMode,
@@ -408,6 +420,7 @@ def _build_mngr_create_command(
     imbue_cloud_account: str | None = None,
     imbue_cloud_repo_url: str | None = None,
     imbue_cloud_branch_or_tag: str | None = None,
+    imbue_cloud_fast_mode: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Build the ``mngr create`` command for a freshly-provisioned workspace.
@@ -552,6 +565,14 @@ def _build_mngr_create_command(
                 mngr_command.extend(["-b", f"repo_url={imbue_cloud_repo_url}"])
             if imbue_cloud_branch_or_tag:
                 mngr_command.extend(["-b", f"repo_branch_or_tag={imbue_cloud_branch_or_tag}"])
+            # ``fast_mode`` selects the imbue_cloud create path: ``require``
+            # adopts an exact-attribute pre-baked pool host (fast); ``prevent``
+            # leases any available host and rebuilds it from the FCT Dockerfile
+            # (slow, but always works). minds tries ``require`` first and falls
+            # back to ``prevent`` on FastPathUnavailableError (see
+            # ``_run_imbue_cloud_create_with_fallback``).
+            if imbue_cloud_fast_mode:
+                mngr_command.extend(["-b", f"fast_mode={imbue_cloud_fast_mode}"])
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -698,6 +719,7 @@ def run_mngr_create(
     imbue_cloud_account: str | None = None,
     imbue_cloud_repo_url: str | None = None,
     imbue_cloud_branch_or_tag: str | None = None,
+    imbue_cloud_fast_mode: str | None = None,
     anthropic_api_key: str | None = None,
     anthropic_base_url: str | None = None,
     gh_token: str | None = None,
@@ -734,6 +756,7 @@ def run_mngr_create(
         imbue_cloud_account=imbue_cloud_account,
         imbue_cloud_repo_url=imbue_cloud_repo_url,
         imbue_cloud_branch_or_tag=imbue_cloud_branch_or_tag,
+        imbue_cloud_fast_mode=imbue_cloud_fast_mode,
         latchkey_env=latchkey_env,
     )
 
@@ -1247,31 +1270,44 @@ class AgentCreator(MutableModel):
 
                 parsed_host = HostName(host_name)
                 log_queue.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))
-                canonical_id, canonical_host_id = run_mngr_create(
-                    launch_mode=launch_mode,
-                    workspace_dir=workspace_dir,
-                    host_name=parsed_host,
-                    on_output=emit_log,
-                    latchkey_env=latchkey_setup.env,
-                    imbue_cloud_account=account_email if launch_mode is LaunchMode.IMBUE_CLOUD else None,
-                    # Don't constrain the lease on ``repo_url`` here:
-                    # ``repo_source`` is whatever the user picked in the UI
-                    # (often a local FCT clone path), but pool hosts are
-                    # operator-baked with whatever ``--attributes`` JSON the
-                    # admin chose -- typically ``cpus``/``memory_gb``/
-                    # ``repo_branch_or_tag`` and not ``repo_url``. Including
-                    # ``repo_url`` here would make every lease request fail
-                    # the JSONB ``@>`` match. Constraining on
-                    # ``repo_branch_or_tag`` (when minds knows it) is enough
-                    # to pick the right pool generation.
-                    imbue_cloud_branch_or_tag=(
-                        branch_or_tag if launch_mode is LaunchMode.IMBUE_CLOUD and branch_or_tag else None
-                    ),
-                    anthropic_api_key=effective_anthropic_api_key,
-                    anthropic_base_url=effective_anthropic_base_url,
-                    gh_token=gh_token if gh_token else None,
-                    parent_cg=self.root_concurrency_group,
-                )
+
+                # ``fast_mode`` is only meaningful for IMBUE_CLOUD; the helper
+                # below threads it through. Defined as a closure so it captures
+                # all the per-creation locals without a wide kwargs dict.
+                def _attempt_create(fast_mode: str | None) -> tuple[AgentId, HostId]:
+                    return run_mngr_create(
+                        launch_mode=launch_mode,
+                        workspace_dir=workspace_dir,
+                        host_name=parsed_host,
+                        on_output=emit_log,
+                        latchkey_env=latchkey_setup.env,
+                        imbue_cloud_account=account_email if launch_mode is LaunchMode.IMBUE_CLOUD else None,
+                        # Don't constrain the lease on ``repo_url`` here:
+                        # ``repo_source`` is whatever the user picked in the UI
+                        # (often a local FCT clone path), but pool hosts are
+                        # operator-baked with whatever ``--attributes`` JSON the
+                        # admin chose -- typically ``cpus``/``memory_gb``/
+                        # ``repo_branch_or_tag`` and not ``repo_url``. Including
+                        # ``repo_url`` here would make every lease request fail
+                        # the JSONB ``@>`` match. Constraining on
+                        # ``repo_branch_or_tag`` (when minds knows it) is enough
+                        # to pick the right pool generation.
+                        imbue_cloud_branch_or_tag=(
+                            branch_or_tag if launch_mode is LaunchMode.IMBUE_CLOUD and branch_or_tag else None
+                        ),
+                        imbue_cloud_fast_mode=fast_mode,
+                        anthropic_api_key=effective_anthropic_api_key,
+                        anthropic_base_url=effective_anthropic_base_url,
+                        gh_token=gh_token if gh_token else None,
+                        parent_cg=self.root_concurrency_group,
+                    )
+
+                if launch_mode is LaunchMode.IMBUE_CLOUD:
+                    canonical_id, canonical_host_id = self._create_imbue_cloud_with_fallback(
+                        _attempt_create, log_queue
+                    )
+                else:
+                    canonical_id, canonical_host_id = _attempt_create(None)
 
                 # Now that we know the canonical host id, point the
                 # opaque permissions handle (which the JWT references)
@@ -1375,6 +1411,34 @@ class AgentCreator(MutableModel):
                 self._errors[cid_str] = str(e)
         finally:
             log_queue.put(LOG_SENTINEL)
+
+    def _create_imbue_cloud_with_fallback(
+        self,
+        attempt_create: Callable[[str | None], tuple[AgentId, HostId]],
+        log_queue: queue.Queue[str],
+    ) -> tuple[AgentId, HostId]:
+        """Try the fast (adopt) path, then fall back to the slow (rebuild) path.
+
+        The first attempt requests ``fast_mode=require`` -- the imbue_cloud
+        provider adopts a pre-baked pool host whose attributes exactly match.
+        If none is available the provider raises ``FastPathUnavailableError``,
+        which surfaces through ``mngr create``'s stderr; minds matches it and
+        retries with ``fast_mode=prevent``, which leases any available host and
+        rebuilds it from the FCT Dockerfile (full client-side setup). Any other
+        failure (including a genuinely empty pool) propagates unchanged.
+        """
+        log_queue.put("[minds] Trying fast path (adopt a matching pre-baked pool host)...")
+        try:
+            return attempt_create(_FAST_MODE_REQUIRE)
+        except MngrCommandError as exc:
+            if _FAST_PATH_UNAVAILABLE_MARKER not in str(exc):
+                raise
+            logger.info("imbue_cloud fast path unavailable; retrying with the slow path (full rebuild)")
+            log_queue.put(
+                "[minds] No matching pre-baked pool host; falling back to slow path (leasing any host "
+                "and rebuilding it). This is slower but always works when the pool has free hosts..."
+            )
+            return attempt_create(_FAST_MODE_PREVENT)
 
     def _prepare_latchkey_or_warn(
         self,
