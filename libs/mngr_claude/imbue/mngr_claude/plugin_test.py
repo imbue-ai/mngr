@@ -3138,17 +3138,17 @@ def test_register_cli_options_returns_none_for_other_commands() -> None:
 # =============================================================================
 
 
-def test_on_before_create_skips_when_no_adopt_session() -> None:
+def test_on_before_create_skips_when_no_adopt_session(temp_mngr_ctx: MngrContext) -> None:
     """on_before_create should return None when adopt_session is not in plugin_data."""
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(agent_type=AgentTypeName("claude")),
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
     )
-    assert on_before_create(args=args) is None
+    assert on_before_create(args=args, mngr_ctx=temp_mngr_ctx) is None
 
 
-def test_on_before_create_passes_with_adopt_session() -> None:
+def test_on_before_create_passes_with_adopt_session(temp_mngr_ctx: MngrContext) -> None:
     """on_before_create should pass when --adopt-session is used with a claude agent."""
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(
@@ -3158,11 +3158,11 @@ def test_on_before_create_passes_with_adopt_session() -> None:
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
     )
-    result = on_before_create(args=args)
+    result = on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
     assert result is None
 
 
-def test_on_before_create_rejects_non_claude_agent_type() -> None:
+def test_on_before_create_rejects_non_claude_agent_type(temp_mngr_ctx: MngrContext) -> None:
     """on_before_create should raise UserInputError for non-claude agent types."""
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(
@@ -3173,11 +3173,11 @@ def test_on_before_create_rejects_non_claude_agent_type() -> None:
         create_work_dir=True,
     )
     with pytest.raises(UserInputError, match="--adopt-session can only be used with the claude agent type"):
-        on_before_create(args=args)
+        on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
 
 
 def test_on_before_create_rejects_adopt_session_with_clone_source(
-    local_provider: LocalProviderInstance, tmp_path: Path
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """on_before_create should raise UserInputError when both --adopt-session
     and a clone source (source_agent_state_location) are passed: each is its
@@ -3196,7 +3196,7 @@ def test_on_before_create_rejects_adopt_session_with_clone_source(
         create_work_dir=True,
     )
     with pytest.raises(UserInputError, match="incompatible with cloning via --from"):
-        on_before_create(args=args)
+        on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
 
 
 # =============================================================================
