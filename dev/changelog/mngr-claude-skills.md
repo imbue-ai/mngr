@@ -17,3 +17,7 @@ claude-plugin`). The repo dogfoods the published plugin by enabling it in
 `message-agent` and `wait-for-agent` now use the verbatim agent name when it
 matches a live agent exactly, only falling back to `find-agent` resolution
 when the exact name does not match.
+
+`scripts/claude_update_plugin.sh` now refreshes `imbue-mngr-skills@imbue-mngr`
+on SessionStart alongside `imbue-code-guardian`, so the dogfooded skills stay
+current with the marketplace.
