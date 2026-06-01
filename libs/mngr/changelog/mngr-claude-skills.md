@@ -9,7 +9,9 @@ both:
   `find-agent` skills for coordinating mngr agents, now published from a
   marketplace hosted in the mngr repo itself.
 
-With an interactive terminal the step shows a picker of the not-yet-installed
-plugins (plus an "Install all" option); `mngr extras claude-plugin -y`
-auto-installs every plugin that is not already present. `mngr extras` status
-output reports each plugin's installed/not-installed state individually.
+With an interactive terminal the step shows a checkbox picker of the
+not-yet-installed plugins (all preselected; Space toggles, Enter confirms),
+matching the multi-select UI of the `mngr extras plugins` wizard;
+`mngr extras claude-plugin -y` auto-installs every plugin that is not already
+present. `mngr extras` status output reports each plugin's
+installed/not-installed state individually.

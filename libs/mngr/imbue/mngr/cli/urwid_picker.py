@@ -1,9 +1,10 @@
-"""Single-select urwid picker for CLI prompts.
+"""urwid pickers for CLI prompts.
 
 Replaces text-mode prompts (`[y/n]:`, `[1-N]:`) in the `mngr extras`
-subcommands with a navigable TUI list. Modeled on the multi-select
-checkbox screen in `plugin_install_wizard._run_selection_screen` but
-single-select: Enter immediately confirms the focused row.
+subcommands with a navigable TUI list. Provides a single-select picker
+(Enter immediately confirms the focused row) and a multi-select picker
+(Space toggles a checkbox per row, Enter confirms the set), both modeled
+on the checkbox screen in `plugin_install_wizard._run_selection_screen`.
 """
 
 from collections.abc import Sequence
@@ -17,6 +18,7 @@ from urwid.widget.listbox import ListBox
 from urwid.widget.listbox import SimpleFocusListWalker
 from urwid.widget.pile import Pile
 from urwid.widget.text import Text
+from urwid.widget.wimp import CheckBox
 from urwid.widget.wimp import SelectableIcon
 
 from imbue.imbue_common.mutable_model import MutableModel
@@ -128,3 +130,81 @@ def run_single_select_picker(
         return None
 
     return listbox.focus_position
+
+
+def run_multi_select_picker(
+    options: Sequence[str],
+    *,
+    title: str,
+    header_text: str,
+    preselected: Sequence[bool] | None = None,
+) -> list[int] | None:
+    """Show a multi-select urwid picker with one checkbox per option.
+
+    Space toggles the focused checkbox, Enter confirms the current set,
+    and q / Ctrl+C cancels. Returns the indices of the checked options
+    (possibly empty if the user confirmed with nothing checked), or None
+    if the user cancelled. ``preselected`` (if given) must be the same
+    length as ``options`` and sets the initial checked state of each row.
+    Caller is responsible for ensuring an interactive terminal is
+    available before calling.
+    """
+    if not options:
+        return None
+
+    if preselected is None:
+        preselected = [False] * len(options)
+    elif len(preselected) != len(options):
+        raise ValueError("preselected must be the same length as options")
+
+    # The shared _PickerInputFilter intercepts Enter and q/Ctrl+C but lets
+    # Space pass through to the focused CheckBox, which toggles on Space.
+    checkboxes = [CheckBox(label, state=initial) for label, initial in zip(options, preselected, strict=True)]
+    list_items = [AttrMap(cb, None, focus_map="reversed") for cb in checkboxes]
+    list_walker: SimpleFocusListWalker[AttrMap] = SimpleFocusListWalker(list_items)
+    listbox = ListBox(list_walker)
+
+    state = _PickerState()
+
+    header = Pile(
+        [
+            AttrMap(Text(title, align="center"), "header"),
+            Divider(),
+            Text(header_text),
+            Divider(),
+        ]
+    )
+
+    footer = Pile(
+        [
+            Divider(),
+            AttrMap(
+                Text("  Space: Toggle | Up/Down: Navigate | Enter: Confirm | q/Ctrl+C: Cancel"),
+                "status",
+            ),
+        ]
+    )
+
+    frame = Frame(body=listbox, header=header, footer=footer)
+
+    palette = [
+        ("header", "white", "dark blue"),
+        ("status", "white", "dark blue"),
+        ("reversed", "standout", ""),
+    ]
+
+    input_filter = _PickerInputFilter(state=state)
+
+    with create_urwid_screen_preserving_terminal() as screen:
+        loop = MainLoop(
+            frame,
+            palette=palette,
+            input_filter=input_filter,
+            screen=screen,
+        )
+        loop.run()
+
+    if not state.is_confirmed:
+        return None
+
+    return [index for index, cb in enumerate(checkboxes) if cb.get_state()]

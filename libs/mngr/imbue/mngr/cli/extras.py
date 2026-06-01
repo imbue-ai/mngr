@@ -26,6 +26,7 @@ from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.plugin_install_wizard import install_wizard_impl
+from imbue.mngr.cli.urwid_picker import run_multi_select_picker
 from imbue.mngr.cli.urwid_picker import run_single_select_picker
 from imbue.mngr.cli.urwid_utils import has_interactive_terminal
 from imbue.mngr.config.host_dir import read_default_host_dir
@@ -235,29 +236,20 @@ def _install_one_claude_plugin(plugin: ClaudeCodePlugin) -> bool:
 def _prompt_claude_plugins_choice(candidates: tuple[ClaudeCodePlugin, ...]) -> tuple[ClaudeCodePlugin, ...]:
     """Ask the user which of the not-yet-installed plugins to install.
 
-    Presents one row per candidate, an "Install all" row when more than one
-    candidate is offered, and a trailing "Skip" row. Returns the chosen
-    plugins (empty when the user skips or cancels). Caller must check
+    Presents a checkbox per candidate (all preselected), toggled with
+    Space and confirmed with Enter. Returns the checked plugins (empty
+    when the user unchecks everything or cancels). Caller must check
     ``has_interactive_terminal()`` first.
     """
-    install_all_offered = len(candidates) > 1
-    options = [f"Install {plugin.label}" for plugin in candidates]
-    if install_all_offered:
-        options.append("Install all of the above")
-    options.append("Skip")
-
-    idx = run_single_select_picker(
-        options=options,
+    selected_indices = run_multi_select_picker(
+        options=[plugin.label for plugin in candidates],
         title="mngr extras",
-        header_text="Install Claude Code plugins:",
+        header_text="Select Claude Code plugins to install:",
+        preselected=[True] * len(candidates),
     )
-    if idx is None:
+    if selected_indices is None:
         return ()
-    if idx < len(candidates):
-        return (candidates[idx],)
-    if install_all_offered and idx == len(candidates):
-        return candidates
-    return ()
+    return tuple(candidates[index] for index in selected_indices)
 
 
 def _install_claude_plugin(
