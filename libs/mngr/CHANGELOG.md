@@ -6,6 +6,22 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: New repeatable `--post-host-create-command` flag on `mngr create` that runs shell commands inside a newly-created host synchronously after the host is online but before any agent work_dir is touched. Stackable from `create_templates.<name>` via `post_host_create_command__extend = [...]`. Replaces the FCT-specific `use_image_default_cmd` opt-out and the defensive `--workdir /` exec override.
+
+### Changed
+
+- Changed: Docker provider untags the per-host build image (`mngr-build-<host_id>`) on `destroy_host` (and again, defensively, on `delete_host`) so built images no longer pile up in `docker images`. Snapshot images keep their own layers.
+- Changed: `mngr destroy` now actually destroys a host when its last agent is destroyed, regardless of `min_online_host_age_seconds`. Ghost-only matches (agents returned by discover but absent from the host's own `get_agents()`) escalate to `provider.destroy_host` instead of silently dropping the match, and a post-loop sweep re-checks `host.get_agents()` and calls `destroy_host` directly when empty. Cloud-side resources are released immediately rather than waiting for the destroyed-host grace period.
+- Changed: `build_check_and_install_packages_command` (`providers/ssh_host_setup.py`) now `mkdir -p`s the symlink target before creating the `host_dir` symlink, so the docker_vps unified-volume layout can seed `<volume>/host_dir` before pointing `/mngr` at it.
+- Changed: Regenerated the CLI reference docs to include the new `mngr imbue_cloud bucket` command group.
+- Changed: Installed `restic` in the mngr Docker image (`libs/mngr/imbue/mngr/resources/Dockerfile`) so the offload test image exercises a real local restic repository, matching the minds app's new runtime dependency.
+
+### Fixed
+
+- Fixed: The default `discover_hosts_and_agents` now tolerates per-host SSH failures. `HostConnectionError` / `HostAuthenticationError` / `HostOfflineError` are caught per host, `on_connection_error(host_id)` is invoked so providers can drop wedged cache entries, and broken hosts fall back to `to_offline_host(host_id).discover_agents()` so the rest of the provider's hosts (and their agents) come through normally. Previously a single unreachable host blanked the entire provider's discovery, which 503'd every workspace through `mngr_forward` and tripped minds' recovery page for healthy workspaces.
+
 ## [v0.2.9] - 2026-05-28
 
 ### Added

@@ -4,6 +4,89 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-05-30
+
+Tolerate per-host SSH failures during provider agent enumeration.
+
+A single unreachable host (sshd hang, banner reset, auth failure) used to make the default `discover_hosts_and_agents` raise a `HostConnectionError` from the per-host futures loop. That bubbled up to `_construct_and_discover_for_provider` and was recorded as a whole-provider failure, so the resulting `DISCOVERY_FULL` event reported `agents=[]` / `hosts=[]` for the entire provider. Downstream, `mngr_forward`'s resolver blanked its known-agents set and every workspace on that provider became unreachable through the forward plugin -- so one broken Docker container could 503 every other workspace on the same daemon and trip minds' recovery page even for perfectly healthy workspaces.
+
+The default `discover_hosts_and_agents` now catches `HostConnectionError` (and its `HostAuthenticationError` / `HostOfflineError` subclasses) per host and recovers the broken host's agents from the provider's offline view (described below) so the rest of the provider's hosts (and their agents) come through normally. The except block also calls `self.on_connection_error(host_id)` -- matching the contract honored elsewhere in the file -- so providers that cache per-host state (docker's container cache, modal/lima/vps_docker host caches) drop the wedged entry instead of replaying the same stale handle on the next discovery cycle.
+
+Per-host connection errors fall back to the provider's offline view (`to_offline_host(host_id).discover_agents()`). This means a docker container whose sshd has died but whose process is still RUNNING preserves its agents in discovery, mirroring the behavior of a fully-stopped container -- the workspaces stay visible on minds' landing page instead of vanishing on the first SSE poll after sshd dies. The fallback assumes any provider whose hosts can raise `HostConnectionError` implements `to_offline_host`: the local provider never opens a connection (so it never reaches this path), and remote providers persist host/agent state. If `to_offline_host` instead fails -- `NotImplementedError` (no offline view) or `HostNotFoundError` (no persisted record for a host that was just discovered) -- that signals a broken invariant and is allowed to propagate as a per-provider `ProviderDiscoveryError` rather than being masked as an empty agent list. The SSH provider does not yet implement `to_offline_host` (tracked by a FIXME on the class), so an unreachable SSH host currently surfaces as such an error.
+
+## 2026-05-29
+
+- Docker provider: the per-host build image (`mngr-build-<host_id>`) is now untagged when a host is destroyed (and again, defensively, when it is deleted), so built images no longer pile up in `docker images`. Snapshot restore is unaffected -- snapshot images keep their own layers.
+
+Regenerated the CLI reference docs to include the new `mngr imbue_cloud bucket`
+command group (R2 bucket + scoped-key management) added by the mngr_imbue_cloud
+plugin.
+
+`mngr destroy` now actually destroys the host when the last agent on it
+is destroyed -- the documented contract -- regardless of how recently the
+host was created. Previously this fired through the post-destroy GC pass,
+which gates on `min_online_host_age_seconds` (default 10 minutes), so any
+host destroyed within minutes of creation leaked its cloud-side resources
+(e.g. an active imbue_cloud lease, a Vultr VPS) until the 7-day
+destroyed-host grace period eventually triggered `provider.delete_host`.
+
+Two changes in `destroy.py`:
+
+1. **Partition step reconciles discover-vs-on-host disagreement.** When
+   every matched agent is a "ghost" -- returned by the provider's discover
+   but absent from the host's own `get_agents()` -- the destroy CLI now
+   escalates to host-level destruction (`provider.destroy_host`) instead
+   of silently dropping the match. This is what was producing the
+   "No agents found" message when the same agent was destroyed twice on
+   an imbue_cloud-leased host: the first destroy removed `/mngr/agents/<id>/`
+   on the VPS but the connector's lease list still reported the agent.
+
+2. **Post-loop sweep destroys hosts whose last agent was just destroyed.**
+   For each online host that had at least one agent destroyed in this
+   invocation, the destroy CLI now re-checks `host.get_agents()` and, if
+   empty, calls `provider.destroy_host` directly. Bypasses the GC's
+   `min_online_host_age_seconds` filter; the GC pass that runs immediately
+   after is the safety net for transient failures.
+
+Net effect: cloud-side resources are released the moment `mngr destroy`
+returns, and the destroyed-host grace period only retains historical
+state -- aligning all provider types with the same semantic that the
+docker / mngr_vps_docker / imbue_cloud `destroy_host` implementations
+already implement individually.
+
+## New: `--post-host-create-command`
+
+`mngr create` learns a new repeatable flag, `--post-host-create-command`,
+that runs one or more shell commands inside a newly-created host
+synchronously after the host is online but before any agent work_dir is
+touched. Each command runs in order via the host's normal exec path; a
+non-zero exit aborts the create. Stackable from `create_templates.<name>`
+via `post_host_create_command__extend = [...]`.
+
+Motivation: an image may need first-boot setup (e.g.
+forever-claude-template seeds a baked workspace from `/docker_build_code`
+onto its `/mngr/` volume) that must complete before mngr's git mirror
+push or any other work_dir setup. Until now this had to be encoded in the
+container's `CMD`, which raced against mngr's `docker exec` calls and
+required an FCT-specific `use_image_default_cmd` opt-out in
+`mngr_vps_docker` / `providers.docker`. The opt-out and the
+defensive `--workdir /` exec override (from commits `d77714cdf` /
+`55c420c35`) are reverted in the same commit -- the new generic hook
+replaces both.
+
+Install `restic` in the mngr Docker image (`libs/mngr/imbue/mngr/resources/Dockerfile`).
+
+This is the offload test image; the minds app now requires `restic` on the
+machine running it (it initializes each workspace's backup repository
+itself), and its tests exercise a real local restic repository, so restic
+must be present in the test environment.
+
+`build_check_and_install_packages_command` (in `providers/ssh_host_setup.py`) now
+`mkdir -p` the symlink target before creating the `host_dir` symlink. The local
+`docker` provider already creates that subdirectory eagerly so it's a safe no-op
+there; the new docker_vps unified-volume layout relies on the in-script mkdir to
+seed `<volume>/host_dir` before pointing `/mngr` at it.
+
 ## 2026-05-28
 
 # `is_allowed_in_pytest` now defaults to False, and the `MNGR_ALLOW_PYTEST` escape hatch is gone
