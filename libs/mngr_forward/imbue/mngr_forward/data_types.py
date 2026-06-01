@@ -22,25 +22,21 @@ class SystemInterfaceBackendFailureReason(UpperCaseStrEnum):
     - ``CONNECT_ERROR``: the plugin could not establish a connection to
       the backend (httpx.ConnectError / RemoteProtocolError before any
       response bytes, or a failure setting up the SSH tunnel to a remote
-      backend -- e.g. when the agent's container has been stopped).
+      backend -- e.g. when the agent's host has gone away).
     - ``SSE_EOF``: the backend dropped the response stream after some
       bytes had already been delivered. Despite the name (motivated by
       the SSE forwarding path that originally surfaced this), it also
       covers non-SSE mid-response read failures.
-    - ``FIVEXX_RESPONSE``: the backend returned a 502/503/504. Other 5xx
-      codes (e.g. application-layer 500s) are *not* tagged as failures.
-    - ``NOT_FOUND_RESPONSE``: the backend answered a ``GET`` with a 404. The
-      real system interface serves its SPA index for every unmatched ``GET``
-      (a catch-all route), so it never 404s a page/route load -- a 404 reaching
-      the proxy means whatever is answering on the port is not behaving like
-      the system interface (e.g. a different process has bound the port).
+    - ``ERROR_RESPONSE``: the backend answered with a non-2xx HTTP status.
+      ``status_code`` carries the code. The plugin forwards the response
+      unchanged and does not interpret which codes matter -- the consumer
+      decides whether (and how) to react to a given status.
     - ``UNRESOLVED``: the backend resolver had no entry for the agent.
     """
 
     CONNECT_ERROR = auto()
     SSE_EOF = auto()
-    FIVEXX_RESPONSE = auto()
-    NOT_FOUND_RESPONSE = auto()
+    ERROR_RESPONSE = auto()
     UNRESOLVED = auto()
 
 
@@ -91,7 +87,7 @@ class SystemInterfaceBackendFailurePayload(FrozenModel):
     """Emitted when the plugin observes a per-agent backend failure.
 
     The plugin's role is observation only: it surfaces the kind of failure
-    it saw (connect error, mid-SSE EOF, 5xx response, 404 GET) so the
+    it saw (connection failure, mid-stream EOF, or a non-2xx response) so the
     minds-side ``SystemInterfaceHealthTracker`` can apply policy (e.g. 5s
     HEALTHY -> STUCK transition).
     """
@@ -101,7 +97,7 @@ class SystemInterfaceBackendFailurePayload(FrozenModel):
     reason: SystemInterfaceBackendFailureReason = Field(description="Why the forward attempt failed")
     status_code: int | None = Field(
         default=None,
-        description="HTTP status code returned by the backend (set when reason is FIVEXX_RESPONSE or NOT_FOUND_RESPONSE)",
+        description="HTTP status code returned by the backend (set when reason is ERROR_RESPONSE; None otherwise)",
     )
 
 
@@ -109,10 +105,9 @@ class ResolverSnapshotPayload(FrozenModel):
     """Emitted on every resolver mutation: full per-agent service map.
 
     Carries the full ``{agent_id: {service_name: url}}`` map held by the
-    plugin's ``ForwardResolver`` at the moment of mutation. Consumers
-    (notably minds' recovery-diagnostics path) keep the latest copy in
-    process state so the recovery page can render whether the plugin has
-    seen the system_interface service for a given agent.
+    plugin's ``ForwardResolver`` at the moment of mutation. A consumer can
+    keep the latest copy in process state to mirror which services the
+    plugin has resolved for a given agent (e.g. for diagnostics).
 
     The full map is sent on every change (no per-agent diff) so a consumer
     that connects late only needs the most recent envelope to be in sync.

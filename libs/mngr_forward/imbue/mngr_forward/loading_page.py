@@ -1,12 +1,13 @@
 """The canonical "Loading workspace" page.
 
 A single source of truth for the loading screen so the mngr_forward proxy
-loader and the minds recovery page render the *same* HTML in their loading
-state -- rather than two hand-matched markups that drift apart.
+loader and any downstream consumer's loading/recovery page render the *same*
+HTML in their loading state -- rather than two hand-matched markups that drift
+apart.
 
-The proxy serves it as a static auto-refreshing page; the minds recovery page
-reuses it and layers its own restart controls and script on top via the
-``card_extra`` / ``style_extra`` / ``body_extra`` hooks.
+The proxy serves it as a static auto-refreshing page; a consumer can reuse it
+and layer its own controls and script on top via the ``card_extra`` /
+``style_extra`` / ``body_extra`` hooks.
 """
 
 from typing import Final
@@ -53,11 +54,11 @@ LOADING_PAGE_CSS: Final[str] = """\
       @keyframes spin { to { transform: rotate(360deg); } }
 """
 
-# The default heading/message. The minds recovery page overrides these at
-# runtime (via its script) for non-loading states, but the initial render --
-# and the proxy loader always -- shows this. The loading state has no message;
-# the empty <p> stays in the markup so the recovery script can populate it for
-# the other states.
+# The default heading/message. A consumer may override these at runtime (via
+# its own script) for non-loading states, but the initial render -- and the
+# proxy loader always -- shows this. The loading state has no message; the
+# empty <p> stays in the markup so a consumer's script can populate it for the
+# other states.
 _LOADING_TITLE: Final[str] = "Loading workspace"
 _LOADING_MESSAGE: Final[str] = ""
 

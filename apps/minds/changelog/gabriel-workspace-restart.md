@@ -42,6 +42,12 @@ Tiered system-interface restart for the minds recovery flow.
   probe loop confirms it unreachable with a sustained run of failed HTTP
   probes; a single transient backend hiccup (such as a recycled SSE
   stream) merely starts active probing instead of triggering recovery.
+- The forwarding plugin now reports every non-2xx backend response (it no
+  longer pre-filters to specific status codes), so minds decides which
+  ones matter: only connection-level failures and infrastructure 5xx
+  (502/503/504) enroll an agent for active probing. Application errors
+  (app 500s, ordinary 4xx) are ignored on the failure-envelope path and
+  left for the background probe to adjudicate.
 - Minds' HTTP calls through the forwarding plugin -- the
   workspace-readiness / health probes and the refresh-service broadcast
   POST -- now connect to the plugin over loopback and carry the agent's

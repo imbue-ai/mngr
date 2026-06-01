@@ -2,12 +2,38 @@
 
 import threading
 
+import pytest
+
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.system_interface_health import should_enroll_suspect_for_backend_failure
 from imbue.mngr.primitives import AgentId
 
 # Short STUCK threshold so the probe-failure-run tests don't have to sleep 5s.
 _FAST_THRESHOLD: float = 0.05
+
+
+@pytest.mark.parametrize(
+    "status_code,expected",
+    [
+        # Connection-level failure (no HTTP status) always enrolls.
+        (None, True),
+        # Infrastructure 5xx: the backend is unreachable / not serving.
+        (502, True),
+        (503, True),
+        (504, True),
+        # Application errors: the backend is alive and responding, so they
+        # don't enroll -- the background probe adjudicates a wedged backend.
+        (500, False),
+        (404, False),
+        (401, False),
+        (400, False),
+        # A success that somehow reached the failure path must not enroll.
+        (200, False),
+    ],
+)
+def test_should_enroll_suspect_for_backend_failure(status_code: int | None, expected: bool) -> None:
+    assert should_enroll_suspect_for_backend_failure(status_code) is expected
 
 
 def _sleep(seconds: float) -> None:
