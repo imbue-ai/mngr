@@ -1,4 +1,4 @@
-const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app, session, screen } = require('electron');
+const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app, session, screen, clipboard } = require('electron');
 const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
@@ -476,12 +476,19 @@ function registerShortcutsFor(bundle, wc) {
 // request-page links keep working. The `setImmediate` defer around
 // openExternal follows Electron's security guide.
 function applyExternalLinkHandling(wc) {
-  // Defer per Electron's security guide. shell.openExternal returns a Promise;
-  // swallow rejections (e.g. the OS has no handler for the scheme) so a failed
-  // open degrades to a no-op instead of becoming an unhandled rejection, which
-  // terminates the main process under the bundled Node runtime.
+  // Defer per Electron's security guide. shell.openExternal returns a Promise
+  // that rejects when the OS has no handler for the scheme -- realistic for
+  // mailto:/tel: on machines with no mail client or dialer configured. We must
+  // catch (an unhandled rejection terminates the main process under the bundled
+  // Node runtime), but rather than silently no-op we log and surface the failure
+  // to the user so the click is recoverable instead of vanishing.
   const openInBrowser = (url) => {
-    setImmediate(() => { shell.openExternal(url).catch(() => {}); });
+    setImmediate(() => {
+      shell.openExternal(url).catch((err) => {
+        console.warn('[external-link] failed to open', url, err);
+        notifyOpenFailed(url);
+      });
+    });
   };
   wc.setWindowOpenHandler(({ url }) => {
     if (isExternalUrl(url)) {
@@ -501,6 +508,28 @@ function applyExternalLinkHandling(wc) {
     details.preventDefault();
     openInBrowser(details.url);
   });
+}
+
+// Surface a failed shell.openExternal to the user instead of letting the click
+// vanish. For mailto:/tel: the useful payload is the bare address (to paste into
+// webmail or a dialer), not the scheme-prefixed URL, so copy that.
+function notifyOpenFailed(url) {
+  let scheme = '';
+  try {
+    scheme = new URL(url).protocol.replace(':', '');
+  } catch {
+    // Unparseable url -- fall through with an empty scheme and copy it verbatim.
+  }
+  const isAddressScheme = scheme === 'mailto' || scheme === 'tel';
+  const payload = isAddressScheme ? url.slice(url.indexOf(':') + 1) : url;
+  clipboard.writeText(payload);
+  const what = scheme === 'mailto' ? 'email address'
+    : scheme === 'tel' ? 'phone number'
+    : 'link';
+  new Notification({
+    title: "Couldn't open link",
+    body: `No app is set up to handle this ${what}. It has been copied to your clipboard.`,
+  }).show();
 }
 
 // -- Sidebar / requests panel helpers (per-bundle) --
