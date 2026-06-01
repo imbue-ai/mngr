@@ -748,9 +748,8 @@ def test_subdomain_forward_emits_system_interface_backend_failure_on_sse_startup
     ``httpx.RemoteProtocolError`` from ``http_client.send(..., stream=True)``.
     That exception was not caught by the SSE branch (only ``ConnectError``
     and ``TimeoutException`` were), so it bubbled up through starlette as a
-    500 and no failure envelope was emitted -- meaning the minds-side health
-    tracker never transitioned to STUCK and the chrome never navigated to
-    the recovery page.
+    500 and no failure envelope was emitted -- meaning a consumer had no
+    signal to drive recovery.
     """
     agent_id = AgentId()
     preauth = "preauth-cookie-sse-startup"
@@ -816,9 +815,9 @@ def test_subdomain_forward_emits_system_interface_backend_failure_on_sse_startup
 
     Regression test: a wedged-but-listening backend produces a
     ``httpx.TimeoutException`` (not ``ConnectError``) when ``send(..., stream=True)``
-    waits for response headers that never arrive. Without an envelope on
-    this branch the minds-side tracker would never transition to STUCK
-    for hung-in-user-code backends.
+    waits for response headers that never arrive. Without an envelope a
+    consumer would have no signal that a hung-in-user-code backend is
+    failing.
     """
     agent_id = AgentId()
     preauth = "preauth-cookie-sse-timeout"
