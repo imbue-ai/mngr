@@ -150,11 +150,23 @@ def snap(name: str) -> None:
 
 
 async def snap_page(page: Page, name: str) -> None:
-    """Both Playwright per-page shot AND macOS desktop shot."""
+    """Both Playwright per-page shot AND macOS desktop shot.
+
+    Raise this page's BrowserWindow to the top of the macOS z-order
+    BEFORE the screencapture; otherwise the full-desktop shot just
+    captures whatever Minds window the WindowServer has at front
+    (usually still the original /welcome window because Playwright
+    routes UI events through CDP, never through a real mouse click
+    that would update WindowServer focus).
+    """
     try:
         await page.set_viewport_size({"width": 1280, "height": 800})
     except Exception:
         pass
+    try:
+        await page.bring_to_front()
+    except Exception as e:
+        logger.warning("  bring_to_front[{}] failed: {}", name, e)
     try:
         await page.screenshot(path=str(SCREENSHOT_DIR / f"{name}.win.png"), full_page=True)
     except Exception as e:
