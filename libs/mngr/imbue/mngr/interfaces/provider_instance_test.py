@@ -343,3 +343,103 @@ def test_build_agent_details_from_offline_ref_omits_none_field_values(host_id: H
     agent_details = build_agent_details_from_offline_ref(agent_ref, host_details, offline_field_generators)
 
     assert agent_details.plugin == {"plugin_a": {"present": "yes"}}
+
+
+def test_discover_hosts_and_agents_tolerates_per_host_connection_error(
+    provider: MockProviderInstance, temp_mngr_ctx: MngrContext
+) -> None:
+    """One host's HostConnectionError must not poison the provider's whole enumeration.
+
+    A wedged container (sshd hang, banner reset, auth failure) used to abort
+    the provider's entire discovery, which downstream blanked the discovery
+    snapshot and broke mngr_forward's resolver for every workspace. The
+    unreachable host now falls back to its offline view (here yielding no
+    persisted agents) while the rest of the provider's hosts come through
+    normally.
+    """
+    healthy_host_id = HostId.generate()
+    broken_host_id = HostId.generate()
+    healthy_agent_id = AgentId.generate()
+    healthy_agent_ref = _make_agent_ref(healthy_host_id, healthy_agent_id, provider.name)
+
+    healthy_host = MagicMock(spec=HostInterface)
+    healthy_host.id = healthy_host_id
+    healthy_host.get_name.return_value = HostName("healthy-host")
+    healthy_host.get_state.return_value = HostState.RUNNING
+    healthy_host.discover_agents.return_value = [healthy_agent_ref]
+
+    broken_host = MagicMock(spec=HostInterface)
+    broken_host.id = broken_host_id
+    broken_host.get_name.return_value = HostName("broken-host")
+    broken_host.get_state.return_value = HostState.RUNNING
+    broken_host.discover_agents.side_effect = HostConnectionError("SSH error (Error reading SSH protocol banner)")
+
+    provider.mock_hosts = [healthy_host, broken_host]
+    # The broken host has an offline view (mock_agent_data is empty, so it
+    # yields no agents). Without one, to_offline_host would raise and -- since
+    # the offline fallback no longer swallows that -- re-poison the provider.
+    provider.mock_offline_hosts = {str(broken_host_id): _make_offline_host(broken_host_id, provider, temp_mngr_ctx)}
+
+    results = provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
+
+    healthy_ref = next(ref for ref in results if ref.host_id == healthy_host_id)
+    assert results[healthy_ref] == [healthy_agent_ref]
+
+    broken_ref = next(ref for ref in results if ref.host_id == broken_host_id)
+    assert results[broken_ref] == []
+
+    # The connected_host context manager's finally must still run on the
+    # failure path, so both hosts had disconnect() called.
+    healthy_host.disconnect.assert_called_once()
+    broken_host.disconnect.assert_called_once()
+
+    # The cache-invalidation hook must fire for the broken host so providers
+    # that cache per-host state (docker/modal/lima/vps_docker) drop the
+    # wedged entry instead of replaying it on the next discovery cycle.
+    assert provider.connection_errors_cleared == [broken_host_id]
+
+
+def test_discover_hosts_and_agents_falls_back_to_offline_on_connection_error(
+    provider: MockProviderInstance, temp_mngr_ctx: MngrContext
+) -> None:
+    """When the online path raises HostConnectionError but the provider has
+    an offline view (e.g. a docker container that is still RUNNING but
+    whose sshd has died), agents from the offline view should populate the
+    discovery result. This mirrors the behavior of a fully-stopped
+    container, whose agents remain visible via the offline path.
+    """
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+
+    broken_host = MagicMock(spec=HostInterface)
+    broken_host.id = host_id
+    broken_host.get_name.return_value = HostName("ssh-dead-host")
+    broken_host.get_state.return_value = HostState.RUNNING
+    broken_host.discover_agents.side_effect = HostConnectionError("Error reading SSH protocol banner")
+
+    offline_host = _make_offline_host(host_id, provider, temp_mngr_ctx)
+    provider.mock_hosts = [broken_host]
+    provider.mock_offline_hosts = {str(host_id): offline_host}
+    provider.mock_agent_data = [
+        {
+            "id": str(agent_id),
+            "name": "ssh-dead-agent",
+            "labels": {"workspace": "ws-42", "is_primary": "true"},
+        }
+    ]
+
+    results = provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
+
+    host_ref = next(iter(results))
+    assert host_ref.host_id == host_id
+    offline_agents = results[host_ref]
+    assert len(offline_agents) == 1
+    assert offline_agents[0].agent_id == agent_id
+    # Labels must be preserved through the offline fallback so downstream
+    # consumers (e.g. minds, which filters on workspace/is_primary labels)
+    # do not silently drop the agents.
+    assert offline_agents[0].labels == {"workspace": "ws-42", "is_primary": "true"}
+
+    # The connected_host cleanup and on_connection_error hook still run.
+    broken_host.disconnect.assert_called_once()
+    assert provider.connection_errors_cleared == [host_id]

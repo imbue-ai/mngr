@@ -22,7 +22,25 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.minds.cli._activated_env import MODAL_PROFILE_ENV_VAR
+from imbue.minds.cli.env import _destroy_agents_and_state_container_for_wipe
 from imbue.minds.cli.env import env
+from imbue.minds.envs.primitives import InvalidDevEnvNameError
+
+
+def test_wipe_teardown_is_noop_without_profile_or_agents(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # With no mngr profile + no agents under the env root, there is nothing to
+    # destroy and the state-container cleanup skips on an unresolved user_id --
+    # a pure no-op that does not raise (no Docker daemon is even contacted).
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _destroy_agents_and_state_container_for_wipe("staging")
+
+
+def test_wipe_teardown_raises_on_invalid_env_name(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Errors are surfaced, not swallowed: a bad env name must raise so the
+    # operator sees the problem rather than silently leaking resources.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    with pytest.raises(InvalidDevEnvNameError):
+        _destroy_agents_and_state_container_for_wipe("not a valid env name!!")
 
 
 @pytest.fixture

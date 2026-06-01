@@ -42,6 +42,7 @@ class MockProviderInstance(BaseProviderInstance):
     deleted_hosts: list[HostId] = Field(default_factory=list)
     deleted_snapshots: list[tuple[HostId, SnapshotId]] = Field(default_factory=list)
     deleted_volumes: list[VolumeId] = Field(default_factory=list)
+    connection_errors_cleared: list[HostId] = Field(default_factory=list)
 
     @property
     def supports_snapshots(self) -> bool:
@@ -101,7 +102,7 @@ class MockProviderInstance(BaseProviderInstance):
         self.deleted_hosts.append(host.id)
 
     def on_connection_error(self, host_id: HostId) -> None:
-        pass
+        self.connection_errors_cleared.append(host_id)
 
     def to_offline_host(self, host_id: HostId) -> OfflineHost:
         offline = self.mock_offline_hosts.get(str(host_id))

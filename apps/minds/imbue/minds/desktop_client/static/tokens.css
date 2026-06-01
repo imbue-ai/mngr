@@ -21,6 +21,16 @@
   --shadow-seam: 0 4px 10px -6px rgba(0, 0, 0, 0.35);
 }
 
+/*
+ * Always reserve space for the scrollbar gutter so that toggling page
+ * height (e.g. expanding the permission dialog's "Adjust" editor) does
+ * not make a classic scrollbar appear/disappear and shift the centered
+ * layout sideways. No-op for macOS-style overlay scrollbars.
+ */
+html {
+  scrollbar-gutter: stable;
+}
+
 .page-workspace::before {
   content: '';
   position: fixed;

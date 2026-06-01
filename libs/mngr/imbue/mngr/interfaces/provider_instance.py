@@ -275,6 +275,15 @@ def _discover_agents_on_host(
     host_id: HostId,
 ) -> list[DiscoveredAgent]:
     """Discover agents on a host, disconnecting afterward."""
+    # FIXME: wrap this in a bounded retry (e.g. tenacity) so a *transient*
+    # connection failure (timeout, connection refused, banner reset) is retried
+    # here rather than immediately surfacing to the caller. The retry predicate
+    # must NOT retry permanent failures (HostAuthenticationError / bad key) --
+    # those should fail fast. This is the right layer for it: retrying here means
+    # a brief network blip never reaches discover_hosts_and_agents' offline
+    # fallback at all, which matters most for providers without an offline view
+    # (e.g. SSH), where a transient blip would otherwise propagate as a
+    # ProviderDiscoveryError.
     with connected_host(provider, host_id) as host:
         return host.discover_agents()
 
@@ -468,7 +477,48 @@ class ProviderInstanceInterface(MutableModel, ABC):
                     host_ref.host_id,
                 )
 
-        return {host_ref: future.result() for host_ref, future in future_by_host_ref.items()}
+        results: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
+        for host_ref, future in future_by_host_ref.items():
+            try:
+                results[host_ref] = future.result()
+            except HostConnectionError as e:
+                # The host was reachable enough to be discovered, but enumerating
+                # its agents failed (sshd crashed, banner reset, auth failure,
+                # ...). Rather than let that bubble up to
+                # _construct_and_discover_for_provider -- which records a
+                # per-provider error and reports agents=[] / hosts=[] for the
+                # WHOLE provider, making every workspace on it unreachable via
+                # mngr_forward -- recover the host's agents from the provider's
+                # offline view.
+                #
+                # First mirror get_host_and_agent_details' on_connection_error
+                # call so providers that cache per-host state (docker's container
+                # cache, modal/lima/vps_docker host caches) drop the wedged entry;
+                # otherwise the next discovery cycle keeps re-hitting the stale
+                # handle.
+                self.on_connection_error(host_ref.host_id)
+                # The offline view recovers the host's persisted records: a docker
+                # container that is RUNNING but whose sshd has died still exposes
+                # its agent records via the docker daemon (labels + on-host-volume
+                # data), so its workspaces stay visible -- matching the behavior of
+                # a fully-stopped container.
+                #
+                # Any provider whose hosts can raise HostConnectionError is assumed
+                # to implement to_offline_host: the local provider never opens a
+                # connection (so it never reaches here), and every remote provider
+                # persists host/agent state. If to_offline_host nonetheless fails
+                # (no offline view, or no persisted record for a host we just
+                # discovered), that signals a broken invariant / corrupt state, so
+                # we let it propagate rather than masking it as an empty agent list.
+                offline_agents = self.to_offline_host(host_ref.host_id).discover_agents()
+                logger.debug(
+                    "Falling back to offline agent enumeration for host {} ({}) after connection error: {}",
+                    host_ref.host_id,
+                    host_ref.host_name,
+                    e,
+                )
+                results[host_ref] = offline_agents
+        return results
 
     @abstractmethod
     def get_host_resources(self, host: HostInterface) -> HostResources:

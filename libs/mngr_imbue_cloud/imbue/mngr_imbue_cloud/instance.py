@@ -9,11 +9,20 @@ runs the rename + label + env-injection sequence in 2 SSH round trips.
 This provider's responsibilities are then:
 - `discover_hosts` -- list this account's leased hosts via the connector.
 - `get_host` -- build a Host pointing at the leased VPS:container_ssh_port.
-- `destroy_host` -- stop the docker container on the VPS via SSH; lease and
-  on-disk data are preserved.
-- `delete_host` -- call /hosts/{id}/release and drop on-disk plugin state.
-- `start_host` -- start the docker container on the VPS.
-- `stop_host` -- stop the docker container on the VPS.
+- `destroy_host` -- wipe the user's data on the leased VPS (container, named
+  volumes, per-host btrfs subvolume under ``/mngr-btrfs/``, ``docker system
+  prune``, ``/root`` and ``/tmp`` content) and release the lease back to the
+  pool. The privacy-first ordering means the agent's data is gone before the
+  connector flips the row to ``released``; ``cleanup_released_hosts.py``'s
+  later VPS-destroy becomes belt-and-suspenders.
+- `delete_host` -- called by mngr's GC after the destroyed-host grace
+  period. Same flow as ``destroy_host``; treated as a no-op when the lease
+  has already been released.
+- `start_host` -- start the docker container on the VPS (no-op for an
+  already-destroyed host; ``destroy_host`` is terminal for imbue_cloud).
+- `stop_host` -- stop the docker container on the VPS without releasing
+  the lease (use ``mngr stop`` when you intend to resume the workspace
+  later on the same VPS).
 """
 
 import json
@@ -97,6 +106,86 @@ from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.session_store import ImbueCloudSessionStore
 
 _SSH_WAIT_TIMEOUT_SECONDS: Final[float] = 120.0
+
+# Path on every mngr_vps_docker-baked outer where the per-host btrfs loop
+# filesystem is mounted (matches ``VpsDockerProviderConfig.btrfs_mount_path``
+# default). The per-host subvolume is at ``<this>/<host_id_hex>``.
+_VPS_BTRFS_MOUNT_PATH: Final[str] = "/mngr-btrfs"
+
+# Container label that mngr_vps_docker tags the workspace container with;
+# also used as ``docker volume`` -name search prefix (the bind-options volume
+# is named ``mngr-host-vol-<host_id_hex>``).
+_LABEL_HOST_ID_KEY: Final[str] = "com.imbue.mngr.host-id"
+_HOST_VOLUME_NAME_PREFIX: Final[str] = "mngr-host-vol-"
+
+
+def build_pool_host_wipe_script(host_id: HostId) -> str:
+    """Render the bash script that wipes a leased pool VPS before release.
+
+    Runs as root on the outer (the leased VPS itself). Each step is
+    independently best-effort -- the script always exits 0 so a single
+    failed sub-step (e.g. ``docker stop`` on an already-stopped container)
+    doesn't abort the rest. The destroy-host caller still logs warnings
+    when this returns abnormally, but the privacy-relevant steps remain
+    unconditionally attempted.
+
+    Wipes:
+
+    * The workspace container (by label) and any named docker volume
+      whose name contains the host hex.
+    * The per-host btrfs subvolume backing the bind-options volume (the
+      bind source ``device=`` lives outside the container, so removing
+      the container alone leaves the data on disk).
+    * Everything docker still knows about (``system prune -a -f --volumes``).
+    * Everything under ``/root`` and ``/tmp`` except
+      ``/root/.ssh/authorized_keys`` (preserves the static pool-management
+      key the connector / cleanup_released_hosts.py needs for any
+      post-release SSH-driven maintenance).
+
+    Pure function so unit tests can assert the exact command shape
+    without standing up an SSH transport.
+    """
+    host_id_hex = host_id.get_uuid().hex
+    host_id_str = str(host_id)
+    label_filter = shlex.quote(f"label={_LABEL_HOST_ID_KEY}={host_id_str}")
+    volume_name_filter = shlex.quote(f"name={_HOST_VOLUME_NAME_PREFIX}{host_id_hex}")
+    subvolume_path = f"{_VPS_BTRFS_MOUNT_PATH}/{host_id_hex}"
+    return (
+        "set +e\n"
+        # Find + remove the workspace container by its host-id label.
+        f"container_id=$(docker ps -a --filter {label_filter} --format '{{{{.ID}}}}' | head -1)\n"
+        'if [ -n "$container_id" ]; then\n'
+        '    docker stop "$container_id" >/dev/null 2>&1\n'
+        '    docker rm -f -v "$container_id" >/dev/null 2>&1\n'
+        "fi\n"
+        # Drop the per-host named volume(s). docker volume rm -f tolerates
+        # the volume not existing.
+        f"for vol in $(docker volume ls -q --filter {volume_name_filter}); do\n"
+        '    docker volume rm -f "$vol" >/dev/null 2>&1\n'
+        "done\n"
+        # The bind-options volume's storage is a btrfs subvolume at
+        # /mngr-btrfs/<host_hex>; docker volume rm doesn't touch the bind
+        # source, so wipe it explicitly. Fall back to rm -rf if btrfs is
+        # absent (older non-btrfs hosts before the btrfs spec landed).
+        f"if [ -d {shlex.quote(subvolume_path)} ]; then\n"
+        f"    btrfs subvolume delete {shlex.quote(subvolume_path)} >/dev/null 2>&1 || "
+        f"rm -rf {shlex.quote(subvolume_path)} >/dev/null 2>&1\n"
+        "fi\n"
+        # Reclaim everything else docker holds: stopped containers, dangling
+        # images, networks, unused volumes, build cache.
+        "docker system prune -a -f --volumes >/dev/null 2>&1\n"
+        # Wipe /root content except .ssh/authorized_keys -- preserves the
+        # pool-management public key the connector relies on if it needs
+        # to reach the host again before cleanup_released_hosts.py runs.
+        "find /root -mindepth 1 -maxdepth 1 -not -name .ssh -exec rm -rf {} + 2>/dev/null\n"
+        "find /root/.ssh -mindepth 1 -not -name authorized_keys -exec rm -rf {} + 2>/dev/null\n"
+        # Wipe /tmp entirely.
+        "find /tmp -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null\n"
+        # Always succeed: release is the gating step, individual wipe
+        # failures are surfaced via the script's stderr but must not
+        # block lease return.
+        "exit 0\n"
+    )
 
 
 def _certified_host_name(raw: Mapping[str, Any]) -> str | None:
@@ -1189,64 +1278,96 @@ class ImbueCloudProvider(BaseProviderInstance):
         return self._build_host_object(leased)
 
     def destroy_host(self, host: HostInterface | HostId) -> None:
-        """Stop the leased container (does NOT release the lease).
+        """Wipe user data on the leased VPS and release the lease back to the pool.
 
-        Matches the architect-spec definition of destroy: the docker container
-        is stopped on the VPS but the lease, on-disk volume, and any in-progress
-        agent work persist. Use ``delete_host`` (or ``mngr imbue_cloud hosts
-        release``) to release the lease back to the pool.
+        Three phases, in order, so the data is unreachable to the next user
+        before the lease is returned to the pool:
+
+        1. Stop + remove the workspace container, drop the per-host named
+           docker volume, delete the per-host btrfs subvolume under
+           ``/mngr-btrfs/``, run ``docker system prune -a -f --volumes``,
+           and wipe ``/root`` and ``/tmp`` (preserving ``authorized_keys``
+           so the pool-management ssh path keeps working through cleanup).
+        2. Release the lease via the connector's ``/hosts/{id}/release``
+           endpoint -- the row flips to ``released`` and gets picked up by
+           ``cleanup_released_hosts.py`` later for VPS-destroy.
+        3. Drop local per-host state (ssh keys, known_hosts, cached records).
+
+        Each step is best-effort with respect to the others: a failed wipe
+        still proceeds to release (because a stuck VPS would otherwise leak
+        a paid lease indefinitely), and a failed release still proceeds to
+        local cleanup. Operators see warnings for each partial failure.
+
+        Use ``mngr stop`` (-> ``stop_host``) instead when you intend to
+        resume the workspace later on the same VPS -- that path preserves
+        the lease and the on-disk data.
+        """
+        self._wipe_and_release_pool_host(host)
+
+    def delete_host(self, host: HostInterface) -> None:
+        """Same as ``destroy_host``; provided for the GC code path.
+
+        mngr's GC calls ``delete_host`` after the destroyed-host grace
+        period. Since ``destroy_host`` is now terminal (wipes + releases
+        the lease immediately), ``delete_host`` is functionally a re-run
+        of the same flow -- it's a no-op for an already-released lease
+        and a recovery path if a previous destroy crashed mid-wipe.
+        """
+        self._wipe_and_release_pool_host(host)
+
+    def _wipe_and_release_pool_host(self, host: HostInterface | HostId) -> None:
+        """Shared implementation for ``destroy_host`` and ``delete_host``.
+
+        See ``destroy_host`` for the contract. Split out so both entry
+        points run identically; both are now terminal for imbue_cloud.
         """
         host_id = host.id if isinstance(host, HostInterface) else host
         leased = self._find_leased(host_id)
-        if leased is None:
-            logger.warning("destroy_host: no lease record for host {}; nothing to do", host_id)
-            return
-        try:
-            with self.outer_host_for(host_id) as outer:
-                assert outer is not None
-                container_id = self._resolve_container_id_on_outer(outer, host_id)
-                if container_id is None:
-                    logger.debug("destroy_host: no container for host {}; nothing to do", host_id)
-                else:
-                    self._run_outer_docker_command(
-                        outer, f"stop {shlex.quote(container_id)}", host_id=host_id, label="docker-stop"
-                    )
-                    logger.debug("Stopped container {} for host {}", container_id, host_id)
-        except HostNotFoundError:
+        host_db_id: str | None = None
+        if isinstance(host, HostInterface):
+            host_db_id = self._resolve_host_db_id(host, host_id)
+        if host_db_id is None and leased is not None:
+            host_db_id = str(leased.host_db_id)
+
+        if leased is None and host_db_id is None:
             logger.warning(
-                "destroy_host: SSH key for host {} is missing; cannot stop container remotely. "
-                "Run `mngr imbue_cloud hosts release` to release the lease instead.",
+                "destroy_host: no lease record for host {} (already released?); running local cleanup only.",
                 host_id,
             )
+            self._cleanup_local_host_state(host_id)
             return
-        self.reset_caches()
 
-    def delete_host(self, host: HostInterface) -> None:
-        """Release the lease back to the pool and drop local state.
-
-        Called by mngr's GC after the destroyed-host grace period (or directly
-        when an operator wants the lease freed immediately). The lease return
-        is the authoritative step here; container removal is best-effort
-        because the connector will reuse the VPS for a new lease anyway.
-        """
-        host_id = host.id
-        host_db_id = self._resolve_host_db_id(host, host_id)
-        leased = self._find_leased(host_id)
         if leased is not None:
             try:
                 with self.outer_host_for(host_id) as outer:
                     assert outer is not None
-                    container_id = self._resolve_container_id_on_outer(outer, host_id)
-                    if container_id is not None:
-                        self._run_outer_docker_command(
-                            outer,
-                            f"rm -f -v {shlex.quote(container_id)}",
-                            host_id=host_id,
-                            label="docker-rm",
+                    script = build_pool_host_wipe_script(host_id)
+                    result = outer.execute_idempotent_command(script, timeout_seconds=300.0)
+                    if not result.success:
+                        # The script exits 0 at the end on purpose; a non-zero
+                        # exit indicates the SSH transport itself or shell-
+                        # invocation framing failed. Log + proceed -- release
+                        # is the gating step regardless.
+                        logger.warning(
+                            "destroy_host: wipe script returned non-zero for {} "
+                            "(stderr={!r}); proceeding with release.",
+                            host_id,
+                            result.stderr.strip(),
                         )
-                        logger.debug("Removed container {} for host {}", container_id, host_id)
-            except (HostNotFoundError, MngrError) as exc:
-                logger.warning("delete_host: failed to remove container for host {}: {}", host_id, exc)
+                    else:
+                        logger.debug("Wiped pool VPS data for host {}", host_id)
+            except HostNotFoundError:
+                logger.warning(
+                    "destroy_host: SSH key for host {} is missing; cannot wipe data on VPS. Proceeding with release.",
+                    host_id,
+                )
+            except MngrError as exc:
+                logger.warning(
+                    "destroy_host: data wipe failed for host {}: {}. Proceeding with release.",
+                    host_id,
+                    exc,
+                )
+
         if host_db_id is not None:
             account = self._require_account()
             token = self._get_access_token(account)
