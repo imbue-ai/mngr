@@ -835,8 +835,7 @@ class CreateAgentOptions(FrozenModel):
         default=None,
         description="Explicit agent ID (auto-generated if not specified)",
     )
-    agent_type: AgentTypeName | None = Field(
-        default=None,
+    agent_type: AgentTypeName = Field(
         description="Type of agent to run (claude, codex, etc.)",
     )
     name: AgentName | None = Field(

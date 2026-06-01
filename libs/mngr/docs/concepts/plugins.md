@@ -73,7 +73,7 @@ Called during `mngr create` and `mngr destroy` operations:
 
 | Hook                          | Description                                                                                       |
 |-------------------------------|---------------------------------------------------------------------------------------------------|
-| `on_before_host_create`       | Before creating a new host (receives host name and provider name). [experimental]                 |
+| `on_before_host_create`       | Before creating a new host (receives host name, provider name, and mngr_ctx). [experimental]       |
 | `on_host_created`             | After a new host has been created via provider.create_host().                                     |
 | `on_before_host_destroy`      | Before destroying a host via provider.destroy_host(). [experimental]                              |
 | `on_host_destroyed`           | After a host has been destroyed. The Python object is still available for metadata. [experimental] |
@@ -243,7 +243,7 @@ def override_command_options(command_name, command_class, params):
 
 ```python
 @hookimpl
-def on_before_create(args):
+def on_before_create(args, mngr_ctx):
     # Return modified args, or None to pass through unchanged
     return args.model_copy(update={"create_work_dir": False})
 ```
