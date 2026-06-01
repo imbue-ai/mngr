@@ -431,24 +431,22 @@ jobs:
           # ---- Timing metrics block --------------------------------------
           # Read launch-to-msg-timings.json (written by the e2e script) and
           # surface the per-phase wall-clocks at the very top of the
-          # summary so creation time is visible at a glance.
+          # summary so creation time is visible at a glance. jq formats
+          # the one-line total + per-phase breakdown.
           timings_json="$shots_dir/launch-to-msg-timings.json"
           if [ -f "$timings_json" ]; then
+            total=$(jq -r '.total_create_s' "$timings_json")
+            mm=$(awk -v t="$total" 'BEGIN{printf "%d", t/60}')
+            ss=$(awk -v t="$total" 'BEGIN{printf "%02d", int(t)%60}')
+            phases=$(jq -r '.phase_durations_s | to_entries | map("\(.key)=\(.value)s") | join(" | ")' "$timings_json")
             {
               echo "## Agent creation timings"
+              echo ""
+              echo "**Total agent creation: ${total}s (${mm}:${ss})** -- ${phases}"
               echo ""
               echo '```json'
               cat "$timings_json"
               echo '```'
-              # Pretty-print a one-liner total too.
-              python3 -c "
-import json,pathlib
-d=json.loads(pathlib.Path('$timings_json').read_text())
-parts=d.get('phase_durations_s',{})
-total=d.get('total_create_s',0)
-mm=int(total//60); ss=int(total%60)
-print(f\"\\n**Total agent creation: {total:.1f}s ({mm}:{ss:02d})** \" +
-      ' | '.join([f\"{k}={v:.0f}s\" for k,v in parts.items()]))" || true
               echo ""
             } >> "$GITHUB_STEP_SUMMARY"
           fi
