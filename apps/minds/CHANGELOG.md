@@ -68,6 +68,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: ToDesktop `beforeInstall` hook is now wired to `./scripts/download-binaries.js` so the build server re-resolves `uv` and `git` for the target platform instead of using the developer-machine bytes; `pnpm` and `node` versions are pinned via ToDesktop's first-class `pnpmVersion` / `nodeVersion` fields sourced from `package.json`'s `engines`. `todesktop.json` is replaced with a `todesktop.js`.
 - Changed: "Destroy workspace" now releases the underlying imbue_cloud lease up front via `mngr destroy` rather than waiting the 7-day grace period for mngr's GC; the stale "Lease release is intentionally NOT chained here" comment in `destroying.py` is updated.
 - Changed: Latchkey dependency is excluded from the supply-chain minimum-age cooldown check (minds and Latchkey are co-developed).
+- Changed: Latchkey services catalog now maps each raw service name to a list of scope entries instead of a single entry, so one service can expose more than one detent scope. `LatchkeyGatewayClient.get_available_services` now returns `dict[str, tuple[AvailableServiceEntry, ...]]`, and `ServicesCatalog.get` / `ServicesCatalog.as_mapping` return a tuple of `ServicePermissionInfo` per service (per-scope lookup via `ServicesCatalog.get_by_scope` is unchanged).
 
 ### Removed
 

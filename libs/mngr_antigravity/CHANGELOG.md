@@ -6,6 +6,15 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `antigravity` agent type now uses agy hooks to report lifecycle state. A `PreInvocation` / `Stop` hook pair maintains an `active` marker so antigravity agents now report RUNNING while working and WAITING when idle (previously they had no `active` marker and could not report RUNNING). Verified working against agy 1.0.3.
+
+### Changed
+
+- Changed: mngr now provisions a per-agent `hooks.json` and points agy at it via `--add-dir` (through a `/tmp` symlink, since agy rejects the dotted state-dir path), so the user's global `~/.gemini/config/` is untouched and each agent's state stays isolated.
+- Changed: `auto_allow_permissions = true` continues to use the `--dangerously-skip-permissions` CLI flag; agy's documented `PreToolUse` `{"decision": "allow"}` hook output does not actually gate the `run_command` confirmation dialog, so a hook can't replace the flag.
+
 ## [v0.1.0] - 2026-05-28
 
 ### Added
