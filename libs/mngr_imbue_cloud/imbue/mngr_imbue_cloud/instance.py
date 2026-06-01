@@ -686,6 +686,8 @@ class ImbueCloudProvider(BaseProviderInstance):
         agent_refs: Sequence[DiscoveredAgent],
         field_generators: Mapping[str, Mapping[str, Callable[[AgentInterface, OnlineHostInterface], Any]]]
         | None = None,
+        offline_field_generators: Mapping[str, Mapping[str, Callable[[DiscoveredAgent, HostDetails], Any]]]
+        | None = None,
         on_error: Callable[[DiscoveredAgent | DiscoveredHost, BaseException], None] | None = None,
     ) -> tuple[HostDetails, list[AgentDetails]]:
         """Build HostDetails + AgentDetails from the cached outer-listing output.
@@ -700,15 +702,26 @@ class ImbueCloudProvider(BaseProviderInstance):
         host_id = host_ref.host_id
         lease = self._find_leased(host_id)
         if lease is None:
-            return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+            return super().get_host_and_agent_details(
+                host_ref,
+                agent_refs,
+                field_generators=field_generators,
+                offline_field_generators=offline_field_generators,
+                on_error=on_error,
+            )
+        resolved_offline_field_generators = offline_field_generators or {}
         raw = self._listing_raw_cache.get(host_id)
         if raw is None:
             # Discovery wasn't run for this host (rare; e.g. an explicit
             # detail call without going through `mngr list`); fall back.
-            return self._build_offline_details_from_lease(host_ref, agent_refs, lease, "discovery did not run")
+            return self._build_offline_details_from_lease(
+                host_ref, agent_refs, lease, "discovery did not run", resolved_offline_field_generators
+            )
         outer_error = raw.get("outer_ssh_error")
         if outer_error is not None:
-            return self._build_offline_details_from_lease(host_ref, agent_refs, lease, str(outer_error))
+            return self._build_offline_details_from_lease(
+                host_ref, agent_refs, lease, str(outer_error), resolved_offline_field_generators
+            )
         host_details = self._build_host_details_from_raw(host_ref, lease, raw)
         agent_details_list: list[AgentDetails] = []
         ssh_activity = timestamp_to_datetime(raw.get("ssh_activity_mtime"))
@@ -728,7 +741,8 @@ class ImbueCloudProvider(BaseProviderInstance):
         # in the agent-driven listing table.
         if not agent_details_list and agent_refs:
             agent_details_list = [
-                build_agent_details_from_offline_ref(agent_ref, host_details) for agent_ref in agent_refs
+                build_agent_details_from_offline_ref(agent_ref, host_details, resolved_offline_field_generators)
+                for agent_ref in agent_refs
             ]
         return host_details, agent_details_list
 
@@ -786,6 +800,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         agent_refs: Sequence[DiscoveredAgent],
         lease: LeasedHostInfo,
         failure_message: str,
+        offline_field_generators: Mapping[str, Mapping[str, Callable[[DiscoveredAgent, HostDetails], Any]]],
     ) -> tuple[HostDetails, list[AgentDetails]]:
         """Build HostDetails + AgentDetails from lease info when outer SSH is unreachable.
 
@@ -807,7 +822,8 @@ class ImbueCloudProvider(BaseProviderInstance):
             failure_reason=failure_message,
         )
         agent_details_list = [
-            build_agent_details_from_offline_ref(agent_ref, host_details) for agent_ref in agent_refs
+            build_agent_details_from_offline_ref(agent_ref, host_details, offline_field_generators)
+            for agent_ref in agent_refs
         ]
         return host_details, agent_details_list
 

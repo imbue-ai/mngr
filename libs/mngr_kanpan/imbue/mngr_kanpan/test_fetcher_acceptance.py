@@ -1,7 +1,7 @@
-"""Acceptance tests for fetch_board_snapshot, fetch_local_snapshot, and _load_muted_agents.
+"""Acceptance tests for fetch_board_snapshot and fetch_local_snapshot.
 
 These tests exercise the full fetch pipeline with real agents created via the
-local provider, rather than mocking list_agents or discover_hosts_and_agents.
+local provider, rather than mocking list_agents.
 
 To run these tests locally:
 
@@ -15,12 +15,16 @@ from pathlib import Path
 import pytest
 from pydantic import TypeAdapter
 
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.cli.testing import create_test_agent_state
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_kanpan.data_source import BoolField
@@ -36,7 +40,6 @@ from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import BoardSnapshot
 from imbue.mngr_kanpan.fetcher import FetchResult
-from imbue.mngr_kanpan.fetcher import _load_muted_agents
 from imbue.mngr_kanpan.fetcher import fetch_board_snapshot
 from imbue.mngr_kanpan.fetcher import fetch_local_snapshot
 from imbue.mngr_kanpan.fetcher import toggle_agent_mute
@@ -92,6 +95,25 @@ def work_dir(tmp_path: Path) -> Path:
     d = tmp_path / "work_dir"
     d.mkdir()
     return d
+
+
+def _ctx_with_failing_provider(mngr_ctx: MngrContext) -> MngrContext:
+    """Return a copy of ``mngr_ctx`` with an extra provider that fails to load.
+
+    The provider references a backend that does not exist, so any attempt to
+    instantiate or discover it raises. This stands in for a real provider that
+    becomes unreachable during a refresh -- e.g. a remote provider behind a
+    flaky network connection -- which is the condition that used to make muted
+    agents leak out of the Muted section.
+    """
+    failing_config = ProviderInstanceConfig(backend=ProviderBackendName("nonexistent-backend-xyz"))
+    updated_config = mngr_ctx.config.model_copy_update(
+        to_update(
+            mngr_ctx.config.field_ref().providers,
+            {**mngr_ctx.config.providers, ProviderInstanceName("failing-provider"): failing_config},
+        ),
+    )
+    return mngr_ctx.model_copy_update(to_update(mngr_ctx.field_ref().config, updated_config))
 
 
 # =============================================================================
@@ -242,39 +264,8 @@ def test_fetch_local_snapshot_skips_remote_sources(
 
 
 # =============================================================================
-# _load_muted_agents and toggle_agent_mute
+# toggle_agent_mute
 # =============================================================================
-
-
-@pytest.mark.acceptance
-def test_load_muted_agents_returns_empty_when_no_agents_muted(
-    local_host: Host,
-    work_dir: Path,
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """_load_muted_agents returns an empty set when no agents are muted."""
-    create_test_agent_state(local_host, work_dir, "unmuted-agent")
-    muted = _load_muted_agents(temp_mngr_ctx)
-    assert AgentName("unmuted-agent") not in muted
-
-
-@pytest.mark.acceptance
-def test_load_muted_agents_after_toggle(
-    local_host: Host,
-    work_dir: Path,
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """After toggling mute on an agent, _load_muted_agents includes it."""
-    create_test_agent_state(local_host, work_dir, "to-mute-agent")
-    # Initially not muted
-    muted_before = _load_muted_agents(temp_mngr_ctx)
-    assert AgentName("to-mute-agent") not in muted_before
-    # Toggle mute on
-    new_state = toggle_agent_mute(temp_mngr_ctx, AgentName("to-mute-agent"))
-    assert new_state is True
-    # Now it should appear in the muted set
-    muted_after = _load_muted_agents(temp_mngr_ctx)
-    assert AgentName("to-mute-agent") in muted_after
 
 
 @pytest.mark.acceptance
@@ -283,14 +274,17 @@ def test_toggle_agent_mute_twice_returns_to_unmuted(
     work_dir: Path,
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """Toggling mute twice returns the agent to unmuted state."""
+    """Toggling mute twice returns the agent to its unmuted state.
+
+    ``toggle_agent_mute`` reads and writes the persisted certified data, so its
+    return values reflect the round trip: first -> True (now muted), second ->
+    False (back to unmuted).
+    """
     create_test_agent_state(local_host, work_dir, "double-toggle-agent")
     first = toggle_agent_mute(temp_mngr_ctx, AgentName("double-toggle-agent"))
     assert first is True
     second = toggle_agent_mute(temp_mngr_ctx, AgentName("double-toggle-agent"))
     assert second is False
-    muted = _load_muted_agents(temp_mngr_ctx)
-    assert AgentName("double-toggle-agent") not in muted
 
 
 @pytest.mark.acceptance
@@ -311,3 +305,36 @@ def test_fetch_board_snapshot_muted_agent_in_muted_section(
     muted_field = entry.fields[FIELD_MUTED]
     assert isinstance(muted_field, BoolField)
     assert muted_field.value is True
+
+
+@pytest.mark.acceptance
+@pytest.mark.tmux
+def test_fetch_board_snapshot_muted_agent_stays_muted_when_a_provider_fails(
+    local_host: Host,
+    work_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A muted agent stays in the MUTED section even when a provider fails to load.
+
+    Reproduces the symptom of a transient provider-discovery failure: when a
+    provider's discovery fails during a refresh, the muted agent used to lose
+    its muted bit and get reclassified by PR state -- landing in PRS_FAILED once
+    the GitHub fetch also failed, so it appeared mixed in with the non-muted
+    rows. The muted bit now rides on each agent's AgentDetails (via kanpan's
+    field generators) and is sourced through ``list_agents``, which tolerates a
+    failing provider, so the muted agent must remain in MUTED.
+    """
+    create_test_agent_state(local_host, work_dir, "muted-despite-failure-agent")
+    toggle_agent_mute(temp_mngr_ctx, AgentName("muted-despite-failure-agent"))
+
+    failing_ctx = _ctx_with_failing_provider(temp_mngr_ctx)
+    result = fetch_board_snapshot(failing_ctx, [], {})
+
+    # Sanity-check that the failing provider was actually exercised, so this test
+    # genuinely covers the provider-failure path rather than passing vacuously.
+    assert any("nonexistent-backend-xyz" in error for error in result.snapshot.errors)
+
+    entries = {e.name: e for e in result.snapshot.entries}
+    entry = entries[AgentName("muted-despite-failure-agent")]
+    assert entry.is_muted is True
+    assert entry.section == BoardSection.MUTED
