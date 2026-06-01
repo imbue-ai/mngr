@@ -25,6 +25,7 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.env_utils import parse_env_file
 from imbue.mngr.utils.git_utils import delete_git_branch
@@ -164,6 +165,13 @@ def create(
         with log_span("Calling on_host_created hooks"):
             mngr_ctx.pm.hook.on_host_created(host=host, mngr_ctx=mngr_ctx)
 
+        # Run post-host-create commands synchronously. The host is fully
+        # online (sshd/exec ready) but no agent work_dir has been touched
+        # yet, so this is the safe window for an image to do first-boot
+        # setup (e.g. seed a volume from an in-image bake) that any
+        # subsequent exec depends on.
+        _run_post_host_create_commands(host, target_host.provisioning.post_host_create_commands)
+
     # ``host.pre_baked_agent_id`` (default None on the base Host class,
     # populated by providers whose ``create_host`` returns a host with a
     # baked-in agent -- ``ImbueCloudHost`` is the only one today) marks
@@ -288,6 +296,28 @@ def create(
                 _cleanup_failed_worktree_create(work_dir_path, created_branch_name, mngr_ctx)
 
     return result
+
+
+def _run_post_host_create_commands(
+    host: OnlineHostInterface,
+    commands: tuple[CommandString, ...],
+) -> None:
+    """Run the configured post-host-create commands on a freshly-created host.
+
+    Each command runs in order via ``host.execute_idempotent_command``; a
+    non-zero exit raises ``MngrError`` and aborts the create. Output goes
+    through the standard host exec plumbing so the user sees what ran.
+    """
+    if not commands:
+        return
+    with log_span("Running post-host-create commands", count=len(commands)):
+        for cmd in commands:
+            with log_span("post-host-create: {}", cmd):
+                result = host.execute_idempotent_command(cmd)
+                if not result.success:
+                    raise MngrError(
+                        f"post-host-create command failed: {cmd}\nstdout: {result.stdout}\nstderr: {result.stderr}"
+                    )
 
 
 def _write_host_env_vars(
