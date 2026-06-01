@@ -1,5 +1,6 @@
 """Tests for the mngr extras command."""
 
+import json
 import os
 from pathlib import Path
 
@@ -327,13 +328,13 @@ def test_extras_claude_plugin_yes_flag(cli_runner: CliRunner, tmp_path: Path, mo
     untouched.
     """
     stub_claude = tmp_path / "claude"
+    # `claude plugin list --json` returns an array of objects keyed by `id`;
+    # report imbue-code-guardian as already installed and succeed otherwise.
+    listing = json.dumps(
+        [{"id": "imbue-code-guardian@imbue-code-guardian", "version": "0.2.1", "scope": "project", "enabled": True}]
+    )
     stub_claude.write_text(
-        "#!/usr/bin/env bash\n"
-        "# Report imbue-code-guardian as already installed; succeed for everything else.\n"
-        'if [ "$1" = "plugin" ] && [ "$2" = "list" ]; then\n'
-        '  echo "imbue-code-guardian@imbue-code-guardian"\n'
-        "fi\n"
-        "exit 0\n"
+        f'#!/usr/bin/env bash\nif [ "$1" = "plugin" ] && [ "$2" = "list" ]; then\n  echo \'{listing}\'\nfi\nexit 0\n'
     )
     stub_claude.chmod(0o755)
     monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")

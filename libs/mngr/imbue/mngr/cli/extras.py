@@ -1,5 +1,6 @@
 """Install optional extras for mngr: plugins, shell completion, Claude Code plugin."""
 
+import json
 import os
 import platform
 import shutil
@@ -144,19 +145,19 @@ def _install_completion(
 
 
 class ClaudeCodePlugin(FrozenModel):
-    """An installable Claude Code plugin offered by `mngr extras claude-plugin`.
-
-    ``name`` doubles as the substring looked for in `claude plugin list`
-    output to detect whether the plugin is installed (the list shows
-    ``<name>@<marketplace>``).
-    """
+    """An installable Claude Code plugin offered by `mngr extras claude-plugin`."""
 
     name: str = Field(description="Plugin name, e.g. 'imbue-code-guardian'")
     description: str = Field(description="One-line description shown next to the name in the picker")
     marketplace_repo: str = Field(
         description="GitHub repo hosting the plugin marketplace, e.g. 'imbue-ai/code-guardian'"
     )
-    install_ref: str = Field(description="Plugin install reference, e.g. 'imbue-code-guardian@imbue-code-guardian'")
+    install_ref: str = Field(
+        description=(
+            "Plugin id passed to `claude plugin install` and matched against the `id` field of"
+            " `claude plugin list --json`, e.g. 'imbue-code-guardian@imbue-code-guardian'"
+        )
+    )
 
 
 # ConcurrencyGroup wraps a synchronous subprocess failure (or spawn error)
@@ -198,14 +199,23 @@ def _claude_plugin_status() -> tuple[bool, dict[str, bool]]:
 
     try:
         with ConcurrencyGroup(name="extras-claude-check") as cg:
-            result = cg.run_process_to_completion(["claude", "plugin", "list"], is_checked_after=False)
+            result = cg.run_process_to_completion(["claude", "plugin", "list", "--json"], is_checked_after=False)
     except _SUBPROCESS_ERRORS:
         return True, not_installed
 
     if result.returncode != 0:
         return True, not_installed
 
-    installed = {plugin.name: plugin.name in result.stdout for plugin in _CLAUDE_CODE_PLUGINS}
+    try:
+        entries = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return True, not_installed
+
+    # `claude plugin list --json` returns objects whose `id` is "<name>@<marketplace>",
+    # which is exactly our install_ref. Match on that rather than substring-scanning
+    # human output.
+    installed_ids = {entry["id"] for entry in entries if isinstance(entry, dict) and "id" in entry}
+    installed = {plugin.name: plugin.install_ref in installed_ids for plugin in _CLAUDE_CODE_PLUGINS}
     return True, installed
 
 
