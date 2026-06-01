@@ -31,6 +31,15 @@ services = [
     "supertokens",
 ]
 
+# Dev envs keep no warm containers (min_containers defaults to 0), so without
+# this every request after ~60s idle pays a cold boot. Hold containers for
+# ~10 minutes after the last request so a dev session stays hot. The ci tier
+# deliberately omits this block (0 = Modal default) so test containers tear
+# down promptly; staging/production also omit it and rely on min_containers=1.
+[scaledown_window]
+connector = 600
+litellm_proxy = 600
+
 # Tier-shape flags consumed by `minds env deploy` / `destroy`. All four
 # are required (no defaults) so a misconfigured tier fails fast on load.
 [lifecycle]

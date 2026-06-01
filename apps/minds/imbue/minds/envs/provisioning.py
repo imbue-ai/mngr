@@ -236,7 +236,8 @@ PushPerEnvSecretFn = Callable[[str, dict[str, str], str, ConcurrencyGroup], None
 # ``<svc>-<tier>-<id>`` Modal Secrets. ``strategy`` is forwarded to
 # ``modal deploy --strategy`` so a single deploy can cycle both apps
 # the same way (see :class:`DeployStrategy`).
-DeployModalAppFn = Callable[[str, str, int, str, DeployStrategy, ConcurrencyGroup], AnyUrl]
+# (modal_env, tier, min_containers, scaledown_window, deploy_id, strategy, cg) -> deployed URL.
+DeployModalAppFn = Callable[[str, str, int, int, str, DeployStrategy, ConcurrencyGroup], AnyUrl]
 # (app_name, modal_env, cg) -> None. Used by tier destroys to ``modal
 # app stop`` each deployed app. Idempotent in the underlying call.
 StopModalAppFn = Callable[[str, str, ConcurrencyGroup], None]
@@ -874,18 +875,22 @@ def _deploy_env_locked(
     # Step 5: modal deploys.
     litellm_proxy_min_containers = int(deploy_config.min_containers.litellm_proxy)
     connector_min_containers = int(deploy_config.min_containers.connector)
+    litellm_proxy_scaledown_window = int(deploy_config.scaledown_window.litellm_proxy)
+    connector_scaledown_window = int(deploy_config.scaledown_window.connector)
 
     with info_span(
-        "Deploying llm-{} into env {!r} (min_containers={}, strategy={})",
+        "Deploying llm-{} into env {!r} (min_containers={}, scaledown_window={}, strategy={})",
         tier,
         modal_env,
         litellm_proxy_min_containers,
+        litellm_proxy_scaledown_window,
         deploy_strategy.value,
     ):
         litellm_proxy_url = providers.deploy_litellm_proxy(
             modal_env,
             tier,
             litellm_proxy_min_containers,
+            litellm_proxy_scaledown_window,
             deploy_id,
             deploy_strategy,
             parent_concurrency_group,
@@ -893,16 +898,18 @@ def _deploy_env_locked(
     _assert_deploy_url_matches(actual=litellm_proxy_url, expected=expected_litellm_proxy_url, app=f"llm-{tier}")
 
     with info_span(
-        "Deploying rsc-{} into env {!r} (min_containers={}, strategy={})",
+        "Deploying rsc-{} into env {!r} (min_containers={}, scaledown_window={}, strategy={})",
         tier,
         modal_env,
         connector_min_containers,
+        connector_scaledown_window,
         deploy_strategy.value,
     ):
         connector_url = providers.deploy_remote_service_connector(
             modal_env,
             tier,
             connector_min_containers,
+            connector_scaledown_window,
             deploy_id,
             deploy_strategy,
             parent_concurrency_group,

@@ -3551,6 +3551,18 @@ _MINDS_DEPLOY_ID = os.environ.get(_MINDS_DEPLOY_ID_ENV_VAR, "MINDS_DEPLOY_ID_UNS
 # cheapest possible warm pool (cold start on first hit).
 _MIN_CONTAINERS = int(os.environ.get("MINDS_CONNECTOR_MIN_CONTAINERS", "0"))
 
+# How long (seconds) an idle container stays alive before Modal scales it
+# down. ``minds env deploy`` threads the tier's
+# ``[scaledown_window].connector`` from its committed ``deploy.toml`` here as
+# ``MINDS_CONNECTOR_SCALEDOWN_WINDOW`` at ``modal deploy`` time. Dev tiers set
+# this high (~10 min) so the no-warm-pool connector stays hot across a dev
+# session instead of cold-booting on every request; staging / production
+# leave it unset and rely on ``min_containers`` instead. ``0`` (the default,
+# and what the ci/test tier uses) means "don't pin it" -- the function falls
+# back to Modal's own default scaledown window. Modal requires the value to
+# be > 0, so 0 is normalized to ``None`` at the call site below.
+_SCALEDOWN_WINDOW = int(os.environ.get("MINDS_CONNECTOR_SCALEDOWN_WINDOW", "0"))
+
 image = modal.Image.debian_slim().pip_install(
     "fastapi[standard]", "httpx", "supertokens-python", "psycopg2-binary", "paramiko"
 )
@@ -3682,6 +3694,10 @@ def _init_supertokens() -> None:
     # at deploy time with ``MINDS_MIN_CONTAINERS=<n>``. Mirrors the
     # equivalent block in apps/modal_litellm/app.py.
     min_containers=_MIN_CONTAINERS,
+    # Idle-before-scaledown window driven by ``_SCALEDOWN_WINDOW``. ``0``
+    # (default / ci) -> ``None`` so Modal uses its own default; dev pins this
+    # high so the no-warm-pool connector stays hot across a dev session.
+    scaledown_window=_SCALEDOWN_WINDOW or None,
 )
 @modal.asgi_app()
 def fastapi_app() -> FastAPI:

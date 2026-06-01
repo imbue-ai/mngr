@@ -86,6 +86,13 @@ _MODAL_ENV_CREATE_TIMEOUT_SECONDS: Final[float] = 60.0
 CONNECTOR_MIN_CONTAINERS_ENV_VAR: Final[str] = "MINDS_CONNECTOR_MIN_CONTAINERS"
 LITELLM_PROXY_MIN_CONTAINERS_ENV_VAR: Final[str] = "MINDS_LITELLM_PROXY_MIN_CONTAINERS"
 
+# Env-var names the deployed modal apps read at module load to set their
+# idle-before-scaledown window (seconds). Same lockstep contract as the
+# min-containers names above. ``0`` (the in-app default) means "use Modal's
+# own default scaledown window".
+CONNECTOR_SCALEDOWN_WINDOW_ENV_VAR: Final[str] = "MINDS_CONNECTOR_SCALEDOWN_WINDOW"
+LITELLM_PROXY_SCALEDOWN_WINDOW_ENV_VAR: Final[str] = "MINDS_LITELLM_PROXY_SCALEDOWN_WINDOW"
+
 # Env-var name the deployed modal apps read at module load to pick
 # which timestamped Modal Secret bundle to attach. Mirrors the same
 # constant in ``secret_lifecycle.py``; kept here (instead of importing
@@ -293,6 +300,7 @@ def deploy_litellm_proxy(
     modal_env: str,
     tier: str,
     min_containers: int,
+    scaledown_window: int,
     deploy_id: str,
     strategy: DeployStrategy,
     parent_cg: ConcurrencyGroup,
@@ -318,6 +326,10 @@ def deploy_litellm_proxy(
     ``min_containers`` controls the deployed function's warm-pool size.
     Threaded into the subprocess env as ``MINDS_LITELLM_PROXY_MIN_CONTAINERS``
     so the modal app picks it up at module load.
+
+    ``scaledown_window`` is the idle-before-scaledown window (seconds);
+    threaded as ``MINDS_LITELLM_PROXY_SCALEDOWN_WINDOW``. ``0`` means
+    "use Modal's own default".
     """
     app_file = _litellm_app_file()
     with info_span(
@@ -341,7 +353,10 @@ def deploy_litellm_proxy(
             tier=tier,
             deploy_id=deploy_id,
             strategy=strategy,
-            extra_env={LITELLM_PROXY_MIN_CONTAINERS_ENV_VAR: str(min_containers)},
+            extra_env={
+                LITELLM_PROXY_MIN_CONTAINERS_ENV_VAR: str(min_containers),
+                LITELLM_PROXY_SCALEDOWN_WINDOW_ENV_VAR: str(scaledown_window),
+            },
             parent_cg=parent_cg,
         )
 
@@ -427,6 +442,7 @@ def deploy_remote_service_connector(
     modal_env: str,
     tier: str,
     min_containers: int,
+    scaledown_window: int,
     deploy_id: str,
     strategy: DeployStrategy,
     parent_cg: ConcurrencyGroup,
@@ -436,7 +452,9 @@ def deploy_remote_service_connector(
     See :func:`deploy_litellm_proxy` for return-value semantics and the
     meaning of ``modal_env``. ``min_containers`` is threaded into the
     subprocess env as ``MINDS_CONNECTOR_MIN_CONTAINERS`` and consumed
-    by the modal app at module load.
+    by the modal app at module load. ``scaledown_window`` (idle seconds
+    before scaledown; ``0`` = Modal default) is threaded as
+    ``MINDS_CONNECTOR_SCALEDOWN_WINDOW``.
 
     ``deploy_id`` is threaded into the subprocess env as ``MINDS_DEPLOY_ID``
     so the deployed connector attaches to the matching ``<svc>-<tier>-<id>``
@@ -451,7 +469,10 @@ def deploy_remote_service_connector(
             tier=tier,
             deploy_id=deploy_id,
             strategy=strategy,
-            extra_env={CONNECTOR_MIN_CONTAINERS_ENV_VAR: str(min_containers)},
+            extra_env={
+                CONNECTOR_MIN_CONTAINERS_ENV_VAR: str(min_containers),
+                CONNECTOR_SCALEDOWN_WINDOW_ENV_VAR: str(scaledown_window),
+            },
             parent_cg=parent_cg,
         )
 
