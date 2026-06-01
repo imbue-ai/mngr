@@ -2470,6 +2470,8 @@ log "=== Shutdown script completed ==="
         agent_refs: Sequence[DiscoveredAgent],
         field_generators: Mapping[str, Mapping[str, Callable[[AgentInterface, OnlineHostInterface], Any]]]
         | None = None,
+        offline_field_generators: Mapping[str, Mapping[str, Callable[[DiscoveredAgent, HostDetails], Any]]]
+        | None = None,
         on_error: Callable[[DiscoveredAgent | DiscoveredHost, BaseException], None] | None = None,
     ) -> tuple[HostDetails, list[AgentDetails]]:
         """Build HostDetails and AgentDetails via a single SSH command."""
@@ -2484,7 +2486,13 @@ log "=== Shutdown script completed ==="
 
                 # For offline hosts, fall back to the default per-field collection
                 if not isinstance(host, Host):
-                    return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+                    return super().get_host_and_agent_details(
+                        host_ref,
+                        agent_refs,
+                        field_generators=field_generators,
+                        offline_field_generators=offline_field_generators,
+                        on_error=on_error,
+                    )
 
                 # Collect all data in one SSH command
                 with trace_span("Collecting listing data for {}", host_ref.host_id, _is_trace_span_enabled=False):
@@ -2503,7 +2511,13 @@ log "=== Shutdown script completed ==="
                     host_ref.host_id,
                     e,
                 )
-                return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+                return super().get_host_and_agent_details(
+                    host_ref,
+                    agent_refs,
+                    field_generators=field_generators,
+                    offline_field_generators=offline_field_generators,
+                    on_error=on_error,
+                )
             finally:
                 if host is not None:
                     host.disconnect()
