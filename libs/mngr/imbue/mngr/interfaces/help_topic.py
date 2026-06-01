@@ -42,6 +42,11 @@ class DocFile(FrozenModel):
     """
 
     path: Path = Field(description="Absolute path to the markdown file")
+    source_url: str | None = Field(
+        default=None,
+        description="Canonical URL of this file (e.g. its GitHub blob URL). When set, relative and "
+        "anchor links in the body are rewritten against it so they are clickable in the terminal.",
+    )
 
 
 class TopicHelpPage(FrozenModel):
@@ -77,5 +82,20 @@ class TopicHelpPage(FrozenModel):
                 return markdown
             case DocFile(path=path):
                 return path.read_text()
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def link_base_url(self) -> str | None:
+        """Base URL for resolving relative/anchor links in the body, or None if unknown.
+
+        Only file-backed bodies (:class:`DocFile`) have a canonical source
+        location; inline bodies have nowhere to resolve relative links against,
+        so they return None (links are left as-is).
+        """
+        match self.body:
+            case DocFile(source_url=source_url):
+                return source_url
+            case InlineContent():
+                return None
             case _ as unreachable:
                 assert_never(unreachable)

@@ -111,8 +111,8 @@ def test_initialize_accepts_newer_version(tmp_path: Path) -> None:
 
 
 def test_initialize_tolerates_leading_v_prefix(tmp_path: Path) -> None:
-    """Some CLIs print ``v2.9.0`` rather than the bare semver string."""
-    binary = _make_version_binary(tmp_path, version_output="v2.9.0")
+    """Some CLIs print ``v<version>`` rather than the bare semver string."""
+    binary = _make_version_binary(tmp_path, version_output=f"v{LATCHKEY_MIN_VERSION}")
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
     manager.initialize()
 
@@ -187,7 +187,7 @@ def _make_fake_latchkey_binary(tmp_path: Path) -> Path:
         "#!/usr/bin/env python3\n"
         "import sys\n"
         'if sys.argv[1] == "--version":\n'
-        "    print('2.9.0')\n"
+        f"    print('{LATCHKEY_MIN_VERSION}')\n"
         "    sys.exit(0)\n"
         'if sys.argv[1] == "ensure-browser":\n'
         "    sys.exit(0)\n"
@@ -303,12 +303,16 @@ def test_start_gateway_drops_bundled_extensions(tmp_path: Path) -> None:
         assert services_json_path.is_file()
         services_catalog = json.loads(services_json_path.read_text())
         assert isinstance(services_catalog, dict) and len(services_catalog) > 0
-        for service_name, entry in services_catalog.items():
+        for service_name, entries in services_catalog.items():
             assert isinstance(service_name, str) and len(service_name) > 0
-            assert set(entry.keys()) == {"scope", "display_name", "permissions"}
-            assert isinstance(entry["scope"], str) and len(entry["scope"]) > 0
-            assert isinstance(entry["display_name"], str) and len(entry["display_name"]) > 0
-            assert isinstance(entry["permissions"], list)
+            # Each service maps to a list of scope entries (a service may
+            # expose more than one detent scope).
+            assert isinstance(entries, list) and len(entries) > 0
+            for entry in entries:
+                assert set(entry.keys()) == {"scope", "display_name", "permissions"}
+                assert isinstance(entry["scope"], str) and len(entry["scope"]) > 0
+                assert isinstance(entry["display_name"], str) and len(entry["display_name"]) > 0
+                assert isinstance(entry["permissions"], list)
         manager.stop_gateway()
 
 
@@ -375,7 +379,7 @@ def test_start_gateway_sets_extension_permissions_root_env_var(tmp_path: Path) -
         "#!/usr/bin/env python3\n"
         "import os, socket, signal, sys\n"
         'if sys.argv[1] == "--version":\n'
-        "    print('2.9.0')\n"
+        f"    print('{LATCHKEY_MIN_VERSION}')\n"
         "    sys.exit(0)\n"
         'if sys.argv[1] == "ensure-browser":\n'
         "    sys.exit(0)\n"
@@ -446,7 +450,7 @@ def test_concurrent_start_gateway_spawns_at_most_one_subprocess(tmp_path: Path) 
         "#!/usr/bin/env python3\n"
         "import os, socket, signal, sys, time\n"
         'if sys.argv[1] == "--version":\n'
-        "    print('2.9.0')\n"
+        f"    print('{LATCHKEY_MIN_VERSION}')\n"
         "    sys.exit(0)\n"
         'if sys.argv[1] == "ensure-browser":\n'
         "    sys.exit(0)\n"
@@ -554,7 +558,7 @@ def test_derive_gateway_password_propagates_failure(tmp_path: Path) -> None:
         "#!/usr/bin/env python3\n"
         "import sys\n"
         'if sys.argv[1] == "--version":\n'
-        "    print('2.9.0')\n"
+        f"    print('{LATCHKEY_MIN_VERSION}')\n"
         "    sys.exit(0)\n"
         "sys.stderr.write('No encryption key available.\\n')\n"
         "sys.exit(1)\n"
@@ -582,7 +586,7 @@ def test_create_permissions_override_jwt_propagates_failure(tmp_path: Path) -> N
         "#!/usr/bin/env python3\n"
         "import sys\n"
         'if sys.argv[1] == "--version":\n'
-        "    print('2.9.0')\n"
+        f"    print('{LATCHKEY_MIN_VERSION}')\n"
         "    sys.exit(0)\n"
         "sys.exit(2)\n"
     )
@@ -609,7 +613,7 @@ def test_create_permissions_override_jwt_clears_latchkey_gateway_env(
         "#!/usr/bin/env python3\n"
         "import os, sys\n"
         'if sys.argv[1] == "--version":\n'
-        "    print('2.9.0')\n"
+        f"    print('{LATCHKEY_MIN_VERSION}')\n"
         "    sys.exit(0)\n"
         f"open({str(report_path)!r}, 'w').write(os.environ.get('LATCHKEY_GATEWAY', '<unset>'))\n"
         "print('jwt')\n"
@@ -629,7 +633,7 @@ def test_start_gateway_passes_password_to_subprocess(tmp_path: Path) -> None:
         "#!/usr/bin/env python3\n"
         "import os, socket, signal, sys\n"
         'if sys.argv[1] == "--version":\n'
-        "    print('2.9.0')\n"
+        f"    print('{LATCHKEY_MIN_VERSION}')\n"
         "    sys.exit(0)\n"
         'if sys.argv[1] == "ensure-browser":\n'
         "    sys.exit(0)\n"
@@ -814,7 +818,7 @@ def _make_fake_latchkey_binary_with_ensure_browser_counter(tmp_path: Path, count
         "#!/usr/bin/env python3\n"
         "import os, socket, signal, sys\n"
         'if sys.argv[1] == "--version":\n'
-        "    print('2.9.0')\n"
+        f"    print('{LATCHKEY_MIN_VERSION}')\n"
         "    sys.exit(0)\n"
         'if sys.argv[1] == "ensure-browser":\n'
         "    counter_path = os.environ['FAKE_LATCHKEY_COUNTER']\n"

@@ -6,6 +6,10 @@ For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
 ## 2026-05-28
 
+- `Latchkey.auth_browser` now transparently recovers from latchkey's "Service `<name>` requires preparation first" error: when it sees that message it runs `latchkey auth browser-prepare <service>` and then retries `latchkey auth browser <service>` once, so callers (e.g. minds' predefined-permission grant flow) succeed on the first user-visible attempt instead of failing with a confusing error. Failures of either the prepare step or the retry are surfaced as the usual `(False, message)` result.
+
+## 2026-05-28
+
 # Dropped redundant per-project ty/ruff ratchet tests
 
 Removed this project's `test_no_type_errors` and `test_no_ruff_errors` from its
