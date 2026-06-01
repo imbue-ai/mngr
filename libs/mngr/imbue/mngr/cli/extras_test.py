@@ -249,7 +249,8 @@ def test_extras_completion_yes_flag(cli_runner: CliRunner) -> None:
     assert result.exit_code == 0
 
 
-@pytest.mark.flaky
+# real agent setup/teardown occasionally exceeds the 10s default.
+@pytest.mark.timeout(30)
 def test_extras_claude_plugin_yes_flag(cli_runner: CliRunner) -> None:
     """The 'extras claude-plugin -y' subcommand auto-installs."""
     result = cli_runner.invoke(extras, ["claude-plugin", "-y"])
