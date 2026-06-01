@@ -205,6 +205,11 @@ class AvailableServiceEntry(FrozenModel):
     it because every scope implicitly admits it; the dialog layer
     (:mod:`services_catalog`) injects it client-side as an opt-in
     choice.
+
+    ``descriptions`` carries detent's per-schema ``$comment`` summaries
+    (keyed by detent schema name, covering the scope itself and each
+    permission). It is optional so older catalogs without the field
+    still validate.
     """
 
     scope: str = Field(min_length=1, description="Detent scope schema name (e.g. ``slack-api``).")
@@ -212,6 +217,10 @@ class AvailableServiceEntry(FrozenModel):
     permissions: tuple[str, ...] = Field(
         default=(),
         description="Detent permission schemas the user can grant for this scope.",
+    )
+    descriptions: Mapping[str, str] = Field(
+        default_factory=dict,
+        description="Plain-English summary for the scope and each permission, keyed by detent schema name.",
     )
 
 

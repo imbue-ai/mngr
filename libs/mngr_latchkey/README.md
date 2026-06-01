@@ -267,7 +267,10 @@ root is rejected with HTTP 403.
   a JSON object keyed by raw service name. Each value is an array of
   scope entries (a single service may expose more than one scope), each
   with the shape `{"scope": "<schema_name>", "display_name": "...",
-  "permissions": ["...", ...]}`.
+  "permissions": ["...", ...], "descriptions": {"<schema_name>": "...",
+  ...}}`. The optional `descriptions` map carries detent's per-schema
+  `$comment` summaries (keyed by detent schema name, covering the scope
+  itself and each permission).
 * `GET /permissions/available/<service_name>` returns the permission
   catalog entries for `<service_name>` (e.g. `slack`, `google-gmail`)
   as an array, using the same value shape, or 404 if the service is
@@ -283,6 +286,18 @@ root is rejected with HTTP 403.
   preserved verbatim.
 * `DELETE /permissions/rules?path=<file>&rule_key=<scope>` removes
   the named rule.
+
+The `services.json` catalog is generated from detent's built-in request
+schemas; do not edit it by hand. Regenerate it against a detent checkout
+with:
+
+```sh
+uv run python libs/mngr_latchkey/scripts/generate_services_json.py \
+  --detent-root /path/to/detent
+```
+
+Display names and the service ordering are editorial metadata detent does
+not carry; they live as curated constants in that script.
 
 A typical end-to-end shell flow:
 

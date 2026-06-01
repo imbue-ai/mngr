@@ -309,10 +309,13 @@ def test_start_gateway_drops_bundled_extensions(tmp_path: Path) -> None:
             # expose more than one detent scope).
             assert isinstance(entries, list) and len(entries) > 0
             for entry in entries:
-                assert set(entry.keys()) == {"scope", "display_name", "permissions"}
+                assert set(entry.keys()) == {"scope", "display_name", "permissions", "descriptions"}
                 assert isinstance(entry["scope"], str) and len(entry["scope"]) > 0
                 assert isinstance(entry["display_name"], str) and len(entry["display_name"]) > 0
                 assert isinstance(entry["permissions"], list)
+                # ``descriptions`` carries detent's per-schema ``$comment`` summaries
+                # keyed by detent schema name (the scope plus each permission).
+                assert isinstance(entry["descriptions"], dict)
         manager.stop_gateway()
 
 

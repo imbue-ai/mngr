@@ -422,10 +422,12 @@ function handleGetCollection(response, filePath) {
  *
  * The file is a JSON object keyed by raw service name (``slack``,
  * ``google-gmail``, ...). Each value is an array of ``{scope:
- * <schema_name>, display_name: <label>, permissions: [...]}`` objects
- * (a single service may expose more than one scope) where ``scope`` is
- * the Detent scope schema name as a plain string and ``display_name``
- * is a human-readable label.
+ * <schema_name>, display_name: <label>, permissions: [...],
+ * descriptions: {...}}`` objects (a single service may expose more than
+ * one scope) where ``scope`` is the Detent scope schema name as a plain
+ * string, ``display_name`` is a human-readable label, and the optional
+ * ``descriptions`` maps each Detent schema name (the scope and every
+ * permission) to its plain-English summary (Detent's ``$comment``).
  */
 function readAvailableServices() {
   let raw;
@@ -474,6 +476,21 @@ function readAvailableServices() {
         throw new AvailableServicesUnavailableError(
           `entry ${index} for '${serviceName}': 'permissions' must be an array of strings`,
         );
+      }
+      // ``descriptions`` is optional, but when present it must be a plain
+      // object mapping schema names to string summaries.
+      const descriptions = entry.descriptions;
+      if (descriptions !== undefined) {
+        if (typeof descriptions !== 'object' || descriptions === null || Array.isArray(descriptions)) {
+          throw new AvailableServicesUnavailableError(
+            `entry ${index} for '${serviceName}': 'descriptions' must be a JSON object`,
+          );
+        }
+        if (!Object.values(descriptions).every((value) => typeof value === 'string')) {
+          throw new AvailableServicesUnavailableError(
+            `entry ${index} for '${serviceName}': 'descriptions' values must be strings`,
+          );
+        }
       }
     });
   }

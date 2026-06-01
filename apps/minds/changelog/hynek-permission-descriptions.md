@@ -1,0 +1,1 @@
+`AvailableServiceEntry` (the typed `GET /permissions/available` catalog entry) now carries an optional `descriptions` field: a map from detent schema name to its plain-English summary (detent's `$comment`), covering the scope itself and each permission. The field defaults to empty so older catalogs without it still validate.

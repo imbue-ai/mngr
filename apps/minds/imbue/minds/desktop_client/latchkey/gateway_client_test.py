@@ -265,6 +265,43 @@ def test_get_available_services_returns_typed_entries() -> None:
     assert captured["override"] == "admin-jwt-token"
 
 
+def test_get_available_services_parses_descriptions_and_defaults_to_empty() -> None:
+    """An entry's optional ``descriptions`` map is parsed; entries without it default to empty."""
+    payload = {
+        "slack": [
+            {
+                "scope": "slack-api",
+                "display_name": "Slack",
+                "permissions": ["slack-read-all"],
+                "descriptions": {
+                    "slack-api": "Any interaction with the Slack API.",
+                    "slack-read-all": "All read operations across the Slack API.",
+                },
+            },
+        ],
+        "linear": [
+            {
+                "scope": "linear-api",
+                "display_name": "Linear",
+                "permissions": [],
+            },
+        ],
+    }
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, json=payload)
+
+    client = _build_client(_handler)
+    result = client.get_available_services()
+
+    assert result["slack"][0].descriptions == {
+        "slack-api": "Any interaction with the Slack API.",
+        "slack-read-all": "All read operations across the Slack API.",
+    }
+    assert result["linear"][0].descriptions == {}
+
+
 def test_get_available_services_raises_on_non_2xx() -> None:
     def _handler(request: httpx.Request) -> httpx.Response:
         del request

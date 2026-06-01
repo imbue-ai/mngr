@@ -1,0 +1,5 @@
+Added `libs/mngr_latchkey/scripts/generate_services_json.py`, a developer tool that regenerates the bundled `services.json` permission catalog from a detent checkout's built-in request schemas. It classifies each schema as a scope or a permission (mirroring detent's own doc generator, including the AWS special case), groups permissions under their owning scope, and carries over detent's per-schema `$comment` summaries.
+
+Regenerated `services.json` against the current detent. Each scope entry now includes a `descriptions` map (detent's `$comment` text, keyed by detent schema name, covering the scope and every permission). The refresh also picks up detent's newer definitions: Slack gains `slack-auth-read`/`slack-auth-write`, and GitLab now exposes a separate `gitlab-git` scope (alongside `gitlab-api`), matching how GitHub is split.
+
+The `permissions` gateway extension now documents and validates the optional `descriptions` field on each catalog entry; `GET /permissions/available` and `GET /permissions/available/<service_name>` surface it.

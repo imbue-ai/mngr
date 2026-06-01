@@ -6,6 +6,8 @@
       "permissions": [
         "slack-read-all",
         "slack-write-all",
+        "slack-auth-read",
+        "slack-auth-write",
         "slack-chat-read",
         "slack-chat-write",
         "slack-conversations-read",
@@ -23,7 +25,31 @@
         "slack-bookmarks-write",
         "slack-reminders-read",
         "slack-reminders-write"
-      ]
+      ],
+      "descriptions": {
+        "slack-api": "Any interaction with the Slack API.",
+        "slack-read-all": "All read operations across the entire Slack API, including messages, users, files, reactions, search, pins, bookmarks, and reminders.",
+        "slack-write-all": "All write operations across the entire Slack API, including sending messages, managing conversations, updating profiles, uploading files, and modifying pins, bookmarks, and reminders.",
+        "slack-auth-read": "Check authentication status and list teams.",
+        "slack-auth-write": "Revoke authentication tokens.",
+        "slack-chat-read": "Get message permalinks and list scheduled messages.",
+        "slack-chat-write": "Send, update, delete, and schedule messages.",
+        "slack-conversations-read": "Read conversation history, details, members, and replies.",
+        "slack-conversations-write": "Create, archive, rename, and manage conversations, including membership, invitations, topics, and purposes.",
+        "slack-users-read": "Read user profiles, presence, identity, and look up users by email.",
+        "slack-users-write": "Update user presence and profile information.",
+        "slack-files-read": "List and inspect files, including remote files.",
+        "slack-files-write": "Upload, delete, and share files, including remote files.",
+        "slack-reactions-read": "List and inspect emoji reactions on messages.",
+        "slack-reactions-write": "Add or remove emoji reactions.",
+        "slack-search": "Search messages, files, and all content.",
+        "slack-pins-read": "List pinned messages in a conversation.",
+        "slack-pins-write": "Pin or unpin messages in a conversation.",
+        "slack-bookmarks-read": "List bookmarks in a conversation.",
+        "slack-bookmarks-write": "Add, edit, or remove bookmarks.",
+        "slack-reminders-read": "List and inspect reminders.",
+        "slack-reminders-write": "Create, complete, or delete reminders."
+      }
     }
   ],
   "discord": [
@@ -40,7 +66,19 @@
         "discord-read-guilds",
         "discord-write-guilds",
         "discord-read-users"
-      ]
+      ],
+      "descriptions": {
+        "discord-api": "Any request to the Discord API.",
+        "discord-read-all": "Read any Discord resource.",
+        "discord-write-all": "Create, update, or delete any Discord resource.",
+        "discord-read-messages": "Read messages in Discord channels.",
+        "discord-write-messages": "Send, edit, or delete messages in Discord channels.",
+        "discord-read-channels": "Read Discord channel information.",
+        "discord-write-channels": "Create, edit, or delete Discord channels.",
+        "discord-read-guilds": "Read Discord server (guild) information.",
+        "discord-write-guilds": "Create, edit, or delete Discord servers (guilds).",
+        "discord-read-users": "Read Discord user information."
+      }
     }
   ],
   "github": [
@@ -62,7 +100,24 @@
         "github-search",
         "github-read-notifications",
         "github-write-notifications"
-      ]
+      ],
+      "descriptions": {
+        "github-rest-api": "Any interaction with the GitHub REST API, excluding GraphQL.",
+        "github-read-all": "Read any GitHub resource.",
+        "github-write-all": "Create, update, or delete any GitHub resource.",
+        "github-read-repos": "Read repository information and contents.",
+        "github-write-repos": "Create, update, or delete repository resources.",
+        "github-read-issues": "Read issues and issue details.",
+        "github-write-issues": "Create, edit, or close issues.",
+        "github-read-pulls": "Read pull requests and their details.",
+        "github-write-pulls": "Create, edit, or merge pull requests.",
+        "github-read-gists": "Read gists.",
+        "github-write-gists": "Create, edit, or delete gists.",
+        "github-read-user": "Read the authenticated user's profile and related information.",
+        "github-search": "Search across GitHub repositories, code, issues, and users.",
+        "github-read-notifications": "Read notifications.",
+        "github-write-notifications": "Mark notifications as read or manage notification subscriptions."
+      }
     },
     {
       "scope": "github-git",
@@ -70,13 +125,18 @@
       "permissions": [
         "github-git-read",
         "github-git-write"
-      ]
+      ],
+      "descriptions": {
+        "github-git": "Any Git protocol operation (clone, fetch, push) on GitHub.",
+        "github-git-read": "Read-only Git operations on GitHub: clone and fetch.",
+        "github-git-write": "Git push operations on GitHub."
+      }
     }
   ],
   "gitlab": [
     {
       "scope": "gitlab-api",
-      "display_name": "GitLab",
+      "display_name": "GitLab (REST API)",
       "permissions": [
         "gitlab-read-all",
         "gitlab-write-all",
@@ -93,7 +153,38 @@
         "gitlab-read-users",
         "gitlab-read-groups",
         "gitlab-write-groups"
-      ]
+      ],
+      "descriptions": {
+        "gitlab-api": "Any request to GitLab.",
+        "gitlab-read-all": "Any read-only action on GitLab.",
+        "gitlab-write-all": "Any write action on GitLab.",
+        "gitlab-read-projects": "List or view GitLab projects.",
+        "gitlab-write-projects": "Create, update, or delete GitLab projects.",
+        "gitlab-read-repository": "View repository contents, branches, tags, and commits on GitLab.",
+        "gitlab-write-repository": "Modify repository contents, branches, tags, or commits on GitLab.",
+        "gitlab-read-merge-requests": "List or view merge requests on GitLab.",
+        "gitlab-write-merge-requests": "Create, update, or delete merge requests on GitLab.",
+        "gitlab-read-issues": "List or view issues on GitLab.",
+        "gitlab-write-issues": "Create, update, or delete issues on GitLab.",
+        "gitlab-read-pipelines": "View CI/CD pipelines and jobs on GitLab.",
+        "gitlab-write-pipelines": "Run, retry, or cancel CI/CD pipelines and jobs on GitLab.",
+        "gitlab-read-users": "View user profiles and information on GitLab.",
+        "gitlab-read-groups": "List or view groups on GitLab.",
+        "gitlab-write-groups": "Create, update, or delete groups on GitLab."
+      }
+    },
+    {
+      "scope": "gitlab-git",
+      "display_name": "GitLab (git)",
+      "permissions": [
+        "gitlab-git-read",
+        "gitlab-git-write"
+      ],
+      "descriptions": {
+        "gitlab-git": "Git operations (clone, fetch, push) on GitLab repositories.",
+        "gitlab-git-read": "Read-only Git operations (clone, fetch) on GitLab repositories.",
+        "gitlab-git-write": "Git push operations on GitLab repositories."
+      }
     }
   ],
   "dropbox": [
@@ -110,14 +201,29 @@
         "dropbox-account",
         "dropbox-file-requests",
         "dropbox-contacts"
-      ]
+      ],
+      "descriptions": {
+        "dropbox-api": "Any Dropbox API activity.",
+        "dropbox-files": "Any Dropbox file operations.",
+        "dropbox-files-read": "Read-only Dropbox file operations such as listing, downloading, searching, and exporting files.",
+        "dropbox-files-write": "Dropbox file modifications such as copying, moving, uploading, deleting, and organizing files and folders.",
+        "dropbox-sharing": "Any Dropbox sharing operations.",
+        "dropbox-sharing-read": "Read-only Dropbox sharing operations such as checking permissions and listing shared items.",
+        "dropbox-sharing-write": "Dropbox sharing modifications such as creating, updating, and revoking shared links and folder memberships.",
+        "dropbox-account": "Dropbox user account information.",
+        "dropbox-file-requests": "Dropbox file request operations.",
+        "dropbox-contacts": "Dropbox contacts operations."
+      }
     }
   ],
   "linear": [
     {
       "scope": "linear-api",
       "display_name": "Linear",
-      "permissions": []
+      "permissions": [],
+      "descriptions": {
+        "linear-api": "All requests to the Linear API."
+      }
     }
   ],
   "notion": [
@@ -138,7 +244,23 @@
         "notion-read-comments",
         "notion-write-comments",
         "notion-search"
-      ]
+      ],
+      "descriptions": {
+        "notion-api": "Any request to the Notion API.",
+        "notion-read-all": "Read any Notion content, including searching across all resources.",
+        "notion-write-all": "Create, update, or delete any Notion content.",
+        "notion-read-pages": "Read Notion pages and their properties.",
+        "notion-write-pages": "Create or update Notion pages.",
+        "notion-read-blocks": "Read Notion blocks (the content elements within pages).",
+        "notion-write-blocks": "Update or delete Notion blocks.",
+        "notion-read-databases": "Read Notion databases and their schemas.",
+        "notion-write-databases": "Create or update Notion databases.",
+        "notion-query-databases": "Query a Notion database to retrieve filtered and sorted entries.",
+        "notion-read-users": "List or retrieve Notion workspace users.",
+        "notion-read-comments": "Read comments on Notion pages or blocks.",
+        "notion-write-comments": "Add comments to Notion pages or blocks.",
+        "notion-search": "Search across all Notion pages and databases."
+      }
     }
   ],
   "mailchimp": [
@@ -161,7 +283,25 @@
         "mailchimp-write-file-manager",
         "mailchimp-read-ecommerce",
         "mailchimp-write-ecommerce"
-      ]
+      ],
+      "descriptions": {
+        "mailchimp-api": "Any request to the Mailchimp API.",
+        "mailchimp-read-all": "Read any Mailchimp resource.",
+        "mailchimp-write-all": "Create, update, or delete any Mailchimp resource.",
+        "mailchimp-read-campaigns": "Read Mailchimp campaigns.",
+        "mailchimp-write-campaigns": "Create, update, or delete Mailchimp campaigns.",
+        "mailchimp-read-lists": "Read Mailchimp lists (audiences).",
+        "mailchimp-write-lists": "Create, update, or delete Mailchimp lists (audiences).",
+        "mailchimp-read-templates": "Read Mailchimp email templates.",
+        "mailchimp-write-templates": "Create, update, or delete Mailchimp email templates.",
+        "mailchimp-read-automations": "Read Mailchimp automations.",
+        "mailchimp-write-automations": "Create, update, or delete Mailchimp automations.",
+        "mailchimp-read-reports": "Read Mailchimp campaign reports and analytics.",
+        "mailchimp-read-file-manager": "Read files and folders in the Mailchimp file manager.",
+        "mailchimp-write-file-manager": "Upload, update, or delete files and folders in the Mailchimp file manager.",
+        "mailchimp-read-ecommerce": "Read Mailchimp e-commerce data (stores, products, orders).",
+        "mailchimp-write-ecommerce": "Create, update, or delete Mailchimp e-commerce data (stores, products, orders)."
+      }
     }
   ],
   "zoom": [
@@ -180,7 +320,21 @@
         "zoom-read-reports",
         "zoom-read-users",
         "zoom-write-users"
-      ]
+      ],
+      "descriptions": {
+        "zoom-api": "Requests to the Zoom API.",
+        "zoom-read-all": "Read any Zoom data.",
+        "zoom-write-all": "Create, update, or delete any Zoom data.",
+        "zoom-read-meetings": "View meetings and meeting details.",
+        "zoom-write-meetings": "Create, update, or delete meetings.",
+        "zoom-read-webinars": "View webinars and webinar details.",
+        "zoom-write-webinars": "Create, update, or delete webinars.",
+        "zoom-read-recordings": "View meeting and user recordings.",
+        "zoom-write-recordings": "Create, update, or delete meeting and user recordings.",
+        "zoom-read-reports": "View reports and report data.",
+        "zoom-read-users": "View user profiles and details.",
+        "zoom-write-users": "Create, update, or delete users."
+      }
     }
   ],
   "telegram": [
@@ -195,7 +349,17 @@
         "telegram-bot-info",
         "telegram-stickers",
         "telegram-payments"
-      ]
+      ],
+      "descriptions": {
+        "telegram-api": "Matches any request to the Telegram Bot API.",
+        "telegram-send-messages": "Send messages, media, locations, polls, and other content, or forward and copy messages.",
+        "telegram-manage-messages": "Edit, delete, or react to existing messages and stop active polls.",
+        "telegram-updates": "Receive updates and manage webhook configuration.",
+        "telegram-manage-chats": "Manage chat members, permissions, invite links, forum topics, and chat settings.",
+        "telegram-bot-info": "Read and update the bot's profile, commands, description, and default settings.",
+        "telegram-stickers": "Send stickers and manage sticker sets, including creating, editing, and deleting them.",
+        "telegram-payments": "Send invoices, handle shipping and checkout queries, and manage Telegram Star payments and subscriptions."
+      }
     }
   ],
   "sentry": [
@@ -213,7 +377,20 @@
         "sentry-read-teams",
         "sentry-read-releases",
         "sentry-write-releases"
-      ]
+      ],
+      "descriptions": {
+        "sentry-api": "Any request to the Sentry API.",
+        "sentry-read-all": "Read any Sentry data.",
+        "sentry-write-all": "Create, update, or delete any Sentry data.",
+        "sentry-read-issues": "View issues and events in Sentry.",
+        "sentry-write-issues": "Create, update, or delete Sentry issues.",
+        "sentry-read-projects": "View Sentry projects.",
+        "sentry-write-projects": "Create, update, or delete Sentry projects.",
+        "sentry-read-organizations": "View Sentry organizations.",
+        "sentry-read-teams": "View Sentry teams.",
+        "sentry-read-releases": "View Sentry releases.",
+        "sentry-write-releases": "Create, update, or delete Sentry releases."
+      }
     }
   ],
   "aws": [
@@ -248,7 +425,37 @@
         "aws-cloudtrail",
         "aws-eventbridge",
         "aws-kinesis"
-      ]
+      ],
+      "descriptions": {
+        "aws": "Any access to AWS services.",
+        "aws-s3": "Any access to AWS S3 object storage.",
+        "aws-s3-read": "Read objects and metadata from AWS S3.",
+        "aws-s3-write": "Create, update, and delete objects in AWS S3.",
+        "aws-ec2": "Any access to AWS EC2 virtual machines.",
+        "aws-iam": "Any access to AWS IAM identity and access management.",
+        "aws-sts": "Any access to AWS STS for temporary security credentials.",
+        "aws-lambda": "Any access to AWS Lambda serverless functions.",
+        "aws-dynamodb": "Any access to AWS DynamoDB NoSQL database.",
+        "aws-cloudformation": "Any access to AWS CloudFormation infrastructure-as-code.",
+        "aws-logs": "Any access to AWS CloudWatch Logs.",
+        "aws-cloudwatch": "Any access to AWS CloudWatch monitoring and metrics.",
+        "aws-sns": "Any access to AWS SNS push notifications.",
+        "aws-sqs": "Any access to AWS SQS message queues.",
+        "aws-ssm": "Any access to AWS Systems Manager.",
+        "aws-secretsmanager": "Any access to AWS Secrets Manager.",
+        "aws-route53": "Any access to AWS Route 53 DNS management.",
+        "aws-ecs": "Any access to AWS ECS container orchestration.",
+        "aws-ecr": "Any access to AWS ECR container image registry.",
+        "aws-eks": "Any access to AWS EKS managed Kubernetes.",
+        "aws-bedrock": "Any access to AWS Bedrock foundation models.",
+        "aws-cloudfront": "Any access to AWS CloudFront content delivery.",
+        "aws-rds": "Any access to AWS RDS managed relational databases.",
+        "aws-kms": "Any access to AWS KMS encryption key management.",
+        "aws-elb": "Any access to AWS Elastic Load Balancing.",
+        "aws-cloudtrail": "Any access to AWS CloudTrail audit logging.",
+        "aws-eventbridge": "Any access to AWS EventBridge event routing.",
+        "aws-kinesis": "Any access to AWS Kinesis data streaming."
+      }
     }
   ],
   "stripe": [
@@ -276,7 +483,30 @@
         "stripe-read-payouts",
         "stripe-write-payouts",
         "stripe-read-events"
-      ]
+      ],
+      "descriptions": {
+        "stripe-api": "Any interaction with the Stripe API.",
+        "stripe-read-all": "Read any Stripe resource.",
+        "stripe-write-all": "Create, update, or delete any Stripe resource.",
+        "stripe-read-customers": "View customers.",
+        "stripe-write-customers": "Create, update, or delete customers.",
+        "stripe-read-payments": "View charges, payment intents, setup intents, and setup attempts.",
+        "stripe-write-payments": "Create, update, or delete charges, payment intents, and setup intents.",
+        "stripe-read-subscriptions": "View subscriptions, subscription items, and subscription schedules.",
+        "stripe-write-subscriptions": "Create, update, or delete subscriptions, subscription items, and subscription schedules.",
+        "stripe-read-invoices": "View invoices and invoice items.",
+        "stripe-write-invoices": "Create, update, or delete invoices and invoice items.",
+        "stripe-read-products": "View products and prices.",
+        "stripe-write-products": "Create, update, or delete products and prices.",
+        "stripe-read-balance": "View balance and balance transactions.",
+        "stripe-read-refunds": "View refunds.",
+        "stripe-write-refunds": "Create, update, or delete refunds.",
+        "stripe-read-disputes": "View disputes.",
+        "stripe-write-disputes": "Create, update, or delete disputes.",
+        "stripe-read-payouts": "View payouts.",
+        "stripe-write-payouts": "Create, update, or cancel payouts.",
+        "stripe-read-events": "View events."
+      }
     }
   ],
   "figma": [
@@ -298,7 +528,24 @@
         "figma-read-dev-resources",
         "figma-write-dev-resources",
         "figma-read-library-analytics"
-      ]
+      ],
+      "descriptions": {
+        "figma-api": "Any request to the Figma API.",
+        "figma-read-all": "Read anything from Figma.",
+        "figma-write-all": "Create, update, or delete anything in Figma.",
+        "figma-read-files": "Read Figma files, including their images, metadata, and versions.",
+        "figma-read-comments": "Read comments on Figma files.",
+        "figma-write-comments": "Post or delete comments on Figma files.",
+        "figma-read-projects": "List team projects and project files.",
+        "figma-read-components": "Read components, component sets, and styles from Figma files or teams.",
+        "figma-read-webhooks": "List webhooks and read their details.",
+        "figma-write-webhooks": "Create, update, or delete webhooks.",
+        "figma-read-variables": "Read variables from Figma files.",
+        "figma-write-variables": "Create or update variables in Figma files.",
+        "figma-read-dev-resources": "Read dev resources from Figma files.",
+        "figma-write-dev-resources": "Create, update, or delete dev resources in Figma files.",
+        "figma-read-library-analytics": "Read library usage analytics."
+      }
     }
   ],
   "calendly": [
@@ -323,7 +570,27 @@
         "calendly-write-scheduling-links",
         "calendly-write-shares",
         "calendly-write-data-compliance"
-      ]
+      ],
+      "descriptions": {
+        "calendly-api": "Identifies requests to the Calendly API.",
+        "calendly-read-all": "Read any Calendly resource.",
+        "calendly-write-all": "Create, update, or delete any Calendly resource.",
+        "calendly-read-scheduled-events": "View scheduled events and invitee no-shows.",
+        "calendly-write-scheduled-events": "Cancel scheduled events and manage invitee no-shows.",
+        "calendly-read-event-types": "View event types, their available times, and memberships.",
+        "calendly-write-event-types": "Create or update event types, including one-off event types.",
+        "calendly-read-availability": "View user busy times and availability schedules.",
+        "calendly-write-availability": "Update event type availability schedules.",
+        "calendly-read-users": "View user profiles.",
+        "calendly-read-organizations": "View organization details, memberships, and invitations.",
+        "calendly-write-organizations": "Create or remove organization invitations and memberships.",
+        "calendly-read-webhooks": "View webhook subscriptions.",
+        "calendly-write-webhooks": "Create or remove webhook subscriptions.",
+        "calendly-read-routing-forms": "View routing forms and their submissions.",
+        "calendly-write-scheduling-links": "Create scheduling links.",
+        "calendly-write-shares": "Create shares.",
+        "calendly-write-data-compliance": "Request deletion of event or invitee data for compliance purposes."
+      }
     }
   ],
   "yelp": [
@@ -340,7 +607,19 @@
         "yelp-read-categories",
         "yelp-autocomplete",
         "yelp-ai-chat"
-      ]
+      ],
+      "descriptions": {
+        "yelp-api": "Any request to the Yelp API.",
+        "yelp-read-all": "Read any Yelp data.",
+        "yelp-write-all": "Create, update, or delete any Yelp data.",
+        "yelp-read-businesses": "Look up businesses and transactions.",
+        "yelp-write-businesses": "Create, update, or delete businesses and transactions.",
+        "yelp-read-reviews": "Read reviews and review highlights for a business.",
+        "yelp-read-events": "Browse and search Yelp events.",
+        "yelp-read-categories": "List or look up business categories.",
+        "yelp-autocomplete": "Get autocomplete suggestions.",
+        "yelp-ai-chat": "Send messages to the Yelp AI chat."
+      }
     }
   ],
   "coolify": [
@@ -362,7 +641,24 @@
         "coolify-read-projects",
         "coolify-write-projects",
         "coolify-read-teams"
-      ]
+      ],
+      "descriptions": {
+        "coolify-api": "Identifies requests to the Coolify API.",
+        "coolify-read-all": "List and inspect all Coolify resources, excluding actions like start, stop, restart, deploy, and similar operations.",
+        "coolify-write-all": "Create, update, delete, and perform actions (start, stop, restart, deploy, etc.) on all Coolify resources.",
+        "coolify-read-applications": "List and inspect applications.",
+        "coolify-write-applications": "Create, update, or delete applications.",
+        "coolify-deployments": "List, inspect, or trigger deployments.",
+        "coolify-read-databases": "List and inspect databases.",
+        "coolify-write-databases": "Create, update, or delete databases.",
+        "coolify-read-servers": "List and inspect servers.",
+        "coolify-write-servers": "Create, update, or delete servers.",
+        "coolify-read-services": "List and inspect services.",
+        "coolify-write-services": "Create, update, or delete services.",
+        "coolify-read-projects": "List and inspect projects.",
+        "coolify-write-projects": "Create, update, or delete projects.",
+        "coolify-read-teams": "List and inspect teams."
+      }
     }
   ],
   "umami": [
@@ -380,7 +676,20 @@
         "umami-read-teams",
         "umami-write-teams",
         "umami-read-me"
-      ]
+      ],
+      "descriptions": {
+        "umami-api": "Identifies requests to the Umami Cloud API.",
+        "umami-read-all": "Read any Umami resource.",
+        "umami-write-all": "Create, update, or delete any Umami resource.",
+        "umami-read-websites": "List websites or view a single website's details.",
+        "umami-write-websites": "Create, update, or delete websites.",
+        "umami-read-stats": "View analytics data for a website, including pageviews, sessions, events, and metrics.",
+        "umami-read-reports": "List or view reports.",
+        "umami-write-reports": "Create, update, or delete reports.",
+        "umami-read-teams": "List or view teams and their details.",
+        "umami-write-teams": "Create, update, or delete teams.",
+        "umami-read-me": "View the current user's profile information."
+      }
     }
   ],
   "google-gmail": [
@@ -403,7 +712,25 @@
         "google-gmail-write-settings",
         "google-gmail-read-history",
         "google-gmail-read-profile"
-      ]
+      ],
+      "descriptions": {
+        "google-gmail-api": "Any request to the Gmail API.",
+        "google-gmail-read-all": "Read anything from Gmail.",
+        "google-gmail-write-all": "Create, update, or delete anything in Gmail.",
+        "google-gmail-read-messages": "List or read messages.",
+        "google-gmail-write-messages": "Create, update, or delete messages, including uploads.",
+        "google-gmail-send-messages": "Send messages, including uploads.",
+        "google-gmail-read-threads": "List or read threads.",
+        "google-gmail-write-threads": "Modify or delete threads.",
+        "google-gmail-read-labels": "List or read labels.",
+        "google-gmail-write-labels": "Create, update, or delete labels.",
+        "google-gmail-read-drafts": "List or read drafts.",
+        "google-gmail-write-drafts": "Create, update, or delete drafts, including uploads.",
+        "google-gmail-read-settings": "Read account settings such as filters, forwarding, and IMAP/POP configuration.",
+        "google-gmail-write-settings": "Change account settings such as filters, forwarding, and IMAP/POP configuration.",
+        "google-gmail-read-history": "Read mailbox change history.",
+        "google-gmail-read-profile": "Read the user's Gmail profile."
+      }
     }
   ],
   "google-calendar": [
@@ -424,7 +751,23 @@
         "google-calendar-write-acl",
         "google-calendar-query-freebusy",
         "google-calendar-read-colors"
-      ]
+      ],
+      "descriptions": {
+        "google-calendar-api": "Identify requests to the Google Calendar API.",
+        "google-calendar-read-all": "Read any Google Calendar resource.",
+        "google-calendar-write-all": "Create, update, or delete any Google Calendar resource.",
+        "google-calendar-read-events": "Read events from calendars.",
+        "google-calendar-write-events": "Create, update, or delete events on calendars.",
+        "google-calendar-read-calendars": "Read calendar details.",
+        "google-calendar-write-calendars": "Create, update, delete, or clear calendars.",
+        "google-calendar-read-calendar-list": "Read the user's list of calendars.",
+        "google-calendar-write-calendar-list": "Add, update, or remove calendars from the user's calendar list.",
+        "google-calendar-read-settings": "Read the user's calendar settings.",
+        "google-calendar-read-acl": "Read access control rules on calendars.",
+        "google-calendar-write-acl": "Create, update, or delete access control rules on calendars.",
+        "google-calendar-query-freebusy": "Query free/busy information for calendars.",
+        "google-calendar-read-colors": "Read available calendar and event colors."
+      }
     }
   ],
   "google-drive": [
@@ -441,7 +784,19 @@
         "google-drive-read-comments",
         "google-drive-write-comments",
         "google-drive-read-about"
-      ]
+      ],
+      "descriptions": {
+        "google-drive-api": "Any request to the Google Drive API.",
+        "google-drive-read-all": "Read anything from Google Drive.",
+        "google-drive-write-all": "Create, update, or delete anything in Google Drive.",
+        "google-drive-read-files": "List files or retrieve file metadata.",
+        "google-drive-write-files": "Create, upload, update, or delete files.",
+        "google-drive-read-permissions": "View sharing permissions on files.",
+        "google-drive-write-permissions": "Share, modify, or revoke sharing permissions on files.",
+        "google-drive-read-comments": "View comments and replies on files.",
+        "google-drive-write-comments": "Add, edit, or delete comments and replies on files.",
+        "google-drive-read-about": "Retrieve information about the user's Drive account and settings."
+      }
     }
   ],
   "google-docs": [
@@ -455,7 +810,16 @@
         "google-docs-write-documents",
         "google-docs-create-documents",
         "google-docs-update-documents"
-      ]
+      ],
+      "descriptions": {
+        "google-docs-api": "Any request to the Google Docs API.",
+        "google-docs-read-all": "Read any Google Docs resource.",
+        "google-docs-write-all": "Create, update, or delete any Google Docs resource.",
+        "google-docs-read-documents": "Read a specific document.",
+        "google-docs-write-documents": "Create, update, or delete documents.",
+        "google-docs-create-documents": "Create new documents.",
+        "google-docs-update-documents": "Apply batch updates to a document's content."
+      }
     }
   ],
   "google-sheets": [
@@ -470,7 +834,17 @@
         "google-sheets-update-spreadsheets",
         "google-sheets-read-values",
         "google-sheets-write-values"
-      ]
+      ],
+      "descriptions": {
+        "google-sheets-api": "Any request to the Google Sheets API.",
+        "google-sheets-read-all": "Read anything from Google Sheets.",
+        "google-sheets-write-all": "Create, update, or delete anything in Google Sheets.",
+        "google-sheets-read-spreadsheets": "Read spreadsheet metadata (title, sheets, properties, etc.).",
+        "google-sheets-create-spreadsheets": "Create new spreadsheets.",
+        "google-sheets-update-spreadsheets": "Modify spreadsheet structure or formatting via batch updates.",
+        "google-sheets-read-values": "Read cell values from a spreadsheet.",
+        "google-sheets-write-values": "Write or append cell values in a spreadsheet."
+      }
     }
   ],
   "google-people": [
@@ -486,7 +860,18 @@
         "google-people-write-contact-groups",
         "google-people-read-other-contacts",
         "google-people-write-other-contacts"
-      ]
+      ],
+      "descriptions": {
+        "google-people-api": "Any request to the Google People API.",
+        "google-people-read-all": "Read anything from the Google People API.",
+        "google-people-write-all": "Create, update, or delete anything in the Google People API.",
+        "google-people-read-contacts": "List or read contacts.",
+        "google-people-write-contacts": "Create, update, or delete contacts.",
+        "google-people-read-contact-groups": "List or read contact groups.",
+        "google-people-write-contact-groups": "Create, update, or delete contact groups.",
+        "google-people-read-other-contacts": "List or read other contacts (contacts outside the user's address book).",
+        "google-people-write-other-contacts": "Create, update, or delete other contacts (contacts outside the user's address book)."
+      }
     }
   ],
   "google-analytics": [
@@ -503,7 +888,19 @@
         "google-analytics-write-properties",
         "google-analytics-read-data-streams",
         "google-analytics-write-data-streams"
-      ]
+      ],
+      "descriptions": {
+        "google-analytics-api": "Any request to the Google Analytics API (data and admin endpoints).",
+        "google-analytics-read-all": "Read-only access to all Google Analytics resources.",
+        "google-analytics-write-all": "Write access to all Google Analytics resources.",
+        "google-analytics-run-reports": "Run analytics reports, including standard, pivot, real-time, batch, compatibility, and access reports.",
+        "google-analytics-read-metadata": "Read metadata (available dimensions and metrics) for an analytics property.",
+        "google-analytics-read-accounts": "List or view Google Analytics accounts and account summaries.",
+        "google-analytics-read-properties": "List or view Google Analytics properties.",
+        "google-analytics-write-properties": "Create, update, or delete Google Analytics properties.",
+        "google-analytics-read-data-streams": "List or view data streams for a Google Analytics property.",
+        "google-analytics-write-data-streams": "Create, update, or delete data streams for a Google Analytics property."
+      }
     }
   ],
   "google-directions": [
@@ -515,7 +912,14 @@
         "google-directions-write-all",
         "google-directions-compute-routes",
         "google-directions-compute-route-matrix"
-      ]
+      ],
+      "descriptions": {
+        "google-directions-api": "Matches all Google Routes API traffic.",
+        "google-directions-read-all": "Read any Google Directions data.",
+        "google-directions-write-all": "Create, update, or delete any Google Directions data.",
+        "google-directions-compute-routes": "Compute routes between locations.",
+        "google-directions-compute-route-matrix": "Compute a distance and duration matrix between multiple origins and destinations."
+      }
     }
   ]
 }
