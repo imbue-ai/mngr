@@ -7,9 +7,9 @@ Claude Code skills that teach Claude how to use [mngr](https://github.com/imbue-
 - `/imbue-mngr-skills:message-agent <agent> <what to say>` -- send a message to another mngr agent.
 - `/imbue-mngr-skills:wait-for-agent <agent> [follow-up instructions]` -- block until an agent reaches a ready state (WAITING without a permissions reason, DONE, or STOPPED), then carry out the follow-up.
 - `/imbue-mngr-skills:find-agent <name or description>` -- resolve an agent name or description to an exact agent name. Used by the other two skills, but invocable on its own.
-- `/imbue-mngr-skills:mngr-help` -- when you want to run an mngr command but aren't sure which, points you at `mngr help` (browse commands) and `mngr ask` (describe what you want in plain language).
+- `/imbue-mngr-skills:mngr-help` -- whenever mngr comes up, run `mngr help` right away for context on what mngr does; also points at `mngr ask` (describe what you want in plain language).
 
-`message-agent` and `wait-for-agent` first try the name you give them verbatim; they only fall back to `find-agent` when that exact name does not match a live agent (for example when you paste a `mngr/<branch>` name or describe the agent instead of naming it).
+`message-agent` and `wait-for-agent` use the name you give them when it already looks like an agent name, and fall back to `find-agent` only when it doesn't -- for example when you paste a `mngr/<branch>` name or describe the agent instead of naming it.
 
 ## Installation
 

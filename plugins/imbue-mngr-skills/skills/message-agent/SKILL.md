@@ -2,7 +2,7 @@
 name: message-agent
 argument-hint: <agent_name> <description of what to say>
 description: Send a message to another mngr agent. Use when you need to communicate with a peer agent.
-allowed-tools: Bash(echo "$MNGR_AGENT_NAME"), Bash(mngr list *), Bash(mngr message *), Write(*), Skill(imbue-mngr-skills:find-agent)
+allowed-tools: Bash(echo "$MNGR_AGENT_NAME"), Bash(mngr message *), Write(*), Skill(imbue-mngr-skills:find-agent)
 ---
 
 The user's message contains a target agent name (the first word) and a description of what to communicate. Extract the agent name and treat everything after it as the intent/content of the message.
@@ -11,13 +11,7 @@ Your agent name is: !`echo "$MNGR_AGENT_NAME"`
 
 ## Agent Name Resolution
 
-First try the first word of the user's input as an exact agent name. List the agents and check for an exact match:
-
-```
-mngr list --format '{name}'
-```
-
-If the first word exactly matches one of the listed agent names, use it directly as the target -- do not invoke any other skill. Only if there is no exact match (for example the user pasted a branch name like `mngr/foo` or gave a description rather than a name) should you fall back to the `/imbue-mngr-skills:find-agent` skill to resolve it.
+Skip this step if the user seems to have provided the exact name of the agent -- just use the first word of their input directly as the target. Only if the input doesn't look like a bare agent name (for example they pasted a branch name like `mngr/foo` or described the agent rather than naming it) should you use the `/imbue-mngr-skills:find-agent` skill to resolve it.
 
 ## Composing the Message
 
