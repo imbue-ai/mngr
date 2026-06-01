@@ -205,16 +205,25 @@ def test_approve_permission_request_raises_on_4xx() -> None:
 def test_get_available_services_returns_typed_entries() -> None:
     """``get_available_services`` GETs the catalog endpoint and returns validated entries."""
     payload = {
-        "slack": {
-            "scope": "slack-api",
-            "display_name": "Slack",
-            "permissions": ["slack-read-all"],
-        },
-        "linear": {
-            "scope": "linear-api",
-            "display_name": "Linear",
-            "permissions": [],
-        },
+        "slack": [
+            {
+                "scope": "slack-api",
+                "display_name": "Slack",
+                "permissions": ["slack-read-all"],
+            },
+        ],
+        "google": [
+            {
+                "scope": "google-gmail-api",
+                "display_name": "Gmail",
+                "permissions": [],
+            },
+            {
+                "scope": "google-drive-api",
+                "display_name": "Drive",
+                "permissions": ["drive-read"],
+            },
+        ],
     }
 
     captured: dict[str, object] = {}
@@ -230,15 +239,24 @@ def test_get_available_services_returns_typed_entries() -> None:
     result = client.get_available_services()
 
     assert result == {
-        "slack": AvailableServiceEntry(
-            scope="slack-api",
-            display_name="Slack",
-            permissions=("slack-read-all",),
+        "slack": (
+            AvailableServiceEntry(
+                scope="slack-api",
+                display_name="Slack",
+                permissions=("slack-read-all",),
+            ),
         ),
-        "linear": AvailableServiceEntry(
-            scope="linear-api",
-            display_name="Linear",
-            permissions=(),
+        "google": (
+            AvailableServiceEntry(
+                scope="google-gmail-api",
+                display_name="Gmail",
+                permissions=(),
+            ),
+            AvailableServiceEntry(
+                scope="google-drive-api",
+                display_name="Drive",
+                permissions=("drive-read",),
+            ),
         ),
     }
     assert captured["method"] == "GET"
@@ -298,7 +316,23 @@ def test_get_available_services_raises_on_malformed_entry(bad_entry: object) -> 
 
     def _handler(request: httpx.Request) -> httpx.Response:
         del request
-        return httpx.Response(200, json={"broken": bad_entry})
+        return httpx.Response(200, json={"broken": [bad_entry]})
+
+    client = _build_client(_handler)
+    with pytest.raises(LatchkeyGatewayClientError) as exc_info:
+        client.get_available_services()
+    assert "broken" in str(exc_info.value)
+
+
+def test_get_available_services_raises_when_service_value_is_not_a_list() -> None:
+    """Each service must map to a JSON array of scope entries, not a bare object."""
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            json={"broken": {"scope": "x-api", "display_name": "X", "permissions": []}},
+        )
 
     client = _build_client(_handler)
     with pytest.raises(LatchkeyGatewayClientError) as exc_info:

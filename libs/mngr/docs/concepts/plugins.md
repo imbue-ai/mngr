@@ -40,6 +40,7 @@ Plugins implement these to register new capabilities with mngr. They are called 
 | `register_provider_backend`  | Register a new provider backend (e.g., cloud platforms)                                                        |
 | `register_cli_commands`      | Define an entirely new CLI command                                                                             |
 | `register_cli_options`       | Add custom CLI options to any existing command's schema so that they appear in `--help`                        |
+| `register_help_topics`       | Add standalone help topic pages that appear in `mngr help` and `mngr help <topic>` when the plugin is installed |
 
 ### Deployment hooks
 
@@ -314,6 +315,40 @@ def override_command_options(command_name, command_class, params):
 ```
 
 To add visible CLI options to existing commands (so they appear in `--help`), implement `register_cli_options`.
+
+### Help topics
+
+`mngr help` lists standalone topic pages (concepts that span multiple commands, like `mngr help address`) alongside per-command help. Implement `register_help_topics` to contribute your own pages; they appear in `mngr help` and are viewable via `mngr help <topic>` whenever your plugin is installed.
+
+Each topic is a `TopicHelpPage` whose metadata (key, description, aliases, see-also) is declared explicitly. Its body (rendered as markdown, rich-rendered in an interactive terminal) is one of:
+
+- `DocFile(path=...)`: a markdown file, read lazily. Use this to keep long-form prose in a `.md` file. The file must ship inside your package -- e.g. keep it under your `imbue/...` tree, or `force-include` it in the wheel; a path outside the installed package works in an editable checkout but is absent from a PyPI wheel.
+- `InlineContent(markdown=...)`: an inline markdown string (handy for short bodies).
+
+```python
+from pathlib import Path
+
+from imbue.mngr import hookimpl
+from imbue.mngr.interfaces.help_topic import DocFile
+from imbue.mngr.interfaces.help_topic import TopicHelpPage
+
+# docs/ is shipped inside the package (e.g. via wheel force-include)
+_DOCS = Path(__file__).parent / "docs"
+
+@hookimpl
+def register_help_topics():
+    return [
+        TopicHelpPage(
+            key="my_topic",
+            aliases=("mt",),
+            one_line_description="What my plugin adds",
+            body=DocFile(path=_DOCS / "my_topic.md"),
+            see_also=(("create", "Create and run an agent"),),
+        ),
+    ]
+```
+
+A plugin topic whose key (or alias) collides with a built-in topic is skipped (built-in topics always win), so pick distinctive keys.
 
 ### Error handling
 

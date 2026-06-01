@@ -264,15 +264,16 @@ root is rejected with HTTP 403.
 
 * `GET /permissions?path=<file>` returns the full permissions file.
 * `GET /permissions/available` returns the full permission catalog as
-  a JSON object keyed by raw service name. Each value has the shape
-  `{"scope": "<schema_name>", "display_name": "...", "permissions":
-  ["...", ...]}`.
+  a JSON object keyed by raw service name. Each value is an array of
+  scope entries (a single service may expose more than one scope), each
+  with the shape `{"scope": "<schema_name>", "display_name": "...",
+  "permissions": ["...", ...]}`.
 * `GET /permissions/available/<service_name>` returns the permission
-  catalog entry for `<service_name>` (e.g. `slack`, `google-gmail`)
-  using the same value shape, or 404 if the service is unknown. Both
-  endpoints are backed by a `services.json` file (keyed by raw
-  service name) that ships alongside the extension; the path query
-  parameter is not consulted.
+  catalog entries for `<service_name>` (e.g. `slack`, `google-gmail`)
+  as an array, using the same value shape, or 404 if the service is
+  unknown. Both endpoints are backed by a `services.json` file (keyed
+  by raw service name) that ships alongside the extension; the path
+  query parameter is not consulted.
 * `GET /permissions/rules?path=<file>&rule_key=<scope>` returns the
   rule for `<scope>`, or 404 if absent.
 * `POST /permissions/rules?path=<file>&rule_key=<scope>` with a JSON
