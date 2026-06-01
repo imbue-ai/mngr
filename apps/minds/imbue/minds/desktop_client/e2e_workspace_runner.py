@@ -533,10 +533,14 @@ def create_workspace_via_electron(
 
                 _ensure_field_value(page, "#host_name", workspace_name)
                 _ensure_field_value(page, "#git_url", str(fct_path))
-                # DOCKER + SUBSCRIPTION are the defaults when no account
-                # is selected; don't touch the launch_mode / ai_provider
-                # selects so this stays robust to future option
-                # reorderings in the form.
+                # Explicitly select the DOCKER compute provider: with no
+                # account selected the form now defaults to LIMA (a local VM
+                # that isn't available on the CI runner), so this test --
+                # which is specifically about local Docker -- must pin DOCKER
+                # rather than relying on the default. The select lives in the
+                # (now-open) "Configure..." panel. AI provider stays at its
+                # no-account default of SUBSCRIPTION.
+                page.select_option("#launch_mode", "DOCKER")
 
                 logger.info("Submitting create form")
                 page.click("#create-submit")
