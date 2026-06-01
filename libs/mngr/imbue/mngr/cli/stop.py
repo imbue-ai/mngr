@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from concurrent.futures import Future
 from datetime import datetime
 from datetime import timezone
 from typing import Any
@@ -43,6 +44,7 @@ from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.providers.base_provider import BaseProviderInstance
+from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 
 class StopCliOptions(CommonCliOptions):
@@ -106,24 +108,45 @@ def _stop_hosts_for_addresses(
     providers = [get_provider_instance(resolved.provider_name, mngr_ctx) for resolved, _ in hosts_to_stop.values()]
     _ensure_providers_support_host_shutdown(providers)
 
-    for resolved, host in hosts_to_stop.values():
-        provider = get_provider_instance(resolved.provider_name, mngr_ctx)
-        match host:
-            case OnlineHostInterface() as online_host:
-                # No snapshot: native start_host preserves the container
-                # filesystem anyway. No discovery-event emission: the host is
-                # offline afterwards, so an online-host sweep would fail.
-                provider.stop_host(online_host, create_snapshot=False)
-                _output(f"Stopped host: {host.get_name()}", output_opts)
-            case HostInterface():
-                # The host is already offline (stopped or destroyed) -- the
-                # desired end state is already reached, so this is an
-                # idempotent no-op.
-                _output(f"Host '{host.get_name()}' is already stopped", output_opts)
-            case _ as unreachable:
-                assert_never(unreachable)
+    # Each stop_host is an independent, network-bound daemon operation, so run
+    # them concurrently rather than serializing on the slowest host. Futures are
+    # iterated in submission order so output (and any re-raised exception)
+    # remains deterministic regardless of completion order.
+    futures: list[Future[str]] = []
+    with mngr_executor(parent_cg=mngr_ctx.concurrency_group, name="stop_hosts", max_workers=32) as executor:
+        for resolved, host in hosts_to_stop.values():
+            futures.append(executor.submit(_stop_single_host, resolved, host, mngr_ctx))
+
+    for future in futures:
+        _output(future.result(), output_opts)
 
     return [str(address.agent) for address in agent_addresses]
+
+
+def _stop_single_host(
+    resolved: ResolvedAgentHost,
+    host: HostInterface,
+    mngr_ctx: MngrContext,
+) -> str:
+    """Stop a single resolved host, returning the human-readable status message.
+
+    Online hosts are stopped via the provider; hosts that are already offline
+    are treated as an idempotent no-op (the desired end state is reached).
+    """
+    provider = get_provider_instance(resolved.provider_name, mngr_ctx)
+    match host:
+        case OnlineHostInterface() as online_host:
+            # No snapshot: native start_host preserves the container filesystem
+            # anyway. No discovery-event emission: the host is offline
+            # afterwards, so an online-host sweep would fail.
+            provider.stop_host(online_host, create_snapshot=False)
+            return f"Stopped host: {host.get_name()}"
+        case HostInterface():
+            # The host is already offline (stopped or destroyed) -- the desired
+            # end state is already reached, so this is an idempotent no-op.
+            return f"Host '{host.get_name()}' is already stopped"
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _output(message: str, output_opts: OutputOptions) -> None:
