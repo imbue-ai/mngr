@@ -1,0 +1,1 @@
+- Bump the per-test timeout on `test_list_command_with_remote_filter_alias` (libs/mngr) to 30s. The test body is fast but its tmux session teardown occasionally exceeds the 10s default under CI load, tripping pytest-timeout. A modest timeout bump is the right remedy for a teardown-latency timeout, rather than marking it `@flaky` (which would just rerun a slow test).

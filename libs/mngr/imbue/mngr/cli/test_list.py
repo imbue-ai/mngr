@@ -762,7 +762,9 @@ def test_list_command_with_local_filter_alias(
         assert agent_name in result.output
 
 
+# tmux session cleanup occasionally exceeds the 10s default.
 @pytest.mark.tmux
+@pytest.mark.timeout(30)
 def test_list_command_with_remote_filter_alias(
     cli_runner: CliRunner,
     temp_work_dir: Path,
