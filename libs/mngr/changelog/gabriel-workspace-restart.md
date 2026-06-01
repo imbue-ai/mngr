@@ -12,13 +12,14 @@ agent on it) instead of just the named agent.
   failed with an `SSH error (Error reading SSH protocol banner...)` when
   the host's container was still running but its sshd was unreachable
   (sshd crashed, or PID exhaustion blocked new SSH sessions) -- one of
-  the cases `--stop-host` is meant to handle. The host is now resolved
-  from the discovery event stream, cross-checked against an SSH-free host
-  scan, so `mngr stop <agent> --stop-host` followed by `mngr start
-  <agent>` reliably bounces an unresponsive workspace. The SSH-free scan
-  is the authoritative check for whether the host still exists, so the
-  resolution no longer also replays host discovered/destroyed events to
-  track host state separately.
+  the cases `--stop-host` is meant to handle. The host_id is now resolved
+  from the discovery event stream and then fetched through the provider's
+  own SSH-free `get_host` (which validates that the host still exists and
+  supplies its name), so `mngr stop <agent> --stop-host` followed by
+  `mngr start <agent>` reliably bounces an unresponsive workspace. A
+  single SSH-free lookup against the one relevant provider both validates
+  and names the host, so resolution does not scan every provider's hosts
+  up front, and does not replay host discovered/destroyed events.
 - This supports the minds tiered workspace-restart recovery flow, which
   uses a full host restart as its heavier recovery tier.
 

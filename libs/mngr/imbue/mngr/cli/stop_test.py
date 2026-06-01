@@ -17,6 +17,7 @@ from imbue.mngr.cli.stop import stop
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import AgentNotFoundError
+from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import HostShutdownNotSupportedError
 from imbue.mngr.errors import LocalHostNotStoppableError
 from imbue.mngr.primitives import AgentAddress
@@ -24,6 +25,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
@@ -229,6 +231,41 @@ def test_stop_hosts_for_addresses_raises_for_unknown_agent(
     with pytest.raises(AgentNotFoundError):
         _stop_hosts_for_addresses(
             [AgentAddress(agent=AgentName("missing-agent"))],
+            temp_mngr_ctx,
+            output_opts,
+        )
+
+
+def test_stop_hosts_for_addresses_raises_when_host_no_longer_exists(
+    temp_mngr_ctx: MngrContext,
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A stale event stream pointing at a vanished host surfaces as an error.
+
+    Resolution maps the agent to a recorded host_id without checking that the
+    host still exists; the provider's SSH-free ``get_host`` is what validates
+    it, raising ``HostNotFoundError`` when the host is gone -- so ``--stop-host``
+    fails loudly instead of silently stopping nothing.
+    """
+    stale_host_id = HostId.generate()
+    agent = DiscoveredAgent(
+        host_id=stale_host_id,
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("orphan-agent"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={},
+    )
+    host = DiscoveredHost(
+        host_id=stale_host_id,
+        host_name=HostName(LOCAL_HOST_NAME),
+        provider_name=ProviderInstanceName("local"),
+    )
+    write_full_discovery_snapshot(temp_mngr_ctx.config, [agent], [host])
+
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    with pytest.raises(HostNotFoundError):
+        _stop_hosts_for_addresses(
+            [AgentAddress(agent=AgentName("orphan-agent"))],
             temp_mngr_ctx,
             output_opts,
         )

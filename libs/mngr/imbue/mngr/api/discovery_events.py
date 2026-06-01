@@ -32,8 +32,6 @@ from imbue.imbue_common.logging import generate_rotation_timestamp
 from imbue.imbue_common.logging import rotation_lock
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.providers import get_provider_instance
-from imbue.mngr.api.providers import list_provider_names_to_load
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
@@ -41,8 +39,6 @@ from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import DiscoverySchemaChangedError
 from imbue.mngr.errors import ProviderDiscoveryError
-from imbue.mngr.errors import ProviderEmptyError
-from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
@@ -601,14 +597,14 @@ def find_latest_full_snapshot_offset(events_path: Path) -> int:
 class ResolvedAgentHost(FrozenModel):
     """The host an agent identifier resolves to, as reconstructed from the event stream.
 
-    All three components are needed by ``mngr stop --stop-host``: the
-    provider to obtain a provider instance, and the host_id to fetch and
-    stop the host. ``host_name`` is carried for diagnostics and so callers
-    can honor an explicit ``@HOST`` qualifier on the agent address.
+    Carries only what ``mngr stop --stop-host`` needs to fetch and stop the
+    host without SSH: the ``provider_name`` to obtain the provider instance and
+    the ``host_id`` to look the host up. The host's name and its continued
+    existence both come from the provider's (SSH-free) ``get_host`` at stop
+    time, so they are not reconstructed here.
     """
 
     host_id: HostId = Field(description="ID of the host the agent runs on")
-    host_name: HostName = Field(description="Name of the host the agent runs on")
     provider_name: ProviderInstanceName = Field(description="Provider instance that owns the host")
 
 
@@ -671,10 +667,9 @@ def _replay_discovery_events_into_maps(events_path: Path) -> _ResolutionMaps:
                 maps.destroyed_agent_ids.add(str(event.agent_id))
             else:
                 # Host, SSH info, and error events are not relevant for
-                # resolution. Host existence is confirmed against a live
-                # SSH-free scan in resolve_hosts_for_identifiers, so a
-                # destroyed/vanished host is caught there rather than by
-                # replaying host events here.
+                # resolution. A host's continued existence (and its name) come
+                # from provider.get_host when the caller fetches the host to
+                # stop it, so there is no need to replay host events here.
                 pass
 
     return maps
@@ -763,44 +758,6 @@ def resolve_provider_names_for_identifiers(
     return tuple(sorted(resolved_providers))
 
 
-def _discover_all_hosts_ssh_free(mngr_ctx: MngrContext) -> dict[str, DiscoveredHost]:
-    """Discover every host across all providers without connecting over SSH.
-
-    ``provider.discover_hosts()`` is SSH-free for every provider (Docker reads
-    container labels and host records; the local provider has a single fixed
-    host). It deliberately does *not* enumerate agents, which is the operation
-    that requires SSH into the host. Returns a map of ``host_id`` (str) ->
-    :class:`DiscoveredHost`.
-
-    Tolerates per-provider failures at both instantiation and ``discover_hosts``
-    time: an unauthorized or unreachable provider (e.g. Modal without a token)
-    is skipped with a warning rather than aborting the whole scan, since the
-    caller only needs to confirm that the *specific* host targeted by
-    ``mngr stop --stop-host`` is still reachable.
-    """
-    hosts_by_id: dict[str, DiscoveredHost] = {}
-    for name in list_provider_names_to_load(mngr_ctx):
-        try:
-            provider = get_provider_instance(name, mngr_ctx)
-        except ProviderEmptyError as e:
-            logger.debug("Skipping provider {} for SSH-free host discovery (empty): {}", name, e)
-            continue
-        except ProviderUnavailableError as e:
-            logger.debug("Skipping provider {} for SSH-free host discovery (unavailable): {}", name, e)
-            continue
-        except BaseMngrError as e:
-            logger.warning("SSH-free host discovery skipped provider {} (instantiation failed): {}", name, e)
-            continue
-        try:
-            discovered = provider.discover_hosts(cg=mngr_ctx.concurrency_group, include_destroyed=False)
-        except BaseMngrError as e:
-            logger.warning("SSH-free host discovery failed for provider {}: {}", provider.name, e)
-            continue
-        for host in discovered:
-            hosts_by_id[str(host.host_id)] = host
-    return hosts_by_id
-
-
 def resolve_hosts_for_identifiers(
     mngr_ctx: MngrContext,
     identifiers: Sequence[str],
@@ -808,31 +765,29 @@ def resolve_hosts_for_identifiers(
     """Resolve agent identifiers to the hosts that run them, without any SSH.
 
     Reads the latest DISCOVERY_FULL snapshot and replays incremental events to
-    map each agent identifier (name or ID) to its ``host_id`` and provider.
-    Each candidate host is then cross-checked against an SSH-free host
-    discovery scan (``provider.discover_hosts()`` -- container labels and host
-    records for Docker, the fixed host for local) so that a stale event stream
-    cannot point ``mngr stop --stop-host`` at a host that no longer exists.
-    The host scan also supplies the authoritative ``host_name``.
+    map each agent identifier (name or ID) to the ``host_id`` and provider
+    recorded for it. This deliberately avoids :func:`discover_hosts_and_agents`
+    / the base ``discover_agents`` path, which reads each host's agent
+    directory over SSH and therefore fails when a host is up but unreachable
+    over SSH (e.g. a dead sshd) -- one of the cases ``mngr stop --stop-host``
+    is meant to handle, though not the only reason the flag exists.
 
-    This deliberately avoids :func:`discover_hosts_and_agents` / the base
-    ``discover_agents`` path, which reads each host's agent directory over SSH
-    and therefore fails when a host is up but unreachable over SSH (e.g. a dead
-    sshd) -- one of the cases ``mngr stop --stop-host`` is meant to handle,
-    though not the only reason the flag exists.
+    Existence of the resolved host is *not* checked here. The caller fetches it
+    via the provider's (also SSH-free) ``get_host``, which raises if the host
+    is gone and supplies the authoritative host name -- so a single SSH-free
+    lookup against the one relevant provider both validates and names the host,
+    with no need to scan every provider's hosts up front.
 
     Returns a map from each input identifier to its :class:`ResolvedAgentHost`.
 
-    Raises :class:`AgentNotFoundError` if any identifier cannot be mapped to a
-    live host (unknown identifier, destroyed agent/host, or a host that the
-    SSH-free discovery scan no longer reports).
+    Raises :class:`AgentNotFoundError` if any identifier is absent from the
+    event stream, has been destroyed, or maps to agents on more than one host
+    (which must be disambiguated with ``NAME@HOST.PROVIDER``).
 
     If the on-disk events are stale relative to the current model schema, this
     regenerates the snapshot once and retries, mirroring
     :func:`resolve_provider_names_for_identifiers`.
     """
-    host_scan = _discover_all_hosts_ssh_free(mngr_ctx)
-
     events_path = get_discovery_events_path(mngr_ctx.config)
     if not events_path.exists():
         raise AgentNotFoundError(
@@ -868,35 +823,28 @@ def resolve_hosts_for_identifiers(
                 f"Could not resolve a host for agent '{identifier}' from the discovery event stream"
             )
 
-        # Collect the distinct live hosts the candidate agent(s) run on, after
-        # cross-checking against the SSH-free host discovery scan.
+        # Collect the distinct hosts the candidate agent(s) run on. An agent
+        # name spanning more than one host_id is ambiguous and must be
+        # disambiguated explicitly.
         candidate_hosts: dict[str, ResolvedAgentHost] = {}
         for agent_id_str in candidate_agent_ids:
             host_id_str = maps.host_id_by_agent_id.get(agent_id_str)
             provider_str = maps.provider_by_agent_id.get(agent_id_str)
             if host_id_str is None or provider_str is None:
                 continue
-            discovered_host = host_scan.get(host_id_str)
-            if discovered_host is None:
-                # The event stream pointed at a host the SSH-free scan no
-                # longer reports -- treat the event stream as stale for this
-                # identifier rather than acting on a vanished host.
-                continue
             candidate_hosts[host_id_str] = ResolvedAgentHost(
-                host_id=discovered_host.host_id,
-                host_name=discovered_host.host_name,
-                provider_name=discovered_host.provider_name,
+                host_id=HostId(host_id_str),
+                provider_name=ProviderInstanceName(provider_str),
             )
 
         if not candidate_hosts:
             raise AgentNotFoundError(
-                f"Could not resolve a live host for agent '{identifier}' "
-                "(the discovery event stream is stale or the host no longer exists)"
+                f"Could not resolve a host for agent '{identifier}' from the discovery event stream"
             )
         if len(candidate_hosts) > 1:
-            host_descriptions = ", ".join(f"{h.host_name}.{h.provider_name}" for h in candidate_hosts.values())
+            host_ids = ", ".join(sorted(candidate_hosts))
             raise AgentNotFoundError(
-                f"Agent identifier '{identifier}' matches agents on multiple hosts ({host_descriptions}); "
+                f"Agent identifier '{identifier}' matches agents on multiple hosts ({host_ids}); "
                 "disambiguate using NAME@HOST.PROVIDER"
             )
         resolved[identifier] = next(iter(candidate_hosts.values()))
