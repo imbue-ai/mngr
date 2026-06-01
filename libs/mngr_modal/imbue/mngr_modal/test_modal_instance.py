@@ -1,3 +1,4 @@
+import shlex
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from imbue.mngr.utils.polling import wait_for
 from imbue.mngr_modal.errors import NoSnapshotsModalMngrError
 from imbue.mngr_modal.instance import ModalProviderInstance
 from imbue.mngr_modal.volume import ModalVolume
+from imbue.mngr_recursive.provisioning import _upload_deploy_files
 
 pytestmark = [pytest.mark.modal]
 
@@ -782,3 +784,60 @@ def test_host_volume_data_readable_via_volume_interface(real_modal_provider: Mod
             # Verify the volume is gone
             volume_after = real_modal_provider.get_volume_for_host(host.id)
             assert volume_after is None
+
+
+@pytest.mark.acceptance
+@pytest.mark.rsync
+@pytest.mark.timeout(300)
+def test_upload_deploy_files_handles_large_set_on_modal(
+    real_modal_provider: ModalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """Regression test for github issue 1825: a large deploy-file set must upload via one rsync.
+
+    The previous implementation uploaded each deploy file through its own SFTP
+    channel. Opening an SFTP channel is a full round-trip over the Modal SSH
+    tunnel (~0.7s/file measured), so a real user's ``~/.claude/plugins`` tree
+    (hundreds of files) either blew past the upload timeout or reset the
+    connection mid-transfer ("Error reading SSH protocol banner"). The fix
+    transfers the whole set with a single ``host.copy_directory`` (rsync) call.
+
+    600 files would take ~400s via the old per-file path -- well beyond both the
+    old internal upload timeout and this test's 300s budget -- but completes in
+    seconds via rsync. The mix of on-disk ``Path`` sources and in-memory string
+    content exercises both staging branches; we then verify every file landed on
+    the remote with the expected contents.
+    """
+    file_count = 600
+    host = None
+    try:
+        host = real_modal_provider.create_host(HostName("rsync-deploy-test"))
+        home_result = host.execute_idempotent_command("echo $HOME")
+        assert home_result.success
+        remote_home = home_result.stdout.strip()
+
+        deploy_files: dict[Path, Path | str] = {}
+        for i in range(file_count):
+            dest = Path(f"~/.mngr/deploytest/sub{i % 20}/file_{i}.txt")
+            if i % 2 == 0:
+                source_file = tmp_path / f"src_{i}.txt"
+                source_file.write_text(f"path-content-{i}")
+                deploy_files[dest] = source_file
+            else:
+                deploy_files[dest] = f"str-content-{i}"
+
+        uploaded = _upload_deploy_files(host, deploy_files, remote_home, real_modal_provider.mngr_ctx)
+        assert uploaded == file_count
+
+        # Every file must have landed on the remote.
+        remote_dir = f"{remote_home}/.mngr/deploytest"
+        count_result = host.execute_idempotent_command(f"find {shlex.quote(remote_dir)} -type f | wc -l")
+        assert count_result.success
+        assert int(count_result.stdout.strip()) == file_count
+
+        # Spot-check one Path-sourced and one string-sourced file's contents.
+        assert host.read_text_file(Path(remote_home) / ".mngr/deploytest/sub0/file_0.txt") == "path-content-0"
+        assert host.read_text_file(Path(remote_home) / ".mngr/deploytest/sub1/file_1.txt") == "str-content-1"
+    finally:
+        if host:
+            real_modal_provider.destroy_host(host)
