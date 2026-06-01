@@ -17,6 +17,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from imbue.mngr import hookimpl
+from imbue.mngr.cli.doc_links import imbue_mngr_doc_url
 from imbue.mngr.interfaces.help_topic import DocFile
 from imbue.mngr.interfaces.help_topic import TopicHelpPage
 
@@ -48,7 +49,7 @@ def _doc_topic(
         aliases=aliases,
         see_also=see_also,
         docs_path=rel_path,
-        body=DocFile(path=_DOCS_ROOT / rel_path),
+        body=DocFile(path=_DOCS_ROOT / rel_path, source_url=imbue_mngr_doc_url(f"libs/mngr/docs/{rel_path}")),
     )
 
 

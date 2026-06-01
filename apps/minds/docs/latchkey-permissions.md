@@ -172,7 +172,9 @@ permission schemas the dialog offers) lives alongside the latchkey
 gateway extension at
 [`libs/mngr_latchkey/imbue/mngr_latchkey/extensions/services.json`](../../../libs/mngr_latchkey/imbue/mngr_latchkey/extensions/services.json)
 and is fetched at desktop-client runtime via the gateway's
-`GET /permissions/available` endpoint. Each entry has the shape:
+`GET /permissions/available` endpoint. Each service maps to a *list* of
+scope entries (a single service may expose more than one detent scope).
+Each entry has the shape:
 
 * `scope` -- the detent scope schema the service owns; used as the rule
   key in `latchkey_permissions.json` and as the value the agent puts
