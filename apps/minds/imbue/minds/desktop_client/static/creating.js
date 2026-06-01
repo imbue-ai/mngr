@@ -77,7 +77,12 @@
     return fetch('/api/create-agent/' + agentId + '/onboarding', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      // keepalive lets the request survive the immediate navigation that
+      // follows on the common "creation already finished" path; without it
+      // the browser would abort the in-flight POST and the onboarding side
+      // effects would silently never fire.
+      keepalive: true
     }).catch(function () {
       // Onboarding side effects are best-effort; a failed submit should not
       // block the user from entering their workspace.
