@@ -1,8 +1,11 @@
 import shlex
+import time
 from pathlib import Path
+from typing import Final
 
 import pytest
 
+from imbue.mngr.api.testing import created_host
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -786,9 +789,15 @@ def test_host_volume_data_readable_via_volume_interface(real_modal_provider: Mod
             assert volume_after is None
 
 
+# Wall-clock budget for the bulk upload itself (not host creation). rsync transfers
+# 600 tiny files in a few seconds; the old per-file SFTP path took ~0.7s/file (~400s),
+# so this comfortably separates "fixed" from "regressed" while tolerating tunnel jitter.
+_UPLOAD_BUDGET_SECONDS: Final[float] = 60.0
+
+
 @pytest.mark.acceptance
 @pytest.mark.rsync
-@pytest.mark.timeout(300)
+@pytest.mark.timeout(150)
 def test_upload_deploy_files_handles_large_set_on_modal(
     real_modal_provider: ModalProviderInstance,
     tmp_path: Path,
@@ -796,22 +805,19 @@ def test_upload_deploy_files_handles_large_set_on_modal(
     """Regression test for github issue 1825: a large deploy-file set must upload via one rsync.
 
     The previous implementation uploaded each deploy file through its own SFTP
-    channel. Opening an SFTP channel is a full round-trip over the Modal SSH
-    tunnel (~0.7s/file measured), so a real user's ``~/.claude/plugins`` tree
-    (hundreds of files) either blew past the upload timeout or reset the
-    connection mid-transfer ("Error reading SSH protocol banner"). The fix
-    transfers the whole set with a single ``host.copy_directory`` (rsync) call.
+    channel -- a full round-trip over the Modal SSH tunnel (~0.7s/file measured) --
+    so a real user's ``~/.claude/plugins`` tree (hundreds of files) either blew past
+    the upload timeout or reset the connection ("Error reading SSH protocol banner").
+    The fix transfers the whole set with a single ``host.copy_directory`` (rsync) call.
 
-    600 files would take ~400s via the old per-file path -- well beyond both the
-    old internal upload timeout and this test's 300s budget -- but completes in
-    seconds via rsync. The mix of on-disk ``Path`` sources and in-memory string
-    content exercises both staging branches; we then verify every file landed on
-    the remote with the expected contents.
+    The real guard is the explicit ``_UPLOAD_BUDGET_SECONDS`` assertion on the upload
+    call itself, decoupled from (variable) host-creation time: 600 files take ~400s via
+    the old per-file path but a few seconds via rsync. The mix of on-disk ``Path``
+    sources and in-memory string content exercises both staging branches; we then
+    verify every file landed on the remote with the expected contents.
     """
     file_count = 600
-    host = None
-    try:
-        host = real_modal_provider.create_host(HostName("rsync-deploy-test"))
+    with created_host(real_modal_provider, HostName("rsync-deploy-test")) as host:
         home_result = host.execute_idempotent_command("echo $HOME")
         assert home_result.success
         remote_home = home_result.stdout.strip()
@@ -826,8 +832,14 @@ def test_upload_deploy_files_handles_large_set_on_modal(
             else:
                 deploy_files[dest] = f"str-content-{i}"
 
+        start = time.monotonic()
         uploaded = _upload_deploy_files(host, deploy_files, remote_home, real_modal_provider.mngr_ctx)
+        upload_elapsed = time.monotonic() - start
         assert uploaded == file_count
+        assert upload_elapsed < _UPLOAD_BUDGET_SECONDS, (
+            f"deploy-file upload took {upload_elapsed:.1f}s for {file_count} files "
+            f"(budget {_UPLOAD_BUDGET_SECONDS:.0f}s) -- per-file-upload regression?"
+        )
 
         # Every file must have landed on the remote.
         remote_dir = f"{remote_home}/.mngr/deploytest"
@@ -838,6 +850,3 @@ def test_upload_deploy_files_handles_large_set_on_modal(
         # Spot-check one Path-sourced and one string-sourced file's contents.
         assert host.read_text_file(Path(remote_home) / ".mngr/deploytest/sub0/file_0.txt") == "path-content-0"
         assert host.read_text_file(Path(remote_home) / ".mngr/deploytest/sub1/file_1.txt") == "str-content-1"
-    finally:
-        if host:
-            real_modal_provider.destroy_host(host)

@@ -1,1 +1,3 @@
 Added `get_local_host(mngr_ctx)` to `imbue.mngr.api.providers` as the canonical way to obtain the local host (e.g. as an rsync/`copy_directory` source). Removed the duplicate `get_local_host` that lived in `imbue.mngr.cli.headless_runner`; callers now import it from `api.providers`. No user-facing behavior change -- this consolidates several copies of the same helper that had been independently reimplemented across plugins.
+
+Added a `created_host(provider, host_name, **create_kwargs)` test context manager to `imbue.mngr.api.testing` that creates a host and destroys it on exit, replacing the create-host / try-finally-destroy boilerplate that recurs across provider tests. Test-only; no runtime impact.

@@ -4,7 +4,9 @@ import shlex
 import shutil
 import subprocess
 import types
+from collections.abc import Iterator
 from collections.abc import Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +17,29 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.api.git import LocalGitContext
 from imbue.mngr.interfaces.data_types import CommandResult
+from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import HostName
+
+
+@contextmanager
+def created_host(
+    provider: ProviderInstanceInterface,
+    host_name: HostName,
+    **create_kwargs: Any,
+) -> Iterator[OnlineHostInterface]:
+    """Create a host via ``provider`` and destroy it on exit.
+
+    Replaces the create-host / ``try``-``finally``-``destroy_host`` boilerplate that
+    recurs across provider tests (modal, docker, ssh) with a single ``with`` block.
+    Extra keyword arguments are forwarded to ``provider.create_host``.
+    """
+    host = provider.create_host(host_name, **create_kwargs)
+    try:
+        yield host
+    finally:
+        provider.destroy_host(host)
 
 
 class FakeAgent(FrozenModel):

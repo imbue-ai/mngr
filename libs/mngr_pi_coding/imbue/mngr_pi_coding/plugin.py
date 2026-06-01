@@ -10,6 +10,7 @@ from pydantic import Field
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_best_effort
+from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import PluginMngrError
@@ -167,6 +168,7 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig]):
         self,
         host: OnlineHostInterface,
         config: PiCodingAgentConfig,
+        mngr_ctx: MngrContext,
         home_dir: Path | None = None,
     ) -> None:
         """Create and populate the per-agent pi config directory.
@@ -185,7 +187,7 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig]):
         if host.is_local:
             self._setup_local_config_dir(host, config, config_dir, home_dir)
         else:
-            self._setup_remote_config_dir(host, config, config_dir, home_dir)
+            self._setup_remote_config_dir(host, config, config_dir, mngr_ctx, home_dir)
 
     def _setup_local_config_dir(
         self,
@@ -232,6 +234,7 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig]):
         host: OnlineHostInterface,
         config: PiCodingAgentConfig,
         config_dir: Path,
+        mngr_ctx: MngrContext,
         home_dir: Path | None = None,
     ) -> None:
         """Set up the per-agent config dir on a remote host via file copies."""
@@ -249,13 +252,18 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig]):
                 logger.info("Transferring settings.json to per-agent config dir...")
                 host.write_text_file(config_dir / "settings.json", settings_source.read_text())
 
+            # Transfer the resource directories with a single rsync rather than
+            # one write_file per file. A per-file upload opens an SFTP channel
+            # per file (a full round-trip over the SSH tunnel) and does not
+            # scale to large resource sets -- see github issue 1825.
+            include_args: list[str] = []
             for dir_name in ("skills", "prompts", "extensions", "themes"):
-                source = home_pi / dir_name
-                if source.exists() and source.is_dir():
-                    for file_path in source.rglob("*"):
-                        if file_path.is_file():
-                            relative = file_path.relative_to(home_pi)
-                            host.write_file(config_dir / relative, file_path.read_bytes())
+                if (home_pi / dir_name).is_dir():
+                    include_args.extend([f"--include={dir_name}/", f"--include={dir_name}/**"])
+            if include_args:
+                include_args.append("--exclude=*")
+                local_host = get_local_host(mngr_ctx)
+                host.copy_directory(local_host, home_pi, config_dir, extra_args=" ".join(include_args))
 
     def provision(
         self,
@@ -283,7 +291,7 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig]):
                     _install_pi(host)
                     logger.info("pi installed successfully")
 
-        self._setup_per_agent_config_dir(host, config)
+        self._setup_per_agent_config_dir(host, config, mngr_ctx)
 
     def on_after_provisioning(
         self,
