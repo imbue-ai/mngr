@@ -667,15 +667,9 @@ CommandHelpMetadata(
     key="extras.claude-plugin",
     one_line_description="Install Claude Code plugins (code review and/or agent skills)",
     synopsis="mngr extras claude-plugin [-y]",
-    description="""Install mngr's Claude Code plugins. Two are offered:
-
-  imbue-code-guardian  Automated code review enforcement.
-  imbue-mngr-skills    Skills that teach Claude how to use mngr, e.g. to
-                       coordinate with other agents.
-
-With an interactive terminal, presents a picker to install either plugin or
-both (already-installed plugins are omitted). Requires Claude Code to be
-installed. Use -y to auto-install every plugin that is not already present.""",
+    description="""Install mngr's Claude Code plugins (imbue-code-guardian and
+imbue-mngr-skills). With an interactive terminal you pick which to install;
+-y auto-installs any that are missing. Requires Claude Code.""",
     examples=(
         ("Choose which plugins to install", "mngr extras claude-plugin"),
         ("Auto-install all Claude Code plugins", "mngr extras claude-plugin -y"),
