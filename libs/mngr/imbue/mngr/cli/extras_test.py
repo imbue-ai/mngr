@@ -1,5 +1,6 @@
 """Tests for the mngr extras command."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -314,17 +315,24 @@ def test_extras_completion_yes_flag(cli_runner: CliRunner) -> None:
     assert result.exit_code == 0
 
 
-@pytest.mark.flaky
-@pytest.mark.allow_warnings(match="Failed to install")
-def test_extras_claude_plugin_yes_flag(cli_runner: CliRunner) -> None:
-    """The 'extras claude-plugin -y' subcommand auto-installs.
+def test_extras_claude_plugin_yes_flag(cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The 'extras claude-plugin -y' subcommand auto-installs without error.
 
-    When Claude Code is present this attempts a real install; in an
-    environment where a marketplace isn't reachable the install logs a
-    "Failed to install" warning, which is the expected failure path here.
+    Prepend a stub ``claude`` that exits 0 for every subcommand to PATH, so
+    the command deterministically exercises the real auto-install plumbing
+    (marketplace add + install per plugin) without a network round-trip or a
+    dependency on whether the real marketplace is reachable. ``claude plugin
+    list`` returns empty output, so both plugins are treated as not-yet-
+    installed and get installed.
     """
+    stub_claude = tmp_path / "claude"
+    stub_claude.write_text("#!/usr/bin/env bash\nexit 0\n")
+    stub_claude.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
     result = cli_runner.invoke(extras, ["claude-plugin", "-y"])
     assert result.exit_code == 0
+    assert "Installed imbue-mngr-skills." in result.output
 
 
 def test_read_current_default_agent_type_returns_value() -> None:
