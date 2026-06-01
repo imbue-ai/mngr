@@ -36,9 +36,15 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Deepen current-branch history for offload
+        # Deepen ONLY the checked-out commit's ancestry -- all offload needs to
+        # find and thin-diff its checkpoint. Naming the SHA matters: a bare
+        # `git fetch --unshallow origin` uses the broad refspec and pulls every
+        # branch's full history (including a heavy orphan branch), which is most
+        # of the fetch cost. GitHub allows fetching reachable SHAs, and the
+        # image-cache git notes are fetched separately below.
         run: |
           if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
-            git fetch --no-tags --prune --unshallow origin
+            git fetch --no-tags --unshallow origin "$(git rev-parse HEAD)"
           fi
 
       - name: Set up Python
@@ -241,9 +247,15 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Deepen current-branch history for offload
+        # Deepen ONLY the checked-out commit's ancestry -- all offload needs to
+        # find and thin-diff its checkpoint. Naming the SHA matters: a bare
+        # `git fetch --unshallow origin` uses the broad refspec and pulls every
+        # branch's full history (including a heavy orphan branch), which is most
+        # of the fetch cost. GitHub allows fetching reachable SHAs, and the
+        # image-cache git notes are fetched separately below.
         run: |
           if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
-            git fetch --no-tags --prune --unshallow origin
+            git fetch --no-tags --unshallow origin "$(git rev-parse HEAD)"
           fi
 
       - name: Set up Python
