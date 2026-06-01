@@ -522,9 +522,12 @@ def create_workspace_via_electron(
                 page.goto(f"{backend_origin}/create", wait_until="domcontentloaded")
                 page.wait_for_selector("#create-form", state="attached", timeout=10_000)
 
-                # The fields are inside the collapsed "Advanced options"
-                # section; opening the section first lets us see typed
-                # values during debugging and matches what a user would do.
+                # The repo field lives inside the collapsed "Configure..."
+                # panel's nested "Show advanced settings" section; open both
+                # so the field is visible (and to mirror what a user setting
+                # a non-default repo would do). ``#host_name`` is top-level.
+                page.click("#configure-toggle")
+                page.wait_for_selector("#toggle-advanced:visible", timeout=5_000)
                 page.click("#toggle-advanced")
                 page.wait_for_selector("#git_url:visible", timeout=5_000)
 
@@ -537,6 +540,19 @@ def create_workspace_via_electron(
 
                 logger.info("Submitting create form")
                 page.click("#create-submit")
+
+                # Submitting starts creation in the background and lands on
+                # the onboarding question flow. Walk the three questions
+                # accepting their pre-selected defaults; finishing the last
+                # one enters the workspace (directly if creation already
+                # finished, otherwise via the loading screen, which redirects
+                # once creation completes).
+                page.wait_for_selector("#onboarding", state="attached", timeout=10_000)
+                for question_screen in ("q1", "q2", "q3"):
+                    next_button = f'[data-screen="{question_screen}"] .js-next'
+                    page.wait_for_selector(next_button, state="visible", timeout=10_000)
+                    page.click(next_button)
+
                 page.wait_for_url(
                     _AGENT_SUBDOMAIN_PATTERN,
                     timeout=_CREATE_FORM_TIMEOUT_SECONDS * 1000,
