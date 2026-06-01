@@ -17,14 +17,18 @@
  *       Return the full permission catalog as a JSON object keyed by
  *       raw service name. Each value is an array of scope entries (a
  *       single service may expose more than one Detent scope). Each
- *       entry has three fields: ``scope`` (the Detent scope schema name
- *       as a string), ``display_name`` (a human-readable label), and
- *       ``permissions`` (an array of Detent permission-schema names that
- *       may be granted under the scope).
+ *       entry has four fields: ``scope`` (the Detent scope schema name
+ *       as a string), ``display_name`` (a human-readable label),
+ *       ``description`` (the scope's plain-English summary, from
+ *       Detent's ``$comment``), and ``permissions`` (an array of
+ *       ``{name, description}`` objects -- the Detent permission-schema
+ *       name plus its own plain-English summary -- that may be granted
+ *       under the scope).
  *   GET    /permissions/available/<service_name>
  *       Return the permission catalog entries for ``<service_name>``
  *       (e.g. ``slack``, ``google-gmail``) as an array, using the same
- *       value shape as the collection endpoint. Returns 404 when the
+ *       value shape as the collection endpoint (including the scope and
+ *       per-permission ``description`` fields). Returns 404 when the
  *       service is unknown. Both endpoints are backed by the
  *       ``services.json`` file that ships alongside this extension,
  *       which is keyed by raw service name.
