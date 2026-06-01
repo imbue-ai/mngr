@@ -169,8 +169,7 @@ def test_upload_deploy_files_uses_single_rsync(tmp_path: Path) -> None:
     local_host = MagicMock(spec=OnlineHostInterface)
     local_host.is_local = True
     ctx = _make_mock_mngr_ctx()
-    with patch("imbue.mngr_recursive.provisioning.get_provider_instance") as get_provider:
-        get_provider.return_value.get_host.return_value = local_host
+    with patch("imbue.mngr_recursive.provisioning.get_local_host", return_value=local_host):
         count = _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
 
     assert count == 2
@@ -558,8 +557,7 @@ def test_upload_deploy_files_propagates_rsync_failure() -> None:
     local_host = MagicMock(spec=OnlineHostInterface)
     local_host.is_local = True
     ctx = _make_mock_mngr_ctx()
-    with patch("imbue.mngr_recursive.provisioning.get_provider_instance") as get_provider:
-        get_provider.return_value.get_host.return_value = local_host
+    with patch("imbue.mngr_recursive.provisioning.get_local_host", return_value=local_host):
         with pytest.raises(MngrError, match="rsync failed"):
             _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
 

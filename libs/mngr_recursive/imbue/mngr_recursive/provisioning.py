@@ -12,17 +12,14 @@ from typing import assert_never
 from loguru import logger
 
 from imbue.imbue_common.logging import log_span
-from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
-from imbue.mngr.primitives import HostName
-from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.providers.deploy_utils import MngrInstallMode
 from imbue.mngr.providers.deploy_utils import collect_deploy_files
 from imbue.mngr.providers.deploy_utils import resolve_mngr_install_mode
-from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr_recursive.data_types import RecursivePluginConfig
 
 
@@ -112,9 +109,7 @@ def _upload_deploy_files(
         count = _stage_deploy_files(deploy_files, remote_home, staging_dir)
         if count == 0:
             return 0
-        local_host = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx).get_host(HostName(LOCAL_HOST_NAME))
-        if not isinstance(local_host, OnlineHostInterface):
-            raise MngrError("Local host is not online; cannot stage deploy files for rsync")
+        local_host = get_local_host(mngr_ctx)
         with log_span("Uploading {} deploy files to remote host via rsync", count):
             host.copy_directory(local_host, staging_dir, Path("/"))
     return count

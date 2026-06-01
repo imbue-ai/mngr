@@ -37,6 +37,7 @@ from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
+from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -66,8 +67,6 @@ from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
-from imbue.mngr.primitives import HostName
-from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.utils.git_utils import find_git_common_dir
 from imbue.mngr.utils.polling import poll_until
@@ -875,14 +874,6 @@ def _merge_keychain_api_key(
     claude_json_data["primaryApiKey"] = keychain_api_key
 
 
-def _get_local_host(mngr_ctx: MngrContext) -> OnlineHostInterface:
-    """Get the local host instance for file operations."""
-    local_host_ref = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx).get_host(HostName("localhost"))
-    if not isinstance(local_host_ref, OnlineHostInterface):
-        raise MngrError("Local host is not online")
-    return local_host_ref
-
-
 def _write_generated_files(
     host: OnlineHostInterface,
     config_dir: Path,
@@ -913,7 +904,7 @@ def _write_generated_files(
                 dest.unlink()
             host.write_text_file(dest, content)
     else:
-        local_host = _get_local_host(mngr_ctx)
+        local_host = get_local_host(mngr_ctx)
         with tempfile.TemporaryDirectory(prefix="mngr-claude-") as staging:
             for relative, content in generated_files.items():
                 staged = Path(staging) / relative
@@ -1960,7 +1951,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
             if host.is_local:
                 _sync_user_resources(host, config_dir, symlink=config.symlink_user_resources)
             else:
-                _rsync_claude_home_directories(host, _get_local_host(mngr_ctx), source_claude_dir, config_dir)
+                _rsync_claude_home_directories(host, get_local_host(mngr_ctx), source_claude_dir, config_dir)
         if host.is_local:
             if config.convert_macos_credentials and is_macos():
                 _provision_keychain_credentials(config_dir, mngr_ctx.concurrency_group)
@@ -2429,7 +2420,7 @@ def _preserve_session_files(agent: ClaudeAgent, host: OnlineHostInterface) -> No
     dest_dir = _get_preserved_sessions_dir(agent)
 
     # Get a local host reference for copy_directory (needed for remote agents)
-    local_host = _get_local_host(agent.mngr_ctx)
+    local_host = get_local_host(agent.mngr_ctx)
 
     with log_span("Preserving session files for agent {}", agent.name):
         # Copy each available data category using copy_directory.

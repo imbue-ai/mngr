@@ -20,9 +20,9 @@ import click
 from loguru import logger
 
 from imbue.imbue_common.model_update import to_update
+from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.cli.env_utils import resolve_env_vars
 from imbue.mngr.cli.env_utils import resolve_labels
-from imbue.mngr.cli.headless_runner import get_local_host
 from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
