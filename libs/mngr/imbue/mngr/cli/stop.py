@@ -75,50 +75,55 @@ def _stop_hosts_for_addresses(
 
     ``mngr stop --stop-host`` is a daemon-level operation: stopping a host does
     not require enumerating the agents on it (which would SSH into the host).
-    This resolves each agent identifier to its host via the SSH-free discovery
-    event stream + host-discovery cross-check, so it still works when the
-    container is running but its sshd is unreachable.
+    This resolves each agent identifier to its ``host_id`` via the SSH-free
+    discovery event stream, then fetches the host through the provider's own
+    (also SSH-free) ``get_host`` -- which validates that the host still exists
+    and supplies its name -- so it works even when the container is running but
+    its sshd is unreachable.
 
     Returns the list of agent identifiers whose host was stopped (or was
     already stopped).
     """
     resolved_by_identifier = resolve_hosts_for_identifiers(mngr_ctx, [str(addr.agent) for addr in agent_addresses])
 
-    # Apply any explicit @HOST[.PROVIDER] qualifier from the address as a
-    # constraint on the resolved host, mirroring the non-stop-host path.
-    hosts_to_stop: dict[HostId, ResolvedAgentHost] = {}
+    # Fetch each distinct host once (SSH-free) -- this is also what validates
+    # the resolved host still exists. Honor any explicit @HOST[.PROVIDER]
+    # qualifier against the fetched host's name, mirroring the non-stop-host
+    # path.
+    hosts_to_stop: dict[HostId, tuple[ResolvedAgentHost, HostInterface]] = {}
     for address in agent_addresses:
         resolved = resolved_by_identifier[str(address.agent)]
+        if resolved.host_id in hosts_to_stop:
+            host = hosts_to_stop[resolved.host_id][1]
+        else:
+            host = get_provider_instance(resolved.provider_name, mngr_ctx).get_host(resolved.host_id)
         if address.host is not None:
-            concrete = HostAddress(host=resolved.host_name, provider=resolved.provider_name)
+            concrete = HostAddress(host=host.get_name(), provider=resolved.provider_name)
             if not address.host.matches(concrete):
                 raise AgentNotFoundError(f"No agent found matching address: {address}")
-        hosts_to_stop[resolved.host_id] = resolved
+        hosts_to_stop[resolved.host_id] = (resolved, host)
 
-    providers = [get_provider_instance(r.provider_name, mngr_ctx) for r in hosts_to_stop.values()]
+    providers = [get_provider_instance(resolved.provider_name, mngr_ctx) for resolved, _ in hosts_to_stop.values()]
     _ensure_providers_support_host_shutdown(providers)
 
-    stopped_identifiers: list[str] = []
-    for resolved in hosts_to_stop.values():
+    for resolved, host in hosts_to_stop.values():
         provider = get_provider_instance(resolved.provider_name, mngr_ctx)
-        host = provider.get_host(resolved.host_id)
         match host:
             case OnlineHostInterface() as online_host:
                 # No snapshot: native start_host preserves the container
                 # filesystem anyway. No discovery-event emission: the host is
                 # offline afterwards, so an online-host sweep would fail.
                 provider.stop_host(online_host, create_snapshot=False)
-                _output(f"Stopped host: {resolved.host_name}", output_opts)
+                _output(f"Stopped host: {host.get_name()}", output_opts)
             case HostInterface():
-                # The host is already offline -- the desired end state is
-                # already reached, so this is an idempotent no-op.
-                _output(f"Host '{resolved.host_name}' is already stopped", output_opts)
+                # The host is already offline (stopped or destroyed) -- the
+                # desired end state is already reached, so this is an
+                # idempotent no-op.
+                _output(f"Host '{host.get_name()}' is already stopped", output_opts)
             case _ as unreachable:
                 assert_never(unreachable)
 
-    for address in agent_addresses:
-        stopped_identifiers.append(str(address.agent))
-    return stopped_identifiers
+    return [str(address.agent) for address in agent_addresses]
 
 
 def _output(message: str, output_opts: OutputOptions) -> None:

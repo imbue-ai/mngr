@@ -937,7 +937,6 @@ def test_resolve_hosts_resolves_agent_name_to_host(
     result = resolved["stoppable-agent"]
     assert isinstance(result, ResolvedAgentHost)
     assert result.host_id == host_id
-    assert result.host_name == HostName(LOCAL_HOST_NAME)
     assert result.provider_name == ProviderInstanceName("local")
 
 
@@ -968,14 +967,16 @@ def test_resolve_hosts_raises_for_unknown_identifier(
         resolve_hosts_for_identifiers(temp_mngr_ctx, ["unknown-agent"])
 
 
-def test_resolve_hosts_raises_when_host_destroyed(
+def test_resolve_hosts_returns_recorded_host_without_validating_existence(
     temp_mngr_ctx: MngrContext, local_provider: LocalProviderInstance
 ) -> None:
-    """A stale event stream pointing at a destroyed host must not resolve.
+    """Resolution maps to the recorded host_id without scanning live hosts.
 
-    The event stream references a host_id that the SSH-free host discovery
-    scan does not report, so cross-checking fails and resolution raises
-    rather than acting on a vanished host.
+    Existence of the host is deliberately not checked here -- the caller
+    validates it when it fetches the host via the provider's SSH-free
+    ``get_host`` (see the stop-command tests). So even a host_id that no
+    longer exists resolves at this layer, which keeps resolution a pure,
+    SSH-free read of the event stream.
     """
     stale_host_id = HostId.generate()
     agent = DiscoveredAgent(
@@ -992,8 +993,8 @@ def test_resolve_hosts_raises_when_host_destroyed(
     )
     write_full_discovery_snapshot(temp_mngr_ctx.config, [agent], [host])
 
-    with pytest.raises(AgentNotFoundError):
-        resolve_hosts_for_identifiers(temp_mngr_ctx, ["orphan-agent"])
+    resolved = resolve_hosts_for_identifiers(temp_mngr_ctx, ["orphan-agent"])
+    assert resolved["orphan-agent"].host_id == stale_host_id
 
 
 def test_resolve_hosts_respects_destroy_events(
