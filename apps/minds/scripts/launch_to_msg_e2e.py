@@ -646,18 +646,15 @@ async def amain() -> int:
                     and not any(SCREENSHOT_DIR.glob("04b-*"))
                     and time.monotonic() - phase_started_at >= 60
                 ):
-                    # Open a SECOND page just for the mid-snap and point
-                    # it at /creating/<id>. Touching `win` here breaks the
-                    # status-polling fetch chain we run from it next
-                    # iteration (last verified failure mode: WAITING_FOR_READY
-                    # transitioned to empty status, never reached DONE).
-                    try:
-                        midpage = await ctx.new_page()
-                        await midpage.goto(f"{origin}/creating/{creation_id}", timeout=10_000)
-                        await snap_page(midpage, "04b-creating-workspace-mid")
-                        await midpage.close()
-                    except Exception as exc:
-                        logger.warning("04b mid-snap failed: {}", exc)
+                    # Snap `win` as-is. Previously tried ctx.new_page() +
+                    # navigate to /creating/<id> but Electron leaves the
+                    # transient BrowserWindow on screen even after close(),
+                    # and that stray /welcome window then sits in front of
+                    # the chat panel for every subsequent screencapture
+                    # (06 / 07 / 07a-d ended up showing the Welcome page).
+                    # The cost of just snapping win here is that 04b shows
+                    # the projects/form view instead of the progress UI.
+                    await snap_page(win, "04b-creating-workspace-mid")
                 await asyncio.sleep(5)
             # Emit a per-phase summary line + persist to artifact JSON.
             total_create_s = sum(phase_durations.values())
