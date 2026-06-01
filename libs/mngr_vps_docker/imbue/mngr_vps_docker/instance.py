@@ -2440,6 +2440,8 @@ class VpsDockerProvider(BaseProviderInstance):
         agent_refs: Sequence[DiscoveredAgent],
         field_generators: Mapping[str, Mapping[str, Callable[[AgentInterface, OnlineHostInterface], Any]]]
         | None = None,
+        offline_field_generators: Mapping[str, Mapping[str, Callable[[DiscoveredAgent, HostDetails], Any]]]
+        | None = None,
         on_error: Callable[[DiscoveredAgent | DiscoveredHost, BaseException], None] | None = None,
     ) -> tuple[HostDetails, list[AgentDetails]]:
         """Build HostDetails and AgentDetails via a single SSH command."""
@@ -2450,13 +2452,25 @@ class VpsDockerProvider(BaseProviderInstance):
 
         # For offline hosts or hosts without a record, fall back to default
         if host_record is None or host_record.vps_ip is None or host_record.config is None:
-            return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+            return super().get_host_and_agent_details(
+                host_ref,
+                agent_refs,
+                field_generators=field_generators,
+                offline_field_generators=offline_field_generators,
+                on_error=on_error,
+            )
 
         try:
             host = self.get_host(host_ref.host_id)
 
             if not isinstance(host, Host):
-                return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+                return super().get_host_and_agent_details(
+                    host_ref,
+                    agent_refs,
+                    field_generators=field_generators,
+                    offline_field_generators=offline_field_generators,
+                    on_error=on_error,
+                )
 
             # Collect all data in one SSH command
             script = build_listing_collection_script(str(self.host_dir), self.mngr_ctx.config.prefix)
@@ -2479,7 +2493,13 @@ class VpsDockerProvider(BaseProviderInstance):
                 host_ref.host_id,
                 e,
             )
-            return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+            return super().get_host_and_agent_details(
+                host_ref,
+                agent_refs,
+                field_generators=field_generators,
+                offline_field_generators=offline_field_generators,
+                on_error=on_error,
+            )
         except MngrError as e:
             if on_error:
                 on_error(host_ref, e)
