@@ -484,14 +484,20 @@ function applyExternalLinkHandling(wc) {
   // to the user so the click is recoverable instead of vanishing.
   const openInBrowser = (url) => {
     setImmediate(() => {
-      shell.openExternal(url).catch((err) => {
+      // TEMP — preview the failure UX. REVERT before committing:
+      //   git checkout apps/minds/electron/main.js
+      Promise.reject(new Error('forced for preview')).catch((err) => {
         console.warn('[external-link] failed to open', url, err);
         notifyOpenFailed(url);
       });
     });
   };
-  wc.setWindowOpenHandler(({ url }) => {
-    if (isExternalUrl(url)) {
+  wc.setWindowOpenHandler((handlerDetails) => {
+    const { url } = handlerDetails;
+    const external = isExternalUrl(url);
+    // TEMP diagnostics — REVERT with: git checkout apps/minds/electron/main.js
+    console.log('[external-link][DIAG] setWindowOpenHandler url=', JSON.stringify(url), 'isExternal=', external, 'details=', JSON.stringify(handlerDetails));
+    if (external) {
       openInBrowser(url);
       return { action: 'deny' };
     }
@@ -504,9 +510,20 @@ function applyExternalLinkHandling(wc) {
   // fires for the main frame as well -- so listening to both would double-fire
   // and open two browser tabs for a top-level external navigation.
   wc.on('will-frame-navigate', (details) => {
+    // TEMP diagnostics — REVERT with: git checkout apps/minds/electron/main.js
+    console.log('[external-link][DIAG] will-frame-navigate url=', JSON.stringify(details.url), 'isExternal=', isExternalUrl(details.url), 'isMainFrame=', details.isMainFrame);
     if (!isExternalUrl(details.url)) return;
     details.preventDefault();
     openInBrowser(details.url);
+  });
+  // TEMP diagnostics — log any popup window that actually gets created (i.e. a
+  // setWindowOpenHandler 'allow'), plus its load failures. REVERT before commit.
+  wc.on('did-create-window', (window, details) => {
+    console.log('[external-link][DIAG] did-create-window for url=', JSON.stringify(details.url));
+    const childWc = window.webContents;
+    childWc.on('did-fail-load', (_e, code, desc, validatedURL) => {
+      console.log('[external-link][DIAG] popup did-fail-load code=', code, 'desc=', desc, 'url=', JSON.stringify(validatedURL));
+    });
   });
 }
 
