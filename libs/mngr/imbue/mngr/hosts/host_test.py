@@ -3008,7 +3008,7 @@ def test_remove_tags_syncs_to_certified_data(
 def test_merge_agent_type_provisioning_returns_unchanged_when_no_fields() -> None:
     """_merge_agent_type_provisioning should return the original options when agent config has no provisioning."""
     agent_config = AgentTypeConfig()
-    options = CreateAgentOptions()
+    options = CreateAgentOptions(agent_type=AgentTypeName("generic"))
     result = _merge_agent_type_provisioning(agent_config, options)
     assert result is options
 
@@ -3017,6 +3017,7 @@ def test_merge_agent_type_provisioning_prepends_extra_provision_commands() -> No
     """Agent type extra_provision_command should be prepended before CLI commands."""
     agent_config = AgentTypeConfig(extra_provision_command=("echo agent_type",))
     options = CreateAgentOptions(
+        agent_type=AgentTypeName("generic"),
         provisioning=AgentProvisioningOptions(extra_provision_commands=("echo cli",)),
     )
     result = _merge_agent_type_provisioning(agent_config, options)
@@ -3027,6 +3028,7 @@ def test_merge_agent_type_provisioning_prepends_upload_files() -> None:
     """Agent type upload_file specs should be parsed and prepended."""
     agent_config = AgentTypeConfig(upload_file=("local.txt:/remote.txt",))
     options = CreateAgentOptions(
+        agent_type=AgentTypeName("generic"),
         provisioning=AgentProvisioningOptions(
             upload_files=(UploadFileSpec(local_path=Path("cli.txt"), remote_path=Path("/cli.txt")),),
         ),
@@ -3042,6 +3044,7 @@ def test_merge_agent_type_provisioning_prepends_env_vars() -> None:
     """Agent type env should be parsed and prepended to environment.env_vars."""
     agent_config = AgentTypeConfig(env=("AGENT_TYPE_VAR=1",))
     options = CreateAgentOptions(
+        agent_type=AgentTypeName("generic"),
         environment=AgentEnvironmentOptions(
             env_vars=(EnvVar(key="CLI_VAR", value="2"),),
         ),
@@ -3057,6 +3060,7 @@ def test_merge_agent_type_provisioning_prepends_env_files() -> None:
     """Agent type env_file should be parsed and prepended to environment.env_files."""
     agent_config = AgentTypeConfig(env_file=("/etc/agent.env",))
     options = CreateAgentOptions(
+        agent_type=AgentTypeName("generic"),
         environment=AgentEnvironmentOptions(
             env_files=(Path("/etc/cli.env"),),
         ),
@@ -3069,6 +3073,7 @@ def test_merge_agent_type_provisioning_prepends_create_directories() -> None:
     """Agent type create_directory should be parsed and prepended."""
     agent_config = AgentTypeConfig(create_directory=("/tmp/mydir",))
     options = CreateAgentOptions(
+        agent_type=AgentTypeName("generic"),
         provisioning=AgentProvisioningOptions(create_directories=(Path("/tmp/existing"),)),
     )
     result = _merge_agent_type_provisioning(agent_config, options)
@@ -3081,7 +3086,7 @@ def test_merge_agent_type_provisioning_combines_provisioning_and_env() -> None:
         extra_provision_command=("echo setup",),
         env=("KEY=val",),
     )
-    options = CreateAgentOptions()
+    options = CreateAgentOptions(agent_type=AgentTypeName("generic"))
     result = _merge_agent_type_provisioning(agent_config, options)
     assert result.provisioning.extra_provision_commands == ("echo setup",)
     assert result.environment.env_vars == (EnvVar(key="KEY", value="val"),)
