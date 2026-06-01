@@ -273,13 +273,13 @@ def _install_claude_plugin(
     when all known plugins were already installed). Returns False when Claude
     Code is unavailable, the user skipped, or any selected install failed.
     """
-    claude_available, installed_by_key = status_fn()
+    claude_available, installed_by_name = status_fn()
 
     if not claude_available:
         write_human_line("Claude Code is not installed -- skipping Claude Code plugins.")
         return False
 
-    candidates = tuple(plugin for plugin in _CLAUDE_CODE_PLUGINS if not installed_by_key.get(plugin.name, False))
+    candidates = tuple(plugin for plugin in _CLAUDE_CODE_PLUGINS if not installed_by_name.get(plugin.name, False))
 
     if not candidates:
         write_human_line("All Claude Code plugins are already installed.")
@@ -479,12 +479,12 @@ def _print_extras_status() -> None:
         write_human_line("  completion       not configured")
 
     # Claude Code plugins
-    claude_available, installed_by_key = _claude_plugin_status()
+    claude_available, installed_by_name = _claude_plugin_status()
     if not claude_available:
         write_human_line("  claude-plugin    claude not installed")
     else:
         statuses = ", ".join(
-            f"{plugin.name}: {'installed' if installed_by_key.get(plugin.name, False) else 'not installed'}"
+            f"{plugin.name}: {'installed' if installed_by_name.get(plugin.name, False) else 'not installed'}"
             for plugin in _CLAUDE_CODE_PLUGINS
         )
         write_human_line("  claude-plugin    {}", statuses)
