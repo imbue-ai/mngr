@@ -1,9 +1,8 @@
 """FastAPI app for ``mngr forward``: auth + subdomain HTTP/WS forwarding.
 
-Adapted from the subdomain-forwarding portions of
-``apps/minds/imbue/minds/desktop_client/app.py``. The minds-specific routes
-(create form, accounts, sharing, request inbox, telegram, chrome, etc.) all
-stay in minds; the plugin only handles:
+Adapted from the subdomain-forwarding portions of minds' desktop client.
+Application-specific routes (create form, accounts, sharing, request inbox,
+telegram, chrome, etc.) stay in the host application; the plugin only handles:
 
 - the bare-origin login flow (``/login``, ``/authenticate``, ``/`` debug index)
 - the ``/goto/<agent>/`` cookie-bridge to per-subdomain auth
