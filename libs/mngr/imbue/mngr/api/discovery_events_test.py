@@ -190,6 +190,20 @@ def test_discovered_agent_from_agent_details_preserves_key_fields() -> None:
     assert discovered.certified_data["type"] == "generic"
 
 
+def test_discovered_agent_from_agent_details_preserves_plugin_fields() -> None:
+    """Plugin fields must survive into the snapshot's certified_data so that
+    offline_agent_field_generators can read them for fully-unreachable hosts."""
+    host_id = HostId.generate()
+    provider_name = ProviderInstanceName("docker")
+    details = make_test_agent_details(
+        host_id=host_id,
+        provider_name=provider_name,
+        plugin={"demo_plugin": {"flag": True}},
+    )
+    discovered = discovered_agent_from_agent_details(details)
+    assert discovered.certified_data["plugin"] == {"demo_plugin": {"flag": True}}
+
+
 def test_discovered_host_from_agent_details_preserves_key_fields() -> None:
     host_id = HostId.generate()
     provider_name = ProviderInstanceName("modal")
