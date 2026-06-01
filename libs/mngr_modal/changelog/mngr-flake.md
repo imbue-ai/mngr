@@ -1,1 +1,0 @@
-Fixed flakiness in two `mngr_modal` host-volume acceptance tests by polling `get_volume_for_host` with `wait_for` instead of asserting once, to absorb the brief Modal control-plane lag before a freshly-created volume becomes resolvable by name.

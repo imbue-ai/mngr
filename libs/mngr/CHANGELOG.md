@@ -6,12 +6,23 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.10] - 2026-06-01
+
 ### Added
 
 - Added: New repeatable `--post-host-create-command` flag on `mngr create` that runs shell commands inside a newly-created host synchronously after the host is online but before any agent work_dir is touched. Stackable from `create_templates.<name>` via `post_host_create_command__extend = [...]`. Replaces the FCT-specific `use_image_default_cmd` opt-out and the defensive `--workdir /` exec override.
+- Added: New `register_help_topics` plugin hook so installed plugins can contribute standalone `mngr help` topic pages. Each topic is a `TopicHelpPage` with explicit metadata (key, description, aliases, see-also) whose body is either `InlineContent(markdown=...)` or `DocFile(path=...)`. Plugin topics that collide with a built-in topic key or alias are skipped.
+- Added: New `offline_agent_field_generators` plugin hook (mirror of `agent_field_generators` for offline/unreachable hosts). `mngr list` threads it through `get_host_and_agent_details` so offline plugin fields are usable in columns and CEL filters; discovery snapshots now preserve plugin fields via `discovered_agent_from_agent_details`.
+- Added: Tab completion now suggests every command and help topic as an argument to `mngr help` (e.g. `mngr help <TAB>`).
+- Added: `DocFile.source_url` field that resolves relative and anchor links inside doc-backed help topics against a canonical GitHub blob URL pinned to the installed release tag (falling back to `main` when the version can't be read), so the rendered terminal hyperlinks open the right GitHub page/section.
 
 ### Changed
 
+- Changed: **Breaking** — `CreateAgentOptions.agent_type` is now a required field (previously `AgentTypeName | None` defaulting to `None`). The residual `agent_type or AgentTypeName("claude")` fallbacks in `api.create.create` and `Host.create_agent_state` are removed, and the now-dead `if options.agent_type is not None:` guard around agent-type provisioning merging in `Host.provision_agent` is dropped.
+- Changed: **Breaking** — `on_before_create` and `on_before_host_create` plugin hooks now receive `MngrContext` as a parameter, giving plugins access to config, the plugin manager, and the concurrency group. Plugins implementing these hooks must add an `mngr_ctx` parameter to their signatures.
+- Changed: `mngr help <topic>` now renders markdown nicely in an interactive terminal (headings, bold, code, links, tables) via `rich`, with paragraphs wrapped to the terminal width; the same rendering is applied to command `--help` description and sections. Non-interactive output (pipes, scripts) stays plain. `rich` is imported lazily so it does not affect CLI startup time.
+- Changed: Built-in topic docs are now shipped inside the wheel via `force-include` of the topic doc dirs, fixing a bug where `mngr help <topic>` showed no doc-based topics in a PyPI/wheel install.
+- Changed: The plugin-facing `TopicHelpPage` model now lives in `imbue.mngr.interfaces.help_topic` (so the plugin hookspec can reference it without the plugins layer importing the CLI); the runtime topic registry lives in `imbue.mngr.cli.help_topics`. mngr's own built-in topics are registered through `register_help_topics` as a built-in plugin from an explicit registry — no directory scanning or heading parsing.
 - Changed: Docker provider untags the per-host build image (`mngr-build-<host_id>`) on `destroy_host` (and again, defensively, on `delete_host`) so built images no longer pile up in `docker images`. Snapshot images keep their own layers.
 - Changed: `mngr destroy` now actually destroys a host when its last agent is destroyed, regardless of `min_online_host_age_seconds`. Ghost-only matches (agents returned by discover but absent from the host's own `get_agents()`) escalate to `provider.destroy_host` instead of silently dropping the match, and a post-loop sweep re-checks `host.get_agents()` and calls `destroy_host` directly when empty. Cloud-side resources are released immediately rather than waiting for the destroyed-host grace period.
 - Changed: `build_check_and_install_packages_command` (`providers/ssh_host_setup.py`) now `mkdir -p`s the symlink target before creating the `host_dir` symlink, so the docker_vps unified-volume layout can seed `<volume>/host_dir` before pointing `/mngr` at it.
@@ -21,6 +32,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Fixed
 
 - Fixed: The default `discover_hosts_and_agents` now tolerates per-host SSH failures. `HostConnectionError` / `HostAuthenticationError` / `HostOfflineError` are caught per host, `on_connection_error(host_id)` is invoked so providers can drop wedged cache entries, and broken hosts fall back to `to_offline_host(host_id).discover_agents()` so the rest of the provider's hosts (and their agents) come through normally. Previously a single unreachable host blanked the entire provider's discovery, which 503'd every workspace through `mngr_forward` and tripped minds' recovery page for healthy workspaces.
+- Fixed: `mngr help <topic>` now produces clickable terminal hyperlinks for relative and anchor links inside doc-backed topics by resolving them against the topic's `source_url` (previously a link like `[Idle Detection](idle_detection.md)` rendered as a dead terminal hyperlink whose relative target meant nothing to a terminal or browser).
 
 ## [v0.2.9] - 2026-05-28
 

@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-01
+
+Bump Latchkey to version 2.14.0 to support GitHub git operations via Latchkey gateway.
+
+Changed the `services.json` catalog (and the `permissions` gateway extension that reads it) so each raw service name now maps to a *list* of scope entries instead of a single entry. This lets one service expose more than one detent scope. The `GET /permissions/available` and `GET /permissions/available/<service_name>` endpoints now return arrays of `{scope, display_name, permissions}` objects per service.
+
 ## 2026-05-28
 
 - `Latchkey.auth_browser` now transparently recovers from latchkey's "Service `<name>` requires preparation first" error: when it sees that message it runs `latchkey auth browser-prepare <service>` and then retries `latchkey auth browser <service>` once, so callers (e.g. minds' predefined-permission grant flow) succeed on the first user-visible attempt instead of failing with a confusing error. Failures of either the prepare step or the retry are surfaced as the usual `(False, message)` result.
