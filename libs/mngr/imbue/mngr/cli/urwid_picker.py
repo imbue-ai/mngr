@@ -174,10 +174,10 @@ def run_multi_select_picker(
     if not options:
         return None
 
+    if preselected is not None and len(preselected) != len(options):
+        raise ValueError("preselected must be the same length as options")
     if preselected is None:
         preselected = [False] * len(options)
-    elif len(preselected) != len(options):
-        raise ValueError("preselected must be the same length as options")
 
     # The shared _PickerInputFilter intercepts Enter and q/Ctrl+C but lets
     # Space pass through to the focused CheckBox, which toggles on Space.
