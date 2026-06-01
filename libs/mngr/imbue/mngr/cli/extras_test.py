@@ -155,11 +155,11 @@ def test_install_completion_picker_skip_writes_nothing(tmp_path: Path) -> None:
 
 
 def _all_installed() -> tuple[bool, dict[str, bool]]:
-    return True, {plugin.key: True for plugin in _CLAUDE_CODE_PLUGINS}
+    return True, {plugin.name: True for plugin in _CLAUDE_CODE_PLUGINS}
 
 
 def _none_installed() -> tuple[bool, dict[str, bool]]:
-    return True, {plugin.key: False for plugin in _CLAUDE_CODE_PLUGINS}
+    return True, {plugin.name: False for plugin in _CLAUDE_CODE_PLUGINS}
 
 
 def test_install_claude_plugin_returns_false_when_claude_missing() -> None:
@@ -178,24 +178,24 @@ def test_install_claude_plugin_auto_installs_all_missing() -> None:
     result = _install_claude_plugin(
         auto=True,
         status_fn=_none_installed,
-        install_fn=lambda plugin: installed.append(plugin.key) or True,
+        install_fn=lambda plugin: installed.append(plugin.name) or True,
     )
     assert result is True
-    assert installed == [plugin.key for plugin in _CLAUDE_CODE_PLUGINS]
+    assert installed == [plugin.name for plugin in _CLAUDE_CODE_PLUGINS]
 
 
 def test_install_claude_plugin_auto_only_installs_missing() -> None:
     """With auto=True, plugins that are already installed are not reinstalled."""
-    keys = [plugin.key for plugin in _CLAUDE_CODE_PLUGINS]
+    names = [plugin.name for plugin in _CLAUDE_CODE_PLUGINS]
     installed: list[str] = []
     result = _install_claude_plugin(
         auto=True,
         # First plugin already present; only the rest should be installed.
-        status_fn=lambda: (True, {key: (key == keys[0]) for key in keys}),
-        install_fn=lambda plugin: installed.append(plugin.key) or True,
+        status_fn=lambda: (True, {name: (name == names[0]) for name in names}),
+        install_fn=lambda plugin: installed.append(plugin.name) or True,
     )
     assert result is True
-    assert installed == keys[1:]
+    assert installed == names[1:]
 
 
 def test_install_claude_plugin_skips_without_tty() -> None:
@@ -211,7 +211,7 @@ def test_install_claude_plugin_skips_without_tty() -> None:
             status_fn=_none_installed,
             is_interactive_fn=lambda: False,
             select_fn=lambda candidates: candidates,
-            install_fn=lambda plugin: installed.append(plugin.key) or True,
+            install_fn=lambda plugin: installed.append(plugin.name) or True,
         )
         is False
     )
@@ -227,7 +227,7 @@ def test_install_claude_plugin_picker_skip_returns_false() -> None:
             status_fn=_none_installed,
             is_interactive_fn=lambda: True,
             select_fn=lambda candidates: (),
-            install_fn=lambda plugin: installed.append(plugin.key) or True,
+            install_fn=lambda plugin: installed.append(plugin.name) or True,
         )
         is False
     )
@@ -242,10 +242,10 @@ def test_install_claude_plugin_picker_installs_selected_subset() -> None:
         status_fn=_none_installed,
         is_interactive_fn=lambda: True,
         select_fn=lambda candidates: (candidates[0],),
-        install_fn=lambda plugin: installed.append(plugin.key) or True,
+        install_fn=lambda plugin: installed.append(plugin.name) or True,
     )
     assert result is True
-    assert installed == [_CLAUDE_CODE_PLUGINS[0].key]
+    assert installed == [_CLAUDE_CODE_PLUGINS[0].name]
 
 
 def test_install_claude_plugin_returns_false_when_install_fails() -> None:

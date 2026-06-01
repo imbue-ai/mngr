@@ -144,15 +144,19 @@ def _install_completion(
 
 
 class ClaudeCodePlugin(FrozenModel):
-    """An installable Claude Code plugin offered by `mngr extras claude-plugin`."""
+    """An installable Claude Code plugin offered by `mngr extras claude-plugin`.
 
-    key: str = Field(description="Short identifier used in status output")
-    label: str = Field(description="Human-readable label shown in the picker")
+    ``name`` doubles as the substring looked for in `claude plugin list`
+    output to detect whether the plugin is installed (the list shows
+    ``<name>@<marketplace>``).
+    """
+
+    name: str = Field(description="Plugin name, e.g. 'imbue-code-guardian'")
+    description: str = Field(description="One-line description shown next to the name in the picker")
     marketplace_repo: str = Field(
         description="GitHub repo hosting the plugin marketplace, e.g. 'imbue-ai/code-guardian'"
     )
     install_ref: str = Field(description="Plugin install reference, e.g. 'imbue-code-guardian@imbue-code-guardian'")
-    list_token: str = Field(description="Substring expected in `claude plugin list` output when installed")
 
 
 # ConcurrencyGroup wraps a synchronous subprocess failure (or spawn error)
@@ -167,29 +171,27 @@ _SUBPROCESS_ERRORS: Final[tuple[type[Exception], ...]] = (OSError, ProcessError,
 # live in the mngr repo because they only make sense alongside mngr.
 _CLAUDE_CODE_PLUGINS: Final[tuple[ClaudeCodePlugin, ...]] = (
     ClaudeCodePlugin(
-        key="code-guardian",
-        label="Code review enforcement (imbue-code-guardian)",
+        name="imbue-code-guardian",
+        description="Automated code review enforcement for Claude Code",
         marketplace_repo="imbue-ai/code-guardian",
         install_ref="imbue-code-guardian@imbue-code-guardian",
-        list_token="imbue-code-guardian",
     ),
     ClaudeCodePlugin(
-        key="agent-skills",
-        label="Agent coordination skills (imbue-mngr-skills)",
+        name="imbue-mngr-skills",
+        description="Skills that let mngr agents use mngr (message, wait for, and find other agents)",
         marketplace_repo="imbue-ai/mngr",
         install_ref="imbue-mngr-skills@imbue-mngr",
-        list_token="imbue-mngr-skills",
     ),
 )
 
 
 def _claude_plugin_status() -> tuple[bool, dict[str, bool]]:
-    """Return (claude_available, {plugin_key: is_installed}).
+    """Return (claude_available, {plugin_name: is_installed}).
 
     When Claude Code is not on PATH, the per-plugin map reports every plugin
     as not installed.
     """
-    not_installed = {plugin.key: False for plugin in _CLAUDE_CODE_PLUGINS}
+    not_installed = {plugin.name: False for plugin in _CLAUDE_CODE_PLUGINS}
     claude_available = shutil.which("claude") is not None
     if not claude_available:
         return False, not_installed
@@ -203,7 +205,7 @@ def _claude_plugin_status() -> tuple[bool, dict[str, bool]]:
     if result.returncode != 0:
         return True, not_installed
 
-    installed = {plugin.key: plugin.list_token in result.stdout for plugin in _CLAUDE_CODE_PLUGINS}
+    installed = {plugin.name: plugin.name in result.stdout for plugin in _CLAUDE_CODE_PLUGINS}
     return True, installed
 
 
@@ -212,7 +214,7 @@ def _install_one_claude_plugin(plugin: ClaudeCodePlugin) -> bool:
 
     Returns True on success, False (with a warning) on failure.
     """
-    write_human_line("Installing {}...", plugin.label)
+    write_human_line("Installing {}...", plugin.name)
     commands = (
         ["claude", "plugin", "marketplace", "add", plugin.marketplace_repo],
         ["claude", "plugin", "install", plugin.install_ref],
@@ -223,13 +225,13 @@ def _install_one_claude_plugin(plugin: ClaudeCodePlugin) -> bool:
                 result = cg.run_process_to_completion(command, is_checked_after=False)
                 if result.returncode != 0:
                     detail = result.stderr.strip() or result.stdout.strip()
-                    write_human_line("WARNING: Failed to install {}. {}", plugin.label, detail)
+                    write_human_line("WARNING: Failed to install {}. {}", plugin.name, detail)
                     return False
     except _SUBPROCESS_ERRORS as e:
-        write_human_line("WARNING: Failed to install {}. {}", plugin.label, str(e))
+        write_human_line("WARNING: Failed to install {}. {}", plugin.name, str(e))
         return False
 
-    write_human_line("Installed {}.", plugin.label)
+    write_human_line("Installed {}.", plugin.name)
     return True
 
 
@@ -237,12 +239,15 @@ def _prompt_claude_plugins_choice(candidates: tuple[ClaudeCodePlugin, ...]) -> t
     """Ask the user which of the not-yet-installed plugins to install.
 
     Presents a checkbox per candidate (all preselected), toggled with
-    Space and confirmed with Enter. Returns the checked plugins (empty
-    when the user unchecks everything or cancels). Caller must check
+    Space and confirmed with Enter. Each row shows the plugin name padded
+    to a common width followed by its description, matching the
+    `mngr extras plugins` wizard. Returns the checked plugins (empty when
+    the user unchecks everything or cancels). Caller must check
     ``has_interactive_terminal()`` first.
     """
+    name_width = max(len(plugin.name) for plugin in candidates)
     selected_indices = run_multi_select_picker(
-        options=[plugin.label for plugin in candidates],
+        options=[f"{plugin.name.ljust(name_width)}  {plugin.description}" for plugin in candidates],
         title="mngr extras",
         header_text="Select Claude Code plugins to install:",
         preselected=[True] * len(candidates),
@@ -274,7 +279,7 @@ def _install_claude_plugin(
         write_human_line("Claude Code is not installed -- skipping Claude Code plugins.")
         return False
 
-    candidates = tuple(plugin for plugin in _CLAUDE_CODE_PLUGINS if not installed_by_key.get(plugin.key, False))
+    candidates = tuple(plugin for plugin in _CLAUDE_CODE_PLUGINS if not installed_by_key.get(plugin.name, False))
 
     if not candidates:
         write_human_line("All Claude Code plugins are already installed.")
@@ -479,7 +484,7 @@ def _print_extras_status() -> None:
         write_human_line("  claude-plugin    claude not installed")
     else:
         statuses = ", ".join(
-            f"{plugin.key}: {'installed' if installed_by_key.get(plugin.key, False) else 'not installed'}"
+            f"{plugin.name}: {'installed' if installed_by_key.get(plugin.name, False) else 'not installed'}"
             for plugin in _CLAUDE_CODE_PLUGINS
         )
         write_human_line("  claude-plugin    {}", statuses)
