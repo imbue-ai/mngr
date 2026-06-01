@@ -3,10 +3,10 @@
 Every line on stdout is a single JSON object with shape
 ``{"stream": "observe"|"event"|"forward", ["agent_id": ...,] "payload": ...}``.
 
-A consumer (notably ``minds run``) parses these lines and dispatches based on
-``stream``. ``observe`` and ``event`` lines carry raw JSON from the spawned
-``mngr observe`` / ``mngr event`` subprocesses; ``forward`` lines carry the
-plugin's own state events (``login_url``, ``listening``,
+A consumer (the application that spawned the plugin) parses these lines and
+dispatches based on ``stream``. ``observe`` and ``event`` lines carry raw JSON
+from the spawned ``mngr observe`` / ``mngr event`` subprocesses; ``forward``
+lines carry the plugin's own state events (``login_url``, ``listening``,
 ``reverse_tunnel_established``).
 """
 
