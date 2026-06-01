@@ -10,7 +10,7 @@
       <div class="flex items-center justify-between gap-4 mb-5">
         <h1 class="text-sm font-medium text-zinc-500">Create workspace</h1>
         <select id="account_id" name="account_id"
-                class="max-w-[220px] text-xs text-zinc-400 bg-transparent border-0 rounded px-1 py-1 outline-none cursor-pointer transition-colors hover:text-zinc-600 focus:outline-none focus:ring-0">
+                class="max-w-[220px] text-xs text-right text-zinc-400 bg-transparent border-0 rounded px-1 py-1 outline-none cursor-pointer transition-colors hover:text-zinc-600 focus:outline-none focus:ring-0">
           {% for acct in accounts %}
             <option value="{{ acct.user_id }}"{% if acct.user_id == default_account_id %} selected{% endif %}>{{ acct.email }}</option>
           {% endfor %}
@@ -200,11 +200,49 @@
       var AI_LABELS = {IMBUE_CLOUD: 'Imbue Cloud', API_KEY: 'your Anthropic API key', SUBSCRIPTION: 'your Claude subscription'};
       var BACKUP_LABELS = {IMBUE_CLOUD: 'Imbue Cloud', API_KEY: 'your own storage', CONFIGURE_LATER: 'off for now'};
 
+      function joinNames(names) {
+        if (names.length === 1) return names[0];
+        if (names.length === 2) return names[0] + ' and ' + names[1];
+        return names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1];
+      }
+
+      function capitalize(text) {
+        return text.charAt(0).toUpperCase() + text.slice(1);
+      }
+
+      // Build a natural-language summary, grouping the facets (compute,
+      // tokens, backups) that share the same destination so e.g. three
+      // imbue_cloud values collapse to one "via Imbue Cloud" clause.
       function updateSummary() {
-        var compute = COMPUTE_LABELS[launchSelect.value] || launchSelect.value;
-        var ai = AI_LABELS[aiProviderSelect.value] || aiProviderSelect.value;
-        var backup = BACKUP_LABELS[backupSelect.value] || backupSelect.value;
-        summaryEl.textContent = 'Compute: ' + compute + ' · Tokens: ' + ai + ' · Backups: ' + backup;
+        var facets = [
+          {name: 'compute', label: COMPUTE_LABELS[launchSelect.value] || launchSelect.value},
+          {name: 'tokens', label: AI_LABELS[aiProviderSelect.value] || aiProviderSelect.value}
+        ];
+        // "Configure later" isn't a destination, so it reads as its own clause
+        // rather than "via ...".
+        var isBackupDeferred = backupSelect.value === 'CONFIGURE_LATER';
+        if (!isBackupDeferred) {
+          facets.push({name: 'backups', label: BACKUP_LABELS[backupSelect.value] || backupSelect.value});
+        }
+
+        var labelOrder = [];
+        var namesByLabel = {};
+        for (var i = 0; i < facets.length; i++) {
+          var facet = facets[i];
+          if (!namesByLabel[facet.label]) {
+            namesByLabel[facet.label] = [];
+            labelOrder.push(facet.label);
+          }
+          namesByLabel[facet.label].push(facet.name);
+        }
+
+        var sentences = labelOrder.map(function (label) {
+          return capitalize(joinNames(namesByLabel[label]) + ' via ' + label);
+        });
+        if (isBackupDeferred) {
+          sentences.push('Backups can be configured later');
+        }
+        summaryEl.textContent = sentences.join('. ') + '.';
       }
 
       // When the account changes, switch the provider defaults: an account
