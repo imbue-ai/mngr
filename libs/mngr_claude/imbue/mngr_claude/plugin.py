@@ -2786,7 +2786,7 @@ def register_cli_options(command_name: str) -> Mapping[str, list[OptionStackItem
 @hookimpl
 def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
     """Validate create args when --adopt-session is used: agent type must
-    be claude (or unset), and the option is incompatible with cloning via
+    be claude, and the option is incompatible with cloning via
     ``--from <agent>`` (both adopt a session into the new agent).
     """
     adopt_session = args.agent_options.plugin_data.get("adopt_session", ())
@@ -2794,7 +2794,7 @@ def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBefor
         return None
 
     agent_type = args.agent_options.agent_type
-    if agent_type is not None and str(agent_type) != "claude":
+    if str(agent_type) != "claude":
         raise UserInputError(f"--adopt-session can only be used with the claude agent type, not '{agent_type}'.")
 
     if args.agent_options.source_agent_state_location is not None:

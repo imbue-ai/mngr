@@ -25,7 +25,6 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.env_utils import parse_env_file
@@ -144,7 +143,7 @@ def create(
     # Run agent-type-specific preflight checks before creating the host.
     # This lets agent types fail fast on configuration errors (e.g. missing
     # gitignore entries) before expensive operations like host creation.
-    agent_type = agent_options.agent_type or AgentTypeName("claude")
+    agent_type = agent_options.agent_type
     resolved = resolve_agent_type(agent_type, mngr_ctx.config)
     agent_class = cast(type[AgentInterface], resolved.agent_class)
     with log_span("Running preflight checks for agent type {}", agent_type):
