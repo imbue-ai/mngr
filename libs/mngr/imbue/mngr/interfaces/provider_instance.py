@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from typing import Mapping
 from typing import Sequence
+from typing import TypeVar
 
 from loguru import logger
 from pydantic import Field
@@ -141,6 +142,33 @@ def _build_host_details_from_host(
     return host_details, ssh_activity
 
 
+_FieldGeneratorAgent = TypeVar("_FieldGeneratorAgent")
+_FieldGeneratorHost = TypeVar("_FieldGeneratorHost")
+
+
+def _compute_plugin_fields(
+    field_generators: Mapping[str, Mapping[str, Callable[[_FieldGeneratorAgent, _FieldGeneratorHost], Any]]],
+    agent: _FieldGeneratorAgent,
+    host: _FieldGeneratorHost,
+) -> dict[str, Any]:
+    """Run plugin field generators, building plugin.<plugin_name>.<field> data.
+
+    Shared by the online path (live agent/host) and the offline path
+    (DiscoveredAgent/HostDetails). Fields that evaluate to None are omitted, and
+    plugins that contribute no fields are dropped.
+    """
+    plugin_data: dict[str, Any] = {}
+    for plugin_name, generators in field_generators.items():
+        plugin_fields: dict[str, Any] = {}
+        for field_name, field_generator in generators.items():
+            value = field_generator(agent, host)
+            if value is not None:
+                plugin_fields[field_name] = value
+        if plugin_fields:
+            plugin_data[plugin_name] = plugin_fields
+    return plugin_data
+
+
 def _build_agent_details_from_online_agent(
     agent: AgentInterface,
     host_details: HostDetails,
@@ -168,15 +196,7 @@ def _build_agent_details_from_online_agent(
     idle_seconds = _compute_idle_seconds(user_activity, agent_activity, ssh_activity)
 
     # Compute plugin-specific fields from field generators
-    plugin_data: dict[str, Any] = {}
-    for plugin_name, generators in field_generators.items():
-        plugin_fields: dict[str, Any] = {}
-        for field_name, generator in generators.items():
-            value = generator(agent, host)
-            if value is not None:
-                plugin_fields[field_name] = value
-        if plugin_fields:
-            plugin_data[plugin_name] = plugin_fields
+    plugin_data = _compute_plugin_fields(field_generators, agent, host)
 
     return AgentDetails(
         id=agent.id,
@@ -206,9 +226,11 @@ def _build_agent_details_from_online_agent(
 def build_agent_details_from_offline_ref(
     agent_ref: DiscoveredAgent,
     host_details: HostDetails,
+    offline_field_generators: Mapping[str, Mapping[str, Callable[[DiscoveredAgent, HostDetails], Any]]] | None = None,
 ) -> AgentDetails:
     """Build AgentDetails from a discovered agent reference when the host is offline."""
     create_time = agent_ref.create_time or datetime(1970, 1, 1, tzinfo=timezone.utc)
+    plugin_data = _compute_plugin_fields(offline_field_generators or {}, agent_ref, host_details)
     return AgentDetails(
         id=agent_ref.agent_id,
         name=agent_ref.agent_name,
@@ -231,7 +253,7 @@ def build_agent_details_from_offline_ref(
         idle_mode=None,
         labels=agent_ref.labels,
         host=host_details,
-        plugin={},
+        plugin=plugin_data,
     )
 
 
@@ -509,6 +531,9 @@ class ProviderInstanceInterface(MutableModel, ABC):
         agent_refs: Sequence[DiscoveredAgent],
         field_generators: Mapping[str, Mapping[str, Callable[[AgentInterface, OnlineHostInterface], Any]]]
         | None = None,
+        # Field generators for offline agents, computing plugin fields from (DiscoveredAgent, HostDetails).
+        offline_field_generators: Mapping[str, Mapping[str, Callable[[DiscoveredAgent, HostDetails], Any]]]
+        | None = None,
         # Called when an error occurs for a specific agent or the host itself.
         # If the callback raises, the error propagates (ABORT semantics).
         # If it returns, the errored item is skipped (CONTINUE).
@@ -523,6 +548,8 @@ class ProviderInstanceInterface(MutableModel, ABC):
         """
         is_authentication_failure = False
         initial_host: HostInterface | None = None
+        # Resolved before the try so the offline fallback (HostConnectionError) can use it too.
+        resolved_offline_field_generators = offline_field_generators or {}
         try:
             host = self.get_host(host_ref.host_id)
             initial_host = host
@@ -562,7 +589,9 @@ class ProviderInstanceInterface(MutableModel, ABC):
 
                     # If this host is offline, or if we failed to find the agent on the online host
                     if agent_details is None:
-                        agent_details = build_agent_details_from_offline_ref(agent_ref, host_details)
+                        agent_details = build_agent_details_from_offline_ref(
+                            agent_ref, host_details, resolved_offline_field_generators
+                        )
 
                     agent_details_list.append(agent_details)
                 except MngrError as e:
@@ -576,7 +605,11 @@ class ProviderInstanceInterface(MutableModel, ABC):
                             host_ref.host_id,
                             e,
                         )
-                        agent_details_list.append(build_agent_details_from_offline_ref(agent_ref, host_details))
+                        agent_details_list.append(
+                            build_agent_details_from_offline_ref(
+                                agent_ref, host_details, resolved_offline_field_generators
+                            )
+                        )
 
         except HostConnectionError as e:
             self.on_connection_error(host_ref.host_id)
@@ -585,7 +618,8 @@ class ProviderInstanceInterface(MutableModel, ABC):
             is_authentication_failure = isinstance(e, HostAuthenticationError)
             host_details, _ssh_activity = _build_host_details_from_host(host, host_ref, is_authentication_failure)
             agent_details_list = [
-                build_agent_details_from_offline_ref(agent_ref, host_details) for agent_ref in agent_refs
+                build_agent_details_from_offline_ref(agent_ref, host_details, resolved_offline_field_generators)
+                for agent_ref in agent_refs
             ]
 
         finally:

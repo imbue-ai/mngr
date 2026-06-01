@@ -11,9 +11,11 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import _discover_agents_on_host
+from imbue.mngr.interfaces.provider_instance import build_agent_details_from_offline_ref
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
@@ -212,6 +214,33 @@ def test_connection_error_during_agent_detail_building_falls_back_to_offline(
     assert agent_details_list[0].state == AgentLifecycleState.STOPPED
 
 
+def test_offline_field_generators_populate_plugin_data_via_get_host_and_agent_details(
+    host_id: HostId, provider: MockProviderInstance, temp_mngr_ctx: MngrContext
+) -> None:
+    """When a host falls back to offline data, offline_field_generators populate plugin fields."""
+    online_host = _make_mock_online_host(host_id)
+    online_host.get_agents.side_effect = HostConnectionError("SSH error")
+
+    offline_host = _make_offline_host(host_id, provider, temp_mngr_ctx)
+    provider.mock_hosts = [online_host, offline_host]
+    provider.mock_offline_hosts = {str(host_id): offline_host}
+
+    host_ref = DiscoveredHost(
+        host_id=host_id,
+        host_name=HostName("test-host"),
+        provider_name=provider.name,
+    )
+    agent_ref = _make_agent_ref(host_id, AgentId.generate(), provider.name)
+    offline_field_generators = {"demo": {"kind": lambda ref, host: ref.certified_data.get("type")}}
+
+    _host_details, agent_details_list = provider.get_host_and_agent_details(
+        host_ref, [agent_ref], offline_field_generators=offline_field_generators
+    )
+
+    assert len(agent_details_list) == 1
+    assert agent_details_list[0].plugin == {"demo": {"kind": "generic"}}
+
+
 # =============================================================================
 # discover_hosts_and_agents disconnect tests
 # =============================================================================
@@ -247,6 +276,73 @@ def test_discover_hosts_and_agents_disconnects_hosts(
     provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
 
     mock_host.disconnect.assert_called_once()
+
+
+# =============================================================================
+# build_agent_details_from_offline_ref offline field generator tests
+# =============================================================================
+
+
+def _make_offline_host_details(host_id: HostId, provider_name: ProviderInstanceName) -> HostDetails:
+    return HostDetails(
+        id=host_id,
+        name="test-host",
+        provider_name=provider_name,
+        state=HostState.CRASHED,
+    )
+
+
+def test_build_agent_details_from_offline_ref_without_generators_has_empty_plugin(host_id: HostId) -> None:
+    """With no offline field generators, plugin data is empty (the prior behavior)."""
+    provider_name = ProviderInstanceName("test")
+    agent_ref = _make_agent_ref(host_id, AgentId.generate(), provider_name)
+    host_details = _make_offline_host_details(host_id, provider_name)
+
+    agent_details = build_agent_details_from_offline_ref(agent_ref, host_details)
+
+    assert agent_details.plugin == {}
+
+
+def test_build_agent_details_from_offline_ref_populates_plugin_data(host_id: HostId) -> None:
+    """Offline field generators receive (agent_ref, host_details) and populate plugin data."""
+    provider_name = ProviderInstanceName("test")
+    agent_ref = DiscoveredAgent(
+        host_id=host_id,
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("test-agent"),
+        provider_name=provider_name,
+        certified_data={"plugin": {"demo_plugin": {"flag": True}}},
+    )
+    host_details = _make_offline_host_details(host_id, provider_name)
+    offline_field_generators = {
+        "demo_plugin": {
+            "flag": lambda ref, host: ref.certified_data.get("plugin", {}).get("demo_plugin", {}).get("flag", False),
+        }
+    }
+
+    agent_details = build_agent_details_from_offline_ref(agent_ref, host_details, offline_field_generators)
+
+    assert agent_details.plugin == {"demo_plugin": {"flag": True}}
+
+
+def test_build_agent_details_from_offline_ref_omits_none_field_values(host_id: HostId) -> None:
+    """Fields whose generator returns None are omitted, and empty plugins are dropped."""
+    provider_name = ProviderInstanceName("test")
+    agent_ref = _make_agent_ref(host_id, AgentId.generate(), provider_name)
+    host_details = _make_offline_host_details(host_id, provider_name)
+    offline_field_generators = {
+        "plugin_a": {
+            "present": lambda ref, host: "yes",
+            "absent": lambda ref, host: None,
+        },
+        "plugin_b": {
+            "also_absent": lambda ref, host: None,
+        },
+    }
+
+    agent_details = build_agent_details_from_offline_ref(agent_ref, host_details, offline_field_generators)
+
+    assert agent_details.plugin == {"plugin_a": {"present": "yes"}}
 
 
 def test_discover_hosts_and_agents_tolerates_per_host_connection_error(
