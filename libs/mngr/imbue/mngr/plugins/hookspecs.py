@@ -15,6 +15,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import HostDetails
+from imbue.mngr.interfaces.help_topic import TopicHelpPage
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import NewHostOptions
@@ -333,6 +334,21 @@ def register_cli_commands() -> Sequence[click.Command] | None:
         @click.option("--example", help="An example option")
         def my_custom_command(example: str) -> None:
             logger.info("Running custom command with: {}", example)
+    """
+
+
+@hookspec
+def register_help_topics() -> Sequence[TopicHelpPage] | None:
+    """Register standalone help topic pages with mngr.
+
+    Plugins implement this hook to contribute topic pages (the kind mngr ships
+    for ``address``, ``filter``, etc.); when the plugin is installed they appear
+    in ``mngr help`` and are viewable via ``mngr help <topic>``.
+
+    Return a sequence of ``TopicHelpPage`` objects, or None. A topic whose key or
+    alias collides with an existing built-in topic is skipped, so plugins cannot
+    override mngr's own topics. See the plugin docs (``concepts/plugins.md``) for
+    how to author topics.
     """
 
 
