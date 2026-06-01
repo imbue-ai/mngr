@@ -49,6 +49,11 @@ def generate_cloud_init_user_data(
     ``curl -fsSL https://depot.dev/install-cli.sh | sh`` (see
     ``_DEPOT_INSTALL_CMD`` in ``instance.py``), and Debian cloud images
     ship ``wget`` but not ``curl`` by default.
+
+    ``inotify-tools`` and ``jq`` are needed by the per-host
+    ``snapshot_helper.sh`` (installed later, after the btrfs mount is
+    ready) -- pre-baked here so the helper install via SSH only needs
+    to drop files in place, no extra package install round-trips.
     """
     shutdown_block = ""
     if auto_shutdown_minutes is not None:
@@ -76,6 +81,8 @@ packages:
   - curl
   - rsync
   - docker.io
+  - inotify-tools
+  - jq
 write_files:
   - path: /etc/ssh/sshd_config.d/99-mngr.conf
     permissions: '0644'

@@ -41,6 +41,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -48,7 +49,6 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
-from imbue.mngr_vps_docker.host_store import VpsDockerHostStore
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
@@ -140,7 +140,7 @@ class _DiscoveryTestProvider(VpsDockerProvider):
         # (cache-fallback or state-container-not-ready paths), it sets the
         # vps_ip in per_vps_outer_errors or state_container_ready, and we
         # route through the superclass method (which will in turn use our
-        # overridden _make_outer_for_vps_ip / _get_existing_host_store below).
+        # overridden _make_outer_for_vps_ip below).
         # Otherwise short-circuit with the canned per-VPS payload.
         if vps_ip in self.per_vps_outer_errors or vps_ip in self.state_container_ready:
             return super()._read_records_from_vps(vps_ip)
@@ -150,50 +150,44 @@ class _DiscoveryTestProvider(VpsDockerProvider):
     def _make_outer_for_vps_ip(self, vps_ip: str) -> Iterator[OuterHostInterface]:
         # Used by tests that opt into the real _read_records_from_vps body:
         # per_vps_outer_errors[ip] -> raise that exception (cache-fallback test);
-        # state_container_ready[ip] -> yield a dummy outer (state-container test).
+        # state_container_ready[ip]=False -> yield a dummy outer that reports no
+        # mngr container (state-container-not-ready test).
         # Tests that don't opt in never reach here -- _read_records_from_vps
         # short-circuits with canned payloads above.
         exc = self.per_vps_outer_errors.get(vps_ip)
         if exc is not None:
             raise exc
         if vps_ip in self.state_container_ready:
-            # _DummyOuter is a duck-typed stand-in (never actually accessed); cast
-            # to satisfy the OuterHostInterface yield type, matching the sibling
-            # vps_docker tests (e.g. _outer_helpers_test, instance_test).
+            if self.state_container_ready[vps_ip]:
+                raise AssertionError(f"state_container_ready=True for {vps_ip!r} not supported by this stub")
+            # _DummyOuter answers the single docker-ps probe issued by
+            # _read_host_id_label_from_vps with an empty result; cast to satisfy
+            # the OuterHostInterface yield type, matching the sibling vps_docker
+            # tests (e.g. _outer_helpers_test, instance_test).
             yield cast(OuterHostInterface, _DummyOuter())
             return
         raise AssertionError(f"unexpected _make_outer_for_vps_ip call for {vps_ip!r}")
 
-    def _get_existing_host_store(self, outer: OuterHostInterface) -> VpsDockerHostStore | None:
-        # Per the test_read_records_from_vps_returns_empty_when_state_container_not_ready
-        # scenario: signal "container not running yet" with None, the same
-        # value the real implementation returns from _docker_inspect_running
-        # when the state container doesn't exist on the VPS.
-        # The only path that reaches this override has set exactly one entry
-        # in state_container_ready; assert that explicitly rather than relying
-        # on a single-iteration for-loop.
-        if not self.state_container_ready:
-            raise AssertionError("unexpected _get_existing_host_store call")
-        if len(self.state_container_ready) != 1:
-            raise AssertionError(
-                f"_get_existing_host_store stub expects exactly one entry in "
-                f"state_container_ready, got {len(self.state_container_ready)}"
-            )
-        vps_ip, ready = next(iter(self.state_container_ready.items()))
-        if ready:
-            raise AssertionError(f"state_container_ready=True for {vps_ip!r} not supported by this stub")
-        return None
-
 
 class _DummyOuter:
-    """Minimal stand-in for an OuterHost that never executes commands.
+    """Minimal outer for the state-container-not-ready discovery path.
 
-    Reached only on the state-container-not-ready path, where the real
-    code asks ``_get_existing_host_store`` (which we've overridden to
-    return None) and immediately returns. No methods on this object are
-    invoked; AssertionError on any access guards against future changes
-    that try to use the outer for something else.
+    main's ``_read_records_from_vps`` detects "no mngr container yet" via
+    ``_read_host_id_label_from_vps``, which runs a single ``docker ps``-based
+    command; empty stdout means no container. This stub answers that one
+    probe with an empty, successful result so discovery returns empty rather
+    than raising. Any other access is a regression and raises.
     """
+
+    def execute_idempotent_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Any = None,
+        env: Any = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        return CommandResult(stdout="", stderr="", success=True)
 
     def __getattr__(self, name: str) -> Any:
         raise AssertionError(f"_DummyOuter.{name} must not be accessed in discovery tests")

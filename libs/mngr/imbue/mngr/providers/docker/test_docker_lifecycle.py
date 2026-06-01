@@ -1,6 +1,7 @@
 from collections.abc import Generator
 from pathlib import Path
 
+import docker.errors
 import pytest
 
 from imbue.mngr.config.data_types import MngrContext
@@ -138,6 +139,43 @@ def test_destroy_host_removes_container(docker_provider: DockerProviderInstance)
     docker_provider.delete_host(offline)
     with pytest.raises(HostNotFoundError):
         docker_provider.get_host(host_id)
+
+
+@pytest.mark.docker
+@pytest.mark.docker_sdk
+def test_destroy_host_untags_build_image(docker_provider: DockerProviderInstance) -> None:
+    # The default (no --image) path builds and tags an image per host.
+    host = docker_provider.create_host(HostName("test-build-untag"))
+    host_id = host.id
+    build_tag = f"mngr-build-{host_id}"
+    assert docker_provider._docker_client.images.get(build_tag) is not None
+
+    # destroy_host untags the build image so built images don't pile up.
+    docker_provider.destroy_host(host)
+    with pytest.raises(docker.errors.ImageNotFound):
+        docker_provider._docker_client.images.get(build_tag)
+
+    # delete_host is idempotent and does not error on the already-removed tag.
+    offline = docker_provider.get_host(host_id)
+    docker_provider.delete_host(offline)
+
+
+@pytest.mark.docker
+@pytest.mark.docker_sdk
+def test_destroy_host_build_image_untag_preserves_snapshot_restore(
+    docker_provider: DockerProviderInstance,
+) -> None:
+    host = docker_provider.create_host(HostName("test-build-untag-snap"))
+    host_id = host.id
+    snapshot_id = docker_provider.create_snapshot(host_id, SnapshotName("snap-untag"))
+
+    # Untagging the build image on destroy must not break snapshot restore:
+    # snapshot images are independent commits that keep their own layers.
+    docker_provider.destroy_host(host)
+    restored = docker_provider.start_host(host_id, snapshot_id=snapshot_id)
+    assert isinstance(restored, Host)
+    result = restored.execute_idempotent_command("echo restored")
+    assert "restored" in result.stdout
 
 
 @pytest.mark.docker

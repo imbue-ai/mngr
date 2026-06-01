@@ -8,6 +8,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Added
 
+- Added: `mngr latchkey register-agent --host-id ID --agent-id ID` CLI as the operator-facing equivalent of the per-agent registration the desktop client now does directly.
+- Added: Lima 2.1.1 is bundled into the desktop app — `scripts/build.js` downloads and extracts the official release tarball into `resources/lima/`, and the packaged backend prepends `resources/lima/bin` to `PATH` so `limactl` is found without a separate `brew install lima`. macOS Apple Silicon is fully self-contained via Lima's `vz` backend; macOS Intel and Linux still require host QEMU.
 - Added: New WebDAV file-server mount at `/api/v1/files` (backed by `wsgidav` + `a2wsgi`) exposing the user's home directory and `/tmp` to agents through the `minds-api-proxy` Latchkey extension, with per-agent Bearer-token auth.
 - Added: Latchkey gateway ships a new bundled `minds-api-proxy` extension that reverse-proxies `/minds-api-proxy` to the minds desktop client's bare-origin Minds API, with the upstream URL re-published on every `minds run` startup.
 - Added: File-sharing permission requests carry a required `access` field (`READ` / `WRITE`); the minds approval dialog renders a green "read-only" / amber "read & write" badge per file path.
@@ -22,9 +24,17 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Per-dev-env Neon project named `minds-<env>` containing `host_pool` and `litellm_cost` DBs, provisioned and torn down atomically by `minds env deploy` / `destroy`.
 - Added: Per-tier generation id minted at deploy and exposed at `GET /generation`; `minds env activate` wipes stale `mngr/` / `auth/` / `logs/` when the tier was redeployed since the dev last activated.
 - Added: `apps/minds/docs/staging-bringup.md` — end-to-end checklist for standing up the `staging` tier from scratch.
+- Added: 14-day dependency-cooldown supply-chain gate for the packaged toolchain — `minimumReleaseAge: 20160` in `apps/minds/pnpm-workspace.yaml` (pnpm) and `exclude-newer = "14 days"` under `[tool.uv]` in `apps/minds/electron/pyproject/pyproject.toml` (uv). Resolution refuses any distribution (including transitive) published within the window; frozen-lockfile installs are unaffected.
+- Added: Packaged macOS desktop now bundles the real `git` binary plus its `libexec/git-core` helpers (resolved via `xcrun --find git`) instead of the `/usr/bin/git` shim, so `git clone` in a packaged app no longer SIGKILLs on Macs without Xcode Command Line Tools at the expected path; ToDesktop `uploadSizeLimit` bumped 300 → 600 to fit the larger bundle.
 
 ### Changed
 
+- Changed: Renamed `LaunchMode.LOCAL` compute provider to `LaunchMode.DOCKER` everywhere (Python code, `/create` form HTML, `/api/create-agent` JSON payloads, docs); the old name collided with mngr's own `local` provider. Submitting `launch_mode=LOCAL` is no longer recognized.
+- Changed: `MINDS_API_KEY` is no longer minted per-agent — `minds run` generates a single in-memory key on startup, the latchkey gateway's `minds-api-proxy` extension injects it on forwarded requests, and workspaces no longer carry the env var. Rotating per-startup removes a long-lived secret from the filesystem.
+- Changed: Notifications endpoint moved from `POST /api/v1/notifications` to `POST /api/v1/agents/<agent_id>/notifications`; every `/api/v1` route is now per-agent. The bearer-auth gate now compares against the single in-memory key with a constant-time check.
+- Changed: Every agent created by minds gets added to the host's `minds-api-proxy-allowed-agent` enum at finalize-host-permissions time, so an agent on host A cannot reach the Minds API on behalf of an agent on host B.
+- Changed: Desktop client now registers each agent via `imbue.mngr_latchkey.agent_setup.register_agent_for_host(...)` (a single atomic file edit) instead of the previous gateway-extension dance that POSTed two schemas + one rule per agent.
+- Changed: `workspace_ready_timeout_seconds` bumped from 60s to 300s in `agent_creator.py` so first-boot provisioning (uv sync, npm ci + run build for the system_interface frontend) no longer bounces users to the recovery page while the agent is still finishing provisioning.
 - Changed: `minds run` no longer dictates the `mngr forward` plugin's port — the `--mngr-forward-port` flag and `MINDS_MNGR_FORWARD_PORT` env var are removed; the plugin picks its own port and reports it back via its `listening` envelope.
 - Changed: Bumped bundled Latchkey version to 2.11.3.
 - Changed: Latchkey gateway's `permission-requests` extension grows a typed request schema (`{agent_id, rationale, type, payload}`) and a new `POST /permission-requests/approve/<id>` endpoint; pending requests live under `permission_requests/v2/`.
@@ -47,19 +57,29 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Speed up local minds workspace creation by restructuring the `forever-claude-template` Dockerfile and deferring Playwright into a post-boot install (warm rebuild 1m33s → 30s → ~25.6s).
 - Changed: Latchkey permission dialog no longer pre-checks the catch-all `any` permission as an implicit default; initial check state is now the union of existing grants and the agent's requested permissions.
 - Changed: Streamed-permission-request handler now dedupes redeliveries by `event_id` so the requests inbox no longer grows unbounded on every gateway reconnect.
+- Changed: Pinned the desktop client's JS toolchain to exact versions (pnpm `10.33.4` + Node.js `24.15.0`) with `engine-strict=true` so mismatched installs fail fast; added an `.nvmrc` so nvm/fnm users pick up the pinned Node automatically. Pinned the packaged end-user Python to `==3.12.13` in `apps/minds/electron/pyproject/pyproject.toml`.
+- Changed: Bumped bundled Electron from `35.7.5` to `40.10.1` so the runtime shipped to end users bundles Node.js `24.15.0`, matching the development pin (the prior bundled runtime was Node 22.x).
+- Changed: Bumped the bundled `UV_VERSION` in `apps/minds/scripts/build.js` from `0.7.12` to `0.11.15` so the shipped uv can parse the relative `exclude-newer` cooldown (0.7.12 failed to parse it, silently discarded the lockfile, and re-resolved unpinned at first launch).
+- Changed: Bumped bundled Latchkey to `2.12.2` — first-time Google Cloud users now see the ToS dialog, and Google Projects are reused when possible to work around the low default project-count limit.
 
 ### Removed
 
+- Removed: Per-agent reverse SSH tunnel that exposed `/api/v1/...` to workspaces, along with `MindsApiUrlWriter`, `LocalAgentDiscoveryHandler`, and the `$MNGR_AGENT_STATE_DIR/minds_api_url` write; agents now reach the Minds API exclusively through the latchkey gateway's `minds-api-proxy` extension.
+- Removed: Per-agent `MINDS_API_KEY` generation in `agent_creator.py` (no more `--host-env MINDS_API_KEY=...` to `mngr create`, no more per-agent `api_key_hash` file).
+- Removed: `gateway_client` field on `AgentCreator` and the low-level schema-altering methods on `LatchkeyGatewayClient` (`set_permission_schema`, `delete_permission_schema`, `delete_permission_rule`); the user-grant API (`set_permission_rule`, etc.) stays.
 - Removed: Silent auto-disable on `imbue_cloud` auth errors — `_ImbueCloudAuthErrorDisabler` and the provider-error callback plumbing on `EnvelopeStreamConsumer` are gone; the user now drives the Disable action explicitly via the providers panel.
 
 ### Fixed
 
+- Fixed: Hardened the workspace-restart shell command in `desktop_client/app.py` to use `tmux kill-window -t "=${MNGR_PREFIX}system-services:svc-system_interface"` (with the `=` exact-match prefix) so the kill no longer silently lands on a sibling-prefix session's window.
 - Fixed: Startup race where the minds desktop client could cache a stale latchkey gateway port and then fail every call with `[Errno 111] Connection refused`; the gateway client now self-heals on `httpx.ConnectError`/`ConnectTimeout`, and supervisor restart + pre-warm now run sequentially on a single background thread.
 - Fixed: `minds env deploy` is now actually idempotent against Neon — `create_neon_project` / `delete_neon_project` look up by name first via `_find_projects_by_name` and raise on ambiguous matches instead of silently leaking duplicate projects.
 - Fixed: Desktop client tolerates legacy `service_name` fields on disk by dropping them before validating `RequestResponseEvent`, eliminating the per-startup pydantic-extras warning and unresolved-request bug.
 - Fixed: `minds env destroy` proceeds with cloud-side cleanup even when the local env root has already been removed by hand.
 - Fixed: `minds env deploy` runs `apply_pool_hosts_migrations` for every tier (not just dev), so shared-tier schema no longer diverges.
 - Fixed: `find_monorepo_root` check runs before Vault credential read and `make_deploy_id` so running from outside the monorepo fails cleanly.
+- Fixed: `FileAuthStore.get_signing_key` race on a fresh data directory that intermittently logged users out — the prior lazy non-atomic generation could let one thread read a momentarily-empty key file (raising `SigningKeyError`, returning 500 from `/authenticate`) or two threads each generate a different key and race to write it (silently invalidating the just-signed cookie). Generation is now serialized behind a per-store lock with a double-checked re-read and `atomic_write`. This was the dominant cause of `test-docker-electron` CI flake.
+- Fixed: Deny button on the latchkey permission-request dialog now works even when the requested scope is not in the gateway's services catalog (e.g. a typo or stale catalog); the deny flow falls back to the raw scope string so the pending request is always torn down and the agent is always notified.
 
 ## [v0.2.8] - 2026-05-13
 

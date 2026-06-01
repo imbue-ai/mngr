@@ -9,14 +9,12 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const https = require('https');
-const http = require('http');
 const { execSync, execFileSync } = require('child_process');
+const { downloadGit, downloadUv, download } = require('./download-binaries.js');
 
 const ROOT = path.resolve(__dirname, '..');
 const RESOURCES_DIR = path.join(ROOT, 'resources');
 
-const UV_VERSION = '0.11.15';
 const LIMA_VERSION = '2.1.1';
 
 function getPlatformArch() {
@@ -29,41 +27,12 @@ function getPlatformArch() {
   throw new Error(`Unsupported platform/arch: ${platform}/${arch}`);
 }
 
-function getUvDownloadUrl({ platform, arch }) {
-  const target = platform === 'darwin'
-    ? `uv-${arch}-apple-darwin`
-    : `uv-${arch}-unknown-linux-gnu`;
-  return `https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${target}.tar.gz`;
-}
-
-function download(url) {
-  return new Promise((resolve, reject) => {
-    const client = url.startsWith('https') ? https : http;
-    client.get(url, { headers: { 'User-Agent': 'minds-build' } }, (res) => {
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        res.resume(); // Drain the redirect response to free the connection
-        download(res.headers.location).then(resolve).catch(reject);
-        return;
-      }
-      if (res.statusCode !== 200) {
-        res.resume(); // Drain the error response to free the connection
-        reject(new Error(`HTTP ${res.statusCode} for ${url}`));
-        return;
-      }
-      const chunks = [];
-      res.on('data', (chunk) => chunks.push(chunk));
-      res.on('end', () => resolve(Buffer.concat(chunks)));
-      res.on('error', reject);
-    }).on('error', reject);
-  });
-}
-
 /**
  * Download a gzipped tarball to ``destDir`` and extract it in place with
  * ``--strip-components=1``, then verify and chmod the named binary.
  *
  * Used for binaries that ship as a single self-contained tarball rooted one
- * level deep (e.g. uv, Lima). ``label`` is used only for log lines and error
+ * level deep (e.g. Lima). ``label`` is used only for log lines and error
  * messages; ``archiveName`` is the on-disk filename for the downloaded
  * tarball (deleted after extraction); ``binaryPath`` is the absolute path
  * the caller expects the extracted binary to live at.
@@ -84,17 +53,6 @@ async function downloadAndExtractTarball({ destDir, url, archiveName, binaryPath
   }
   fs.chmodSync(binaryPath, 0o755);
   console.log(`${label} binary installed at ${binaryPath}`);
-}
-
-async function downloadUv({ platform, arch }) {
-  const uvDir = path.join(RESOURCES_DIR, 'uv');
-  await downloadAndExtractTarball({
-    destDir: uvDir,
-    url: getUvDownloadUrl({ platform, arch }),
-    archiveName: 'uv.tar.gz',
-    binaryPath: path.join(uvDir, 'uv'),
-    label: 'uv',
-  });
 }
 
 /**
@@ -380,23 +338,6 @@ async function downloadLima({ platform, arch }) {
   }
 }
 
-async function downloadGit() {
-  const gitDir = path.join(RESOURCES_DIR, 'git');
-  const binDir = path.join(gitDir, 'bin');
-  fs.mkdirSync(binDir, { recursive: true });
-
-  // Copy the system git binary into the resources directory.
-  const systemGit = execSync('which git', { encoding: 'utf-8' }).trim();
-  if (!systemGit) {
-    throw new Error('git not found on system -- install git first');
-  }
-
-  const destGit = path.join(binDir, 'git');
-  fs.copyFileSync(systemGit, destGit);
-  fs.chmodSync(destGit, 0o755);
-  console.log(`git binary copied to ${destGit}`);
-}
-
 function copyPyproject() {
   const srcDir = path.join(ROOT, 'electron', 'pyproject');
   const destDir = path.join(RESOURCES_DIR, 'pyproject');
@@ -541,9 +482,9 @@ async function main() {
 
   // Download binaries and copy pyproject in parallel
   await Promise.all([
-    downloadUv({ platform, arch }),
+    downloadUv(RESOURCES_DIR, { platform, arch }),
     downloadLima({ platform, arch }),
-    downloadGit(),
+    downloadGit(RESOURCES_DIR, { platform }),
   ]);
 
   bundleLatchkey();

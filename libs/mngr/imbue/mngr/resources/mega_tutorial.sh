@@ -454,7 +454,8 @@ mngr exec -a --on-error continue "git log --oneline -5"
 #   sync your local changes to an agent's workspace.
 ##############################################################################
 
-# "push" is an experimental command. See "mngr push --help" for current usage.
+# Use "mngr rsync <local> <agent>" to push files. See "mngr rsync --help".
+# Use "mngr git push <agent>" to push git commits. See "mngr git push --help".
 
 ##############################################################################
 # PULLING FILES FROM AGENTS
@@ -462,7 +463,8 @@ mngr exec -a --on-error continue "git log --oneline -5"
 #   This is how you retrieve an agent's work.
 ##############################################################################
 
-# "pull" is an experimental command. See "mngr pull --help" for current usage.
+# Use "mngr rsync <agent> <local>" to pull files. See "mngr rsync --help".
+# Use "mngr git pull <agent>" to pull git commits. See "mngr git pull --help".
 
 ##############################################################################
 # PAIRING WITH AGENTS
@@ -902,7 +904,7 @@ git fetch --all && git merge mngr/my-task
 
 # TODO: give an example of how to use a stop hook to automatically push for the agent
 
-# TODO: add some more example with mngr pull for how to merge work back in
+# TODO: add some more example with mngr git pull for how to merge work back in
 
 # when destroying, clean up the branch that was originally created when the agent was created
 mngr destroy my-task --force --remove-created-branch
@@ -1283,7 +1285,7 @@ mngr create my-task --provider modal \
   --sudo-command "apt-get update && apt-get install -y build-essential" \
   --extra-provision-command "pip install -r /workspace/requirements.txt"
 
-# TODO: also show how you can use "mngr push" or "mngr exec" after starting the agent, just as nice alternatives
+# TODO: also show how you can use "mngr rsync" or "mngr exec" after starting the agent, just as nice alternatives
 
 ##############################################################################
 # ADVANCED WORKFLOWS

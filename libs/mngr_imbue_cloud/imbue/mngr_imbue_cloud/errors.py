@@ -35,3 +35,23 @@ class PoolHostNotMatchedError(ImbueCloudError):
 
 class AccountNotConfiguredError(ImbueCloudError):
     """Raised when the requested account has no provider instance entry."""
+
+
+class ImbueCloudBucketError(ImbueCloudError):
+    """Raised when an R2 bucket or bucket-key operation fails."""
+
+
+class ImbueCloudBucketNotEmptyError(ImbueCloudBucketError):
+    """Raised when destroying a bucket that still contains objects."""
+
+
+class ImbueCloudBucketExistsError(ImbueCloudBucketError):
+    """Raised when creating a bucket whose derived name already exists."""
+
+
+class ImbueCloudBucketNotFoundError(ImbueCloudBucketError):
+    """Raised when referencing a bucket that does not exist (or is not the caller's)."""
+
+
+class ImbueCloudBucketLimitError(ImbueCloudBucketError):
+    """Raised when the account is already at the per-account bucket cap."""

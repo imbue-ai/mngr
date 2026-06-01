@@ -361,8 +361,16 @@ def test_unison_syncer_syncs_file_changes(tmp_path: Path, cg: ConcurrencyGroup) 
 
 
 @pytest.mark.unison
+@pytest.mark.flaky
 def test_unison_syncer_syncs_symlinks(tmp_path: Path, cg: ConcurrencyGroup) -> None:
-    """Test that UnisonSyncer correctly syncs symlinks."""
+    """Test that UnisonSyncer correctly syncs symlinks.
+
+    Marked flaky because the ``wait_for`` only waits for the symlink to appear in
+    ``target``, but the very next assertion checks that the symlink's target file
+    ``real_file.txt`` also exists. Unison gives no ordering guarantee between two
+    unrelated files in a single sync sweep, so the symlink can land in ``target``
+    before its real file does.
+    """
     source = tmp_path / "source"
     target = tmp_path / "target"
     source.mkdir()

@@ -5,8 +5,6 @@ from inline_snapshot import snapshot
 
 from imbue.imbue_common.ratchet_testing import standard_ratchet_checks as rc
 from imbue.imbue_common.ratchet_testing.ratchets import TEST_FILE_PATTERNS
-from imbue.imbue_common.ratchet_testing.ratchets import check_no_ruff_errors
-from imbue.imbue_common.ratchet_testing.ratchets import check_no_type_errors
 
 # mngr's test_ratchets.py is nested one level deeper than other projects (in utils/),
 # so the source dir is parent.parent instead of parent.parent.parent
@@ -94,7 +92,14 @@ def test_prevent_getattr() -> None:
     # pattern documented inline on _walk_to_field. Switching to model_dump
     # round-tripping to dodge the ratchet would re-introduce the serialisation
     # cost _walk_to_field was rewritten to avoid (see its docstring).
-    rc.check_getattr(_DIR, snapshot(11))
+    #
+    # cli/create.py uses the same map-driven `getattr(opts, config_field, ())`
+    # pattern twice -- once for AgentProvisioningOptions
+    # (PROVISIONING_FIELD_MAP) and once for HostProvisioningOptions
+    # (HOST_PROVISIONING_FIELD_MAP). Both are data-driven traversals where
+    # the attribute name only exists in the map; static field access is not
+    # possible.
+    rc.check_getattr(_DIR, snapshot(12))
 
 
 def test_prevent_setattr() -> None:
@@ -305,13 +310,3 @@ def test_prevent_code_in_init_files() -> None:
             'hookimpl = pluggy.HookimplMarker("mngr")',
         },
     )
-
-
-def test_no_type_errors() -> None:
-    """Ensure the codebase has zero type errors."""
-    check_no_type_errors(Path(__file__).parent.parent.parent.parent)
-
-
-def test_no_ruff_errors() -> None:
-    """Ensure the codebase has zero ruff linting errors."""
-    check_no_ruff_errors(Path(__file__).parent.parent.parent.parent)

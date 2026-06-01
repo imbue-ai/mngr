@@ -600,45 +600,13 @@ _SYNOPSIS_OPTOUT_FLAGS: dict[str, frozenset[str]] = {
             "--remove-ssh-key",
         }
     ),
-    "pull": frozenset(
+    "rsync": frozenset(
         {
-            "--all-branches",
-            "--branch",
-            "--delete",
-            "--destination",
-            "--exclude",
-            "--exclude-file",
-            "--force-git",
-            "--include-file",
             "--include-gitignored",
-            "--merge",
-            "--rebase",
-            "--rsync-arg",
-            "--rsync-args",
-            "--source-host",
-            "--source-path",
-            "--stdin",
-            "--tags",
-            "--target",
-            "--target-agent",
-            "--target-branch",
-            "--target-host",
-            "--target-path",
-            "--uncommitted-changes",
-            "--uncommitted-source",
         }
     ),
-    "push": frozenset(
-        {
-            "--delete",
-            "--exclude",
-            "--rsync-only",
-            "--source-branch",
-            "--target-host",
-            "--target-path",
-            "--uncommitted-changes",
-        }
-    ),
+    "git.push": frozenset(),
+    "git.pull": frozenset(),
     "pair": frozenset(
         {
             "--require-git",

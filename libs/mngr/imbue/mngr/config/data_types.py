@@ -307,6 +307,19 @@ class WorkDirExtraPathMode(UpperCaseStrEnum):
     COPY = auto()
 
 
+class ConfigScope(UpperCaseStrEnum):
+    """A settings-file layer: the user profile, the project, or the local override.
+
+    The lowercased member name is the value accepted by ``mngr config set
+    --scope`` and surfaced in diagnostics; ``get_config_path`` (cli/config.py)
+    and ``read_config_layers`` (pre_readers.py) both map these to the same files.
+    """
+
+    USER = auto()
+    PROJECT = auto()
+    LOCAL = auto()
+
+
 # === Value Types ===
 
 
@@ -711,15 +724,15 @@ class MngrConfig(FrozenModel):
     )
     is_error_reporting_enabled: bool = Field(
         default=True,
-        description="Whether to prompt users to report unexpected errors as GitHub issues when running interactively",
+        description="Whether to suggest launching a diagnostic agent "
+        "when an unexpected error occurs while running interactively",
     )
     is_allowed_in_pytest: bool = Field(
-        default=True,
+        default=False,
         description=(
-            "Set this to False to prevent loading this config in pytest runs. "
-            "Tests that intentionally need to load a config with this set to False "
-            "(e.g. end-to-end tests of real mngr subprocesses) must set "
-            "MNGR_ALLOW_PYTEST=1 in the subprocess env as an explicit opt-in."
+            "Whether this config may be loaded during a pytest run. Defaults to False so a "
+            "poorly-scoped test cannot pick up a real config (e.g. ~/.mngr) and perform real "
+            "operations; configs written for tests set this to True to opt in."
         ),
     )
     default_destroyed_host_persisted_seconds: float = Field(
@@ -1003,6 +1016,7 @@ class CreateCliOptions(CommonCliOptions):
     snapshot: str | None
     build_arg: tuple[str, ...]
     start_arg: tuple[str, ...]
+    post_host_create_command: tuple[str, ...]
     reconnect: bool
     message: str | None
     message_file: str | None

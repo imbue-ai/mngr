@@ -735,6 +735,28 @@ def test_apply_create_template_multiple_templates_extend_stack(mngr_test_prefix:
     assert result["env"] == ("FOO=1", "BAR=2")
 
 
+def test_apply_create_template_post_host_create_command_extend_stacks(mngr_test_prefix: str) -> None:
+    """`post_host_create_command__extend` from a template merges into the CLI tuple param
+    so users can opt into image-specific first-boot setup (e.g. FCT's /usr/local/bin/fct-seed)
+    without inlining shell into mngr."""
+    ctx = _make_click_context(
+        params={
+            "template": ("fct-docker",),
+            "post_host_create_command": (),
+        },
+    )
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        create_templates={
+            CreateTemplateName("fct-docker"): CreateTemplate(
+                options={"post_host_create_command__extend": ["/usr/local/bin/fct-seed"]}
+            ),
+        },
+    )
+    result = apply_create_template(ctx, ctx.params.copy(), config)
+    assert result["post_host_create_command"] == ("/usr/local/bin/fct-seed",)
+
+
 def test_apply_create_template_second_template_narrowing_raises(mngr_test_prefix: str) -> None:
     """When the first template extends and the second bare-assigns over the result,
     the second template trips the narrowing guard against the in-flight value."""
@@ -1415,7 +1437,9 @@ def test_setup_command_context_raises_on_unknown_command_param_by_default(
     """Without MNGR_ALLOW_UNKNOWN_CONFIG, a typo in [commands.create] must raise."""
     # MNGR_PROJECT_CONFIG_DIR points directly at the directory containing settings.toml
     # (see resolve_project_config_dir in config/pre_readers.py).
-    (tmp_path / "settings.toml").write_text('[commands.create]\nbogus_typo_param = "x"\n')
+    (tmp_path / "settings.toml").write_text(
+        'is_allowed_in_pytest = true\n\n[commands.create]\nbogus_typo_param = "x"\n'
+    )
 
     monkeypatch.delenv("MNGR_ALLOW_UNKNOWN_CONFIG", raising=False)
     monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
@@ -1440,7 +1464,9 @@ def test_setup_command_context_warns_on_unknown_command_param_when_lax(
     log_warnings: list[str],
 ) -> None:
     """With MNGR_ALLOW_UNKNOWN_CONFIG=1, a typo in [commands.create] should warn, not raise."""
-    (tmp_path / "settings.toml").write_text('[commands.create]\nbogus_typo_param = "x"\n')
+    (tmp_path / "settings.toml").write_text(
+        'is_allowed_in_pytest = true\n\n[commands.create]\nbogus_typo_param = "x"\n'
+    )
 
     monkeypatch.setenv("MNGR_ALLOW_UNKNOWN_CONFIG", "1")
     monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
@@ -1453,3 +1479,28 @@ def test_setup_command_context_warns_on_unknown_command_param_when_lax(
     assert any("bogus_typo_param" in msg for msg in log_warnings), (
         f"Expected a warning mentioning the unknown param, got: {log_warnings}"
     )
+
+
+# =============================================================================
+# Tests for the narrowing guard on --setting overrides.
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    "flag_setting",
+    [
+        "allow_settings_key_assignment_narrowing=true",
+        "allow_settings_key_assignment_narrowing=false",
+        # Hyphenated spelling normalizes to the same field.
+        "allow-settings-key-assignment-narrowing=true",
+    ],
+)
+def test_apply_settings_to_config_rejects_setting_the_narrowing_flag(flag_setting: str, mngr_test_prefix: str) -> None:
+    """``--setting`` cannot set ``allow_settings_key_assignment_narrowing``: the
+    narrowing guard runs while loading the settings files and env vars, before
+    ``--setting`` is applied, so a ``--setting`` value would be misleading. It
+    raises a clear error pointing to the settings file / env var instead.
+    """
+    config = MngrConfig(prefix=mngr_test_prefix)
+    with pytest.raises(UserInputError, match="allow_settings_key_assignment_narrowing"):
+        apply_settings_to_config(config, (flag_setting,), frozenset())
