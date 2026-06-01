@@ -209,7 +209,9 @@ def _claude_plugin_status() -> tuple[bool, dict[str, bool]]:
     try:
         entries = json.loads(result.stdout)
     except json.JSONDecodeError as e:
-        logger.warning("Could not parse `claude plugin list --json` output ({}); assuming no plugins installed.", e)
+        logger.warning(
+            "Could not parse `claude plugin list --json` output ({}); unable to detect installed plugins.", e
+        )
         return True, not_installed
 
     # `claude plugin list --json` returns objects whose `id` is "<name>@<marketplace>",
