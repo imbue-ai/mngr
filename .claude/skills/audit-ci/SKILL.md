@@ -21,20 +21,21 @@ Start cheap: `gh run view <run_id>` lists jobs + durations and has an **ANNOTATI
 ## What to look for
 
 1. **Warnings** (the ANNOTATIONS section, including on otherwise-passing runs).
-2. **Uncached image rebuilds**: offload caches its base image in git notes (`refs/notes/offload-images`, ~48h TTL), so occasional misses are fine -- flag *frequent*/no-change misses, or a missing `contents: write` perm / failed `git fetch refs/notes/*` (defeats the cache every run). Grep logs for base-image build / `cache miss`.
+2. **Uncached image rebuilds**: offload records each checkpoint commit's base-image ID in a git note (`refs/notes/offload-images`); the image itself lives in Modal and is evicted after ~48h, so occasional rebuilds are expected. Flag *frequent* rebuilds with no triggering change, or a missing `contents: write` perm / failed `git fetch refs/notes/*` (loses the notes -> rebuild every run). Grep logs for base-image build / `cache miss`.
 3. **Flaky tests** (`neutral` / `Flaky-recovered > 0`): record the test, `@flaky` status, run-count, and the failure reason from the `## Failures` traceback.
 4. **Slow jobs/tests**: flag anything egregiously slow for its value, or that bottlenecks the pipeline regardless of value (e.g. a single 5-min test). Investigate *every* slow job to find what caused the extra time -- break it down per-step (log timestamps) before blaming tests; e.g. `actions/checkout` with `fetch-depth: 0` does a full-history, all-branches fetch that can dominate wall-clock.
 5. **Failures recurring across PRs**: one hard failure is a human's problem, but the same signature on multiple unrelated branches is a systemic issue a human looking at a single PR won't see.
 6. **Coverage**: `test-offload` prints a coverage-delivery diagnostic; a `MISMATCH` line = dropped `.coverage` data.
-7. **Repeated log noise**: a warning recurring at a fixed interval, even on a *passing* job, usually means a misconfig -- e.g. `test-docker-electron` (no Modal token) logging `Modal is not authorized` every ~10s. The text usually names the fix.
+7. **Repeated log noise**: the same warning recurring many times within a job (even a passing one) usually signals a misconfigured environment.
+8. **Anything else that looks off**: you won't have a rule for every anomaly -- flag whatever seems wrong and dig in. First rule out the known-weird-but-expected (see traps below), e.g. offload running a given test a nondeterministic number of times due to speculative retries and cancellations.
 
 ## Don't over-claim (common traps)
 
 - Always read the actual failure output before attributing a cause. Hard failures are usually branch-specific gates (ratchet sync, coverage, stale generated CLI docs, snapshot mismatches), not infra; Modal acceptance flakiness is usually absorbed by retries (-> neutral), so it rarely causes the hard failure.
 - Cross-branch duration differences are mostly test-phase variance; the cached base build (~45s) and env-prep (~60s) are near-constant. Only flag a regression if *setup/cache* steps grew or the *same* branch slowed across runs.
 - Normal Modal host-creation output (not errors/cache-misses): `building from mngr default Dockerfile` (cheap COPY layer, ~2s) and `<pkg> ... Installing at runtime` (only `test_mngr_create_with_dockerfile_on_modal`, not every host).
-- One broken branch is not a CI-health issue: a WIP branch failing repeatedly with the same signature on files it added is normal; only the same failure across unrelated branches is systemic.
+- A single branch failing repeatedly the same way is its own bug; only the same failure across unrelated branches is systemic.
 
 ## Report
 
-Group by category, most important first. Per finding: what, where (run/check URL + test/job), frequency across sampled runs, and the diagnostic detail (a flake's failure reason; which step made a job slow). Separate infra noise from real regressions, and already-being-fixed (check `gh pr list`) from open. State how many runs you sampled and over what window. Don't dump raw logs.
+Group by category, most important first. Per finding: what, where (run/check URL + test/job), frequency across sampled runs, and the diagnostic detail (a flake's failure reason; which step made a job slow). Separate infra noise from real regressions, and already-being-fixed (check `gh pr list`) from open. State how many runs you sampled and over what window.
