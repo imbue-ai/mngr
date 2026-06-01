@@ -315,8 +315,14 @@ def test_extras_completion_yes_flag(cli_runner: CliRunner) -> None:
 
 
 @pytest.mark.flaky
+@pytest.mark.allow_warnings(match="Failed to install")
 def test_extras_claude_plugin_yes_flag(cli_runner: CliRunner) -> None:
-    """The 'extras claude-plugin -y' subcommand auto-installs."""
+    """The 'extras claude-plugin -y' subcommand auto-installs.
+
+    When Claude Code is present this attempts a real install; in an
+    environment where a marketplace isn't reachable the install logs a
+    "Failed to install" warning, which is the expected failure path here.
+    """
     result = cli_runner.invoke(extras, ["claude-plugin", "-y"])
     assert result.exit_code == 0
 

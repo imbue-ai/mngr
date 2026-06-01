@@ -225,10 +225,10 @@ def _install_one_claude_plugin(plugin: ClaudeCodePlugin) -> bool:
                 result = cg.run_process_to_completion(command, is_checked_after=False)
                 if result.returncode != 0:
                     detail = result.stderr.strip() or result.stdout.strip()
-                    write_human_line("WARNING: Failed to install {}. {}", plugin.name, detail)
+                    logger.warning("Failed to install {}. {}", plugin.name, detail)
                     return False
     except _SUBPROCESS_ERRORS as e:
-        write_human_line("WARNING: Failed to install {}. {}", plugin.name, str(e))
+        logger.warning("Failed to install {}. {}", plugin.name, str(e))
         return False
 
     write_human_line("Installed {}.", plugin.name)
