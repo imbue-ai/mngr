@@ -6,7 +6,6 @@ from unittest.mock import patch
 
 import pytest
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -48,20 +47,12 @@ def _make_mock_host(is_local: bool = False, host_dir: Path | None = None) -> Mag
 
 def _make_mock_mngr_ctx(
     plugin_config: RecursivePluginConfig | None = None,
-    concurrency_group: ConcurrencyGroup | None = None,
 ) -> MagicMock:
-    """Create a mock MngrContext.
-
-    If concurrency_group is provided, it will be used for the mock's
-    concurrency_group attribute. This is required for tests that exercise
-    code paths using a real ConcurrencyGroup (e.g. provision_mngr_for_agent).
-    """
+    """Create a mock MngrContext."""
     ctx = MagicMock()
     resolved_config = plugin_config if plugin_config is not None else RecursivePluginConfig()
     ctx.get_plugin_config.return_value = resolved_config
     ctx.pm.hook.get_files_for_deploy.return_value = []
-    if concurrency_group is not None:
-        ctx.concurrency_group = concurrency_group
     return ctx
 
 
