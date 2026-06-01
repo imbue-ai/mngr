@@ -10,7 +10,7 @@
     {
       "name": "imbue-mngr-skills",
       "source": "./plugins/imbue-mngr-skills",
-      "description": "Skills for coordinating mngr agents: message a peer agent, wait for one to finish, and resolve agent names."
+      "description": "Skills that teach Claude how to use mngr, e.g. to coordinate with other agents."
     }
   ]
 }

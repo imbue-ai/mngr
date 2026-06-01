@@ -2,9 +2,14 @@
 
 The repo now hosts a Claude Code plugin marketplace at its root
 (`.claude-plugin/marketplace.json`), publishing the `imbue-mngr-skills`
-plugin under `plugins/imbue-mngr-skills/`. The plugin bundles three skills
-for coordinating mngr agents: `message-agent`, `wait-for-agent`, and
-`find-agent`.
+plugin under `plugins/imbue-mngr-skills/`. The plugin bundles skills that
+teach Claude how to use mngr: `message-agent`, `wait-for-agent`, and
+`find-agent` (coordinating with other agents), plus `mngr-help`, which
+points an agent at `mngr help` and `mngr ask` when it needs to run an mngr
+command but isn't sure which.
+
+The skills invoke the installed `mngr` tool directly (not `uv run mngr`),
+so they work in any project, not just the mngr monorepo.
 
 These skills previously lived only in this repo's project-level
 `.claude/skills/` directory; they have been moved into the plugin so any

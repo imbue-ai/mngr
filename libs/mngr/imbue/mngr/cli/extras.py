@@ -179,7 +179,7 @@ _CLAUDE_CODE_PLUGINS: Final[tuple[ClaudeCodePlugin, ...]] = (
     ),
     ClaudeCodePlugin(
         name="imbue-mngr-skills",
-        description="Skills that let mngr agents use mngr (message, wait for, and find other agents)",
+        description="Skills that teach Claude how to use mngr, e.g. to coordinate with other agents",
         marketplace_repo="imbue-ai/mngr",
         install_ref="imbue-mngr-skills@imbue-mngr",
     ),
@@ -670,8 +670,8 @@ CommandHelpMetadata(
     description="""Install mngr's Claude Code plugins. Two are offered:
 
   imbue-code-guardian  Automated code review enforcement.
-  imbue-mngr-skills    Skills for coordinating mngr agents (message a peer,
-                       wait for one to finish, resolve an agent name).
+  imbue-mngr-skills    Skills that teach Claude how to use mngr, e.g. to
+                       coordinate with other agents.
 
 With an interactive terminal, presents a picker to install either plugin or
 both (already-installed plugins are omitted). Requires Claude Code to be
