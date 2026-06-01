@@ -19,9 +19,10 @@ mngr user can install them for any project (via
 claude-plugin`). The repo dogfoods the published plugin by enabling it in
 `.claude/settings.json`, mirroring how `imbue-code-guardian` is consumed.
 
-`message-agent` and `wait-for-agent` now use the verbatim agent name when it
-matches a live agent exactly, only falling back to `find-agent` resolution
-when the exact name does not match.
+`message-agent` and `wait-for-agent` use the name you give them when it already
+looks like an agent name, and fall back to `find-agent` resolution only when it
+doesn't -- for example when you paste a `mngr/<branch>` name or describe the
+agent instead of naming it.
 
 `scripts/claude_update_plugin.sh` now refreshes `imbue-mngr-skills@imbue-mngr`
 on SessionStart alongside `imbue-code-guardian`, so the dogfooded skills stay
