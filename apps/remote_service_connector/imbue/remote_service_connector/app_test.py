@@ -2075,7 +2075,7 @@ def _paid_admin_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {_PAID_ADMIN_KEY_TEST_VALUE}"}
 
 
-def _make_paid_crud_test_client(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, "object"]:
+def _make_paid_crud_test_client(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, FakePoolBackend]:
     """Test client with the paid-admin key configured and a fresh paid-list backend."""
     client, backend = _make_pool_test_client(monkeypatch)
     monkeypatch.setenv("MINDS_PAID_ADMIN_KEY", _PAID_ADMIN_KEY_TEST_VALUE)
