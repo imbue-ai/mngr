@@ -1167,8 +1167,13 @@ class ImbueCloudProvider(BaseProviderInstance):
         self.reset_caches()
 
         host_id = HostId(lease_result.host_id)
-        final_private_key, _final_public_key = self._install_leased_keypair(host_id, tmp_private_key, tmp_public_key)
         with self._release_lease_on_failure(token, str(lease_result.host_db_id), host_id, "fast-path setup"):
+            # Install the keypair inside the guard: the connector has already
+            # marked the host leased, so a failure here (e.g. an OSError while
+            # moving the key files) must still release the lease.
+            final_private_key, _final_public_key = self._install_leased_keypair(
+                host_id, tmp_private_key, tmp_public_key
+            )
             self._persist_lease_meta(host_id, lease_result)
             # Wait for the leased container's sshd to be ready before we hand the
             # host back to mngr's create pipeline (which SSHes in immediately).
@@ -1236,8 +1241,13 @@ class ImbueCloudProvider(BaseProviderInstance):
         self.reset_caches()
 
         host_id = HostId(lease_result.host_id)
-        _final_private_key, final_public_key = self._install_leased_keypair(host_id, tmp_private_key, tmp_public_key)
         with self._release_lease_on_failure(token, str(lease_result.host_db_id), host_id, "slow-path rebuild"):
+            # Install the keypair inside the guard: the connector has already
+            # marked the host leased, so a failure here (e.g. an OSError while
+            # moving the key files) must still release the lease.
+            _final_private_key, final_public_key = self._install_leased_keypair(
+                host_id, tmp_private_key, tmp_public_key
+            )
             self._persist_lease_meta(host_id, lease_result)
             per_host_public_key = final_public_key.read_text().strip()
             self._rebuild_leased_container(
