@@ -22,6 +22,10 @@ agent on it) instead of just the named agent.
   up front, and does not replay host discovered/destroyed events.
 - This supports the minds tiered workspace-restart recovery flow, which
   uses a full host restart as its heavier recovery tier.
+- When `--stop-host` targets multiple hosts, they are now stopped
+  concurrently (via a concurrency-group executor) instead of one at a
+  time, so the command no longer serializes on the slowest host. Output
+  order is unchanged.
 
 Fix `mngr list --format json` crashing on `ProviderErrorInfo` when no
 agents were returned. With `--on-error continue` and a per-provider
