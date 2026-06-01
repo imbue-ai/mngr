@@ -147,13 +147,18 @@ def get_terminal_width() -> int:
     return terminal_size.columns
 
 
-def render_markdown(markdown: str, *, use_ansi: bool, width: int) -> str:
+def render_markdown(markdown: str, *, use_ansi: bool, width: int, link_base: str | None = None) -> str:
     """Render a markdown block for terminal display.
 
     When ``use_ansi`` is True, render via rich (tables, bold, code, links,
     wrapped to ``width``). When False, return the markdown unchanged -- this
     preserves plain output for pipes, non-interactive runs, tests, and the doc
     generator, so only interactive terminals get the rich rendering.
+
+    When ``link_base`` is provided (and ``use_ansi`` is True), relative and
+    anchor links are rewritten to absolute URLs resolved against it, so they are
+    clickable terminal hyperlinks rather than dead relative targets. Plain
+    (non-ANSI) output keeps the original relative links untouched.
     """
     if not use_ansi:
         return markdown
@@ -161,7 +166,7 @@ def render_markdown(markdown: str, *, use_ansi: bool, width: int) -> str:
     # it is only needed here, when rendering help for an interactive terminal.
     from imbue.mngr.cli.markdown_render import markdown_to_ansi
 
-    return markdown_to_ansi(markdown, width)
+    return markdown_to_ansi(markdown, width, link_base=link_base)
 
 
 @pure
