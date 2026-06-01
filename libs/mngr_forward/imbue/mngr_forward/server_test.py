@@ -379,8 +379,8 @@ def test_subdomain_forward_routes_loopback_without_tunnel_to_recovery(
     info. The handler still refuses to dial host loopback (security: PR 1482),
     but rather than returning raw 502 text it emits a ``CONNECT_ERROR``
     backend-failure envelope and serves the styled loader -- the same
-    treatment as an SSH-tunnel setup failure -- so the minds health tracker
-    shows the recovery page instead of flashing a raw error.
+    treatment as an SSH-tunnel setup failure -- so a consumer can drive its
+    own recovery UI instead of the user seeing a raw error.
     """
     auth_store = FileAuthStore(data_directory=tmp_path)
     resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
@@ -423,7 +423,7 @@ def test_subdomain_forward_routes_loopback_without_tunnel_to_recovery(
     assert response.status_code == 503
     assert "Loading workspace" in response.text
     assert captured == [], "request must NOT be forwarded to anything when loopback fallback is refused"
-    # The failure envelope is what drives minds to the recovery page.
+    # The failure envelope is what lets a consumer drive its recovery flow.
     lines = _envelope_lines(envelope_output)
     assert len(lines) == 1
     payload = json.loads(lines[0])["payload"]
@@ -570,7 +570,7 @@ def _envelope_lines(envelope_output: io.StringIO) -> list[str]:
 
 
 def test_subdomain_forward_emits_system_interface_backend_failure_on_5xx(tmp_path: Path) -> None:
-    """A 502/503/504 backend response triggers a ``system_interface_backend_failure`` envelope."""
+    """A 5xx backend response triggers an ``ERROR_RESPONSE`` ``system_interface_backend_failure`` envelope."""
     agent_id = AgentId()
     preauth = "preauth-cookie-1"
     captured: list[httpx.Request] = []
@@ -600,7 +600,7 @@ def test_subdomain_forward_emits_system_interface_backend_failure_on_5xx(tmp_pat
     assert envelope["agent_id"] == str(agent_id)
     payload = envelope["payload"]
     assert payload["type"] == "system_interface_backend_failure"
-    assert payload["reason"] == "FIVEXX_RESPONSE"
+    assert payload["reason"] == "ERROR_RESPONSE"
     assert payload["status_code"] == 503
 
 
@@ -631,13 +631,11 @@ def test_subdomain_forward_does_not_emit_failure_on_2xx(tmp_path: Path) -> None:
     assert _envelope_lines(env_out) == []
 
 
-def test_subdomain_forward_emits_not_found_response_on_404_get(tmp_path: Path) -> None:
-    """A 404 to a proxied GET emits a ``NOT_FOUND_RESPONSE`` failure envelope.
+def test_subdomain_forward_emits_error_response_on_404(tmp_path: Path) -> None:
+    """Any non-2xx response (here a 404) emits a single ``ERROR_RESPONSE`` envelope.
 
-    The real system interface serves its SPA index for every unmatched GET, so
-    it never 404s a page/route load. A 404 reaching the proxy on a GET means the
-    responder is not behaving like the system interface (e.g. a different process
-    has bound the inner port), which should enroll the agent as a probe suspect.
+    The plugin does not interpret which status codes matter; it forwards the
+    response unchanged and surfaces the status code so the consumer can decide.
     """
     agent_id = AgentId()
     preauth = "preauth-cookie-404"
@@ -665,17 +663,16 @@ def test_subdomain_forward_emits_not_found_response_on_404_get(tmp_path: Path) -
     assert len(lines) == 1
     payload = json.loads(lines[0])["payload"]
     assert payload["type"] == "system_interface_backend_failure"
-    assert payload["reason"] == "NOT_FOUND_RESPONSE"
+    assert payload["reason"] == "ERROR_RESPONSE"
     assert payload["status_code"] == 404
 
 
-def test_subdomain_forward_does_not_emit_failure_on_non_get_404(tmp_path: Path) -> None:
-    """A 404 to a non-GET request must not emit a failure envelope.
+def test_subdomain_forward_emits_error_response_regardless_of_method(tmp_path: Path) -> None:
+    """Emission is method-agnostic: a non-GET non-2xx response also emits ``ERROR_RESPONSE``.
 
-    The SPA catch-all guarantee that makes a 404 an identity signal only holds
-    for GET. A POST/PUT/DELETE returning 404 (or 405) is an ordinary
-    method/resource outcome, not evidence of a wrong backend, so it must not
-    enroll the agent.
+    The plugin no longer special-cases the request method (it previously
+    skipped non-GET 404s). Any non-2xx is surfaced with its status code and
+    the consumer decides what to do with it.
     """
     agent_id = AgentId()
     preauth = "preauth-cookie-404-post"
@@ -699,7 +696,48 @@ def test_subdomain_forward_does_not_emit_failure_on_non_get_404(tmp_path: Path) 
         )
 
     assert response.status_code == 404
-    assert _envelope_lines(env_out) == []
+    lines = _envelope_lines(env_out)
+    assert len(lines) == 1
+    payload = json.loads(lines[0])["payload"]
+    assert payload["type"] == "system_interface_backend_failure"
+    assert payload["reason"] == "ERROR_RESPONSE"
+    assert payload["status_code"] == 404
+
+
+def test_subdomain_forward_emits_error_response_on_application_500(tmp_path: Path) -> None:
+    """An application-layer 500 now emits ``ERROR_RESPONSE`` too.
+
+    The plugin used to suppress non-infrastructure 5xx (e.g. a 500 stack
+    trace). It now surfaces every non-2xx and leaves that policy to the
+    consumer (a consumer may, for instance, choose to ignore app 500s).
+    """
+    agent_id = AgentId()
+    preauth = "preauth-cookie-500"
+    captured: list[httpx.Request] = []
+    app, env_out, mock_client = _make_forward_app_with_capture(
+        tmp_path,
+        captured,
+        agent_id,
+        preauth,
+        backend_status=500,
+    )
+
+    with TestClient(app, base_url=f"http://{agent_id}.localhost:18421", follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        response = client.get(
+            "/api/state",
+            headers={
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                "accept": "application/json",
+            },
+        )
+
+    assert response.status_code == 500
+    lines = _envelope_lines(env_out)
+    assert len(lines) == 1
+    payload = json.loads(lines[0])["payload"]
+    assert payload["reason"] == "ERROR_RESPONSE"
+    assert payload["status_code"] == 500
 
 
 def test_subdomain_forward_emits_system_interface_backend_failure_on_sse_startup_disconnect(tmp_path: Path) -> None:
@@ -870,8 +908,7 @@ def test_subdomain_forward_emits_failure_on_ssh_tunnel_setup_error(tmp_path: Pat
     """An SSH-tunnel setup failure (stopped container) must emit ``CONNECT_ERROR`` and serve the loader.
 
     Regression test: previously this path returned a raw 502 with no failure
-    envelope, so the minds health tracker never transitioned the agent toward
-    STUCK and the chrome never navigated to the recovery page -- the user just
+    envelope, so a consumer had no signal to drive recovery -- the user just
     saw raw "SSH tunnel failed" text.
     """
     auth_store = FileAuthStore(data_directory=tmp_path)
@@ -908,7 +945,7 @@ def test_subdomain_forward_emits_failure_on_ssh_tunnel_setup_error(tmp_path: Pat
     # HTML callers get the styled auto-refreshing loader, not raw 502 text.
     assert html_response.status_code == 503
     assert "Loading workspace" in html_response.text
-    # The failure envelope is what drives minds to the recovery page.
+    # The failure envelope is what lets a consumer drive its recovery flow.
     lines = _envelope_lines(envelope_output)
     assert len(lines) == 1
     envelope = json.loads(lines[0])

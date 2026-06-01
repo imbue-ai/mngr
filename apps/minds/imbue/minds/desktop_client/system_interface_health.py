@@ -1,8 +1,11 @@
 """Tracks per-agent system-interface health for restart-recovery UX.
 
 The plugin (``mngr_forward``) emits a ``system_interface_backend_failure``
-envelope each time it observes a backend failure (connect error, mid-SSE EOF,
-5xx response). Minds routes those into ``record_failure``.
+envelope each time it observes a backend failure (connection failure, mid-SSE
+EOF, or any non-2xx response). The plugin does not decide which of those
+matter -- that policy lives here: ``should_enroll_suspect_for_backend_failure``
+selects the ones that suggest the backend is unreachable, and minds routes only
+those into ``record_failure``.
 
 A failure envelope is only a *hint*. A single transient blip -- most commonly a
 mid-SSE EOF when an SSE stream is recycled -- is not evidence that the workspace
@@ -52,6 +55,26 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.primitives import AgentId
 
 _DEFAULT_STUCK_THRESHOLD_SECONDS: Final[float] = 5.0
+
+# HTTP statuses that suggest the backend itself is unreachable / not serving,
+# as opposed to an application-layer error. The plugin reports every non-2xx
+# response, but only these (or a connection-level failure carrying no status)
+# enroll an agent as a probe suspect.
+_BACKEND_UNREACHABLE_STATUSES: Final[frozenset[int]] = frozenset({502, 503, 504})
+
+
+def should_enroll_suspect_for_backend_failure(status_code: int | None) -> bool:
+    """Whether a ``system_interface_backend_failure`` should enroll a probe suspect.
+
+    The plugin emits a failure envelope for every non-2xx response and for
+    connection-level failures (which carry no status code). Minds acts only on
+    the ones that suggest the backend is unreachable: a connection-level failure
+    (``status_code is None``) or an infrastructure 5xx (502/503/504). Application
+    errors (app 500s, ordinary 4xx) mean the backend is alive and responding, so
+    they are left alone; the background probe still catches a genuinely-wrong or
+    wedged backend.
+    """
+    return status_code is None or status_code in _BACKEND_UNREACHABLE_STATUSES
 
 
 class AgentHealth(str, Enum):

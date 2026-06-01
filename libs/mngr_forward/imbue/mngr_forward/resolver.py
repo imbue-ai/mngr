@@ -47,9 +47,8 @@ class ForwardResolver(MutableModel):
             "mutation of the per-agent services map -- ``update_services`` "
             "(set/replace) plus the destruction paths (``remove_known_agent`` and "
             "``update_known_agents`` when they drop an agent that had services). "
-            "Plugin wires this so minds-side consumers can mirror the per-agent "
-            "service map for diagnostics. None in tests / code paths that don't "
-            "care about emission."
+            "The plugin wires this so a downstream consumer can mirror the per-agent "
+            "service map. None in tests / code paths that don't care about emission."
         ),
     )
 

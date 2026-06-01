@@ -70,6 +70,7 @@ from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.system_interface_health import should_enroll_suspect_for_backend_failure
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
@@ -274,8 +275,13 @@ def run(
     # consumer's failure callback (registered before consumer.start() below;
     # otherwise early failures would dispatch against an empty list).
     system_interface_health_tracker = SystemInterfaceHealthTracker()
+    # The plugin reports every non-2xx response; minds decides which ones count.
+    # Only connection-level failures and infrastructure 5xx enroll a suspect --
+    # application errors are left for the background probe to adjudicate.
     consumer.add_on_system_interface_backend_failure_callback(
-        lambda agent_id, _reason, _status: system_interface_health_tracker.record_failure(agent_id)
+        lambda agent_id, _reason, status_code: system_interface_health_tracker.record_failure(agent_id)
+        if should_enroll_suspect_for_backend_failure(status_code)
+        else None
     )
 
     # All callbacks registered -- now safe to start the envelope reader

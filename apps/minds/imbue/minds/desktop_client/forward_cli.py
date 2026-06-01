@@ -151,9 +151,9 @@ class EnvelopeStreamConsumer(MutableModel):
 
         The callback receives ``(agent_id, reason, status_code)``. ``reason``
         is a ``SystemInterfaceBackendFailureReason`` enum value (CONNECT_ERROR /
-        SSE_EOF / FIVEXX_RESPONSE / NOT_FOUND_RESPONSE / UNRESOLVED);
-        ``status_code`` is set when ``reason`` is ``FIVEXX_RESPONSE`` or
-        ``NOT_FOUND_RESPONSE``.
+        SSE_EOF / ERROR_RESPONSE / UNRESOLVED); ``status_code`` is set when
+        ``reason`` is ``ERROR_RESPONSE`` (the backend's non-2xx status) and
+        ``None`` otherwise.
         Used by minds to feed its ``SystemInterfaceHealthTracker``.
         """
         with self._lock:

@@ -71,13 +71,6 @@ _EXCLUDED_RESPONSE_HEADERS: Final[frozenset[str]] = frozenset(
     {"transfer-encoding", "content-encoding", "content-length"}
 )
 
-# HTTP status codes that the plugin surfaces as ``system_interface_backend_failure``
-# events with ``reason=FIVEXX_RESPONSE``. Limiting to the "infrastructure"
-# subset (Bad Gateway / Service Unavailable / Gateway Timeout) avoids
-# surfacing a wedged Python backend's stack-trace 500s as health-recovery
-# events, which would be too aggressive.
-_INFRASTRUCTURE_5XX_STATUSES: Final[frozenset[int]] = frozenset({502, 503, 504})
-
 # WebSocket close-reasons are capped at 123 bytes by RFC 6455. Keep messages
 # short; full diagnostic detail goes to ``logger.warning`` instead.
 _WS_CLOSE_REASON_LOOPBACK_REFUSED: Final[str] = "Loopback fallback refused"
@@ -403,34 +396,17 @@ async def _forward_workspace_http(
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
         return Response(status_code=504, content="Backend timed out")
 
-    if backend_response.status_code in _INFRASTRUCTURE_5XX_STATUSES:
+    if not 200 <= backend_response.status_code < 300:
+        # Any non-2xx response is surfaced as a single ``ERROR_RESPONSE`` signal
+        # carrying the status code. The plugin forwards the response unchanged
+        # and does not interpret which codes matter -- the consumer decides
+        # whether (and how) to react to a given status.
         _emit_backend_failure(
             envelope_writer,
             agent_id,
-            SystemInterfaceBackendFailureReason.FIVEXX_RESPONSE,
+            SystemInterfaceBackendFailureReason.ERROR_RESPONSE,
             backend_response.status_code,
         )
-    elif backend_response.status_code == 404 and request.method == "GET":
-        # The real system interface serves its SPA index for every unmatched
-        # GET (a ``/{path:path}`` catch-all), so it never 404s a page/route
-        # load. A 404 on a proxied GET therefore means the responder is not
-        # behaving like the system interface (e.g. another process has bound
-        # the inner port). Scoped to GET because non-GET 404/405s are ordinary
-        # method/resource outcomes, not an identity signal. Only a hint: it
-        # enrolls the agent as a probe suspect, and the minds background probe
-        # loop -- which probes a real SI route -- decides STUCK.
-        _emit_backend_failure(
-            envelope_writer,
-            agent_id,
-            SystemInterfaceBackendFailureReason.NOT_FOUND_RESPONSE,
-            backend_response.status_code,
-        )
-    else:
-        # Every other response (normal 2xx/3xx, an application-layer 4xx other
-        # than a GET 404, a non-infrastructure 5xx like a 500 stack trace) is a
-        # legitimate backend reply, not a health signal: forward it as-is and
-        # emit no failure envelope.
-        pass
 
     response = Response(content=backend_response.content, status_code=backend_response.status_code)
     for header_key, header_value in backend_response.headers.multi_items():
@@ -459,8 +435,9 @@ def _emit_backend_failure(
 
 
 # The proxy loader: the canonical "Loading workspace" page with a 1s meta
-# refresh so it re-attempts the workspace until the backend answers. minds'
-# recovery page reuses ``render_loading_page`` so the two are identical.
+# refresh so it re-attempts the workspace until the backend answers. A
+# downstream consumer can reuse ``render_loading_page`` so its own loading
+# page renders identically.
 _SERVICE_UNAVAILABLE_HTML = render_loading_page(head_extra='    <meta http-equiv="refresh" content="1">\n')
 
 
@@ -569,9 +546,9 @@ async def _handle_workspace_forward_http(
     except (SSHTunnelError, paramiko.SSHException, OSError) as e:
         # A stopped container fails here (its SSH endpoint is gone) rather
         # than at the resolver -- the resolver still holds a stale entry.
-        # Emit a backend-failure envelope so the minds health tracker ticks
-        # the agent toward STUCK and shows the recovery page, and serve the
-        # same styled loader as the UNRESOLVED path instead of raw error text.
+        # Emit a backend-failure envelope so a consumer can react (e.g. drive
+        # its own recovery UI), and serve the same styled loader as the
+        # UNRESOLVED path instead of raw error text.
         logger.warning("SSH tunnel setup failed for {}: {}", agent_id, e)
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
         return _service_unavailable_response(request)
@@ -580,10 +557,10 @@ async def _handle_workspace_forward_http(
         # A loopback registered URL with no SSH tunnel is what a stopped
         # container looks like once discovery drops its SSH info: there is
         # nothing safe to dial. Treat it exactly like the SSH-tunnel setup
-        # failure above -- emit a backend-failure envelope so the minds health
-        # tracker shows the recovery page, and serve the styled loader instead
-        # of raw 502 error text. (When allow_host_loopback is set the agent
-        # really runs on the host, so that case never reaches here.)
+        # failure above -- emit a backend-failure envelope so a consumer can
+        # react, and serve the styled loader instead of raw 502 error text.
+        # (When allow_host_loopback is set the agent really runs on the host,
+        # so that case never reaches here.)
         logger.warning(
             "Refusing to dial host loopback for agent {}: registered URL {} has no SSH tunnel "
             "(pass --allow-host-loopback if the agent really runs on the host).",
