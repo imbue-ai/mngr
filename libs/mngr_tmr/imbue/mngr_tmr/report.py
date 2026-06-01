@@ -88,6 +88,9 @@ class ReportSection(UpperCaseStrEnum):
 class TestRunInfo(FrozenModel):
     """Metadata for a single test run within an agent's work."""
 
+    # Tell pytest not to collect this as a test class (its name starts with "Test").
+    __test__ = False
+
     run_name: str = Field(description="The --mngr-e2e-run-name value used for this run")
     description_markdown: str = Field(description="Brief description of what this run was for")
 
