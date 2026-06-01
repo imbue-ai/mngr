@@ -388,24 +388,24 @@ jobs:
           fi
           run_dir="$work/runs/${{ github.run_id }}"
           mkdir -p "$run_dir"
-          # Publish Playwright per-page shots (.win.png) as the headline
-          # `<name>.png` -- they're the actual app UI and are display-state
-          # independent. The full-desktop `screencapture -x` outputs come
-          # along as `<name>.desktop.png` for forensic value when the
-          # runner display is in a visible Aqua session.
-          for prefix in 00 01 02 03 04 05 06 07 07a 08 09 10 11 12 99; do
+          # Publish full-desktop screencapture shots (the bare `.png` from
+          # screencapture -x) as the headline `<name>.png`. The per-page
+          # Playwright `.win.png` outputs come along as `<name>.win.png`
+          # for forensic value but are no longer the embedded summary
+          # default -- the user prefers seeing the whole desktop.
+          for prefix in 00 01 02 03 04 04b 05 06 07 07a 07b 07c 07d 08 09 10 11 12 99; do
+            for desk in "$shots_dir"/${prefix}-*.png; do
+              [ -f "$desk" ] || continue
+              case "$desk" in
+                *.win.png) continue ;;
+              esac
+              base=$(basename "$desk" .png)
+              cp "$desk" "$run_dir/${base}.png" 2>/dev/null || true
+            done
             for win in "$shots_dir"/${prefix}-*.win.png; do
               [ -f "$win" ] || continue
               base=$(basename "$win" .win.png)
-              cp "$win" "$run_dir/${base}.png" 2>/dev/null || true
-            done
-            for png in "$shots_dir"/${prefix}-*.png; do
-              [ -f "$png" ] || continue
-              case "$png" in
-                *.win.png) continue ;;
-              esac
-              base=$(basename "$png" .png)
-              cp "$png" "$run_dir/${base}.desktop.png" 2>/dev/null || true
+              cp "$win" "$run_dir/${base}.win.png" 2>/dev/null || true
             done
           done
           cd "$work"
@@ -427,28 +427,49 @@ jobs:
             exit 0
           fi
           base="https://raw.githubusercontent.com/${{ github.repository }}/ci-screenshots/runs/${{ github.run_id }}"
+
+          # ---- Timing metrics block --------------------------------------
+          # Read launch-to-msg-timings.json (written by the e2e script) and
+          # surface the per-phase wall-clocks at the very top of the
+          # summary so creation time is visible at a glance.
+          timings_json="$shots_dir/launch-to-msg-timings.json"
+          if [ -f "$timings_json" ]; then
+            {
+              echo "## Agent creation timings"
+              echo ""
+              echo '```json'
+              cat "$timings_json"
+              echo '```'
+              # Pretty-print a one-liner total too.
+              python3 -c "
+import json,pathlib
+d=json.loads(pathlib.Path('$timings_json').read_text())
+parts=d.get('phase_durations_s',{})
+total=d.get('total_create_s',0)
+mm=int(total//60); ss=int(total%60)
+print(f\"\\n**Total agent creation: {total:.1f}s ({mm}:{ss:02d})** \" +
+      ' | '.join([f\"{k}={v:.0f}s\" for k,v in parts.items()]))" || true
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # ---- Flow screenshots block ------------------------------------
           {
-            echo "## Flow screenshots (Playwright phase)"
+            echo "## Flow screenshots (full-desktop)"
             echo ""
-            echo "Numbered to sort in flow order. Per-window duplicates (.winN) and dump-* shots are in the downloadable artifact above."
+            echo "Full-screen captures via macOS \`screencapture -x\` at each milestone. Per-window Playwright dupes (\`.win.png\`) are in the downloadable artifact above."
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
-          # Walk the published files (run_dir on the ci-screenshots
-          # branch is whatever we published above -- desktop-preferred
-          # headlines + bash-phase 00-04 if present). Use the cloned
-          # working tree's runs/<id> as the source of truth for what
-          # we'll surface.
           run_dir=/tmp/ci-screenshots-work/runs/${{ github.run_id }}
           if [ ! -d "$run_dir" ]; then
             echo "(no published run_dir, nothing to embed)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          # Embed only the headline shots (skip `.desktop.png` forensic
-          # dupes -- those are the same wallpaper-only screencaptures
-          # when the runner has no foreground Aqua session).
+          # Embed headline shots (.png) -- skip `.win.png` per-window
+          # forensic dupes; user prefers the full-desktop capture.
           for png in $(ls "$run_dir"/*.png 2>/dev/null | sort); do
             case "$png" in
-              *.desktop.png) continue ;;
+              *.win.png) continue ;;
             esac
             label=$(basename "$png" .png)
             {

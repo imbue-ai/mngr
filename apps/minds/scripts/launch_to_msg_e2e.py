@@ -632,6 +632,13 @@ async def amain() -> int:
                     break
                 if state == "FAILED":
                     raise RuntimeError(f"creation FAILED: {payload.get('error', stat['body'])}")
+                # Mid-creation snapshot so the "creating" UI is captured
+                # in CI -- fires once when CREATING_WORKSPACE has been
+                # running for ~60s so the progress dialog is on-screen.
+                if state == "CREATING_WORKSPACE" and "04b" not in [p.name for p in SCREENSHOT_DIR.glob("04b-*")]:
+                    elapsed_in_phase = time.monotonic() - phase_started_at
+                    if elapsed_in_phase >= 60:
+                        await snap_page(win, "04b-creating-workspace-mid")
                 await asyncio.sleep(5)
             # Emit a per-phase summary line + persist to artifact JSON.
             total_create_s = sum(phase_durations.values())
@@ -680,10 +687,17 @@ async def amain() -> int:
             await inp.fill(FIRST_PROMPT)
             await inp.press("Enter")
             await snap_page(win, "05-first-message-sent")
+            # Wait for the AGENT's reply, not the user prompt echo. The
+            # prompt itself contains "pong" so a naive `includes('pong')`
+            # check returns true the moment we send -- before any agent
+            # reply paints. Count occurrences instead: 1 (prompt only)
+            # vs 2+ (prompt + reply).
             await win.wait_for_function(
-                f"document.body.innerText.toLowerCase().includes('{FIRST_EXPECT}')",
+                f"(document.body.innerText.toLowerCase().match(/{FIRST_EXPECT}/g) || []).length >= 2",
                 timeout=REPLY_TIMEOUT * 1000,
             )
+            # Brief settle for the reply bubble to paint, then snap.
+            await asyncio.sleep(1)
             await snap_page(win, "06-first-message-reply")
 
         if not SKIP_SLACK_FLOW:
@@ -713,6 +727,8 @@ async def amain() -> int:
                 deadline = time.time() + DRIVE_SLACK_TIMEOUT
                 clicked_at = {}
                 approved_request_urls: set[str] = set()
+                last_kick_at = 0.0  # monotonic timestamp of last kick
+                first_approve_at = 0.0
                 while time.time() < deadline:
                     chat_now = await find_chat_window(ctx)
                     if chat_now is not None:
@@ -727,6 +743,8 @@ async def amain() -> int:
                     if approval_stage < 3:
                         await _advance_approval(ctx, win, approval_stage, clicked_at)
                         approval_stage = clicked_at.get("stage", approval_stage)
+                        if approval_stage >= 3 and first_approve_at == 0.0:
+                            first_approve_at = time.monotonic()
 
                     # After the first approval, the latchkey gateway often
                     # re-gates the next slack API call separately -- the
@@ -742,6 +760,31 @@ async def amain() -> int:
                                     logger.info("auto-approving follow-up request at {}", p.url)
                                     await btn.click()
                                     approved_request_urls.add(p.url)
+
+                        # Periodic kick: Claude often sits parked after a
+                        # permission round-trip. Every KICK_INTERVAL secs
+                        # send a short "approved, retry" prompt into the
+                        # chat to nudge it. The first kick fires KICK_DELAY
+                        # secs after the first Approve so it lands AFTER
+                        # the gateway's permission grant is visible.
+                        KICK_DELAY = 8
+                        KICK_INTERVAL = 30
+                        now = time.monotonic()
+                        if now - first_approve_at >= KICK_DELAY and now - last_kick_at >= KICK_INTERVAL:
+                            chat = await find_chat_window(ctx)
+                            if chat is not None:
+                                with contextlib.suppress(Exception):
+                                    inp = await chat.wait_for_selector(
+                                        'textarea, [contenteditable="true"]', timeout=5_000
+                                    )
+                                    await inp.fill(
+                                        "Slack permission approved. Please retry the read-only Slack "
+                                        f'read now and respond with the prefix "TOK {NONCE}:" '
+                                        "followed by the message text."
+                                    )
+                                    await inp.press("Enter")
+                                    logger.info("sent post-approval kick #{}", 1 + int(last_kick_at > 0))
+                                    last_kick_at = now
 
                     await asyncio.sleep(2)
                 else:
@@ -853,18 +896,13 @@ async def _advance_approval(ctx: BrowserContext, win: Page, stage: int, state: d
                     await snap_page(w, "07c-stage2-pre-click-approve")
                     await btn.click()
                     state["stage"] = 3
+                    # Snap a beat later so the post-approval state of the
+                    # request page (typically "Approved") is captured.
                     await asyncio.sleep(2)
-                    # Kick the agent to retry.
-                    chat = await find_chat_window(ctx)
-                    if chat is not None:
-                        kick = await chat.wait_for_selector('textarea, [contenteditable="true"]', timeout=15_000)
-                        await kick.fill(
-                            "Permission approved. Please retry the read-only "
-                            f'Slack read now and respond with the prefix "TOK {NONCE}:" '
-                            "followed by the message text."
-                        )
-                        await kick.press("Enter")
-                        logger.info("sent post-approval kick")
+                    with contextlib.suppress(Exception):
+                        await snap_page(w, "07d-stage2-post-approve")
+                    # Kicks are sent from the main poll loop after a
+                    # KICK_DELAY settle period; see slack-flow loop.
                     return
             except Exception:
                 pass
