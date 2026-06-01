@@ -1,7 +1,7 @@
 ---
 name: mngr-help
 description: Use whenever the user says anything about mngr. Run `mngr help` right away to get context on what mngr does, and use `mngr ask` to turn a goal into a command.
-allowed-tools: Bash(mngr help*), Bash(mngr ask *)
+allowed-tools: Bash(mngr help*), Bash(uv run mngr help*), Bash(mngr ask *), Bash(uv run mngr ask *)
 ---
 
 When the user says anything about mngr -- asking you to run a command, manage agents or hosts, coordinate with other agents, or just mentioning it in passing -- run `mngr help` right away so you have context on what mngr is and which commands exist.

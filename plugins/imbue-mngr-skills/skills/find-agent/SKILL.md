@@ -2,7 +2,7 @@
 name: find-agent
 argument-hint: <agent_name_or_description>
 description: Resolve an agent name or description to an exact mngr agent name. Used by other skills that target agents.
-allowed-tools: Bash(mngr list *)
+allowed-tools: Bash(mngr list *), Bash(uv run mngr list *)
 ---
 
 The user's input is an agent name or description. Resolve it to an exact agent name.
