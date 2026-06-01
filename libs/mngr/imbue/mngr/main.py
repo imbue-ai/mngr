@@ -8,6 +8,7 @@ import pluggy
 import setproctitle
 from click_option_group import OptionGroup
 
+import imbue.mngr.cli.builtin_help_topics as builtin_help_topics_module
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.cli.archive import archive
@@ -31,6 +32,8 @@ from imbue.mngr.cli.extras import extras
 from imbue.mngr.cli.gc import gc
 from imbue.mngr.cli.git import git_command
 from imbue.mngr.cli.help import help_command
+from imbue.mngr.cli.help import load_help_topics_from_plugins
+from imbue.mngr.cli.help import register_help_command_metadata
 from imbue.mngr.cli.help_formatter import get_help_metadata
 from imbue.mngr.cli.issue_reporting import handle_not_implemented_error
 from imbue.mngr.cli.issue_reporting import handle_unexpected_error
@@ -292,8 +295,10 @@ def create_plugin_manager() -> pluggy.PluginManager:
     load_all_registries(pm)
     load_agents_from_plugins(pm)
 
-    # Wire up the agent type resolver so hosts can resolve agent types
-    # without directly importing from the agents layer
+    # Register mngr's built-in topics as a built-in plugin (like the backends/
+    # agents above). The register_help_topics hook is fired once at module
+    # import, not here (see load_help_topics_from_plugins).
+    pm.register(builtin_help_topics_module, name="builtin_help_topics")
 
     return pm
 
@@ -387,6 +392,13 @@ except ConfigParseError as e:
 
 for cmd in BUILTIN_COMMANDS + PLUGIN_COMMANDS:
     apply_plugin_cli_options(cmd)
+
+# Populate the (process-global) topic registry now that the plugin manager is
+# fully built. At module scope -- not in create_plugin_manager, which can be
+# rebuilt (e.g. test resets) -- so it runs once per process. Then build the help
+# command's "Available Topics" metadata from the loaded registry.
+load_help_topics_from_plugins(get_or_create_plugin_manager())
+register_help_command_metadata()
 
 
 def _update_create_help_with_provider_args() -> None:
