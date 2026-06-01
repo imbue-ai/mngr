@@ -25,7 +25,9 @@ agent on it) instead of just the named agent.
 - When `--stop-host` targets multiple hosts, they are now stopped
   concurrently (via a concurrency-group executor) instead of one at a
   time, so the command no longer serializes on the slowest host. Output
-  order is unchanged.
+  order is unchanged. If one host fails to stop, the others are still
+  stopped before the error is raised (the previous sequential version
+  aborted on the first failure, leaving later hosts running).
 
 Fix `mngr list --format json` crashing on `ProviderErrorInfo` when no
 agents were returned. With `--on-error continue` and a per-provider
