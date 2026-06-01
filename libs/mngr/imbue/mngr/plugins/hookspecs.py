@@ -63,7 +63,7 @@ def register_agent_type() -> tuple[str, type[AgentInterface] | None, type | None
 
 
 @hookspec
-def on_before_host_create(name: HostName, provider_name: ProviderInstanceName) -> None:
+def on_before_host_create(name: HostName, provider_name: ProviderInstanceName, mngr_ctx: MngrContext) -> None:
     """[experimental] Called before a new host is created.
 
     This hook fires before provider.create_host() is called during `mngr create`
@@ -488,7 +488,7 @@ class OnBeforeCreateArgs(FrozenModel):
 
 
 @hookspec
-def on_before_create(args: OnBeforeCreateArgs) -> OnBeforeCreateArgs | None:
+def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
     """Called at the start of create(), before any work is done.
 
     This hook allows plugins to inspect and modify the arguments that will be
@@ -502,7 +502,7 @@ def on_before_create(args: OnBeforeCreateArgs) -> OnBeforeCreateArgs | None:
     Example plugin implementation::
 
         @hookimpl
-        def on_before_create(args: OnBeforeCreateArgs) -> OnBeforeCreateArgs | None:
+        def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
             if args.agent_options.agent_type == "claude":
                 # Override agent name for claude agents
                 new_options = args.agent_options.model_copy_update(
