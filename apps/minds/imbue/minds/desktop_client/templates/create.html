@@ -10,7 +10,7 @@
       <div class="flex items-center justify-between gap-4 mb-5">
         <h1 class="text-sm font-medium text-zinc-500">Create workspace</h1>
         <select id="account_id" name="account_id"
-                class="max-w-[200px] text-xs rounded-md border border-zinc-200 bg-white text-zinc-600 px-2 py-1.5 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
+                class="max-w-[220px] text-xs text-zinc-400 bg-transparent border-0 rounded px-1 py-1 outline-none cursor-pointer transition-colors hover:text-zinc-600 focus:outline-none focus:ring-0">
           {% for acct in accounts %}
             <option value="{{ acct.user_id }}"{% if acct.user_id == default_account_id %} selected{% endif %}>{{ acct.email }}</option>
           {% endfor %}
@@ -28,7 +28,7 @@
       </div>
 
       <div class="flex items-center justify-between gap-3 mt-2.5 px-1 text-xs">
-        <span class="text-zinc-400">Compute, tokens, and backups on Imbue Cloud</span>
+        <span id="config-summary" class="text-zinc-400 leading-snug"></span>
         <button type="button" id="configure-toggle"
                 class="text-blue-600 hover:text-blue-700 cursor-pointer transition-colors whitespace-nowrap">
           Configure&hellip;
@@ -38,27 +38,31 @@
       <div id="configure-panel" class="hidden mt-5 flex flex-col gap-4">
 
         <div>
-          <label for="launch_mode" class="text-sm text-zinc-900 font-medium block mb-1">Compute provider</label>
-          <select id="launch_mode" name="launch_mode"
-                  class="w-full px-3 py-2.5 text-sm rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
-            {% for mode in launch_modes %}
-              <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}
-                      {% if mode.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{{ mode.value | lower }}</option>
-            {% endfor %}
-          </select>
-          <p id="launch-mode-account-error" class="hidden mt-1 text-xs text-amber-600">imbue_cloud requires a selected account.</p>
+          <div class="flex items-center justify-between gap-3">
+            <label for="launch_mode" class="text-sm text-zinc-900 font-medium">Compute provider</label>
+            <select id="launch_mode" name="launch_mode"
+                    class="w-48 px-3 py-2 text-sm rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
+              {% for mode in launch_modes %}
+                <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}
+                        {% if mode.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{{ mode.value | lower }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <p id="launch-mode-account-error" class="hidden mt-1 text-xs text-amber-600 text-right">imbue_cloud requires a selected account.</p>
         </div>
 
         <div>
-          <label for="ai_provider" class="text-sm text-zinc-900 font-medium block mb-1">AI provider</label>
-          <select id="ai_provider" name="ai_provider"
-                  class="w-full px-3 py-2.5 text-sm rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
-            {% for provider in ai_providers %}
-              <option value="{{ provider.value }}"{% if provider.value == selected_ai_provider %} selected{% endif %}
-                      {% if provider.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{{ provider.value | lower }}</option>
-            {% endfor %}
-          </select>
-          <p id="ai-provider-account-error" class="hidden mt-1 text-xs text-amber-600">imbue_cloud requires a selected account.</p>
+          <div class="flex items-center justify-between gap-3">
+            <label for="ai_provider" class="text-sm text-zinc-900 font-medium">AI provider</label>
+            <select id="ai_provider" name="ai_provider"
+                    class="w-48 px-3 py-2 text-sm rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
+              {% for provider in ai_providers %}
+                <option value="{{ provider.value }}"{% if provider.value == selected_ai_provider %} selected{% endif %}
+                        {% if provider.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{{ provider.value | lower }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <p id="ai-provider-account-error" class="hidden mt-1 text-xs text-amber-600 text-right">imbue_cloud requires a selected account.</p>
           <div id="api-key-row" class="mt-2 hidden">
             <label for="anthropic_api_key" class="text-sm text-zinc-900 font-medium block mb-1">Anthropic API key</label>
             {{ ui.text_input('anthropic_api_key', value=anthropic_api_key, placeholder='sk-ant-...', id='anthropic_api_key', type='password') }}
@@ -66,15 +70,17 @@
         </div>
 
         <div>
-          <label for="backup_provider" class="text-sm text-zinc-900 font-medium block mb-1">Backup provider</label>
-          <select id="backup_provider" name="backup_provider"
-                  class="w-full px-3 py-2.5 text-sm rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
-            {% for provider in backup_providers %}
-              <option value="{{ provider.value }}"{% if provider.value == selected_backup_provider %} selected{% endif %}
-                      {% if provider.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{% if provider.value == 'API_KEY' %}manual{% else %}{{ provider.value | lower }}{% endif %}</option>
-            {% endfor %}
-          </select>
-          <p id="backup-provider-account-error" class="hidden mt-1 text-xs text-amber-600">imbue_cloud requires a selected account.</p>
+          <div class="flex items-center justify-between gap-3">
+            <label for="backup_provider" class="text-sm text-zinc-900 font-medium">Backup provider</label>
+            <select id="backup_provider" name="backup_provider"
+                    class="w-48 px-3 py-2 text-sm rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
+              {% for provider in backup_providers %}
+                <option value="{{ provider.value }}"{% if provider.value == selected_backup_provider %} selected{% endif %}
+                        {% if provider.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{% if provider.value == 'API_KEY' %}manual{% else %}{{ provider.value | lower }}{% endif %}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <p id="backup-provider-account-error" class="hidden mt-1 text-xs text-amber-600 text-right">imbue_cloud requires a selected account.</p>
 
           <div id="backup-api-key-row" class="mt-2 hidden">
             <label for="backup_api_key_env" class="text-sm text-zinc-900 font-medium block mb-1">restic environment</label>
@@ -89,13 +95,15 @@
           </div>
 
           <div id="backup-encryption-row" class="mt-2 hidden">
-            <label for="backup_encryption_method" class="text-sm text-zinc-900 font-medium block mb-1">Backup encryption method</label>
-            <select id="backup_encryption_method" name="backup_encryption_method"
-                    class="w-full px-3 py-2.5 text-sm rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
-              {% for method in backup_encryption_methods %}
-                <option value="{{ method.value }}"{% if method.value == selected_backup_encryption_method %} selected{% endif %}>{{ method.value | lower }}</option>
-              {% endfor %}
-            </select>
+            <div class="flex items-center justify-between gap-3">
+              <label for="backup_encryption_method" class="text-sm text-zinc-900 font-medium">Backup encryption method</label>
+              <select id="backup_encryption_method" name="backup_encryption_method"
+                      class="w-48 px-3 py-2 text-sm rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
+                {% for method in backup_encryption_methods %}
+                  <option value="{{ method.value }}"{% if method.value == selected_backup_encryption_method %} selected{% endif %}>{{ method.value | lower }}</option>
+                {% endfor %}
+              </select>
+            </div>
           </div>
 
           <div id="backup-master-password-row" class="mt-2 hidden">
@@ -185,6 +193,43 @@
       var backupMasterPasswordInput = document.getElementById('backup_master_password');
       var backupProviderError = document.getElementById('backup-provider-account-error');
       var submitBtn = document.getElementById('create-submit');
+      var summaryEl = document.getElementById('config-summary');
+
+      // Human-readable labels for the generated config summary line.
+      var COMPUTE_LABELS = {IMBUE_CLOUD: 'Imbue Cloud', DOCKER: 'Docker', LIMA: 'Lima', CLOUD: 'a cloud VM'};
+      var AI_LABELS = {IMBUE_CLOUD: 'Imbue Cloud', API_KEY: 'your Anthropic API key', SUBSCRIPTION: 'your Claude subscription'};
+      var BACKUP_LABELS = {IMBUE_CLOUD: 'Imbue Cloud', API_KEY: 'your own storage', CONFIGURE_LATER: 'off for now'};
+
+      function updateSummary() {
+        var compute = COMPUTE_LABELS[launchSelect.value] || launchSelect.value;
+        var ai = AI_LABELS[aiProviderSelect.value] || aiProviderSelect.value;
+        var backup = BACKUP_LABELS[backupSelect.value] || backupSelect.value;
+        summaryEl.textContent = 'Compute: ' + compute + ' · Tokens: ' + ai + ' · Backups: ' + backup;
+      }
+
+      // When the account changes, switch the provider defaults: an account
+      // enables the Imbue Cloud defaults; "no account" falls back to the
+      // local/self-served defaults (lima / subscription / configure_later).
+      function onAccountChange() {
+        var hasAccount = accountSelect.value !== '';
+        // Enable/disable the imbue_cloud options first -- a disabled option
+        // can't be selected programmatically in some browsers.
+        var imbueOptionSelects = [launchSelect, aiProviderSelect, backupSelect];
+        for (var i = 0; i < imbueOptionSelects.length; i++) {
+          var opt = imbueOptionSelects[i].querySelector('option[data-requires-account]');
+          if (opt) opt.disabled = !hasAccount;
+        }
+        if (hasAccount) {
+          launchSelect.value = 'IMBUE_CLOUD';
+          aiProviderSelect.value = 'IMBUE_CLOUD';
+          backupSelect.value = 'IMBUE_CLOUD';
+        } else {
+          launchSelect.value = 'LIMA';
+          aiProviderSelect.value = 'SUBSCRIPTION';
+          backupSelect.value = 'CONFIGURE_LATER';
+        }
+        update();
+      }
 
       function update() {
         var hasAccount = accountSelect.value !== '';
@@ -217,9 +262,11 @@
         aiProviderError.classList.toggle('hidden', !aiInvalid);
         backupProviderError.classList.toggle('hidden', !backupInvalid);
         submitBtn.disabled = launchInvalid || aiInvalid || backupInvalid;
+
+        updateSummary();
       }
 
-      accountSelect.addEventListener('change', update);
+      accountSelect.addEventListener('change', onAccountChange);
       launchSelect.addEventListener('change', update);
       aiProviderSelect.addEventListener('change', update);
       backupSelect.addEventListener('change', update);

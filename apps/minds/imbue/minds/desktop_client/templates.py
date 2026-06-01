@@ -177,7 +177,7 @@ def render_create_form(
 
     The compute provider (``launch_mode``), AI provider, and backup provider
     are independent. The compute / AI providers default to ``IMBUE_CLOUD``
-    when an account is selected; without an account they drop to ``DOCKER`` /
+    when an account is selected; without an account they drop to ``LIMA`` /
     ``SUBSCRIPTION``. The backup provider defaults to ``IMBUE_CLOUD`` with an
     account and ``CONFIGURE_LATER`` without one. The backup encryption method
     defaults to ``NO_PASSWORD``.
@@ -197,7 +197,7 @@ def render_create_form(
     effective_branch = branch if branch else _dev_only_workspace_default("MINDS_WORKSPACE_BRANCH", _FALLBACK_BRANCH)
     has_account = bool(default_account_id and accounts)
     effective_launch_mode = (
-        launch_mode if launch_mode is not None else (LaunchMode.IMBUE_CLOUD if has_account else LaunchMode.DOCKER)
+        launch_mode if launch_mode is not None else (LaunchMode.IMBUE_CLOUD if has_account else LaunchMode.LIMA)
     )
     effective_ai_provider = (
         ai_provider
