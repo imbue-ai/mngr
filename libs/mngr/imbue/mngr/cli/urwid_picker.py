@@ -29,7 +29,8 @@ class _PickerState(MutableModel):
     """Mutable state shared with the input filter.
 
     Holds only the confirm flag the input filter needs to flip; the
-    listbox itself is owned by ``run_single_select_picker`` as a local.
+    listbox (and its widgets) is owned by the calling picker function as
+    a local.
     """
 
     is_confirmed: bool = False
@@ -50,6 +51,60 @@ class _PickerInputFilter(MutableModel):
                 raise ExitMainLoop()
             passthrough.append(key)
         return passthrough
+
+
+def _run_picker_loop(
+    listbox: ListBox,
+    *,
+    title: str,
+    header_text: str,
+    footer_text: str,
+) -> _PickerState:
+    """Run the shared urwid picker event loop around *listbox*.
+
+    Wraps the chrome (header, footer, palette), the Enter/q/Ctrl+C input
+    filter, and the screen-preserving ``MainLoop`` shared by every picker
+    in this module. Returns the ``_PickerState`` so callers can check
+    ``is_confirmed`` and then read their own selection off the listbox.
+    """
+    state = _PickerState()
+
+    header = Pile(
+        [
+            AttrMap(Text(title, align="center"), "header"),
+            Divider(),
+            Text(header_text),
+            Divider(),
+        ]
+    )
+
+    footer = Pile(
+        [
+            Divider(),
+            AttrMap(Text(footer_text), "status"),
+        ]
+    )
+
+    frame = Frame(body=listbox, header=header, footer=footer)
+
+    palette = [
+        ("header", "white", "dark blue"),
+        ("status", "white", "dark blue"),
+        ("reversed", "standout", ""),
+    ]
+
+    input_filter = _PickerInputFilter(state=state)
+
+    with create_urwid_screen_preserving_terminal() as screen:
+        loop = MainLoop(
+            frame,
+            palette=palette,
+            input_filter=input_filter,
+            screen=screen,
+        )
+        loop.run()
+
+    return state
 
 
 def run_single_select_picker(
@@ -86,45 +141,12 @@ def run_single_select_picker(
     if 0 <= initial_focus < len(options):
         listbox.set_focus(initial_focus)
 
-    state = _PickerState()
-
-    header = Pile(
-        [
-            AttrMap(Text(title, align="center"), "header"),
-            Divider(),
-            Text(header_text),
-            Divider(),
-        ]
+    state = _run_picker_loop(
+        listbox,
+        title=title,
+        header_text=header_text,
+        footer_text="  Up/Down: Navigate | Enter: Confirm | q/Ctrl+C: Cancel",
     )
-
-    footer = Pile(
-        [
-            Divider(),
-            AttrMap(
-                Text("  Up/Down: Navigate | Enter: Confirm | q/Ctrl+C: Cancel"),
-                "status",
-            ),
-        ]
-    )
-
-    frame = Frame(body=listbox, header=header, footer=footer)
-
-    palette = [
-        ("header", "white", "dark blue"),
-        ("status", "white", "dark blue"),
-        ("reversed", "standout", ""),
-    ]
-
-    input_filter = _PickerInputFilter(state=state)
-
-    with create_urwid_screen_preserving_terminal() as screen:
-        loop = MainLoop(
-            frame,
-            palette=palette,
-            input_filter=input_filter,
-            screen=screen,
-        )
-        loop.run()
 
     if not state.is_confirmed:
         return None
@@ -164,45 +186,12 @@ def run_multi_select_picker(
     list_walker: SimpleFocusListWalker[AttrMap] = SimpleFocusListWalker(list_items)
     listbox = ListBox(list_walker)
 
-    state = _PickerState()
-
-    header = Pile(
-        [
-            AttrMap(Text(title, align="center"), "header"),
-            Divider(),
-            Text(header_text),
-            Divider(),
-        ]
+    state = _run_picker_loop(
+        listbox,
+        title=title,
+        header_text=header_text,
+        footer_text="  Space: Toggle | Up/Down: Navigate | Enter: Confirm | q/Ctrl+C: Cancel",
     )
-
-    footer = Pile(
-        [
-            Divider(),
-            AttrMap(
-                Text("  Space: Toggle | Up/Down: Navigate | Enter: Confirm | q/Ctrl+C: Cancel"),
-                "status",
-            ),
-        ]
-    )
-
-    frame = Frame(body=listbox, header=header, footer=footer)
-
-    palette = [
-        ("header", "white", "dark blue"),
-        ("status", "white", "dark blue"),
-        ("reversed", "standout", ""),
-    ]
-
-    input_filter = _PickerInputFilter(state=state)
-
-    with create_urwid_screen_preserving_terminal() as screen:
-        loop = MainLoop(
-            frame,
-            palette=palette,
-            input_filter=input_filter,
-            screen=screen,
-        )
-        loop.run()
 
     if not state.is_confirmed:
         return None
