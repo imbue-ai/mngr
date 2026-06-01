@@ -433,13 +433,22 @@ class DockerProviderInstance(BaseProviderInstance):
     ) -> tuple[int, str]:
         """Execute a command in a Docker container via docker exec.
 
+        Forces ``workdir="/"`` so the exec succeeds regardless of whether
+        the image's declared ``WORKDIR`` exists at exec time. Mngr's
+        first container exec is its own sshd setup -- which runs *before*
+        any ``post_host_create_command`` hook -- so a ``WORKDIR`` like
+        ``/mngr/code/`` that the image expects to be populated by a
+        first-boot seed step won't be on disk yet. None of mngr's
+        automated setup commands depend on the image's WORKDIR; they
+        all use absolute paths.
+
         Returns (exit_code, output). For detached commands, returns (0, "").
         """
         if detach:
-            container.exec_run(["sh", "-c", command], detach=True)
+            container.exec_run(["sh", "-c", command], detach=True, workdir="/")
             return 0, ""
 
-        exit_code, output = container.exec_run(["sh", "-c", command])
+        exit_code, output = container.exec_run(["sh", "-c", command], workdir="/")
         output_str = output.decode("utf-8") if isinstance(output, bytes) else str(output)
         return exit_code, output_str
 
@@ -734,6 +743,28 @@ kill -TERM 1
         if line:
             logger.log(LogLevel.BUILD.value, "{}", line.rstrip(), source="docker")
 
+    @staticmethod
+    def _build_image_tag(host_id: HostId) -> str:
+        """The deterministic tag for the image built for a host in create_host."""
+        return f"mngr-build-{host_id}"
+
+    def _remove_build_image(self, host_id: HostId) -> None:
+        """Remove the per-host build image created in create_host.
+
+        No-op when the image is absent -- the host used a pulled `--image`
+        (no such tag), or the tag was already removed (destroy_host runs
+        before delete_host). When the image IS present, any removal failure
+        propagates so it is visible rather than silently leaking the image.
+        Snapshot images are independent `docker commit` images that retain
+        the underlying layers, so removing this tag does not break snapshot
+        restore.
+        """
+        tag = self._build_image_tag(host_id)
+        if not self._docker_client.images.list(name=tag):
+            logger.trace("No build image to remove for host {}", host_id)
+            return
+        self._docker_client.images.remove(tag)
+
     def _build_image(self, build_args: Sequence[str], tag: str) -> str:
         """Build a Docker image using the configured builder (docker or depot)."""
         builder = self.config.builder
@@ -1018,11 +1049,11 @@ kill -TERM 1
         try:
             if build_args:
                 # Build image from user-provided build args / Dockerfile
-                build_tag = f"mngr-build-{host_id}"
+                build_tag = self._build_image_tag(host_id)
                 image_name = self._build_image(build_args, build_tag)
             elif is_using_default:
                 # Build from the mngr default Dockerfile so packages are pre-installed
-                build_tag = f"mngr-build-{host_id}"
+                build_tag = self._build_image_tag(host_id)
                 image_name = self._build_default_image(build_tag)
             else:
                 # User specified an image (via --image or config default_image); pull it
@@ -1363,6 +1394,10 @@ kill -TERM 1
             except docker.errors.DockerException as e:
                 logger.warning("Error removing container: {}", e)
 
+        # Untag the per-host build image so built images don't pile up. Safe
+        # now that the container is gone; snapshots keep their own layers.
+        self._remove_build_image(host_id)
+
         self._mark_host_destroyed(host_id)
 
         self._container_cache_by_id.pop(host_id, None)
@@ -1391,6 +1426,9 @@ kill -TERM 1
                 self._state_volume.remove_directory(f"volumes/{volume_id}")
             except (FileNotFoundError, OSError, MngrError) as e:
                 logger.trace("No host volume to clean up for {}: {}", host_id, e)
+
+        # Defensive untag in case destroy_host did not run (idempotent).
+        self._remove_build_image(host_id)
 
         self._host_store.delete_host_record(host_id)
         self._container_cache_by_id.pop(host_id, None)
