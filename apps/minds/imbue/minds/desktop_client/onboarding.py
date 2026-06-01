@@ -98,10 +98,16 @@ class OnboardingAnswers(FrozenModel):
     )
 
     @property
+    def is_scan_requested(self) -> bool:
+        """True when Q1 asks for the local user-context scan (any preference except ``CONTROL``)."""
+        return self.data_preference is not None and self.data_preference is not UserDataPreference.CONTROL
+
+    @property
     def is_noop(self) -> bool:
         """True when no answer triggers any side effect."""
-        is_scan_requested = self.data_preference is not None and self.data_preference is not UserDataPreference.CONTROL
-        return not is_scan_requested and not self.initial_problem.strip() and not self.permissions_preference.strip()
+        return (
+            not self.is_scan_requested and not self.initial_problem.strip() and not self.permissions_preference.strip()
+        )
 
 
 @pure
@@ -232,7 +238,7 @@ class OnboardingApplier(MutableModel):
         """Apply each answer in turn; each step is best-effort and isolated."""
         with log_span("Applying onboarding answers for creation {}", creation_id):
             # Q1: local scan. Independent of the workspace, so run it first.
-            if answers.data_preference is not None and answers.data_preference is not UserDataPreference.CONTROL:
+            if answers.is_scan_requested:
                 self._run_user_context_scan(creation_id)
 
             # Q2 and Q3 both need the workspace to exist. Resolve the host
