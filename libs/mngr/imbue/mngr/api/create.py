@@ -25,7 +25,6 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.env_utils import parse_env_file
@@ -64,7 +63,7 @@ def _call_on_before_create_hooks(
     hookimpls = pm.hook.on_before_create.get_hookimpls()
     for hookimpl in hookimpls:
         # Call the hook with current args
-        result = cast(OnBeforeCreateArgs | None, hookimpl.function(args=current_args))
+        result = cast(OnBeforeCreateArgs | None, hookimpl.function(args=current_args, mngr_ctx=mngr_ctx))
         # If the hook returned a new args object, use it for subsequent hooks
         if result is not None:
             current_args = result
@@ -144,7 +143,7 @@ def create(
     # Run agent-type-specific preflight checks before creating the host.
     # This lets agent types fail fast on configuration errors (e.g. missing
     # gitignore entries) before expensive operations like host creation.
-    agent_type = agent_options.agent_type or AgentTypeName("claude")
+    agent_type = agent_options.agent_type
     resolved = resolve_agent_type(agent_type, mngr_ctx.config)
     agent_class = cast(type[AgentInterface], resolved.agent_class)
     with log_span("Running preflight checks for agent type {}", agent_type):
@@ -376,7 +375,7 @@ def _create_new_host(
 ) -> OnlineHostInterface:
     """Create a new host and write its environment variables."""
     with log_span("Calling on_before_host_create hooks"):
-        mngr_ctx.pm.hook.on_before_host_create(name=host_name, provider_name=target_host.provider)
+        mngr_ctx.pm.hook.on_before_host_create(name=host_name, provider_name=target_host.provider, mngr_ctx=mngr_ctx)
     with log_span(
         "Creating new host '{}' using provider '{}'",
         host_name,
