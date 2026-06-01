@@ -108,7 +108,7 @@ class EnvelopeWriter(MutableModel):
         """Emit a ``system_interface_backend_failure`` plugin event.
 
         Surfaces a per-agent backend failure observed in the forwarding
-        path so the minds-side health tracker can apply restart-recovery
+        path so a downstream consumer can apply its own restart-recovery
         policy. The plugin remains a dumb reverse proxy -- this is the
         only forwarding-failure signal it exposes outside its own logs.
         """

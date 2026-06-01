@@ -16,8 +16,8 @@ from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 class SystemInterfaceBackendFailureReason(UpperCaseStrEnum):
     """Why a per-agent backend forward attempt failed.
 
-    Surfaced by the plugin so the minds-side health tracker can decide
-    whether to tick the agent toward STUCK.
+    Surfaced by the plugin so a downstream consumer can decide how to
+    react (e.g. drive a health tracker / recovery UI).
 
     - ``CONNECT_ERROR``: the plugin could not establish a connection to
       the backend (httpx.ConnectError / RemoteProtocolError before any
@@ -87,8 +87,8 @@ class SystemInterfaceBackendFailurePayload(FrozenModel):
     """Emitted when the plugin observes a per-agent backend failure.
 
     The plugin's role is observation only: it surfaces the kind of failure
-    it saw (connection failure, mid-stream EOF, or a non-2xx response) so the
-    minds-side ``SystemInterfaceHealthTracker`` can apply policy (e.g. 5s
+    it saw (connection failure, mid-stream EOF, or a non-2xx response) so a
+    downstream consumer can apply its own policy (e.g. a health tracker's
     HEALTHY -> STUCK transition).
     """
 
