@@ -10,14 +10,17 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr_antigravity.antigravity_config import ACTIVE_MARKER_FILENAME
+from imbue.mngr_antigravity.antigravity_config import build_antigravity_hooks_config
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_user_settings_path
 from imbue.mngr_antigravity.antigravity_config import merge_trusted_workspace
 from imbue.mngr_antigravity.antigravity_config import read_antigravity_settings
+from imbue.mngr_antigravity.antigravity_config import serialize_antigravity_hooks
 from imbue.mngr_antigravity.antigravity_config import serialize_antigravity_settings
 
 
 def test_user_settings_path_lives_under_gemini_antigravity_cli() -> None:
-    """Path is fixed by agy; no env-var override exists in the v1.0.0 binary."""
+    """Path is fixed by agy; no env-var override exists in the binary."""
     path = get_antigravity_user_settings_path()
     assert path == Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
 
@@ -125,3 +128,46 @@ def test_read_antigravity_settings_returns_parsed_dict(
     parsed = read_antigravity_settings(host, settings_with_existing_trust)
     assert parsed["trustedWorkspaces"] == ["/work/prior"]
     assert parsed["enableTelemetry"] is False
+
+
+# =============================================================================
+# Hook config builder
+# =============================================================================
+
+
+def test_hooks_config_always_emits_active_marker_via_preinvocation_and_stop() -> None:
+    """PreInvocation touches the active marker; Stop removes it.
+
+    The active marker drives BaseAgent's RUNNING/WAITING detection. agy fires
+    PreInvocation before each model call (agent working) and Stop when the
+    loop terminates (agent idle), so this pair flips the marker at the right
+    boundaries.
+    """
+    config = build_antigravity_hooks_config()
+
+    mngr = config["mngr"]
+    # PreInvocation/Stop use the flat handler-list shape (no matcher wrapper).
+    pre = mngr["PreInvocation"]
+    stop = mngr["Stop"]
+    assert pre == [{"type": "command", "command": f'touch "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'}]
+    assert stop == [{"type": "command", "command": f'rm -f "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'}]
+
+
+def test_hooks_config_never_emits_pretooluse() -> None:
+    """No PreToolUse hook is generated: auto-approval uses the CLI flag, not a hook.
+
+    agy's documented PreToolUse {"decision": "allow"} output does not actually
+    gate the run_command confirmation dialog (verified live against agy 1.0.3),
+    so permission auto-approval is wired through --dangerously-skip-permissions
+    in assemble_command instead. The hooks file only carries lifecycle markers.
+    """
+    config = build_antigravity_hooks_config()
+    assert "PreToolUse" not in config["mngr"]
+    assert set(config["mngr"]) == {"PreInvocation", "Stop"}
+
+
+def test_serialize_antigravity_hooks_round_trips() -> None:
+    config = build_antigravity_hooks_config()
+    serialized = serialize_antigravity_hooks(config)
+    assert json.loads(serialized) == config
+    assert "  " in serialized
