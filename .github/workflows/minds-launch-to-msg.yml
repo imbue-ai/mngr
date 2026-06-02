@@ -394,7 +394,12 @@ jobs:
               echo "**Total agent creation: ${total}s (${mm}:${ss})** -- ${phases}"
               echo ""
               echo '```json'
+              # The e2e-written JSON may lack a trailing newline; ensure
+              # one so the closing fence below doesn't merge onto the
+              # `}` line and open a new (unterminated) code fence that
+              # swallows the rest of the summary as preformatted text.
               cat "$timings_json"
+              echo
               echo '```'
               echo ""
             } >> "$GITHUB_STEP_SUMMARY"
