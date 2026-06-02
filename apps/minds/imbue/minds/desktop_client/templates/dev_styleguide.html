@@ -1,8 +1,6 @@
 {#
   Dev styleguide: hand-authored inventory of design tokens and UI
-  patterns. Mounted at /_dev/styleguide. Visible in every tier except
-  production (gated on MINDS_ROOT_NAME != "minds" -- see
-  app.py::_handle_dev_styleguide).
+  patterns. Mounted at /_dev/styleguide. Always visible (no tier gate).
 #}
 {% extends 'base.html' %}
 {% import '_macros.html' as ui %}
@@ -15,8 +13,6 @@
     <p class="text-sm text-zinc-500 mt-1">
       Tokens are in
       <code class="text-zinc-700">apps/minds/imbue/minds/desktop_client/static/tokens.css</code>.
-      Visible in every tier except production
-      (<code class="text-zinc-700">MINDS_ROOT_NAME=minds</code>).
     </p>
   </header>
 

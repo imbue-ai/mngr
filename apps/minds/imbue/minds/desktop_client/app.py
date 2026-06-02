@@ -22,7 +22,6 @@ from fastapi import FastAPI
 from fastapi import Request
 from fastapi.responses import FileResponse
 from fastapi.responses import HTMLResponse
-from fastapi.responses import JSONResponse
 from fastapi.responses import RedirectResponse
 from fastapi.responses import Response
 from fastapi.responses import StreamingResponse
@@ -35,8 +34,6 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.minds.bootstrap import DEFAULT_MINDS_ROOT_NAME
-from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.bootstrap import is_imbue_cloud_provider_enabled_for_account
 from imbue.minds.bootstrap import list_disabled_provider_names
 from imbue.minds.bootstrap import set_provider_is_enabled
@@ -1558,19 +1555,10 @@ def _handle_chrome_sidebar(request: Request) -> Response:
 def _handle_dev_styleguide() -> Response:
     """Serve the dev styleguide page.
 
-    Visible in every tier except production. Gating is on ``MINDS_ROOT_NAME``:
-    any value other than ``minds`` (the production root) opens the route,
-    so dev tiers (``minds-<user>-dev``) and staging (``minds-staging``)
-    both render the page. An unset ``MINDS_ROOT_NAME`` is treated as
-    production (``bootstrap.get_minds_root_name`` semantics).
-
-    Returns 404 in production so the route looks indistinguishable from
-    any other not-found path -- same body and content-type FastAPI emits
-    for an unregistered route.
+    Visible in every tier including production. The page documents the
+    macros and tokens the rest of the app uses, so there's no reason to
+    hide it from end users.
     """
-    root_name = os.environ.get(MINDS_ROOT_NAME_ENV_VAR, DEFAULT_MINDS_ROOT_NAME)
-    if root_name == DEFAULT_MINDS_ROOT_NAME:
-        return JSONResponse({"detail": "Not Found"}, status_code=404)
     return HTMLResponse(content=render_dev_styleguide_page())
 
 
@@ -2979,7 +2967,6 @@ def create_desktop_client(
     app.get("/_chrome/sidebar")(_handle_chrome_sidebar)
     app.get("/_chrome/events")(_handle_chrome_events)
 
-    # Dev/staging styleguide (404 in production -- MINDS_ROOT_NAME=minds)
     app.get("/_dev/styleguide")(_handle_dev_styleguide)
 
     # Register routes
