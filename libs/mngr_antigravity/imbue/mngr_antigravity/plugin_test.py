@@ -19,6 +19,7 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_user_settings_path
 from imbue.mngr_antigravity.plugin import AntigravityAgent
 from imbue.mngr_antigravity.plugin import AntigravityAgentConfig
@@ -374,15 +375,38 @@ def test_get_expected_process_name_returns_agy(antigravity_agent: AntigravityAge
     assert antigravity_agent.get_expected_process_name() == "agy"
 
 
-def test_modify_env_vars_exposes_agy_log_file_path(antigravity_agent: AntigravityAgent) -> None:
-    """The streamer needs the agy --log-file location to grep for `Created conversation`."""
-    env_vars: dict[str, str] = {"PRE_EXISTING": "kept"}
-    antigravity_agent.modify_env_vars(antigravity_agent.host, env_vars)
-    assert env_vars["PRE_EXISTING"] == "kept"
-    assert "ANTIGRAVITY_AGY_LOG_FILE" in env_vars
-    assert env_vars["ANTIGRAVITY_AGY_LOG_FILE"].endswith("logs/agy_cli.log")
-    # Must be inside the per-agent state dir so the path is unique per agent.
-    assert "/agents/" in env_vars["ANTIGRAVITY_AGY_LOG_FILE"]
+def test_assemble_command_resumes_last_conversation_via_set_dash_dash(antigravity_agent: AntigravityAgent) -> None:
+    """The launch command resumes the last-recorded conversation, evaluated in the shell.
+
+    The stored command is replayed verbatim on every `mngr start`, so the
+    resume decision is shell-evaluated at launch: read the last line of the
+    per-agent conversation-ids file, and -- if that conversation's `.pb` store
+    file still exists -- pass `--conversation "$id"` via `set --` / "$@" (which
+    avoids unquoted-substitution word splitting so it works in bash and zsh).
+    """
+    command = str(antigravity_agent.assemble_command(antigravity_agent.host, (), command_override=None))
+    ids_file = str(antigravity_agent._get_conversation_ids_file_path())
+    # Reads the last recorded id from the per-agent ids file.
+    assert f"__mngr_cid=$(tail -n 1 {ids_file} 2>/dev/null || true)" in command
+    # Guarded on the conversation's .db store file still existing. The .db (not
+    # the .pb) is what agy writes incrementally and resumes from, so it survives
+    # the hard kill `mngr stop` performs (the .pb is clean-exit only).
+    assert (
+        '[ -f "${ANTIGRAVITY_APP_DATA_DIR:-$HOME/.gemini/antigravity-cli}/conversations/$__mngr_cid.db" ]' in command
+    )
+    # Passes the flag positionally (no unquoted-substitution word splitting).
+    assert 'set -- --conversation "$__mngr_cid"' in command
+    assert "agy " in command and '"$@"' in command
+
+
+def test_assemble_command_resume_prelude_runs_after_cd_and_before_agy(antigravity_agent: AntigravityAgent) -> None:
+    """The resume prelude + agy run as a `{ ...; }` group gated on the cd succeeding."""
+    command = str(antigravity_agent.assemble_command(antigravity_agent.host, (), command_override=None))
+    symlink_path = antigravity_agent._get_agy_workspace_symlink_path()
+    # cd -> resume-prelude -> agy "$@", all inside a brace group after the cd.
+    assert f"cd {symlink_path} && {{ __mngr_cid=" in command
+    assert command.index("__mngr_cid=") < command.index(" agy ")
+    assert command.rstrip().endswith('"$@" ; }')
 
 
 def test_provision_does_not_create_workspace_subdirs(
@@ -408,6 +432,28 @@ def test_provision_does_not_create_workspace_subdirs(
     assert not (agent.work_dir / ".agents").exists()
     assert not (agent.work_dir / ".antigravityignore").exists()
     assert not (agent.work_dir / ".gemini").exists()
+
+
+def test_provision_installs_capture_conversation_id_script(
+    auto_approve_ctx: AntigravityAgent,
+    isolated_home: Path,
+) -> None:
+    """provision() installs capture_conversation_id.sh into the agent's commands/ dir.
+
+    The PreInvocation capture hook invokes this script by that path
+    (build_antigravity_hooks_config), so it must be provisioned for conversation
+    resume + transcript scoping to work.
+    """
+    agent = auto_approve_ctx
+    agent.provision(
+        host=agent.host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
+        mngr_ctx=agent.mngr_ctx,
+    )
+    script_path = agent._get_agent_dir() / "commands" / CAPTURE_CONVERSATION_ID_SCRIPT_NAME
+    assert script_path.exists()
+    # Sanity-check it's the capture script (extracts conversationId from stdin).
+    assert "conversationId" in script_path.read_text()
 
 
 def _read_user_settings(monkeypatched_home: Path) -> dict[str, Any]:
