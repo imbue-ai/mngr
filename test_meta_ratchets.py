@@ -614,13 +614,10 @@ def test_every_project_has_changelog_layout() -> None:
     ``test_every_project_has_pypi_readme``: a symmetric requirement that
     every project participates in the consolidation flow uniformly.
 
-    The ``.gitkeep`` requirement matters because git does not track empty
-    directories. The consolidation agent periodically drains a project's
-    pending entry files into its ``UNABRIDGED_CHANGELOG.md``; without a
-    ``.gitkeep`` the now-empty ``changelog/`` directory would vanish from git
-    entirely. Requiring the ``.gitkeep`` here means a missing placeholder is
-    caught when a project is first added, rather than silently later when that
-    project happens to be consolidated.
+    The ``.gitkeep`` is required because git does not track empty directories:
+    once consolidation drains a project's last entry, the ``changelog/`` dir
+    would vanish without it. Checking for it here catches the omission when a
+    project is added, not silently later when it is first consolidated.
     """
     missing: list[str] = []
     for project in all_known_projects(_REPO_ROOT):
