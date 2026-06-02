@@ -1635,6 +1635,45 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             exclude_git=exclude_git,
         )
 
+    def copy_local_directory(self, source_path: Path, target_path: Path, extra_args: str | None) -> None:
+        """Copy a local-machine directory to self:target_path. See OnlineHostInterface."""
+        # rsync does not create intermediate parents for the destination root.
+        self.execute_idempotent_command(f"mkdir -p {shlex.quote(str(target_path))}", timeout_seconds=5.0)
+        # --keep-dirlinks (-K) is essential: on some hosts a destination directory is a
+        # symlink to real storage (e.g. on Modal, host_dir /mngr is a symlink into the
+        # mounted volume). Without -K, when the source has a real directory where the
+        # receiver has a symlink-to-directory, rsync DELETES the symlink and replaces it
+        # with a real directory on the ephemeral filesystem -- stranding everything that
+        # lived behind the symlink (e.g. agents/<id>/data.json on the volume) and writing
+        # our files to a non-persistent location. -K makes rsync follow the symlinked dir
+        # and write through it instead. See github issue 1825.
+        rsync_args = ["rsync", "-rlpt", "--keep-dirlinks"]
+        if extra_args:
+            rsync_args.extend(shlex.split(extra_args))
+        source_str = str(source_path).rstrip("/") + "/"
+        target_str = str(target_path).rstrip("/") + "/"
+
+        if self.is_local:
+            rsync_args.extend([source_str, target_str])
+            rsync_cmd = " ".join(shlex.quote(a) for a in rsync_args)
+            with log_span("rsync: local dir {} -> {}", source_path, target_path):
+                result = self.execute_idempotent_command(rsync_cmd)
+                if not result.success:
+                    raise MngrError(f"rsync failed (local): {result.stderr}")
+            return
+
+        ssh_info = self.get_ssh_connection_info()
+        assert ssh_info is not None
+        user, hostname, port, key_path = ssh_info
+        known_hosts = get_ssh_known_hosts_file(self)
+        rsync_args.extend(["-e", build_ssh_transport_command(key_path, port, known_hosts)])
+        rsync_args.extend([source_str, f"{user}@{hostname}:{target_str}"])
+        with log_span("rsync: local dir -> {}@{}:{}", user, hostname, port):
+            try:
+                self.mngr_ctx.concurrency_group.run_process_to_completion(rsync_args)
+            except ProcessError as e:
+                raise MngrError(f"rsync failed (push to {hostname}): {e.stderr}") from e
+
     def _rsync_files(
         self,
         source_host: OnlineHostInterface,
@@ -2095,7 +2134,6 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         agent: AgentInterface,
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
-        local_host: OnlineHostInterface,
     ) -> None:
         """Provision an agent (install packages, configure, etc.).
 
@@ -2145,7 +2183,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
             # Validate required files exist and execute transfers
             agent_file_transfer_thread = concurrency_group.start_new_thread(
-                self._execute_agent_file_transfers, (agent, all_file_transfers, local_host, remote_home)
+                self._execute_agent_file_transfers, (agent, all_file_transfers, remote_home)
             )
 
             # Write environment variables to agent env file (before agent.provision()
@@ -2180,11 +2218,13 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
                 # Upload files in a single bulk transfer (rsync for remote hosts)
                 # rather than one write_file per file (a per-file SSH round-trip).
+                # skip_missing=False: a user-specified upload whose source is missing
+                # is an error (matches the old read_bytes() behavior).
                 upload_files_in_bulk(
                     self,
-                    local_host,
                     {spec.remote_path: spec.local_path for spec in provisioning.upload_files},
                     remote_home,
+                    skip_missing=False,
                 )
 
                 # Build the source prefix for commands (sources host env, then agent env)
@@ -2223,8 +2263,8 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         """
         host_commands = self.host_dir / "commands"
         agent_commands = self._get_agent_state_dir(agent) / "commands"
-        # These stay per-file write_file calls (not upload_files_in_bulk) because they
-        # need the executable bit (mode="0755"), which the rsync staging helper does
+        # These should stay per-file write_file calls (not upload_files_in_bulk) because
+        # they need the executable bit (mode="0755"), which the rsync staging helper does
         # not preserve. The set is fixed and tiny (two libs x two destinations), so the
         # per-file cost is negligible and this is exempt from the bulk-upload ratchet.
         for name in self._SHARED_SHELL_LIB_NAMES:
@@ -2236,7 +2276,6 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         self,
         agent: AgentInterface,
         transfers: list[FileTransferSpec],
-        local_host: OnlineHostInterface,
         remote_home: str,
     ) -> None:
         """Validate and execute file transfers from the agent.
@@ -2260,10 +2299,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 missing_str = ", ".join(str(p) for p in missing_required)
                 raise MngrError(f"Required files for provisioning not found: {missing_str}")
 
-            # Build the {remote_path: local_path} map; upload_files_in_bulk skips any
-            # optional source that does not exist locally.
+            # Required files were validated above; skip_missing=True drops any optional
+            # transfer whose source does not exist (matching the old per-file skip).
             uploads = {agent.work_dir / transfer.agent_path: transfer.local_path for transfer in transfers}
-            upload_files_in_bulk(self, local_host, uploads, remote_home)
+            upload_files_in_bulk(self, uploads, remote_home, skip_missing=True)
 
     def rename_agent(
         self,

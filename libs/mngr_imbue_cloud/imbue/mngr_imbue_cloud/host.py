@@ -252,7 +252,6 @@ class ImbueCloudHost(Host):
         agent: AgentInterface,
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
-        local_host: OnlineHostInterface,
     ) -> None:
         """Minimal provisioning when the pool host is already provisioned, full otherwise.
 
@@ -270,7 +269,7 @@ class ImbueCloudHost(Host):
         run from scratch.
         """
         if self._read_pre_baked_data() is None:
-            super().provision_agent(agent, options, mngr_ctx, local_host)
+            super().provision_agent(agent, options, mngr_ctx)
             return
         agent_env = self._collect_agent_env_vars(agent, options)
         self._write_agent_env_file(agent, agent_env)

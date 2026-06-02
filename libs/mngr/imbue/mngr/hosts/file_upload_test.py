@@ -1,44 +1,20 @@
-"""Unit tests for the bulk file-upload helper."""
+"""Unit tests for the bulk file-upload helper.
+
+The remote (rsync) branch is covered end-to-end by the Modal acceptance test
+``test_upload_deploy_files_handles_large_set_on_modal`` (and rsync's no-delete
+behavior by ``test_rsync_does_not_delete_existing_files_by_default`` in test_host.py).
+These unit tests cover the branch-agnostic logic and the local branch.
+"""
 
 from pathlib import Path
 from typing import Any
 
-from pydantic import Field
+import pytest
 
 from imbue.mngr.api.testing import FakeHost
+from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.file_upload import resolve_remote_path
 from imbue.mngr.hosts.file_upload import upload_files_in_bulk
-
-
-class _RecordingRemoteHost(FakeHost):
-    """A non-local FakeHost that records copy_directory calls and snapshots the staged tree.
-
-    Used to exercise upload_files_in_bulk's remote (rsync) branch without actually
-    writing to the filesystem root ("/"). The real rsync transfer is covered by the
-    copy_directory tests in test_host.py and the Modal acceptance test.
-    """
-
-    copy_directory_count: int = Field(default=0)
-    staged_tree: dict[str, str] = Field(default_factory=dict)
-    last_target: Path | None = Field(default=None)
-
-    def copy_directory(
-        self,
-        source_host: object,
-        source_path: Path,
-        target_path: Path,
-        extra_args: str | None = None,
-        exclude_git: bool = False,
-    ) -> None:
-        self.copy_directory_count += 1
-        self.last_target = target_path
-        for staged in Path(source_path).rglob("*"):
-            if staged.is_file():
-                self.staged_tree[staged.relative_to(source_path).as_posix()] = staged.read_text()
-
-
-def _remote_host() -> Any:
-    return _RecordingRemoteHost(host_dir=Path("/tmp/mngr-test/host"), is_local=False)
 
 
 def _local_host() -> Any:
@@ -64,43 +40,6 @@ def test_resolve_remote_path_absolute_unchanged() -> None:
     assert resolve_remote_path(Path("/etc/thing"), "/home/u") == Path("/etc/thing")
 
 
-# --- upload_files_in_bulk: remote (rsync) branch ---
-
-
-def test_remote_upload_uses_single_copy_directory(tmp_path: Path) -> None:
-    source_file = tmp_path / "a.txt"
-    source_file.write_text("aaa")
-    host = _remote_host()
-    files: dict[Path, bytes | str | Path] = {
-        Path("~/.claude/a.txt"): source_file,
-        Path("~/.mngr/b.toml"): "bbb",
-        Path("/etc/c.conf"): b"ccc",
-    }
-
-    count = upload_files_in_bulk(host, _local_host(), files, "/home/u")
-
-    assert count == 3
-    assert host.copy_directory_count == 1
-    assert host.last_target == Path("/")
-    # Staged tree mirrors absolute remote paths (leading slash stripped).
-    assert host.staged_tree == {
-        "home/u/.claude/a.txt": "aaa",
-        "home/u/.mngr/b.toml": "bbb",
-        "etc/c.conf": "ccc",
-    }
-
-
-def test_remote_upload_skips_missing_path_sources(tmp_path: Path) -> None:
-    host = _remote_host()
-    files: dict[Path, bytes | str | Path] = {Path("~/.mngr/x"): tmp_path / "nope.txt"}
-
-    count = upload_files_in_bulk(host, _local_host(), files, "/home/u")
-
-    assert count == 0
-    # Nothing to transfer -> no rsync.
-    assert host.copy_directory_count == 0
-
-
 # --- upload_files_in_bulk: local branch ---
 
 
@@ -114,7 +53,7 @@ def test_local_upload_writes_each_source_type(tmp_path: Path) -> None:
         dest_dir / "sub" / "c.bin": b"from-bytes",
     }
 
-    count = upload_files_in_bulk(_local_host(), _local_host(), files, "")
+    count = upload_files_in_bulk(_local_host(), files, "", skip_missing=False)
 
     assert count == 3
     assert (dest_dir / "a.txt").read_text() == "from-path"
@@ -134,7 +73,7 @@ def test_local_upload_source_equals_dest_is_noop(tmp_path: Path) -> None:
     dest.write_text("keep")
     files: dict[Path, bytes | str | Path] = {dest: dest}
 
-    count = upload_files_in_bulk(_local_host(), _local_host(), files, "")
+    count = upload_files_in_bulk(_local_host(), files, "", skip_missing=False)
 
     assert count == 1
     assert dest.read_text() == "keep"
@@ -151,7 +90,33 @@ def test_local_upload_does_not_delete_existing_files(tmp_path: Path) -> None:
     (dest_dir / "preexisting.txt").write_text("keep me")
 
     files: dict[Path, bytes | str | Path] = {dest_dir / "new.txt": "new"}
-    upload_files_in_bulk(_local_host(), _local_host(), files, "")
+    upload_files_in_bulk(_local_host(), files, "", skip_missing=False)
 
     assert (dest_dir / "new.txt").read_text() == "new"
     assert (dest_dir / "preexisting.txt").read_text() == "keep me"
+
+
+# --- missing sources: skip vs error ---
+
+
+def test_missing_source_raises_when_skip_missing_false(tmp_path: Path) -> None:
+    files: dict[Path, bytes | str | Path] = {tmp_path / "dest" / "a.txt": tmp_path / "missing.txt"}
+
+    with pytest.raises(MngrError, match="do not exist locally"):
+        upload_files_in_bulk(_local_host(), files, "", skip_missing=False)
+
+
+def test_skip_missing_true_skips_missing_sources(tmp_path: Path) -> None:
+    dest_dir = tmp_path / "dest"
+    present = tmp_path / "present.txt"
+    present.write_text("here")
+    files: dict[Path, bytes | str | Path] = {
+        dest_dir / "a.txt": present,
+        dest_dir / "b.txt": tmp_path / "missing.txt",
+    }
+
+    count = upload_files_in_bulk(_local_host(), files, "", skip_missing=True)
+
+    assert count == 1
+    assert (dest_dir / "a.txt").read_text() == "here"
+    assert not (dest_dir / "b.txt").exists()

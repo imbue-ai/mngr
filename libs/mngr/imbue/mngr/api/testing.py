@@ -148,6 +148,21 @@ class FakeHost(MutableModel):
         target_path.mkdir(parents=True, exist_ok=True)
         shutil.copytree(source_path, target_path, dirs_exist_ok=True)
 
+    def copy_local_directory(self, source_path: Path, target_path: Path, extra_args: str | None = None) -> None:
+        """Merge a local directory into target_path file-by-file (mimics rsync -r, additive).
+
+        Unlike a plain copytree, this handles a ``target_path`` of "/" (the real
+        upload path stages absolute remote paths and rsyncs to the filesystem root):
+        each staged file lands at ``target_path / <relative>``, which reconstructs the
+        intended absolute path. Ignores ``extra_args`` (include/exclude filters), like
+        ``copy_directory``.
+        """
+        for staged in Path(source_path).rglob("*"):
+            if staged.is_file():
+                dest = target_path / staged.relative_to(source_path)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(staged, dest)
+
     def get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
         """Return configured SSH connection info, or None for local hosts."""
         if self.is_local:

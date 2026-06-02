@@ -11,7 +11,6 @@ from typing import assert_never
 from loguru import logger
 
 from imbue.imbue_common.logging import log_span
-from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.file_upload import upload_files_in_bulk
@@ -35,20 +34,22 @@ def _upload_deploy_files(
     host: OnlineHostInterface,
     deploy_files: dict[Path, Path | str],
     remote_home: str,
-    mngr_ctx: MngrContext,
 ) -> int:
     """Upload collected deploy files to the remote host with a single rsync.
 
     Delegates to the shared ``upload_files_in_bulk`` helper, which stages every file
     into a local temp dir mirroring its absolute remote path and transfers the whole
-    tree with one ``host.copy_directory`` (rsync) call. This replaces the previous
+    tree with one ``copy_local_directory`` (rsync) call. This replaces the previous
     per-file SFTP approach, which opened a fresh SFTP channel per file -- a full
     round-trip over the SSH connection (~0.7s/file measured over a Modal tunnel) -- so
     a few hundred files (e.g. a user's ``~/.claude/plugins`` tree) would either blow
     past the upload timeout or reset the connection mid-transfer ("Error reading SSH
     protocol banner"). Returns the number of files uploaded.
+
+    skip_missing=True: deploy files are collected best-effort, so a source that no
+    longer exists locally is skipped rather than failing the whole provision.
     """
-    return upload_files_in_bulk(host, get_local_host(mngr_ctx), deploy_files, remote_home)
+    return upload_files_in_bulk(host, deploy_files, remote_home, skip_missing=True)
 
 
 def _get_installed_mngr_packages() -> list[tuple[str, str]]:
@@ -325,7 +326,7 @@ def provision_mngr_on_host(
 
                 if deploy_files:
                     with log_span("Uploading {} deploy files to remote host", len(deploy_files)):
-                        uploaded = _upload_deploy_files(host, deploy_files, remote_home, mngr_ctx)
+                        uploaded = _upload_deploy_files(host, deploy_files, remote_home)
                         logger.info("Uploaded {} mngr config files to remote host", uploaded)
 
             # Ensure uv is available on the host

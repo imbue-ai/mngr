@@ -18,7 +18,6 @@ from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
-from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr_pi_coding.plugin import PiCodingAgent
 from imbue.mngr_pi_coding.plugin import PiCodingAgentConfig
@@ -80,13 +79,9 @@ def _make_options() -> CreateAgentOptions:
 
 
 def _make_test_mngr_ctx(tmp_path: Path, *, is_auto_approve: bool = False) -> MngrContext:
-    pm = pluggy.PluginManager("mngr")
-    # Register the local (and ssh) provider backends so get_local_host works -- the
-    # remote config-dir setup resolves the local host as an rsync source.
-    load_local_backend_only(pm)
     return make_mngr_ctx(
         config=MngrConfig(),
-        pm=pm,
+        pm=pluggy.PluginManager("mngr"),
         profile_dir=tmp_path / "profile",
         is_interactive=False,
         is_auto_approve=is_auto_approve,
@@ -229,9 +224,8 @@ def test_setup_remote_config_dir_copies_auth(tmp_path: Path, pi_agent: PiCodingA
 
     host = _fake_host(tmp_path, is_local=False)
     config = PiCodingAgentConfig()
-    mngr_ctx = _make_test_mngr_ctx(tmp_path)
 
-    pi_agent._setup_remote_config_dir(host, config, config_dir, mngr_ctx, home)
+    pi_agent._setup_remote_config_dir(host, config, config_dir, home)
 
     assert (config_dir / "auth.json").read_text() == auth_content
 
@@ -293,9 +287,8 @@ def test_setup_remote_config_dir_copies_settings(tmp_path: Path, pi_agent: PiCod
 
     host = _fake_host(tmp_path, is_local=False)
     config = PiCodingAgentConfig(sync_home_settings=True, sync_auth=False)
-    mngr_ctx = _make_test_mngr_ctx(tmp_path)
 
-    pi_agent._setup_remote_config_dir(host, config, config_dir, mngr_ctx, home)
+    pi_agent._setup_remote_config_dir(host, config, config_dir, home)
 
     assert (config_dir / "settings.json").read_text() == settings_content
 
@@ -311,16 +304,15 @@ def test_setup_remote_config_dir_copies_resource_files(tmp_path: Path, pi_agent:
 
     host = _fake_host(tmp_path, is_local=False)
     config = PiCodingAgentConfig(sync_home_settings=True, sync_auth=False)
-    mngr_ctx = _make_test_mngr_ctx(tmp_path)
 
-    # Resource dirs are transferred via host.copy_directory (rsync). FakeHost's
-    # copy_directory does a local shutil copytree, so the files land under config_dir.
+    # Resource dirs are transferred via host.copy_local_directory (rsync). FakeHost's
+    # copy_local_directory does a local shutil copytree, so the files land under config_dir.
     # NOTE: FakeHost ignores the rsync --include/--exclude args this code passes, so
     # this test only confirms resource files get transferred -- it does NOT verify the
     # include/exclude filtering (e.g. it would not catch a broken dir_name list). The
     # real rsync filter mechanism is exercised by the host.copy_directory tests in
     # libs/mngr (test_host.py).
-    pi_agent._setup_remote_config_dir(host, config, config_dir, mngr_ctx, home)
+    pi_agent._setup_remote_config_dir(host, config, config_dir, home)
 
     assert (config_dir / "skills" / "test-skill.md").read_text() == "# Test Skill"
 

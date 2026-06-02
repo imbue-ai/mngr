@@ -10,7 +10,6 @@ from pydantic import Field
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_best_effort
-from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import PluginMngrError
@@ -168,7 +167,6 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig]):
         self,
         host: OnlineHostInterface,
         config: PiCodingAgentConfig,
-        mngr_ctx: MngrContext,
         home_dir: Path | None = None,
     ) -> None:
         """Create and populate the per-agent pi config directory.
@@ -187,7 +185,7 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig]):
         if host.is_local:
             self._setup_local_config_dir(host, config, config_dir, home_dir)
         else:
-            self._setup_remote_config_dir(host, config, config_dir, mngr_ctx, home_dir)
+            self._setup_remote_config_dir(host, config, config_dir, home_dir)
 
     def _setup_local_config_dir(
         self,
@@ -234,7 +232,6 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig]):
         host: OnlineHostInterface,
         config: PiCodingAgentConfig,
         config_dir: Path,
-        mngr_ctx: MngrContext,
         home_dir: Path | None = None,
     ) -> None:
         """Set up the per-agent config dir on a remote host via file copies."""
@@ -262,8 +259,7 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig]):
                     include_args.extend([f"--include={dir_name}/", f"--include={dir_name}/**"])
             if include_args:
                 include_args.append("--exclude=*")
-                local_host = get_local_host(mngr_ctx)
-                host.copy_directory(local_host, home_pi, config_dir, extra_args=" ".join(include_args))
+                host.copy_local_directory(home_pi, config_dir, " ".join(include_args))
 
     def provision(
         self,
@@ -291,7 +287,7 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig]):
                     _install_pi(host)
                     logger.info("pi installed successfully")
 
-        self._setup_per_agent_config_dir(host, config, mngr_ctx)
+        self._setup_per_agent_config_dir(host, config)
 
     def on_after_provisioning(
         self,

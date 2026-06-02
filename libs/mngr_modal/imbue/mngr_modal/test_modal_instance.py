@@ -735,7 +735,7 @@ def test_upload_deploy_files_handles_large_set_on_modal(
                 deploy_files[dest] = f"str-content-{i}"
 
         start = time.monotonic()
-        uploaded = _upload_deploy_files(host, deploy_files, remote_home, real_modal_provider.mngr_ctx)
+        uploaded = _upload_deploy_files(host, deploy_files, remote_home)
         upload_elapsed = time.monotonic() - start
         assert uploaded == file_count
         assert upload_elapsed < _UPLOAD_BUDGET_SECONDS, (

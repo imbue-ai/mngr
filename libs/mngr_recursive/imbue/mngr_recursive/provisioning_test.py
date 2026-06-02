@@ -8,7 +8,6 @@ import pytest
 
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CommandResult
-from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.providers.deploy_utils import MngrInstallMode
 from imbue.mngr_recursive.data_types import RecursivePluginConfig
 from imbue.mngr_recursive.plugin import on_host_created
@@ -67,7 +66,7 @@ def _make_mock_agent(agent_id: str = "agent-123", mngr_ctx: MagicMock | None = N
 
 
 def test_upload_deploy_files_uses_single_rsync(tmp_path: Path) -> None:
-    """All deploy files are transferred via one copy_directory (rsync) call, not per-file writes.
+    """All deploy files are transferred via one copy_local_directory (rsync) call, not per-file writes.
 
     This is the regression guard for the Modal "SSH connection reset / banner" bug: the old
     implementation opened one SFTP channel per file (~0.7s/file over a Modal tunnel), so a few
@@ -82,34 +81,30 @@ def test_upload_deploy_files_uses_single_rsync(tmp_path: Path) -> None:
         Path("~/.mngr/b.toml"): "bbb",
     }
 
-    # Snapshot the staging tree at copy_directory time, since the temp dir is
+    # Snapshot the staging tree at copy_local_directory time, since the temp dir is
     # cleaned up before _upload_deploy_files returns.
     staged_snapshot: dict[str, str] = {}
 
-    def _record(source_host: object, source_path: Path, target_path: Path, **_kwargs: object) -> None:
+    def _record(source_path: Path, target_path: Path, extra_args: object) -> None:
         for staged in Path(source_path).rglob("*"):
             if staged.is_file():
                 staged_snapshot[staged.relative_to(source_path).as_posix()] = staged.read_text()
 
-    host.copy_directory.side_effect = _record
+    host.copy_local_directory.side_effect = _record
 
-    local_host = MagicMock(spec=OnlineHostInterface)
-    local_host.is_local = True
-    ctx = _make_mock_mngr_ctx()
-    with patch("imbue.mngr_recursive.provisioning.get_local_host", return_value=local_host):
-        count = _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
+    count = _upload_deploy_files(host, deploy_files, "/home/testuser")
 
     assert count == 2
-    host.copy_directory.assert_called_once()
+    host.copy_local_directory.assert_called_once()
     # The per-file SFTP path must no longer be exercised at all.
     host.write_file.assert_not_called()
     host.write_text_file.assert_not_called()
-    call_args = host.copy_directory.call_args.args
-    assert call_args[0] is local_host
-    assert call_args[2] == Path("/")
+    call_args = host.copy_local_directory.call_args.args
+    # rsync targets the tightest common ancestor of the destinations, not "/".
+    assert call_args[1] == Path("/home/testuser")
     assert staged_snapshot == {
-        "home/testuser/.claude/a.txt": "aaa",
-        "home/testuser/.mngr/b.toml": "bbb",
+        ".claude/a.txt": "aaa",
+        ".mngr/b.toml": "bbb",
     }
 
 
@@ -466,18 +461,14 @@ def test_agent_package_mode_warns_when_no_packages() -> None:
 
 
 def test_upload_deploy_files_propagates_rsync_failure() -> None:
-    """_upload_deploy_files should propagate an rsync (copy_directory) failure."""
+    """_upload_deploy_files should propagate an rsync (copy_local_directory) failure."""
     host = _make_mock_host(is_local=False)
-    host.copy_directory.side_effect = MngrError("rsync failed: connection reset")
+    host.copy_local_directory.side_effect = MngrError("rsync failed: connection reset")
     deploy_files: dict[Path, Path | str] = {
         Path("~/.mngr/config.toml"): "content",
     }
-    local_host = MagicMock(spec=OnlineHostInterface)
-    local_host.is_local = True
-    ctx = _make_mock_mngr_ctx()
-    with patch("imbue.mngr_recursive.provisioning.get_local_host", return_value=local_host):
-        with pytest.raises(MngrError, match="rsync failed"):
-            _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
+    with pytest.raises(MngrError, match="rsync failed"):
+        _upload_deploy_files(host, deploy_files, "/home/testuser")
 
 
 def test_install_package_mode_raises_when_force_reinstall_also_fails() -> None:

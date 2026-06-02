@@ -564,15 +564,8 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
         agent: AgentInterface,
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
-        local_host: "OnlineHostInterface",
     ) -> None:
-        """Install packages, create config files, and set up an agent.
-
-        ``local_host`` is the local host, used as the source for bulk (rsync) file
-        uploads. It is passed in rather than resolved here because resolving it
-        requires ``mngr.api.providers``, which cannot be imported from the host layer
-        (import cycle via ``base_provider``).
-        """
+        """Install packages, create config files, and set up an agent."""
         ...
 
     @abstractmethod
@@ -606,6 +599,18 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
         - Local to remote (push via SSH)
         - Remote to local (pull via SSH)
         - Remote to remote (via local temp directory as intermediary)
+        """
+        ...
+
+    @abstractmethod
+    def copy_local_directory(self, source_path: Path, target_path: Path, extra_args: str | None) -> None:
+        """Copy a directory from the local machine (where mngr runs) to self:target_path.
+
+        Like ``copy_directory`` with a local source, but takes no source-host object --
+        the source is always the local filesystem. This lets the host layer push staged
+        files without resolving a local host (which would require ``mngr.api.providers``
+        and hit an import cycle). Uses rsync (additive, no ``--delete``); ``extra_args``
+        is appended to the rsync invocation (e.g. ``--include``/``--exclude`` filters).
         """
         ...
 
