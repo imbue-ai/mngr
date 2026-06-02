@@ -622,8 +622,6 @@ _SYNOPSIS_OPTOUT_FLAGS: dict[str, frozenset[str]] = {
     # agent-filter flags (--include / --exclude / --local / ... / --provider)
     # are inherited via ``add_agent_filter_options`` and listed in the OPTIONS
     # section of help/docs; keeping them out of the synopsis keeps it readable.
-    # (``--preserved/--no-preserved`` is a wait-behavior toggle like --since, so
-    # it IS enumerated in the synopsis -- as ``--no-preserved`` -- not opted out.)
     "usage.wait": frozenset(
         {
             "--active",
