@@ -5,5 +5,5 @@
     "name": "Imbue"
   },
   "repository": "https://github.com/imbue-ai/mngr",
-  "keywords": ["mngr", "agents", "coordination", "messaging"]
+  "keywords": ["mngr"]
 }
