@@ -40,8 +40,8 @@ from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentId
@@ -259,10 +259,10 @@ def _create_agent_env_command(ctx: click.Context, **kwargs: Any) -> None:
         "env": dict(setup.env),
         "opaque_permissions_path": str(setup.opaque_permissions_path),
     }
-    # ``emit_final_json`` is the project's standard helper for emitting
+    # ``write_json_line`` is the project's standard helper for emitting
     # a single JSON object on stdout (used by every ``mngr`` command
     # that supports ``--format=json`` final output).
-    emit_final_json(payload)
+    write_json_line(payload)
 
 
 _add_common_latchkey_options(_create_agent_env_command)
@@ -755,7 +755,7 @@ def _gateway_info_command(ctx: click.Context, **kwargs: Any) -> None:
     except LatchkeyError as e:
         raise click.ClickException(f"Failed to derive gateway password: {e}") from e
 
-    emit_final_json(
+    write_json_line(
         {
             "url": f"http://{latchkey.listen_host}:{info.gateway_port}",
             "password": password,
