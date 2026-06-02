@@ -145,7 +145,7 @@ function getBundleFromEvent(event) {
   const senderId = event.sender.id;
   for (const b of bundles) {
     if (b.window.isDestroyed()) continue;
-    const views = [b.chromeView, b.contentView, b.sidebarView, b.requestsPanelView];
+    const views = [b.chromeView, b.contentView, b.sidebarView, b.requestsPanelView, b.modalView];
     for (const v of views) {
       if (!v) continue;
       if (v.webContents.isDestroyed()) continue;
@@ -242,6 +242,19 @@ function updateBundleBounds(bundle) {
       height: height - TITLEBAR_HEIGHT,
     });
   }
+  // The modal overlays the entire content area (everything below the title
+  // bar, including the sidebar and requests panel). The title bar stays
+  // uncovered so window controls and the drag handle remain usable. The
+  // view is transparent, so the dialog's own dim backdrop shows the
+  // workspace behind it.
+  if (bundle.modalView && !bundle.modalView.webContents.isDestroyed()) {
+    bundle.modalView.setBounds({
+      x: 0,
+      y: TITLEBAR_HEIGHT,
+      width,
+      height: height - TITLEBAR_HEIGHT,
+    });
+  }
 }
 
 // -- Bundle lifecycle --
@@ -315,7 +328,7 @@ function wireBundleWindowEvents(bundle) {
       clearTimeout(bundle.requestsPanelReloadTimer);
       bundle.requestsPanelReloadTimer = null;
     }
-    const views = [bundle.chromeView, bundle.contentView, bundle.sidebarView, bundle.requestsPanelView];
+    const views = [bundle.chromeView, bundle.contentView, bundle.sidebarView, bundle.requestsPanelView, bundle.modalView];
     for (const view of views) {
       if (!view) continue;
       if (view.webContents.isDestroyed()) continue;
@@ -362,6 +375,8 @@ function createBundle() {
     requestsPanelView: null,
     requestsPanelVisible: false,
     requestsPanelReloadTimer: null,
+    modalView: null,
+    modalVisible: false,
     currentContentUrl: null,
     currentWorkspaceId: null,
     preErrorUrl: null,
@@ -675,6 +690,63 @@ function toggleRequestsPanel(bundle) {
   else openRequestsPanel(bundle);
 }
 
+// -- Modal overlay (per-bundle) --
+//
+// The modal is a full-content-area overlay used for transient dialogs (the
+// permission request page) that should not replace the user's workspace in
+// the content view. Like the sidebar / requests panel it is created lazily
+// and reused via setVisible(true/false). It uses the default session (so it
+// carries the auth cookie, like the chrome / requests-panel views) plus the
+// preload bridge, so the page inside can call `window.minds.closeModal()`.
+
+function openModal(bundle, url) {
+  if (!bundle || bundle.window.isDestroyed() || !url) return;
+  if (!bundle.modalView) {
+    const modal = new WebContentsView({
+      webPreferences: {
+        preload: path.join(__dirname, 'preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+      },
+    });
+    // Transparent background so the dialog's own dim backdrop reveals the
+    // workspace underneath instead of an opaque rectangle.
+    modal.setBackgroundColor('#00000000');
+    bundle.modalView = modal;
+    bundle.window.contentView.addChildView(modal);
+    registerShortcutsFor(bundle, modal.webContents);
+    // Escape closes the modal even if the page's own key handling fails.
+    modal.webContents.on('before-input-event', (event, input) => {
+      if (input.type === 'keyDown' && input.key === 'Escape') {
+        event.preventDefault();
+        closeModal(bundle);
+      }
+    });
+  } else {
+    // Re-add to the parent to raise to the top of z-order, then make visible.
+    bundle.window.contentView.removeChildView(bundle.modalView);
+    bundle.window.contentView.addChildView(bundle.modalView);
+    bundle.modalView.setVisible(true);
+  }
+  bundle.modalVisible = true;
+  if (!bundle.modalView.webContents.isDestroyed()) {
+    bundle.modalView.webContents.loadURL(url);
+  }
+  updateBundleBounds(bundle);
+}
+
+function closeModal(bundle) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  if (!bundle.modalView || !bundle.modalVisible) return;
+  bundle.modalView.setVisible(false);
+  bundle.modalVisible = false;
+  // Drop the page so its websockets/timers stop and a stale dialog isn't
+  // briefly visible the next time the modal opens.
+  if (!bundle.modalView.webContents.isDestroyed()) {
+    bundle.modalView.webContents.loadURL('about:blank').catch(() => {});
+  }
+}
+
 function sendCurrentWorkspaceToBundleViews(bundle) {
   if (!bundle) return;
   // Both the titlebar (chrome view) and the sidebar key UI off the current
@@ -754,6 +826,7 @@ function showErrorInAllWindows(message, details) {
 
     if (bundle.sidebarView) closeSidebar(bundle);
     if (bundle.requestsPanelView) closeRequestsPanel(bundle);
+    if (bundle.modalView) closeModal(bundle);
 
     if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
       bundle.window.contentView.removeChildView(bundle.contentView);
@@ -1768,27 +1841,19 @@ ipcMain.on('open-workspace-in-new-window', (event, agentId) => {
   if (bundle) closeSidebar(bundle);
 });
 
-ipcMain.on('navigate-to-request', (event, agentId, eventId) => {
+ipcMain.on('navigate-to-request', (event, _agentId, eventId) => {
   if (!eventId) return;
   const url = toAbsoluteUrl('/requests/' + eventId);
+  // Open the request in a modal overlay in the window the user clicked from,
+  // rather than navigating its content view. This keeps the user's workspace
+  // exactly as they left it -- closing the dialog returns them to their work
+  // with no context lost, and no window switching.
   const sender = getBundleFromEvent(event);
-  // Route to the workspace's window when one is open so the request page
-  // lives alongside the workspace it's about, rather than wherever the user
-  // happened to click the request card from.
-  if (agentId) {
-    const existing = findBundleForWorkspace(agentId);
-    if (existing) {
-      focusBundle(existing);
-      if (existing.contentView && !existing.contentView.webContents.isDestroyed()) {
-        existing.contentView.webContents.loadURL(url);
-      }
-      return;
-    }
-  }
-  // Fallback: no window for this workspace -- open the request in the sender.
-  if (sender && sender.contentView && !sender.contentView.webContents.isDestroyed()) {
-    sender.contentView.webContents.loadURL(url);
-  }
+  if (sender) openModal(sender, url);
+});
+
+ipcMain.on('close-modal', (event) => {
+  closeModal(getBundleFromEvent(event));
 });
 
 ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
