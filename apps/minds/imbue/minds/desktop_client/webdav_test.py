@@ -1,7 +1,9 @@
 """Unit tests for the /api/v1/files WebDAV mount."""
 
 import os
+import tempfile
 from pathlib import Path
+from uuid import uuid4
 
 from starlette.testclient import TestClient
 
@@ -73,15 +75,31 @@ def test_propfind_rejects_missing_auth(tmp_path: Path) -> None:
 
 # -- Share roots --
 
-# The /tmp share is the only one exercised here; the home share uses the
-# same provider class and the same auth wrapper, so the /tmp tests give
+# The tmp share is the only one exercised here; the home share uses the
+# same provider class and the same auth wrapper, so the tmp tests give
 # us full coverage of the wiring without monkeypatching ``Path.home``.
+#
+# The tmp share root is ``tempfile.gettempdir()`` (what ``webdav.py``
+# mounts), NOT a hardcoded ``/tmp``: under a ``TMPDIR`` override (e.g. the
+# sandboxed test runner) the two differ, and a hardcoded ``/tmp`` path
+# would not match the mounted provider and would 404. Deriving the test
+# paths from the same call the app uses keeps these correct in every
+# environment. Each file uses a unique name so parallel workers don't
+# collide in the shared tmp dir.
+
+
+def _tmp_share_root() -> Path:
+    return Path(tempfile.gettempdir())
+
+
+def _unique_tmp_file(suffix: str) -> Path:
+    return _tmp_share_root() / f"webdav-unit-test-{suffix}-{uuid4().hex}.txt"
 
 
 def test_get_serves_file_under_tmp(tmp_path: Path) -> None:
-    """A file at /tmp/<name> is reachable at /api/v1/files/tmp/<name>."""
+    """A file under the tmp share is reachable at /api/v1/files<path>."""
     client, api_key = _build_authenticated_client(tmp_path)
-    target = Path("/tmp/webdav-unit-test-tmp.txt")
+    target = _unique_tmp_file("get")
     target.write_bytes(b"hello via webdav")
     try:
         response = client.get(f"/api/v1/files{target}", headers=_auth_headers(api_key))
@@ -95,17 +113,16 @@ def test_propfind_on_tmp_returns_multistatus(tmp_path: Path) -> None:
     client, api_key = _build_authenticated_client(tmp_path)
     response = client.request(
         "PROPFIND",
-        "/api/v1/files/tmp",
+        f"/api/v1/files{_tmp_share_root()}",
         headers={"Depth": "0", **_auth_headers(api_key)},
     )
     assert response.status_code == 207
     assert b"<ns0:multistatus" in response.content
-    assert b"/tmp/" in response.content
 
 
 def test_put_creates_file_under_tmp(tmp_path: Path) -> None:
     client, api_key = _build_authenticated_client(tmp_path)
-    target = Path("/tmp/webdav-unit-test-put.txt")
+    target = _unique_tmp_file("put")
     target.unlink(missing_ok=True)
     try:
         response = client.put(
@@ -121,7 +138,7 @@ def test_put_creates_file_under_tmp(tmp_path: Path) -> None:
 
 def test_put_overwrites_existing_file(tmp_path: Path) -> None:
     client, api_key = _build_authenticated_client(tmp_path)
-    target = Path("/tmp/webdav-unit-test-overwrite.txt")
+    target = _unique_tmp_file("overwrite")
     target.write_bytes(b"original")
     try:
         response = client.put(
@@ -137,7 +154,7 @@ def test_put_overwrites_existing_file(tmp_path: Path) -> None:
 
 def test_delete_removes_file_under_tmp(tmp_path: Path) -> None:
     client, api_key = _build_authenticated_client(tmp_path)
-    target = Path("/tmp/webdav-unit-test-delete.txt")
+    target = _unique_tmp_file("delete")
     target.write_bytes(b"goodbye")
     response = client.request(
         "DELETE",
