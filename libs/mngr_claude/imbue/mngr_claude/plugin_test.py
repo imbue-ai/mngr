@@ -54,7 +54,6 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
-from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr_claude.claude_config import ClaudeDirectoryNotTrustedError
@@ -4122,9 +4121,11 @@ def _make_offline_host_with_volume(
 ) -> OfflineHostWithVolume:
     """Build an OfflineHostWithVolume backed by the local provider's host_dir volume.
 
-    The volume is rooted at the provider's host_dir (the same root used for the
-    online path), so agent state lives at host_dir/agents/<id>/... and is read
-    back through the HostFileReadInterface exactly as on a real stopped host.
+    The local provider's ``get_volume_for_host`` returns a volume rooted at the
+    provider's host_dir (the same root used for the online path), which the
+    readable offline host resolves lazily. Agent state lives at
+    host_dir/agents/<id>/... and is read back through the HostFileReadInterface
+    exactly as on a real stopped host.
     """
     now = datetime.now(timezone.utc)
     offline_host = OfflineHost(
@@ -4138,7 +4139,7 @@ def _make_offline_host_with_volume(
         provider_instance=local_provider,
         mngr_ctx=temp_mngr_ctx,
     )
-    return OfflineHostWithVolume.from_offline_host(offline_host, LocalVolume(root_path=local_provider.host_dir))
+    return OfflineHostWithVolume.from_offline_host(offline_host)
 
 
 def _populate_volume_session_files(volume_root: Path, agent_id: AgentId) -> dict[str, Path]:

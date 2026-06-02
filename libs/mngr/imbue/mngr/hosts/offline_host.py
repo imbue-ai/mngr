@@ -404,24 +404,19 @@ class OfflineHostWithVolume(OfflineHost, HostFileReadInterface):
     _is_volume_resolved: bool = PrivateAttr(default=False)
 
     @classmethod
-    def from_offline_host(cls, host: OfflineHost, host_volume: Volume | None = None) -> "OfflineHostWithVolume":
+    def from_offline_host(cls, host: OfflineHost) -> "OfflineHostWithVolume":
         """Build a readable offline host from a plain OfflineHost.
 
-        ``host_volume`` may be passed to seed the volume eagerly (e.g. in tests
-        or when it is already known); otherwise it is resolved lazily from the
-        provider on first read.
+        The volume is resolved lazily from the provider on first read (see the
+        class docstring); it is never supplied up front.
         """
-        readable = cls(
+        return cls(
             id=host.id,
             certified_host_data=host.certified_host_data,
             provider_instance=host.provider_instance,
             mngr_ctx=host.mngr_ctx,
             on_updated_host_data=host.on_updated_host_data,
         )
-        if host_volume is not None:
-            readable._resolved_volume = host_volume
-            readable._is_volume_resolved = True
-        return readable
 
     def _volume(self) -> Volume | None:
         """Return the host's volume, resolving (and caching) it on first use."""

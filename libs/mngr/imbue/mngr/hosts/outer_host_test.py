@@ -1,5 +1,6 @@
 """Unit tests for OuterHost and the outer-host accessors."""
 
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -14,6 +15,7 @@ from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.hosts.outer_host import create_local_pyinfra_host
 from imbue.mngr.hosts.outer_host import create_ssh_pyinfra_host_using_user_config
 from imbue.mngr.interfaces.data_types import PyinfraConnector
+from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 
@@ -62,6 +64,53 @@ def test_outer_host_local_executes_command(temp_mngr_ctx: MngrContext) -> None:
     result = outer.execute_idempotent_command("echo hello-from-outer")
     assert result.success
     assert "hello-from-outer" in result.stdout
+
+
+def test_outer_host_list_directory_local(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """list_directory on a local OuterHost reports entries with absolute paths and types."""
+    root = tmp_path / "tree"
+    (root / "sub").mkdir(parents=True)
+    (root / "sub" / "nested.txt").write_text("n")
+    (root / "top.txt").write_text("t")
+
+    outer = OuterHost(
+        id=HostId.generate(),
+        connector=PyinfraConnector(create_local_pyinfra_host()),
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    # Non-recursive: only the immediate children.
+    shallow = {entry.path: entry.file_type for entry in outer.list_directory(root)}
+    assert shallow == {
+        str(root / "sub"): VolumeFileType.DIRECTORY,
+        str(root / "top.txt"): VolumeFileType.FILE,
+    }
+
+    # Recursive: descends into subdirectories.
+    deep = {entry.path for entry in outer.list_directory(root, recursive=True)}
+    assert str(root / "sub" / "nested.txt") in deep
+
+    # A missing directory yields an empty list rather than raising.
+    assert outer.list_directory(root / "does-not-exist") == []
+
+
+def test_outer_host_list_directory_local_symlink_to_dir_is_not_directory(
+    temp_mngr_ctx: MngrContext, tmp_path: Path
+) -> None:
+    """A symlink to a directory is classified as FILE (lstat semantics), matching the remote path."""
+    root = tmp_path / "tree"
+    (root / "real_dir").mkdir(parents=True)
+    (root / "link").symlink_to(root / "real_dir")
+
+    outer = OuterHost(
+        id=HostId.generate(),
+        connector=PyinfraConnector(create_local_pyinfra_host()),
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    by_path = {entry.path: entry.file_type for entry in outer.list_directory(root)}
+    assert by_path[str(root / "real_dir")] == VolumeFileType.DIRECTORY
+    assert by_path[str(root / "link")] == VolumeFileType.FILE
 
 
 def test_host_is_outer_host_interface() -> None:
