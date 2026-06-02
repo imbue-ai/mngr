@@ -11,7 +11,6 @@ the defaults and the source/destination args.
 """
 
 import shlex
-import subprocess
 from collections.abc import Sequence
 from contextlib import nullcontext
 from pathlib import Path
@@ -36,6 +35,7 @@ from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import UncommittedChangesMode
 from imbue.mngr.utils.deps import RSYNC
+from imbue.mngr.utils.interactive_subprocess import run_command_in_terminal
 from imbue.mngr.utils.rsync_utils import parse_rsync_output
 
 # (user, hostname, port, private_key_path) -- matches OnlineHostInterface.get_ssh_connection_info().
@@ -208,9 +208,7 @@ def _do_rsync(
         if run_in_terminal:
             with log_span("{} files from {} to {}", direction, source_str, destination_str):
                 logger.debug("Running rsync command: {}", shlex.join(rsync_cmd))
-                terminal_result = subprocess.run(rsync_cmd)
-            if terminal_result.returncode != 0:
-                raise MngrError(f"rsync exited with status {terminal_result.returncode}")
+                run_command_in_terminal(rsync_cmd)
             rsync_stdout = ""
         elif remote_host.is_local:
             cmd_str = shlex.join(rsync_cmd)

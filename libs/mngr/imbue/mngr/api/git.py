@@ -16,7 +16,6 @@ around a sync operation.
 
 import os
 import shlex
-import subprocess
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Iterator
@@ -40,6 +39,7 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import UncommittedChangesMode
 from imbue.mngr.utils.git_utils import get_current_branch
 from imbue.mngr.utils.git_utils import is_git_repository
+from imbue.mngr.utils.interactive_subprocess import run_command_in_terminal
 
 # (user, hostname, port, private_key_path) -- matches OnlineHostInterface.get_ssh_connection_info().
 _SshConnectionInfo = tuple[str, str, int, Path]
@@ -373,17 +373,9 @@ def _default_push_refspec(
 
 
 def _run_git_command(cmd: list[str], env: dict[str, str] | None, cg: ConcurrencyGroup, run_in_terminal: bool) -> None:
-    """Run ``cmd`` either via cg (captured) or as a plain subprocess (passthrough).
-
-    Passthrough mode skips the cg wrapper and lets ``git`` own the user's stdin,
-    stdout, and stderr -- so progress, errors, and pager-style output flow
-    directly to the terminal. We still wait for ``git`` to exit, so the caller
-    can run cleanup (stash pop, etc.) afterwards.
-    """
+    """Run ``cmd`` either via cg (captured) or with terminal-stdio passthrough."""
     if run_in_terminal:
-        result = subprocess.run(cmd, env=env)
-        if result.returncode != 0:
-            raise GitSyncError(f"git exited with status {result.returncode}")
+        run_command_in_terminal(cmd, env=env, error_class=GitSyncError)
         return
     try:
         cg.run_process_to_completion(cmd, env=env)
