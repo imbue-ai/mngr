@@ -608,7 +608,7 @@ def test_pr_has_changelog_entry() -> None:
 def test_every_project_has_changelog_layout() -> None:
     """Ensure every project (libs/<name>, apps/<name>, and the synthetic dev)
     has the full changelog layout: ``CHANGELOG.md``, ``UNABRIDGED_CHANGELOG.md``,
-    and a ``changelog/`` directory for per-PR entries.
+    and a ``changelog/.gitkeep`` anchoring the directory for per-PR entries.
 
     Mirrors ``test_every_project_has_test_ratchets_file`` and
     ``test_every_project_has_pypi_readme``: a symmetric requirement that
@@ -617,19 +617,20 @@ def test_every_project_has_changelog_layout() -> None:
     missing: list[str] = []
     for project in all_known_projects(_REPO_ROOT):
         proj_dir = get_project_dir(project, _REPO_ROOT)
-        for required in ("CHANGELOG.md", "UNABRIDGED_CHANGELOG.md"):
-            target = proj_dir / required
+        required = [
+            proj_dir / "CHANGELOG.md",
+            proj_dir / "UNABRIDGED_CHANGELOG.md",
+            project_entries_dir(project, _REPO_ROOT) / ".gitkeep",
+        ]
+        for target in required:
             if not target.exists():
                 missing.append(str(target.relative_to(_REPO_ROOT)))
-        entries = project_entries_dir(project, _REPO_ROOT)
-        if not entries.is_dir():
-            missing.append(f"{entries.relative_to(_REPO_ROOT)}/ (directory)")
 
     assert not missing, (
         "The following projects are missing required changelog-layout files:\n"
         + "\n".join(f"  - {m}" for m in missing)
         + "\n\nEvery project must have CHANGELOG.md (with an '## [Unreleased]' heading), "
-        "UNABRIDGED_CHANGELOG.md, and a changelog/ directory."
+        "UNABRIDGED_CHANGELOG.md, and a changelog/ directory containing a .gitkeep."
     )
 
 
