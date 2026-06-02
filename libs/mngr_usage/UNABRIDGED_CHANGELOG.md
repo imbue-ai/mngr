@@ -4,6 +4,28 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-01
+
+Added a "cron automation recipes" doc (`docs/cron_recipes.md`), linked from the
+README, with worked examples of driving `mngr` from `cron` using check mode
+(`mngr usage --format json`) rather than the blocking `mngr usage wait`, plus a
+shared `spare-capacity.sh` helper (exit 0 when the 5h window still has budget and
+the week is under pace):
+
+- Use up an about-to-expire 5h window: one cron job owns a dedicated agent's whole
+  lifecycle, starting it in the tail of an open 5h window when there's spare
+  capacity and stopping it once the window rolls over or the week falls off pace.
+- Warm a fresh 5h window early: when the last recorded window has elapsed, nudge a
+  dedicated warming agent to fire one prompt and open the next window so it resets
+  partway through your work rather than a full 5h later.
+- Dispatch a queue of task files: launch an agent per task file from the project
+  repo, only while there's spare capacity, capped by a shared `queue=live` label;
+  finished agents are stopped and relabeled `queue=in-review` for later review.
+
+The usage plugin contributes its cron-recipes documentation as a `mngr help` topic via mngr's `register_help_topics` hook. With the plugin installed, `mngr help` lists `usage_cron_recipes` ("mngr usage: Cron automation recipes") and `mngr help usage_cron_recipes` renders the cron automation recipes. The topic's body is the plugin's `cron_recipes.md`, now shipped inside the wheel (`force-include`) so it works in a PyPI install; the key and description are namespaced so they are unambiguous in the global topic list.
+
+The `usage_cron_recipes` help topic's `DocFile` now carries a GitHub `source_url`, so when `mngr help usage_cron_recipes` is shown in an interactive terminal, its relative links (e.g. `[Waiting on a predicate](../README.md#waiting-on-a-predicate)`) are rewritten to clickable absolute GitHub URLs instead of dead relative targets.
+
 ## 2026-05-28
 
 # Dropped redundant per-project ty/ruff ratchet tests
