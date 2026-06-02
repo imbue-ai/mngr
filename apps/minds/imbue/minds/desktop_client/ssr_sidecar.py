@@ -314,12 +314,17 @@ class SsrSidecar(MutableModel):
         env["ELECTRON_RUN_AS_NODE"] = "1"
         cmd = _resolve_node_command(self.server_entry)
         logger.info("Starting SSR sidecar: {} (port={})", " ".join(cmd), port)
+        # bufsize is left at the default (-1, default buffer size). Python
+        # emits a RuntimeWarning if ``bufsize=1`` is paired with
+        # ``text=False`` because line buffering only applies in text
+        # mode; the binary readline loop in _pump_stdout works correctly
+        # with the default buffered binary reader, and Node flushes
+        # stdout per ``console.log`` so log lines remain visible.
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             env=env,
-            bufsize=1,
             text=False,
         )
         client = httpx.Client(
