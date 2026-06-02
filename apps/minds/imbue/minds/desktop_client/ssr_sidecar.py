@@ -26,11 +26,13 @@ Health probe: ``GET /__ssr/health`` returns 200 ``{"status":"ok"}`` when
 the sidecar's HTTP server is up. ``wait_ready`` polls for a bounded
 duration after launch.
 
-This class is intentionally minimal: it owns the subprocess and an
-``httpx.Client`` aimed at it. Concurrency control (start_new_thread,
-restart-on-crash bookkeeping) is delegated to a caller-supplied
-:class:`ConcurrencyGroup` so the lifecycle composes with the rest of the
-desktop client's threading model.
+Concurrency model: matches the pattern used by ``EnvelopeStreamConsumer``
+and ``PermissionRequestsConsumer`` -- a single fire-and-forget worker
+thread registered on the caller-supplied ``ConcurrencyGroup`` with
+``is_checked=False``, which loops over (pump stdout into the logger
+until the subprocess dies) -> (backoff) -> (respawn) until ``stop`` sets
+the shutdown event. This keeps a transient ``OSError`` from re-raising
+from the CG's ``__exit__`` and avoids leaking threads on every restart.
 """
 
 import os
@@ -97,8 +99,19 @@ class SsrSidecar:
 
     Thread-safety: ``start``, ``stop``, and ``render`` are safe to call
     from any thread. Internal state is guarded by a ``threading.RLock``;
-    the subprocess and the http client are stable references once
-    ``start`` returns.
+    the subprocess and the http client are stable references between
+    spawns -- the supervisor thread swaps them under the lock when it
+    detects a crash and respawns.
+
+    Lifecycle: call ``start(concurrency_group)`` once; it does the
+    synchronous first-spawn (picks port, opens an httpx client, launches
+    the subprocess, waits for the health endpoint) and registers a
+    single supervisor thread with ``is_checked=False``. The supervisor
+    pumps the subprocess's stdout into the logger; when the subprocess
+    exits the supervisor sleeps for the current backoff, picks a fresh
+    port, and respawns. ``stop`` sets the shutdown event and terminates
+    the subprocess, which the supervisor observes between iterations
+    and exits.
     """
 
     def __init__(
@@ -107,33 +120,44 @@ class SsrSidecar:
         server_entry: Path,
         manifest_path: Path | None = None,
         vite_dev_url: str | None = None,
-        port: int | None = None,
         ready_timeout_seconds: float = _DEFAULT_READY_TIMEOUT_SECONDS,
         render_timeout_seconds: float = _RENDER_TIMEOUT_SECONDS,
-        parent_cg: ConcurrencyGroup | None = None,
     ) -> None:
         self._server_entry = server_entry
         self._manifest_path = manifest_path
         self._vite_dev_url = vite_dev_url
-        self._port = port if port is not None else _pick_free_port()
         self._ready_timeout_seconds = ready_timeout_seconds
         self._render_timeout_seconds = render_timeout_seconds
-        self._parent_cg = parent_cg
+        # ``_port`` is rebound on every spawn so a re-leased port doesn't
+        # produce a permanent EADDRINUSE backoff after the first restart.
+        self._port: int | None = None
         self._proc: subprocess.Popen[bytes] | None = None
         self._client: httpx.Client | None = None
         self._lock = threading.RLock()
         self._shutting_down = threading.Event()
-        self._supervisor_thread: threading.Thread | None = None
 
     @property
     def base_url(self) -> str:
+        if self._port is None:
+            raise SsrSidecarError("SSR sidecar is not started")
         return f"http://127.0.0.1:{self._port}"
 
-    def start(self) -> None:
-        """Spawn the sidecar and wait for it to report healthy.
+    def start(self, concurrency_group: ConcurrencyGroup) -> None:
+        """Spawn the sidecar, wait until healthy, register the supervisor.
 
-        Raises :class:`SsrSidecarError` if the sidecar fails to come up
-        within ``ready_timeout_seconds``.
+        Synchronously: picks a free port, opens an ``httpx.Client``,
+        launches the subprocess, and polls the health endpoint until it
+        returns 200 (or the ready timeout elapses).
+
+        Asynchronously: registers a single daemon supervisor thread on
+        ``concurrency_group`` with ``is_checked=False`` (matching the
+        ``EnvelopeStreamConsumer`` / ``PermissionRequestsConsumer``
+        pattern). The supervisor self-loops over log-pumping +
+        respawn-on-crash until ``stop`` sets the shutdown event.
+
+        Raises :class:`SsrSidecarError` if the initial spawn fails or
+        the sidecar does not become ready within
+        ``ready_timeout_seconds``.
         """
         # Vite emits the SSR bundle as plain ``.js``, but the bundle uses
         # ESM syntax. Without a ``"type": "module"`` package.json sibling
@@ -142,42 +166,16 @@ class SsrSidecar:
         # next to the entry once silences the warning for both dev and
         # packaged builds.
         self._ensure_esm_marker()
-        with self._lock:
-            if self._proc is not None and self._proc.poll() is None:
-                return
-            env = os.environ.copy()
-            env["MINDS_SSR_PORT"] = str(self._port)
-            if self._manifest_path is not None:
-                env["MINDS_VITE_MANIFEST"] = str(self._manifest_path)
-            if self._vite_dev_url is not None:
-                env["MINDS_VITE_DEV_URL"] = self._vite_dev_url
-            env["ELECTRON_RUN_AS_NODE"] = "1"
-            cmd = _resolve_node_command(self._server_entry)
-            logger.info("Starting SSR sidecar: {} (port={})", " ".join(cmd), self._port)
-            self._proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                env=env,
-                bufsize=1,
-                text=False,
-            )
-            self._client = httpx.Client(
-                base_url=self.base_url,
-                timeout=self._render_timeout_seconds,
-            )
-            if self._parent_cg is not None:
-                self._supervisor_thread = self._parent_cg.start_new_thread(
-                    target=self._supervise_loop,
-                    name="ssr-sidecar-supervisor",
-                    daemon=True,
-                )
-                self._parent_cg.start_new_thread(
-                    target=self._pump_logs,
-                    name="ssr-sidecar-log-pump",
-                    daemon=True,
-                )
+        self._spawn()
         self.wait_ready()
+        concurrency_group.start_new_thread(
+            target=self._supervise_loop,
+            name="ssr-sidecar-supervisor",
+            daemon=True,
+            # Fire-and-forget: any transient OSError from poll() or httpx
+            # during shutdown must not re-raise from the CG's __exit__.
+            is_checked=False,
+        )
 
     def wait_ready(self, timeout: float | None = None) -> None:
         """Poll the sidecar's health endpoint until it returns 200."""
@@ -186,12 +184,16 @@ class SsrSidecar:
         while time.monotonic() < deadline:
             if self._shutting_down.is_set():
                 raise SsrSidecarError("SSR sidecar wait_ready interrupted by shutdown")
-            if self._proc is not None and self._proc.poll() is not None:
+            with self._lock:
+                proc = self._proc
+                client = self._client
+            if proc is not None and proc.poll() is not None:
                 raise SsrSidecarError(
-                    f"SSR sidecar exited during startup with code {self._proc.returncode}"
+                    f"SSR sidecar exited during startup with code {proc.returncode}"
                 )
+            if client is None:
+                raise SsrSidecarError("SSR sidecar wait_ready called before spawn")
             try:
-                client = self._require_client()
                 response = client.get(_HEALTH_PATH, timeout=1.0)
                 if response.status_code == 200:
                     return
@@ -222,8 +224,10 @@ class SsrSidecar:
         """Render a route to an HTML string via the sidecar.
 
         Raises :class:`SsrSidecarError` on any transport or render-side
-        failure. Callers fall back to a client-render shell that embeds
-        ``{ "route": route, "props": props }`` for client-side hydration.
+        failure (including the brief window when the supervisor is
+        respawning the subprocess). Callers fall back to a client-render
+        shell that embeds ``{ "route": route, "props": props }`` for
+        client-side hydration.
         """
         client = self._require_client()
         try:
@@ -241,7 +245,11 @@ class SsrSidecar:
         return response.text
 
     def stop(self) -> None:
-        """Terminate the sidecar and close the HTTP client."""
+        """Terminate the sidecar and close the HTTP client.
+
+        Sets the shutdown event first so the supervisor thread exits on
+        its next iteration instead of attempting another respawn.
+        """
         self._shutting_down.set()
         with self._lock:
             proc = self._proc
@@ -280,55 +288,103 @@ class SsrSidecar:
             raise SsrSidecarError("SSR sidecar is not started")
         return client
 
-    def _supervise_loop(self) -> None:
-        """Background loop that restarts the sidecar on crash.
+    def _spawn(self) -> None:
+        """Pick a fresh port, spawn the subprocess, open a matching client.
 
-        Runs in the parent ConcurrencyGroup. Returns when the
-        ``_shutting_down`` event is set, which the lifespan teardown
-        triggers via :meth:`stop`.
+        Closes any previous client first. A fresh port per spawn avoids
+        a permanent EADDRINUSE backoff failure on restart when the OS
+        has re-leased the port we picked at construction time.
+        """
+        port = _pick_free_port()
+        env = os.environ.copy()
+        env["MINDS_SSR_PORT"] = str(port)
+        if self._manifest_path is not None:
+            env["MINDS_VITE_MANIFEST"] = str(self._manifest_path)
+        if self._vite_dev_url is not None:
+            env["MINDS_VITE_DEV_URL"] = self._vite_dev_url
+        env["ELECTRON_RUN_AS_NODE"] = "1"
+        cmd = _resolve_node_command(self._server_entry)
+        logger.info("Starting SSR sidecar: {} (port={})", " ".join(cmd), port)
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env,
+            bufsize=1,
+            text=False,
+        )
+        client = httpx.Client(
+            base_url=f"http://127.0.0.1:{port}",
+            timeout=self._render_timeout_seconds,
+        )
+        with self._lock:
+            previous_client = self._client
+            self._port = port
+            self._proc = proc
+            self._client = client
+        if previous_client is not None:
+            previous_client.close()
+
+    def _supervise_loop(self) -> None:
+        """Single-thread supervisor: pumps stdout, respawns on crash.
+
+        Each iteration:
+            1. Reads ``self._proc.stdout`` line-by-line into loguru
+               until the read loop hits EOF (i.e. the subprocess has
+               closed its stdout, which happens when it exits).
+            2. Checks the shutdown event; if set, exits.
+            3. Sleeps for the current backoff (interruptible by
+               ``stop``), then respawns and resets the backoff to the
+               initial value once the new process reports healthy.
+
+        Reading ``self._proc`` per iteration (not capturing it once at
+        the top) is what lets the log pump and crash watcher live in a
+        single thread without losing track of the current subprocess
+        after a respawn. Running as ``is_checked=False`` means any
+        transient OSError here does not propagate to the CG's __exit__.
         """
         backoff = _RESTART_BACKOFF_INITIAL_SECONDS
         while not self._shutting_down.is_set():
             with self._lock:
                 proc = self._proc
-            if proc is None:
-                # ``stop`` clears the slot; that's our exit signal.
+            if proc is None or proc.stdout is None:
+                # stop() has cleared the subprocess slot; we're done.
                 return
-            exit_code = proc.poll()
-            if exit_code is None:
-                backoff = _RESTART_BACKOFF_INITIAL_SECONDS
-                time.sleep(0.5)
-                continue
-            logger.warning("SSR sidecar exited with code {}; restarting in {}s", exit_code, backoff)
-            time.sleep(backoff)
+            self._pump_stdout(proc)
             if self._shutting_down.is_set():
                 return
+            exit_code = proc.poll()
+            logger.warning(
+                "SSR sidecar exited with code {}; restarting in {}s", exit_code, backoff
+            )
+            if self._shutting_down.wait(timeout=backoff):
+                return
             try:
-                self._restart_locked()
+                self._spawn()
+                self.wait_ready()
             except SsrSidecarError as exc:
                 logger.error("SSR sidecar restart failed: {}", exc)
-            backoff = min(backoff * 2, _RESTART_BACKOFF_MAX_SECONDS)
+                backoff = min(backoff * 2, _RESTART_BACKOFF_MAX_SECONDS)
+                continue
+            backoff = _RESTART_BACKOFF_INITIAL_SECONDS
 
-    def _restart_locked(self) -> None:
-        with self._lock:
-            if self._client is not None:
-                self._client.close()
-                self._client = None
-            self._proc = None
-        self.start()
+    def _pump_stdout(self, proc: subprocess.Popen[bytes]) -> None:
+        """Forward ``proc``'s stdout into loguru, one line at a time.
 
-    def _pump_logs(self) -> None:
-        """Forward the subprocess's stdout into loguru, one line at a time."""
-        with self._lock:
-            proc = self._proc
-        if proc is None or proc.stdout is None:
+        Blocks until the read loop hits EOF (i.e. ``proc`` has closed
+        its stdout, which happens when it exits). Catches and logs any
+        I/O error so the supervisor loop survives transient pipe
+        failures and can move on to the respawn step.
+        """
+        stdout = proc.stdout
+        if stdout is None:
             return
         try:
-            for raw_line in iter(proc.stdout.readline, b""):
+            for raw_line in iter(stdout.readline, b""):
                 if not raw_line:
                     break
                 text = raw_line.rstrip(b"\n").decode("utf-8", errors="replace")
                 if text:
                     logger.bind(component="ssr-sidecar").info(text)
-        except Exception as exc:
+        except OSError as exc:
             logger.warning("SSR sidecar log pump exited: {}", exc)

@@ -3453,10 +3453,9 @@ def create_desktop_client(
             server_entry=_server_entry,
             manifest_path=_manifest_path if _manifest_path.exists() else None,
             vite_dev_url=_vite_dev_url,
-            parent_cg=root_concurrency_group,
         )
         try:
-            ssr_sidecar.start()
+            ssr_sidecar.start(root_concurrency_group)
         except SsrSidecarError as exc:
             logger.warning("SSR sidecar failed to start; using client-render fallback: {}", exc)
             ssr_sidecar = None
