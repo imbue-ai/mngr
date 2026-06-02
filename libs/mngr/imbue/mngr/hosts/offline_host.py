@@ -374,7 +374,7 @@ class OfflineHost(BaseHost):
 
 
 class OfflineHostWithVolume(OfflineHost, HostFileReadInterface, HostFileWriteInterface):
-    """An offline host whose persisted storage volume is still readable (and writable).
+    """An offline host whose persisted storage volume is still readable and writable.
 
     A plain :class:`OfflineHost` exposes only last-known metadata. When the
     provider also surfaces a persistent volume for the host, the host's files
@@ -402,6 +402,14 @@ class OfflineHostWithVolume(OfflineHost, HostFileReadInterface, HostFileWriteInt
     volume-relative one by stripping the ``host_dir`` prefix.
     """
 
+    # Lazy-resolution cache for the host's volume. The two attrs together encode
+    # three states: not-yet-resolved (_is_volume_resolved is False); resolved to a
+    # volume (_resolved_volume is the volume); and resolved to *no* volume
+    # (_is_volume_resolved is True, _resolved_volume is None). The last state
+    # exists because make_readable_offline_host wraps every offline host without
+    # probing the provider up front, so a host whose provider turns out to expose
+    # no volume is still this type -- its reads/writes then no-op rather than
+    # hitting a volume.
     _resolved_volume: Volume | None = PrivateAttr(default=None)
     _is_volume_resolved: bool = PrivateAttr(default=False)
 
