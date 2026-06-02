@@ -9,7 +9,6 @@ spawning a real Node subprocess is the acceptance test's job).
 
 from pathlib import Path
 
-import httpx
 from starlette.testclient import TestClient
 
 from imbue.minds.desktop_client.app import create_desktop_client
