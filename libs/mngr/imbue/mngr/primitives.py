@@ -16,6 +16,7 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import RandomId
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.imbue_common.pure import pure
 
 # === Enums ===
 
@@ -520,6 +521,21 @@ class SSHInfo(FrozenModel):
         "(ssh falls back to the user's ssh-agent / ~/.ssh/config)",
     )
     command: str = Field(description="Full SSH command to connect")
+
+
+@pure
+def build_user_ssh_command(user: str, hostname: str, port: int, key_path: Path | None) -> str:
+    """Build the human-readable ``ssh`` command shown to users for connecting to a host.
+
+    Omits ``-i`` when key_path is None (no mngr-owned key; ssh uses the user's
+    ssh-agent / ~/.ssh/config), so the displayed command never contains an empty
+    ``-i ''`` argument.
+    """
+    parts = ["ssh"]
+    if key_path is not None:
+        parts.extend(["-i", str(key_path)])
+    parts.extend(["-p", str(port), f"{user}@{hostname}"])
+    return " ".join(parts)
 
 
 class DiscoveredHost(FrozenModel):

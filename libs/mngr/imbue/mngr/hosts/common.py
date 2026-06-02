@@ -62,21 +62,6 @@ def build_ssh_transport_command(
     return " ".join(parts)
 
 
-@pure
-def build_user_ssh_command(user: str, hostname: str, port: int, key_path: Path | None) -> str:
-    """Build the human-readable ``ssh`` command shown to users for connecting to a host.
-
-    Omits ``-i`` when key_path is None (no mngr-owned key; ssh uses the user's
-    ssh-agent / ~/.ssh/config), so the displayed command never contains an empty
-    ``-i ''`` argument.
-    """
-    parts = ["ssh"]
-    if key_path is not None:
-        parts.extend(["-i", str(key_path)])
-    parts.extend(["-p", str(port), f"{user}@{hostname}"])
-    return " ".join(parts)
-
-
 def add_safe_directory_on_remote(host: OnlineHostInterface, path: Path) -> None:
     """Add a git safe.directory entry on a remote host.
 
