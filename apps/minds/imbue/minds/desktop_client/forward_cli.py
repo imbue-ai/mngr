@@ -126,6 +126,11 @@ class EnvelopeStreamConsumer(MutableModel):
     # blocks on the event so `minds run` can learn the port at startup.
     _listening_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _listening_port: int | None = PrivateAttr(default=None)
+    # Mirror of the plugin's per-agent ``ForwardResolver`` service map, fed by
+    # ``resolver_snapshot`` envelopes. Used by minds' recovery-diagnostics path
+    # to render Q7 (whether the plugin has seen the agent's system_interface).
+    # Empty dict on a fresh / restarted plugin until the first envelope arrives.
+    _resolver_snapshot_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
 
     # -- Public callback registration -------------------------------------
 
@@ -146,8 +151,9 @@ class EnvelopeStreamConsumer(MutableModel):
 
         The callback receives ``(agent_id, reason, status_code)``. ``reason``
         is a ``SystemInterfaceBackendFailureReason`` enum value (CONNECT_ERROR /
-        SSE_EOF / FIVEXX_RESPONSE / UNRESOLVED); ``status_code`` is set
-        only when ``reason == SystemInterfaceBackendFailureReason.FIVEXX_RESPONSE``.
+        SSE_EOF / ERROR_RESPONSE / UNRESOLVED); ``status_code`` is set when
+        ``reason`` is ``ERROR_RESPONSE`` (the backend's non-2xx status) and
+        ``None`` otherwise.
         Used by minds to feed its ``SystemInterfaceHealthTracker``.
         """
         with self._lock:
@@ -537,10 +543,41 @@ class EnvelopeStreamConsumer(MutableModel):
 
     # -- Forward-stream payloads ------------------------------------------
 
+    def get_resolver_snapshot_for_agent(self, agent_id: AgentId) -> dict[str, str]:
+        """Return the latest plugin-side service map for ``agent_id``.
+
+        Returns an empty dict if no ``resolver_snapshot`` envelope has been
+        seen for this agent yet (plugin restarted, or agent not yet
+        published its services). The caller should treat the empty case
+        as "no entry yet" -- it is not evidence of failure.
+        """
+        with self._lock:
+            return dict(self._resolver_snapshot_by_agent.get(str(agent_id), {}))
+
+    def _handle_resolver_snapshot(self, payload: dict[str, Any]) -> None:
+        """Record the latest per-agent service map from a ``resolver_snapshot`` envelope."""
+        services_by_agent = payload.get("services_by_agent")
+        if not isinstance(services_by_agent, dict):
+            logger.warning("Malformed resolver_snapshot envelope: {}", payload)
+            return
+        new_snapshot: dict[str, dict[str, str]] = {}
+        for aid, services in services_by_agent.items():
+            if not isinstance(aid, str) or not isinstance(services, dict):
+                continue
+            entry: dict[str, str] = {}
+            for service_name, url in services.items():
+                if isinstance(service_name, str) and isinstance(url, str):
+                    entry[service_name] = url
+            new_snapshot[aid] = entry
+        with self._lock:
+            self._resolver_snapshot_by_agent = new_snapshot
+
     def _handle_forward_payload(self, payload: dict[str, Any]) -> None:
         payload_type = payload.get("type")
         if payload_type == "reverse_tunnel_established":
             logger.trace("Ignoring reverse_tunnel_established envelope: {}", payload)
+        elif payload_type == "resolver_snapshot":
+            self._handle_resolver_snapshot(payload)
         elif payload_type == "system_interface_backend_failure":
             try:
                 agent_id = AgentId(str(payload["agent_id"]))

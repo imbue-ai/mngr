@@ -15,6 +15,7 @@ from http.server import BaseHTTPRequestHandler
 from http.server import HTTPServer
 from pathlib import Path
 
+import httpx
 import pytest
 from pydantic import AnyUrl
 from pydantic import Field
@@ -30,6 +31,7 @@ from imbue.minds.desktop_client.agent_creator import _is_local_path
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
+from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
@@ -354,10 +356,10 @@ def test_wait_for_workspace_ready_returns_when_probe_succeeds(tmp_path) -> None:
             probe_timeout_seconds=0.5,
         )
         log_q: queue.Queue[str] = queue.Queue()
-        # Use a localhost URL that resolves to the same server. Subdomains
-        # of localhost all resolve to 127.0.0.1, so an http.server bound to
-        # 127.0.0.1 answers regardless of the Host header. Construct a
-        # plausible-looking AgentId so the probe URL is well-formed.
+        # The probe connects to the plugin on loopback and carries the agent
+        # vhost only in the Host header, so the http.server bound to 127.0.0.1
+        # answers it without any ``*.localhost`` name resolution. Construct a
+        # plausible-looking AgentId so the Host header is well-formed.
         aid = AgentId.generate()
         creator._wait_for_workspace_ready(aid, log_q)
     finally:
@@ -366,24 +368,27 @@ def test_wait_for_workspace_ready_returns_when_probe_succeeds(tmp_path) -> None:
     while not log_q.empty():
         drained.append(log_q.get_nowait())
     assert any("Waiting for system interface" in line for line in drained)
-    assert any("ready" in line.lower() for line in drained)
+    # Assert the *success* line specifically -- the timeout-warning line also
+    # contains the word "ready", so a substring check would pass on a timeout.
+    assert any("System interface is ready" in line for line in drained)
 
 
-def test_wait_for_workspace_ready_calls_record_success_on_ready(tmp_path) -> None:
+def test_wait_for_workspace_ready_calls_record_probe_success_on_ready(tmp_path) -> None:
     """Regression: a successful readiness probe must propagate to the health tracker.
 
-    Without the ``record_success`` call, a HEALTHY->STUCK timer armed by an
-    earlier ``system_interface_backend_failure`` envelope would fire AFTER readiness
-    returned, the chrome SSE would receive ``status=stuck``, and the user
-    would land on the workspace-recovery page seconds after their freshly
-    created agent appeared healthy. See ``system_interface_health.py`` for
-    the timer's lifecycle.
+    Without the ``record_probe_success`` call, the agent stays enrolled as a
+    suspect probe target after an earlier ``system_interface_backend_failure``
+    envelope, the background probe loop keeps accumulating a probe-failure run
+    while the container warms up, and the agent would be driven to STUCK --
+    landing the user on the recovery page seconds after their freshly created
+    agent appeared healthy. See ``system_interface_health.py`` for the
+    suspect / probe-failure-run lifecycle.
     """
     tracker = SystemInterfaceHealthTracker()
     aid = AgentId.generate()
-    # Pre-arm the STUCK timer the way an in-flight warmup failure would.
-    # The agent stays HEALTHY until the 5s timer fires; we want to verify
-    # ``record_success`` cancels the timer before that.
+    # Enroll the agent as a suspect the way an in-flight warmup failure would.
+    # The agent stays HEALTHY; we want to verify ``record_probe_success``
+    # de-enrolls it so the background probe loop stops polling it.
     tracker.record_failure(aid)
     assert tracker.get_health(aid) == AgentHealth.HEALTHY
     server, _thread, port = _start_scripted_server(not_ready_count=0)
@@ -400,11 +405,68 @@ def test_wait_for_workspace_ready_calls_record_success_on_ready(tmp_path) -> Non
         creator._wait_for_workspace_ready(aid, queue.Queue())
     finally:
         server.shutdown()
-    # ``record_success`` cancelled the timer + cleared first_failure_at, so
-    # any subsequent record_failure would arm a fresh timer (i.e. the
-    # tracker is no longer mid-failing-run for this agent).
+    # ``record_probe_success`` de-enrolled the agent, so it is no longer a
+    # probe target and the background loop will stop polling it.
     assert tracker.get_health(aid) == AgentHealth.HEALTHY
     assert aid not in tracker.snapshot_all()
+    assert aid not in tracker.snapshot_probe_targets()
+
+
+def test_probe_workspace_through_plugin_targets_root_path() -> None:
+    """The probe hits ``/``, carrying the agent vhost in the Host header.
+
+    Probing ``/`` deliberately decouples readiness from any particular app
+    running inside the workspace: a 200 only confirms that some web server is
+    answering on the inner port, with no assumption about which routes it
+    implements.
+    """
+    captured: list[httpx.Request] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, text="ok")
+
+    aid = AgentId.generate()
+    with httpx.Client(transport=httpx.MockTransport(_capture)) as client:
+        status = probe_workspace_through_plugin(
+            mngr_forward_port=18999,
+            preauth_cookie="any-preauth",
+            agent_id=aid,
+            probe_timeout_seconds=0.5,
+            client=client,
+        )
+
+    assert status == 200
+    assert len(captured) == 1
+    assert captured[0].url.path == "/"
+    # The agent vhost rides the Host header, not the URL host, so the probe
+    # does not depend on ``*.localhost`` resolution.
+    assert captured[0].headers["host"] == f"{aid}.localhost"
+
+
+def test_probe_workspace_through_plugin_surfaces_non_200_status() -> None:
+    """A non-200 from the probed route surfaces as that status (not None / not 200).
+
+    When the inner port answers but not with a 200 (e.g. a 503 while the server
+    is still warming up), the probe returns that status so the caller's
+    ``== 200`` check treats the workspace as unready and the background loop
+    records a probe failure, driving the agent toward STUCK.
+    """
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(503, text="Service Unavailable")
+
+    with httpx.Client(transport=httpx.MockTransport(_capture)) as client:
+        status = probe_workspace_through_plugin(
+            mngr_forward_port=18999,
+            preauth_cookie="any-preauth",
+            agent_id=AgentId.generate(),
+            probe_timeout_seconds=0.5,
+            client=client,
+        )
+
+    assert status == 503
 
 
 def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:
