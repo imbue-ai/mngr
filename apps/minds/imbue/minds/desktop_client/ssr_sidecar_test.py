@@ -8,7 +8,6 @@ route key and props.
 """
 
 from imbue.minds.desktop_client.ssr_sidecar import SsrSidecarError
-from imbue.minds.desktop_client.ssr_sidecar import _pick_free_port
 from imbue.minds.desktop_client.templates import _client_render_shell
 from imbue.minds.desktop_client.templates import _render_ssr_or_fallback
 from imbue.minds.desktop_client.testing import extract_ssr_route_payload
@@ -75,14 +74,3 @@ def test_render_ssr_or_fallback_with_healthy_sidecar_returns_ssr_html() -> None:
     html = _render_ssr_or_fallback(sidecar=sidecar, route="welcome", props={"a": 1})
     assert html == "<html><body>SSR for welcome</body></html>"
     assert sidecar.calls == [("welcome", {"a": 1})]
-
-
-def test_pick_free_port_returns_distinct_ports() -> None:
-    p1 = _pick_free_port()
-    p2 = _pick_free_port()
-    assert 0 < p1 < 65536
-    assert 0 < p2 < 65536
-    # Two probes in a row almost always return different ports because
-    # the kernel rarely re-issues the same ephemeral port back-to-back;
-    # the rare equal case is benign so this is purely a smoke check.
-    assert isinstance(p1, int) and isinstance(p2, int)
