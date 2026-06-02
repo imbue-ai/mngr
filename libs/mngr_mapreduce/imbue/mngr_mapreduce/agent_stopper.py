@@ -62,7 +62,7 @@ class AgentStopper(MutableModel):
             target=stop_agent_on_host,
             args=(host, agent_id, agent_name),
             name=f"stop-{agent_name}",
-            # Anything that escapes ``stop_agent_on_host``'s own ``(MngrError, HostError)``
+            # Anything that escapes ``stop_agent_on_host``'s own ``MngrError``
             # catch (e.g. an unwrapped ``OSError`` from paramiko) is logged via
             # ObservableThread's error logger, but we don't want it to crash the drain
             # ``join()`` -- the stops are best-effort cleanup.

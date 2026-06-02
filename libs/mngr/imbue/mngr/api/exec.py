@@ -202,7 +202,7 @@ def _get_online_host_for_agents(
             host_interface, is_start_desired=is_start_desired, provider=provider
         )
         return started_host
-    except (MngrError, UserInputError) as e:
+    except MngrError as e:
         for match in agent_list:
             is_should_abort = _record_failure(
                 result,
