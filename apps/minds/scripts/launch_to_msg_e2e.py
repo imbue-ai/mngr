@@ -150,14 +150,15 @@ def snap(name: str) -> None:
 
 
 async def snap_page(page: Page, name: str) -> None:
-    """Both Playwright per-page shot AND macOS desktop shot.
+    """Full-desktop macOS screencapture only.
 
-    Raise this page's BrowserWindow to the top of the macOS z-order
-    BEFORE the screencapture; otherwise the full-desktop shot just
-    captures whatever Minds window the WindowServer has at front
-    (usually still the original /welcome window because Playwright
-    routes UI events through CDP, never through a real mouse click
-    that would update WindowServer focus).
+    bring_to_front is best-effort -- CDP page activation does not move
+    the OS-level z-order, so 00 / 02 / 04 / 04b / 06 typically capture
+    the unauthenticated /welcome BrowserWindow rather than the page
+    the test is exercising. Only milestones that open a dedicated
+    BrowserWindow (07c / 07d permission-request) reliably render
+    correctly. Per-window Playwright `.win.png` capture is disabled --
+    the workflow embeds only the full-desktop `.png` inline now.
     """
     try:
         await page.set_viewport_size({"width": 1280, "height": 800})
@@ -167,10 +168,13 @@ async def snap_page(page: Page, name: str) -> None:
         await page.bring_to_front()
     except Exception as e:
         logger.warning("  bring_to_front[{}] failed: {}", name, e)
-    try:
-        await page.screenshot(path=str(SCREENSHOT_DIR / f"{name}.win.png"), full_page=True)
-    except Exception as e:
-        logger.warning("  page-shot[{}] failed: {}", name, e)
+    # NOTE: per-window playwright .win.png shots disabled per user
+    # preference for full-desktop only. Re-enable by un-commenting if
+    # window-content correctness becomes the priority again.
+    # try:
+    #     await page.screenshot(path=str(SCREENSHOT_DIR / f"{name}.win.png"), full_page=True)
+    # except Exception as e:
+    #     logger.warning("  page-shot[{}] failed: {}", name, e)
     snap(name)
 
 
