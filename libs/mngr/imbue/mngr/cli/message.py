@@ -6,6 +6,7 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
+from imbue.mngr.api.find import collect_required_provider_names
 from imbue.mngr.api.message import MessageResult
 from imbue.mngr.api.message import send_message_to_agents
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
@@ -44,7 +45,6 @@ class MessageCliOptions(CommonCliOptions):
     agent_list: tuple[AgentAddress, ...]
     message_content: str | None
     message_file: str | None
-    provider: tuple[str, ...]
     on_error: str
     start: bool
 
@@ -83,11 +83,6 @@ class MessageCliOptions(CommonCliOptions):
     type=click.Choice(["abort", "continue"], case_sensitive=False),
     default="continue",
     help="What to do when errors occur: abort (stop immediately) or continue (keep going)",
-)
-@optgroup.option(
-    "--provider",
-    multiple=True,
-    help="Message only agents using specified provider (repeatable)",
 )
 @add_common_options
 @click.pass_context
@@ -135,6 +130,11 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
 
     error_behavior = ErrorBehavior(opts.on_error.upper())
 
+    # Restrict discovery to the providers named by the agent addresses; if any
+    # address omits a provider, fall back to a full scan.
+    provider_filter = collect_required_provider_names(agent_addresses)
+    provider_names = tuple(str(p) for p in provider_filter) if provider_filter is not None else None
+
     # Build include filters from agent addresses.
     include_filters: list[str] = []
     if agent_addresses:
@@ -163,7 +163,7 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
             is_start_desired=opts.start,
             on_success=lambda agent_name: _emit_jsonl_success(agent_name),
             on_error=lambda agent_name, error: _emit_jsonl_error(agent_name, error),
-            provider_names=opts.provider,
+            provider_names=provider_names,
         )
         if result.failed_agents:
             ctx.exit(1)
@@ -178,7 +178,7 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
         all_agents=False,
         error_behavior=error_behavior,
         is_start_desired=opts.start,
-        provider_names=opts.provider,
+        provider_names=provider_names,
     )
 
     _emit_output(result, output_opts)
