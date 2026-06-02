@@ -84,10 +84,11 @@ _SLACK_AVAILABLE_PAYLOAD: dict[str, object] = {
         {
             "scope": "slack-api",
             "display_name": "Slack",
+            "description": "Any interaction with the Slack API.",
             "permissions": [
-                "slack-read-all",
-                "slack-write-all",
-                "slack-chat-read",
+                {"name": "slack-read-all", "description": "All read operations across the Slack API."},
+                {"name": "slack-write-all"},
+                {"name": "slack-chat-read"},
             ],
         },
     ],
