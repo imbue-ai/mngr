@@ -6,9 +6,7 @@ import pytest
 
 from imbue.mngr.api.rsync import RsyncResult
 from imbue.mngr.cli.output_helpers import AbortError
-from imbue.mngr.cli.output_helpers import _write_json_line
 from imbue.mngr.cli.output_helpers import emit_event
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import emit_info
 from imbue.mngr.cli.output_helpers import format_size
@@ -18,6 +16,7 @@ from imbue.mngr.cli.output_helpers import output_git_push_success
 from imbue.mngr.cli.output_helpers import output_rsync_result
 from imbue.mngr.cli.output_helpers import render_format_template
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
@@ -153,20 +152,6 @@ def test_on_error_stores_original_exception() -> None:
     with pytest.raises(AbortError) as exc_info:
         on_error("test error", ErrorBehavior.ABORT, OutputFormat.HUMAN, exc=original)
     assert exc_info.value.original_exception is original
-
-
-# =============================================================================
-# Tests for emit_final_json
-# =============================================================================
-
-
-def test_emit_final_json_outputs_json(capsys: pytest.CaptureFixture[str]) -> None:
-    """emit_final_json should output JSON data."""
-    emit_final_json({"status": "success", "count": 5})
-    captured = capsys.readouterr()
-    output = json.loads(captured.out.strip())
-    assert output["status"] == "success"
-    assert output["count"] == 5
 
 
 # =============================================================================
@@ -432,13 +417,13 @@ def test_write_human_line_with_args(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 # =============================================================================
-# Tests for _write_json_line
+# Tests for write_json_line
 # =============================================================================
 
 
 def test_write_json_line_outputs_json(capsys: pytest.CaptureFixture[str]) -> None:
-    """_write_json_line should output valid JSON followed by newline."""
-    _write_json_line({"key": "value", "number": 42})
+    """write_json_line should output valid JSON followed by newline."""
+    write_json_line({"key": "value", "number": 42})
     captured = capsys.readouterr()
     output = json.loads(captured.out.strip())
     assert output["key"] == "value"
@@ -446,8 +431,8 @@ def test_write_json_line_outputs_json(capsys: pytest.CaptureFixture[str]) -> Non
 
 
 def test_write_json_line_terminates_with_newline(capsys: pytest.CaptureFixture[str]) -> None:
-    """_write_json_line should terminate output with newline."""
-    _write_json_line({"a": 1})
+    """write_json_line should terminate output with newline."""
+    write_json_line({"a": 1})
     captured = capsys.readouterr()
     assert captured.out.endswith("\n")
 

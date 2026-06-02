@@ -1,4 +1,4 @@
-const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app, session, screen } = require('electron');
+const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app, session, screen, clipboard } = require('electron');
 const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
@@ -69,6 +69,37 @@ function toAbsoluteUrl(url) {
   if (!url) return url;
   if (url.startsWith('/') && backendBaseUrl) return backendBaseUrl + url;
   return url;
+}
+
+// Classify a URL as "external" -- i.e. something that should open in the
+// user's default browser rather than inside the app. All in-app navigation
+// (the minds backend, the mngr_forward plugin, and every
+// `agent-<id>.localhost` workspace subdomain) lives on localhost, so anything
+// off-localhost over http(s), plus mail/tel links, is treated as external.
+// Non-web schemes (file:, about:, blob:, data:, devtools:, etc.) are internal
+// app machinery and must never be handed to shell.openExternal.
+function isExternalUrl(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    // Malformed but still clearly an http(s) link -- e.g. an agent emitted
+    // "https://example.com (note)" and the space/parens got encoded into the
+    // host, which makes `new URL` throw. Treat it as external so it routes to
+    // the browser (which shows a normal error page) instead of falling through
+    // to 'allow' and spawning a chrome-less Electron popup that hangs on
+    // ERR_NAME_NOT_RESOLVED. mailto:/tel: aren't handled here: a malformed one
+    // can't be opened meaningfully, so we let it stay internal (a no-op).
+    return /^https?:\/\//i.test(url);
+  }
+  if (parsed.protocol === 'mailto:' || parsed.protocol === 'tel:') return true;
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+  const host = parsed.hostname.toLowerCase();
+  if (host === 'localhost' || host.endsWith('.localhost')) return false;
+  // URL.hostname wraps IPv6 literals in brackets, so the loopback parses as
+  // `[::1]`, not `::1`.
+  if (host === '127.0.0.1' || host === '[::1]') return false;
+  return true;
 }
 
 // Build the auth-bridge URL that, when loaded, installs a session cookie on
@@ -440,6 +471,72 @@ function registerShortcutsFor(bundle, wc) {
       return;
     }
   });
+}
+
+// Route external links to the user's default browser instead of navigating
+// the in-app view (which would clobber the workspace UI) or spawning a bare
+// chrome-less Electron window. Covers both `target="_blank"` / `window.open`
+// (via setWindowOpenHandler) and ordinary link clicks / JS navigations (via
+// will-frame-navigate, which -- unlike will-navigate -- also fires for clicks
+// inside the iframes that the workspace UI embeds agent content in). In-app
+// (localhost) navigation is left untouched so workspace, home, and
+// request-page links keep working. The `setImmediate` defer around
+// openExternal follows Electron's security guide.
+function applyExternalLinkHandling(wc) {
+  // Defer per Electron's security guide. shell.openExternal returns a Promise
+  // that rejects when the OS has no handler for the scheme -- realistic for
+  // mailto:/tel: on machines with no mail client or dialer configured. We must
+  // catch (an unhandled rejection terminates the main process under the bundled
+  // Node runtime), but rather than silently no-op we log and surface the failure
+  // to the user so the click is recoverable instead of vanishing.
+  const openInBrowser = (url) => {
+    setImmediate(() => {
+      shell.openExternal(url).catch((err) => {
+        console.warn('[external-link] failed to open', url, err);
+        notifyOpenFailed(url);
+      });
+    });
+  };
+  wc.setWindowOpenHandler(({ url }) => {
+    if (isExternalUrl(url)) {
+      openInBrowser(url);
+      return { action: 'deny' };
+    }
+    // Internal popups keep Electron's default behavior (unchanged from before
+    // this handler existed).
+    return { action: 'allow' };
+  });
+  // Use will-frame-navigate (not will-navigate) so external link clicks inside
+  // embedded iframes are caught too. It is a superset of will-navigate -- it
+  // fires for the main frame as well -- so listening to both would double-fire
+  // and open two browser tabs for a top-level external navigation.
+  wc.on('will-frame-navigate', (details) => {
+    if (!isExternalUrl(details.url)) return;
+    details.preventDefault();
+    openInBrowser(details.url);
+  });
+}
+
+// Surface a failed shell.openExternal to the user instead of letting the click
+// vanish. For mailto:/tel: the useful payload is the bare address (to paste into
+// webmail or a dialer), not the scheme-prefixed URL, so copy that.
+function notifyOpenFailed(url) {
+  let scheme = '';
+  try {
+    scheme = new URL(url).protocol.replace(':', '');
+  } catch {
+    // Unparseable url -- fall through with an empty scheme and copy it verbatim.
+  }
+  const isAddressScheme = scheme === 'mailto' || scheme === 'tel';
+  const payload = isAddressScheme ? url.slice(url.indexOf(':') + 1) : url;
+  clipboard.writeText(payload);
+  const what = scheme === 'mailto' ? 'email address'
+    : scheme === 'tel' ? 'phone number'
+    : 'link';
+  new Notification({
+    title: "Couldn't open link",
+    body: `No app is set up to handle this ${what}. It has been copied to your clipboard.`,
+  }).show();
 }
 
 // -- Sidebar / requests panel helpers (per-bundle) --
@@ -1216,6 +1313,13 @@ async function syncContentCookiesToDefaultSession() {
 }
 
 async function onReady() {
+  // Send external links to the user's default browser for every WebContents
+  // the app ever creates (all four bundle views plus any popup windows),
+  // rather than wiring each view individually. Registered before the first
+  // bundle is created so it covers the initial chrome/content views too.
+  app.on('web-contents-created', (_event, contents) => {
+    applyExternalLinkHandling(contents);
+  });
   installApplicationMenu();
   installDockMenu();
   setupContentPartitionCookieSync();
