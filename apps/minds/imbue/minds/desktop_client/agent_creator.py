@@ -415,11 +415,13 @@ _DEFAULT_AGENT_NAME: Final[AgentName] = AgentName("system-services")
 _FAST_MODE_REQUIRE: Final[str] = "require"
 _FAST_MODE_PREVENT: Final[str] = "prevent"
 
-# Substring of the imbue_cloud provider's ``FastPathUnavailableError`` that
-# appears in ``mngr create``'s stderr traceback when ``fast_mode=require`` finds
-# no exact-attribute pool match. minds matches this to fall back to the slow
-# path. Kept in sync with ``imbue.mngr_imbue_cloud.errors.FastPathUnavailableError``.
-_FAST_PATH_UNAVAILABLE_MARKER: Final[str] = "FastPathUnavailableError"
+# ``error_class`` of the imbue_cloud provider's ``FastPathUnavailableError``,
+# emitted by ``mngr create --format jsonl`` as a structured
+# ``{"event": "error", "error_class": ...}`` line when ``fast_mode=require``
+# finds no exact-attribute pool match. minds matches on this (not on
+# human-formatted error text) to fall back to the slow path. Kept in sync with
+# ``imbue.mngr_imbue_cloud.errors.FastPathUnavailableError``.
+_FAST_PATH_UNAVAILABLE_ERROR_CLASS: Final[str] = "FastPathUnavailableError"
 
 
 def _build_mngr_create_command(
@@ -696,6 +698,14 @@ class _CreateEventCapture(MutableModel):
         default=None,
         description="Populated alongside ``canonical_agent_id`` from the same JSONL event",
     )
+    error_class: str | None = Field(
+        default=None,
+        description=(
+            "Populated when a JSONL ``error`` event is seen on stdout. Carries mngr's exception "
+            "class name (e.g. ``FastPathUnavailableError``) so callers can branch on the error "
+            "*type* instead of substring-matching human-formatted text."
+        ),
+    )
 
     def __call__(self, line: str, is_stdout: bool) -> None:
         if self.inner_on_output is not None:
@@ -709,7 +719,15 @@ class _CreateEventCapture(MutableModel):
             event = json.loads(stripped)
         except json.JSONDecodeError:
             return
-        if not isinstance(event, dict) or event.get("event") != "created":
+        if not isinstance(event, dict):
+            return
+        event_type = event.get("event")
+        if event_type == "error":
+            error_class_raw = event.get("error_class")
+            if isinstance(error_class_raw, str) and error_class_raw:
+                self.error_class = error_class_raw
+            return
+        if event_type != "created":
             return
         agent_id_raw = event.get("agent_id")
         if isinstance(agent_id_raw, str) and agent_id_raw:
@@ -798,7 +816,8 @@ def run_mngr_create(
             "mngr create failed (exit code {}):\n{}".format(
                 result.returncode,
                 result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
-            )
+            ),
+            error_class=capture.error_class,
         )
 
     if capture.canonical_agent_id is None or capture.canonical_host_id is None:
@@ -1458,16 +1477,18 @@ class AgentCreator(MutableModel):
         The first attempt requests ``fast_mode=require`` -- the imbue_cloud
         provider adopts a pre-baked pool host whose attributes exactly match.
         If none is available the provider raises ``FastPathUnavailableError``,
-        which surfaces through ``mngr create``'s stderr; minds matches it and
-        retries with ``fast_mode=prevent``, which leases any available host and
-        rebuilds it from the FCT Dockerfile (full client-side setup). Any other
-        failure (including a genuinely empty pool) propagates unchanged.
+        which ``mngr create --format jsonl`` surfaces as a structured
+        ``{"event": "error", "error_class": "FastPathUnavailableError"}`` line;
+        minds matches on that ``error_class`` and retries with
+        ``fast_mode=prevent``, which leases any available host and rebuilds it
+        from the FCT Dockerfile (full client-side setup). Any other failure
+        (including a genuinely empty pool) propagates unchanged.
         """
         log_queue.put("[minds] Trying fast path (adopt a matching pre-baked pool host)...")
         try:
             return _attempt_mngr_create(_FAST_MODE_REQUIRE, attempt_params)
         except MngrCommandError as exc:
-            if _FAST_PATH_UNAVAILABLE_MARKER not in str(exc):
+            if exc.error_class != _FAST_PATH_UNAVAILABLE_ERROR_CLASS:
                 raise
             logger.info("imbue_cloud fast path unavailable; retrying with the slow path (full rebuild)")
             log_queue.put(

@@ -35,3 +35,11 @@ flow, surfaced while standing up a fresh dev environment:
   `run_mngr_create`) after `GH_TOKEN` had been removed end-to-end as unused, so
   the param no longer matched `run_mngr_create`'s signature and the field was
   never supplied at the construction site. Removed the leftover `gh_token`.
+- Fixed the imbue_cloud fast->slow path fallback. minds decided whether to fall
+  back from `fast_mode=require` by substring-matching `"FastPathUnavailableError"`
+  in `mngr create`'s output, but mngr surfaces that error as a clean
+  `Error: <message>` with no class name -- so the marker never matched and the
+  create failed instead of falling back to the slow (rebuild) path. minds now
+  parses the structured `{"event":"error","error_class":...}` JSONL record (see
+  the mngr-side change), threading `error_class` through `_CreateEventCapture` ->
+  `MngrCommandError` and branching on it in `_create_imbue_cloud_with_fallback`.
