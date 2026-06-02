@@ -120,15 +120,22 @@ class LockNotHeldError(HostError):
     """Raised when attempting to use a lock that is not held."""
 
 
-class AgentError(BaseMngrError):
-    """Base class for agent-related errors."""
+class AgentError(MngrError):
+    """Base class for agent-related errors.
+
+    Inherits from MngrError (not just BaseMngrError) so that agent errors are
+    ClickException instances: when they reach the CLI they render as a clean
+    ``Error: ...`` message (plus any user_help_text) instead of a traceback,
+    and ``except MngrError`` handlers treat them as the user-facing errors
+    they are.
+    """
 
 
 class NoCommandDefinedError(AgentError, ValueError):
     """Raised when no command is defined for an agent type."""
 
 
-class AgentNotFoundError(AgentError, MngrError):
+class AgentNotFoundError(AgentError):
     """No agent with this ID exists."""
 
     user_help_text = "Use 'mngr list' to see available agents."
@@ -158,7 +165,7 @@ class SendMessageError(AgentError):
         super().__init__(f"Failed to send message to agent {agent_name}: {reason}")
 
 
-class DuplicateAgentNameError(AgentError, MngrError):
+class DuplicateAgentNameError(AgentError):
     """An agent with this name already exists on the host."""
 
     user_help_text = (
@@ -388,7 +395,7 @@ class LocalHostNotDestroyableError(ProviderError):
         super().__init__(provider_name, "Cannot destroy the local host - it is your local computer")
 
 
-class PluginSpecifierError(BaseMngrError, ValueError):
+class PluginSpecifierError(MngrError, ValueError):
     """Raised when a plugin specifier is invalid or cannot be resolved."""
 
 
@@ -481,7 +488,7 @@ class BinaryNotInstalledError(MngrError):
         super().__init__(f"{binary} is required for {purpose} but was not found on PATH")
 
 
-class DiscoverySchemaChangedError(BaseMngrError, ValueError):
+class DiscoverySchemaChangedError(MngrError, ValueError):
     """Raised when a discovery event line cannot be validated against the current schema.
 
     This typically means a field was added, removed, or renamed in a discovery event
@@ -497,7 +504,7 @@ class DiscoverySchemaChangedError(BaseMngrError, ValueError):
         super().__init__(f"Discovery event of type {event_type!r} does not match current schema: {validation_error}")
 
 
-class MalformedJsonlLineError(BaseMngrError, ValueError):
+class MalformedJsonlLineError(MngrError, ValueError):
     """Raised when a JSONL line is structurally invalid (e.g. not a JSON object, missing required envelope fields).
 
     The right fix is to track down whichever process is producing the bad line and stop it

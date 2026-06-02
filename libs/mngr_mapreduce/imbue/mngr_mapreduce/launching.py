@@ -15,7 +15,6 @@ from imbue.mngr.api.data_types import CreateAgentResult
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.api.rsync import rsync_to_remote
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import AgentError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.host import AgentDataOptions
 from imbue.mngr.interfaces.host import AgentGitOptions
@@ -446,7 +445,7 @@ def launch_all_mappers(
                 info, host = future.result()
                 agents.append(info)
                 agent_hosts[str(info.agent_id)] = host
-            except (MngrError, AgentError, OSError, BaseExceptionGroup) as exc:
+            except (MngrError, OSError, BaseExceptionGroup) as exc:
                 logger.warning("Failed to launch agent for {}: {}", task.id, exc)
                 launch_failures.append(_make_launch_failure_metadata(task.id, agent_name, branch_name, exc))
 
@@ -507,7 +506,7 @@ def launch_mappers_up_to_limit(
                 )
             )
             continue
-        except (MngrError, AgentError, OSError, BaseExceptionGroup) as exc:
+        except (MngrError, OSError, BaseExceptionGroup) as exc:
             logger.warning("Failed to launch agent for {}: {}", task.id, exc)
             launch_failures.append(_make_launch_failure_metadata(task.id, agent_name, branch_name, exc))
             continue
