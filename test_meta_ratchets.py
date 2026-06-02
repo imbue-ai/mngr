@@ -617,13 +617,14 @@ def test_every_project_has_changelog_layout() -> None:
     missing: list[str] = []
     for project in all_known_projects(_REPO_ROOT):
         proj_dir = get_project_dir(project, _REPO_ROOT)
-        for required in ("CHANGELOG.md", "UNABRIDGED_CHANGELOG.md"):
-            target = proj_dir / required
+        required = [
+            proj_dir / "CHANGELOG.md",
+            proj_dir / "UNABRIDGED_CHANGELOG.md",
+            project_entries_dir(project, _REPO_ROOT) / ".gitkeep",
+        ]
+        for target in required:
             if not target.exists():
                 missing.append(str(target.relative_to(_REPO_ROOT)))
-        gitkeep = project_entries_dir(project, _REPO_ROOT) / ".gitkeep"
-        if not gitkeep.exists():
-            missing.append(str(gitkeep.relative_to(_REPO_ROOT)))
 
     assert not missing, (
         "The following projects are missing required changelog-layout files:\n"
