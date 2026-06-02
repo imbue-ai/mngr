@@ -270,7 +270,15 @@ def test_render_dev_styleguide_page_surfaces_tokens_and_macro_widgets() -> None:
     # The accent picker section is a separate runtime variable, not a :root token.
     assert "--workspace-accent" in html
     # Each pattern block should be present.
-    for header in ("Titlebar buttons", "Window controls", "Sidebar items", "Accent spine", "Spinner", "Buttons", "Notices"):
+    for header in (
+        "Titlebar buttons",
+        "Window controls",
+        "Sidebar items",
+        "Accent spine",
+        "Spinner",
+        "Buttons",
+        "Notices",
+    ):
         assert header in html, f"missing pattern: {header}"
     # The buttons / notices / inputs are rendered through _macros.html; these
     # assertions verify that the macro output (button label, notice copy, input
@@ -295,6 +303,6 @@ def test_dev_styleguide_token_swatches_enumerate_root_declarations() -> None:
     assert declared == surfaced, (
         f"tokens.css :root declares {sorted(declared)} but the styleguide "
         f"surfaces {sorted(surfaced)}. Add or remove a "
-        f"`data-token=\"--<name>\"` swatch in templates/dev_styleguide.html "
+        f'`data-token="--<name>"` swatch in templates/dev_styleguide.html '
         f"to match."
     )
