@@ -1,0 +1,1 @@
+Regenerated the `mngr usage` command reference docs to include the new `--preserved` / `--no-preserved` flag (on `mngr usage` and `mngr usage wait`). The behavior itself lives in the `mngr_usage` plugin; this is just the generated CLI doc reflecting it.
