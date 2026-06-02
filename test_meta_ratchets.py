@@ -616,8 +616,7 @@ def test_every_project_has_changelog_layout() -> None:
 
     The ``.gitkeep`` is required because git does not track empty directories:
     once consolidation drains a project's last entry, the ``changelog/`` dir
-    would vanish without it. Checking for it here catches the omission when a
-    project is added, not silently later when it is first consolidated.
+    would vanish without it.
     """
     missing: list[str] = []
     for project in all_known_projects(_REPO_ROOT):
