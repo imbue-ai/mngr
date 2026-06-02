@@ -186,7 +186,6 @@ def test_landing_page_shows_login_when_unauthenticated(tmp_path: Path) -> None:
     response = client.get("/")
 
     assert response.status_code == 200
-    assert response.status_code == 200
     payload = json.loads(
         re.search(
             r'<script type="application/json" id="__route__">(.+?)</script>',
