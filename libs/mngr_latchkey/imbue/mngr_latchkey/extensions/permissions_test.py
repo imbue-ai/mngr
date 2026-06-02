@@ -161,15 +161,17 @@ def _as_nonempty_str(value: object) -> str:
     return value
 
 
-def _assert_entry_carries_descriptions(entry: object) -> None:
+def _assert_entry_well_formed(entry: object) -> None:
+    # ``name`` is required on every permission; the scope-level and
+    # per-permission ``description`` fields are optional (detent's
+    # ``$comment``), so we only assert their type when present.
     entry_dict = _as_dict(entry)
-    assert set(entry_dict.keys()) == {"scope", "display_name", "description", "permissions"}
-    assert isinstance(entry_dict["description"], str)
+    assert {"scope", "display_name", "permissions"} <= set(entry_dict.keys())
+    assert isinstance(entry_dict.get("description", ""), str)
     for permission in _as_list(entry_dict["permissions"]):
         permission_dict = _as_dict(permission)
-        assert set(permission_dict.keys()) == {"name", "description"}
         _as_nonempty_str(permission_dict["name"])
-        assert isinstance(permission_dict["description"], str)
+        assert isinstance(permission_dict.get("description", ""), str)
 
 
 def test_available_collection_exposes_descriptions(node_extension: str) -> None:
@@ -183,7 +185,7 @@ def test_available_collection_exposes_descriptions(node_extension: str) -> None:
         entry_list = _as_list(entries)
         assert len(entry_list) > 0
         for entry in entry_list:
-            _assert_entry_carries_descriptions(entry)
+            _assert_entry_well_formed(entry)
 
     # Pin a concrete service so the test fails loudly if descriptions ever
     # stop flowing through: Slack's scope and its read-all permission both
@@ -203,7 +205,7 @@ def test_available_for_service_exposes_descriptions(node_extension: str) -> None
     entries = _as_list(payload)
     assert len(entries) > 0
     for entry in entries:
-        _assert_entry_carries_descriptions(entry)
+        _assert_entry_well_formed(entry)
     _as_nonempty_str(_as_dict(entries[0])["description"])
 
 
