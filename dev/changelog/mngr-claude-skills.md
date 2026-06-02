@@ -8,8 +8,9 @@ teach Claude how to use mngr: `message-agent`, `wait-for-agent`, and
 the agent run `mngr help` for context whenever mngr comes up (and points at
 `mngr ask`).
 
-The skills invoke the installed `mngr` tool directly (not `uv run mngr`),
-so they work in any project, not just the mngr monorepo.
+The skills prefer the installed `mngr` tool so they work in any project (not
+just the mngr monorepo), while also allowing `uv run mngr` for use inside the
+monorepo.
 
 These skills previously lived only in this repo's project-level
 `.claude/skills/` directory; they have been moved into the plugin so any
