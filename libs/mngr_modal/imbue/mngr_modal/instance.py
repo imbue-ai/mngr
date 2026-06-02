@@ -519,6 +519,7 @@ class ModalProviderInstance(BaseProviderInstance):
             return None
         return host_volume
 
+    @handle_modal_auth_error
     def get_volume_reference_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
         """Return a host-volume *reference* without verifying it exists.
 

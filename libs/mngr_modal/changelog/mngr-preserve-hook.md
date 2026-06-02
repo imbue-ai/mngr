@@ -8,3 +8,8 @@ while offline (the destroy path obtains the host via `get_host`), and available
 to other readers of offline host data. The host's volume is resolved lazily on
 first read, so this adds no per-host probe to host discovery. When no volume is
 available, reads behave as "nothing there".
+
+The new `get_volume_reference_for_host` is wrapped so missing/expired Modal
+credentials surface as the user-friendly `ModalAuthError` (consistent with the
+other provider methods) rather than a raw proxy error, including when reached
+during offline-host construction.
