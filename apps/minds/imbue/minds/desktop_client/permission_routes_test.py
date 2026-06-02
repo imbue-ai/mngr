@@ -301,7 +301,7 @@ def test_get_permission_request_page_pre_checks_agent_requested_permissions(tmp_
 
 
 def test_get_permission_request_page_shows_descriptions_when_present(tmp_path: Path) -> None:
-    """detent's scope and per-permission descriptions are rendered on the dialog when present."""
+    """detent's per-permission descriptions are rendered next to each permission when present."""
     agent_id = AgentId()
     request = create_latchkey_predefined_permission_request_event(
         agent_id=str(agent_id),
@@ -317,10 +317,11 @@ def test_get_permission_request_page_shows_descriptions_when_present(tmp_path: P
 
     assert response.status_code == 200
     body = response.text
-    # The scope summary and the requested permission's summary both come
-    # from the catalog fixture's ``description`` fields.
-    assert "Any interaction with the Slack API." in body
+    # The requested permission's summary comes from the catalog fixture's
+    # per-permission ``description`` field.
     assert "All read operations across the Slack API." in body
+    # The scope-level description is intentionally not surfaced on the dialog.
+    assert "Any interaction with the Slack API." not in body
 
 
 def test_get_permission_request_page_renders_no_pre_checks_when_request_and_existing_are_empty(

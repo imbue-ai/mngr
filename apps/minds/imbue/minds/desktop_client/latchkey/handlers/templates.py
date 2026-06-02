@@ -59,7 +59,6 @@ def render_predefined_permission_dialog(
         rationale=rationale,
         display_name=service.display_name,
         scope=service.scope,
-        scope_description=service.description,
         permission_schemas=service.permission_schemas,
         description_by_permission_name=service.description_by_permission_name,
         checked_permissions=set(checked_permissions),
