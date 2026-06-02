@@ -1,16 +1,7 @@
-"""Bulk file upload to a host via a single rsync (instead of one SFTP write per file).
+"""Bulk file upload to a host: a single rsync instead of one SFTP write per file.
 
-Uploading files to a remote host one at a time -- a ``write_file``/``put_file`` call
-per file inside a loop -- is slow and fragile: each call is a separate round-trip (an
-SFTP channel open per file), which over an SSH tunnel scales linearly and has
-repeatedly caused upload timeouts and "connection reset / SSH protocol banner"
-failures (github issue 1825). ``upload_files_in_bulk`` stages everything into a local
-temp directory and transfers it with one ``host.copy_directory`` (rsync) call.
-
-This is the shared primitive behind ``Host.provision_agent``'s file transfers and the
-``mngr_recursive`` deploy-file upload. It takes the local host as an argument rather
-than resolving it itself, so it can live in ``mngr.hosts`` without importing
-``mngr.api.providers`` (which would create an import cycle via ``base_provider``).
+Per-file uploads opened an SFTP channel per file (a full SSH round-trip), which did
+not scale and caused upload timeouts / connection resets (github issue 1825).
 """
 
 import shutil
