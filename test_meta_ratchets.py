@@ -634,9 +634,7 @@ def test_every_project_has_changelog_layout() -> None:
         "The following projects are missing required changelog-layout files:\n"
         + "\n".join(f"  - {m}" for m in missing)
         + "\n\nEvery project must have CHANGELOG.md (with an '## [Unreleased]' heading), "
-        "UNABRIDGED_CHANGELOG.md, and a changelog/ directory containing a .gitkeep "
-        "(git does not track empty directories, so the .gitkeep keeps the directory "
-        "alive once consolidation drains its pending entries)."
+        "UNABRIDGED_CHANGELOG.md, and a changelog/ directory containing a .gitkeep."
     )
 
 
