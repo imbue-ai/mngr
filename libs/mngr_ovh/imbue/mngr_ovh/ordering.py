@@ -182,7 +182,7 @@ def order_and_wait_for_vps(
                 requested_datacenter=datacenter,
             )
             return service_name
-        except (MngrError, VpsApiError, VpsProvisioningError):
+        except MngrError:
             _safe_delete_cart(client, cart_id)
             raise
 
@@ -230,7 +230,7 @@ def _set_configuration(
 def _safe_delete_cart(client: OvhVpsClient, cart_id: str) -> None:
     try:
         client.call_api("DELETE", f"/order/cart/{cart_id}")
-    except (VpsApiError, MngrError) as e:
+    except MngrError as e:
         logger.debug("Failed to clean up OVH cart {}: {}", cart_id, e)
 
 
