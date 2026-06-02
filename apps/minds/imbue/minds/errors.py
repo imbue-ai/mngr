@@ -31,9 +31,20 @@ class GitOperationError(MindError):
 
 
 class MngrCommandError(MindError):
-    """Raised when an mngr CLI command fails."""
+    """Raised when an mngr CLI command fails (timed out, exited nonzero, or could not be launched).
 
-    ...
+    ``stdout`` carries whatever the process printed before failing. It is
+    retained so callers that tolerate partial output can still consume it --
+    e.g. ``mngr list --on-error continue``, whose JSON for the reachable hosts
+    is still usable when an unrelated provider was unreachable and the command
+    exited nonzero. It defaults to the empty string for the many failure points
+    that never ran a subprocess (validation errors, a process that failed to
+    launch at all, etc.).
+    """
+
+    def __init__(self, message: str, *, stdout: str = "") -> None:
+        super().__init__(message)
+        self.stdout = stdout
 
 
 class MalformedMngrOutputError(MindError, ValueError):

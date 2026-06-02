@@ -34,7 +34,6 @@ from pydantic import SecretStr
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
-from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.bootstrap import is_imbue_cloud_provider_enabled_for_account
 from imbue.minds.bootstrap import list_disabled_provider_names
@@ -113,6 +112,7 @@ from imbue.minds.desktop_client.templates import workspace_accent
 from imbue.minds.desktop_client.tunnel_token_injection import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.webdav import create_webdav_app
 from imbue.minds.errors import BackupProvisioningError
+from imbue.minds.errors import MngrCommandError
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupEncryptionMethod
 from imbue.minds.primitives import BackupProvider
@@ -2065,58 +2065,43 @@ def _handle_recovery_page(
     return HTMLResponse(content=html_body)
 
 
-class MngrRun(FrozenModel):
-    """Outcome of running an ``mngr`` subprocess: captured stdout plus a classified failure reason.
+def _run_mngr(concurrency_group: ConcurrencyGroup, argv: list[str], env: dict[str, str]) -> str:
+    """Run an ``mngr`` subprocess to completion and return its stdout.
 
-    ``stdout`` is whatever the process produced, retained even on a non-clean
-    exit so callers that tolerate partial output (e.g. ``mngr list --on-error
-    continue``) can still use it. ``failure_reason`` is None on a clean exit
-    (returncode 0, not timed out) and otherwise a human-readable description of
-    why the run did not exit cleanly.
+    Raises ``MngrCommandError`` for every non-clean outcome, mirroring how the
+    rest of minds shells out to mngr (``run_mngr_create``, the destroy cleanup):
+    a single rich domain error the caller catches once, rather than a status
+    field threaded alongside infra exceptions. The three non-clean outcomes are:
+
+    * a timeout (with ``is_checked_after=False`` a timeout comes back as a
+      finished process flagged ``is_timed_out`` rather than raising);
+    * a nonzero exit;
+    * a failure to launch at all -- ``OSError`` for fork/exec failures, and
+      ``ConcurrencyGroupError`` for the group's own setup / shutdown / strand
+      failures (``ProcessSetupError``, ``StrandTimedOutError``,
+      ``EnvironmentStoppedError``, ``InvalidConcurrencyGroupStateError``).
+
+    For the first two the process ran, so its partial ``stdout`` is attached to
+    the error (``MngrCommandError.stdout``) for callers that tolerate partial
+    output (e.g. ``mngr list --on-error continue``). A launch failure produces
+    no output, so ``stdout`` stays empty. On a clean exit the stdout is returned.
     """
-
-    stdout: str = Field(default="", description="Captured stdout (retained even on a non-clean exit).")
-    failure_reason: str | None = Field(
-        default=None, description="Why the run did not exit cleanly, or None on a clean exit."
-    )
-
-
-def _run_mngr(concurrency_group: ConcurrencyGroup, argv: list[str], env: dict[str, str]) -> MngrRun:
-    """Run an ``mngr`` subprocess to completion and classify the outcome.
-
-    A ``MngrRun`` is returned only for a process that actually ran to
-    completion: a clean exit, a timeout (with ``is_checked_after=False`` a
-    timeout comes back as a finished process flagged ``is_timed_out`` rather
-    than raising), or a nonzero exit. The latter two retain ``stdout`` so
-    callers that tolerate partial output (e.g. ``mngr list --on-error
-    continue``) can still use it.
-
-    The exceptions raised when the process could not be run at all propagate
-    unchanged -- ``OSError`` for fork/exec failures, and ``ConcurrencyGroupError``
-    for the group's own setup / shutdown / strand failures
-    (``ProcessSetupError``, ``StrandTimedOutError``, ``EnvironmentStoppedError``,
-    ``InvalidConcurrencyGroupStateError``). These are genuine exceptions -- the
-    command never ran -- so they keep normal traceback and propagation semantics
-    instead of being laundered into a return value. Each caller catches them at
-    the point where it knows how to surface the reason (a restart step marks the
-    health tracker failed; the host-health probe threads the reason into its
-    response).
-    """
-    finished = concurrency_group.run_process_to_completion(
-        argv,
-        timeout=_RESTART_COMMAND_TIMEOUT_SECONDS,
-        is_checked_after=False,
-        env=env,
-    )
+    try:
+        finished = concurrency_group.run_process_to_completion(
+            argv,
+            timeout=_RESTART_COMMAND_TIMEOUT_SECONDS,
+            is_checked_after=False,
+            env=env,
+        )
+    except (OSError, ConcurrencyGroupError) as exc:
+        # The command never ran (a fork/exec failure, or a concurrency-group
+        # setup/strand/shutdown failure), so there is no captured output.
+        raise MngrCommandError(str(exc)) from exc
     if finished.is_timed_out:
-        return MngrRun(
-            stdout=finished.stdout, failure_reason=f"timed out after {int(_RESTART_COMMAND_TIMEOUT_SECONDS)}s"
-        )
+        raise MngrCommandError(f"timed out after {int(_RESTART_COMMAND_TIMEOUT_SECONDS)}s", stdout=finished.stdout)
     if finished.returncode != 0:
-        return MngrRun(
-            stdout=finished.stdout, failure_reason=f"exited {finished.returncode}: {finished.stderr.strip()}"
-        )
-    return MngrRun(stdout=finished.stdout)
+        raise MngrCommandError(f"exited {finished.returncode}: {finished.stderr.strip()}", stdout=finished.stdout)
+    return finished.stdout
 
 
 def _await_system_interface_ready(
@@ -2203,25 +2188,17 @@ def _run_restart_sequence(
         logger.info("Skipping stop step for {} ({}): container already fully stopped", workspace_agent_id, tier_label)
     else:
         try:
-            stop_failure = _run_mngr(
-                concurrency_group, _build_mngr_stop_argv(mngr_binary, services_agent_id, is_host_restart), env
-            ).failure_reason
-        except (OSError, ConcurrencyGroupError) as exc:
-            stop_failure = str(exc)
-        if stop_failure is not None:
-            logger.warning("Stop step of {} for {} failed: {}", tier_label, workspace_agent_id, stop_failure)
-            tracker.mark_restart_failed(workspace_agent_id, f"Stop step of {tier_label} failed: {stop_failure}")
+            _run_mngr(concurrency_group, _build_mngr_stop_argv(mngr_binary, services_agent_id, is_host_restart), env)
+        except MngrCommandError as exc:
+            logger.warning("Stop step of {} for {} failed: {}", tier_label, workspace_agent_id, exc)
+            tracker.mark_restart_failed(workspace_agent_id, f"Stop step of {tier_label} failed: {exc}")
             return
 
     try:
-        start_failure = _run_mngr(
-            concurrency_group, _build_mngr_start_argv(mngr_binary, services_agent_id), env
-        ).failure_reason
-    except (OSError, ConcurrencyGroupError) as exc:
-        start_failure = str(exc)
-    if start_failure is not None:
-        logger.warning("Start step of {} for {} failed: {}", tier_label, workspace_agent_id, start_failure)
-        tracker.mark_restart_failed(workspace_agent_id, f"Start step of {tier_label} failed: {start_failure}")
+        _run_mngr(concurrency_group, _build_mngr_start_argv(mngr_binary, services_agent_id), env)
+    except MngrCommandError as exc:
+        logger.warning("Start step of {} for {} failed: {}", tier_label, workspace_agent_id, exc)
+        tracker.mark_restart_failed(workspace_agent_id, f"Start step of {tier_label} failed: {exc}")
         return
 
     # Without a plugin route there is no way to probe for recovery, so treat a
@@ -2367,40 +2344,34 @@ def _run_host_health_probe(
     services_agent_id = backend_resolver.get_system_services_agent_id(agent_id)
     list_argv = _build_mngr_host_state_argv(mngr_binary, agent_id, services_agent_id)
     list_command = shlex.join(list_argv)
+    list_error: str | None = None
     try:
-        list_run = _run_mngr(concurrency_group, list_argv, env)
-        list_stdout = list_run.stdout
-        list_error = list_run.failure_reason
-    except (OSError, ConcurrencyGroupError) as exc:
-        # A launch / group failure means the listing never ran, so there is no
-        # partial output to keep; record the reason and continue with an empty
-        # listing so the rest of the response still composes.
-        list_stdout = ""
-        list_error = str(exc)
-    if list_error is not None:
+        list_stdout = _run_mngr(concurrency_group, list_argv, env)
+    except MngrCommandError as exc:
         # ``--on-error continue`` means the listing can return useful JSON for
         # this workspace's own host even when it does not exit cleanly (an
-        # unrelated provider was unreachable), so we still use the stdout. The
-        # reason is logged here and threaded into the response so the recovery
-        # page can surface it on the host-state rows when our own row is missing.
+        # unrelated provider was unreachable), so we keep whatever stdout the
+        # command captured. A launch / group failure leaves it empty. Either
+        # way the reason is logged below and threaded into the response so the
+        # recovery page can surface it on the host-state rows when our own row
+        # is missing.
+        list_stdout = exc.stdout
+        list_error = str(exc)
         logger.warning("`mngr list` for host-health probe of {} did not exit cleanly: {}", agent_id, list_error)
     list_json: str | None = list_stdout or None
     # The in-container probe stays quiet at warning level: its argv embeds a
     # long base64 inner script that adds nothing to diagnostics, and the
     # dispatch_tier INFO line already records the outcome. Trust the stdout only
-    # on a clean exit -- a failed ``mngr exec`` (e.g. ``--no-start`` against a
-    # stopped host) leaves ``in_container_stdout`` None, which parses to a "no"
-    # on the can-we-run-commands probe. A launch / group failure is the same
-    # "no" outcome and is recorded only at debug for the same reason.
+    # on a clean exit -- any non-clean outcome (a failed ``mngr exec`` such as
+    # ``--no-start`` against a stopped host, a timeout, or a launch / group
+    # failure) raises and leaves ``in_container_stdout`` None, which parses to a
+    # "no" on the can-we-run-commands probe, and is recorded only at debug.
     in_container_stdout: str | None = None
     if services_agent_id is not None:
         try:
-            probe_run = _run_mngr(concurrency_group, build_probe_argv(mngr_binary, services_agent_id), env)
-        except (OSError, ConcurrencyGroupError) as exc:
-            logger.debug("in-container probe for host-health of {} could not run: {}", agent_id, exc)
-        else:
-            if probe_run.failure_reason is None:
-                in_container_stdout = probe_run.stdout
+            in_container_stdout = _run_mngr(concurrency_group, build_probe_argv(mngr_binary, services_agent_id), env)
+        except MngrCommandError as exc:
+            logger.debug("in-container probe for host-health of {} did not exit cleanly: {}", agent_id, exc)
     consumer: EnvelopeStreamConsumer | None = request.app.state.envelope_stream_consumer
     plugin_resolver_services: dict[str, str] = (
         consumer.get_resolver_snapshot_for_agent(agent_id) if consumer is not None else {}

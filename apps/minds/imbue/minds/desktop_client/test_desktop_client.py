@@ -2023,9 +2023,9 @@ def test_run_restart_sequence_fails_when_stop_command_errors(tmp_path: Path) -> 
 def test_run_restart_sequence_fails_when_stop_command_cannot_launch(tmp_path: Path) -> None:
     """A launch failure (missing ``mngr`` binary) surfaces as RESTART_FAILED naming the stop step.
 
-    Exercises the path where ``_run_mngr`` lets the ``OSError`` propagate and the
-    restart sequence catches it at the call site -- rather than the prior
-    behavior of laundering the exception into a ``MngrRun.failure_reason``.
+    Exercises the path where ``_run_mngr`` wraps the ``OSError`` from the failed
+    fork/exec into a ``MngrCommandError`` and the restart sequence catches that
+    single domain error at the call site.
     """
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()

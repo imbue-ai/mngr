@@ -290,12 +290,15 @@ Tiered system-interface restart for the minds recovery flow.
   ``workspace_misconfigured`` check now runs ahead of the no-auto-dispatch
   short-circuit, so this tier is honored on every entry path.
 - Internal: the ``mngr`` subprocess helper that drives the restart steps and
-  the host-health probe no longer converts launch failures (``OSError`` on
-  fork/exec, ``ConcurrencyGroupError`` on group setup) into a return value.
-  Those genuine exceptions now propagate with their normal traceback and are
-  caught at each call site that knows how to surface them -- a restart step
-  still marks the workspace "Restart failed" with the reason, and the
-  host-health probe still threads the reason into its response. A process that
-  actually ran (clean, timed out, or nonzero exit) stays a returned outcome, so
-  the partial ``mngr list --on-error continue`` output is still used. No
-  user-visible behavior change.
+  the host-health probe now raises a single ``MngrCommandError`` for every
+  non-clean outcome -- a timeout, a nonzero exit, or a failure to launch at all
+  (``OSError`` on fork/exec, ``ConcurrencyGroupError`` on group setup) -- and
+  returns the captured stdout on a clean exit. This matches how the rest of
+  minds shells out to ``mngr`` (``run_mngr_create``, the destroy cleanup):
+  each call site catches the one domain error instead of a mix of a status
+  field and a ``(OSError, ConcurrencyGroupError)`` tuple. The partial stdout of
+  a process that ran but did not exit cleanly is carried on the error
+  (``MngrCommandError.stdout``), so the ``mngr list --on-error continue`` output
+  is still used by the host-health probe. A restart step still marks the
+  workspace "Restart failed" with the reason; the probe still threads it into
+  its response. No user-visible behavior change.
