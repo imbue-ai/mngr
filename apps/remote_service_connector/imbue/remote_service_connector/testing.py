@@ -8,6 +8,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from ovh.exceptions import APIError as OvhApiError
 from supertokens_python.recipe.emailpassword.interfaces import ConsumePasswordResetTokenOkResult
 from supertokens_python.recipe.emailpassword.interfaces import EmailAlreadyExistsError
 from supertokens_python.recipe.emailpassword.interfaces import SignInOkResult as EPSignInOkResult
@@ -985,15 +986,21 @@ class FakeCursor:
             # Release endpoint: lookup by id. The connector stringifies
             # the UUID before passing it as a bind param (psycopg2 can't
             # adapt Python ``UUID`` directly), so accept either form.
-            # Returns ``(leased_to_user, status)`` so the route can
-            # distinguish 'already-released' (idempotent 200) from
-            # 'leased' (proceed with update) without a second SELECT.
+            # Returns ``(leased_to_user, status, vps_instance_id)`` so the
+            # route can distinguish already-released / removing / leased and
+            # has the service name needed for the OVH cancel.
             raw_host_id = params[0]
             host_id = UUID(raw_host_id) if isinstance(raw_host_id, str) else raw_host_id
             for row in self._backend.pool_rows:
                 if row.host_id == host_id:
-                    self._results = [(row.leased_to_user, row.status)]
+                    self._results = [(row.leased_to_user, row.status, row.vps_instance_id)]
                     break
+
+        elif "select id, vps_instance_id from pool_hosts where status = 'removing'" in query_lower:
+            # Cleanup sweep: every row still marked 'removing'.
+            for row in self._backend.pool_rows:
+                if row.status == "removing":
+                    self._results.append((row.host_id, row.vps_instance_id))
 
         elif (
             "from pool_hosts" in query_lower and "status = 'leased'" in query_lower and "leased_to_user" in query_lower
@@ -1017,12 +1024,12 @@ class FakeCursor:
                         )
                     )
 
-        elif "update pool_hosts set status = 'released'" in query_lower:
+        elif "update pool_hosts set status = 'removing'" in query_lower:
             raw_host_id = params[0]
             host_id = UUID(raw_host_id) if isinstance(raw_host_id, str) else raw_host_id
             for row in self._backend.pool_rows:
                 if row.host_id == host_id:
-                    row.status = "released"
+                    row.status = "removing"
                     row.released_at = "2026-01-02T00:00:00+00:00"
                     break
 
@@ -1057,6 +1064,11 @@ class FakeCursor:
 
         elif "update paid_domains set is_paid = false" in query_lower:
             self._backend.deactivate_paid_entry(self._backend.paid_domains, params[0])
+
+        elif query_lower.startswith("delete from pool_hosts where id"):
+            raw_host_id = params[0]
+            host_id = UUID(raw_host_id) if isinstance(raw_host_id, str) else raw_host_id
+            self._backend.pool_rows = [r for r in self._backend.pool_rows if r.host_id != host_id]
 
         else:
             pass
@@ -1110,6 +1122,32 @@ def _make_fake_connection(backend: "FakePoolBackend") -> FakeConnection:
     return conn
 
 
+class FakeOvhOps:
+    """In-memory fake implementing the OvhOps protocol for testing.
+
+    Records tag deletions and cancellations so tests can assert the cleanup
+    chain ran. ``resources`` backs ``list_vps_resources`` (used by the runbook
+    tag-scan). Set ``fail_on_cancel`` to simulate a flaky OVH cancel.
+    """
+
+    def __init__(self) -> None:
+        self.deleted_tags: list[tuple[str, str]] = []
+        self.cancelled: list[str] = []
+        self.resources: list[Any] = []
+        self.fail_on_cancel: bool = False
+
+    def delete_tag(self, urn: str, key: str) -> None:
+        self.deleted_tags.append((urn, key))
+
+    def set_delete_at_expiration(self, service_name: str, delete_at_expiration: bool) -> None:
+        if self.fail_on_cancel:
+            raise OvhApiError(f"simulated OVH cancel failure for {service_name}")
+        self.cancelled.append(service_name)
+
+    def list_vps_resources(self) -> list[Any]:
+        return list(self.resources)
+
+
 _PAID_ENTRY_CREATED_AT = "2026-01-01T00:00:00+00:00"
 _PAID_ENTRY_UPDATED_AT = "2026-01-02T00:00:00+00:00"
 
@@ -1119,6 +1157,7 @@ class FakePoolBackend:
 
     pool_rows: list[FakePoolRow]
     append_key_calls: list[tuple[str, int, str, str, str]]
+    ovh_ops: FakeOvhOps
     # Paid-list stores: value -> {"is_paid", "created_at", "updated_at"}.
     paid_domains: dict[str, dict[str, Any]]
     paid_emails: dict[str, dict[str, Any]]
@@ -1164,7 +1203,7 @@ class FakePoolBackend:
             existing["updated_at"] = _PAID_ENTRY_UPDATED_AT
 
     def install_on_app_module(self, app_mod: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Swap DB and SSH functions on the app module with fakes.
+        """Swap DB, SSH, and OVH functions on the app module with fakes.
 
         Uses the same single-loop-setattr pattern as FakeSuperTokensBackend to
         minimize the test-patching ratchet count.
@@ -1172,12 +1211,16 @@ class FakePoolBackend:
         fakes: dict[str, Any] = {
             "_get_pool_db_connection": self.get_connection,
             "_append_authorized_key": self.append_authorized_key,
+            "_get_ovh_ops": self.get_ovh_ops,
         }
         for name, fake in fakes.items():
             monkeypatch.setattr(app_mod, name, fake)
 
     def get_connection(self) -> FakeConnection:
         return _make_fake_connection(self)
+
+    def get_ovh_ops(self) -> FakeOvhOps:
+        return self.ovh_ops
 
     def append_authorized_key(
         self,
@@ -1247,6 +1290,33 @@ class FakePoolBackend:
         self.pool_rows.append(row)
         return row
 
+    def add_removing_host(
+        self,
+        host_id: UUID,
+        version: str,
+        leased_to_user: str = "some-user",
+        vps_address: str = "203.0.113.10",
+        agent_id: str = "agent-abc123",
+        host_id_str: str = "host-xyz",
+    ) -> FakePoolRow:
+        """Add a host already marked 'removing' (an interrupted release) to the pool."""
+        row = _make_pool_row(
+            host_id=host_id,
+            vps_address=vps_address,
+            agent_id=agent_id,
+            host_id_str=host_id_str,
+            ssh_port=22,
+            ssh_user="root",
+            container_ssh_port=2222,
+            version=version,
+            status="removing",
+            leased_to_user=leased_to_user,
+            leased_at="2026-01-01T00:00:00+00:00",
+        )
+        row.released_at = "2026-01-02T00:00:00+00:00"
+        self.pool_rows.append(row)
+        return row
+
 
 def make_fake_pool_backend() -> FakePoolBackend:
     """Construct an empty in-memory pool backend (no pool rows, empty paid lists)."""
@@ -1255,4 +1325,5 @@ def make_fake_pool_backend() -> FakePoolBackend:
     backend.append_key_calls = []
     backend.paid_domains = {}
     backend.paid_emails = {}
+    backend.ovh_ops = FakeOvhOps()
     return backend
