@@ -314,13 +314,33 @@ jobs:
             if [[ -d "$D" ]]; then echo "$D" >> "$GITHUB_PATH"; fi
           done
 
+      - name: disable modal provider (CI has no Modal token)
+        # Without this, `mngr forward` discovery emits a "Modal is not
+        # authorized" warning on every poll. Hundreds of repetitions
+        # bury real signal in minds.log and latchkey_forward.log. The
+        # minds.app's bundled mngr reads ~/.minds/mngr/<scope>.toml at
+        # startup; pre-seeding the user-scope config before launch
+        # silences modal discovery entirely.
+        run: |
+          mkdir -p "$HOME/.minds/mngr"
+          MNGR_HOST_DIR="$HOME/.minds/mngr" \
+            uv run --package imbue-mngr mngr config set providers.modal.is_enabled false --scope user
+
       - name: launch-to-msg + slack flow (Python)
         env:
           GIT_BRANCH:         ${{ inputs.template_ref }}
           GIT_URL:            ${{ inputs.template_url }}
           SKIP_FIRST_MESSAGE: ${{ inputs.skip_first_message && '1' || '0' }}
           SKIP_SLACK_FLOW:    ${{ inputs.skip_slack_flow    && '1' || '0' }}
-        run: uv run --package minds python apps/minds/scripts/launch_to_msg_e2e.py
+        run: |
+          # Tee stdout+stderr to a file so the e2e script's structured
+          # output (loguru lines: phase=, kick attempts, navigation
+          # debug) is preserved in the artifact alongside the daemon
+          # logs. GHA's own console log expires; the artifact zip is
+          # what survives for post-mortem.
+          mkdir -p /tmp/launch-to-msg-logs
+          uv run --package minds python apps/minds/scripts/launch_to_msg_e2e.py 2>&1 \
+            | tee /tmp/launch-to-msg-logs/e2e-stdout.log
 
       - name: collect screenshots + diagnostics
         if: always()
@@ -334,6 +354,7 @@ jobs:
             cp -R /tmp/launch-to-msg-screenshots artifacts/screenshots 2>/dev/null || true
           fi
           # Diagnostic logs (also useful on success for tuning).
+          [ -d /tmp/launch-to-msg-logs ] && cp -R /tmp/launch-to-msg-logs artifacts/ || true
           [ -d "$HOME/.minds/logs" ] && cp -R "$HOME/.minds/logs" artifacts/ || true
           [ -d "$HOME/.minds/events" ] && cp -R "$HOME/.minds/events" artifacts/ || true
           [ -d "$HOME/.minds/mngr" ] && cp -R "$HOME/.minds/mngr"/*/events artifacts/agent-events 2>/dev/null || true
