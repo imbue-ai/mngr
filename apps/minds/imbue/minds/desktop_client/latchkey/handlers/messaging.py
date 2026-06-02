@@ -7,6 +7,7 @@ inside either handler module so neither sibling has to import from
 the other.
 """
 
+import json
 from typing import Final
 
 from loguru import logger
@@ -14,10 +15,41 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.pure import pure
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.mngr.primitives import AgentId
 
 _MNGR_MESSAGE_TIMEOUT_SECONDS: Final[float] = 30.0
+
+
+@pure
+def stdout_reports_message_delivered(stdout: str) -> bool:
+    """True if ``mngr message --format jsonl`` stdout reports a successful delivery.
+
+    ``mngr message`` emits one ``{"event": "message_sent", "agent": ...}``
+    JSONL line per agent it actually delivered to. Because the command is
+    scoped by an include filter to a single target, the presence of any
+    ``message_sent`` event means that target received the message.
+
+    This is the source of truth for delivery -- the process exit code is
+    not, because ``mngr message`` exits 0 both when it delivers AND when no
+    agent matches the target (so exit code alone cannot distinguish
+    "delivered" from "the agent does not exist yet").
+    """
+    for raw_line in stdout.splitlines():
+        line = raw_line.strip()
+        # mngr interleaves human-readable warnings on stdout; only attempt to
+        # parse lines that look like a JSONL record (mirrors the ``mngr
+        # create`` event sniff in ``agent_creator._CreateEventCapture``).
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and event.get("event") == "message_sent":
+            return True
+    return False
 
 
 class MngrMessageSender(MutableModel):
@@ -65,3 +97,29 @@ class MngrMessageSender(MutableModel):
             )
             return False
         return True
+
+    def deliver(self, target: str, text: str) -> bool:
+        """Send a message and return whether the TARGET agent actually received it.
+
+        Unlike :meth:`try_send`, delivery is judged from the structured
+        ``--format jsonl`` output (a ``message_sent`` event) rather than the
+        process exit code. ``mngr message`` exits 0 both when it delivers and
+        when no agent matches the target, so a caller that retries until the
+        agent exists must inspect the output, not the exit code.
+        """
+        cg = ConcurrencyGroup(name="mngr-message")
+        with cg:
+            result = cg.run_process_to_completion(
+                command=[self.mngr_binary, "message", "--format", "jsonl", "-m", text, "--", target],
+                timeout=_MNGR_MESSAGE_TIMEOUT_SECONDS,
+                is_checked_after=False,
+            )
+        is_delivered = stdout_reports_message_delivered(result.stdout)
+        if not is_delivered:
+            logger.debug(
+                "mngr message to target {} not yet delivered (exit {}); stderr: {}",
+                target,
+                result.returncode,
+                result.stderr.strip(),
+            )
+        return is_delivered

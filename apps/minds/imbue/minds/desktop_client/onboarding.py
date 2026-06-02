@@ -318,13 +318,17 @@ class OnboardingApplier(MutableModel):
         """Send the Q2 message to the chat agent, retrying until it exists or the timeout elapses.
 
         The chat agent is created asynchronously by the workspace's
-        bootstrap and is named after the host, so the first few sends fail
-        until it comes online. ``MngrMessageSender.try_send`` reports
-        success so we can stop retrying once delivered.
+        bootstrap and is named after the host, so it does not exist for the
+        first several attempts. ``MngrMessageSender.deliver`` confirms the
+        target actually received the message (via the structured ``mngr
+        message`` output), so we keep retrying until a real delivery happens
+        rather than stopping on the first non-error exit -- ``mngr message``
+        exits 0 even when no agent matches, which would otherwise make us
+        "succeed" without ever reaching the chat agent.
         """
         deadline = time.monotonic() + self.chat_agent_message_timeout_seconds
         while time.monotonic() < deadline:
-            if self.message_sender.try_send(host_name, initial_problem):
+            if self.message_sender.deliver(host_name, initial_problem):
                 logger.debug("Delivered initial problem to chat agent {}", host_name)
                 return
             threading.Event().wait(timeout=self.poll_interval_seconds)
