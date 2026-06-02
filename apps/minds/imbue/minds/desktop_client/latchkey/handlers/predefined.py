@@ -205,14 +205,43 @@ def _render_unknown_scope_page(request_id: str, scope: str) -> Response:
     No catalog entry means we have no permissions to offer the user; the
     only sensible action is to send the request straight to deny.
     """
+    # Rendered inside the desktop client's transparent modal overlay (same as
+    # the catalog-backed dialog), so it uses a dim backdrop + centered card and
+    # a JS-driven Deny that closes the modal rather than a raw form post (which
+    # would render the deny endpoint's JSON response inside the overlay).
+    escaped_scope = html_module.escape(scope)
+    escaped_request_id = html_module.escape(request_id, quote=True)
     body = (
-        "<!DOCTYPE html><html><body><h1>Unknown scope</h1>"
-        f"<p>The agent requested permissions under scope <code>{html_module.escape(scope)}</code>, "
+        '<!DOCTYPE html><html><head><meta charset="UTF-8">'
+        "<title>Unknown scope</title>"
+        "<style>body{margin:0;font-family:-apple-system,sans-serif;background:transparent;}"
+        ".backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.4);display:flex;"
+        "align-items:flex-start;justify-content:center;overflow-y:auto;padding:24px;}"
+        ".dialog{width:100%;max-width:640px;margin:auto;background:#fff;border:1px solid #e4e4e7;"
+        "border-radius:16px;box-shadow:0 10px 25px rgba(0,0,0,0.15);padding:28px;}"
+        "h1{font-size:22px;margin:0 0 12px;color:#18181b;}p{color:#3f3f46;line-height:1.5;}"
+        "code{background:#f4f4f5;padding:2px 5px;border-radius:4px;}"
+        ".actions{display:flex;justify-content:flex-end;margin-top:20px;}"
+        "button{padding:8px 14px;border-radius:6px;font-size:14px;font-weight:500;cursor:pointer;"
+        "background:#fef2f2;color:#dc2626;border:1px solid #fecaca;}button:hover{background:#fee2e2;}"
+        "</style></head><body>"
+        '<div class="backdrop" onclick="if(event.target.classList.contains(\'backdrop\'))closeDialog()">'
+        '<div class="dialog"><h1>Unknown scope</h1>'
+        f"<p>The agent requested permissions under scope <code>{escaped_scope}</code>, "
         "but this scope is not in the latchkey gateway's permission catalog. The request can only "
         "be denied from here.</p>"
-        f'<form method="POST" action="/requests/{html_module.escape(request_id, quote=True)}/deny">'
-        '<button type="submit">Deny</button></form>'
-        "</body></html>"
+        '<div class="actions"><button type="button" onclick="denyRequest()">Deny</button></div>'
+        "</div></div>"
+        "<script>"
+        "function closeDialog(){"
+        "if(window.minds&&window.minds.closeModal){window.minds.closeModal();}"
+        'else{window.location.href="/";}}'
+        "function denyRequest(){"
+        f'fetch("/requests/{escaped_request_id}/deny",'
+        '{method:"POST",credentials:"same-origin",keepalive:true}).catch(function(){});'
+        "closeDialog();}"
+        'document.addEventListener("keydown",function(e){if(e.key==="Escape")closeDialog();});'
+        "</script></body></html>"
     )
     return HTMLResponse(content=body, status_code=200)
 

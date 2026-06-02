@@ -28,7 +28,14 @@ and how the agent receives the answer.
    request events file via `mngr events --follow`, adds a card to the
    right-side requests inbox panel, and surfaces a notification.
 5. **User opens the dialog.** Clicking the card opens
-   `/requests/<event_id>`, which renders a single-scope permission dialog:
+   `/requests/<event_id>` in a **modal overlay** over the current window
+   (a transparent full-content-area `WebContentsView` stacked above the
+   workspace, with a dim backdrop). The user's workspace view is never
+   navigated away, so dismissing the dialog -- via Approve/Deny, the close
+   button, a backdrop click, or Escape -- returns them to their work with
+   no context lost. (Opened directly in a browser, with no modal host, the
+   page degrades to a dimmed, centered card and dismissal navigates home.)
+   The page renders a single-scope permission dialog:
    * The dialog header names the service plainly (no monospace pill) and
      attributes the agent's rationale prominently as
      "`<workspace>` says:" -- this is the main place the requesting

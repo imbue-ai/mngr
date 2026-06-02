@@ -39,6 +39,9 @@ contextBridge.exposeInMainWorld('minds', {
   toggleRequestsPanel: () => ipcRenderer.send('toggle-requests-panel'),
   openRequestsPanel: () => ipcRenderer.send('open-requests-panel'),
 
+  // Modal overlay (e.g. permission request dialogs)
+  closeModal: () => ipcRenderer.send('close-modal'),
+
   // Multi-window workspace actions
   openWorkspaceInNewWindow: (agentId) =>
     ipcRenderer.send('open-workspace-in-new-window', agentId),
