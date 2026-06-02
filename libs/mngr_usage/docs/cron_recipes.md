@@ -147,8 +147,11 @@ else
 fi
 
 # One cheap prompt opens the new 5h window. Wait for the turn to finish, then STOP
-# (don't destroy): a stopped agent keeps its events, so the snapshot reflects the
-# new window and the check above won't re-fire until the next window rolls.
+# (rather than destroy) so we can `mngr start` this same warmer next boundary
+# instead of recreating it. Either way the snapshot reflects the new window: a
+# stopped agent keeps its events, and a destroyed one's usage is preserved by
+# default (the `preserve_on_destroy` usage-plugin option), so the check above
+# won't re-fire until the next window rolls.
 mngr message "$WARMER" --message 'just say hi'
 mngr wait "$WARMER" WAITING --timeout 5m
 mngr stop "$WARMER"

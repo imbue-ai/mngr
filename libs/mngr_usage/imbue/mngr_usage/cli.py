@@ -55,7 +55,8 @@ from imbue.mngr_usage.data_types import WindowSnapshot
 _NO_DATA_HINT = (
     "No usage data yet -- check that a usage writer plugin is installed in the env "
     "running `mngr`, and that you've sent a prompt to an agent that (a) was created "
-    "after that plugin was installed and (b) is still alive."
+    "after that plugin was installed and (b) is still alive (or was preserved on "
+    "destroy -- the default; pass --no-preserved to ignore destroyed agents)."
 )
 
 

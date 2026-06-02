@@ -19,6 +19,7 @@ from imbue.mngr import hookimpl
 from imbue.mngr.cli.doc_links import imbue_mngr_doc_url
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.plugin_registry import register_plugin_config
+from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.help_topic import DocFile
@@ -64,17 +65,25 @@ def _preserve_destroyed_agent_usage(
     provider_name: str,
     mngr_ctx: MngrContext,
 ) -> None:
-    """Preserve one destroyed agent's usage events, capturing its host metadata."""
-    preserve_agent_usage(
-        source,
-        get_agent_state_dir_path(host.host_dir, agent_id),
-        agent_name,
-        agent_id,
-        provider_name=provider_name,
-        host_id=str(host.id),
-        host_name=str(host.get_name()),
-        mngr_ctx=mngr_ctx,
-    )
+    """Preserve one destroyed agent's usage events, capturing its host metadata.
+
+    Best-effort: any failure is logged and swallowed. These run from the
+    ``on_before_*_destroy`` hooks, whose contract is that a raised exception
+    *aborts the destroy* -- preservation must never be able to block teardown.
+    """
+    try:
+        preserve_agent_usage(
+            source,
+            get_agent_state_dir_path(host.host_dir, agent_id),
+            agent_name,
+            agent_id,
+            provider_name=provider_name,
+            host_id=str(host.id),
+            host_name=str(host.get_name()),
+            mngr_ctx=mngr_ctx,
+        )
+    except (MngrError, OSError) as e:
+        logger.warning("Failed to preserve usage for agent {} on destroy: {}", agent_id, e)
 
 
 @hookimpl
@@ -86,14 +95,21 @@ def on_before_agent_destroy(agent: AgentInterface, host: OnlineHostInterface) ->
     Claude agents via ``mngr_claude_usage``) actually produce a preserved copy.
     ``provider_name`` is read from the agent's discovery record (the only place
     that carries it without reaching into a concrete host implementation).
+
+    Best-effort: a failure resolving the provider or preserving is logged and
+    swallowed -- this hook must never raise, since a raise aborts the destroy.
     """
     mngr_ctx = agent.mngr_ctx
     if not _is_preserve_on_destroy_enabled(mngr_ctx):
         return
-    provider_name = next(
-        (str(ref.provider_name) for ref in host.discover_agents() if ref.agent_id == agent.id),
-        None,
-    )
+    try:
+        provider_name = next(
+            (str(ref.provider_name) for ref in host.discover_agents() if ref.agent_id == agent.id),
+            None,
+        )
+    except (MngrError, OSError) as e:
+        logger.warning("Could not discover agents to preserve usage for {}: {}", agent.id, e)
+        return
     if provider_name is None:
         logger.debug("Could not resolve provider for agent {}; skipping usage preservation", agent.id)
         return
@@ -109,13 +125,21 @@ def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
     provider surfaces that volume the host is a :class:`HostFileReadInterface`,
     so the same :func:`preserve_agent_usage` reads the files straight off it. If
     the host is not readable (no volume), there is nothing we can preserve.
+
+    Best-effort: discovery and per-agent preservation failures are logged and
+    swallowed -- this hook must never raise, since a raise aborts the destroy.
     """
     if not _is_preserve_on_destroy_enabled(mngr_ctx):
         return
     if not isinstance(host, HostFileReadInterface):
         logger.debug("Host {} is not readable (no volume); skipping usage preservation", host.id)
         return
-    for ref in host.discover_agents():
+    try:
+        refs = host.discover_agents()
+    except (MngrError, OSError) as e:
+        logger.warning("Could not discover agents on host {} to preserve usage: {}", host.id, e)
+        return
+    for ref in refs:
         _preserve_destroyed_agent_usage(host, host, ref.agent_name, ref.agent_id, str(ref.provider_name), mngr_ctx)
 
 

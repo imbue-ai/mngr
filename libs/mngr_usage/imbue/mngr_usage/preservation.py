@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -42,10 +41,10 @@ from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.host import HostFileReadInterface
+from imbue.mngr.interfaces.provider_instance import build_agent_details_from_offline_ref
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
-from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.cel_utils import apply_compiled_cel_filters
@@ -163,37 +162,33 @@ def _read_json_file(path: Path) -> dict[str, Any] | None:
 
 
 def _agent_details_from_preserved(data: dict[str, Any], meta: dict[str, Any]) -> AgentDetails | None:
-    """Rebuild a minimal :class:`AgentDetails` from a preserved data.json + host meta.
+    """Rebuild an :class:`AgentDetails` from a preserved data.json + host meta.
 
-    Carries through the fields filters key on (type, work_dir, labels, name,
-    create_time/age, host.provider). The agent is destroyed, so lifecycle /
-    activity fields have no meaningful value: ``state`` is reported as ``DONE``
-    and the reported activity / runtime fields are left unset (filters that
-    reference them simply won't match a preserved agent). Returns None if the
-    record is too malformed to reconstruct.
+    Wraps the preserved ``data.json`` in a :class:`DiscoveredAgent` (whose typed
+    properties already parse ``type`` / ``work_dir`` / ``command`` / ``labels`` /
+    etc. from that dict) and hands it to ``build_agent_details_from_offline_ref``
+    -- the same construction the ``list_agents`` offline path uses for
+    destroyed/unreachable agents. So the reconstructed CEL context matches the
+    offline list path field-for-field, and the host metadata captured at
+    preserve time (provider/host) populates ``host.*`` for ``--provider`` /
+    ``--local`` filters. Returns None if the record is too malformed to
+    reconstruct.
     """
     try:
-        return AgentDetails(
-            id=AgentId(str(data["id"])),
-            name=AgentName(str(data["name"])),
-            type=str(data["type"]),
-            command=CommandString(str(data.get("command") or "unknown")),
-            work_dir=Path(str(data["work_dir"])),
-            initial_branch=data.get("created_branch_name"),
-            create_time=datetime.fromisoformat(str(data["create_time"])),
-            start_on_boot=bool(data.get("start_on_boot", False)),
-            state=AgentLifecycleState.DONE,
-            labels=dict(data.get("labels", {})),
-            plugin=dict(data.get("plugin", {})),
-            host=HostDetails(
-                id=HostId(str(meta["host_id"])),
-                name=str(meta["host_name"]),
-                provider_name=ProviderInstanceName(str(meta["provider_name"])),
-            ),
+        host_id = HostId(str(meta["host_id"]))
+        provider_name = ProviderInstanceName(str(meta["provider_name"]))
+        ref = DiscoveredAgent(
+            host_id=host_id,
+            agent_id=AgentId(str(data["id"])),
+            agent_name=AgentName(str(data["name"])),
+            provider_name=provider_name,
+            certified_data=data,
         )
+        host_details = HostDetails(id=host_id, name=str(meta["host_name"]), provider_name=provider_name)
     except (KeyError, ValueError, ValidationError) as e:
         logger.debug("Could not reconstruct AgentDetails from preserved data.json: {}", e)
         return None
+    return build_agent_details_from_offline_ref(ref, host_details)
 
 
 def _passes_filters(

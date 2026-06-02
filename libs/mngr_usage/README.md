@@ -27,6 +27,26 @@ The `<source>` segment is free-form -- whatever the writer plugin chose.
 When multiple writers contribute, each renders as its own `[source]` section in
 human output and as an entry in the JSON `sources` array.
 
+## Destroyed agents
+
+Usage is **not** lost when an agent (or its whole host) is destroyed. Before the
+agent's state directory is deleted, its `events/<source>/usage` directories are
+copied to `<local_host_dir>/preserved/<agent-name>--<agent-id>/` (the same place
+`mngr claude` preserves session files); for remote agents the files are pulled
+to the local machine so they survive host destruction. This is on by default and
+controlled by the `preserve_on_destroy` option on the `usage` plugin config (set
+it to `false` to discard usage on destroy).
+
+`mngr usage` reads these preserved files back **by default**, so a destroyed
+agent's accumulated cost and rate-limit history still counts toward the totals --
+you no longer need to keep an agent alive (or merely stopped) just to retain its
+usage in the snapshot. Preserved agents are filtered by the same
+`--provider` / `--project` / `--local` / label / CEL predicates as live agents
+(evaluated against the agent's preserved `data.json`), and an agent that is still
+alive is never double-counted against its own preserved copy. Pass
+`--no-preserved` (on `mngr usage` and `mngr usage wait`) to consider only live
+agents.
+
 ## Output formats
 
 - `mngr usage` (human summary: per-mode cost line(s) + window lines)
