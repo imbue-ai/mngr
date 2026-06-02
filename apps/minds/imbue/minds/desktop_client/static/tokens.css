@@ -73,6 +73,62 @@ html {
   background: var(--workspace-accent, oklch(65% 0.15 230));
 }
 
+/*
+ * Onboarding option cards (creating-page question flow). Selection state
+ * and the editable-textarea reveal are driven by the `.opt-selected` class
+ * (toggled by static/creating.js); kept here rather than as Tailwind
+ * utilities because they depend on parent-state selectors.
+ */
+.opt {
+  display: flex;
+  gap: 12px;
+  padding: 13px 14px;
+  border: 1px solid rgba(9, 9, 11, 0.1);
+  border-radius: 11px;
+  cursor: pointer;
+  background: #f5f5f7;
+  transition: border-color 150ms, background 150ms;
+}
+.opt:hover {
+  border-color: rgba(9, 9, 11, 0.2);
+}
+.opt-selected {
+  border-color: #2563eb;
+  background: rgba(37, 99, 235, 0.06);
+}
+.opt-radio {
+  flex: 0 0 auto;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(9, 9, 11, 0.25);
+  margin-top: 2px;
+  position: relative;
+}
+.opt-selected .opt-radio {
+  border-color: #2563eb;
+}
+.opt-selected .opt-radio::after {
+  content: '';
+  position: absolute;
+  inset: 3.5px;
+  border-radius: 50%;
+  background: #2563eb;
+}
+.opt-body {
+  flex: 1;
+  min-width: 0;
+}
+.opt-edit {
+  display: none;
+}
+.opt-editable.opt-selected .opt-desc {
+  display: none;
+}
+.opt-editable.opt-selected .opt-edit {
+  display: block;
+}
+
 .spinner {
   border: 2px solid #e4e4e7;
   border-top-color: #18181b;
