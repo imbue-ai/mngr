@@ -31,9 +31,9 @@ human output and as an entry in the JSON `sources` array.
 
 A destroyed agent's usage still counts. Before an agent's (or its whole host's)
 state directory is deleted, its `events/<source>/usage` directories are copied to
-`<local_host_dir>/preserved/<agent-name>--<agent-id>/` (the same place
-`mngr claude` preserves session files); for remote agents the files are pulled
-to the local machine so they survive host destruction. This is on by default and
+`<local_host_dir>/preserved/<agent-name>--<agent-id>/`; for remote agents the
+files are pulled to the local machine so they survive host destruction. This is
+on by default and
 controlled by the `preserve_on_destroy` option on the `usage` plugin config (set
 it to `false` to discard usage on destroy).
 
