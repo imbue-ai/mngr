@@ -29,6 +29,7 @@ from imbue.mngr_forward.data_types import ForwardPortStrategy
 from imbue.mngr_forward.data_types import ForwardServiceStrategy
 from imbue.mngr_forward.data_types import ForwardStrategy
 from imbue.mngr_forward.data_types import ProxyTarget
+from imbue.mngr_forward.envelope import EnvelopeWriter
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 
@@ -39,6 +40,17 @@ class ForwardResolver(MutableModel):
         frozen=True,
         description="Either ForwardServiceStrategy or ForwardPortStrategy; chosen at CLI parse time",
     )
+    envelope_writer: EnvelopeWriter | None = Field(
+        default=None,
+        description=(
+            "Optional writer used to emit a ``resolver_snapshot`` envelope on every "
+            "mutation of the per-agent services map -- ``update_services`` "
+            "(set/replace) plus the destruction paths (``remove_known_agent`` and "
+            "``update_known_agents`` when they drop an agent that had services). "
+            "The plugin wires this so a downstream consumer can mirror the per-agent "
+            "service map. None in tests / code paths that don't care about emission."
+        ),
+    )
 
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _services_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
@@ -46,16 +58,38 @@ class ForwardResolver(MutableModel):
     _known_agent_ids: set[str] = PrivateAttr(default_factory=set)
     _initial_discovery_done: bool = PrivateAttr(default=False)
 
+    def _snapshot_services_locked(self) -> dict[str, dict[str, str]]:
+        """Return a deep copy of ``_services_by_agent`` for emission.
+
+        Caller MUST hold ``self._lock``. The copy is taken under the lock
+        so the resulting payload is a consistent point-in-time view; the
+        actual ``emit_resolver_snapshot`` call must happen outside the
+        lock to avoid holding it across a write.
+        """
+        return {aid: dict(svc) for aid, svc in self._services_by_agent.items()}
+
     def update_known_agents(self, agent_ids: tuple[AgentId, ...]) -> None:
-        """Replace the set of known agents. Drops services / SSH info for removed agents."""
+        """Replace the set of known agents. Drops services / SSH info for removed agents.
+
+        Emits a ``resolver_snapshot`` envelope when any agent's services
+        entry was dropped, so consumers stay in sync with the resolver
+        after bulk destruction.
+        """
+        snapshot: dict[str, dict[str, str]] | None = None
         with self._lock:
             new_set = {str(aid) for aid in agent_ids}
             removed = self._known_agent_ids - new_set
+            services_changed = False
             for aid_str in removed:
-                self._services_by_agent.pop(aid_str, None)
+                if self._services_by_agent.pop(aid_str, None) is not None:
+                    services_changed = True
                 self._ssh_by_agent.pop(aid_str, None)
             self._known_agent_ids = new_set
             self._initial_discovery_done = True
+            if services_changed:
+                snapshot = self._snapshot_services_locked()
+        if snapshot is not None and self.envelope_writer is not None:
+            self.envelope_writer.emit_resolver_snapshot(snapshot)
 
     def add_known_agent(self, agent_id: AgentId) -> None:
         """Mark a single agent as known (incremental discovery)."""
@@ -64,17 +98,39 @@ class ForwardResolver(MutableModel):
             self._initial_discovery_done = True
 
     def remove_known_agent(self, agent_id: AgentId) -> None:
-        """Mark a single agent as no longer known (incremental destruction)."""
+        """Mark a single agent as no longer known (incremental destruction).
+
+        Emits a ``resolver_snapshot`` envelope when the agent had a services
+        entry (i.e. there was something for the consumer's mirror to drop).
+        Mirrors the ``update_services`` emission contract: every mutation
+        of ``_services_by_agent`` produces a snapshot envelope so the
+        consumer-side mirror does not retain stale entries for destroyed
+        agents.
+        """
+        snapshot: dict[str, dict[str, str]] | None = None
         with self._lock:
             aid_str = str(agent_id)
             self._known_agent_ids.discard(aid_str)
-            self._services_by_agent.pop(aid_str, None)
+            services_changed = self._services_by_agent.pop(aid_str, None) is not None
             self._ssh_by_agent.pop(aid_str, None)
+            if services_changed:
+                snapshot = self._snapshot_services_locked()
+        if snapshot is not None and self.envelope_writer is not None:
+            self.envelope_writer.emit_resolver_snapshot(snapshot)
 
     def update_services(self, agent_id: AgentId, services: dict[str, str]) -> None:
-        """Replace the known services for a single agent."""
+        """Replace the known services for a single agent.
+
+        Emits a ``resolver_snapshot`` envelope after the mutation so consumers
+        can mirror the per-agent service map. The snapshot carries the full
+        per-agent map (not just this agent) so a late-attaching consumer can
+        catch up from a single envelope.
+        """
         with self._lock:
             self._services_by_agent[str(agent_id)] = dict(services)
+            snapshot = self._snapshot_services_locked()
+        if self.envelope_writer is not None:
+            self.envelope_writer.emit_resolver_snapshot(snapshot)
 
     def update_ssh_info(self, agent_id: AgentId, ssh_info: RemoteSSHInfo) -> None:
         """Set or replace the SSH info for a single agent."""

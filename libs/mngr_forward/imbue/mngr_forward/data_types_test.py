@@ -4,6 +4,7 @@ from imbue.imbue_common.primitives import PositiveInt
 from imbue.mngr_forward.data_types import ForwardEnvelope
 from imbue.mngr_forward.data_types import ListeningPayload
 from imbue.mngr_forward.data_types import LoginUrlPayload
+from imbue.mngr_forward.data_types import ResolverSnapshotPayload
 from imbue.mngr_forward.data_types import ReverseTunnelEstablishedPayload
 from imbue.mngr_forward.primitives import ForwardPort
 from imbue.mngr_forward.testing import TEST_AGENT_ID_1
@@ -35,6 +36,16 @@ def test_reverse_tunnel_payload_round_trip() -> None:
     )
     serialized = payload.model_dump(mode="json")
     parsed = ReverseTunnelEstablishedPayload.model_validate(serialized)
+    assert parsed == payload
+
+
+def test_resolver_snapshot_payload_round_trip() -> None:
+    payload = ResolverSnapshotPayload(
+        services_by_agent={str(TEST_AGENT_ID_1): {"system_interface": "http://127.0.0.1:9100"}},
+    )
+    serialized = payload.model_dump(mode="json")
+    assert serialized["type"] == "resolver_snapshot"
+    parsed = ResolverSnapshotPayload.model_validate(serialized)
     assert parsed == payload
 
 

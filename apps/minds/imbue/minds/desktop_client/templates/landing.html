@@ -39,6 +39,15 @@
               <a class="landing-backup-download hidden text-xs text-blue-600 hover:underline cursor-pointer" href="#">download</a>
               <span class="landing-health-badge hidden inline-flex items-center px-2 py-0.5 rounded text-sm font-medium"></span>
               <button class="bg-transparent border border-transparent rounded-md cursor-pointer p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 flex items-center justify-center"
+                      onclick="event.stopPropagation(); window.landingRestartClick(this)"
+                      title="Restart workspace"
+                      aria-label="Restart workspace">
+                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+                  <path d="M21 3v6h-6"/>
+                </svg>
+              </button>
+              <button class="bg-transparent border border-transparent rounded-md cursor-pointer p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 flex items-center justify-center"
                       onclick="event.stopPropagation(); window.location='/workspace/{{ agent_id }}/settings'"
                       title="Settings"
                       aria-label="Workspace settings">
@@ -117,6 +126,9 @@
         } else if (status === 'restarting') {
           badge.textContent = 'Restarting...';
           badge.className = 'landing-health-badge inline-flex items-center px-2 py-0.5 rounded text-sm font-medium bg-amber-100 text-amber-800';
+        } else if (status === 'restart_failed') {
+          badge.textContent = 'Restart failed';
+          badge.className = 'landing-health-badge inline-flex items-center px-2 py-0.5 rounded text-sm font-medium bg-amber-100 text-amber-800';
         } else {
           badge.textContent = '';
           badge.className = 'landing-health-badge hidden inline-flex items-center px-2 py-0.5 rounded text-sm font-medium';
@@ -126,12 +138,26 @@
       window.landingRowClick = function (row) {
         var agentId = row.dataset.agentId;
         var status = healthStatusByAgent[agentId];
-        if (status === 'stuck' || status === 'restarting') {
+        if (status === 'stuck' || status === 'restarting' || status === 'restart_failed') {
           var ret = row.dataset.defaultHref || '';
           window.location = '/agents/' + encodeURIComponent(agentId) + '/recovery?return_to=' + encodeURIComponent(ret);
         } else {
           window.location = row.dataset.defaultHref;
         }
+      };
+
+      // The per-row restart control routes to the recovery page, which runs
+      // the layer-2 probe and offers the appropriate restart tier. The
+      // ``intent=restart`` marker tells the recovery page to render its
+      // restart UI even when the workspace is currently healthy, instead of
+      // redirecting straight back (the automatic-503 behaviour).
+      window.landingRestartClick = function (button) {
+        var row = button.closest('[data-agent-id]');
+        if (!row) return;
+        var agentId = row.dataset.agentId;
+        var ret = row.dataset.defaultHref || '';
+        window.location = '/agents/' + encodeURIComponent(agentId)
+          + '/recovery?return_to=' + encodeURIComponent(ret) + '&intent=restart';
       };
 
       // Providers panel: pending-toggle state and last-known snapshot timestamps.
