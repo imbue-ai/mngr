@@ -975,7 +975,16 @@ class ImbueCloudProvider(BaseProviderInstance):
             plugin={},
         )
 
-    def _build_host_object(self, lease: LeasedHostInfo) -> ImbueCloudHost:
+    def _build_host_object(self, lease: LeasedHostInfo, *, adopt_pre_baked_agent: bool = True) -> ImbueCloudHost:
+        """Construct the ``ImbueCloudHost`` for a leased host.
+
+        ``adopt_pre_baked_agent`` records whether the leased container still
+        carries the bake's pre-provisioned agent state to adopt. The fast path
+        (and discovery) leaves it True; the slow path passes False because it
+        tore down the baked container and rebuilt it, so there is nothing to
+        adopt -- ``pre_baked_agent_id=None`` then makes ``create_agent_*`` /
+        ``provision_agent`` all fall through to mngr's standard full create.
+        """
         host_id = HostId(lease.host_id)
         agent_id = AgentId(lease.agent_id)
         ssh_user = lease.ssh_user
@@ -1010,7 +1019,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
-            pre_baked_agent_id=agent_id,
+            pre_baked_agent_id=agent_id if adopt_pre_baked_agent else None,
             lease_db_id=host_db_id,
         )
         self._evict_cached_host(host_id, replacement=host)
@@ -1267,7 +1276,11 @@ class ImbueCloudProvider(BaseProviderInstance):
             self._scan_and_record_container_host_key(
                 host_id, lease_result.vps_address, lease_result.container_ssh_port
             )
-            host = self._build_host_object(self._leased_info_from_result(lease_result))
+            # The container was torn down and rebuilt -- there is no baked agent
+            # state to adopt, so don't mark the host as pre-baked. This makes
+            # mngr run its standard full create + provision (matching this
+            # method's "fresh OVH host" contract) instead of the adopt path.
+            host = self._build_host_object(self._leased_info_from_result(lease_result), adopt_pre_baked_agent=False)
         logger.info(
             "imbue_cloud[{}] SLOW PATH: rebuilt container on leased host {} (lease {}); "
             "mngr will now run full client-side setup",

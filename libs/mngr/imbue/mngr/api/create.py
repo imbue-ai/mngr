@@ -1,3 +1,6 @@
+import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
 from typing import cast
@@ -34,6 +37,49 @@ from imbue.mngr.utils.git_utils import remove_worktree
 
 _MAX_HOST_NAME_GENERATION_ATTEMPTS: Final[int] = 100
 _MAX_HOST_NAME_CONFLICT_RETRIES: Final[int] = 3
+
+# Set to "1" to retain a host whose create failed (skip both the host-lock
+# removal in ``Host.lock_cooperatively`` and the host teardown below), so it can
+# be inspected. Mirrors the flag used in ``hosts/host.py``.
+_RETAIN_FAILED_HOSTS_ENV_VAR: Final[str] = "MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE"
+
+
+@contextmanager
+def _destroy_new_host_on_create_failure(
+    host: OnlineHostInterface, provider: ProviderInstanceInterface | None
+) -> Iterator[None]:
+    """Destroy a freshly-created host if the create fails, so we don't leak it.
+
+    ``provider`` is the provider that created the host for a ``--new-host``
+    create, or ``None`` for an existing host the caller already had (which is
+    never torn down). ``Host.lock_cooperatively`` removes the host lock on
+    failure so *idle-shutdown* providers reclaim the host on their own, but
+    providers that never idle-shut-down (e.g. imbue_cloud pool leases, which set
+    ``idle_mode=disabled``) would otherwise leak the host and its connector
+    lease. Destroying here also releases that lease (``destroy_host`` is the same
+    path ``mngr destroy`` takes). Gated by
+    ``MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1``, which retains the
+    failed host for debugging (the same flag that retains the lock).
+    """
+    try:
+        yield
+    except BaseException:
+        if provider is not None:
+            if os.environ.get(_RETAIN_FAILED_HOSTS_ENV_VAR) == "1":
+                logger.debug("Retaining failed host {} for debugging ({}=1)", host.id, _RETAIN_FAILED_HOSTS_ENV_VAR)
+            else:
+                logger.info(
+                    "Destroying host {} after failed create (set {}=1 to retain it for debugging)",
+                    host.id,
+                    _RETAIN_FAILED_HOSTS_ENV_VAR,
+                )
+                try:
+                    provider.destroy_host(host)
+                except (MngrError, OSError) as destroy_error:
+                    logger.opt(exception=destroy_error).warning(
+                        "Failed to destroy host {} after a failed create", host.id
+                    )
+        raise
 
 
 def _call_on_before_create_hooks(
@@ -157,20 +203,26 @@ def create(
 
     # Determine which provider to use and get the host
     is_new_host = isinstance(target_host, NewHostOptions)
+    # Resolve the provider that owns a newly-created host so we can tear it down
+    # if the rest of the create fails (None when adopting an existing host).
+    new_host_provider: ProviderInstanceInterface | None = (
+        get_provider_instance(target_host.provider, mngr_ctx) if isinstance(target_host, NewHostOptions) else None
+    )
     with log_span("Resolving target host"):
         host = resolve_target_host(target_host, mngr_ctx)
 
     # Notify plugins that a new host was created (only for new hosts)
     if is_new_host:
-        with log_span("Calling on_host_created hooks"):
-            mngr_ctx.pm.hook.on_host_created(host=host, mngr_ctx=mngr_ctx)
+        with _destroy_new_host_on_create_failure(host, new_host_provider):
+            with log_span("Calling on_host_created hooks"):
+                mngr_ctx.pm.hook.on_host_created(host=host, mngr_ctx=mngr_ctx)
 
-        # Run post-host-create commands synchronously. The host is fully
-        # online (sshd/exec ready) but no agent work_dir has been touched
-        # yet, so this is the safe window for an image to do first-boot
-        # setup (e.g. seed a volume from an in-image bake) that any
-        # subsequent exec depends on.
-        _run_post_host_create_commands(host, target_host.provisioning.post_host_create_commands)
+            # Run post-host-create commands synchronously. The host is fully
+            # online (sshd/exec ready) but no agent work_dir has been touched
+            # yet, so this is the safe window for an image to do first-boot
+            # setup (e.g. seed a volume from an in-image bake) that any
+            # subsequent exec depends on.
+            _run_post_host_create_commands(host, target_host.provisioning.post_host_create_commands)
 
     # ``host.pre_baked_agent_id`` (default None on the base Host class,
     # populated by providers whose ``create_host`` returns a host with a
@@ -181,8 +233,10 @@ def create(
     # the adopt scenario.
     pre_baked_agent_id: AgentId | None = host.pre_baked_agent_id
 
-    # while we are deploying an agent, lock the host:
-    with host.lock_cooperatively():
+    # While we are deploying an agent, lock the host. Wrap in the
+    # destroy-on-failure guard so a new host we just created is torn down (and,
+    # for imbue_cloud, its lease released) if any step below fails.
+    with _destroy_new_host_on_create_failure(host, new_host_provider), host.lock_cooperatively():
         # Prevent duplicate agent names on the same host. The tmux session name
         # is derived from the agent name, so two agents with the same name would
         # collide on the same tmux session. This check must be inside the lock to
