@@ -415,7 +415,10 @@ def stop_modal_app(
     stopped" as success so re-running ``destroy`` after a failed first
     pass is safe. Any other non-zero exit raises :class:`ModalDeployError`.
     """
-    command = ["modal", "app", "stop", "--env", modal_env, app_name]
+    # ``-y`` skips Modal's interactive confirmation prompt; without it the
+    # command aborts with "no interactive terminal detected" whenever it runs
+    # without a TTY (auto-recover after a failed deploy, CI, background runs).
+    command = ["modal", "app", "stop", "-y", "--env", modal_env, app_name]
     cg = parent_cg.make_concurrency_group(name=f"modal-app-stop-{app_name}")
     with cg:
         result = cg.run_process_to_completion(
