@@ -13,9 +13,12 @@ export function LoginRedirectRoute(props) {
     if (typeof code !== 'string') return;
     window.location.href = '/authenticate?one_time_code=' + encodeURIComponent(code);
   });
+  // The surrounding document <body> (with its Tailwind background/typography
+  // classes) is supplied by the SSR shell in server.jsx / the
+  // _client_render_shell in Python; the route only owns the in-app content.
   return (
-    <body>
+    <div>
       <p>Authenticating...</p>
-    </body>
+    </div>
   );
 }
