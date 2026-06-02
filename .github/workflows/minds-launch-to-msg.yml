@@ -321,6 +321,13 @@ jobs:
           SKIP_FIRST_MESSAGE: ${{ inputs.skip_first_message && '1' || '0' }}
           SKIP_SLACK_FLOW:    ${{ inputs.skip_slack_flow    && '1' || '0' }}
         run: |
+          # pipefail is REQUIRED: without it, the pipeline below exits
+          # with tee's status (always 0), so an e2e failure (exit 1) is
+          # silently masked and GHA reports the step as success. That
+          # caused run 26850735596 to be marked completed/success despite
+          # a real Lima provisioning failure -- the only signal was 5
+          # screenshots instead of the usual 26-28.
+          set -o pipefail
           # Tee stdout+stderr to a file so the e2e script's structured
           # output (loguru lines: phase=, kick attempts, navigation
           # debug) is preserved in the artifact alongside the daemon
