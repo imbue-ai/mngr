@@ -1829,11 +1829,17 @@ class OvhOps(Protocol):
     def list_vps_resources(self) -> list[OvhVpsResource]: ...
 
 
+class OvhClientCaller(Protocol):
+    """The single python-ovh entrypoint HttpOvhOps depends on (a DI seam for tests)."""
+
+    def call(self, method: str, path: str, data: object, need_auth: bool) -> Any: ...
+
+
 class HttpOvhOps:
     """OvhOps implementation backed by the official ``ovh`` SDK (signed calls)."""
 
     def __init__(self, application_key: str, application_secret: str, consumer_key: str, endpoint: str) -> None:
-        self.client = ovh.Client(
+        self.client: OvhClientCaller = ovh.Client(
             endpoint=endpoint,
             application_key=application_key,
             application_secret=application_secret,
