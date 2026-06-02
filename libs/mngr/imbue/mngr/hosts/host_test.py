@@ -13,7 +13,6 @@ from typing import cast
 import pytest
 from paramiko import ChannelException
 from paramiko import SSHException
-from pydantic import PrivateAttr
 from pyinfra.api.command import StringCommand
 from pyinfra.api.host import Host as PyinfraHost
 from pyinfra.connectors.util import CommandOutput
@@ -1083,6 +1082,48 @@ def _create_host_with_fake_connector(
     )
 
 
+def _make_stop_agents_test_host(
+    local_provider: LocalProviderInstance,
+    agent: AgentInterface,
+    command_handler: Callable[[str], CommandResult],
+) -> tuple[Host, list[tuple[str, float | None]]]:
+    """Build a Host whose stop-path shell commands are served by ``command_handler``.
+
+    The returned Host's ``execute_idempotent_command`` records every
+    ``(command, timeout_seconds)`` pair into the returned list (so callers can
+    assert on the bounds passed) and delegates the actual result to
+    ``command_handler``, which is free to return canned output or raise to
+    simulate a wedged command. ``_get_agent_by_id`` is stubbed to return
+    ``agent`` so ``stop_agents`` walks its full collect-then-kill sequence
+    without touching real tmux or processes.
+    """
+    recorded_timeouts: list[tuple[str, float | None]] = []
+
+    class _StopAgentsTestHost(Host):
+        def execute_idempotent_command(
+            self,
+            command: str,
+            user: str | None = None,
+            cwd: Path | None = None,
+            env: Any = None,
+            timeout_seconds: float | None = None,
+        ) -> CommandResult:
+            recorded_timeouts.append((command, timeout_seconds))
+            return command_handler(command)
+
+        def _get_agent_by_id(self, agent_id: AgentId) -> AgentInterface | None:
+            return agent
+
+    host = _StopAgentsTestHost(
+        id=HostId.generate(),
+        host_name=HostName("test"),
+        connector=PyinfraConnector(cast(PyinfraHost, _FakePyinfraHost())),
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+    return host, recorded_timeouts
+
+
 def test_stop_agents_bounds_every_command_with_a_timeout(
     local_provider: LocalProviderInstance,
 ) -> None:
@@ -1099,47 +1140,21 @@ def test_stop_agents_bounds_every_command_with_a_timeout(
     agent = make_test_agent_details("cleanup-timeout-agent")
     fake_pid = "12345"
 
-    class _RecordingHost(Host):
-        """Host that records the timeout for every execute_idempotent_command call.
+    def handle(command: str) -> CommandResult:
+        # Canned output (a window index for list-windows and a pane PID for
+        # list-panes) so stop_agents walks its full collect-then-kill sequence.
+        if "list-windows" in command:
+            stdout = "0"
+        elif "list-panes" in command:
+            stdout = fake_pid
+        else:
+            stdout = ""
+        return CommandResult(stdout=stdout, stderr="", success=True)
 
-        Returns canned output (a window index for list-windows and a pane PID for
-        list-panes) so stop_agents walks its full collect-then-kill sequence
-        without touching real tmux or processes.
-        """
-
-        _recorded_timeouts: list[tuple[str, float | None]] = PrivateAttr(default_factory=list)
-
-        def execute_idempotent_command(
-            self,
-            command: str,
-            user: str | None = None,
-            cwd: Path | None = None,
-            env: Any = None,
-            timeout_seconds: float | None = None,
-        ) -> CommandResult:
-            self._recorded_timeouts.append((command, timeout_seconds))
-            if "list-windows" in command:
-                stdout = "0"
-            elif "list-panes" in command:
-                stdout = fake_pid
-            else:
-                stdout = ""
-            return CommandResult(stdout=stdout, stderr="", success=True)
-
-        def _get_agent_by_id(self, agent_id: AgentId) -> AgentInterface | None:
-            return cast(AgentInterface, agent)
-
-    host = _RecordingHost(
-        id=HostId.generate(),
-        host_name=HostName("test"),
-        connector=PyinfraConnector(cast(PyinfraHost, _FakePyinfraHost())),
-        provider_instance=local_provider,
-        mngr_ctx=local_provider.mngr_ctx,
-    )
+    host, recorded = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle)
 
     host.stop_agents([agent.id])
 
-    recorded = host._recorded_timeouts
     # Sanity: we actually exercised the tmux pid-collection path and the kill step.
     assert any("list-panes" in command for command, _ in recorded)
     assert any("kill-session" in command for command, _ in recorded)
@@ -1163,43 +1178,23 @@ def test_stop_agents_keeps_cleaning_up_when_a_command_times_out(
     """
     agent = make_test_agent_details("cleanup-timeout-agent")
 
-    class _TimingOutHost(Host):
-        """Host that raises TimeoutError for list-panes (mimicking the remote SSH
-        timeout) and returns success otherwise."""
+    def handle(command: str) -> CommandResult:
+        # Mimic the remote SSH timeout (socket.timeout, a TimeoutError) on the
+        # wedged list-panes command; everything else succeeds.
+        if "list-panes" in command:
+            raise TimeoutError("timed out")
+        stdout = "0" if "list-windows" in command else ""
+        return CommandResult(stdout=stdout, stderr="", success=True)
 
-        _commands: list[str] = PrivateAttr(default_factory=list)
-
-        def execute_idempotent_command(
-            self,
-            command: str,
-            user: str | None = None,
-            cwd: Path | None = None,
-            env: Any = None,
-            timeout_seconds: float | None = None,
-        ) -> CommandResult:
-            self._commands.append(command)
-            if "list-panes" in command:
-                raise TimeoutError("timed out")
-            stdout = "0" if "list-windows" in command else ""
-            return CommandResult(stdout=stdout, stderr="", success=True)
-
-        def _get_agent_by_id(self, agent_id: AgentId) -> AgentInterface | None:
-            return cast(AgentInterface, agent)
-
-    host = _TimingOutHost(
-        id=HostId.generate(),
-        host_name=HostName("test"),
-        connector=PyinfraConnector(cast(PyinfraHost, _FakePyinfraHost())),
-        provider_instance=local_provider,
-        mngr_ctx=local_provider.mngr_ctx,
-    )
+    host, recorded = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle)
 
     # Must not raise even though list-panes timed out mid-collection.
     host.stop_agents([agent.id])
 
-    assert any("list-panes" in command for command in host._commands)
+    commands = [command for command, _ in recorded]
+    assert any("list-panes" in command for command in commands)
     # The timeout was swallowed and cleanup still reached the session teardown.
-    assert any("kill-session" in command for command in host._commands)
+    assert any("kill-session" in command for command in commands)
 
 
 @pytest.mark.parametrize(
