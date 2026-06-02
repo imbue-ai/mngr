@@ -107,83 +107,72 @@ def create_ssh_pyinfra_host_using_user_config(
     return pyinfra_host
 
 
-# Cross-platform directory listing executed on remote hosts via `python3 -c`.
-# Emits one tab-separated line per entry: <type><TAB><size><TAB><mtime_epoch><TAB><abs_path>
-# where <type> is 'd' for directories and 'f' for everything else. Uses Python's
-# os/stat modules so it works identically on macOS and Linux.
-_LIST_DIRECTORY_SCRIPT: str = r"""
-import os, stat, sys
-d = sys.argv[1]
-is_recursive = sys.argv[2] == '1'
-def emit(path):
-    try:
-        st = os.lstat(path)
-    except OSError:
-        return
-    tc = 'd' if stat.S_ISDIR(st.st_mode) else 'f'
-    sys.stdout.write(f'{tc}\t{st.st_size}\t{int(st.st_mtime)}\t{path}\n')
-if is_recursive:
-    for root, dirs, files in os.walk(d):
-        for name in dirs + files:
-            emit(os.path.join(root, name))
-else:
-    try:
-        names = os.listdir(d)
-    except OSError:
-        names = []
-    for name in names:
-        emit(os.path.join(d, name))
-"""
+def _local_dir_entry(entry_path: str) -> VolumeFile | None:
+    """Stat a local path into a VolumeFile, or None if it cannot be stat'd.
 
-
-def _parse_list_directory_output(output: str) -> list[VolumeFile]:
-    """Parse the tab-separated output of ``_LIST_DIRECTORY_SCRIPT`` into VolumeFiles."""
-    entries: list[VolumeFile] = []
-    for line in output.splitlines():
-        if not line:
-            continue
-        parts = line.split("\t", 3)
-        if len(parts) != 4:
-            logger.trace("Skipping malformed list_directory line: {}", line)
-            continue
-        type_char, size_str, mtime_str, path = parts
-        file_type = VolumeFileType.DIRECTORY if type_char == "d" else VolumeFileType.FILE
-        try:
-            size = int(size_str)
-            mtime = int(mtime_str)
-        except ValueError:
-            logger.trace("Skipping list_directory line with bad size/mtime: {}", line)
-            continue
-        entries.append(VolumeFile(path=path, file_type=file_type, mtime=mtime, size=size))
-    return entries
+    Classification uses ``lstat`` (does not follow symlinks) so it matches the
+    remote SFTP listing, which also reports symlink attributes rather than their
+    targets -- local and remote agree on symlink-to-directory entries.
+    """
+    try:
+        st = os.lstat(entry_path)
+    except OSError:
+        return None
+    file_type = VolumeFileType.DIRECTORY if stat.S_ISDIR(st.st_mode) else VolumeFileType.FILE
+    return VolumeFile(path=entry_path, file_type=file_type, mtime=int(st.st_mtime), size=st.st_size)
 
 
 def _list_directory_local(path: Path, recursive: bool) -> list[VolumeFile]:
-    """List a directory on the local filesystem, mirroring the remote script's output."""
+    """List a directory on the local filesystem."""
     entries: list[VolumeFile] = []
-
-    def emit(entry_path: str) -> None:
-        try:
-            st = os.lstat(entry_path)
-        except OSError:
-            return
-        # Classify from the lstat result (do not follow symlinks), matching the
-        # remote _LIST_DIRECTORY_SCRIPT exactly so local and remote listings agree.
-        file_type = VolumeFileType.DIRECTORY if stat.S_ISDIR(st.st_mode) else VolumeFileType.FILE
-        entries.append(VolumeFile(path=entry_path, file_type=file_type, mtime=int(st.st_mtime), size=st.st_size))
-
     str_path = str(path)
     if recursive:
         for root, dirs, files in os.walk(str_path):
             for name in dirs + files:
-                emit(os.path.join(root, name))
+                entry = _local_dir_entry(os.path.join(root, name))
+                if entry is not None:
+                    entries.append(entry)
     else:
         try:
             names = os.listdir(str_path)
         except OSError:
             return []
         for name in names:
-            emit(os.path.join(str_path, name))
+            entry = _local_dir_entry(os.path.join(str_path, name))
+            if entry is not None:
+                entries.append(entry)
+    return entries
+
+
+def _sftp_walk(sftp: SFTPClient, dir_path: str, recursive: bool) -> list[VolumeFile]:
+    """List a remote directory via SFTP ``listdir_attr``, optionally recursing.
+
+    Entry paths are absolute (built from ``dir_path``). Classification uses the
+    entry's own mode (SFTP reports symlink attributes, not their targets), so a
+    symlink to a directory is reported as a FILE, matching the local listing. A
+    directory that cannot be listed (e.g. does not exist) yields no entries.
+    """
+    try:
+        attrs = sftp.listdir_attr(dir_path)
+    except IOError as e:
+        logger.trace("list_directory failed for {}: {}", dir_path, e)
+        return []
+    base = dir_path.rstrip("/")
+    entries: list[VolumeFile] = []
+    for attr in attrs:
+        entry_path = f"{base}/{attr.filename}"
+        is_dir = attr.st_mode is not None and stat.S_ISDIR(attr.st_mode)
+        file_type = VolumeFileType.DIRECTORY if is_dir else VolumeFileType.FILE
+        entries.append(
+            VolumeFile(
+                path=entry_path,
+                file_type=file_type,
+                mtime=int(attr.st_mtime) if attr.st_mtime is not None else 0,
+                size=int(attr.st_size) if attr.st_size is not None else 0,
+            )
+        )
+        if recursive and is_dir:
+            entries.extend(_sftp_walk(sftp, entry_path, recursive))
     return entries
 
 
@@ -916,20 +905,26 @@ class OuterHost(OuterHostInterface):
     def list_directory(self, path: Path, *, recursive: bool = False) -> list[VolumeFile]:
         """List the entries under ``path`` on this host.
 
-        Returns one VolumeFile per entry, each with an absolute ``path``. On
-        local hosts this reads the filesystem directly; on remote hosts it runs
-        a small cross-platform Python script over SSH. A non-existent directory
-        yields an empty list rather than raising.
+        Returns one VolumeFile per entry, each with an absolute ``path``. Local
+        hosts read the filesystem directly; remote hosts list over SFTP (the
+        same paramiko channel used for file reads). Symlinks are not followed
+        when classifying entries, so local and remote listings agree. A
+        non-existent directory yields an empty list rather than raising.
         """
         if self.is_local:
             return _list_directory_local(path, recursive)
-        flag = "1" if recursive else "0"
-        command = f"python3 -c {shlex.quote(_LIST_DIRECTORY_SCRIPT)} {shlex.quote(str(path))} {flag}"
-        result = self.execute_idempotent_command(command, timeout_seconds=30.0)
-        if not result.success:
-            logger.trace("list_directory failed for {}: {}", path, result.stderr.strip())
-            return []
-        return _parse_list_directory_output(result.stdout)
+        return self._list_directory_remote(path, recursive)
+
+    def _list_directory_remote(self, path: Path, recursive: bool) -> list[VolumeFile]:
+        """List a remote directory over a dedicated paramiko SFTP channel."""
+        transport = self._get_paramiko_transport()
+        sftp = self._create_sftp_client(transport)
+        if sftp is None:
+            raise HostConnectionError("Failed to create SFTP channel from transport")
+        try:
+            return _sftp_walk(sftp, str(path), recursive)
+        finally:
+            sftp.close()
 
     def get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
         """Get SSH connection info for this host if it's remote."""

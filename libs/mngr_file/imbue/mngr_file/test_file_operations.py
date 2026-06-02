@@ -4,24 +4,27 @@ from pathlib import Path
 
 from imbue.mngr.api.address_parsers import parse_agent_or_host_address
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr_file.cli.list import list_files_on_host
+from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr_file.cli.list import _volume_file_to_entry
 from imbue.mngr_file.cli.target import resolve_file_target
+from imbue.mngr_file.data_types import FileEntry
 from imbue.mngr_file.data_types import FileType
 from imbue.mngr_file.data_types import PathRelativeTo
 
 
+def _list_entries(host: object, directory: Path, *, recursive: bool) -> list[FileEntry]:
+    assert isinstance(host, OnlineHostInterface)
+    return [_volume_file_to_entry(vf) for vf in host.list_directory(directory, recursive=recursive)]
+
+
 def test_list_files_on_localhost(temp_mngr_ctx: MngrContext) -> None:
-    """List files on the local host via the host interface."""
+    """List files on the local host via the unified readable-host interface."""
     resolved = resolve_file_target(
         target=parse_agent_or_host_address("@localhost"),
         mngr_ctx=temp_mngr_ctx,
         relative_to=PathRelativeTo.HOST,
     )
-    entries = list_files_on_host(
-        host=resolved.host,
-        directory=resolved.base_path,
-        is_recursive=False,
-    )
+    entries = _list_entries(resolved.host, resolved.base_path, recursive=False)
     # The host dir should contain at least some standard files/dirs
     names = {e.name for e in entries}
     assert len(names) > 0
@@ -34,6 +37,7 @@ def test_put_and_get_file_on_localhost(temp_mngr_ctx: MngrContext, tmp_path: Pat
         mngr_ctx=temp_mngr_ctx,
         relative_to=PathRelativeTo.HOST,
     )
+    assert isinstance(resolved.host, OnlineHostInterface)
 
     # Write a test file
     test_content = b"integration test content 82749"
@@ -41,16 +45,12 @@ def test_put_and_get_file_on_localhost(temp_mngr_ctx: MngrContext, tmp_path: Pat
     test_path = resolved.base_path / test_file_name
     resolved.host.write_file(test_path, test_content)
 
-    # Read it back
+    # Read it back through the readable-host interface
     read_content = resolved.host.read_file(test_path)
     assert read_content == test_content
 
     # List the directory and verify the file appears
-    entries = list_files_on_host(
-        host=resolved.host,
-        directory=resolved.base_path,
-        is_recursive=False,
-    )
+    entries = _list_entries(resolved.host, resolved.base_path, recursive=False)
     names = {e.name for e in entries}
     assert test_file_name in names
 
@@ -77,11 +77,7 @@ def test_list_files_recursive_on_localhost(temp_mngr_ctx: MngrContext) -> None:
     nested_file = nested_dir / "nested-file.txt"
     nested_file.write_text("nested content")
 
-    entries = list_files_on_host(
-        host=resolved.host,
-        directory=resolved.base_path,
-        is_recursive=True,
-    )
+    entries = _list_entries(resolved.host, resolved.base_path, recursive=True)
     names = {e.name for e in entries}
     assert "test-nested-dir-83921" in names
     assert "nested-file.txt" in names

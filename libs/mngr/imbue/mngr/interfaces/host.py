@@ -251,7 +251,38 @@ class HostFileReadInterface(MutableModel, ABC):
         ...
 
 
-class OuterHostInterface(HostFileReadInterface, ABC):
+class HostFileWriteInterface(MutableModel, ABC):
+    """Write access to a host's files.
+
+    The companion to :class:`HostFileReadInterface`. Implemented by:
+    - :class:`OuterHostInterface` (and thus every online host), writing the live
+      filesystem over SSH / locally.
+    - :class:`~imbue.mngr.hosts.offline_host.OfflineHostWithVolume`, writing the
+      host's persisted volume when the host itself is stopped (so files can be
+      staged for the next time it starts). File modes are not settable on a
+      volume write, so ``mode`` is ignored there.
+
+    All paths are absolute paths as seen under the host's ``host_dir``.
+    """
+
+    @abstractmethod
+    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
+        """Write bytes content to a file."""
+        ...
+
+    @abstractmethod
+    def write_text_file(
+        self,
+        path: Path,
+        content: str,
+        encoding: str = "utf-8",
+        mode: str | None = None,
+    ) -> None:
+        """Write string content to a file."""
+        ...
+
+
+class OuterHostInterface(HostFileReadInterface, HostFileWriteInterface, ABC):
     """Minimal interface for the "outer" machine that hosts a container/sandbox.
 
     Outer hosts have a strictly smaller surface than mngr-managed hosts: just the
@@ -338,22 +369,6 @@ class OuterHostInterface(HostFileReadInterface, ABC):
         and tolerate duplicate lines on retry. Use this for commands like
         ``docker build`` where re-running is safe.
         """
-        ...
-
-    @abstractmethod
-    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
-        """Write bytes content to a file."""
-        ...
-
-    @abstractmethod
-    def write_text_file(
-        self,
-        path: Path,
-        content: str,
-        encoding: str = "utf-8",
-        mode: str | None = None,
-    ) -> None:
-        """Write string content to a file."""
         ...
 
     @abstractmethod

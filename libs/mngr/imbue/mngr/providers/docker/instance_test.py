@@ -13,8 +13,10 @@ from imbue.mngr.errors import DockerBuildTimeoutError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.host import HostFileReadInterface
+from imbue.mngr.interfaces.host import HostFileWriteInterface
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -508,6 +510,44 @@ def test_offline_host_from_record_is_readable(
     assert host.read_text_file(host.host_dir / "agents" / "agent-x" / "f.txt") == "hi"
     assert host.path_exists(host.host_dir / "agents" / "agent-x")
     assert not host.path_exists(host.host_dir / "agents" / "missing")
+
+
+@pytest.mark.allow_warnings(match=r"File mode is not settable when writing to an offline host's volume")
+def test_offline_host_from_record_is_writable(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """An offline host built from a host record writes files to its volume.
+
+    Backs `mngr file put` against a stopped host: writing through the host's
+    HostFileWriteInterface lands the bytes on the persisted volume (with --mode
+    ignored), and the write is read back through the same host.
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    record = HostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=HOST_ID_A,
+            host_name="h",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+    )
+
+    host = provider._create_host_from_host_record(record)
+    assert isinstance(host, OfflineHostWithVolume)
+    assert isinstance(host, HostFileWriteInterface)
+
+    target = host.host_dir / "agents" / "agent-x" / "staged.txt"
+    host.write_file(target, b"hello")
+
+    vol_id = DockerProviderInstance._volume_id_for_host(HostId(HOST_ID_A))
+    on_disk = tmp_path / "volumes" / str(vol_id) / "agents" / "agent-x" / "staged.txt"
+    assert on_disk.read_bytes() == b"hello"
+    assert host.read_file(target) == b"hello"
+
+    # mode is not settable on a volume write -- it is ignored, not an error.
+    host.write_file(target, b"world", mode="0644")
+    assert host.read_file(target) == b"world"
 
 
 def test_volume_id_for_host_is_deterministic() -> None:

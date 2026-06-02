@@ -24,6 +24,7 @@ from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.host import HostFileReadInterface
+from imbue.mngr.interfaces.host import HostFileWriteInterface
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.interfaces.volume import Volume
@@ -371,8 +372,8 @@ class OfflineHost(BaseHost):
             raise AgentNotFoundOnHostError(agent_ref.agent_id, self.id)
 
 
-class OfflineHostWithVolume(OfflineHost, HostFileReadInterface):
-    """An offline host whose persisted storage volume is still readable.
+class OfflineHostWithVolume(OfflineHost, HostFileReadInterface, HostFileWriteInterface):
+    """An offline host whose persisted storage volume is still readable (and writable).
 
     A plain :class:`OfflineHost` exposes only last-known metadata. When the
     provider also surfaces a persistent volume for the host, the host's files
@@ -453,6 +454,25 @@ class OfflineHostWithVolume(OfflineHost, HostFileReadInterface):
     def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
         """Read a file from the host volume and decode it."""
         return self.read_file(path).decode(encoding)
+
+    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
+        """Write bytes to a file on the host volume.
+
+        ``mode`` cannot be applied through a volume write and is ignored (with a
+        warning) if supplied; ``is_atomic`` is likewise not honored.
+        """
+        if mode is not None:
+            logger.warning(
+                "File mode is not settable when writing to an offline host's volume; ignoring mode={}", mode
+            )
+        volume = self._volume()
+        if volume is None:
+            raise FileNotFoundError(f"No writable volume for offline host {self.id}; cannot write {path}")
+        volume.write_files({self._to_volume_path(path): content})
+
+    def write_text_file(self, path: Path, content: str, encoding: str = "utf-8", mode: str | None = None) -> None:
+        """Write string content to a file on the host volume."""
+        self.write_file(path, content.encode(encoding), mode=mode)
 
     def path_exists(self, path: Path) -> bool:
         """Whether a path exists on the host volume."""
