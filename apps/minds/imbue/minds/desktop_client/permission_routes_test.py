@@ -341,6 +341,12 @@ def test_get_permission_request_page_renders_as_modal(tmp_path: Path) -> None:
     # Backdrop click and Escape are wired to the same dismissal helper.
     assert "onBackdropClick" in body
     assert 'e.key === "Escape"' in body
+    # Overflow scrolls inside the dialog card (capped at the viewport height
+    # with an inner scroll region), not down the full width of the app.
+    dialog_idx = body.find('id="permissions-dialog"')
+    dialog_tag_end = body.find(">", dialog_idx)
+    assert "max-h-full" in body[dialog_idx:dialog_tag_end]
+    assert "overflow-y-auto" in body
 
 
 def test_get_permission_request_page_shows_descriptions_when_present(tmp_path: Path) -> None:
