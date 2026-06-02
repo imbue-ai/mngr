@@ -1,9 +1,3 @@
-"""Bulk file upload to a host: a single rsync instead of one SFTP write per file.
-
-Per-file uploads opened an SFTP channel per file (a full SSH round-trip), which did
-not scale and caused upload timeouts / connection resets (github issue 1825).
-"""
-
 import shutil
 import tempfile
 from collections.abc import Mapping
