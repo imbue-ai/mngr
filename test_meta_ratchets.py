@@ -629,9 +629,6 @@ def test_every_project_has_changelog_layout() -> None:
             target = proj_dir / required
             if not target.exists():
                 missing.append(str(target.relative_to(_REPO_ROOT)))
-        # Checking for the .gitkeep subsumes a check that the changelog/ directory
-        # itself exists: .gitkeep can only be present if its parent directory is,
-        # and git does not track the directory at all unless it holds the placeholder.
         gitkeep = project_entries_dir(project, _REPO_ROOT) / ".gitkeep"
         if not gitkeep.exists():
             missing.append(str(gitkeep.relative_to(_REPO_ROOT)))
