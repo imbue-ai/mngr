@@ -1936,14 +1936,21 @@ def run_pool_host_cleanup_sweep(conn: Any, ovh_ops: OvhOps, region_code: str) ->
         cur.execute("SELECT id, vps_instance_id FROM pool_hosts WHERE status = 'removing' FOR UPDATE SKIP LOCKED")
         rows = cur.fetchall()
         for host_db_id, vps_instance_id in rows:
+            # Per-host savepoint so a DB error on one host's DELETE doesn't
+            # abort the whole transaction (which would roll back every other
+            # host's already-issued DELETE in this run and poison subsequent
+            # statements). Rollback-to-savepoint leaves the transaction usable.
+            cur.execute("SAVEPOINT pool_host_cleanup")
             try:
                 if vps_instance_id:
                     clean_up_pool_host_in_ovh(ovh_ops, vps_instance_id, region_code)
                 else:
                     logger.warning("Removing pool host %s has no vps_instance_id; skipping OVH cleanup", host_db_id)
                 cur.execute("DELETE FROM pool_hosts WHERE id = %s", (str(host_db_id),))
+                cur.execute("RELEASE SAVEPOINT pool_host_cleanup")
                 success_count += 1
             except (OvhApiError, OvhHttpError, psycopg2.Error) as exc:
+                cur.execute("ROLLBACK TO SAVEPOINT pool_host_cleanup")
                 logger.warning("Cleanup failed for removing pool host %s; will retry next run: %s", host_db_id, exc)
                 failure_count += 1
     conn.commit()
