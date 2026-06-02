@@ -18,6 +18,7 @@ from __future__ import annotations
 import io
 import os
 import shlex
+import stat
 import threading
 from contextlib import contextmanager
 from datetime import datetime
@@ -166,7 +167,9 @@ def _list_directory_local(path: Path, recursive: bool) -> list[VolumeFile]:
             st = os.lstat(entry_path)
         except OSError:
             return
-        file_type = VolumeFileType.DIRECTORY if os.path.isdir(entry_path) else VolumeFileType.FILE
+        # Classify from the lstat result (do not follow symlinks), matching the
+        # remote _LIST_DIRECTORY_SCRIPT exactly so local and remote listings agree.
+        file_type = VolumeFileType.DIRECTORY if stat.S_ISDIR(st.st_mode) else VolumeFileType.FILE
         entries.append(VolumeFile(path=entry_path, file_type=file_type, mtime=int(st.st_mtime), size=st.st_size))
 
     str_path = str(path)
