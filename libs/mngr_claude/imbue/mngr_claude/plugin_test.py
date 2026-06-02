@@ -35,6 +35,7 @@ from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
+from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -4121,9 +4122,8 @@ def _make_offline_host_with_volume(
 ) -> OfflineHostWithVolume:
     """Build an OfflineHostWithVolume backed by the local provider's host_dir volume.
 
-    The local provider's ``get_volume_for_host`` returns a volume rooted at the
-    provider's host_dir (the same root used for the online path), which the
-    readable offline host resolves lazily. Agent state lives at
+    Uses the same ``make_readable_offline_host`` wrapping the providers use, so
+    the volume is the local provider's (rooted at host_dir). Agent state lives at
     host_dir/agents/<id>/... and is read back through the HostFileReadInterface
     exactly as on a real stopped host.
     """
@@ -4139,7 +4139,9 @@ def _make_offline_host_with_volume(
         provider_instance=local_provider,
         mngr_ctx=temp_mngr_ctx,
     )
-    return OfflineHostWithVolume.from_offline_host(offline_host)
+    host = make_readable_offline_host(offline_host)
+    assert isinstance(host, OfflineHostWithVolume)
+    return host
 
 
 def _populate_volume_session_files(volume_root: Path, agent_id: AgentId) -> dict[str, Path]:
