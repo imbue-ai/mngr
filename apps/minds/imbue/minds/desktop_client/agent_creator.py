@@ -224,6 +224,14 @@ class AgentCreationInfo(FrozenModel):
             "mode-aware status captions without a separate lookup."
         ),
     )
+    host_name: str = Field(
+        default="",
+        description=(
+            "Resolved workspace/host name for this creation (the form's Name field, or a "
+            "repo-derived fallback). Carried so onboarding can address the bootstrap-created "
+            "chat agent (named after the host) without re-deriving it."
+        ),
+    )
     redirect_url: str | None = Field(default=None, description="URL to redirect to when creation is done")
     error: str | None = Field(default=None, description="Error message, set when status is FAILED")
 
@@ -454,12 +462,12 @@ def _build_mngr_create_command(
     name (IMBUE_CLOUD's lease flow is one-shot per pool host, so reuse
     is not meaningful there).
 
-    Secrets (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``, ``GH_TOKEN``)
-    are forwarded by the FCT template's own ``pass_(host_)env`` declarations,
-    not by inline flags here -- ``run_mngr_create`` populates them in the
-    subprocess env when needed and the template-declared forwards pick
-    them up. Keeping the forwarding declaration in FCT means the same
-    template works for ``mngr create`` invocations from outside minds too.
+    Secrets (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``) are forwarded by
+    the FCT template's own ``pass_(host_)env`` declarations, not by inline
+    flags here -- ``run_mngr_create`` populates them in the subprocess env
+    when needed and the template-declared forwards pick them up. Keeping the
+    forwarding declaration in FCT means the same template works for ``mngr
+    create`` invocations from outside minds too.
 
     ``latchkey_env`` is the latchkey wiring (gateway URL, password, JWT,
     disable-counting flag) computed by
@@ -718,7 +726,6 @@ def run_mngr_create(
     imbue_cloud_branch_or_tag: str | None = None,
     anthropic_api_key: str | None = None,
     anthropic_base_url: str | None = None,
-    gh_token: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
     *,
     parent_cg: ConcurrencyGroup | None = None,
@@ -732,10 +739,10 @@ def run_mngr_create(
     pool host has its own pre-baked ``.mngr/`` and the local repo is
     irrelevant.
 
-    ``anthropic_api_key`` / ``anthropic_base_url`` / ``gh_token`` are placed
-    into the subprocess env (not argv) so they don't show up in ``ps`` output;
-    the FCT template's own ``pass_(host_)env`` declarations cause mngr to
-    forward them onto the host as appropriate.
+    ``anthropic_api_key`` / ``anthropic_base_url`` are placed into the
+    subprocess env (not argv) so they don't show up in ``ps`` output; the FCT
+    template's own ``pass_(host_)env`` declarations cause mngr to forward them
+    onto the host as appropriate.
 
     Returns ``(canonical_agent_id, canonical_host_id)``. Both canonical
     ids are parsed out of the ``"event": "created"`` JSONL line that
@@ -761,14 +768,12 @@ def run_mngr_create(
     # client's other subprocesses, so we keep the override scoped to this
     # invocation.
     subprocess_env: dict[str, str] | None = None
-    if anthropic_api_key is not None or anthropic_base_url is not None or gh_token is not None:
+    if anthropic_api_key is not None or anthropic_base_url is not None:
         subprocess_env = dict(os.environ)
         if anthropic_api_key is not None:
             subprocess_env["ANTHROPIC_API_KEY"] = anthropic_api_key
         if anthropic_base_url is not None:
             subprocess_env["ANTHROPIC_BASE_URL"] = anthropic_base_url
-        if gh_token is not None:
-            subprocess_env["GH_TOKEN"] = gh_token
 
     logger.info("Running: {}", " ".join(mngr_command))
 
@@ -937,6 +942,7 @@ class AgentCreator(MutableModel):
     _redirect_urls: dict[str, str] = PrivateAttr(default_factory=dict)
     _errors: dict[str, str] = PrivateAttr(default_factory=dict)
     _launch_modes: dict[str, LaunchMode] = PrivateAttr(default_factory=dict)
+    _host_names: dict[str, str] = PrivateAttr(default_factory=dict)
     _log_queues: dict[str, queue.Queue[str]] = PrivateAttr(default_factory=dict)
     _threads: list[threading.Thread] = PrivateAttr(default_factory=list)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
@@ -951,7 +957,6 @@ class AgentCreator(MutableModel):
         account_email: str = "",
         branch_or_tag: str = "",
         anthropic_api_key: str = "",
-        gh_token: str = "",
         on_created: Callable[[AgentId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
     ) -> CreationId:
@@ -968,9 +973,6 @@ class AgentCreator(MutableModel):
           talks to the official Anthropic API.
         - ``SUBSCRIPTION`` -- inject neither; the user signs in to Claude
           interactively in the workspace.
-
-        ``gh_token`` is optional; when provided it's forwarded to the host
-        as ``GH_TOKEN``.
 
         For ``LaunchMode.IMBUE_CLOUD``, the agent runs on a leased pool host
         via the ``imbue_cloud_<account-slug>`` provider; the plugin's
@@ -1008,6 +1010,7 @@ class AgentCreator(MutableModel):
         with self._lock:
             self._statuses[str(creation_id)] = AgentCreationStatus.INITIALIZING
             self._launch_modes[str(creation_id)] = launch_mode
+            self._host_names[str(creation_id)] = effective_name
             self._log_queues[str(creation_id)] = log_queue
 
         thread = threading.Thread(
@@ -1023,7 +1026,6 @@ class AgentCreator(MutableModel):
                 account_email,
                 branch_or_tag,
                 anthropic_api_key,
-                gh_token,
                 on_created,
                 backup_request,
             ),
@@ -1061,6 +1063,7 @@ class AgentCreator(MutableModel):
                 agent_id=self._canonical_agent_ids.get(cid_str),
                 status=status,
                 launch_mode=self._launch_modes.get(cid_str, LaunchMode.DOCKER),
+                host_name=self._host_names.get(cid_str, ""),
                 redirect_url=self._redirect_urls.get(cid_str),
                 error=self._errors.get(cid_str),
             )
@@ -1082,7 +1085,6 @@ class AgentCreator(MutableModel):
         account_email: str = "",
         branch_or_tag: str = "",
         anthropic_api_key: str = "",
-        gh_token: str = "",
         on_created: Callable[[AgentId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
     ) -> None:
@@ -1287,7 +1289,6 @@ class AgentCreator(MutableModel):
                     ),
                     anthropic_api_key=effective_anthropic_api_key,
                     anthropic_base_url=effective_anthropic_base_url,
-                    gh_token=gh_token if gh_token else None,
                     parent_cg=self.root_concurrency_group,
                 )
 

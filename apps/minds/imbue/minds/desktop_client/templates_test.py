@@ -91,17 +91,20 @@ def test_render_create_form_contains_all_launch_modes() -> None:
         assert mode.value.lower() in html
 
 
-def test_render_create_form_selects_docker_by_default() -> None:
+def test_render_create_form_selects_lima_by_default_without_account() -> None:
+    # With no account selected the compute provider defaults to LIMA (the
+    # local self-served default); IMBUE_CLOUD is only the default when an
+    # account is present.
     html = render_create_form()
-    assert 'value="DOCKER" selected' in html
+    assert 'value="LIMA" selected' in html
 
 
 def test_render_create_form_selects_specified_launch_mode() -> None:
-    # CLOUD instead of the default DOCKER so the "selection honored over the
+    # CLOUD instead of the default LIMA so the "selection honored over the
     # default" assertion is meaningful.
     html = render_create_form(launch_mode=LaunchMode.CLOUD)
     assert 'value="CLOUD" selected' in html
-    assert 'value="DOCKER" selected' not in html
+    assert 'value="LIMA" selected' not in html
 
 
 def test_render_create_form_contains_ai_provider_options() -> None:
@@ -118,11 +121,6 @@ def test_render_create_form_defaults_ai_provider_to_subscription_without_account
 def test_render_create_form_omits_env_file_checkbox() -> None:
     html = render_create_form()
     assert "include_env_file" not in html
-
-
-def test_render_create_form_includes_gh_token_field() -> None:
-    html = render_create_form()
-    assert 'name="gh_token"' in html
 
 
 def test_render_create_form_shows_error_message_when_supplied() -> None:

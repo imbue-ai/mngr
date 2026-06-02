@@ -71,10 +71,13 @@ from imbue.minds.desktop_client.destroying import start_destroy
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
+from imbue.minds.desktop_client.onboarding import OnboardingAnswers
+from imbue.minds.desktop_client.onboarding import OnboardingApplier
 from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
 from imbue.minds.desktop_client.recovery_probe import build_host_health_response
 from imbue.minds.desktop_client.recovery_probe import build_probe_argv
@@ -121,6 +124,7 @@ from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.primitives import ServiceName
+from imbue.minds.primitives import UserDataPreference
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.telegram.setup import TelegramSetupStatus
 from imbue.mngr.primitives import AgentId
@@ -750,7 +754,6 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
         ai_provider = AIProvider.SUBSCRIPTION
     account_id = str(form.get("account_id", "")).strip()
     anthropic_api_key = str(form.get("anthropic_api_key", "")).strip()
-    gh_token = str(form.get("gh_token", "")).strip()
     try:
         backup_provider = BackupProvider(str(form.get("backup_provider", BackupProvider.CONFIGURE_LATER.value)))
     except ValueError:
@@ -780,7 +783,6 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
             ai_provider=ai_provider,
             accounts=accounts_list,
             default_account_id=account_id,
-            gh_token=gh_token,
             anthropic_api_key=anthropic_api_key,
             backup_provider=backup_provider,
             backup_encryption_method=backup_encryption_method,
@@ -863,7 +865,6 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
         account_email=account_email,
         branch_or_tag=branch_or_tag,
         anthropic_api_key=anthropic_api_key,
-        gh_token=gh_token,
         on_created=on_created,
         backup_request=backup_request,
     )
@@ -959,7 +960,6 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
     is_save_backup_password = bool(body.get("backup_save_password", False))
     backup_api_key_env = str(body.get("backup_api_key_env", ""))
     anthropic_api_key = str(body.get("anthropic_api_key", "")).strip()
-    gh_token = str(body.get("gh_token", "")).strip()
     account_id = str(body.get("account_id", "")).strip()
     if not git_url:
         return Response(
@@ -1031,9 +1031,18 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
         ai_provider=ai_provider,
         account_email=account_email,
         anthropic_api_key=anthropic_api_key,
-        gh_token=gh_token,
         backup_request=backup_request,
     )
+
+    # Apply any onboarding answers supplied inline by the API caller. Absent
+    # / empty fields map to the no-op path, so existing callers that omit
+    # them are unaffected. The form-driven UI submits answers separately via
+    # POST /api/create-agent/{id}/onboarding once the user finishes the
+    # questions.
+    onboarding_applier: OnboardingApplier | None = request.app.state.onboarding_applier
+    if onboarding_applier is not None:
+        onboarding_applier.start_apply(creation_id, _parse_onboarding_answers(body))
+
     # API contract: the JSON field stays named ``agent_id`` for backwards
     # compatibility with existing API clients, but the value is now a
     # CreationId (minds-internal in-flight handle, distinct prefix from a
@@ -1083,12 +1092,75 @@ def _handle_creation_status_api(
     return Response(content=json.dumps(result), media_type="application/json")
 
 
+def _parse_onboarding_answers(data: Mapping[str, object]) -> OnboardingAnswers:
+    """Parse the three optional onboarding fields from a JSON body / form mapping.
+
+    An unrecognized or empty ``user_data_preference`` resolves to ``None``
+    (the question was skipped), matching the no-op semantics of every
+    onboarding answer.
+    """
+    raw_preference = str(data.get("user_data_preference", "")).strip()
+    data_preference: UserDataPreference | None = None
+    if raw_preference:
+        try:
+            data_preference = UserDataPreference(raw_preference)
+        except ValueError:
+            data_preference = None
+    return OnboardingAnswers(
+        data_preference=data_preference,
+        initial_problem=str(data.get("initial_problem", "")),
+        permissions_preference=str(data.get("permissions_preference", "")),
+    )
+
+
+async def _handle_onboarding_submit(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Apply onboarding answers for an in-flight creation (POST /api/create-agent/{agent_id}/onboarding).
+
+    Used by the creating-page question flow: the answers are submitted once
+    the user finishes the questions, then applied on a background thread.
+    Returns immediately; the route param carries a ``CreationId``.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+
+    onboarding_applier: OnboardingApplier | None = request.app.state.onboarding_applier
+    if onboarding_applier is None:
+        return Response(
+            status_code=501, content='{"error": "Onboarding not configured"}', media_type="application/json"
+        )
+
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        return Response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
+
+    creation_id = CreationId(agent_id)
+    if onboarding_applier.agent_creator.get_creation_info(creation_id) is None:
+        return Response(status_code=404, content='{"error": "Unknown agent creation"}', media_type="application/json")
+
+    answers = _parse_onboarding_answers(body)
+    onboarding_applier.start_apply(creation_id, answers)
+    return Response(content=json.dumps({"status": "ok"}), media_type="application/json")
+
+
 def _handle_creating_page(
     agent_id: str,
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """Show the creating progress page (GET /creating/{agent_id})."""
+    """Show the creating/onboarding page (GET /creating/{agent_id}).
+
+    The page renders the onboarding questions first (the workspace is
+    already being created in the background) and falls through to the
+    loading screen if creation hasn't finished by the time the user is
+    done. It no longer redirects when creation is already DONE -- the
+    questions still need to be shown so their answers can take effect; the
+    page itself redirects into the workspace once the user finishes.
+    """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
 
@@ -1102,9 +1174,6 @@ def _handle_creating_page(
     info = agent_creator.get_creation_info(creation_id)
     if info is None:
         return Response(status_code=404, content="Unknown agent creation")
-
-    if info.status == AgentCreationStatus.DONE and info.redirect_url is not None:
-        return Response(status_code=307, headers={"Location": info.redirect_url})
 
     html = render_creating_page(creation_id=creation_id, info=info)
     return HTMLResponse(content=html)
@@ -3217,6 +3286,21 @@ def create_desktop_client(
     # thread, so awaitability buys us nothing here.
     app.state.shutdown_event = threading.Event()
     app.state.agent_creator = agent_creator
+    # Applies onboarding answers (Q1 local scan, Q2 chat message, Q3 memory
+    # file) on a background thread. Available whenever agent creation is: it
+    # reuses the agent creator's own root concurrency group to track the
+    # detached apply thread, and reads the host name / canonical agent id off
+    # the creator. Without an agent_creator the endpoint returns 501.
+    onboarding_applier: OnboardingApplier | None = None
+    if agent_creator is not None:
+        onboarding_applier = OnboardingApplier(
+            agent_creator=agent_creator,
+            paths=agent_creator.paths,
+            message_sender=MngrMessageSender(mngr_binary=mngr_binary),
+            root_concurrency_group=agent_creator.root_concurrency_group,
+            mngr_binary=mngr_binary,
+        )
+    app.state.onboarding_applier = onboarding_applier
     app.state.imbue_cloud_cli = imbue_cloud_cli
     app.state.telegram_orchestrator = telegram_orchestrator
     app.state.notification_dispatcher = notification_dispatcher
@@ -3327,6 +3411,7 @@ def create_desktop_client(
     app.get("/api/backup-status")(_handle_backup_status_api)
     app.get("/api/backup-export/{agent_id}")(_handle_backup_export_api)
     app.post("/api/create-agent")(_handle_create_agent_api)
+    app.post("/api/create-agent/{agent_id}/onboarding")(_handle_onboarding_submit)
     app.get("/api/create-agent/{agent_id}/status")(_handle_creation_status_api)
     app.get("/api/create-agent/{agent_id}/logs")(_handle_creation_logs_sse)
     app.get("/creating/{agent_id}")(_handle_creating_page)
