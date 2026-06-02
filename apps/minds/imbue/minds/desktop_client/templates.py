@@ -488,6 +488,20 @@ def render_workspace_settings(
     )
 
 
+# -- Dev styleguide --
+
+
+@pure
+def render_dev_styleguide_page() -> str:
+    """Render the dev-only styleguide page.
+
+    The page is a hand-authored catalog of UI patterns and tokens. When
+    a new ``:root`` token is added to ``static/tokens.css``, add the
+    matching swatch markup directly to ``templates/dev_styleguide.html``.
+    """
+    return JINJA_ENV.get_template("dev_styleguide.html").render()
+
+
 @pure
 def render_accounts_page(
     accounts: Sequence[object],

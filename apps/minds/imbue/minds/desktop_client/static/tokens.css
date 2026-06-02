@@ -1,23 +1,20 @@
 /*
  * Design tokens + a handful of custom CSS that Tailwind doesn't cover
- * (chrome colors, per-workspace accent stripe, spinner keyframes).
+ * (per-workspace accent stripe, spinner keyframes, titlebar drop shadow).
  *
  * This file is committed and loaded alongside the Tailwind Play CDN JS
  * (which generates utility classes at runtime -- see static/tailwind.js).
+ *
+ * Chrome colors / focus rings / link color are not tokens here -- chrome
+ * uses raw Tailwind classes (bg-zinc-900, text-zinc-200, border-white/10,
+ * focus:ring-blue-600/15, ...) directly. The only token consumed by
+ * non-styleguide code is --shadow-seam (titlebar drop shadow, chrome.html)
+ * and the implicit --workspace-accent (set per-workspace via inline
+ * style, consumed by the .page-workspace / .accent-spine / .sidebar-item
+ * / .accent-swatch rules below).
  */
 
 :root {
-  --bg-chrome: #18181b;
-  --bg-chrome-elev: #27272a;
-  --bg-chrome-hover: rgba(255, 255, 255, 0.06);
-  --bg-chrome-active: rgba(255, 255, 255, 0.10);
-  --border-chrome: rgba(255, 255, 255, 0.08);
-  --text-chrome: #e4e4e7;
-  --text-chrome-muted: #a1a1aa;
-
-  --link: #2563eb;
-  --focus-ring: 0 0 0 3px rgba(37, 99, 235, 0.18);
-
   --shadow-seam: 0 4px 10px -6px rgba(0, 0, 0, 0.35);
 }
 
