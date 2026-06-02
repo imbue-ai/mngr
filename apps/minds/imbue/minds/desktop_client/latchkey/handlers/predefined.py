@@ -397,9 +397,10 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         """Append a DENIED response and notify the agent. Returns ``(message, response_event)``.
 
         ``scope`` is the Detent scope schema the request was filed under;
-        it goes into the response event so the inbox can dedupe the
-        response against the original request. ``display_name`` is the
-        human-readable service name shown in the agent-facing message.
+        it goes into the response event for informational purposes (the
+        inbox joins responses to requests on ``request_event_id``).
+        ``display_name`` is the human-readable service name shown in the
+        agent-facing message.
         """
         message = _format_denied_message(display_name)
         response_event = self._write_response_and_notify(

@@ -1832,9 +1832,8 @@ def _build_requests_payload(inbox: RequestInbox | None) -> dict[str, Any]:
     The chrome's live request UI (badge, panel refresh, auto-open) must react
     to any change in the *set* of pending requests, not merely its size. A
     bare count is a lossy summary: if one request is resolved while another
-    arrives, or a request is replaced under the same dedup key, the count is
-    unchanged even though the inbox contents are not. Keying updates off the
-    count therefore silently drops those transitions.
+    arrives, the count is unchanged even though the inbox contents are not.
+    Keying updates off the count therefore silently drops those transitions.
 
     To make change detection sound, we surface the actual pending request
     ids (in a deterministic order) alongside the count. Consumers diff
