@@ -198,6 +198,24 @@ function getPyprojectDir() {
   return path.join(getResourcesDir(), 'pyproject');
 }
 
+/**
+ * Path to the packaged Solid SSR sidecar entry bundle.
+ *
+ * ``scripts/build.js::buildFrontend`` writes the Vite SSR build under
+ * ``resources/frontend/server/assets/server.js`` (alongside an ESM
+ * marker package.json and a ``bin/ssr-sidecar`` shim). The Python
+ * supervisor (``imbue/minds/desktop_client/ssr_sidecar.py``) reads this
+ * path from the ``MINDS_SSR_SERVER_ENTRY`` env var so the packaged
+ * build doesn't have to know the monorepo's ``frontend/dist-server/``
+ * default.
+ *
+ * Dev mode is a no-op here: the Python side already auto-discovers the
+ * monorepo build under ``apps/minds/frontend/dist-server/``.
+ */
+function getSsrServerEntryPath() {
+  return path.join(getResourcesDir(), 'frontend', 'server', 'assets', 'server.js');
+}
+
 function getMonorepoRoot() {
   // apps/minds/electron/ -> apps/minds/ -> apps/ -> repo root
   return path.resolve(__dirname, '..', '..', '..');
@@ -226,4 +244,5 @@ module.exports = {
   getMonorepoRoot,
   getBundledClientConfigPath,
   getBundledMindsRootName,
+  getSsrServerEntryPath,
 };

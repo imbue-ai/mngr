@@ -227,6 +227,12 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
           // Tell the packaged latchkey shim which Electron binary to use as Node.
           MINDS_ELECTRON_EXEC_PATH: process.execPath,
+          // Tell the Python SSR supervisor where build.js placed the
+          // bundled Solid server entry. Without this the supervisor
+          // falls back to the monorepo dev path, which does not exist
+          // in a packaged build, and every HTML route degrades to the
+          // client-render shell.
+          MINDS_SSR_SERVER_ENTRY: paths.getSsrServerEntryPath(),
         };
         // Remove VIRTUAL_ENV to avoid uv warnings about path mismatches
         delete env.VIRTUAL_ENV;
