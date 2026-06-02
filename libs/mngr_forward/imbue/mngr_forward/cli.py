@@ -240,7 +240,7 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
     envelope_writer = EnvelopeWriter()
 
     strategy = _build_strategy(opts)
-    resolver = ForwardResolver(strategy=strategy)
+    resolver = ForwardResolver(strategy=strategy, envelope_writer=envelope_writer)
     tunnel_manager = SSHTunnelManager()
 
     reverse_specs = _parse_reverse_specs(opts.reverse)
