@@ -42,8 +42,6 @@ Do NOT report issues that are already covered by an existing FIXME.
 
 Do NOT report issues that are highlighted as non-issues in non_issues.md.
 
-Do NOT report anything already enforced by an existing ratchet test or linter (go look at the ratchet tests first)--those are caught automatically.
-
 After reviewing all the code in the library, think carefully about the most important and most suspicious edge-case handlers.
 
 Then put them, in order from most important to least important, into a markdown file in the library's "_tasks/suspicious-edge-cases/" folder (make one if you have to). Name the file "<date>.md" (where you should get "date" by calling this precise command: "date +%Y-%m-%d-%T | tr : -")
