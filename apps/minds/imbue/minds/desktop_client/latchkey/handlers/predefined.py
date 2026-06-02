@@ -212,7 +212,7 @@ def _render_unknown_scope_page(request_id: str, scope: str) -> Response:
     escaped_scope = html_module.escape(scope)
     escaped_request_id = html_module.escape(request_id, quote=True)
     body = (
-        "<!DOCTYPE html><html><head><meta charset=\"UTF-8\">"
+        '<!DOCTYPE html><html><head><meta charset="UTF-8">'
         "<title>Unknown scope</title>"
         "<style>body{margin:0;font-family:-apple-system,sans-serif;background:transparent;}"
         ".backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.4);display:flex;"
