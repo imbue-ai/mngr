@@ -13,15 +13,13 @@ Claude Code skills that teach Claude how to use [mngr](https://github.com/imbue-
 
 ## Installation
 
-The easiest way is through mngr:
+Through mngr -- run and choose the imbue-mngr-skills plugin:
 
 ```bash
 mngr extras claude-plugin
 ```
 
-and choose to install the imbue-mngr-skills plugin.
-
-To install manually with the Claude Code CLI:
+Or with the Claude Code CLI directly:
 
 ```bash
 claude plugin marketplace add imbue-ai/mngr
