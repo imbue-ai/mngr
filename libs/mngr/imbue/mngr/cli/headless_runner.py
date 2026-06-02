@@ -9,11 +9,10 @@ from typing import assert_never
 from loguru import logger
 
 from imbue.mngr.api.create import create as api_create
-from imbue.mngr.cli.output_helpers import emit_final_json
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
@@ -69,7 +68,7 @@ def remove_work_dir_on_host(host: OnlineHostInterface, work_path: Path) -> None:
     """
     try:
         result = host.execute_idempotent_command(f"rm -rf {shlex.quote(str(work_path))}")
-    except (OSError, BaseMngrError) as exc:
+    except (OSError, MngrError) as exc:
         logger.warning("Failed to remove work dir {}: {}", work_path, exc)
         return
     if not result.success:
@@ -85,11 +84,11 @@ def destroy_agent_on_exit(host: OnlineHostInterface, agent: AgentInterface) -> I
     finally:
         try:
             host.stop_agents([agent.id])
-        except (OSError, BaseMngrError) as exc:
+        except (OSError, MngrError) as exc:
             logger.warning("Failed to stop agent {}: {}", agent.name, exc)
         try:
             host.destroy_agent(agent)
-        except (OSError, BaseMngrError) as exc:
+        except (OSError, MngrError) as exc:
             logger.warning("Failed to destroy agent {}: {}", agent.name, exc)
 
 
@@ -197,9 +196,9 @@ def stream_or_accumulate_response(chunks: Iterator[str], output_format: OutputFo
             sys.stdout.flush()
         case OutputFormat.JSON:
             response = accumulate_chunks(chunks)
-            emit_final_json({"response": response})
+            write_json_line({"response": response})
         case OutputFormat.JSONL:
             response = accumulate_chunks(chunks)
-            emit_final_json({"event": "response", "response": response})
+            write_json_line({"event": "response", "response": response})
         case _ as unreachable:
             assert_never(unreachable)

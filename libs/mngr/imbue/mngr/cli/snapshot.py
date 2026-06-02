@@ -21,18 +21,18 @@ from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.output_helpers import emit_event
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import emit_info
 from imbue.mngr.cli.output_helpers import format_size
 from imbue.mngr.cli.output_helpers import on_error
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.cli.stdin_utils import STDIN_PLACEHOLDER
 from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
-from imbue.mngr.errors import BaseMngrError
+from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.data_types import SnapshotInfo
@@ -129,7 +129,7 @@ def _discover_all_hosts(mngr_ctx: MngrContext) -> list[DiscoveredHost]:
             include_destroyed=False,
             reset_caches=False,
         )
-    except BaseMngrError as e:
+    except MngrError as e:
         logger.warning("Failed to discover hosts: {}", e)
         return []
     return list(agents_by_host.keys())
@@ -236,7 +236,7 @@ def _emit_create_result(
             if errors:
                 data["errors"] = errors
                 data["error_count"] = len(errors)
-            emit_final_json(data)
+            write_json_line(data)
         case OutputFormat.JSONL:
             event_data: dict[str, Any] = {"count": len(created)}
             if errors:
@@ -281,7 +281,7 @@ def _emit_list_snapshots(
                 }
                 for host_id, snap in all_snapshots
             ]
-            emit_final_json({"snapshots": data, "count": len(data)})
+            write_json_line({"snapshots": data, "count": len(data)})
         case OutputFormat.JSONL:
             for host_id, snap in all_snapshots:
                 emit_event(
@@ -330,7 +330,7 @@ def _emit_destroy_result(
         return
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json({"snapshots_destroyed": destroyed, "count": len(destroyed)})
+            write_json_line({"snapshots_destroyed": destroyed, "count": len(destroyed)})
         case OutputFormat.JSONL:
             emit_event("destroy_result", {"count": len(destroyed)}, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
@@ -504,7 +504,7 @@ def _snapshot_create_impl(ctx: click.Context, **kwargs: Any) -> None:
                     {"message": f"Created snapshot {snapshot_id} for host {host_id_str}{agents_str}", **result},
                     output_opts.output_format,
                 )
-        except BaseMngrError as e:
+        except MngrError as e:
             error_msg = f"Failed to create snapshot for host {host_id_str}: {e}"
             errors.append({"host_id": host_id_str, "error": str(e)})
             on_error(error_msg, error_behavior, output_opts.output_format, exc=e)

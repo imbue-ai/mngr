@@ -19,10 +19,10 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.cli.address_params import AGENT_OR_HOST_ADDRESS
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import format_size
 from imbue.mngr.cli.output_helpers import render_format_template
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import MngrError
@@ -304,7 +304,7 @@ def _emit_list_result(
             table = tabulate(rows, headers=headers, tablefmt="plain")
             write_human_line(table)
         case OutputFormat.JSON:
-            emit_final_json(
+            write_json_line(
                 {
                     "count": len(entries),
                     "files": [_entry_to_json_dict(e) for e in entries],

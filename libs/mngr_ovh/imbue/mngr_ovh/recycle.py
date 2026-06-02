@@ -163,7 +163,7 @@ def finalize_recycle(client: OvhVpsClient, handle: RecycleHandle) -> bool:
     client.discard_recycle_handle(handle.service_name)
     try:
         client.set_renew_at_expiration(handle.service_name, delete_at_expiration=False)
-    except (VpsApiError, MngrError) as e:
+    except MngrError as e:
         logger.error(
             "OVH recycle: un-cancel of {} failed at finalize ({}); VPS will auto-decommission at end of month",
             handle.service_name,
@@ -212,7 +212,7 @@ def _select_candidates(
     """
     try:
         all_resources = list_vps_resources_for_provider(client, provider_name=provider_name)
-    except (VpsApiError, MngrError) as e:
+    except MngrError as e:
         # Surface as WARNING (not DEBUG): every ``mngr create`` will silently
         # fall back to ordering a fresh VPS if discovery is broken, which is
         # surprising and expensive (OVH bills monthly per VPS). Operators
@@ -329,7 +329,7 @@ def _try_recycle_one(
     urn = candidate.urn
     try:
         attach_tag(client, urn, MNGR_RECYCLING_LOCK_TAG_KEY, lock_value)
-    except (VpsApiError, MngrError) as e:
+    except MngrError as e:
         logger.debug("OVH recycle: failed to acquire lock on {} ({}); skipping", candidate.service_name, e)
         return None
     if not _confirm_lock_held(client, urn, lock_value):
@@ -338,7 +338,7 @@ def _try_recycle_one(
         return None
     try:
         _swap_host_id_tag(client, urn, new_host_id)
-    except (VpsApiError, MngrError) as e:
+    except MngrError as e:
         logger.warning("OVH recycle: host-id tag swap failed on {} ({}); aborting", candidate.service_name, e)
         _release_lock(client, urn, lock_value)
         return None
@@ -398,7 +398,7 @@ def _release_lock(client: OvhVpsClient, urn: str, lock_value: str) -> None:
     """
     try:
         resource = get_vps_resource(client, urn)
-    except (VpsApiError, MngrError) as e:
+    except MngrError as e:
         logger.warning("OVH recycle: failed to re-read lock tag on {} before release: {}", urn, e)
         return
     if resource is None:

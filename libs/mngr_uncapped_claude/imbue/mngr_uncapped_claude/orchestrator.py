@@ -25,7 +25,6 @@ from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.cli.common_opts import apply_settings_to_config
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
@@ -228,7 +227,7 @@ def run(
     # ``state_holder`` is populated by ``_run_with_agent`` as soon as the agent
     # has been created. The ``finally`` below destroys whatever ended up in
     # it, so even an unexpected exception inside ``_run_with_agent`` (anything
-    # other than the ``BaseMngrError`` it handles internally) cannot leak the
+    # other than the ``MngrError`` it handles internally) cannot leak the
     # agent. On SIGINT the ``_DestroyOnSignal`` handler destroys the agent and
     # then ``os.kill``s the process, so this ``finally`` does not run -- which
     # is intentional and avoids a double-destroy.
@@ -265,7 +264,7 @@ def _run_with_agent(
     ``state_holder_out`` is appended-to as soon as the agent has been created;
     the caller owns destroying whatever ends up in it. This split means that
     even an unexpected exception inside this function (anything other than the
-    ``BaseMngrError`` cases handled internally) cannot leak the agent.
+    ``MngrError`` cases handled internally) cannot leak the agent.
     """
     local_host = get_local_host(mngr_ctx)
     cwd = Path.cwd().resolve()
@@ -293,7 +292,7 @@ def _run_with_agent(
             mngr_ctx=mngr_ctx,
             create_work_dir=False,
         )
-    except BaseMngrError as exc:
+    except MngrError as exc:
         logger.error("Failed to create agent: {}", exc)
         return EXIT_MNGR_ERROR
 
@@ -371,7 +370,7 @@ def _run_with_agent(
                 final_state, seen_bytes = _wait_for_turn_end(
                     agent, events_target, writer, parser, read_failure_warner, seen_bytes
                 )
-        except BaseMngrError as exc:
+        except MngrError as exc:
             logger.error("Run failed: {}", exc)
             _finalize_run(writer, start_time, agent_id=str(agent.id), error_text=str(exc), turn_count=turn_count)
             return EXIT_MNGR_ERROR
@@ -684,11 +683,11 @@ def _destroy_agent(agent: AgentInterface, host: OnlineHostInterface) -> None:
     """
     try:
         host.stop_agents([agent.id])
-    except (OSError, BaseMngrError) as exc:
+    except (OSError, MngrError) as exc:
         logger.warning("Failed to stop agent {}: {}", agent.name, exc)
     try:
         host.destroy_agent(agent)
-    except (OSError, BaseMngrError) as exc:
+    except (OSError, MngrError) as exc:
         logger.warning("Failed to destroy agent {}: {}", agent.name, exc)
 
 

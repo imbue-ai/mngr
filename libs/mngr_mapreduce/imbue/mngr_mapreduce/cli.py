@@ -28,8 +28,6 @@ from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
-from imbue.mngr.errors import AgentError
-from imbue.mngr.errors import HostError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UnknownBackendError
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
@@ -365,7 +363,7 @@ def _run_reducer_phase(
             run_name=ctx.run_name,
             output_dir=ctx.output_dir,
         )
-    except (MngrError, HostError, AgentError, OSError, BaseExceptionGroup) as exc:
+    except (MngrError, OSError, BaseExceptionGroup) as exc:
         logger.warning("Failed to launch reducer agent: {}", exc)
         return None
 

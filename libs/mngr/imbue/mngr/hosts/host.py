@@ -49,7 +49,6 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import AgentStartError
-from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostDataSchemaError
 from imbue.mngr.errors import InvalidActivityTypeError
@@ -610,7 +609,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     )
                     try:
                         self.execute_idempotent_command(f"rm -f '{lock_file_path}'")
-                    except (BaseMngrError, OSError) as lock_removal_error:
+                    except (MngrError, OSError) as lock_removal_error:
                         logger.warning(
                             "Failed to remove host lock file during error cleanup: {}",
                             lock_removal_error,
