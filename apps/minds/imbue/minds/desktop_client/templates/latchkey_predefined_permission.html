@@ -48,26 +48,23 @@
       <div class="bg-white border border-zinc-200 rounded-xl p-4 space-y-3">
         {% for permission in permission_schemas %}
           {% if permission in checked_permissions %}
-            <div class="flex items-start gap-2.5">
-              {# Green checkmark leads each row so the list reads as #}
-              {# "these will be granted". The wrapper is one text line #}
-              {# tall (h-5 matches the name's text-sm line-height) so the #}
-              {# icon centers on the permission name rather than floating #}
-              {# above it. #}
-              <span class="flex items-center h-5 shrink-0">
+            <div>
+              {# The checkmark and the permission name share one #}
+              {# ``items-center`` row so the icon is vertically centered #}
+              {# on the name. Any description sits below, indented to #}
+              {# line up under the name (icon width + gap = 26px). #}
+              <div class="flex items-center gap-2.5">
                 <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"
-                     class="w-4 h-4 text-emerald-600">
+                     class="w-4 h-4 shrink-0 text-emerald-600">
                   <path fill-rule="evenodd" clip-rule="evenodd"
                         d="M16.704 4.153a.75.75 0 0 1 .143 1.052l-8 10.5a.75.75 0 0 1-1.127.075l-4.5-4.5a.75.75 0 1 1 1.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 0 1 1.05-.143Z" />
                 </svg>
-              </span>
-              <span class="min-w-0">
                 <code class="text-sm font-mono text-zinc-900">{{ permission }}</code>
-                {% set permission_description = description_by_permission_name.get(permission) %}
-                {% if permission_description %}
-                  <span class="block text-sm text-zinc-600 mt-0.5">{{ permission_description }}</span>
-                {% endif %}
-              </span>
+              </div>
+              {% set permission_description = description_by_permission_name.get(permission) %}
+              {% if permission_description %}
+                <span class="block text-sm text-zinc-600 mt-0.5 ml-[26px]">{{ permission_description }}</span>
+              {% endif %}
             </div>
           {% endif %}
         {% endfor %}
