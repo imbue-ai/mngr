@@ -495,7 +495,7 @@ def render_workspace_settings(
 
 @pure
 def render_dev_styleguide_page() -> str:
-    """Render the dev-only styleguide page.
+    """Render the styleguide page (mounted at ``/_dev/styleguide``).
 
     The page is a hand-authored catalog of UI patterns and tokens. When a
     new ``:root`` token is added to ``static/tokens.css``, add a swatch
