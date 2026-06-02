@@ -313,11 +313,6 @@
 **/.reviewer/autofix/issues/
 .reviewer/logs/
 
-# Tailwind Play CDN JS for the minds desktop client. Fetched once via
-# `just minds-tailwind` (plain curl, no build) and shipped with the
-# distributable. Not checked in because it's a ~300KB blob we can always
-# re-fetch.
-/apps/minds/imbue/minds/desktop_client/static/tailwind.js
 **/.env.swp
 # Vim swap files for any file (`.foo.swp`, `.foo.swo`, etc.) -- generated
 # while a file is open in vim. Never checked in.
