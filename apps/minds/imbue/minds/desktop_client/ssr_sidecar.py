@@ -229,20 +229,6 @@ class SsrSidecar(MutableModel):
             f"(last error: {last_exc})"
         )
 
-    def is_healthy(self) -> bool:
-        """Cheap probe used by the proxy fallback path."""
-        with self._lock:
-            if self._proc is None or self._proc.poll() is not None:
-                return False
-            client = self._client
-        if client is None:
-            return False
-        try:
-            response = client.get(_HEALTH_PATH, timeout=0.5)
-            return response.status_code == 200
-        except httpx.HTTPError:
-            return False
-
     def render(self, *, route: str, props: dict[str, Any]) -> str:
         """Render a route to an HTML string via the sidecar.
 
