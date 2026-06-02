@@ -1855,7 +1855,7 @@ Acceptance tests can sometimes be flaky. This is ok. Make it possible to easily 
 
 ### Release Tests
 
-Release tests are comprehensive tests that only run when pushing to the special "release" branch. They verify the application is ready for release and may include slower, more thorough tests that would be too time-consuming to run on every PR.
+Release tests are comprehensive tests that verify the application is ready for release and may include slower, more thorough tests that would be too time-consuming to run on every PR. They do not run per-PR; instead the TMR workflow exercises them on a daily schedule (and on manual dispatch).
 
 Create release tests in the source package folder, using files that start with "test_" (same location as integration tests).
 

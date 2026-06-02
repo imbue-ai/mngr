@@ -1,0 +1,1 @@
+- Refresh a stale comment in `test_docker_state_transitions.py` that described the release tests as running "on release branch only". There is no `release` branch; these tests are marked `@pytest.mark.release` and run via the TMR workflow. No behavior change.
