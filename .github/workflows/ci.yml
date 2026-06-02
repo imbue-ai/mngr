@@ -356,40 +356,6 @@ jobs:
         # `just test-offload-minds-snapshot <image-id>` instead.
         run: PYTEST_MAX_DURATION_SECONDS=600 uv run pytest -n 0 --timeout 300 --no-cov --cov-fail-under=0 -v --tb=short -m '(docker or docker_sdk) and not release and not minds_electron and not minds_snapshot_resume'
 
-  # The `node`-marked tests need a Node runtime, which offload's sandboxes
-  # don't provide -- but not the Electron/docker/xvfb rig of
-  # test-docker-electron either, so they get their own lightweight job.
-  test-node:
-    if: github.ref != 'refs/heads/release'
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24.15.0'
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          version: "latest"
-
-      - name: Install Python dependencies
-        run: uv sync --all-packages
-
-      - name: Run tests that need Node
-        # `not minds_electron`: the Electron e2e test also invokes node (so it
-        # carries @pytest.mark.node) but needs the full Electron + docker +
-        # xvfb rig, which the test-docker-electron job provides instead.
-        run: env PYTEST_MAX_DURATION_SECONDS=300 uv run pytest --timeout 60 -m 'node and not release and not minds_electron' --no-cov --cov-fail-under=0 -v --tb=short
-
   # Sibling to `test-docker` for the single minds Electron e2e test. Split
   # out because the test (~2 min end-to-end: docker pull + container start
   # + bootstrap + system_interface render) is the longest single
