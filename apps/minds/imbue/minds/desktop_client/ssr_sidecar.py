@@ -178,7 +178,13 @@ class SsrSidecar:
         )
 
     def wait_ready(self, timeout: float | None = None) -> None:
-        """Poll the sidecar's health endpoint until it returns 200."""
+        """Poll the sidecar's health endpoint until it returns 200.
+
+        Waits between probes via ``_shutting_down.wait`` (not ``time.sleep``)
+        so ``stop`` interrupts the poll immediately, and so the file honors
+        the project ratchet against ``time.sleep`` (see
+        ``cli/run.py::_sleep_then_open`` for the same pattern).
+        """
         deadline = time.monotonic() + (timeout if timeout is not None else self._ready_timeout_seconds)
         last_exc: Exception | None = None
         while time.monotonic() < deadline:
@@ -200,7 +206,8 @@ class SsrSidecar:
                 last_exc = SsrSidecarError(f"health probe returned {response.status_code}")
             except httpx.HTTPError as exc:
                 last_exc = exc
-            time.sleep(_PROBE_INTERVAL_SECONDS)
+            if self._shutting_down.wait(timeout=_PROBE_INTERVAL_SECONDS):
+                raise SsrSidecarError("SSR sidecar wait_ready interrupted by shutdown")
         raise SsrSidecarError(
             f"SSR sidecar did not become ready within {self._ready_timeout_seconds}s "
             f"(last error: {last_exc})"
