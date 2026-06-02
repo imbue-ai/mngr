@@ -80,6 +80,7 @@ class UsageCliOptions(CommonCliOptions, AgentFilterCliOptions):
     since: str | None
     detail: bool
     provider: tuple[str, ...]
+    preserved: bool
 
 
 @pure
@@ -696,6 +697,14 @@ def _reject_group_options_when_subcommand_invoked(ctx: click.Context) -> None:
     "source (JSON, each session carrying `cost_mode`). Default omits the per-session breakdown "
     "for terseness; the per-mode cost lines and window lines are unchanged.",
 )
+@click.option(
+    "--preserved/--no-preserved",
+    default=True,
+    show_default=True,
+    help="Include usage preserved from destroyed agents (under <local_host_dir>/preserved/). "
+    "On by default so destroyed agents' spend still counts; pass --no-preserved to show only "
+    "live agents. Preserved agents honor the same --provider/--project/--local/label filters.",
+)
 @add_agent_filter_options
 @optgroup.option(
     "--provider",
@@ -745,6 +754,7 @@ def usage(ctx: click.Context, **kwargs: Any) -> None:
         provider_names=provider_names,
         since_seconds=effective_since,
         now=now,
+        include_preserved=opts.preserved,
     )
 
     # One render model per source (already collapsed in the aggregation pipeline),
@@ -846,6 +856,7 @@ class UsageWaitCliOptions(CommonCliOptions, AgentFilterCliOptions):
     timeout: str | None
     interval: str
     since: str | None
+    preserved: bool
 
 
 @usage.command("wait")
@@ -885,6 +896,13 @@ class UsageWaitCliOptions(CommonCliOptions, AgentFilterCliOptions):
     "--provider",
     multiple=True,
     help="Restrict to agents from the given provider(s) (repeatable, e.g. --provider local).",
+)
+@optgroup.option(
+    "--preserved/--no-preserved",
+    default=True,
+    show_default=True,
+    help="Include usage preserved from destroyed agents when evaluating the predicate. "
+    "On by default; pass --no-preserved to consider only live agents.",
 )
 @add_common_options
 @click.pass_context
@@ -934,6 +952,7 @@ def wait(ctx: click.Context, **kwargs: Any) -> None:
                 exclude_filters=exclude_filters,
                 provider_names=provider_names,
                 since_seconds=effective_since,
+                include_preserved=opts.preserved,
             ),
             until_filters=until_programs,
             timeout_seconds=timeout_seconds,

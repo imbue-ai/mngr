@@ -13,14 +13,24 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import click
+from loguru import logger
 
 from imbue.mngr import hookimpl
 from imbue.mngr.cli.doc_links import imbue_mngr_doc_url
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.plugin_registry import register_plugin_config
+from imbue.mngr.hosts.host import get_agent_state_dir_path
+from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.help_topic import DocFile
 from imbue.mngr.interfaces.help_topic import TopicHelpPage
+from imbue.mngr.interfaces.host import HostFileReadInterface
+from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentName
 from imbue.mngr_usage.cli import usage
 from imbue.mngr_usage.data_types import UsagePluginConfig
+from imbue.mngr_usage.preservation import preserve_agent_usage
 
 # Docs root resolution, mirroring mngr's built-in topics. In a wheel the docs are
 # force-included under the package at imbue/mngr_usage/docs; in a source/editable
@@ -39,6 +49,74 @@ register_plugin_config("usage", UsagePluginConfig)
 def register_cli_commands() -> Sequence[click.Command] | None:
     """Register the `mngr usage` command."""
     return [usage]
+
+
+def _is_preserve_on_destroy_enabled(mngr_ctx: MngrContext) -> bool:
+    """Whether usage events should be preserved on destroy (from plugin config)."""
+    return mngr_ctx.get_plugin_config("usage", UsagePluginConfig).preserve_on_destroy
+
+
+def _preserve_destroyed_agent_usage(
+    source: HostFileReadInterface,
+    host: HostInterface,
+    agent_name: AgentName,
+    agent_id: AgentId,
+    provider_name: str,
+    mngr_ctx: MngrContext,
+) -> None:
+    """Preserve one destroyed agent's usage events, capturing its host metadata."""
+    preserve_agent_usage(
+        source,
+        get_agent_state_dir_path(host.host_dir, agent_id),
+        agent_name,
+        agent_id,
+        provider_name=provider_name,
+        host_id=str(host.id),
+        host_name=str(host.get_name()),
+        mngr_ctx=mngr_ctx,
+    )
+
+
+@hookimpl
+def on_before_agent_destroy(agent: AgentInterface, host: OnlineHostInterface) -> None:
+    """Preserve the agent's usage events before its online state directory is deleted.
+
+    Agent-agnostic: fires for every agent type, but :func:`preserve_agent_usage`
+    is a no-op for agents that wrote no usage events, so only usage writers (e.g.
+    Claude agents via ``mngr_claude_usage``) actually produce a preserved copy.
+    ``provider_name`` is read from the agent's discovery record (the only place
+    that carries it without reaching into a concrete host implementation).
+    """
+    mngr_ctx = agent.mngr_ctx
+    if not _is_preserve_on_destroy_enabled(mngr_ctx):
+        return
+    provider_name = next(
+        (str(ref.provider_name) for ref in host.discover_agents() if ref.agent_id == agent.id),
+        None,
+    )
+    if provider_name is None:
+        logger.debug("Could not resolve provider for agent {}; skipping usage preservation", agent.id)
+        return
+    _preserve_destroyed_agent_usage(host, host, agent.name, agent.id, provider_name, mngr_ctx)
+
+
+@hookimpl
+def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
+    """Preserve usage events from a host's volume before the host is destroyed.
+
+    When a host is destroyed without each agent's ``on_before_agent_destroy``
+    firing, usage data still lives on the host's persisted volume. If the
+    provider surfaces that volume the host is a :class:`HostFileReadInterface`,
+    so the same :func:`preserve_agent_usage` reads the files straight off it. If
+    the host is not readable (no volume), there is nothing we can preserve.
+    """
+    if not _is_preserve_on_destroy_enabled(mngr_ctx):
+        return
+    if not isinstance(host, HostFileReadInterface):
+        logger.debug("Host {} is not readable (no volume); skipping usage preservation", host.id)
+        return
+    for ref in host.discover_agents():
+        _preserve_destroyed_agent_usage(host, host, ref.agent_name, ref.agent_id, str(ref.provider_name), mngr_ctx)
 
 
 @hookimpl
