@@ -138,11 +138,6 @@
             <p class="mb-1 text-xs text-zinc-400">Leave empty for latest version</p>
             {{ ui.text_input('branch', value=branch, placeholder='latest tag', id='branch') }}
           </div>
-          <div>
-            <label for="gh_token" class="text-sm text-zinc-900 font-medium block mb-1">GH_TOKEN</label>
-            <p class="mb-1 text-xs text-zinc-400">Optional GitHub token forwarded to the agent host</p>
-            {{ ui.text_input('gh_token', value=gh_token, placeholder='ghp_...', id='gh_token', type='password') }}
-          </div>
         </div>
       </div>
     </form>

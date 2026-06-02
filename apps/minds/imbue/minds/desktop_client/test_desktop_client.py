@@ -1010,15 +1010,6 @@ def test_create_form_does_not_show_env_file_checkbox(tmp_path: Path) -> None:
     assert "include_env_file" not in response.text
 
 
-def test_create_form_shows_gh_token_input_in_advanced(tmp_path: Path) -> None:
-    """The advanced section includes an optional GH_TOKEN field."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.get("/create")
-    assert response.status_code == 200
-    assert 'name="gh_token"' in response.text
-
-
 def test_create_form_submit_rejects_imbue_cloud_compute_without_account(tmp_path: Path) -> None:
     """Selecting IMBUE_CLOUD compute without an account is rejected with a clear message."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)

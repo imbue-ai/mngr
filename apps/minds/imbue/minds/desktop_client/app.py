@@ -735,7 +735,6 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
         ai_provider = AIProvider.SUBSCRIPTION
     account_id = str(form.get("account_id", "")).strip()
     anthropic_api_key = str(form.get("anthropic_api_key", "")).strip()
-    gh_token = str(form.get("gh_token", "")).strip()
     try:
         backup_provider = BackupProvider(str(form.get("backup_provider", BackupProvider.CONFIGURE_LATER.value)))
     except ValueError:
@@ -765,7 +764,6 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
             ai_provider=ai_provider,
             accounts=accounts_list,
             default_account_id=account_id,
-            gh_token=gh_token,
             anthropic_api_key=anthropic_api_key,
             backup_provider=backup_provider,
             backup_encryption_method=backup_encryption_method,
@@ -848,7 +846,6 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
         account_email=account_email,
         branch_or_tag=branch_or_tag,
         anthropic_api_key=anthropic_api_key,
-        gh_token=gh_token,
         on_created=on_created,
         backup_request=backup_request,
     )
@@ -944,7 +941,6 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
     is_save_backup_password = bool(body.get("backup_save_password", False))
     backup_api_key_env = str(body.get("backup_api_key_env", ""))
     anthropic_api_key = str(body.get("anthropic_api_key", "")).strip()
-    gh_token = str(body.get("gh_token", "")).strip()
     account_id = str(body.get("account_id", "")).strip()
     if not git_url:
         return Response(
@@ -1016,7 +1012,6 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
         ai_provider=ai_provider,
         account_email=account_email,
         anthropic_api_key=anthropic_api_key,
-        gh_token=gh_token,
         backup_request=backup_request,
     )
 

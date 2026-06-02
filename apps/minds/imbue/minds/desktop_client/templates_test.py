@@ -123,11 +123,6 @@ def test_render_create_form_omits_env_file_checkbox() -> None:
     assert "include_env_file" not in html
 
 
-def test_render_create_form_includes_gh_token_field() -> None:
-    html = render_create_form()
-    assert 'name="gh_token"' in html
-
-
 def test_render_create_form_shows_error_message_when_supplied() -> None:
     html = render_create_form(error_message="Imbue cloud requires an account.")
     assert "Imbue cloud requires an account." in html

@@ -169,7 +169,6 @@ def render_create_form(
     has_saved_backup_password: bool = False,
     accounts: Sequence[object] | None = None,
     default_account_id: str = "",
-    gh_token: str = "",
     anthropic_api_key: str = "",
     error_message: str = "",
 ) -> str:
@@ -229,7 +228,6 @@ def render_create_form(
         has_saved_backup_password=has_saved_backup_password,
         accounts=accounts or [],
         default_account_id=default_account_id,
-        gh_token=gh_token,
         anthropic_api_key=anthropic_api_key,
         error_message=error_message,
     )

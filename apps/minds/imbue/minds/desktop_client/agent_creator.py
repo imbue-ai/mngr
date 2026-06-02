@@ -444,12 +444,12 @@ def _build_mngr_create_command(
     name (IMBUE_CLOUD's lease flow is one-shot per pool host, so reuse
     is not meaningful there).
 
-    Secrets (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``, ``GH_TOKEN``)
-    are forwarded by the FCT template's own ``pass_(host_)env`` declarations,
-    not by inline flags here -- ``run_mngr_create`` populates them in the
-    subprocess env when needed and the template-declared forwards pick
-    them up. Keeping the forwarding declaration in FCT means the same
-    template works for ``mngr create`` invocations from outside minds too.
+    Secrets (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``) are forwarded by
+    the FCT template's own ``pass_(host_)env`` declarations, not by inline
+    flags here -- ``run_mngr_create`` populates them in the subprocess env
+    when needed and the template-declared forwards pick them up. Keeping the
+    forwarding declaration in FCT means the same template works for ``mngr
+    create`` invocations from outside minds too.
 
     ``latchkey_env`` is the latchkey wiring (gateway URL, password, JWT,
     disable-counting flag) computed by
@@ -708,7 +708,6 @@ def run_mngr_create(
     imbue_cloud_branch_or_tag: str | None = None,
     anthropic_api_key: str | None = None,
     anthropic_base_url: str | None = None,
-    gh_token: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
     *,
     parent_cg: ConcurrencyGroup | None = None,
@@ -722,10 +721,10 @@ def run_mngr_create(
     pool host has its own pre-baked ``.mngr/`` and the local repo is
     irrelevant.
 
-    ``anthropic_api_key`` / ``anthropic_base_url`` / ``gh_token`` are placed
-    into the subprocess env (not argv) so they don't show up in ``ps`` output;
-    the FCT template's own ``pass_(host_)env`` declarations cause mngr to
-    forward them onto the host as appropriate.
+    ``anthropic_api_key`` / ``anthropic_base_url`` are placed into the
+    subprocess env (not argv) so they don't show up in ``ps`` output; the FCT
+    template's own ``pass_(host_)env`` declarations cause mngr to forward them
+    onto the host as appropriate.
 
     Returns ``(canonical_agent_id, canonical_host_id)``. Both canonical
     ids are parsed out of the ``"event": "created"`` JSONL line that
@@ -751,14 +750,12 @@ def run_mngr_create(
     # client's other subprocesses, so we keep the override scoped to this
     # invocation.
     subprocess_env: dict[str, str] | None = None
-    if anthropic_api_key is not None or anthropic_base_url is not None or gh_token is not None:
+    if anthropic_api_key is not None or anthropic_base_url is not None:
         subprocess_env = dict(os.environ)
         if anthropic_api_key is not None:
             subprocess_env["ANTHROPIC_API_KEY"] = anthropic_api_key
         if anthropic_base_url is not None:
             subprocess_env["ANTHROPIC_BASE_URL"] = anthropic_base_url
-        if gh_token is not None:
-            subprocess_env["GH_TOKEN"] = gh_token
 
     logger.info("Running: {}", " ".join(mngr_command))
 
@@ -942,7 +939,6 @@ class AgentCreator(MutableModel):
         account_email: str = "",
         branch_or_tag: str = "",
         anthropic_api_key: str = "",
-        gh_token: str = "",
         on_created: Callable[[AgentId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
     ) -> CreationId:
@@ -959,9 +955,6 @@ class AgentCreator(MutableModel):
           talks to the official Anthropic API.
         - ``SUBSCRIPTION`` -- inject neither; the user signs in to Claude
           interactively in the workspace.
-
-        ``gh_token`` is optional; when provided it's forwarded to the host
-        as ``GH_TOKEN``.
 
         For ``LaunchMode.IMBUE_CLOUD``, the agent runs on a leased pool host
         via the ``imbue_cloud_<account-slug>`` provider; the plugin's
@@ -1015,7 +1008,6 @@ class AgentCreator(MutableModel):
                 account_email,
                 branch_or_tag,
                 anthropic_api_key,
-                gh_token,
                 on_created,
                 backup_request,
             ),
@@ -1075,7 +1067,6 @@ class AgentCreator(MutableModel):
         account_email: str = "",
         branch_or_tag: str = "",
         anthropic_api_key: str = "",
-        gh_token: str = "",
         on_created: Callable[[AgentId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
     ) -> None:
@@ -1280,7 +1271,6 @@ class AgentCreator(MutableModel):
                     ),
                     anthropic_api_key=effective_anthropic_api_key,
                     anthropic_base_url=effective_anthropic_base_url,
-                    gh_token=gh_token if gh_token else None,
                     parent_cg=self.root_concurrency_group,
                 )
 
