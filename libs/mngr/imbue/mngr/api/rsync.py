@@ -16,11 +16,9 @@ from contextlib import nullcontext
 from pathlib import Path
 
 from loguru import logger
-from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
-from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.git import GitContextInterface
@@ -31,18 +29,16 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import build_ssh_transport_command
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
-from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import UncommittedChangesMode
 from imbue.mngr.utils.deps import RSYNC
 from imbue.mngr.utils.interactive_subprocess import run_interactive_subprocess
-from imbue.mngr.utils.rsync_utils import parse_rsync_output
 
 # (user, hostname, port, private_key_path) -- matches OnlineHostInterface.get_ssh_connection_info().
 _SshConnectionInfo = tuple[str, str, int, Path]
 
 
-# === Errors and result ===
+# === Errors ===
 
 
 class RsyncEndpointError(UserInputError):
@@ -51,25 +47,6 @@ class RsyncEndpointError(UserInputError):
     user_help_text = (
         "``mngr rsync`` requires exactly one endpoint to be on the local machine and the other on a "
         "remote host. Use ``rsync`` directly for local-to-local copies."
-    )
-
-
-class RsyncResult(FrozenModel):
-    """Result of an rsync operation between two endpoints."""
-
-    files_transferred: int = Field(
-        default=0,
-        description="Number of files transferred",
-    )
-    bytes_transferred: int = Field(
-        default=0,
-        description="Total bytes transferred",
-    )
-    source_path: str = Field(
-        description="Source path (verbatim string passed to rsync)",
-    )
-    destination_path: str = Field(
-        description="Destination path (verbatim string passed to rsync)",
     )
 
 
@@ -132,7 +109,7 @@ def _do_rsync(
     uncommitted_changes: UncommittedChangesMode,
     cg: ConcurrencyGroup,
     run_in_terminal: bool = False,
-) -> RsyncResult:
+) -> None:
     """Internal workhorse that runs the actual rsync command.
 
     ``is_push`` True: local→remote (local is source, remote is destination).
@@ -146,9 +123,9 @@ def _do_rsync(
     With ``run_in_terminal=True``, ``rsync`` is run as a plain subprocess with
     the user's stdin/stdout/stderr (no redirection), so progress and errors
     flow directly to the terminal. The function still waits for rsync to exit,
-    so destination-side cleanup (stash pop on MERGE) runs as usual. The
-    returned :class:`RsyncResult` has zero counts in that mode (no stdout to
-    parse), so this is intended for CLI use, not internal callers.
+    so destination-side cleanup (stash pop on MERGE) runs as usual.
+
+    Raises :class:`MngrError` on non-zero exit.
     """
     RSYNC.require()
 
@@ -211,35 +188,20 @@ def _do_rsync(
                 terminal_result = run_interactive_subprocess(rsync_cmd)
             if terminal_result.returncode != 0:
                 raise MngrError(f"rsync exited with status {terminal_result.returncode}")
-            rsync_stdout = ""
         elif remote_host.is_local:
             cmd_str = shlex.join(rsync_cmd)
             with log_span("{} files from {} to {}", direction, source_str, destination_str):
                 logger.debug("Running rsync command: {}", cmd_str)
-                result: CommandResult = remote_host.execute_idempotent_command(cmd_str)
+                result = remote_host.execute_idempotent_command(cmd_str)
             if not result.success:
                 raise MngrError(f"rsync failed: {result.stderr}")
-            rsync_stdout = result.stdout
         else:
             with log_span("{} files from {} to {} via SSH", direction, source_str, destination_str):
                 logger.debug("Running rsync command: {}", shlex.join(rsync_cmd))
                 try:
-                    process_result = cg.run_process_to_completion(rsync_cmd)
+                    cg.run_process_to_completion(rsync_cmd)
                 except ProcessError as e:
                     raise MngrError(f"rsync failed: {e.stderr}") from e
-
-            rsync_stdout = process_result.stdout
-
-        files_transferred, bytes_transferred = parse_rsync_output(rsync_stdout)
-
-    logger.debug("Sync complete: {} files, {} bytes transferred", files_transferred, bytes_transferred)
-
-    return RsyncResult(
-        files_transferred=files_transferred,
-        bytes_transferred=bytes_transferred,
-        source_path=source_str,
-        destination_path=destination_str,
-    )
 
 
 def rsync_to_remote(
@@ -250,7 +212,7 @@ def rsync_to_remote(
     uncommitted_changes: UncommittedChangesMode,
     cg: ConcurrencyGroup,
     run_in_terminal: bool = False,
-) -> RsyncResult:
+) -> None:
     """Rsync files from a local path to a path on ``remote_host``.
 
     If ``remote_host.is_local`` is True both sides are on the local machine and
@@ -260,7 +222,7 @@ def rsync_to_remote(
 
     See :func:`_do_rsync` for ``run_in_terminal`` semantics.
     """
-    return _do_rsync(
+    _do_rsync(
         local_path=local_path,
         remote_host=remote_host,
         remote_path=remote_path,
@@ -280,7 +242,7 @@ def rsync_from_remote(
     uncommitted_changes: UncommittedChangesMode,
     cg: ConcurrencyGroup,
     run_in_terminal: bool = False,
-) -> RsyncResult:
+) -> None:
     """Rsync files from a path on ``remote_host`` to a local path.
 
     If ``remote_host.is_local`` is True both sides are on the local machine and
@@ -290,7 +252,7 @@ def rsync_from_remote(
 
     See :func:`_do_rsync` for ``run_in_terminal`` semantics.
     """
-    return _do_rsync(
+    _do_rsync(
         local_path=local_path,
         remote_host=remote_host,
         remote_path=remote_path,
@@ -311,7 +273,7 @@ def rsync(
     uncommitted_changes: UncommittedChangesMode,
     cg: ConcurrencyGroup,
     run_in_terminal: bool = False,
-) -> RsyncResult:
+) -> None:
     """Generic two-endpoint rsync used by ``mngr rsync``.
 
     Dispatches to :func:`rsync_to_remote` or :func:`rsync_from_remote` based on
@@ -326,7 +288,7 @@ def rsync(
     if not source_host.is_local and not destination_host.is_local:
         raise RsyncEndpointError("mngr rsync does not support remote-to-remote transfers")
     if source_host.is_local:
-        return rsync_to_remote(
+        rsync_to_remote(
             local_path=source_path,
             remote_host=destination_host,
             remote_path=destination_path,
@@ -335,12 +297,13 @@ def rsync(
             cg=cg,
             run_in_terminal=run_in_terminal,
         )
-    return rsync_from_remote(
-        remote_host=source_host,
-        remote_path=source_path,
-        local_path=destination_path,
-        extra_args=extra_args,
-        uncommitted_changes=uncommitted_changes,
-        cg=cg,
-        run_in_terminal=run_in_terminal,
-    )
+    else:
+        rsync_from_remote(
+            remote_host=source_host,
+            remote_path=source_path,
+            local_path=destination_path,
+            extra_args=extra_args,
+            uncommitted_changes=uncommitted_changes,
+            cg=cg,
+            run_in_terminal=run_in_terminal,
+        )

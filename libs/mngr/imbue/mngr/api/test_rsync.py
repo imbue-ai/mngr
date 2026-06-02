@@ -65,7 +65,7 @@ def test_rsync_from_remote_fail_mode_with_clean_destination_succeeds(
     (pull_ctx.agent_dir / "file.txt").write_text("agent content")
     assert not has_uncommitted_changes(pull_ctx.local_dir, cg)
 
-    result = rsync_from_remote(
+    rsync_from_remote(
         remote_host=pull_ctx.host,
         remote_path=_agent_src(pull_ctx),
         local_path=pull_ctx.local_dir,
@@ -75,8 +75,6 @@ def test_rsync_from_remote_fail_mode_with_clean_destination_succeeds(
     )
 
     assert (pull_ctx.local_dir / "file.txt").read_text() == "agent content"
-    assert result.destination_path == str(pull_ctx.local_dir)
-    assert result.source_path == _agent_src(pull_ctx)
 
 
 def test_rsync_from_remote_fail_mode_with_uncommitted_changes_raises(
@@ -381,7 +379,7 @@ def test_rsync_to_remote_transfers_files(
     run_git_command(push_ctx.local_dir, "add", "file.txt")
     run_git_command(push_ctx.local_dir, "commit", "-m", "Add file")
 
-    result = rsync_to_remote(
+    rsync_to_remote(
         local_path=_local_src(push_ctx),
         remote_host=push_ctx.host,
         remote_path=push_ctx.agent_dir,
@@ -391,8 +389,6 @@ def test_rsync_to_remote_transfers_files(
     )
 
     assert (push_ctx.agent_dir / "file.txt").read_text() == "local content"
-    assert result.source_path == _local_src(push_ctx)
-    assert result.destination_path == str(push_ctx.agent_dir)
 
 
 @pytest.mark.rsync
