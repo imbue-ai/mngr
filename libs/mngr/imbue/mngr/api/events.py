@@ -560,12 +560,13 @@ def _read_events_from_file(
     Returns (events, byte_length) where byte_length is the size of the raw content.
 
     Note: this function intentionally does NOT hold back a trailing partial line via
-    split_complete_lines. The via-host code path reads through pyinfra, whose
-    CommandOutput.stdout strips the trailing newline (it joins lines with "\\n"),
-    so any partial-line detection here would misclassify a complete final line as
-    partial and silently drop it. The follow-tail loop in _tail_source_thread_remote
-    has its own partial-line guard (it reads bytes directly from a volume, not via
-    pyinfra), so partial-write robustness during streaming is preserved there.
+    split_complete_lines. It is used for whole-file historical reads (rotated files
+    and the current events.jsonl), where the final line is expected to be complete;
+    holding one back would misclassify a complete final line as partial and silently
+    drop it. ``read_event_content`` reads byte-exact via ``HostFileReadInterface.read_file``,
+    so a file's true trailing-newline state is preserved either way. Partial-write
+    robustness during *streaming* is handled separately by the follow-tail loop in
+    _tail_source_thread_remote, which has its own partial-line guard.
     """
     try:
         content = read_event_content(target, relative_file_path)

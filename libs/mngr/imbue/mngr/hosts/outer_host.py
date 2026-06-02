@@ -916,7 +916,25 @@ class OuterHost(OuterHostInterface):
         return self._list_directory_remote(path, recursive)
 
     def _list_directory_remote(self, path: Path, recursive: bool) -> list[VolumeFile]:
-        """List a remote directory over a dedicated paramiko SFTP channel."""
+        """List a remote directory over SFTP, classifying connection failures.
+
+        Mirrors ``_get_file``: transient SSH drops are retried and any remaining
+        connection-level error is surfaced as :class:`HostConnectionError` (a
+        missing directory still yields an empty list, handled in ``_sftp_walk``).
+        """
+        with self._notify_on_connection_error():
+            try:
+                return self._list_directory_remote_with_retry(path, recursive)
+            except OSError as e:
+                if "Socket is closed" in str(e):
+                    raise HostConnectionError("Connection was closed while listing directory") from e
+                raise
+            except (EOFError, SSHException) as e:
+                raise HostConnectionError("Could not list directory due to connection error") from e
+
+    @_retry_on_transient_ssh_error
+    def _list_directory_remote_with_retry(self, path: Path, recursive: bool) -> list[VolumeFile]:
+        self._ensure_connected()
         transport = self._get_paramiko_transport()
         sftp = self._create_sftp_client(transport)
         if sftp is None:
