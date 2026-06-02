@@ -13,9 +13,9 @@ this file follows the same pattern as ``minds_api_proxy_test.py``:
    ``LATCHKEY_DIRECTORY`` we point the child at.
 
 The node-driving fixture declares ``@fixture_uses_resources("node")`` and
-the tests carry ``@pytest.mark.node`` (the node resource guard), routing
-them to the ``test-node`` CI job -- mirroring the minds-api-proxy test
-module.
+the tests carry ``@pytest.mark.node`` (the node resource guard) -- mirroring
+the minds-api-proxy test module. Node is installed in the shared mngr image,
+so these tests run on offload.
 """
 
 import json

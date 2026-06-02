@@ -15,9 +15,9 @@ this file drives it from the outside:
 Node is a hard runtime requirement for the ``latchkey gateway``
 subprocess we ship alongside the extension, so the node-driving fixtures
 declare ``@fixture_uses_resources("node")`` and the tests carry
-``@pytest.mark.node`` (the node resource guard). That routes them to the
-Node-equipped ``test-node`` CI job and keeps them out of the Node-less
-offload sandboxes.
+``@pytest.mark.node`` (the node resource guard, which enforces the mark
+via a PATH wrapper). Node is installed in the shared mngr image, so these
+tests run on offload.
 """
 
 import json
