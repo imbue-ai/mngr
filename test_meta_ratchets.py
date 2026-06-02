@@ -244,18 +244,22 @@ def test_prevent_bash_without_strict_mode() -> None:
       ``scripts/push_vault_from_file.py`` when seeding HCP Vault), not
       executable scripts -- adding ``set -euo pipefail`` to them would leak
       strict mode into whatever shell sources them.
-    - ``apps/minds/scripts/first-message-verify.sh``, which uses
-      ``set -uo pipefail`` (omitting ``-e``) on purpose: its polling loops
-      depend on commands exiting non-zero while they retry, and it handles
-      errors explicitly via a ``fail`` helper and ``PIPESTATUS``. Adding
-      ``-e`` would abort those loops instead of letting them retry.
+    - The minds verify scripts ``apps/minds/scripts/first-message-verify.sh``
+      and ``apps/minds/scripts/launch-and-verify.sh``, which use
+      ``set -uo pipefail`` (omitting ``-e``) on purpose: they handle errors
+      explicitly (a ``fail`` helper, ``PIPESTATUS``, polling loops that depend
+      on commands exiting non-zero while they retry, and diagnostic blocks on
+      failure). ``-e`` would abort that handling instead of running it. The
+      sibling non-verify scripts in the same directory do use ``set -euo
+      pipefail``, so this omission is a deliberate, matched choice rather than
+      an oversight.
 
     The count is enumerated against the full local checkout. In offload
     sandboxes the count is lower because ``.dockerignore`` omits some of these
     tracked paths from the build context, so they are absent on disk there.
     """
     violations = find_bash_scripts_without_strict_mode(_REPO_ROOT)
-    assert len(violations) <= snapshot(11), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
+    assert len(violations) <= snapshot(12), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
         f"  - {v}" for v in violations
     )
 

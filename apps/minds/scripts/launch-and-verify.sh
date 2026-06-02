@@ -2,7 +2,12 @@
 # Launch the installed minds.app and wait for its backend to come up.
 # Success: ~/.minds/logs/minds-events.jsonl is written within the timeout.
 # Failure: timeout, log macOS console + any partial state, exit non-zero.
-set -euo pipefail
+#
+# Deliberately omits `set -e` (matching first-message-verify.sh): the script
+# launches the app and then handles every failure explicitly so it can emit
+# diagnostics (pgrep + macOS unified log) and a specific exit code. `-e` would
+# abort early -- e.g. on a non-zero `open` -- skipping that diagnostic path.
+set -uo pipefail
 
 EVENTS_LOG="$HOME/.minds/logs/minds-events.jsonl"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-120}"
