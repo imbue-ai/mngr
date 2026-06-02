@@ -1,6 +1,6 @@
 # imbue-mngr-skills
 
-Claude Code skills that teach Claude how to use [mngr](https://github.com/imbue-ai/mngr) -- for example, to coordinate with other agents. More skills may be added over time; the current set is listed below.
+Claude Code skills that teach Claude how to use [mngr](https://github.com/imbue-ai/mngr) -- for example, to coordinate with other agents.
 
 ## Skills
 

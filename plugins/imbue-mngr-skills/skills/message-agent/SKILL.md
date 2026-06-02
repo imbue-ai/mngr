@@ -11,7 +11,7 @@ Your agent name is: !`echo "$MNGR_AGENT_NAME"`
 
 ## Agent Name Resolution
 
-Skip this step if the user seems to have provided the exact name of the agent -- just use the first word of their input directly as the target. Otherwise (for example they pasted a branch name like `mngr/foo`, or described the agent instead of naming it), run the `/imbue-mngr-skills:find-agent` skill, which turns that input into an exact agent name.
+Skip this step if the user seems to have provided the exact name of the agent -- just use the first word of their input directly as the target. Otherwise (for example they pasted a branch name like `mngr/foo`, or described the agent instead of naming it), run the `/imbue-mngr-skills:find-agent` skill, which explains how to find the exact agent name.
 
 ## Composing the Message
 
