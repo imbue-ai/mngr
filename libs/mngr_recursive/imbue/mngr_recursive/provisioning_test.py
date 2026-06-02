@@ -96,7 +96,7 @@ def test_upload_deploy_files_uses_single_rsync(tmp_path: Path) -> None:
 
     assert count == 2
     host.copy_local_directory.assert_called_once()
-    # The per-file SFTP path must no longer be exercised at all.
+    # Deploy files must be transferred via a single rsync, never per-file writes.
     host.write_file.assert_not_called()
     host.write_text_file.assert_not_called()
     call_args = host.copy_local_directory.call_args.args

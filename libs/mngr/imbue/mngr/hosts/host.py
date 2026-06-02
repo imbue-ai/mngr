@@ -2215,10 +2215,9 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     self._mkdir(directory)
                     logger.trace("Created directory: {}", directory)
 
-                # Upload files in a single bulk transfer (rsync for remote hosts)
-                # rather than one write_file per file (a per-file SSH round-trip).
+                # Upload files in a single bulk transfer (rsync for remote hosts).
                 # skip_missing=False: a user-specified upload whose source is missing
-                # is an error (matches the old read_bytes() behavior).
+                # is an error.
                 upload_files_in_bulk(
                     self,
                     {spec.remote_path: spec.local_path for spec in provisioning.upload_files},
@@ -2280,9 +2279,9 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         """Validate and execute file transfers from the agent.
 
         First validates that all required files exist, then transfers everything in a
-        single bulk upload (rsync for remote hosts) rather than one write_file per
-        file. Always emits a "Transferring agent files" log_span (with count=0 when
-        the agent declared no transfers) so timing is visible at -vv.
+        single bulk upload (rsync for remote hosts). Always emits a "Transferring agent
+        files" log_span (with count=0 when the agent declared no transfers) so timing is
+        visible at -vv.
         """
         with log_span("Transferring agent files", count=len(transfers)):
             if not transfers:
@@ -2299,7 +2298,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 raise MngrError(f"Required files for provisioning not found: {missing_str}")
 
             # Required files were validated above; skip_missing=True drops any optional
-            # transfer whose source does not exist (matching the old per-file skip).
+            # transfer whose source does not exist.
             uploads = {agent.work_dir / transfer.agent_path: transfer.local_path for transfer in transfers}
             upload_files_in_bulk(self, uploads, remote_home, skip_missing=True)
 

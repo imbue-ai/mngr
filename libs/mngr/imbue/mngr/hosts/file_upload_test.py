@@ -65,8 +65,8 @@ def test_local_upload_source_equals_dest_is_noop(tmp_path: Path) -> None:
     """A local Path source that already IS the destination must not error (no-op).
 
     On a local host an agent file transfer can target a file already present in the
-    work_dir, so source == dest. The old write_file(path, path.read_bytes()) handled
-    this; the helper must too (shutil.copyfile would otherwise raise SameFileError).
+    work_dir, so source == dest. The helper must treat this as a no-op (shutil.copyfile
+    would otherwise raise SameFileError).
     """
     dest = tmp_path / "work" / ".claude" / "settings.local.json"
     dest.parent.mkdir(parents=True)

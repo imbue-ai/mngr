@@ -36,15 +36,14 @@ def _write_source(source: FileSource, dest: Path) -> None:
     if isinstance(source, Path):
         # On a local host the source can already BE the destination (e.g. a file
         # already present in the agent work_dir). copyfile would raise SameFileError,
-        # so treat that as a no-op -- the file is already in place. (This matches the
-        # old write_file(path, path.read_bytes()) behavior, which was a harmless
-        # rewrite.) For a remote target the dest is in the staging dir, never the
-        # source, so this never triggers there.
+        # so treat that as a no-op -- the file is already in place. For a remote
+        # target the dest is in the staging dir, never the source, so this never
+        # triggers there.
         if source.resolve() == dest.resolve():
             return
         dest.parent.mkdir(parents=True, exist_ok=True)
-        # copyfile (not copy2) writes with default perms, matching the previous
-        # SFTP putfo / write_file behavior (which did not preserve source mode).
+        # copyfile (not copy2) writes with default perms and does not preserve the
+        # source file's mode.
         shutil.copyfile(source, dest)
     elif isinstance(source, bytes):
         dest.parent.mkdir(parents=True, exist_ok=True)

@@ -686,8 +686,9 @@ def test_host_volume_data_readable_via_volume_interface(real_modal_provider: Mod
 
 
 # Wall-clock budget for the bulk upload itself (not host creation). rsync transfers
-# 600 tiny files in a few seconds; the old per-file SFTP path took ~0.7s/file (~400s),
-# so this comfortably separates "fixed" from "regressed" while tolerating tunnel jitter.
+# 600 tiny files in a few seconds; a per-file SFTP upload would take ~0.7s/file (~400s),
+# so this comfortably separates a single-rsync upload from a per-file regression while
+# tolerating tunnel jitter.
 _UPLOAD_BUDGET_SECONDS: Final[float] = 60.0
 
 
@@ -700,17 +701,17 @@ def test_upload_deploy_files_handles_large_set_on_modal(
 ) -> None:
     """Regression test for github issue 1825: a large deploy-file set must upload via one rsync.
 
-    The previous implementation uploaded each deploy file through its own SFTP
-    channel -- a full round-trip over the Modal SSH tunnel (~0.7s/file measured) --
-    so a real user's ``~/.claude/plugins`` tree (hundreds of files) either blew past
-    the upload timeout or reset the connection ("Error reading SSH protocol banner").
-    The fix transfers the whole set with a single ``host.copy_directory`` (rsync) call.
+    Uploading each deploy file through its own SFTP channel is a full round-trip over
+    the Modal SSH tunnel (~0.7s/file measured), so a real user's ``~/.claude/plugins``
+    tree (hundreds of files) would blow past the upload timeout or reset the connection
+    ("Error reading SSH protocol banner"). The whole set must instead transfer with a
+    single ``host.copy_local_directory`` (rsync) call.
 
     The real guard is the explicit ``_UPLOAD_BUDGET_SECONDS`` assertion on the upload
-    call itself, decoupled from (variable) host-creation time: 600 files take ~400s via
-    the old per-file path but a few seconds via rsync. The mix of on-disk ``Path``
-    sources and in-memory string content exercises both staging branches; we then
-    verify every file landed on the remote with the expected contents.
+    call itself, decoupled from (variable) host-creation time: 600 files would take
+    ~400s via a per-file path but only a few seconds via rsync. The mix of on-disk
+    ``Path`` sources and in-memory string content exercises both staging branches; we
+    then verify every file landed on the remote with the expected contents.
     """
     file_count = 600
     with created_host(real_modal_provider, HostName("rsync-deploy-test")) as host:
