@@ -60,6 +60,7 @@ def render_predefined_permission_dialog(
         display_name=service.display_name,
         scope=service.scope,
         permission_schemas=service.permission_schemas,
+        description_by_permission_name=service.description_by_permission_name,
         checked_permissions=set(checked_permissions),
         accent=workspace_accent(agent_id),
         will_open_browser=will_open_browser,

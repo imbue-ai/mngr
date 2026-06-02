@@ -9,7 +9,7 @@ from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.config.data_types import CommonCliOptions
-from imbue.mngr.errors import BaseMngrError
+from imbue.mngr.errors import MngrError
 from imbue.mngr_uncapped_claude.arg_partition import partition_args
 from imbue.mngr_uncapped_claude.errors import UnsupportedClaudeFlagError
 from imbue.mngr_uncapped_claude.orchestrator import EXIT_MNGR_ERROR
@@ -68,7 +68,7 @@ def uncapped_claude(ctx: click.Context, **_kwargs: Any) -> None:
             stdout=sys.stdout,
             is_stdin_a_tty=sys.stdin.isatty(),
         )
-    except BaseMngrError as exc:
+    except MngrError as exc:
         logger.error("{}", exc)
         ctx.exit(EXIT_MNGR_ERROR)
 

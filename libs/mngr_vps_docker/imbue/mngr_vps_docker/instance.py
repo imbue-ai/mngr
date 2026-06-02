@@ -1223,7 +1223,7 @@ class VpsDockerProvider(BaseProviderInstance):
                 if existing is not None:
                     updated = existing.model_copy(update={"certified_host_data": certified_data})
                     host_store.write_host_record(updated)
-        except (HostConnectionError, MngrError) as e:
+        except MngrError as e:
             logger.warning("Failed to sync certified data to VPS host volume: {}", e)
 
     # =========================================================================
@@ -1966,7 +1966,7 @@ class VpsDockerProvider(BaseProviderInstance):
                 # will fail otherwise because the container still holds it open.
                 try:
                     _remove_container(outer, vps_config.container_name, force=True)
-                except (HostConnectionError, MngrError) as e:
+                except MngrError as e:
                     logger.warning("Failed to remove container: {}", e)
 
                 # Delete the per-host btrfs subvolume before the named volume.
@@ -1977,7 +1977,7 @@ class VpsDockerProvider(BaseProviderInstance):
                 subvolume_path = self.config.btrfs_mount_path / host_id.get_uuid().hex
                 try:
                     _delete_btrfs_subvolume_on_outer(outer, subvolume_path)
-                except (HostConnectionError, MngrError) as e:
+                except MngrError as e:
                     logger.warning("Failed to delete btrfs subvolume {}: {}", subvolume_path, e)
 
                 # Remove the unified host volume. With bind options the volume
@@ -1986,7 +1986,7 @@ class VpsDockerProvider(BaseProviderInstance):
                 # volume name doesn't collide.
                 try:
                     _remove_volume(outer, vps_config.volume_name)
-                except (HostConnectionError, MngrError) as e:
+                except MngrError as e:
                     logger.warning("Failed to remove host volume: {}", e)
 
                 # Remove the per-host snapshot-trigger volume (the named entry;
@@ -1994,7 +1994,7 @@ class VpsDockerProvider(BaseProviderInstance):
                 # all containers on this outer and is left alone).
                 try:
                     _remove_volume(outer, _snapshot_trigger_volume_name_for(host_id))
-                except (HostConnectionError, MngrError) as e:
+                except MngrError as e:
                     logger.warning("Failed to remove snapshot trigger volume: {}", e)
 
         # Destroy the VPS instance
@@ -2163,7 +2163,7 @@ class VpsDockerProvider(BaseProviderInstance):
                             self._container_running_cache[container_name] = _docker_inspect_running(
                                 outer, container_name
                             )
-                    except (HostConnectionError, MngrError) as exc:
+                    except MngrError as exc:
                         logger.warning(
                             "Failed to inspect container status for host {} on VPS {}: {}",
                             host_id,
@@ -2263,7 +2263,7 @@ class VpsDockerProvider(BaseProviderInstance):
                     return [], {}
                 agent_data = host_store.list_persisted_agent_data()
                 return [record], {host_id: agent_data}
-        except (HostConnectionError, MngrError) as e:
+        except MngrError as e:
             cached_records = [r for r in self._host_record_cache.values() if r.vps_ip == vps_ip]
             if cached_records:
                 logger.warning(
@@ -2350,6 +2350,8 @@ class VpsDockerProvider(BaseProviderInstance):
         agent_refs: Sequence[DiscoveredAgent],
         field_generators: Mapping[str, Mapping[str, Callable[[AgentInterface, OnlineHostInterface], Any]]]
         | None = None,
+        offline_field_generators: Mapping[str, Mapping[str, Callable[[DiscoveredAgent, HostDetails], Any]]]
+        | None = None,
         on_error: Callable[[DiscoveredAgent | DiscoveredHost, BaseException], None] | None = None,
     ) -> tuple[HostDetails, list[AgentDetails]]:
         """Build HostDetails and AgentDetails via a single SSH command."""
@@ -2360,13 +2362,25 @@ class VpsDockerProvider(BaseProviderInstance):
 
         # For offline hosts or hosts without a record, fall back to default
         if host_record is None or host_record.vps_ip is None or host_record.config is None:
-            return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+            return super().get_host_and_agent_details(
+                host_ref,
+                agent_refs,
+                field_generators=field_generators,
+                offline_field_generators=offline_field_generators,
+                on_error=on_error,
+            )
 
         try:
             host = self.get_host(host_ref.host_id)
 
             if not isinstance(host, Host):
-                return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+                return super().get_host_and_agent_details(
+                    host_ref,
+                    agent_refs,
+                    field_generators=field_generators,
+                    offline_field_generators=offline_field_generators,
+                    on_error=on_error,
+                )
 
             # Collect all data in one SSH command
             script = build_listing_collection_script(str(self.host_dir), self.mngr_ctx.config.prefix)
@@ -2389,7 +2403,13 @@ class VpsDockerProvider(BaseProviderInstance):
                 host_ref.host_id,
                 e,
             )
-            return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+            return super().get_host_and_agent_details(
+                host_ref,
+                agent_refs,
+                field_generators=field_generators,
+                offline_field_generators=offline_field_generators,
+                on_error=on_error,
+            )
         except MngrError as e:
             if on_error:
                 on_error(host_ref, e)

@@ -50,7 +50,6 @@ from imbue.mngr_ovh.pending_orders import write_pending_order_marker
 from imbue.mngr_ovh.recycle import abort_recycle
 from imbue.mngr_ovh.recycle import finalize_recycle
 from imbue.mngr_ovh.recycle import try_recycle_cancelled_vps
-from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
@@ -141,7 +140,7 @@ class OvhProvider(VpsDockerProvider):
             return []
         try:
             resources = list_vps_resources_for_provider(self.ovh_client, provider_name=str(self.name))
-        except (VpsApiError, MngrError) as e:
+        except MngrError as e:
             logger.warning("OVH IAM tag listing failed; treating as empty: {}", e)
             self._vps_iam_cache = []
             return []
@@ -199,7 +198,7 @@ class OvhProvider(VpsDockerProvider):
                     order_id=record.order_id,
                     plan_code=record.plan_code,
                 )
-            except (VpsApiError, MngrError) as exc:
+            except MngrError as exc:
                 logger.warning(
                     "OVH pending-orders reconcile: poll for order {} failed ({}); keeping marker for next bake",
                     record.order_id,
@@ -219,7 +218,7 @@ class OvhProvider(VpsDockerProvider):
                     provider_name=provider_name,
                     region_code=region_code,
                 )
-            except (VpsApiError, MngrError) as exc:
+            except MngrError as exc:
                 logger.warning(
                     "OVH pending-orders reconcile: adoption of {} (order {}) failed ({}); keeping marker",
                     service_name,
@@ -333,7 +332,7 @@ class OvhProvider(VpsDockerProvider):
             return
         try:
             finalize_recycle(self.ovh_client, handle)
-        except (VpsApiError, MngrError) as e:
+        except MngrError as e:
             logger.error(
                 "OVH recycle: finalize_recycle raised for {} after host record was written; "
                 "the VPS may auto-decommission at end of month -- manual un-cancel may be needed. {}",
@@ -587,7 +586,7 @@ class OvhProvider(VpsDockerProvider):
                 "OVH _provision_vps failed after fresh order delivered {}; requested termination to avoid a leaked month of billing",
                 service_name,
             )
-        except (VpsApiError, MngrError) as e:
+        except MngrError as e:
             logger.error(
                 "OVH _provision_vps cleanup: failed to terminate freshly-ordered VPS {} ({}); manual cleanup may be needed to avoid a leaked month of billing",
                 service_name,

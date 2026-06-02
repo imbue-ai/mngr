@@ -28,7 +28,14 @@ and how the agent receives the answer.
    request events file via `mngr events --follow`, adds a card to the
    right-side requests inbox panel, and surfaces a notification.
 5. **User opens the dialog.** Clicking the card opens
-   `/requests/<event_id>`, which renders a single-scope permission dialog:
+   `/requests/<event_id>` in a **modal overlay** over the current window
+   (a transparent full-content-area `WebContentsView` stacked above the
+   workspace, with a dim backdrop). The user's workspace view is never
+   navigated away, so dismissing the dialog -- via Approve/Deny, the close
+   button, a backdrop click, or Escape -- returns them to their work with
+   no context lost. (Opened directly in a browser, with no modal host, the
+   page degrades to a dimmed, centered card and dismissal navigates home.)
+   The page renders a single-scope permission dialog:
    * The dialog header names the service plainly (no monospace pill) and
      attributes the agent's rationale prominently as
      "`<workspace>` says:" -- this is the main place the requesting
@@ -172,7 +179,9 @@ permission schemas the dialog offers) lives alongside the latchkey
 gateway extension at
 [`libs/mngr_latchkey/imbue/mngr_latchkey/extensions/services.json`](../../../libs/mngr_latchkey/imbue/mngr_latchkey/extensions/services.json)
 and is fetched at desktop-client runtime via the gateway's
-`GET /permissions/available` endpoint. Each entry has the shape:
+`GET /permissions/available` endpoint. Each service maps to a *list* of
+scope entries (a single service may expose more than one detent scope).
+Each entry has the shape:
 
 * `scope` -- the detent scope schema the service owns; used as the rule
   key in `latchkey_permissions.json` and as the value the agent puts

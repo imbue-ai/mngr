@@ -4,6 +4,147 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-01
+
+The latchkey services catalog now maps each raw service name to a list of scope entries instead of a single entry, so one service can expose more than one detent scope. `LatchkeyGatewayClient.get_available_services` now returns `dict[str, tuple[AvailableServiceEntry, ...]]`, and `ServicesCatalog.get` / `ServicesCatalog.as_mapping` now return a tuple of `ServicePermissionInfo` per service. Per-scope lookup via `ServicesCatalog.get_by_scope` is unchanged.
+
+## 2026-05-29
+
+Exclude the Latchkey dependency from the minimum age check (we are co-developing Latchkey together with Minds).
+
+Simplified the latchkey predefined-permission approval dialog for non-technical users. By default it now shows a read-only, informative list of the permissions the agent is requesting (no checkboxes), with only Approve and Deny actions. A small "Adjust" link (rendered inside the permission list, aligned with the permission names) reveals the full per-permission checkbox editor (the previous appearance) for users who want fine-grained control. The dialog was also visually streamlined: the standalone "Workspace:" line was removed, the agent's reason is now attributed prominently as "<workspace> says:", the request summary is a single sentence ("Approving will grant <workspace> and its sibling agents the following permissions:"), and the service name in the header no longer renders inside a grey box. The file-sharing permission dialog was updated to match this chrome (same header treatment, "<workspace> says:" attribution, dropped workspace line, and a single summary sentence naming the workspace, access level, and host-wide scope). The rationale text is italicized, the "Adjust" link is right-aligned within the permission list and separated from it by a faint divider, and the page now reserves the scrollbar gutter so expanding the editor no longer shifts the layout sideways.
+
+- `apps/minds`: activate the ToDesktop `beforeInstall` hook so the build
+  server re-downloads/re-resolves `uv` and `git` for its target platform
+  rather than using the bytes uploaded from the developer's machine.
+  Wires `package.json`'s `todesktop:beforeInstall` to
+  `./scripts/download-binaries.js`, and restores the `downloadUv()`
+  orchestrator in that file (it had been removed in the bundled-git
+  carve-out because it was dormant without this PR's hook wiring).
+- `apps/minds`: pin both `pnpm` and `node` via ToDesktop's first-class
+  `pnpmVersion` / `nodeVersion` config fields, sourcing the literal
+  values from `package.json`'s `engines` block (which #1710 already
+  pins to `pnpm 10.33.4` and `node 24.15.0`). To make this work,
+  `todesktop.json` is replaced with a `todesktop.js` that does
+  `require('./package.json')` and reads `engines.pnpm` and
+  `engines.node` into the `pnpmVersion` and `nodeVersion` ToDesktop
+  config fields; ToDesktop's CLI supports `.json`, `.js`, and `.ts`
+  config formats. Net effect: `package.json` is now the single source
+  of truth for the pnpm + node versions used on dev laptops (via
+  `engines` + `.nvmrc`), in imbue CI (via the workflow's explicit
+  installs, still a separate pin), and on ToDesktop's runner (via
+  `todesktop.js` reading `package.json`). Replaces a draft of this
+  PR that had a home-rolled `installPnpm()` fallback ladder
+  (~80 LoC + a 14-line rationale comment) -- ToDesktop's runtime
+  already provisions the requested versions before installing
+  dependencies, so the ladder was working around the absence of a
+  knob that isn't absent. Empirically verified end-to-end against a
+  draft ToDesktop build from `wz/minds_onboard` (build
+  `260528yf2ma2jd4`) with the earlier `"pnpmVersion": "10.33.4"`
+  spelling: both Linux and Mac arm64 finished, packaged binary
+  launches and round-trips a first message E2E. The `beforeInstall`
+  hook stays for `uv` + `git` (no first-class ToDesktop knob).
+  `apps/minds/scripts/build_test.py` (which reads the ToDesktop config
+  to assert the limactl signing contract) now shells out to `node -e
+  "console.log(JSON.stringify(require('./todesktop.js')))"`. It
+  module-level-skips via `pytest.mark.skipif(shutil.which('node') is
+  None, ...)` when no node is on PATH -- matches the existing
+  `mngr_latchkey` precedent for Node-dependent Python tests. Coverage
+  gap: this test currently doesn't run in the offload sandbox (no
+  node there). Adding node to the offload image -- or to a
+  minds-specific sandbox image -- is a follow-up.
+- `apps/minds`: consolidate `downloadUv` into a single definition in
+  `scripts/download-binaries.js` and import it into `scripts/build.js`,
+  mirroring how `downloadGit` and `download` are already shared.
+  Removes the duplicated `UV_VERSION` constant, `getUvDownloadUrl`,
+  and `downloadUv` from `build.js`. Both call sites (local
+  `pnpm build` and ToDesktop's `beforeInstall` hook) now run the same
+  implementation against their own resources directory.
+
+- Resetting or destroying an env no longer leaves its mngr Docker state container (`<MNGR_PREFIX>docker-state-<user_id>`) running forever. Both `minds env destroy` and the activate-time generation-mismatch auto-wipe now remove that env's exact state container and its backing volume.
+- The auto-wipe now also destroys the env's mngr agents (in a single `mngr destroy` call) before wiping local state, so their Docker host containers and build images are cleaned up too.
+- Env-teardown agent destruction now uses one batched `mngr destroy` call instead of one call per agent.
+
+The "destroy workspace" UI action now releases the underlying
+imbue_cloud-leased host's lease immediately rather than waiting the 7-day
+destroyed-host grace period for mngr's GC to run `delete_host`. The
+implementation lives in `mngr destroy` (see `libs/mngr/changelog/`);
+minds' destroy command was previously *intentionally* not chaining lease
+release because the grace-period delegation was the design. That
+intentional decision is no longer correct -- `mngr destroy` now drops
+cloud-side resources up front, and the grace period only retains
+historical state. The stale "Lease release is intentionally NOT chained
+here" comment in `destroying.py` is updated to reflect the new contract.
+
+# Self-hosted Mac runner support
+
+- Added `apps/minds/scripts/mac-runner-reset.sh`: cleans `~/.minds`, removes the installed `.app`, kills leftover Minds processes, and stops/deletes any Lima VM instances. Optionally re-downloads + installs a fresh `.app` from a ToDesktop `.zip` URL passed as the first argument. Intended to run at the start of every verification job on the dedicated self-hosted mac-runner so each run starts from a known-clean state. Preserves only the Lima base-image cache (`~/Library/Caches/lima/`), which is ~1.5 GB and unrelated to Minds itself.
+
+Added a "Backup provider" control to the workspace create form, mirroring the
+existing "AI provider" toggle, with three options:
+
+- `imbue_cloud` -- creates a per-workspace R2 bucket (named after the new host
+  id) and a scoped key, then injects a `runtime/secrets/restic.env` pointing
+  the FCT `host_backup` service at that bucket. Gated on a selected account;
+  the default when an account is present.
+- `manual` -- a free-form `KEY=VALUE` block written verbatim to `restic.env`
+  (you supply `RESTIC_REPOSITORY` and backend credentials).
+- `configure_later` -- injects nothing now; the default when no account is
+  selected.
+
+When a real backup provider is chosen, a "Backup encryption method" row
+appears: `master_password` or `no_password`. The conditional backup fields
+(restic environment, encryption method, master password) render as standard
+label-on-left / field-on-right rows like the rest of the form.
+
+minds (which now requires `restic` to be installed on the machine running it)
+initializes each workspace's restic repository itself and gives the workspace
+its own random repository password, so the master password never enters the
+workspace. Enabling backups: resolve the repository + credentials, generate a
+random per-workspace password, `restic init` the repo with the master
+password (or empty for `no_password`), `restic key add` the random password,
+write the canonical `restic.env` to a 0600 minds-side file, and inject that
+file into the workspace. The `manual` block must not set `RESTIC_PASSWORD`
+(minds assigns it).
+
+A freshly-minted imbue_cloud (Cloudflare R2) credential takes a few seconds to
+become active at the storage backend's edge, so the immediate `restic init`
+could fail with a transient `Unauthorized`. minds now retries the `restic init`
+/ `restic key add` bootstrap on such transient auth failures for a bounded
+window, so backup provisioning rides out that propagation delay instead of
+failing outright.
+
+Backup setup runs asynchronously after the host is created (mirroring the
+Cloudflare tunnel-token injection) and is non-fatal: a failure surfaces as a
+notification and leaves the workspace running. The reusable
+`configure_backups_for_host` operation can be re-applied to an existing host
+later and is idempotent (an existing canonical env is re-injected; an
+already-created bucket / initialized repo is reused). The canonical
+`restic.env` is never auto-deleted, so a stopped or destroyed workspace's
+backups stay recoverable.
+
+The Projects page now shows each project's backup status (Backing up / Backed
+up N ago / No backups / Unknown), fetched once on load from a new
+`/api/backup-status` route that queries restic per project from the minds
+machine. While that request is in flight each tile shows "Checking backups…",
+and a freshly-created workspace with no backups yet shows "Created N ago"
+(for the first 75 minutes after creation) instead of "No backups", so a brand
+new project doesn't look alarming before its first backup has had a chance to
+run. The route includes each workspace's creation time for this.
+
+A backed-up project also gets a "download" link next to its status that exports
+the latest snapshot as a zip. minds builds the zip on demand from the minds
+machine (no workspace access needed) by restoring the latest snapshot to a temp
+dir and zipping it -- `restic restore` downloads in parallel and is ~50x faster
+than `restic dump --archive zip` (which fetches blobs sequentially: ~5 min vs
+~10 s for a ~95 MiB snapshot). The zip lands in a /tmp file keyed by host id
+(so re-exports overwrite rather than accumulate) and is served via a new
+`GET /api/backup-export/{agent_id}` route; the temp restore dir is always
+cleaned up. The link shows a spinner and "exporting…" while the zip is built.
+
+New `BackupProvider` / `BackupEncryptionMethod` primitives; new
+`mngr imbue_cloud bucket ...` wrappers on the imbue_cloud CLI client.
+
 ## 2026-05-28
 
 Pin minds desktop client JS toolchain to exact versions: pnpm 10.33.4 and Node.js 24.15.0. With `engine-strict=true` plus exact `engines.node`/`engines.pnpm`, installs fail fast on mismatch instead of breaking in confusing ways. Added `.nvmrc` so nvm/fnm users pick up the pinned Node automatically. Documented how existing developers can install the pinned versions (nvm/fnm for Node, `npm install --global pnpm@10.33.4` for pnpm, with a note that Homebrew's `@<major>` kegs drift) in `apps/minds/docs/desktop-app.md`. Also pinned end-user Python to `==3.12.13` in `apps/minds/electron/pyproject/pyproject.toml` (the packaged-app pyproject that uv reads at first launch) so every install downloads the same interpreter instead of the latest 3.12 patch available at the time.

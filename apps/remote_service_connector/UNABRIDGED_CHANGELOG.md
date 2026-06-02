@@ -4,6 +4,32 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-05-29
+
+Added R2 bucket routes (`/buckets/*` and `/bucket-keys/*`), gated to paid
+accounts. Supports creating a bucket with a default scoped key, listing /
+inspecting / destroying buckets, and minting / listing / revoking additional
+bucket-scoped keys (read-only or read-write).
+
+Each key is an account-owned Cloudflare API token scoped to a single bucket; the
+S3 Access Key ID is the token id and the Secret Access Key is the SHA-256 of the
+token value (returned once, never stored). Only key metadata is persisted, in a
+new `r2_keys` table (migration `004_r2_keys.sql`); buckets are listed straight
+from the R2 API with an in-code owner-prefix re-check. Destroying a bucket
+refuses if it is non-empty and otherwise cascades to revoke its keys.
+
+Operator note: `CLOUDFLARE_API_TOKEN` must now be an account-owned (`cfat_`)
+token with `Workers R2 Storage: Edit` + `Account API Tokens: Edit` added, and R2
+must be enabled on the Cloudflare account. See the README for the full migration.
+
+The connector's R2 bucket + bucket-key endpoints are now exercised end-to-end
+by the minds workspace-creation flow (via `mngr imbue_cloud bucket ...`) to
+provision per-workspace restic backup buckets.
+
+(This integration PR adds no code in this project; it wires the existing
+bucket endpoints into minds. The endpoints themselves are covered by the
+`mngr-cloud-bucket` changelog entry.)
+
 ## 2026-05-28
 
 # Dropped redundant per-project ty/ruff ratchet tests

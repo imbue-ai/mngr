@@ -15,6 +15,7 @@ from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.app import _build_mngr_exec_argv
+from imbue.minds.desktop_client.app import _build_requests_payload
 from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -33,7 +34,9 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import RequestInbox
+from imbue.minds.desktop_client.request_events import RequestStatus
 from imbue.minds.desktop_client.request_events import create_latchkey_predefined_permission_request_event
+from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.primitives import CreationId
@@ -353,7 +356,7 @@ def test_landing_page_shows_create_form_after_discovery_finds_no_agents(tmp_path
 
     response = client.get("/")
     assert response.status_code == 200
-    assert "Create a Project" in response.text
+    assert "Create workspace" in response.text
     assert "git_url" in response.text
 
 
@@ -384,7 +387,7 @@ def test_create_page_shows_form(tmp_path: Path) -> None:
 
     response = client.get("/create")
     assert response.status_code == 200
-    assert "Create a Project" in response.text
+    assert "Create workspace" in response.text
 
 
 def test_creation_status_returns_404_for_unknown_agent(tmp_path: Path) -> None:
@@ -611,6 +614,67 @@ def test_create_agent_api_rejects_empty_git_url(tmp_path: Path) -> None:
 
     response = client.post("/api/create-agent", json={"git_url": ""})
     assert response.status_code == 400
+
+
+def test_create_agent_api_accepts_onboarding_fields(tmp_path: Path) -> None:
+    """POST /api/create-agent accepts the optional onboarding fields without breaking.
+
+    Only ``user_data_preference`` is sent (a local-only side effect) so the
+    background apply thread doesn't spin on ``mngr message`` / ``mngr exec``.
+    """
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/api/create-agent",
+        json={"git_url": "file:///nonexistent-repo", "user_data_preference": "PRIVACY"},
+    )
+    assert response.status_code == 200
+    assert "agent_id" in response.json()
+    agent_creator.wait_for_all()
+
+
+def test_onboarding_submit_returns_404_for_unknown_creation(tmp_path: Path) -> None:
+    """POST /api/create-agent/{id}/onboarding returns 404 for an untracked creation."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/api/create-agent/{}/onboarding".format(CreationId()),
+        json={"user_data_preference": "PRIVACY"},
+    )
+    assert response.status_code == 404
+
+
+def test_onboarding_submit_accepts_answers_for_tracked_creation(tmp_path: Path) -> None:
+    """POST /api/create-agent/{id}/onboarding accepts answers for a tracked creation."""
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
+
+    create_response = client.post("/api/create-agent", json={"git_url": "file:///nonexistent-repo"})
+    creation_id = create_response.json()["agent_id"]
+
+    # Only the data preference is submitted so the apply thread stays local.
+    response = client.post(
+        "/api/create-agent/{}/onboarding".format(creation_id),
+        json={"user_data_preference": "PRIVACY"},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    agent_creator.wait_for_all()
+
+
+def test_onboarding_submit_requires_authentication(tmp_path: Path) -> None:
+    """POST /api/create-agent/{id}/onboarding returns 403 without authentication."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    client, _ = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+
+    response = client.post(
+        "/api/create-agent/{}/onboarding".format(CreationId()),
+        json={"user_data_preference": "PRIVACY"},
+    )
+    assert response.status_code == 403
 
 
 def test_create_form_submit_rejects_invalid_host_name(tmp_path: Path) -> None:
@@ -996,15 +1060,6 @@ def test_create_form_does_not_show_env_file_checkbox(tmp_path: Path) -> None:
     assert "include_env_file" not in response.text
 
 
-def test_create_form_shows_gh_token_input_in_advanced(tmp_path: Path) -> None:
-    """The advanced section includes an optional GH_TOKEN field."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.get("/create")
-    assert response.status_code == 200
-    assert 'name="gh_token"' in response.text
-
-
 def test_create_form_submit_rejects_imbue_cloud_compute_without_account(tmp_path: Path) -> None:
     """Selecting IMBUE_CLOUD compute without an account is rejected with a clear message."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
@@ -1247,6 +1302,55 @@ def test_chrome_events_sse_returns_workspaces_when_authenticated(tmp_path: Path)
     workspaces = _build_workspace_list(backend_resolver)
     assert len(workspaces) == 1
     assert workspaces[0]["id"] == str(agent_id)
+
+
+def test_build_requests_payload_empty_inbox() -> None:
+    """An empty inbox yields a zero count and no pending ids."""
+    assert _build_requests_payload(None) == {"count": 0, "request_ids": []}
+    assert _build_requests_payload(RequestInbox()) == {"count": 0, "request_ids": []}
+
+
+def test_build_requests_payload_carries_pending_ids() -> None:
+    """A pending request surfaces its event_id alongside the count."""
+    agent_id = str(AgentId())
+    event = create_latchkey_predefined_permission_request_event(
+        agent_id=agent_id, scope="slack-api", rationale="post updates"
+    )
+    payload = _build_requests_payload(RequestInbox().add_request(event))
+    assert payload == {"count": 1, "request_ids": [str(event.event_id)]}
+
+
+def test_build_requests_payload_distinguishes_equal_count_different_contents() -> None:
+    """A swap of the pending set at constant size changes the payload.
+
+    This is the soundness property: keying live updates off the bare count
+    would miss this transition (count stays 1), so the payload must differ.
+    """
+    agent_id = str(AgentId())
+    request_a = create_latchkey_predefined_permission_request_event(
+        agent_id=agent_id, scope="slack-api", rationale="a"
+    )
+    request_b = create_latchkey_predefined_permission_request_event(
+        agent_id=agent_id, scope="github-api", rationale="b"
+    )
+
+    inbox_with_a = RequestInbox().add_request(request_a)
+    # Resolve A and add B: the pending set becomes {B}, same size as {A}.
+    inbox_with_b = inbox_with_a.add_response(
+        create_request_response_event(
+            request_event_id=str(request_a.event_id),
+            status=RequestStatus.GRANTED,
+            agent_id=agent_id,
+            request_type=request_a.request_type,
+            scope="slack-api",
+        )
+    ).add_request(request_b)
+
+    payload_a = _build_requests_payload(inbox_with_a)
+    payload_b = _build_requests_payload(inbox_with_b)
+    assert payload_a["count"] == payload_b["count"] == 1
+    assert payload_a != payload_b
+    assert payload_b["request_ids"] == [str(request_b.event_id)]
 
 
 # -- Tests for new account management and request routes --

@@ -125,6 +125,7 @@ def test_build_offline_details_from_lease_preserves_host_and_failure_reason(tmp_
         agent_refs=[agent_ref],
         lease=lease,
         failure_message=failure_message,
+        offline_field_generators={},
     )
 
     # The host is NOT dropped from the listing -- this is the primary contract.
