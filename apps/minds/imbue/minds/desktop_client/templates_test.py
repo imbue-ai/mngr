@@ -272,9 +272,9 @@ def test_render_dev_styleguide_page_surfaces_tokens_and_macro_widgets() -> None:
     # Each pattern block should be present.
     for header in ("Titlebar buttons", "Window controls", "Sidebar items", "Accent spine", "Spinner", "Buttons", "Notices"):
         assert header in html, f"missing pattern: {header}"
-    # The buttons / notices / inputs are rendered through _macros.html (the
-    # macros emit these strings; literal macro names would mean the template
-    # is hardcoding markup instead of calling the macros).
+    # The buttons / notices / inputs are rendered through _macros.html; these
+    # assertions verify that the macro output (button label, notice copy, input
+    # name) actually reaches the rendered page.
     assert ">Primary<" in html and ">Danger<" in html
     assert "All set: action completed." in html
     assert 'name="styleguide-focus-ring-input"' in html
