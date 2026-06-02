@@ -799,24 +799,23 @@ async def amain() -> int:
                         KICK_INTERVAL = 30
                         now = time.monotonic()
                         if now - first_approve_at >= KICK_DELAY and now - last_kick_at >= KICK_INTERVAL:
-                            # Try the chat panel first; fall back to the
-                            # current `win` (which we keep re-resolving).
-                            target = await find_chat_window(ctx) or win
-                            kick_msg = (
-                                "Slack permission approved. Please retry the read-only Slack "
-                                f'read now and respond with the prefix "TOK {NONCE}:" '
-                                "followed by the message text."
-                            )
-                            try:
-                                inp = await target.wait_for_selector(
-                                    'textarea, [contenteditable="true"]', timeout=5_000
+                            target = await find_chat_window(ctx)
+                            if target is not None:
+                                kick_msg = (
+                                    "Slack permission approved. Please retry the read-only Slack "
+                                    f'read now and respond with the prefix "TOK {NONCE}:" '
+                                    "followed by the message text."
                                 )
-                                await inp.fill(kick_msg)
-                                await inp.press("Enter")
-                                logger.info("sent post-approval kick (target={})", target.url)
-                                last_kick_at = now
-                            except Exception as exc:
-                                logger.warning("kick attempt failed on {}: {}", target.url, exc)
+                                try:
+                                    inp = await target.wait_for_selector(
+                                        'textarea, [contenteditable="true"]', timeout=5_000
+                                    )
+                                    await inp.fill(kick_msg)
+                                    await inp.press("Enter")
+                                    logger.info("sent post-approval kick (target={})", target.url)
+                                    last_kick_at = now
+                                except Exception as exc:
+                                    logger.warning("kick attempt failed on chat {}: {}", target.url, exc)
 
                     await asyncio.sleep(2)
                 else:
