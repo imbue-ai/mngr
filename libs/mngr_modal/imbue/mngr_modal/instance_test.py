@@ -1358,9 +1358,8 @@ def test_get_volume_reference_for_host_converts_auth_error(
     make_readable_offline_host -> to_offline_host, so it must surface the
     user-friendly ModalAuthError rather than the raw proxy error.
     """
-    modal_provider.modal_app.modal_interface.volume_from_name.side_effect = ModalProxyAuthError(
-        "Token missing or expired"
-    )
+    mock_interface = cast(Any, modal_provider.modal_app.modal_interface)
+    mock_interface.volume_from_name.side_effect = ModalProxyAuthError("Token missing or expired")
     with pytest.raises(ModalAuthError):
         modal_provider.get_volume_reference_for_host(HostId.generate())
 
