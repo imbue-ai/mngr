@@ -3438,7 +3438,7 @@ def create_desktop_client(
     # we run with the fallback shell only (and log loudly).
     _server_entry_override = os.environ.get("MINDS_SSR_SERVER_ENTRY")
     if _server_entry_override:
-        _server_entry: Path | None = Path(_server_entry_override)
+        _server_entry = Path(_server_entry_override)
     else:
         _server_entry = (
             Path(__file__).resolve().parent.parent.parent.parent
@@ -3448,7 +3448,7 @@ def create_desktop_client(
             / "server.js"
         )
     ssr_sidecar: SsrSidecar | None = None
-    if _server_entry is not None and _server_entry.exists() and root_concurrency_group is not None:
+    if _server_entry.exists() and root_concurrency_group is not None:
         ssr_sidecar = SsrSidecar(
             server_entry=_server_entry,
             manifest_path=_manifest_path if _manifest_path.exists() else None,
@@ -3464,7 +3464,7 @@ def create_desktop_client(
             "SSR sidecar disabled (server_entry={} exists={} root_cg={}); "
             "HTML routes will use the client-render fallback shell.",
             _server_entry,
-            _server_entry.exists() if _server_entry else False,
+            _server_entry.exists(),
             root_concurrency_group is not None,
         )
     app.state.ssr_sidecar = ssr_sidecar
