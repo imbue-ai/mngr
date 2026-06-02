@@ -272,7 +272,7 @@ def read_event_content(target: EventsTarget, event_file_name: str) -> str:
 
     Reads through :class:`HostFileReadInterface`, whose ``read_file`` is
     byte-exact (local reads bytes directly, remote uses SFTP), so the file's
-    trailing-newline state is preserved without any sentinel workaround.
+    exact bytes -- including its trailing-newline state -- are preserved.
     """
     if target.host is None or target.events_path is None:
         raise MngrError(f"Cannot read event file for {target.display_name}: no readable host available")
