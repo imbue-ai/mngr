@@ -701,14 +701,22 @@ _RECOVERY_SCRIPT: Final[str] = """\
             latestHealth = data || null;
             renderDebugMenu(latestHealth);
             var tier = data && data.dispatch_tier;
+            // A missing [services.system_interface] block means no restart can
+            // recover the workspace, so honor this tier on every entry path --
+            // including restart_failed, which is exactly the state a
+            // misconfigured workspace lands in once its undeclared interface
+            // fails to come back up. This must precede the no-auto-dispatch
+            // short-circuit below; renderMisconfigured() dispatches nothing (it
+            // only renders, with a "Try restart anyway" affordance), so it is
+            // safe regardless of autoDispatch.
+            if (tier === 'workspace_misconfigured') {
+              renderMisconfigured();
+              return;
+            }
             if (!autoDispatch) {
               // restart_failed entry: render unresponsive so the failure
               // reason and the diagnostics list both stay visible.
               renderUnresponsive();
-              return;
-            }
-            if (tier === 'workspace_misconfigured') {
-              renderMisconfigured();
               return;
             }
             if (tier === 'host_offline') {

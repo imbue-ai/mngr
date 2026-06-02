@@ -278,6 +278,17 @@ Tiered system-interface restart for the minds recovery flow.
   scrolls internally once its content overflows. Previously the whole card grew
   past the viewport and, because it is vertically centered, the heading and
   button slid above the top edge out of reach of the page scrollbar.
+- Fix: a misconfigured workspace (``services.toml`` missing
+  ``[services.system_interface]``) now renders the "Workspace misconfigured"
+  page even after a failed restart. Previously the misconfigured tier was only
+  honored on the live stuck/probe entry path; on the ``restart_failed`` entry
+  path -- which is exactly where a misconfigured workspace ends up once its
+  undeclared interface fails to come back up -- the recovery page
+  short-circuited to the generic "Workspace unresponsive" state before
+  inspecting the dispatch tier, so the diagnostic correctly flagged the missing
+  block while the page still implied a restart could help. The
+  ``workspace_misconfigured`` check now runs ahead of the no-auto-dispatch
+  short-circuit, so this tier is honored on every entry path.
 - Internal: the ``mngr`` subprocess helper that drives the restart steps and
   the host-health probe no longer converts launch failures (``OSError`` on
   fork/exec, ``ConcurrencyGroupError`` on group setup) into a return value.
