@@ -21,12 +21,17 @@ export function OptionCard(props) {
     if (typeof local.onSelect === 'function') {
       local.onSelect(local.value);
     }
-    // Defer focus so any DOM reconciliation has flushed.
+    // Defer focus so any DOM reconciliation has flushed. We must capture
+    // the card element *now*, because ``event.currentTarget`` is reset
+    // to ``null`` as soon as the synchronous handler returns -- reading
+    // it inside the microtask would always see null and silently skip
+    // the focus. Mirrors the closure-captured ``opt`` element in the
+    // legacy ``static/creating.js``.
     if (local.editable) {
+      const cardElement = event.currentTarget;
       queueMicrotask(() => {
-        const target = event.currentTarget;
-        if (!target) return;
-        const textarea = target.querySelector('textarea.opt-text');
+        if (!cardElement) return;
+        const textarea = cardElement.querySelector('textarea.opt-text');
         if (textarea) {
           textarea.focus();
           const len = textarea.value.length;
