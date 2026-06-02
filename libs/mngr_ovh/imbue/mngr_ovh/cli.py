@@ -88,7 +88,7 @@ def _build_tag_map_by_service_name(client: OvhVpsClient) -> dict[str, Mapping[st
     """One IAM-resource call gives us tags for every VPS in the account at once."""
     try:
         resources = list_vps_resources(client)
-    except (VpsApiError, MngrError) as e:
+    except MngrError as e:
         logger.warning("OVH IAM tag listing failed; rendering rows without tag info: {}", e)
         return {}
     return {r.name: r.tags for r in resources}
@@ -114,7 +114,7 @@ def _collect_rows_in_parallel(
         for future in futures:
             try:
                 rows.append(future.result())
-            except (VpsApiError, MngrError) as e:
+            except MngrError as e:
                 logger.warning("Failed to fetch row for one VPS: {}", e)
     rows.sort(key=lambda r: r["service_name"])
     return rows

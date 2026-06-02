@@ -21,10 +21,10 @@ from imbue.mngr.cli.filter_opts import build_agent_filter_cel
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import emit_event
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_info
 from imbue.mngr.cli.output_helpers import render_format_template
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
@@ -588,7 +588,7 @@ def _emit_output(
                 "since_seconds": since_seconds,
                 "sources": [_render_one_source_for_json(model, now, detail) for _, model in snapshots_with_models],
             }
-            emit_final_json(payload)
+            write_json_line(payload)
         case OutputFormat.HUMAN:
             if not snapshots_with_models:
                 return
@@ -999,7 +999,7 @@ def _output_wait_result(result: WaitForUsageResult, output_format: OutputFormat)
     }
     match output_format:
         case OutputFormat.JSON:
-            emit_final_json(payload)
+            write_json_line(payload)
         case OutputFormat.JSONL:
             emit_event("result", payload, OutputFormat.JSONL)
         case OutputFormat.HUMAN:

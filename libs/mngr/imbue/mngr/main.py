@@ -52,8 +52,8 @@ from imbue.mngr.cli.stop import stop
 from imbue.mngr.cli.transcript import transcript
 from imbue.mngr.config.loader import block_disabled_plugins
 from imbue.mngr.config.pre_readers import read_disabled_plugins
-from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import ConfigParseError
+from imbue.mngr.errors import MngrError
 from imbue.mngr.plugins import hookspecs
 from imbue.mngr.providers.registry import get_all_provider_args_help_sections
 from imbue.mngr.providers.registry import load_all_registries
@@ -112,7 +112,7 @@ class AliasAwareGroup(DefaultCommandGroup):
         except NotImplementedError as e:
             _call_on_error_hook(ctx, e)
             handle_not_implemented_error(e, is_interactive=ctx.meta.get("is_interactive"))
-        except (click.ClickException, click.Abort, click.exceptions.Exit, BaseMngrError, bdb.BdbQuit) as e:
+        except (click.ClickException, click.Abort, click.exceptions.Exit, MngrError, bdb.BdbQuit) as e:
             _call_on_error_hook(ctx, e)
             raise
         except Exception as e:

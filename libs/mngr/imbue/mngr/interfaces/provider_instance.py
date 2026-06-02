@@ -594,6 +594,14 @@ class ProviderInstanceInterface(MutableModel, ABC):
                         )
 
                     agent_details_list.append(agent_details)
+                except HostConnectionError:
+                    # A connection failure means the whole host is unreachable,
+                    # not just this one agent. Let it propagate to the outer
+                    # ``except HostConnectionError`` handler, which clears the
+                    # per-host connection cache and falls back to the offline
+                    # view for every agent. (HostConnectionError is a MngrError
+                    # subclass, so without this it would be swallowed per-agent.)
+                    raise
                 except MngrError as e:
                     if on_error is not None:
                         on_error(agent_ref, e)

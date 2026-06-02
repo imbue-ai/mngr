@@ -2498,6 +2498,13 @@ log "=== Shutdown script completed ==="
                 with trace_span("Collecting listing data for {}", host_ref.host_id, _is_trace_span_enabled=False):
                     try:
                         raw = self._collect_all_listing_data_via_ssh(host)
+                    except HostConnectionError:
+                        # Connection failures must reach the outer
+                        # ``except HostConnectionError`` handler so the per-host
+                        # connection cache is cleared and we fall back to the
+                        # default listing. (HostConnectionError is a MngrError
+                        # subclass, so without this it would be swallowed here.)
+                        raise
                     except MngrError as e:
                         if on_error:
                             on_error(host_ref, e)

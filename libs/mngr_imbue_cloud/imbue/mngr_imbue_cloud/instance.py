@@ -48,7 +48,6 @@ from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.errors import HostAuthenticationError
-from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SnapshotsNotSupportedError
@@ -662,7 +661,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                 exc,
             )
             return None, f"outer SSH authentication failed: {exc}", True
-        except (HostConnectionError, HostNotFoundError, MngrError) as exc:
+        except MngrError as exc:
             logger.warning(
                 "imbue_cloud[{}] outer SSH unreachable for host {}: {}",
                 self.name,
