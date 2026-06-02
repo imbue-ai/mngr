@@ -8,7 +8,7 @@ Go gather all the context for the $1 library (per instructions in CLAUDE.md). Be
 
 Once you've gathered that context, please do the below (and commit when you're finished).
 
-Your task is to identify suspicious edge-case handling in the $1 library. The motivation is that defensively written code tends to *over-handle* edge cases: catching errors that should be allowed to crash, adding fallback `else` branches that paper over states that should be impossible, and inserting defensive guards that mask bugs. This skill is an intermittent cleanup pass to counteract that tendency. **The default stance is suspicion: assume each edge-case handler is unjustified until you can articulate exactly why it must be there.**
+Your task is to identify suspicious edge-case handling in the $1 library. The motivation is that defensively written code tends to *over-handle* edge cases: catching errors that should be allowed to crash, adding fallback `else` branches that paper over states that should be impossible, and inserting defensive guards that mask bugs. This skill is an intermittent cleanup pass to counteract that tendency. **The default stance is suspicion: assume each edge-case handler is unjustified until you can articulate not just that *some* handling must be there, but that *this specific logic* is the right way to handle the case.** It will often be true that the edge case needs handling of some kind; that is not enough. The bar is that the chosen behavior (this default, this caught type, this fallback value, this early return) is demonstrably the correct response to the case, not merely a plausible one.
 
 ## What to look for
 
@@ -24,7 +24,7 @@ Examine every place where the code handles a branch or failure that may not need
 
 For each edge-case handler you find, ask these three questions:
 
-1. **Is the logic semantically unassailable?** Be suspicious by default. Can you construct a precise argument for exactly which real inputs reach this branch and why handling it this way is correct? If you cannot, it is a candidate. Vague justifications ("just in case", "for safety", "to be defensive") are red flags, not reasons.
+1. **Is the logic semantically unassailable?** Be suspicious by default. Can you construct a precise argument for exactly which real inputs reach this branch *and* why this particular handling is the right response to them (rather than, say, crashing, raising, or handling the case differently)? Showing that the case can occur is not enough on its own; the chosen behavior must be the correct one. If you cannot make that argument, it is a candidate. Vague justifications ("just in case", "for safety", "to be defensive") are red flags, not reasons.
 2. **Can the case be avoided entirely?** Could restructuring the control flow remove the branch (e.g. converting an if/elif/else over an enum into a `match` with `assert_never`)? Could the type checker (ty) make the case unrepresentable, so the guard becomes dead code you can delete? Prefer making bad states unrepresentable over handling them.
 3. **Could it silently produce wrong output?** The worst handlers are the ones that turn a loud failure into a quiet incorrect result: a swallowed exception that lets the caller proceed with partial data, a fallback default that flows downstream as if it were real, an `else` that returns a placeholder. Flag anything where, if the "impossible" case did occur, the program would keep running and produce a wrong answer instead of crashing.
 
