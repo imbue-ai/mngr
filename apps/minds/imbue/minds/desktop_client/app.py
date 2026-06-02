@@ -1622,12 +1622,7 @@ def _handle_chrome_sidebar(request: Request) -> Response:
 
 
 def _handle_dev_styleguide() -> Response:
-    """Serve the dev styleguide page.
-
-    Visible in every tier including production. The page documents the
-    macros and tokens the rest of the app uses, so there's no reason to
-    hide it from end users.
-    """
+    """Render the design-system styleguide page."""
     return HTMLResponse(content=render_dev_styleguide_page())
 
 
