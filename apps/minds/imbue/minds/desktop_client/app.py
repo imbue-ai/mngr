@@ -108,6 +108,7 @@ from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates import status_text_for
 from imbue.minds.desktop_client.templates import workspace_accent
+from imbue.minds.desktop_client.tunnel_token_injection import clear_tunnel_token_from_agent
 from imbue.minds.desktop_client.tunnel_token_injection import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.webdav import create_webdav_app
 from imbue.minds.errors import BackupProvisioningError
@@ -2271,12 +2272,16 @@ async def _handle_workspace_disassociate(
         account = session_store.get_account_for_workspace(agent_id)
         if account:
             # Tear down the Cloudflare tunnel for this agent (if any). The
-            # plugin owns tunnel state -- minds keeps no local cache.
+            # plugin owns tunnel state -- minds keeps no local cache. After
+            # deleting the tunnel server-side, also clear the token file inside
+            # the agent so its cloudflare-tunnel service stops cloudflared
+            # rather than spinning against a now-deleted tunnel.
             if cli is not None:
                 try:
                     tunnel = cli.find_tunnel_for_agent(account=str(account.email), agent_id=agent_id)
                     if tunnel is not None:
                         cli.delete_tunnel(account=str(account.email), tunnel_name=tunnel.tunnel_name)
+                        clear_tunnel_token_from_agent(AgentId(agent_id))
                 except ImbueCloudCliError as e:
                     logger.warning("Failed to delete tunnel during disassociation: {}", e)
             session_store.disassociate_workspace(str(account.user_id), agent_id)

@@ -43,3 +43,22 @@ flow, surfaced while standing up a fresh dev environment:
   parses the structured `{"event":"error","error_class":...}` JSONL record (see
   the mngr-side change), threading `error_class` through `_CreateEventCapture` ->
   `MngrCommandError` and branching on it in `_create_imbue_cloud_with_fallback`.
+
+Also resolved a `runtime/secrets` path collision that broke Cloudflare tunnel
+sharing whenever host backups were configured:
+
+- `runtime/secrets` is now consistently a *directory* of per-secret `*.env`
+  files inside the workspace, rather than a single shared file. Host backups
+  already wrote `runtime/secrets/restic.env` (forcing the directory form),
+  which broke the Cloudflare tunnel runner (it read `runtime/secrets` as a
+  file and crashed with `IsADirectoryError`) and the Telegram injector (it
+  appended to `runtime/secrets`, which fails against a directory).
+- The Cloudflare tunnel token now lives at
+  `runtime/secrets/cloudflare_tunnel.env`; `inject_tunnel_token_into_agent`
+  writes that file (overwrite in place, no more line-strip dance).
+- Added `clear_tunnel_token_from_agent`, called from the workspace
+  disassociation handler after the tunnel is deleted, so the agent's
+  cloudflare-tunnel service stops `cloudflared` instead of spinning against a
+  now-deleted tunnel. Previously nothing ever cleared the token.
+- The Telegram bot token now lives at `runtime/secrets/telegram.env`
+  (overwrite in place) so it no longer collides with the other secrets.

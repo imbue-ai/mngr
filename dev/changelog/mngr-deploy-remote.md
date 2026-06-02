@@ -11,3 +11,8 @@ justfile error hints:
   minds-start` error hints.
 - Pool-host baking described as OVH-backed (the imbue_cloud pool's VPS provider)
   rather than the outdated "Vultr".
+
+`just forward-system-interface` now writes the Cloudflare tunnel token to
+`runtime/secrets/cloudflare_tunnel.env` (one of the per-secret env files in the
+`runtime/secrets/` directory) instead of the old single `runtime/secrets` file,
+matching the directory-based secrets layout the FCT runner and minds now use.

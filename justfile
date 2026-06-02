@@ -633,13 +633,14 @@ forward-system-interface agent_name:
     fi
 
     # Inject the token where the agent's cloudflare-tunnel service
-    # (libs/cloudflare_tunnel/.../runner.py) watches for it. Strip any
-    # existing CLOUDFLARE_TUNNEL_TOKEN line first so we don't keep two
-    # copies, then atomic-rename so the watcher never observes a
-    # half-written file. CF tokens are base64url-y, so single-quoting
-    # the value is safe.
+    # (libs/cloudflare_tunnel/.../runner.py) watches for it:
+    # runtime/secrets/cloudflare_tunnel.env, one of the per-secret env files
+    # in the runtime/secrets/ directory. We own that file outright, so just
+    # write it via an atomic rename so the watcher never observes a
+    # half-written file. CF tokens are base64url-y, so single-quoting the
+    # value is safe.
     uv run mngr exec "$AGENT_ID" \
-        "mkdir -p runtime && { [ -f runtime/secrets ] && grep -Ev '^export[[:space:]]+CLOUDFLARE_TUNNEL_TOKEN=' runtime/secrets || true; printf 'export CLOUDFLARE_TUNNEL_TOKEN=%s\n' '$TOKEN'; } > runtime/secrets.tmp && mv runtime/secrets.tmp runtime/secrets"
+        "mkdir -p runtime/secrets && printf 'export CLOUDFLARE_TUNNEL_TOKEN=%s\n' '$TOKEN' > runtime/secrets/cloudflare_tunnel.env.tmp && mv runtime/secrets/cloudflare_tunnel.env.tmp runtime/secrets/cloudflare_tunnel.env"
 
     URL=$(uv run mngr imbue_cloud tunnels services add \
         "$TUNNEL_NAME" system_interface http://localhost:8000 \
