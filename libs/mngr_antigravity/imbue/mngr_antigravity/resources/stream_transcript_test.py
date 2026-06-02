@@ -253,7 +253,7 @@ def test_streamer_resets_offset_when_transcript_shrinks(env: dict[str, Any]) -> 
 
 
 def test_streamer_handles_missing_transcript_file_gracefully(env: dict[str, Any]) -> None:
-    """A conversation id in agy's log without an on-disk transcript yet is tolerated."""
+    """A recorded conversation id without an on-disk transcript yet is tolerated."""
     _record_conversation(env, _CONV_MISSING)
     # No transcript file staged.
     _run_streamer(env)
