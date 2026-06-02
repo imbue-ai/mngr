@@ -18,6 +18,7 @@ from __future__ import annotations
 import io
 import os
 import shlex
+import socket
 import threading
 from contextlib import contextmanager
 from datetime import datetime
@@ -141,9 +142,13 @@ def _get_ssh_transport(pyinfra_host: Any) -> Transport | None:
 
 
 def _harden_ssh_transport(pyinfra_host: Any) -> None:
-    """Apply ``harden_tcp_socket`` to the SSH transport's underlying socket, if any."""
+    """Apply ``harden_tcp_socket`` to the SSH transport's underlying socket, if any.
+
+    paramiko's ``Transport.sock`` can also be a ``paramiko.Channel`` for the
+    SSH-over-SSH case; we only harden the bare-TCP case mngr actually uses.
+    """
     transport = _get_ssh_transport(pyinfra_host)
-    if transport is None or transport.sock is None:
+    if transport is None or not isinstance(transport.sock, socket.socket):
         return
     harden_tcp_socket(transport.sock)
 
