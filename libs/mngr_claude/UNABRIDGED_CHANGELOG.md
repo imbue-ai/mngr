@@ -4,6 +4,20 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-01
+
+Fixed `--adopt-session` rejecting valid Claude agent subtypes. It now accepts any agent type that resolves to a Claude agent (including config-defined templates like `write-plus` whose `parent_type` chain reaches `claude`), instead of only the literal `claude` type name. The check routes through the centralized `resolve_agent_type` registry rather than a string comparison.
+
+# Simplify `--adopt-session` agent-type validation
+
+- Now that `CreateAgentOptions.agent_type` is always set (it became a
+  required field), the `--adopt-session` `on_before_create` validation no
+  longer special-cases an unset type: it simply requires the agent type
+  to be `claude`. No behavior change for users, since the CLI already
+  requires a concrete agent type.
+
+Updated the `on_before_create` hook implementation (used for `--adopt-session` validation) to accept the new `mngr_ctx` parameter now passed by mngr.
+
 ## 2026-05-28
 
 # Adopt-session test opts into the pytest config guard

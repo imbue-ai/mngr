@@ -28,6 +28,7 @@ from imbue.mngr.cli.filter_opts import add_agent_filter_options
 from imbue.mngr.cli.filter_opts import build_agent_filter_cel
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
+from imbue.mngr.cli.help_topics import get_all_topics
 from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import render_format_template
@@ -201,12 +202,14 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
     if ctx.parent is not None and isinstance(ctx.parent.command, click.Group):
         cli_group = ctx.parent.command
         registered_agent_types = list_registered_agent_types()
+        topic_names = sorted(get_all_topics().keys())
         mngr_ctx.concurrency_group.start_new_thread(
             target=write_cli_completions_cache,
             kwargs={
                 "cli_group": cli_group,
                 "mngr_ctx": mngr_ctx,
                 "registered_agent_types": registered_agent_types,
+                "topic_names": topic_names,
             },
             name="completion-cache-writer",
             is_checked=False,

@@ -395,18 +395,17 @@ def reconcile_imbue_cloud_providers_from_sessions(connector_url: str, *, root_na
             logger.warning("Skipping imbue_cloud provider registration for {!r}: {}", email, e)
 
 
-def _imbue_cloud_accounts_path(root_name: str) -> Path | None:
-    """Return the path to the plugin's ``accounts.json``, or None if no profile is set.
+def read_active_profile_dir(mngr_host_dir: Path) -> Path | None:
+    """Return ``<mngr_host_dir>/profiles/<active-profile>``, or None if unresolved.
 
-    Mirrors ``mngr_imbue_cloud.config.get_sessions_dir`` /
-    ``get_active_profile_dir``: the active profile id lives in
-    ``<host_dir>/config.toml`` and the accounts index lives at
-    ``<host_dir>/profiles/<profile>/providers/imbue_cloud/sessions/accounts.json``.
-    Inlined here so bootstrap stays free of the ``imbue.mngr_imbue_cloud``
-    import (which transitively pulls in mngr).
+    The active profile id lives in ``<mngr_host_dir>/config.toml`` under the
+    ``profile`` key and each profile's state lives at
+    ``<mngr_host_dir>/profiles/<profile>/``. Returns None when mngr hasn't been
+    initialized in this host_dir yet (no ``config.toml`` / no ``profile`` key) or
+    when the config can't be read. Resolution is inlined here (rather than imported
+    from mngr) so bootstrap stays free of any ``imbue.mngr.*`` import.
     """
-    host_dir = mngr_host_dir_for(root_name)
-    config_path = host_dir / "config.toml"
+    config_path = mngr_host_dir / "config.toml"
     if not config_path.is_file():
         return None
     try:
@@ -417,7 +416,23 @@ def _imbue_cloud_accounts_path(root_name: str) -> Path | None:
     profile_id = config_data.get("profile")
     if not isinstance(profile_id, str) or not profile_id:
         return None
-    return host_dir / "profiles" / profile_id / "providers" / "imbue_cloud" / "sessions" / "accounts.json"
+    return mngr_host_dir / "profiles" / profile_id
+
+
+def _imbue_cloud_accounts_path(root_name: str) -> Path | None:
+    """Return the path to the plugin's ``accounts.json``, or None if no profile is set.
+
+    Mirrors ``mngr_imbue_cloud.config.get_sessions_dir`` /
+    ``get_active_profile_dir``: the active profile id lives in
+    ``<host_dir>/config.toml`` and the accounts index lives at
+    ``<host_dir>/profiles/<profile>/providers/imbue_cloud/sessions/accounts.json``.
+    Inlined here so bootstrap stays free of the ``imbue.mngr_imbue_cloud``
+    import (which transitively pulls in mngr).
+    """
+    profile_dir = read_active_profile_dir(mngr_host_dir_for(root_name))
+    if profile_dir is None:
+        return None
+    return profile_dir / "providers" / "imbue_cloud" / "sessions" / "accounts.json"
 
 
 _IMBUE_CLOUD_BACKEND_NAME: Final[str] = "imbue_cloud"
@@ -458,16 +473,8 @@ def _resolve_active_settings_path(root_name: str) -> Path | None:
     ``config.toml`` / a profile dir). Callers should treat ``None`` as
     "skip silently" since there's nothing useful to write yet.
     """
-    mngr_host_dir = mngr_host_dir_for(root_name)
-    root_config_path = mngr_host_dir / "config.toml"
-    if not root_config_path.exists():
-        return None
-    root_config = tomllib.loads(root_config_path.read_text())
-    profile_id = root_config.get("profile")
-    if not profile_id:
-        return None
-    settings_dir = mngr_host_dir / "profiles" / profile_id
-    if not settings_dir.exists():
+    settings_dir = read_active_profile_dir(mngr_host_dir_for(root_name))
+    if settings_dir is None or not settings_dir.exists():
         return None
     return settings_dir / "settings.toml"
 

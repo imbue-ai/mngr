@@ -159,8 +159,9 @@ _TEST_SERVICES_CATALOG_PAYLOAD: dict[str, object] = {
         {
             "scope": "slack-api",
             "display_name": "Slack",
+            "description": "Any interaction with the Slack API.",
             "permissions": [
-                {"name": "slack-read-all"},
+                {"name": "slack-read-all", "description": "All read operations across the Slack API."},
                 {"name": "slack-write-all"},
                 {"name": "slack-chat-read"},
             ],
@@ -297,6 +298,29 @@ def test_get_permission_request_page_pre_checks_agent_requested_permissions(tmp_
     # user confirms / interacts with the form).
     assert 'id="permissions-approve-btn"' in body
     assert "disabled" in body
+
+
+def test_get_permission_request_page_shows_descriptions_when_present(tmp_path: Path) -> None:
+    """detent's scope and per-permission descriptions are rendered on the dialog when present."""
+    agent_id = AgentId()
+    request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        permissions=("slack-read-all",),
+        rationale="reason",
+    )
+    inbox = RequestInbox().add_request(request)
+    handler = _make_recording_handler(tmp_path)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    response = client.get(f"/requests/{request.event_id}")
+
+    assert response.status_code == 200
+    body = response.text
+    # The scope summary and the requested permission's summary both come
+    # from the catalog fixture's ``description`` fields.
+    assert "Any interaction with the Slack API." in body
+    assert "All read operations across the Slack API." in body
 
 
 def test_get_permission_request_page_renders_no_pre_checks_when_request_and_existing_are_empty(
