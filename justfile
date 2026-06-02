@@ -347,7 +347,7 @@ minds-start agent_name="mindtest" branch="":
     if [ ! -e "$fct_wt/.git" ]; then
         echo "error: no FCT worktree at $fct_wt" >&2
         echo "       run \`git -C ~/project/forever-claude-template worktree add -b <branch> $fct_wt <base>\`" >&2
-        echo "       (e.g. base = josh/start-minds) before re-running minds-start." >&2
+        echo "       (e.g. base = origin/main) before re-running minds-start." >&2
         exit 2
     fi
     vendor_mngr="$fct_wt/vendor/mngr"
@@ -384,7 +384,7 @@ minds-start agent_name="mindtest" branch="":
     if [ ! -e "$fct_wt/.git" ]; then
         echo "error: no FCT worktree at $fct_wt" >&2
         echo "       run \`git -C ~/project/forever-claude-template worktree add -b <branch> $fct_wt <base>\`" >&2
-        echo "       (e.g. base = josh/start-minds) before re-running minds-start." >&2
+        echo "       (e.g. base = origin/main) before re-running minds-start." >&2
         exit 2
     fi
     if [ -f .env ]; then
