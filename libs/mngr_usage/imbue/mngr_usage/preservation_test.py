@@ -20,6 +20,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
+from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -48,7 +49,9 @@ def _make_offline_host_with_volume(
         provider_instance=local_provider,
         mngr_ctx=temp_mngr_ctx,
     )
-    return OfflineHostWithVolume.from_offline_host(offline_host)
+    host = make_readable_offline_host(offline_host)
+    assert isinstance(host, OfflineHostWithVolume)
+    return host
 
 
 def _usage_event(session_id: str, *, used_percentage: float = 50.0, total_cost_usd: float = 1.0) -> dict[str, Any]:
