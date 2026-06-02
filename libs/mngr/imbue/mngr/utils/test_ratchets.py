@@ -299,7 +299,7 @@ def test_prevent_assert_isinstance() -> None:
 
 
 def test_prevent_per_file_host_upload() -> None:
-    rc.check_per_file_host_upload(_DIR, snapshot(4))
+    rc.check_per_file_host_upload(_DIR, snapshot(2))
 
 
 # --- Project-level checks ---

@@ -2341,7 +2341,7 @@ def test_host_provision_agent_basic(
     )
 
     agent = host.create_agent_state(temp_work_dir, options)
-    host.provision_agent(agent, options, temp_mngr_ctx)
+    host.provision_agent(agent, options, temp_mngr_ctx, host)
 
     # Verify env file was created with MNGR-specific variables
     env_path = temp_host_dir / "agents" / str(agent.id) / "env"
@@ -2374,7 +2374,7 @@ def test_host_provision_agent_with_env_vars(
     )
 
     agent = host.create_agent_state(temp_work_dir, options)
-    host.provision_agent(agent, options, temp_mngr_ctx)
+    host.provision_agent(agent, options, temp_mngr_ctx, host)
 
     # Verify custom env vars are in the env file
     env_path = temp_host_dir / "agents" / str(agent.id) / "env"
@@ -2404,7 +2404,7 @@ def test_host_provision_agent_with_extra_provision_commands(
     )
 
     agent = host.create_agent_state(temp_work_dir, options)
-    host.provision_agent(agent, options, temp_mngr_ctx)
+    host.provision_agent(agent, options, temp_mngr_ctx, host)
 
     assert marker_file.exists()
     assert "provisioned" in marker_file.read_text()
@@ -2430,7 +2430,7 @@ def test_host_provision_agent_with_create_directories(
     )
 
     agent = host.create_agent_state(temp_work_dir, options)
-    host.provision_agent(agent, options, temp_mngr_ctx)
+    host.provision_agent(agent, options, temp_mngr_ctx, host)
 
     assert new_dir.is_dir()
 

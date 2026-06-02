@@ -17,8 +17,6 @@ from imbue.mngr_recursive.provisioning import _ensure_uv_available
 from imbue.mngr_recursive.provisioning import _get_installed_mngr_packages
 from imbue.mngr_recursive.provisioning import _get_mngr_repo_root
 from imbue.mngr_recursive.provisioning import _install_mngr_package_mode
-from imbue.mngr_recursive.provisioning import _resolve_remote_path
-from imbue.mngr_recursive.provisioning import _stage_deploy_files
 from imbue.mngr_recursive.provisioning import _upload_deploy_files
 from imbue.mngr_recursive.provisioning import provision_mngr_for_agent
 from imbue.mngr_recursive.provisioning import provision_mngr_on_host
@@ -65,78 +63,7 @@ def _make_mock_agent(agent_id: str = "agent-123", mngr_ctx: MagicMock | None = N
     return agent
 
 
-# --- Path resolution tests ---
-
-
-def test_resolve_remote_path_with_tilde() -> None:
-    """Paths starting with ~ should resolve relative to the remote home."""
-    result = _resolve_remote_path(Path("~/.mngr/config.toml"), "/home/testuser")
-    assert result == Path("/home/testuser/.mngr/config.toml")
-
-
-def test_resolve_remote_path_with_tilde_nested() -> None:
-    """Nested tilde paths should resolve correctly."""
-    result = _resolve_remote_path(Path("~/.mngr/profiles/abc/settings.toml"), "/home/testuser")
-    assert result == Path("/home/testuser/.mngr/profiles/abc/settings.toml")
-
-
-def test_resolve_remote_path_relative() -> None:
-    """Relative paths should pass through unchanged."""
-    result = _resolve_remote_path(Path(".mngr/settings.local.toml"), "/home/testuser")
-    assert result == Path(".mngr/settings.local.toml")
-
-
 # --- Staging / upload tests ---
-
-
-def test_stage_deploy_files_with_path_source(tmp_path: Path) -> None:
-    """Path sources are copied into the staging tree under their absolute remote path."""
-    source_file = tmp_path / "config.toml"
-    source_file.write_text("key = 'value'")
-    staging = tmp_path / "staging"
-    staging.mkdir()
-
-    deploy_files: dict[Path, Path | str] = {Path("~/.mngr/config.toml"): source_file}
-    count = _stage_deploy_files(deploy_files, "/home/testuser", staging)
-
-    assert count == 1
-    assert (staging / "home/testuser/.mngr/config.toml").read_text() == "key = 'value'"
-
-
-def test_stage_deploy_files_with_string_source(tmp_path: Path) -> None:
-    """String sources are written into the staging tree directly."""
-    staging = tmp_path / "staging"
-    staging.mkdir()
-
-    deploy_files: dict[Path, Path | str] = {Path("~/.mngr/config.toml"): 'key = "value"'}
-    count = _stage_deploy_files(deploy_files, "/home/testuser", staging)
-
-    assert count == 1
-    assert (staging / "home/testuser/.mngr/config.toml").read_text() == 'key = "value"'
-
-
-def test_stage_deploy_files_skips_missing_path(tmp_path: Path) -> None:
-    """Missing Path source files are skipped and nothing is staged for them."""
-    staging = tmp_path / "staging"
-    staging.mkdir()
-
-    deploy_files: dict[Path, Path | str] = {Path("~/.mngr/config.toml"): tmp_path / "nonexistent.toml"}
-    count = _stage_deploy_files(deploy_files, "/home/testuser", staging)
-
-    assert count == 0
-    assert [p for p in staging.rglob("*") if p.is_file()] == []
-
-
-def test_stage_deploy_files_relative_path_resolved_under_home(tmp_path: Path) -> None:
-    """Relative destinations are staged under the remote home dir (matching write_file semantics)."""
-    staging = tmp_path / "staging"
-    staging.mkdir()
-
-    deploy_files: dict[Path, Path | str] = {Path(".claude/settings.local.json"): "{}"}
-    count = _stage_deploy_files(deploy_files, "/home/testuser", staging)
-
-    assert count == 1
-    assert (staging / "home/testuser/.claude/settings.local.json").read_text() == "{}"
 
 
 def test_upload_deploy_files_uses_single_rsync(tmp_path: Path) -> None:
@@ -455,15 +382,6 @@ def test_recursive_plugin_config_merge_with() -> None:
     merged = base.merge_with(override)
     assert merged.is_errors_fatal is True
     assert merged.install_mode == MngrInstallMode.PACKAGE
-
-
-# --- _resolve_remote_path bare tilde test ---
-
-
-def test_resolve_remote_path_bare_tilde() -> None:
-    """A bare '~' should resolve to the remote home directory."""
-    result = _resolve_remote_path(Path("~"), "/home/testuser")
-    assert result == Path("/home/testuser")
 
 
 # --- _build_uv_env_prefix test ---

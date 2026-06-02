@@ -3,7 +3,6 @@
 import importlib.metadata
 import json
 import shlex
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -15,6 +14,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
+from imbue.mngr.hosts.file_upload import upload_files_in_bulk
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.providers.deploy_utils import MngrInstallMode
@@ -31,59 +31,6 @@ def _get_remote_home(host: OnlineHostInterface) -> str:
     return result.stdout.strip()
 
 
-def _resolve_remote_path(dest_path: Path, remote_home: str) -> Path:
-    """Resolve a deploy destination path to an absolute path on the remote host.
-
-    Paths starting with '~/' are resolved relative to the remote user's home.
-    A bare '~' resolves to the remote home directory itself.
-    Relative paths are left as-is.
-    """
-    dest_str = str(dest_path)
-    if dest_str == "~":
-        return Path(remote_home)
-    if dest_str.startswith("~/"):
-        return Path(remote_home) / dest_str.removeprefix("~/")
-    return dest_path
-
-
-def _stage_deploy_files(
-    deploy_files: dict[Path, Path | str],
-    remote_home: str,
-    staging_dir: Path,
-) -> int:
-    """Stage deploy files into ``staging_dir``, mirroring their absolute remote paths.
-
-    Each file is placed at ``staging_dir/<remote_abs_without_leading_slash>`` so
-    the whole tree can be rsynced to the remote filesystem root ("/") in a single
-    pass. Destinations that resolve to a relative path are interpreted relative to
-    the remote home (matching the previous per-file ``write_file`` semantics, where
-    a relative remote path lands in the SSH login directory).
-
-    Returns the number of files staged. ``Path`` sources that do not exist on the
-    local filesystem are skipped.
-    """
-    count = 0
-    for dest_path, source in deploy_files.items():
-        resolved_path = _resolve_remote_path(dest_path, remote_home)
-        remote_abs = resolved_path if resolved_path.is_absolute() else Path(remote_home) / resolved_path
-        staged_path = staging_dir / remote_abs.relative_to(remote_abs.anchor)
-        if isinstance(source, Path):
-            if not source.exists():
-                logger.debug("Skipping non-existent deploy file: {}", source)
-                continue
-            staged_path.parent.mkdir(parents=True, exist_ok=True)
-            # copyfile (not copy2) writes the staged file with default perms,
-            # matching the previous SFTP putfo behavior (which did not preserve
-            # source mode).
-            shutil.copyfile(source, staged_path)
-        else:
-            staged_path.parent.mkdir(parents=True, exist_ok=True)
-            staged_path.write_text(source)
-        logger.trace("Staged deploy file: {} -> {}", dest_path, remote_abs)
-        count += 1
-    return count
-
-
 def _upload_deploy_files(
     host: OnlineHostInterface,
     deploy_files: dict[Path, Path | str],
@@ -92,27 +39,16 @@ def _upload_deploy_files(
 ) -> int:
     """Upload collected deploy files to the remote host with a single rsync.
 
-    Stages every file into a local temp directory mirroring its absolute remote
-    path, then transfers the whole tree with one ``host.copy_directory`` (rsync)
-    call rooted at "/". This replaces the previous per-file SFTP approach, which
-    opened and closed a fresh SFTP channel per file. Each channel open is a full
-    round-trip over the SSH connection (~0.7s/file measured over a Modal tunnel),
-    so a few hundred files -- e.g. a user's ``~/.claude/plugins`` tree -- would
-    either blow past the upload timeout or reset the connection mid-transfer
-    ("Error reading SSH protocol banner"). rsync streams everything over one
-    connection and transfers the same set in seconds.
-
-    Returns the number of files uploaded.
+    Delegates to the shared ``upload_files_in_bulk`` helper, which stages every file
+    into a local temp dir mirroring its absolute remote path and transfers the whole
+    tree with one ``host.copy_directory`` (rsync) call. This replaces the previous
+    per-file SFTP approach, which opened a fresh SFTP channel per file -- a full
+    round-trip over the SSH connection (~0.7s/file measured over a Modal tunnel) -- so
+    a few hundred files (e.g. a user's ``~/.claude/plugins`` tree) would either blow
+    past the upload timeout or reset the connection mid-transfer ("Error reading SSH
+    protocol banner"). Returns the number of files uploaded.
     """
-    with tempfile.TemporaryDirectory(prefix="mngr-deploy-") as staging:
-        staging_dir = Path(staging)
-        count = _stage_deploy_files(deploy_files, remote_home, staging_dir)
-        if count == 0:
-            return 0
-        local_host = get_local_host(mngr_ctx)
-        with log_span("Uploading {} deploy files to remote host via rsync", count):
-            host.copy_directory(local_host, staging_dir, Path("/"))
-    return count
+    return upload_files_in_bulk(host, get_local_host(mngr_ctx), deploy_files, remote_home)
 
 
 def _get_installed_mngr_packages() -> list[tuple[str, str]]:

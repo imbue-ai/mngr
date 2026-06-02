@@ -1,1 +1,1 @@
-Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.
+Updated the `provision_agent` override for the new required `local_host` parameter (the local host is passed in as the source for bulk rsync file uploads; it cannot be resolved inside the host layer due to an import cycle). Also adopted the new repo-wide `per-file host uploads inside loops` ratchet check.

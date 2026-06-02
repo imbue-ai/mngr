@@ -564,8 +564,15 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
         agent: AgentInterface,
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
+        local_host: "OnlineHostInterface",
     ) -> None:
-        """Install packages, create config files, and set up an agent."""
+        """Install packages, create config files, and set up an agent.
+
+        ``local_host`` is the local host, used as the source for bulk (rsync) file
+        uploads. It is passed in rather than resolved here because resolving it
+        requires ``mngr.api.providers``, which cannot be imported from the host layer
+        (import cycle via ``base_provider``).
+        """
         ...
 
     @abstractmethod

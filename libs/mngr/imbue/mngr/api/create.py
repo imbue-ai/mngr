@@ -9,6 +9,7 @@ from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.api.data_types import CreateAgentResult
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
+from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import MngrContext
@@ -242,7 +243,7 @@ def create(
             with log_span("Calling on_before_provisioning hooks"):
                 mngr_ctx.pm.hook.on_before_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)
             with log_span("Provisioning agent {}", agent.name):
-                host.provision_agent(agent, agent_options, mngr_ctx)
+                host.provision_agent(agent, agent_options, mngr_ctx, get_local_host(mngr_ctx))
             with log_span("Calling on_after_provisioning hooks"):
                 mngr_ctx.pm.hook.on_after_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)
 

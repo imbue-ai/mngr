@@ -718,6 +718,12 @@ def test_upload_deploy_files_handles_large_set_on_modal(
         assert home_result.success
         remote_home = home_result.stdout.strip()
 
+        # Pre-existing file in a target dir that is NOT in the upload set: the rsync
+        # transfer must be additive (no --delete), so it must survive.
+        sentinel = f"{remote_home}/.mngr/deploytest/sub0/preexisting.txt"
+        host.execute_idempotent_command(f"mkdir -p {shlex.quote(remote_home)}/.mngr/deploytest/sub0")
+        host.write_text_file(Path(sentinel), "do-not-delete")
+
         deploy_files: dict[Path, Path | str] = {}
         for i in range(file_count):
             dest = Path(f"~/.mngr/deploytest/sub{i % 20}/file_{i}.txt")
@@ -737,11 +743,13 @@ def test_upload_deploy_files_handles_large_set_on_modal(
             f"(budget {_UPLOAD_BUDGET_SECONDS:.0f}s) -- per-file-upload regression?"
         )
 
-        # Every file must have landed on the remote.
+        # Every uploaded file plus the pre-existing sentinel must be present (rsync is
+        # additive: the sentinel, absent from the upload set, must not be deleted).
         remote_dir = f"{remote_home}/.mngr/deploytest"
         count_result = host.execute_idempotent_command(f"find {shlex.quote(remote_dir)} -type f | wc -l")
         assert count_result.success
-        assert int(count_result.stdout.strip()) == file_count
+        assert int(count_result.stdout.strip()) == file_count + 1
+        assert host.read_text_file(Path(sentinel)) == "do-not-delete"
 
         # Spot-check one Path-sourced and one string-sourced file's contents.
         assert host.read_text_file(Path(remote_home) / ".mngr/deploytest/sub0/file_0.txt") == "path-content-0"

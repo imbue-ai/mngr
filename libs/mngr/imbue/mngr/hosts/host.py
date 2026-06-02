@@ -60,6 +60,7 @@ from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import build_ssh_transport_command
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
+from imbue.mngr.hosts.file_upload import upload_files_in_bulk
 from imbue.mngr.hosts.offline_host import BaseHost
 from imbue.mngr.hosts.offline_host import apply_rename_to_agent_data
 from imbue.mngr.hosts.outer_host import OuterHost
@@ -2094,6 +2095,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         agent: AgentInterface,
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
+        local_host: OnlineHostInterface,
     ) -> None:
         """Provision an agent (install packages, configure, etc.).
 
@@ -2127,9 +2129,14 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     agent.get_provision_file_transfers(host=self, options=options, mngr_ctx=mngr_ctx)
                 )
 
+            # Resolve the remote home once: bulk uploads stage files under their
+            # absolute remote paths, and relative destinations resolve against it.
+            # (Unused for local hosts, which write directly.)
+            remote_home = "" if self.is_local else self.execute_idempotent_command("echo $HOME").stdout.strip()
+
             # Validate required files exist and execute transfers
             agent_file_transfer_thread = concurrency_group.start_new_thread(
-                self._execute_agent_file_transfers, (agent, all_file_transfers)
+                self._execute_agent_file_transfers, (agent, all_file_transfers, local_host, remote_home)
             )
 
             # Write environment variables to agent env file (before agent.provision()
@@ -2162,12 +2169,14 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     self._mkdir(directory)
                     logger.trace("Created directory: {}", directory)
 
-                # Upload files (read from local filesystem, write to host)
-                for upload_spec in provisioning.upload_files:
-                    # Read from local filesystem (not via host primitives)
-                    local_content = upload_spec.local_path.read_bytes()
-                    self.write_file(upload_spec.remote_path, local_content)
-                    logger.trace("Uploaded file: {} -> {}", upload_spec.local_path, upload_spec.remote_path)
+                # Upload files in a single bulk transfer (rsync for remote hosts)
+                # rather than one write_file per file (a per-file SSH round-trip).
+                upload_files_in_bulk(
+                    self,
+                    local_host,
+                    {spec.remote_path: spec.local_path for spec in provisioning.upload_files},
+                    remote_home,
+                )
 
                 # Build the source prefix for commands (sources host env, then agent env)
                 source_prefix = self.build_source_env_prefix(agent)
@@ -2205,6 +2214,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         """
         host_commands = self.host_dir / "commands"
         agent_commands = self._get_agent_state_dir(agent) / "commands"
+        # These stay per-file write_file calls (not upload_files_in_bulk) because they
+        # need the executable bit (mode="0755"), which the rsync staging helper does
+        # not preserve. The set is fixed and tiny (two libs x two destinations), so the
+        # per-file cost is negligible and this is exempt from the bulk-upload ratchet.
         for name in self._SHARED_SHELL_LIB_NAMES:
             content_bytes = importlib.resources.files(mngr_resources).joinpath(name).read_text().encode()
             self.write_file(host_commands / name, content_bytes, mode="0755")
@@ -2214,11 +2227,14 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         self,
         agent: AgentInterface,
         transfers: list[FileTransferSpec],
+        local_host: OnlineHostInterface,
+        remote_home: str,
     ) -> None:
         """Validate and execute file transfers from the agent.
 
-        First validates that all required files exist, then executes transfers.
-        Always emits a "Transferring agent files" log_span (with count=0 when
+        First validates that all required files exist, then transfers everything in a
+        single bulk upload (rsync for remote hosts) rather than one write_file per
+        file. Always emits a "Transferring agent files" log_span (with count=0 when
         the agent declared no transfers) so timing is visible at -vv.
         """
         with log_span("Transferring agent files", count=len(transfers)):
@@ -2235,18 +2251,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 missing_str = ", ".join(str(p) for p in missing_required)
                 raise MngrError(f"Required files for provisioning not found: {missing_str}")
 
-            for transfer in transfers:
-                if not transfer.local_path.exists():
-                    # Optional file doesn't exist, skip it
-                    logger.trace("Skipped optional file transfer (file not found): {}", transfer.local_path)
-                    continue
-
-                # Resolve relative remote paths to work_dir
-                remote_path = agent.work_dir / transfer.agent_path
-
-                local_content = transfer.local_path.read_bytes()
-                self.write_file(remote_path, local_content)
-                logger.trace("Transferred agent file: {} -> {}", transfer.local_path, remote_path)
+            # Build the {remote_path: local_path} map; upload_files_in_bulk skips any
+            # optional source that does not exist locally.
+            uploads = {agent.work_dir / transfer.agent_path: transfer.local_path for transfer in transfers}
+            upload_files_in_bulk(self, local_host, uploads, remote_home)
 
     def rename_agent(
         self,

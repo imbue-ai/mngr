@@ -1137,7 +1137,7 @@ def test_stop_agent_kills_orphaned_processes_by_env_marker(
     # Without it the pane shell's `set -a; . agent_env` sources nothing and the
     # orphan inherits no marker -- exactly the failure mode the assertion below
     # is guarding against.
-    host.provision_agent(agent, options, mngr_ctx)
+    host.provision_agent(agent, options, mngr_ctx, host)
     session_name = f"{mngr_test_prefix}{agent.name}"
 
     # Wrap in tmux_session_cleanup so the foreground `sleep 1000` and tmux
@@ -1511,7 +1511,7 @@ def test_provision_agent_create_directories(host_with_temp_dir: tuple[Host, Path
         ),
     )
 
-    host.provision_agent(agent, options, host.mngr_ctx)
+    host.provision_agent(agent, options, host.mngr_ctx, host)
 
     assert dir1.exists()
     assert dir1.is_dir()
@@ -1540,7 +1540,7 @@ def test_provision_agent_upload_files(host_with_temp_dir: tuple[Host, Path], tmp
         ),
     )
 
-    host.provision_agent(agent, options, host.mngr_ctx)
+    host.provision_agent(agent, options, host.mngr_ctx, host)
 
     assert remote_path.exists()
     assert remote_path.read_text() == "uploaded content"
@@ -1563,7 +1563,7 @@ def test_provision_agent_extra_provision_commands(host_with_temp_dir: tuple[Host
         ),
     )
 
-    host.provision_agent(agent, options, host.mngr_ctx)
+    host.provision_agent(agent, options, host.mngr_ctx, host)
 
     assert marker_file.exists()
     assert "extra command executed" in marker_file.read_text()
@@ -1589,7 +1589,7 @@ def test_provision_agent_extra_provision_commands_in_work_dir(host_with_temp_dir
         ),
     )
 
-    host.provision_agent(agent, options, host.mngr_ctx)
+    host.provision_agent(agent, options, host.mngr_ctx, host)
 
     assert marker_file.exists()
     assert str(work_dir) in marker_file.read_text()
@@ -1616,7 +1616,7 @@ def test_provision_agent_multiple_extra_provision_commands(host_with_temp_dir: t
         ),
     )
 
-    host.provision_agent(agent, options, host.mngr_ctx)
+    host.provision_agent(agent, options, host.mngr_ctx, host)
 
     assert output_file.exists()
     content = output_file.read_text()
@@ -1641,7 +1641,7 @@ def test_provision_agent_extra_provision_command_failure_raises(host_with_temp_d
     )
 
     with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
-        host.provision_agent(agent, options, host.mngr_ctx)
+        host.provision_agent(agent, options, host.mngr_ctx, host)
 
     assert exc_info.value.main_exception is not None
     assert isinstance(exc_info.value.main_exception, MngrError)
@@ -1673,7 +1673,7 @@ def test_provision_agent_combined_options(host_with_temp_dir: tuple[Host, Path],
         ),
     )
 
-    host.provision_agent(agent, options, host.mngr_ctx)
+    host.provision_agent(agent, options, host.mngr_ctx, host)
 
     # Verify all operations completed
     assert provision_dir.exists()
@@ -1704,7 +1704,7 @@ def test_provision_agent_upload_binary_file(host_with_temp_dir: tuple[Host, Path
         ),
     )
 
-    host.provision_agent(agent, options, host.mngr_ctx)
+    host.provision_agent(agent, options, host.mngr_ctx, host)
 
     assert remote_path.exists()
     assert remote_path.read_bytes() == binary_content
@@ -1743,7 +1743,7 @@ def test_provision_agent_order_of_operations(host_with_temp_dir: tuple[Host, Pat
         ),
     )
 
-    host.provision_agent(agent, options, host.mngr_ctx)
+    host.provision_agent(agent, options, host.mngr_ctx, host)
 
     # Verify upload happened and extra command could read the file
     assert target_file.read_text() == "uploaded\n"
@@ -2347,7 +2347,7 @@ def test_provision_agent_writes_env_vars_to_file(host_with_temp_dir: tuple[Host,
         ),
     )
 
-    host.provision_agent(agent, options, host.mngr_ctx)
+    host.provision_agent(agent, options, host.mngr_ctx, host)
 
     # Check that env file was created
     env_path = temp_dir / "agents" / str(agent.id) / "env"
@@ -2376,7 +2376,7 @@ def test_provision_agent_writes_env_files_to_agent_env(host_with_temp_dir: tuple
         ),
     )
 
-    host.provision_agent(agent, options, host.mngr_ctx)
+    host.provision_agent(agent, options, host.mngr_ctx, host)
 
     # Check that env file was created with vars from the env file
     env_path = temp_dir / "agents" / str(agent.id) / "env"
@@ -2409,7 +2409,7 @@ def test_provision_agent_extra_provision_commands_have_access_to_env_vars(
         ),
     )
 
-    host.provision_agent(agent, options, host.mngr_ctx)
+    host.provision_agent(agent, options, host.mngr_ctx, host)
 
     assert output_file.exists()
     assert "test_value_12345" in output_file.read_text()
@@ -2439,7 +2439,7 @@ def test_provision_agent_env_vars_precedence(
         ),
     )
 
-    host.provision_agent(agent, options, host.mngr_ctx)
+    host.provision_agent(agent, options, host.mngr_ctx, host)
 
     # Check that env_vars overrode env_files
     env_path = temp_dir / "agents" / str(agent.id) / "env"
@@ -2495,7 +2495,7 @@ def test_start_agent_has_access_to_env_vars(
     )
 
     # Provision the agent to write the env file
-    host.provision_agent(agent, options, mngr_ctx)
+    host.provision_agent(agent, options, mngr_ctx, host)
 
     # Start the agent
     host.start_agents([agent.id])
@@ -2570,7 +2570,7 @@ def test_new_tmux_window_inherits_env_vars(
         options=options,
     )
 
-    host.provision_agent(agent, options, mngr_ctx)
+    host.provision_agent(agent, options, mngr_ctx, host)
     host.start_agents([agent.id])
 
     try:
@@ -2671,7 +2671,7 @@ def test_provision_agent_host_env_sourced_before_agent_env(host_with_temp_dir: t
         ),
     )
 
-    host.provision_agent(agent, options, host.mngr_ctx)
+    host.provision_agent(agent, options, host.mngr_ctx, host)
 
     assert output_file.exists()
     content = output_file.read_text()
@@ -3114,7 +3114,7 @@ def test_provision_agent_applies_agent_type_provisioning_fields(
         command=CommandString("sleep 1"),
     )
 
-    host.provision_agent(agent, options, updated_ctx)
+    host.provision_agent(agent, options, updated_ctx, host)
 
     # Verify agent type provisioning was applied
     assert marker_file.exists()
@@ -3164,7 +3164,7 @@ def test_provision_agent_type_provisioning_stacks_with_cli(
         ),
     )
 
-    host.provision_agent(agent, options, updated_ctx)
+    host.provision_agent(agent, options, updated_ctx, host)
 
     assert output_file.exists()
     lines = output_file.read_text().strip().split("\n")
@@ -3222,7 +3222,7 @@ def test_provision_agent_inherits_parent_type_provisioning(
         command=CommandString("sleep 1"),
     )
 
-    host.provision_agent(agent, options, updated_ctx)
+    host.provision_agent(agent, options, updated_ctx, host)
 
     # Parent's provisioning commands should have been executed
     assert marker_file.exists()
