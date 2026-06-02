@@ -4,13 +4,11 @@ import click
 import pytest
 from click.testing import CliRunner
 
-from imbue.mngr.cli.issue_reporting import IssueSearchError
 from imbue.mngr.errors import AgentError
 from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import CommandTimeoutError
-from imbue.mngr.errors import DiscoverySchemaChangedError
 from imbue.mngr.errors import DuplicateAgentNameError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostDataSchemaError
@@ -21,10 +19,8 @@ from imbue.mngr.errors import HostNotRunningError
 from imbue.mngr.errors import HostNotStoppedError
 from imbue.mngr.errors import ImageNotFoundError
 from imbue.mngr.errors import LockNotHeldError
-from imbue.mngr.errors import MalformedJsonlLineError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
-from imbue.mngr.errors import PluginSpecifierError
 from imbue.mngr.errors import ProviderError
 from imbue.mngr.errors import ProviderInstanceNotFoundError
 from imbue.mngr.errors import ProviderNotAuthorizedError
@@ -40,7 +36,6 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
-from imbue.mngr.utils.cel_utils import TolerantPathError
 from imbue.mngr.utils.testing import assert_init_first_param_is_provider_name
 from imbue.mngr.utils.testing import walk_concrete_subclasses
 
@@ -355,27 +350,6 @@ def test_agent_start_error_displays_single_error_prefix_via_click() -> None:
     assert result.output.startswith("Error: ")
     assert "Error: Error:" not in result.output
     assert "my-agent" in result.output
-
-
-@pytest.mark.parametrize(
-    "mngr_error_subclass",
-    [
-        PluginSpecifierError,
-        DiscoverySchemaChangedError,
-        MalformedJsonlLineError,
-        TolerantPathError,
-        IssueSearchError,
-    ],
-    ids=lambda c: c.__name__,
-)
-def test_consolidated_errors_are_mngr_errors(mngr_error_subclass: type) -> None:
-    """The remaining formerly-BaseMngrError-only types now inherit from MngrError.
-
-    Completes the consolidation so that every mngr error shares the single
-    user-facing MngrError parent (and thus is a ClickException).
-    """
-    assert issubclass(mngr_error_subclass, MngrError)
-    assert issubclass(mngr_error_subclass, click.ClickException)
 
 
 def test_host_data_schema_error_includes_path_and_fix() -> None:

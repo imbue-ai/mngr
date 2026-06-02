@@ -14,11 +14,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 
 
-class BaseMngrError(Exception):
-    """Base exception for all mngr errors."""
-
-
-class MngrError(ClickException, BaseMngrError):
+class MngrError(ClickException):
     """Base exception for all user-facing mngr errors.
 
     All MngrError subclasses can provide a user_help_text attribute that contains
@@ -55,11 +51,10 @@ class InvalidRelativePathError(MngrError, ValueError):
 class HostError(MngrError):
     """Base class for host-related errors.
 
-    Inherits from MngrError (not just BaseMngrError) so that host errors are
-    ClickException instances: when they reach the CLI they render as a clean
-    ``Error: ...`` message (plus any user_help_text) instead of a traceback,
-    and ``except MngrError`` handlers treat them as the user-facing errors
-    they are.
+    As a MngrError subclass, host errors are ClickException instances: when they
+    reach the CLI they render as a clean ``Error: ...`` message (plus any
+    user_help_text) instead of a traceback, and ``except MngrError`` handlers
+    treat them as the user-facing errors they are.
     """
 
 
@@ -123,11 +118,10 @@ class LockNotHeldError(HostError):
 class AgentError(MngrError):
     """Base class for agent-related errors.
 
-    Inherits from MngrError (not just BaseMngrError) so that agent errors are
-    ClickException instances: when they reach the CLI they render as a clean
-    ``Error: ...`` message (plus any user_help_text) instead of a traceback,
-    and ``except MngrError`` handlers treat them as the user-facing errors
-    they are.
+    As a MngrError subclass, agent errors are ClickException instances: when they
+    reach the CLI they render as a clean ``Error: ...`` message (plus any
+    user_help_text) instead of a traceback, and ``except MngrError`` handlers
+    treat them as the user-facing errors they are.
     """
 
 

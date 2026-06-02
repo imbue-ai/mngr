@@ -270,7 +270,7 @@ def test_send_message_one_agent_failure_does_not_prevent_other_agents(
     """One agent's SendMessageError must not kill the broadcast to other agents.
 
     SendMessageError is an AgentError, which inherits from MngrError. The per-agent
-    send is guarded by ``except BaseMngrError`` so that, in CONTINUE mode, one
+    send is guarded by ``except MngrError`` so that, in CONTINUE mode, one
     agent's failure is recorded without aborting the broadcast to the others.
     """
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
