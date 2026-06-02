@@ -1,5 +1,5 @@
-Fixed three bugs in `minds env deploy` / `recover` surfaced while standing up a
-fresh dev environment:
+Fixed several bugs in `minds env deploy` / `recover` and the workspace-create
+flow, surfaced while standing up a fresh dev environment:
 
 - Deploy now pushes the `ovh` per-env Modal Secret. The remote-service-connector
   app references `ovh-<tier>-<deploy_id>` via `Secret.from_name` (its release
@@ -17,3 +17,14 @@ fresh dev environment:
   branch behind, so re-running returned 409 ("branch with that name already
   exists") and could never delete its recover-target file. The restore now
   treats that 409 as "already restored" and proceeds.
+- `minds env deploy` now exits non-zero when a failed deploy rolls back. The
+  failure path execs into `minds env recover`, which inherits the exit code; a
+  successful rollback therefore reported the *failed* deploy as success (exit 0),
+  masking it from callers / CI. `recover` gained a hidden `--from-failed-deploy`
+  flag (passed only by that auto-rollback exec) that forces a non-zero exit even
+  when the rollback itself succeeds.
+- Fixed a `ty` error / runtime breakage in workspace creation from a bad merge:
+  `_MngrCreateAttemptParams` still carried a `gh_token` field (and passed it to
+  `run_mngr_create`) after `GH_TOKEN` had been removed end-to-end as unused, so
+  the param no longer matched `run_mngr_create`'s signature and the field was
+  never supplied at the construction site. Removed the leftover `gh_token`.

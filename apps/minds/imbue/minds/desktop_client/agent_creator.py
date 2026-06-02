@@ -836,7 +836,6 @@ class _MngrCreateAttemptParams(FrozenModel):
     branch_or_tag: str | None
     anthropic_api_key: str | None
     anthropic_base_url: str | None
-    gh_token: str | None
     parent_cg: ConcurrencyGroup | None
 
 
@@ -867,7 +866,6 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         imbue_cloud_fast_mode=fast_mode,
         anthropic_api_key=params.anthropic_api_key,
         anthropic_base_url=params.anthropic_base_url,
-        gh_token=params.gh_token if params.gh_token else None,
         parent_cg=params.parent_cg,
     )
 

@@ -505,7 +505,10 @@ def _exec_into_recover(*, deploy_error: Exception) -> None:
     re-type the follow-up command. Uses the process-replacement primitive
     so the recover process INHERITS our stdout/stderr and exit code --
     from the operator's shell it looks like one command (``minds env
-    deploy``) that just kept running through the rollback.
+    deploy``) that just kept running through the rollback. We pass
+    ``--from-failed-deploy`` so that inherited exit code is non-zero even
+    when the rollback succeeds: the deploy failed, and a clean rollback
+    must not let a caller / CI read that failure as success.
 
     The first argv element comes from ``sys.argv[0]`` so the same
     minds binary (or ``uv run minds`` wrapper) the operator launched
@@ -537,7 +540,10 @@ def _exec_into_recover(*, deploy_error: Exception) -> None:
     sys.stdout.flush()
     sys.stderr.flush()
     argv0 = sys.argv[0]
-    os.execvp(argv0, [argv0, "env", "recover"])
+    # `--from-failed-deploy` makes recover exit non-zero even when the rollback
+    # succeeds, so the deploy failure that triggered this is never masked by a
+    # clean rollback's exit code (we exec, so recover's exit code becomes ours).
+    os.execvp(argv0, [argv0, "env", "recover", "--from-failed-deploy"])
 
 
 def _refuse_if_any_recover_target_exists() -> None:
@@ -1288,8 +1294,19 @@ def env_destroy(ctx: click.Context, keep_agents: bool, yes_i_mean_staging: bool)
 
 
 @env.command("recover")
+@click.option(
+    "--from-failed-deploy",
+    "is_from_failed_deploy",
+    is_flag=True,
+    hidden=True,
+    help=(
+        "Internal: set when `minds env deploy` auto-chains (execs) into recover after a "
+        "failed deploy. Forces a non-zero exit even when the rollback itself succeeds, so "
+        "the failed deploy is never reported to a caller / CI as success."
+    ),
+)
 @click.pass_context
-def env_recover(_ctx: click.Context) -> None:
+def env_recover(_ctx: click.Context, is_from_failed_deploy: bool) -> None:
     """Roll back to the pre-deploy state captured by a failed `minds env deploy`.
 
     Reads ``.minds-deploy-recover-target-<env-name>.json`` at the
@@ -1301,6 +1318,11 @@ def env_recover(_ctx: click.Context) -> None:
     Refuses to run if no recover-target file exists for the activated
     env. To recover a different env, activate it first. Also refuses
     unless the shell is *deploy-activated* (see :func:`env_deploy`).
+
+    With ``--from-failed-deploy`` (set only by the deploy auto-rollback
+    path), a *successful* rollback still exits non-zero -- the deploy
+    that triggered it failed, and the exec'd recover owns the exit code
+    the operator's shell / CI sees.
     """
     try:
         repo_root = find_monorepo_root()
@@ -1348,3 +1370,13 @@ def env_recover(_ctx: click.Context) -> None:
             raise click.ClickException(str(exc)) from exc
         except RecoverFailedError as exc:
             raise click.ClickException(str(exc)) from exc
+
+    # The rollback succeeded. When recover was auto-chained from a failed
+    # deploy, the overall command still represents a FAILED deploy, so exit
+    # non-zero -- otherwise a successful rollback would mask the deploy
+    # failure from any caller / CI reading the exit code.
+    if is_from_failed_deploy:
+        raise click.ClickException(
+            "Deploy failed; rolled back to the pre-deploy state. Exiting non-zero to reflect "
+            "the deploy failure (the rollback itself succeeded)."
+        )
