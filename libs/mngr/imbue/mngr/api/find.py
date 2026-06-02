@@ -445,7 +445,7 @@ def _address_matches_agent_match(address: AgentAddress, match: AgentMatch) -> bo
 
 
 @pure
-def collect_required_provider_names(
+def _collect_required_provider_names(
     addresses: Sequence[AgentAddress],
 ) -> tuple[ProviderInstanceName, ...] | None:
     """Return the set of provider names a discovery call can be restricted to.
@@ -479,7 +479,7 @@ def find_all_agents(
     keep only matches on a satisfying host.
     """
     agent_identifiers = [addr.agent for addr in addresses]
-    provider_filter = collect_required_provider_names(addresses)
+    provider_filter = _collect_required_provider_names(addresses)
     provider_names = tuple(str(p) for p in provider_filter) if provider_filter is not None else None
 
     matches = _find_agents_by_identifiers_or_state(

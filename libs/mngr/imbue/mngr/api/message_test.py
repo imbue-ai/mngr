@@ -327,5 +327,3 @@ def test_send_message_one_agent_failure_does_not_prevent_other_agents(
 
     # The other agent must still have succeeded
     assert "will-succeed" in result.successful_agents
-
-
