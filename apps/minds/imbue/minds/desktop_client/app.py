@@ -102,6 +102,7 @@ from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_creating_page
 from imbue.minds.desktop_client.templates import render_destroying_page
+from imbue.minds.desktop_client.templates import render_dev_styleguide_page
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
@@ -1637,6 +1638,11 @@ def _handle_chrome_sidebar(request: Request) -> Response:
     """Serve the standalone sidebar page for the Electron sidebar WebContentsView."""
     html = render_sidebar_page(mngr_forward_origin=_get_mngr_forward_origin(request))
     return HTMLResponse(content=html)
+
+
+def _handle_dev_styleguide() -> Response:
+    """Render the design-system styleguide page."""
+    return HTMLResponse(content=render_dev_styleguide_page())
 
 
 async def _handle_chrome_events(
@@ -3405,6 +3411,8 @@ def create_desktop_client(
     app.get("/_chrome")(_handle_chrome_page)
     app.get("/_chrome/sidebar")(_handle_chrome_sidebar)
     app.get("/_chrome/events")(_handle_chrome_events)
+
+    app.get("/_dev/styleguide")(_handle_dev_styleguide)
 
     # Register routes
     app.get("/welcome")(_handle_welcome_page)
