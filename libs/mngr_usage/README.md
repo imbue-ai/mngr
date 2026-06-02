@@ -38,9 +38,8 @@ controlled by the `preserve_on_destroy` option on the `usage` plugin config (set
 it to `false` to discard usage on destroy).
 
 `mngr usage` reads these preserved files back **by default**, so a destroyed
-agent's accumulated cost and rate-limit history still counts toward the totals --
-you no longer need to keep an agent alive (or merely stopped) just to retain its
-usage in the snapshot. Preserved agents are filtered by the same
+agent's accumulated cost and rate-limit history still counts toward the totals.
+Preserved agents are filtered by the same
 `--provider` / `--project` / `--local` / label / CEL predicates as live agents
 (evaluated against the agent's preserved `data.json`), and an agent that is still
 alive is never double-counted against its own preserved copy. Pass
