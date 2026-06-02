@@ -1,7 +1,6 @@
 import json
 import os
 import queue
-import re
 from pathlib import Path
 
 import httpx
@@ -48,6 +47,7 @@ from imbue.minds.desktop_client.request_events import create_latchkey_predefined
 from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.testing import extract_ssr_route_payload
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
@@ -186,13 +186,7 @@ def test_landing_page_shows_login_when_unauthenticated(tmp_path: Path) -> None:
     response = client.get("/")
 
     assert response.status_code == 200
-    payload = json.loads(
-        re.search(
-            r'<script type="application/json" id="__route__">(.+?)</script>',
-            response.text,
-            re.DOTALL,
-        ).group(1)
-    )
+    payload = extract_ssr_route_payload(response.text)
     assert payload["route"] == "login"
 
 
@@ -217,13 +211,7 @@ def test_login_redirects_to_authenticate_via_js(tmp_path: Path) -> None:
     )
 
     assert response.status_code == 200
-    payload = json.loads(
-        re.search(
-            r'<script type="application/json" id="__route__">(.+?)</script>',
-            response.text,
-            re.DOTALL,
-        ).group(1)
-    )
+    payload = extract_ssr_route_payload(response.text)
     assert payload["route"] == "login_redirect"
     assert payload["props"]["one_time_code"] == str(code)
 

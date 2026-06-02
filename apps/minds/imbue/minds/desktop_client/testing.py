@@ -1,8 +1,31 @@
 """Shared non-fixture test helpers for desktop_client tests."""
 
+import json
 import os
+import re
 import subprocess
 from pathlib import Path
+
+# Matches the JSON payload that ``_client_render_shell`` and the Node SSR
+# sidecar both emit so the client bundle can hydrate the right route.
+# Kept in one place so callers can't drift if the shell ever changes shape.
+_SSR_PAYLOAD_RE = re.compile(
+    r'<script type="application/json" id="__route__">(.+?)</script>',
+    re.DOTALL,
+)
+
+
+def extract_ssr_route_payload(html: str) -> dict[str, object]:
+    """Return the ``{route, props}`` payload embedded in an SSR-shell page.
+
+    Raises ``AssertionError`` if the payload script tag is missing. Used
+    by every desktop_client test that asserts on which Solid route the
+    server told the client to hydrate.
+    """
+    match = _SSR_PAYLOAD_RE.search(html)
+    if match is None:
+        raise AssertionError(f"No __route__ payload found in SSR shell: {html[:200]!r}")
+    return json.loads(match.group(1))
 
 
 def restic_backup_a_file(repository: str, password: str, source: Path) -> None:

@@ -7,30 +7,16 @@ return a deterministic client-render shell that hydrates the right
 route key and props.
 """
 
-import json
-import re
-
-import pytest
-
 from imbue.minds.desktop_client.ssr_sidecar import SsrSidecarError
 from imbue.minds.desktop_client.ssr_sidecar import _pick_free_port
 from imbue.minds.desktop_client.templates import _client_render_shell
 from imbue.minds.desktop_client.templates import _render_ssr_or_fallback
-
-
-def _extract_payload(html: str) -> dict[str, object]:
-    match = re.search(
-        r'<script type="application/json" id="__route__">(.+?)</script>',
-        html,
-        re.DOTALL,
-    )
-    assert match is not None, f"No __route__ payload in: {html[:200]!r}"
-    return json.loads(match.group(1))
+from imbue.minds.desktop_client.testing import extract_ssr_route_payload
 
 
 def test_client_render_shell_inlines_route_and_props() -> None:
     html = _client_render_shell(route="welcome", props={"hello": "world"})
-    payload = _extract_payload(html)
+    payload = extract_ssr_route_payload(html)
     assert payload == {"route": "welcome", "props": {"hello": "world"}}
     assert '<div id="app"></div>' in html
     assert 'src="/_static/_dist/assets/app.js"' in html
@@ -49,13 +35,13 @@ def test_client_render_shell_escapes_script_terminators() -> None:
     # it would let the inlined string close the inlining script tag.
     assert "</script><script>alert" not in html
     # The original string is still recoverable via JSON.parse on the client.
-    payload = _extract_payload(html)
+    payload = extract_ssr_route_payload(html)
     assert payload["props"]["message"] == "</script><script>alert(1)</script>"
 
 
 def test_render_ssr_or_fallback_with_no_sidecar_returns_shell() -> None:
     html = _render_ssr_or_fallback(sidecar=None, route="login", props={})
-    payload = _extract_payload(html)
+    payload = extract_ssr_route_payload(html)
     assert payload["route"] == "login"
     assert payload["props"] == {}
 
@@ -69,7 +55,7 @@ class _BoomSidecar:
 
 def test_render_ssr_or_fallback_with_failing_sidecar_returns_shell() -> None:
     html = _render_ssr_or_fallback(sidecar=_BoomSidecar(), route="welcome", props={})
-    payload = _extract_payload(html)
+    payload = extract_ssr_route_payload(html)
     # The shell still embeds the route key so client hydration can take
     # over -- the user sees the page as soon as the JS bundle loads.
     assert payload["route"] == "welcome"

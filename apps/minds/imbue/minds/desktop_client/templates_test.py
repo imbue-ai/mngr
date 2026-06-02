@@ -1,4 +1,3 @@
-import json
 import re
 from pathlib import Path
 
@@ -15,6 +14,7 @@ from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_recovery_page
 from imbue.minds.desktop_client.templates import render_sidebar_page
+from imbue.minds.desktop_client.testing import extract_ssr_route_payload
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
@@ -48,35 +48,16 @@ def test_render_landing_page_discovering_shows_auto_refresh() -> None:
     assert "/goto/" not in html
 
 
-def _extract_route_payload(html: str) -> dict[str, object]:
-    """Pull the ``{ route, props }`` JSON payload out of the SSR fallback shell.
-
-    The four trivial pages now render through the Solid SSR sidecar; when
-    the sidecar is absent (as in these unit tests) the shim returns a
-    deterministic shell with the route key and props inlined as JSON for
-    client-side hydration. Tests assert on that payload instead of on
-    the previous Jinja-rendered HTML.
-    """
-    match = re.search(
-        r'<script type="application/json" id="__route__">(.+?)</script>',
-        html,
-        re.DOTALL,
-    )
-    if match is None:
-        raise AssertionError(f"No __route__ payload found in SSR shell: {html[:200]!r}")
-    return json.loads(match.group(1))
-
-
 def test_render_login_redirect_page_inlines_one_time_code_for_client_hydration() -> None:
     html = render_login_redirect_page(one_time_code=OneTimeCode("abc123-secret-82341"))
-    payload = _extract_route_payload(html)
+    payload = extract_ssr_route_payload(html)
     assert payload["route"] == "login_redirect"
     assert payload["props"]["one_time_code"] == "abc123-secret-82341"
 
 
 def test_render_auth_error_page_inlines_error_message_for_client_hydration() -> None:
     html = render_auth_error_page(message="This code has already been used.")
-    payload = _extract_route_payload(html)
+    payload = extract_ssr_route_payload(html)
     assert payload["route"] == "auth_error"
     assert payload["props"]["message"] == "This code has already been used."
 
@@ -210,7 +191,7 @@ def test_render_create_form_ignores_workspace_env_vars_when_unactivated(monkeypa
 
 def test_render_login_page_emits_solid_route_payload() -> None:
     html = render_login_page()
-    payload = _extract_route_payload(html)
+    payload = extract_ssr_route_payload(html)
     assert payload["route"] == "login"
     assert payload["props"] == {}
 
