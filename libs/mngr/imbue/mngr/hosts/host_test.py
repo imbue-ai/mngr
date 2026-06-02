@@ -1148,6 +1148,60 @@ def test_stop_agents_bounds_every_command_with_a_timeout(
     assert unbounded == [], f"stop_agents ran command(s) without a timeout: {unbounded}"
 
 
+@pytest.mark.allow_warnings(match=r"^Stop-path command timed out")
+def test_stop_agents_keeps_cleaning_up_when_a_command_times_out(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A timed-out stop-path command must not abort the rest of cleanup.
+
+    The local runner reports a timeout as a failed CommandResult, but the
+    remote SSH layer raises ``socket.timeout`` (a ``TimeoutError``, which is not
+    classified as a transient SSH error and so is not retried). stop_agents must
+    treat either as "no output" and still reach ``tmux kill-session``, so a
+    single wedged ``tmux list-panes`` cannot leave the session un-torn-down. This
+    simulates the remote raise path on the wedged command.
+    """
+    agent = make_test_agent_details("cleanup-timeout-agent")
+
+    class _TimingOutHost(Host):
+        """Host that raises TimeoutError for list-panes (mimicking the remote SSH
+        timeout) and returns success otherwise."""
+
+        _commands: list[str] = PrivateAttr(default_factory=list)
+
+        def execute_idempotent_command(
+            self,
+            command: str,
+            user: str | None = None,
+            cwd: Path | None = None,
+            env: Any = None,
+            timeout_seconds: float | None = None,
+        ) -> CommandResult:
+            self._commands.append(command)
+            if "list-panes" in command:
+                raise TimeoutError("timed out")
+            stdout = "0" if "list-windows" in command else ""
+            return CommandResult(stdout=stdout, stderr="", success=True)
+
+        def _get_agent_by_id(self, agent_id: AgentId) -> AgentInterface | None:
+            return cast(AgentInterface, agent)
+
+    host = _TimingOutHost(
+        id=HostId.generate(),
+        host_name=HostName("test"),
+        connector=PyinfraConnector(cast(PyinfraHost, _FakePyinfraHost())),
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+
+    # Must not raise even though list-panes timed out mid-collection.
+    host.stop_agents([agent.id])
+
+    assert any("list-panes" in command for command in host._commands)
+    # The timeout was swallowed and cleanup still reached the session teardown.
+    assert any("kill-session" in command for command in host._commands)
+
+
 @pytest.mark.parametrize(
     ("exception", "expected"),
     [

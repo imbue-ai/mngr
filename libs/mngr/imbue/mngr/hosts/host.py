@@ -2512,6 +2512,31 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     if not result.success:
                         raise AgentStartError(str(agent.name), result.stderr)
 
+    def _run_bounded_stop_command(
+        self,
+        command: str,
+        timeout_seconds: float = _STOP_AGENT_COMMAND_TIMEOUT_SECONDS,
+    ) -> CommandResult:
+        """Run one shell step of the stop/cleanup path, bounded and degrading gracefully on timeout.
+
+        Every step in the stop path is idempotent and best-effort, so a step
+        that fails to return in time must not abort the rest of cleanup. The two
+        execution backends report a timeout differently: the local runner kills
+        the process and returns a failed CommandResult (non-zero exit), but the
+        remote SSH layer raises ``socket.timeout`` (a ``TimeoutError``, which is
+        not classified as a transient SSH error and so is not retried). We catch
+        the latter and return the same failed result, so both paths behave
+        identically -- the caller treats it as "no output" and cleanup proceeds
+        (env-scan fallback, kill-session, ...) instead of stalling or aborting.
+        """
+        try:
+            return self.execute_idempotent_command(command, timeout_seconds=timeout_seconds)
+        except TimeoutError:
+            logger.warning(
+                "Stop-path command timed out after {}s; treating as no output: {}", timeout_seconds, command
+            )
+            return CommandResult(stdout="", stderr="", success=False)
+
     def _get_all_descendant_pids(self, parent_pid: str, visited: set[str] | None = None) -> list[str]:
         """Recursively get all descendant PIDs of a given parent PID.
 
@@ -2530,10 +2555,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         descendant_pids: list[str] = []
 
         # Get immediate children
-        result = self.execute_idempotent_command(
-            f"pgrep -P {parent_pid} 2>/dev/null || true",
-            timeout_seconds=_STOP_AGENT_COMMAND_TIMEOUT_SECONDS,
-        )
+        result = self._run_bounded_stop_command(f"pgrep -P {parent_pid} 2>/dev/null || true")
         if result.success and result.stdout.strip():
             child_pids = result.stdout.strip().split("\n")
             for child_pid in child_pids:
@@ -2558,9 +2580,8 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         (cheap, and this is a cleanup path) and removes the prefix-matching
         risk entirely.
         """
-        windows_result = self.execute_idempotent_command(
-            f"tmux list-windows -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()} -F '#I' 2>/dev/null",
-            timeout_seconds=_STOP_AGENT_COMMAND_TIMEOUT_SECONDS,
+        windows_result = self._run_bounded_stop_command(
+            f"tmux list-windows -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()} -F '#I' 2>/dev/null"
         )
         if not windows_result.success or not windows_result.stdout.strip():
             return []
@@ -2569,9 +2590,8 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         window_indices = [w.strip() for w in windows_result.stdout.strip().split("\n") if w.strip()]
         for window_idx in window_indices:
             window_target = TmuxWindowTarget(session_name=session_name, window=window_idx)
-            result = self.execute_idempotent_command(
-                f"tmux list-panes -t {window_target.as_shell_arg()} -F '#{{pane_pid}}' 2>/dev/null",
-                timeout_seconds=_STOP_AGENT_COMMAND_TIMEOUT_SECONDS,
+            result = self._run_bounded_stop_command(
+                f"tmux list-panes -t {window_target.as_shell_arg()} -F '#{{pane_pid}}' 2>/dev/null"
             )
             if result.success and result.stdout.strip():
                 pane_pids = [p.strip() for p in result.stdout.strip().split("\n") if p.strip()]
@@ -2635,7 +2655,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             "  done; "
             "fi; true"
         )
-        result = self.execute_idempotent_command(cmd, timeout_seconds=_STOP_AGENT_COMMAND_TIMEOUT_SECONDS)
+        result = self._run_bounded_stop_command(cmd)
         if not result.stdout.strip():
             return []
         return [pid for pid in result.stdout.strip().split("\n") if pid.strip()]
@@ -2679,7 +2699,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 grace_seconds = min(1.0, timeout_seconds)
                 # Bound by the grace sleep plus a fixed margin so a stuck kill
                 # loop can't hang cleanup; the command itself only sleeps once.
-                self.execute_idempotent_command(
+                self._run_bounded_stop_command(
                     f"for p in {pid_list}; do kill -TERM $p 2>/dev/null; done; "
                     f"sleep {grace_seconds}; "
                     f"for p in {pid_list}; do kill -KILL $p 2>/dev/null; done; true",
@@ -2689,9 +2709,8 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             # Finally kill the tmux sessions themselves
             for agent in current_agents:
                 session_name = f"{self.mngr_ctx.config.prefix}{agent.name}"
-                self.execute_idempotent_command(
-                    f"tmux kill-session -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()} 2>/dev/null || true",
-                    timeout_seconds=_STOP_AGENT_COMMAND_TIMEOUT_SECONDS,
+                self._run_bounded_stop_command(
+                    f"tmux kill-session -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()} 2>/dev/null || true"
                 )
 
     def _get_agent_by_id(self, agent_id: AgentId) -> AgentInterface | None:
