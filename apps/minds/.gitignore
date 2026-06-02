@@ -5,3 +5,10 @@ dist/
 # static dir so FastAPI serves it; SSR sidecar bundle lands here.
 frontend/dist-server/
 imbue/minds/desktop_client/static/_dist/
+
+# The repo-root .gitignore's ``**/lib/`` rule (for Python build artifacts)
+# would also mask the Solid frontend's helper directory. Negate the rule
+# for this specific path so the Vitest suite and the SSE-store /
+# workspace-accent helpers stay tracked.
+!frontend/src/lib/
+!frontend/src/lib/**
