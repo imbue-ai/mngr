@@ -37,9 +37,11 @@ agent exposes no permission-specific WAITING reason.
 Transcript support: enabled by default. ``stream_transcript.sh`` tails agy's
 per-conversation JSONL files at
 ``~/.gemini/antigravity-cli/brain/<conv_id>/.system_generated/logs/transcript.jsonl``,
-filtered to conversation IDs that *this* agent created (discovered by
-grepping agy's own ``--log-file``). ``common_transcript.sh`` converts to
-the agent-agnostic schema that ``mngr transcript`` reads.
+filtered to conversation IDs that *this* agent worked on (discovered from the
+per-agent conversation-ids file the ``PreInvocation`` capture hook maintains;
+see ``CONVERSATION_IDS_FILENAME`` and ``capture_conversation_id.sh``).
+``common_transcript.sh`` converts to the agent-agnostic schema that ``mngr
+transcript`` reads.
 """
 
 from __future__ import annotations
