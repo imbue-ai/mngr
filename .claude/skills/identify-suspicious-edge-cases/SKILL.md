@@ -1,14 +1,21 @@
 ---
 name: identify-suspicious-edge-cases
-argument-hint: [library_name]
-description: Identify suspicious edge-case handling (over-broad catches, fallback else branches, defensive guards) in the $1 library
+argument-hint: [target_path]
+description: Identify suspicious edge-case handling (over-broad catches, fallback else branches, defensive guards) under the $1 path
 ---
 
-Go gather all the context for the $1 library (per instructions in CLAUDE.md). Be sure to read non_issues.md as well, and read the error-handling and control-flow sections of style_guide.md (the "If/elif/else", "Match statements with assert_never", "Exception hierarchy", and "Try/except" sections in particular).
+The argument `$1` is the path to scan. It may be an entire library (e.g. `libs/mngr`, or just the bare name `mngr`) or any subdirectory within one (e.g. `libs/mngr/imbue/mngr/cli`), so you can scope this skill narrowly to part of a library when that is all you care about.
+
+Before doing anything else, resolve these two things from `$1` and state them explicitly:
+
+- **The scan scope**: the directory tree you will examine. This is `$1` itself, resolved to a real path. (If `$1` is a bare library name like `mngr`, resolve it to `libs/mngr` or `apps/mngr` -- whichever exists.) You must only report findings for code under this path.
+- **The containing library**: the project directory that owns the scan scope. Projects always live at `libs/<name>` or `apps/<name>`, so the containing library is exactly that two-component prefix of the scan-scope path (e.g. for a scan scope of `libs/mngr/imbue/mngr/cli`, the containing library is `libs/mngr`; for a scan scope of `libs/mngr`, it is `libs/mngr` itself). You need this both to gather context and to know where to write the output file -- so make sure you have identified it unambiguously before continuing.
+
+Go gather all the context for the containing library (per instructions in CLAUDE.md). Even when the scan scope is a small subdirectory, you still need the whole containing library's context (style guide, primitives, data_types, interfaces, utils) to judge whether an edge case is handled correctly. Be sure to read the containing library's non_issues.md as well, and read the error-handling and control-flow sections of style_guide.md (the "If/elif/else", "Match statements with assert_never", "Exception hierarchy", and "Try/except" sections in particular).
 
 Once you've gathered that context, please do the below (and commit when you're finished).
 
-Your task is to identify suspicious edge-case handling in the $1 library. The motivation is that defensively written code tends to *over-handle* edge cases: catching errors that should be allowed to crash, adding fallback `else` branches that paper over states that should be impossible, and inserting defensive guards that mask bugs. This skill is an intermittent cleanup pass to counteract that tendency. **The default stance is suspicion: assume each edge-case handler is unjustified until you can articulate not just that *some* handling must be there, but that *this specific logic* is the right way to handle the case.** It will often be true that the edge case needs handling of some kind; that is not enough. The bar is that the chosen behavior (this default, this caught type, this fallback value, this early return) is demonstrably the correct response to the case, not merely a plausible one.
+Your task is to identify suspicious edge-case handling within the scan scope. The motivation is that defensively written code tends to *over-handle* edge cases: catching errors that should be allowed to crash, adding fallback `else` branches that paper over states that should be impossible, and inserting defensive guards that mask bugs. This skill is an intermittent cleanup pass to counteract that tendency. **The default stance is suspicion: assume each edge-case handler is unjustified until you can articulate not just that *some* handling must be there, but that *this specific logic* is the right way to handle the case.** It will often be true that the edge case needs handling of some kind; that is not enough. The bar is that the chosen behavior (this default, this caught type, this fallback value, this early return) is demonstrably the correct response to the case, not merely a plausible one.
 
 ## What to look for
 
@@ -42,14 +49,14 @@ Do NOT report issues that are already covered by an existing FIXME.
 
 Do NOT report issues that are highlighted as non-issues in non_issues.md.
 
-After reviewing all the code in the library, think carefully about the most important and most suspicious edge-case handlers.
+After reviewing all the code in the scan scope, think carefully about the most important and most suspicious edge-case handlers.
 
-Then put them, in order from most important to least important, into a markdown file in the library's "_tasks/suspicious-edge-cases/" folder (make one if you have to). Name the file "<date>.md" (where you should get "date" by calling this precise command: "date +%Y-%m-%d-%T | tr : -")
+Then put them, in order from most important to least important, into a markdown file in the *containing library's* "_tasks/suspicious-edge-cases/" folder (make one if you have to) -- always the containing library's folder, even when the scan scope was a subdirectory, so the findings live where the other identify-* outputs and create-fixmes expect them. Name the file "<date>.md" (where you should get "date" by calling this precise command: "date +%Y-%m-%d-%T | tr : -")
 
 For the format of the file, use the following:
 
 ```markdown
-# Suspicious edge cases in the $1 library (identified on <date>)
+# Suspicious edge cases under <scan scope> (identified on <date>)
 ## 1. <Short description of the suspicious edge case>
 
 Description: <detailed description, including file names and line numbers, of what is handled, why it is suspicious (which of the three questions it fails), and what would happen if the "impossible" case actually occurred>
