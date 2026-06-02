@@ -253,10 +253,12 @@ class FileSharingGrantHandler(RequestEventHandler):
             status=status,
             agent_id=str(agent_id),
             request_type=str(RequestType.FILE_SHARING_PERMISSION),
-            # File-sharing requests are deduplicated by ``path`` (see
-            # ``_dedup_key`` in ``request_events.py``); reuse that
-            # field so the response collapses with the matching
-            # request entry rather than leaking past it.
+            # ``scope`` on a response is informational only -- the
+            # inbox joins responses to requests on
+            # ``request_event_id`` (see ``get_pending_requests`` in
+            # ``request_events.py``). We still record the file path
+            # here so the persisted response carries the resolved
+            # path for debugging.
             scope=file_path,
         )
         append_response_event(self.data_dir, response_event)
