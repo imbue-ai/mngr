@@ -613,10 +613,6 @@ def test_every_project_has_changelog_layout() -> None:
     Mirrors ``test_every_project_has_test_ratchets_file`` and
     ``test_every_project_has_pypi_readme``: a symmetric requirement that
     every project participates in the consolidation flow uniformly.
-
-    The ``.gitkeep`` is required because git does not track empty directories:
-    once consolidation drains a project's last entry, the ``changelog/`` dir
-    would vanish without it.
     """
     missing: list[str] = []
     for project in all_known_projects(_REPO_ROOT):
