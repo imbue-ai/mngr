@@ -143,9 +143,7 @@ mngr create "$WARMER" claude --no-connect -- --model haiku
 
 # One cheap prompt opens the new 5h window. Wait for the turn to finish, then
 # destroy the warmer -- it's a throwaway, and its usage events are preserved on
-# destroy (the `preserve_on_destroy` usage-plugin option, on by default), so the
-# snapshot still reflects the new window and the check above won't re-fire until
-# the next window rolls.
+# destroy (the `preserve_on_destroy` usage-plugin option, on by default).
 mngr message "$WARMER" --message 'just say hi'
 mngr wait "$WARMER" WAITING --timeout 5m
 mngr destroy "$WARMER" --force
