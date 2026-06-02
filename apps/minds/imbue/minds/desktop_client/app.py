@@ -2017,9 +2017,9 @@ def _build_mngr_host_state_argv(
     workspace's provider is known it also passes ``--provider`` so discovery
     only queries that provider: ``--provider`` is a discovery fan-out control
     (unlike the post-discovery CEL ``--include``), so an unrelated provider
-    being unreachable can no longer make this listing exit nonzero and blank
-    out this workspace's own host state. ``--on-error continue`` still keeps a
-    per-host failure within the scoped provider from hard-failing the listing.
+    being unreachable does not make this listing exit nonzero and blank out
+    this workspace's own host state. ``--on-error continue`` keeps a per-host
+    failure within the scoped provider from hard-failing the listing.
     """
     if services_agent_id is None:
         include = f'id == "{agent_id}"'
@@ -2144,10 +2144,9 @@ def _handle_recovery_page(
 def _run_mngr(concurrency_group: ConcurrencyGroup, argv: list[str], env: dict[str, str]) -> str:
     """Run an ``mngr`` subprocess to completion and return its stdout on a clean exit.
 
-    Raises ``MngrCommandError`` for every non-clean outcome, mirroring how the
-    rest of minds shells out to mngr (``run_mngr_create``, the destroy cleanup):
-    a single rich domain error the caller catches once, rather than a status
-    field threaded alongside infra exceptions. The three non-clean outcomes are:
+    Raises ``MngrCommandError`` for every non-clean outcome, like the rest of
+    minds' mngr calls (``run_mngr_create``, the destroy cleanup) -- one domain
+    error the caller catches once. The non-clean outcomes are:
 
     * a timeout (with ``is_checked_after=False`` a timeout comes back as a
       finished process flagged ``is_timed_out`` rather than raising);
@@ -2156,12 +2155,6 @@ def _run_mngr(concurrency_group: ConcurrencyGroup, argv: list[str], env: dict[st
       ``ConcurrencyGroupError`` for the group's own setup / shutdown / strand
       failures (``ProcessSetupError``, ``StrandTimedOutError``,
       ``EnvironmentStoppedError``, ``InvalidConcurrencyGroupStateError``).
-
-    A non-clean exit yields no usable stdout to the caller -- the only consumer
-    that tolerated partial output (the host-health ``mngr list`` probe) now
-    scopes its listing to the workspace's own provider, so a non-clean exit
-    there reflects a problem with *that* provider/host rather than an unrelated
-    sibling, and the partial listing is not worth trusting.
     """
     try:
         finished = concurrency_group.run_process_to_completion(
@@ -2172,7 +2165,12 @@ def _run_mngr(concurrency_group: ConcurrencyGroup, argv: list[str], env: dict[st
         )
     except (OSError, ConcurrencyGroupError) as exc:
         # The command never ran (a fork/exec failure, or a concurrency-group
-        # setup/strand/shutdown failure).
+        # setup/strand/shutdown failure). create/destroy let these propagate to
+        # one outer handler because a launch failure is fatal to the operation;
+        # our callers instead handle failure locally and must keep going (the
+        # host-health probe composes a partial response and cannot 500), so we
+        # wrap it as the single MngrCommandError they already catch rather than
+        # leaving them to also catch this infra-exception tuple.
         raise MngrCommandError(str(exc)) from exc
     if finished.is_timed_out:
         raise MngrCommandError(f"timed out after {int(_RESTART_COMMAND_TIMEOUT_SECONDS)}s")
