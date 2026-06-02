@@ -549,12 +549,13 @@ def _exec_into_recover(*, deploy_error: Exception) -> None:
 def _refuse_if_any_recover_target_exists() -> None:
     """Block the command if ANY per-env recover-target file sits at the monorepo root.
 
-    Used by env-agnostic commands (``activate``, ``deactivate``,
-    ``list``) -- they don't have a single env in mind, but we still
-    want to surface any in-flight failed deploy that the operator
-    might have forgotten about. Each matching file's env name is
-    listed in the error so the operator knows which env(s) need
-    ``minds env recover``.
+    Used by env-agnostic commands (``deactivate``, ``list``) -- they
+    don't have a single env in mind, but we still want to surface any
+    in-flight failed deploy that the operator might have forgotten
+    about. Each matching file's env name is listed in the error so the
+    operator knows which env(s) need ``minds env recover``. (``activate``
+    uses the env-scoped :func:`_refuse_if_recover_target_blocks_activation`
+    instead, so it can still activate an env in order to recover it.)
 
     Tolerates ``NotInMonorepoError`` for commands that don't strictly
     require monorepo context (e.g. ``list`` from $HOME); when we can't
@@ -595,6 +596,49 @@ def _refuse_if_this_env_recover_target_exists(env_name: str) -> None:
             f"a prior `minds env deploy` against env {env_name!r} failed mid-flight. Run `minds env recover` "
             "(with this env activated) to roll back, or delete the file manually if it's known-stale."
         )
+
+
+def _refuse_if_recover_target_blocks_activation(env_name: str) -> None:
+    """Block activating ``env_name`` only when a DIFFERENT env's recover-target exists.
+
+    ``minds env recover`` requires an *activated* env, so the blanket
+    "refuse activation while ANY recover-target exists" guard created a
+    catch-22: a failed deploy's own recover-target sat at the monorepo
+    root and made it impossible to activate that env in order to recover
+    it. Instead we allow activating an env that has its own pending
+    recover-target (the activate-then-recover path), and only hard-refuse
+    when the pending recover-target(s) belong solely to *other* envs -- a
+    forgotten failed deploy the operator should clear first. When
+    activating an affected env, any other envs' targets are surfaced as a
+    warning rather than blocking.
+    """
+    try:
+        repo_root = find_monorepo_root()
+    except MindError:
+        return
+    files = find_all_recover_target_files(repo_root=repo_root)
+    if not files:
+        return
+    this_env_path = recover_target_path(repo_root=repo_root, env_name=env_name)
+    other_files = [recover_file for recover_file in files if recover_file != this_env_path]
+    if this_env_path in files:
+        # Activating the very env that needs recovery: allow it so `minds
+        # env recover` can run next. Surface any unrelated failed deploys.
+        if other_files:
+            other_list = "\n".join(f"  - {recover_file.name}" for recover_file in other_files)
+            logger.warning(
+                "Other env(s) still have a pending recover-target file:\n{}\n"
+                "Activate each and run `minds env recover` before deploying them.",
+                other_list,
+            )
+        return
+    file_list = "\n".join(f"  - {recover_file.name}" for recover_file in other_files)
+    raise click.ClickException(
+        f"{len(other_files)} recover-target file(s) for other env(s) sit at {repo_root} -- one or "
+        f"more prior `minds env deploy` runs failed mid-flight:\n{file_list}\n"
+        "Activate each affected env and run `minds env recover` (or delete a known-stale file "
+        "manually) before activating an unaffected env."
+    )
 
 
 def _emit_destroy_result(env_name: str, *, output_format: OutputFormat) -> None:
@@ -700,7 +744,7 @@ def env_activate(name: str, create: bool, is_deploy_mode: bool) -> None:
       and proceeds. Without ``--create``, the error message tells the
       operator how to bootstrap a fresh dev env in one line.
     """
-    _refuse_if_any_recover_target_exists()
+    _refuse_if_recover_target_blocks_activation(name)
 
     if name in _RESERVED_TIER_ENV_NAMES or name == _PRODUCTION_ENV_NAME:
         _activate_reserved_env(name, is_deploy_mode=is_deploy_mode)

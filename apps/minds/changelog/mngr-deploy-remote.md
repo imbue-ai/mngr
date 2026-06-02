@@ -23,6 +23,13 @@ flow, surfaced while standing up a fresh dev environment:
   masking it from callers / CI. `recover` gained a hidden `--from-failed-deploy`
   flag (passed only by that auto-rollback exec) that forces a non-zero exit even
   when the rollback itself succeeds.
+- `minds env activate` no longer dead-locks the recover flow. The blanket
+  "refuse activation while ANY recover-target file exists" guard created a
+  catch-22: `minds env recover` requires an activated env, but activation was
+  blocked by the failed env's own recover-target -- so you could never activate
+  the env to recover it. Activation now allows activating an env that has its
+  own pending recover-target (surfacing any *other* envs' targets as a warning),
+  and only hard-refuses when the pending target(s) belong solely to other envs.
 - Fixed a `ty` error / runtime breakage in workspace creation from a bad merge:
   `_MngrCreateAttemptParams` still carried a `gh_token` field (and passed it to
   `run_mngr_create`) after `GH_TOKEN` had been removed end-to-end as unused, so
