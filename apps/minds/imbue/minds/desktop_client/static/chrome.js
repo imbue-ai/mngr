@@ -255,7 +255,7 @@
     try {
       if (data.type === 'workspaces') renderWorkspaces(data.workspaces);
       if (data.type === 'auth_status') updateAuthUI(data);
-      if (data.type === 'request_count') updateRequestsBadge(data.count);
+      if (data.type === 'requests') updateRequestsBadge(data.count);
       if (data.type === 'system_interface_status') handleSystemInterfaceStatus(data.agent_id, data.status);
     } catch (e) {}
   }
