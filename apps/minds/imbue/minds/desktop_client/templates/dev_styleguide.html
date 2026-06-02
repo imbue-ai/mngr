@@ -27,8 +27,15 @@
       CSS custom properties declared on <code>:root</code> in
       <code>static/tokens.css</code>.
     </p>
+    {#
+      Each swatch declares its token via ``data-token="--<name>"``. The
+      ratchet in ``templates_test.py`` cross-checks this set against the
+      ``:root`` declarations in ``static/tokens.css`` and fails if either
+      side drifts.
+    #}
     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-      <div class="flex items-center gap-3 bg-white border border-zinc-200 rounded-lg p-3 shadow-sm">
+      <div data-token="--shadow-seam"
+           class="flex items-center gap-3 bg-white border border-zinc-200 rounded-lg p-3 shadow-sm">
         <div class="w-10 h-10 rounded-md bg-white shrink-0"
              style="box-shadow: var(--shadow-seam);"></div>
         <div class="min-w-0 flex-1">

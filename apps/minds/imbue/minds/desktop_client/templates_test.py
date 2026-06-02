@@ -1,9 +1,14 @@
+import re
+from pathlib import Path
+
 import pytest
 
 from imbue.imbue_common.ids import InvalidRandomIdError
+from imbue.minds.desktop_client import templates as _templates_module
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
+from imbue.minds.desktop_client.templates import render_dev_styleguide_page
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
@@ -13,6 +18,8 @@ from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.mngr.primitives import AgentId
+
+_TOKENS_CSS_PATH = Path(_templates_module.__file__).resolve().parent / "static" / "tokens.css"
 
 _AGENT_A: AgentId = AgentId("agent-00000000000000000000000000000001")
 _AGENT_B: AgentId = AgentId("agent-00000000000000000000000000000002")
@@ -252,3 +259,42 @@ def test_render_recovery_page_restarting_status() -> None:
         initial_status="restarting",
     )
     assert 'data-initial-status="restarting"' in html
+
+
+def test_render_dev_styleguide_page_surfaces_tokens_and_macro_widgets() -> None:
+    """The styleguide must surface the live ``:root`` tokens and render
+    each catalog widget through its real macro (so the catalog can't drift
+    silently from the macros it documents)."""
+    html = render_dev_styleguide_page()
+    assert "--shadow-seam" in html
+    # The accent picker section is a separate runtime variable, not a :root token.
+    assert "--workspace-accent" in html
+    # Each pattern block should be present.
+    for header in ("Titlebar buttons", "Window controls", "Sidebar items", "Accent spine", "Spinner", "Buttons", "Notices"):
+        assert header in html, f"missing pattern: {header}"
+    # The buttons / notices / inputs are rendered through _macros.html (the
+    # macros emit these strings; literal macro names would mean the template
+    # is hardcoding markup instead of calling the macros).
+    assert ">Primary<" in html and ">Danger<" in html
+    assert "All set: action completed." in html
+    assert 'name="styleguide-focus-ring-input"' in html
+
+
+def test_dev_styleguide_token_swatches_enumerate_root_declarations() -> None:
+    """Drift guard: every ``:root`` token in ``tokens.css`` must have a
+    matching ``data-token`` swatch in the styleguide template (and vice
+    versa). Failure means the catalog is out of sync with the live tokens.
+    """
+    root_block = re.search(r":root\s*\{([^}]*)\}", _TOKENS_CSS_PATH.read_text(), re.DOTALL)
+    assert root_block is not None, "tokens.css must declare a :root block"
+    declared = {f"--{name}" for name in re.findall(r"--([a-z][a-z0-9-]*)\s*:", root_block.group(1))}
+
+    html = render_dev_styleguide_page()
+    surfaced = set(re.findall(r'data-token="(--[a-z][a-z0-9-]*)"', html))
+
+    assert declared == surfaced, (
+        f"tokens.css :root declares {sorted(declared)} but the styleguide "
+        f"surfaces {sorted(surfaced)}. Add or remove a "
+        f"`data-token=\"--<name>\"` swatch in templates/dev_styleguide.html "
+        f"to match."
+    )

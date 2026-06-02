@@ -495,9 +495,12 @@ def render_workspace_settings(
 def render_dev_styleguide_page() -> str:
     """Render the dev-only styleguide page.
 
-    The page is a hand-authored catalog of UI patterns and tokens. When
-    a new ``:root`` token is added to ``static/tokens.css``, add the
-    matching swatch markup directly to ``templates/dev_styleguide.html``.
+    The page is a hand-authored catalog of UI patterns and tokens. When a
+    new ``:root`` token is added to ``static/tokens.css``, add a swatch
+    in ``templates/dev_styleguide.html`` with ``data-token="--<name>"``
+    on its wrapper -- the ``templates_test.py`` ratchet cross-checks the
+    set of declared ``:root`` tokens against the set of ``data-token``
+    swatches and fails if either side drifts.
     """
     return JINJA_ENV.get_template("dev_styleguide.html").render()
 
