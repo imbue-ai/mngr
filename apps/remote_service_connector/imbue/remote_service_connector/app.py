@@ -30,12 +30,16 @@ from uuid import UUID
 
 import httpx
 import modal
+import ovh
 import paramiko
 import psycopg2
 from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi import Request
 from fastapi.responses import HTMLResponse
+from ovh.exceptions import APIError as OvhApiError
+from ovh.exceptions import HTTPError as OvhHttpError
+from ovh.exceptions import ResourceNotFoundError
 from pydantic import BaseModel
 from pydantic import Field
 from pydantic import field_validator
@@ -1792,6 +1796,156 @@ def _append_authorized_key(
 
 
 # ---------------------------------------------------------------------------
+# OVH pool-host cleanup
+#
+# Releasing a pool host (and the periodic sweep that mops up interrupted
+# releases) must (a) strip the per-lease OVH IAM tags so the VPS reads as a
+# clean, recyclable host and (b) cancel the VPS in OVH so it stops renewing.
+# We do this with direct OVH REST calls rather than running ``mngr`` here so
+# the connector image stays light; the call surface is intentionally tiny.
+# Keep the tag keys / endpoint defaults in sync with ``libs/mngr_ovh``.
+# ---------------------------------------------------------------------------
+
+# Always kept on a recyclable host so the OVH provider can still discover it.
+OVH_PROVIDER_TAG_KEY = "mngr-provider"
+# Per-lease tags stripped on cleanup (everything except the provider tag).
+_OVH_STALE_TAG_KEYS: tuple[str, ...] = ("minds_env", "mngr-host-id")
+_OVH_DEFAULT_ENDPOINT = "ovh-us"
+
+
+class OvhVpsResource(BaseModel):
+    """A single OVH IAM ``vps`` resource with its tags."""
+
+    urn: str = Field(description="IAM URN like urn:v1:us:resource:vps:<serviceName>")
+    name: str = Field(description="OVH VPS service name")
+    tags: dict[str, str] = Field(default_factory=dict, description="IAM resource tags")
+
+
+class OvhOps(Protocol):
+    """Abstraction over the few OVH REST calls the cleanup path needs."""
+
+    def delete_tag(self, urn: str, key: str) -> None: ...
+    def set_delete_at_expiration(self, service_name: str, delete_at_expiration: bool) -> None: ...
+    def list_vps_resources(self) -> list[OvhVpsResource]: ...
+
+
+class HttpOvhOps:
+    """OvhOps implementation backed by the official ``ovh`` SDK (signed calls)."""
+
+    def __init__(self, application_key: str, application_secret: str, consumer_key: str, endpoint: str) -> None:
+        self.client = ovh.Client(
+            endpoint=endpoint,
+            application_key=application_key,
+            application_secret=application_secret,
+            consumer_key=consumer_key,
+        )
+
+    def delete_tag(self, urn: str, key: str) -> None:
+        # Idempotent: a missing tag means the strip already happened.
+        try:
+            self.client.call("DELETE", f"/v2/iam/resource/{urn}/tag/{key}", None, True)
+        except ResourceNotFoundError:
+            pass
+
+    def set_delete_at_expiration(self, service_name: str, delete_at_expiration: bool) -> None:
+        # Read-modify-write so we don't clobber unrelated serviceInfos fields.
+        info = dict(self.client.call("GET", f"/vps/{service_name}/serviceInfos", None, True) or {})
+        renew = dict(info.get("renew") or {})
+        renew["deleteAtExpiration"] = delete_at_expiration
+        info["renew"] = renew
+        self.client.call("PUT", f"/vps/{service_name}/serviceInfos", info, True)
+
+    def list_vps_resources(self) -> list[OvhVpsResource]:
+        payload = self.client.call("GET", "/v2/iam/resource?resourceType=vps", None, True)
+        if not isinstance(payload, list):
+            return []
+        resources: list[OvhVpsResource] = []
+        for raw in payload:
+            if not isinstance(raw, dict):
+                continue
+            urn = str(raw.get("urn") or "")
+            if not urn:
+                continue
+            tags = {str(k): str(v) for k, v in (raw.get("tags") or {}).items()}
+            resources.append(OvhVpsResource(urn=urn, name=str(raw.get("name") or ""), tags=tags))
+        return resources
+
+
+def ovh_region_code_for_endpoint(endpoint: str) -> str:
+    """Map an OVH endpoint id (``ovh-us``) to the URN region segment (``us``)."""
+    if endpoint.startswith("ovh-"):
+        return endpoint.removeprefix("ovh-")
+    return "us"
+
+
+def _get_ovh_endpoint() -> str:
+    return os.environ.get("OVH_ENDPOINT", _OVH_DEFAULT_ENDPOINT)
+
+
+def vps_urn_for(service_name: str, region_code: str) -> str:
+    """Build the IAM resource URN for an OVH VPS owned by this account."""
+    return f"urn:v1:{region_code}:resource:vps:{service_name}"
+
+
+@functools.cache
+def _get_ovh_ops() -> OvhOps:
+    return HttpOvhOps(
+        application_key=os.environ["OVH_APPLICATION_KEY"],
+        application_secret=os.environ["OVH_APPLICATION_SECRET"],
+        consumer_key=os.environ["OVH_CONSUMER_KEY"],
+        endpoint=_get_ovh_endpoint(),
+    )
+
+
+def clean_up_pool_host_in_ovh(ovh_ops: OvhOps, vps_instance_id: str, region_code: str) -> None:
+    """Strip the per-lease tags (keeping ``mngr-provider``) then cancel the VPS.
+
+    Tags are stripped first (per the cleanup contract) so a mid-crash leaves a
+    recyclable-looking host that the next sweep finishes cancelling. Each call
+    is idempotent, so re-running is safe.
+    """
+    urn = vps_urn_for(vps_instance_id, region_code)
+    for tag_key in _OVH_STALE_TAG_KEYS:
+        ovh_ops.delete_tag(urn, tag_key)
+    ovh_ops.set_delete_at_expiration(vps_instance_id, True)
+
+
+def _delete_pool_host_row(conn: Any, host_db_id: Any) -> None:
+    """Delete a single pool_hosts row by id (committing immediately)."""
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM pool_hosts WHERE id = %s", (str(host_db_id),))
+    conn.commit()
+
+
+def run_pool_host_cleanup_sweep(conn: Any, ovh_ops: OvhOps, region_code: str) -> tuple[int, int]:
+    """Clean up every ``removing`` pool host: strip tags, cancel, delete the row.
+
+    Returns ``(success_count, failure_count)``. Per-host failures are logged
+    and skipped (the row stays ``removing`` for the next run); ``FOR UPDATE
+    SKIP LOCKED`` keeps a concurrent inline release and the sweep from
+    double-processing the same row.
+    """
+    success_count = 0
+    failure_count = 0
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, vps_instance_id FROM pool_hosts WHERE status = 'removing' FOR UPDATE SKIP LOCKED")
+        rows = cur.fetchall()
+        for host_db_id, vps_instance_id in rows:
+            try:
+                if vps_instance_id:
+                    clean_up_pool_host_in_ovh(ovh_ops, vps_instance_id, region_code)
+                else:
+                    logger.warning("Removing pool host %s has no vps_instance_id; skipping OVH cleanup", host_db_id)
+                cur.execute("DELETE FROM pool_hosts WHERE id = %s", (str(host_db_id),))
+                success_count += 1
+            except (OvhApiError, OvhHttpError, psycopg2.Error) as exc:
+                logger.warning("Cleanup failed for removing pool host %s; will retry next run: %s", host_db_id, exc)
+                failure_count += 1
+    conn.commit()
+    return success_count, failure_count
+
+
+# ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
 
@@ -2098,12 +2252,21 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
 
 @web_app.post("/hosts/{host_db_id}/release")
 def release_host(request: Request, host_db_id: UUID) -> dict[str, object]:
-    """Release a leased host back to the pool.
+    """Release a leased host: cancel the OVH VPS, strip its tags, drop the row.
 
-    Idempotent at the HTTP layer: a second release on an already-
-    released host returns 200 ``status: already_released`` rather than
-    404. Ownership is still enforced -- if some other user leased the
-    row, the call returns 403 regardless of status.
+    Runs the full cleanup chain inline (best-effort): flip the row to
+    ``removing`` (the durable intent marker the periodic sweep keys off),
+    strip the per-lease OVH tags, cancel the VPS, then delete the row.
+
+    Returns 200 once the row has reached ``removing`` -- from the caller's
+    view the release succeeded, and any OVH/DB step that fails afterward is
+    finished by the hourly sweep. A failure *before* ``removing`` is committed
+    (lookup, ownership, the status flip) surfaces as an error so the client
+    retries.
+
+    Idempotent at the HTTP layer: a release on a row that is already gone
+    (deleted) or no longer leased returns 200 ``status: already_released``.
+    Ownership is still enforced -- a row leased by another user returns 403.
     """
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
@@ -2116,27 +2279,56 @@ def release_host(request: Request, host_db_id: UUID) -> dict[str, object]:
                 # Python ``UUID`` type that FastAPI parsed from the path
                 # (it raises "can't adapt type 'UUID'").
                 cur.execute(
-                    "SELECT leased_to_user, status FROM pool_hosts WHERE id = %s",
+                    "SELECT leased_to_user, status, vps_instance_id FROM pool_hosts WHERE id = %s",
                     (str(host_db_id),),
                 )
                 row = cur.fetchone()
+                # A missing row means cleanup already finished (idempotent).
                 if row is None:
-                    raise HTTPException(status_code=404, detail="Host not found")
-                leased_to_user, status = row
+                    return ReleaseHostResponse(status="already_released").model_dump()
+                leased_to_user, status, vps_instance_id = row
                 # Ownership check first: we don't want to leak a status
                 # signal to other users via the response code.
                 if leased_to_user != admin.username:
                     raise HTTPException(status_code=403, detail="You do not own this host lease")
-                if status != "leased":
+                # Only a leased or already-removing row is eligible for
+                # cleanup; anything else is treated as already released.
+                if status not in ("leased", "removing"):
                     return ReleaseHostResponse(status="already_released").model_dump()
-                cur.execute(
-                    "UPDATE pool_hosts SET status = 'released', released_at = NOW() WHERE id = %s",
-                    (str(host_db_id),),
-                )
-                conn.commit()
+                if status == "leased":
+                    cur.execute(
+                        "UPDATE pool_hosts SET status = 'removing', released_at = NOW() WHERE id = %s",
+                        (str(host_db_id),),
+                    )
+                    conn.commit()
+            # Past the commit point: the row is durably ``removing`` and the
+            # sweep will finish anything that fails below, so we always
+            # return 200 from here.
+            _finish_releasing_pool_host(conn, host_db_id, vps_instance_id)
         finally:
             conn.close()
         return ReleaseHostResponse(status="released").model_dump()
+
+
+def _finish_releasing_pool_host(conn: Any, host_db_id: Any, vps_instance_id: str) -> None:
+    """Best-effort OVH cleanup + row delete for a host already marked ``removing``.
+
+    Swallows OVH/DB errors (logging a warning) so a flaky OVH call never
+    fails the user-facing release -- the row stays ``removing`` and the
+    hourly sweep retries it.
+    """
+    try:
+        if vps_instance_id:
+            clean_up_pool_host_in_ovh(
+                _get_ovh_ops(), vps_instance_id, ovh_region_code_for_endpoint(_get_ovh_endpoint())
+            )
+        else:
+            logger.warning("Releasing pool host %s has no vps_instance_id; skipping OVH cleanup", host_db_id)
+        _delete_pool_host_row(conn, host_db_id)
+    except (OvhApiError, OvhHttpError, psycopg2.Error) as exc:
+        logger.warning(
+            "Inline cleanup for released pool host %s did not finish; sweep will retry: %s", host_db_id, exc
+        )
 
 
 @web_app.get("/hosts")
@@ -3257,7 +3449,7 @@ _MINDS_DEPLOY_ID = os.environ.get(_MINDS_DEPLOY_ID_ENV_VAR, "MINDS_DEPLOY_ID_UNS
 _MIN_CONTAINERS = int(os.environ.get("MINDS_CONNECTOR_MIN_CONTAINERS", "0"))
 
 image = modal.Image.debian_slim().pip_install(
-    "fastapi[standard]", "httpx", "supertokens-python", "psycopg2-binary", "paramiko"
+    "fastapi[standard]", "httpx", "supertokens-python", "psycopg2-binary", "paramiko", "ovh"
 )
 app = modal.App(name=f"rsc-{_DEPLOY_ENV}", image=image)
 
@@ -3370,17 +3562,27 @@ def _init_supertokens() -> None:
     logger.info("SuperTokens SDK initialized (providers=%d)", len(providers))
 
 
-@app.function(
-    name="api",
-    secrets=[
+def _connector_secrets() -> list[modal.Secret]:
+    """The Modal secrets attached to every connector function (web app + cron).
+
+    Includes ``ovh-<env>`` so the release route and the cleanup cron can make
+    signed OVH calls (tag strip + cancel) at runtime.
+    """
+    return [
         modal.Secret.from_name(f"cloudflare-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
         modal.Secret.from_name(f"supertokens-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
         modal.Secret.from_name(f"neon-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
         modal.Secret.from_name(f"pool-ssh-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
         modal.Secret.from_name(f"litellm-connector-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
         modal.Secret.from_name(f"paid-accounts-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
+        modal.Secret.from_name(f"ovh-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
         modal.Secret.from_dict({"MNGR_DEPLOY_ENV": _DEPLOY_ENV, _MINDS_DEPLOY_ID_ENV_VAR: _MINDS_DEPLOY_ID}),
-    ],
+    ]
+
+
+@app.function(
+    name="api",
+    secrets=_connector_secrets(),
     # Warm-pool size driven by ``_MIN_CONTAINERS`` at the top of this
     # module: defaults to 1 for production / staging (avoid cold-boot
     # penalty on auth / lease / tunnel hits from the desktop client) and
@@ -3393,3 +3595,24 @@ def _init_supertokens() -> None:
 def fastapi_app() -> FastAPI:
     _init_supertokens()
     return web_app
+
+
+@app.function(
+    name="cleanup_removing_pool_hosts",
+    secrets=_connector_secrets(),
+    # Hourly mop-up of any pool host left in ``removing`` by a crashed or
+    # timed-out inline release. The happy path deletes the row inline, so this
+    # is purely a safety net.
+    schedule=modal.Cron("0 * * * *"),
+    timeout=900,
+)
+def cleanup_removing_pool_hosts() -> dict[str, int]:
+    conn = _get_pool_db_connection()
+    try:
+        success_count, failure_count = run_pool_host_cleanup_sweep(
+            conn, _get_ovh_ops(), ovh_region_code_for_endpoint(_get_ovh_endpoint())
+        )
+    finally:
+        conn.close()
+    logger.info("Pool host cleanup sweep done: cleaned=%d failed=%d", success_count, failure_count)
+    return {"cleaned": success_count, "failed": failure_count}

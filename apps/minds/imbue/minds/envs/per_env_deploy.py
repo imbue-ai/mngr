@@ -67,6 +67,9 @@ _PER_ENV_SECRET_SERVICES: Final[tuple[str, ...]] = (
     "neon",
     "pool-ssh",
     "paid-accounts",
+    # OVH AK/AS/CK -- the connector's release route + cleanup cron make signed
+    # OVH calls at runtime to strip per-lease tags and cancel released VPSes.
+    "ovh",
 )
 
 # Placeholder key written when a Vault entry isn't populated yet. Modal

@@ -28,6 +28,7 @@ from imbue.remote_service_connector.app import _authenticate_supertokens
 from imbue.remote_service_connector.app import _default_email_getter
 from imbue.remote_service_connector.app import cf_check
 from imbue.remote_service_connector.app import cf_list_all_pages
+from imbue.remote_service_connector.app import clean_up_pool_host_in_ovh
 from imbue.remote_service_connector.app import derive_s3_secret_access_key
 from imbue.remote_service_connector.app import extract_service_name
 from imbue.remote_service_connector.app import extract_username_from_tunnel_name
@@ -36,10 +37,13 @@ from imbue.remote_service_connector.app import make_bucket_name
 from imbue.remote_service_connector.app import make_hostname
 from imbue.remote_service_connector.app import make_tunnel_name
 from imbue.remote_service_connector.app import require_paid_account
+from imbue.remote_service_connector.app import run_pool_host_cleanup_sweep
 from imbue.remote_service_connector.app import slugify_r2_name
 from imbue.remote_service_connector.app import verify_bucket_ownership
+from imbue.remote_service_connector.app import vps_urn_for
 from imbue.remote_service_connector.app import web_app
 from imbue.remote_service_connector.testing import FakeCloudflareOps
+from imbue.remote_service_connector.testing import FakeOvhOps
 from imbue.remote_service_connector.testing import FakePoolBackend
 from imbue.remote_service_connector.testing import FakeSuperTokensBackend
 from imbue.remote_service_connector.testing import InMemoryKeyStore
@@ -1732,15 +1736,50 @@ def test_lease_host_rejects_invalid_host_name(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_release_host_succeeds_for_owner(monkeypatch: pytest.MonkeyPatch) -> None:
-    """POST /hosts/{id}/release succeeds when the caller owns the lease."""
+    """POST /hosts/{id}/release strips OVH tags, cancels the VPS, and drops the row."""
     client, backend = _make_pool_test_client(monkeypatch)
-    backend.add_leased_host(
+    row = backend.add_leased_host(
         host_id=UUID("00000000-0000-0000-0000-000000000042"), version="v0.1.0", leased_to_user=_ADMIN_STUB_USERNAME
     )
     resp = client.post("/hosts/00000000-0000-0000-0000-000000000042/release", headers=_admin_headers())
     assert resp.status_code == 200
     assert resp.json()["status"] == "released"
-    assert backend.pool_rows[0].status == "released"
+    # Row fully cleaned up (deleted), VPS cancelled, stale tags stripped.
+    assert backend.pool_rows == []
+    assert backend.ovh_ops.cancelled == [row.vps_instance_id]
+    stripped_keys = {key for _urn, key in backend.ovh_ops.deleted_tags}
+    assert stripped_keys == {"minds_env", "mngr-host-id"}
+    # The provider tag is never stripped.
+    assert all(key != "mngr-provider" for _urn, key in backend.ovh_ops.deleted_tags)
+
+
+def test_release_host_idempotent_when_already_removing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A release on a row already in 'removing' re-drives cleanup and returns 200."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    row = backend.add_removing_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000077"),
+        version="v0.1.0",
+        leased_to_user=_ADMIN_STUB_USERNAME,
+    )
+    resp = client.post("/hosts/00000000-0000-0000-0000-000000000077/release", headers=_admin_headers())
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "released"
+    assert backend.pool_rows == []
+    assert backend.ovh_ops.cancelled == [row.vps_instance_id]
+
+
+def test_release_host_returns_200_even_when_ovh_cancel_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If the OVH cancel fails after the row is 'removing', release still returns 200."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.ovh_ops.fail_on_cancel = True
+    backend.add_leased_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000099"), version="v0.1.0", leased_to_user=_ADMIN_STUB_USERNAME
+    )
+    resp = client.post("/hosts/00000000-0000-0000-0000-000000000099/release", headers=_admin_headers())
+    assert resp.status_code == 200
+    # The row stays 'removing' for the cron to retry (not deleted).
+    assert len(backend.pool_rows) == 1
+    assert backend.pool_rows[0].status == "removing"
 
 
 def test_release_host_returns_403_for_non_owner(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1756,11 +1795,12 @@ def test_release_host_returns_403_for_non_owner(monkeypatch: pytest.MonkeyPatch)
     assert backend.pool_rows[0].status == "leased"
 
 
-def test_release_host_returns_404_for_unknown_host(monkeypatch: pytest.MonkeyPatch) -> None:
-    """POST /hosts/{id}/release returns 404 when the host doesn't exist or isn't leased."""
+def test_release_host_unknown_returns_already_released(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /hosts/{id}/release on a missing row returns 200 already_released (idempotent)."""
     client, _backend = _make_pool_test_client(monkeypatch)
     resp = client.post("/hosts/00000000-0000-0000-0000-000000000999/release", headers=_admin_headers())
-    assert resp.status_code == 404
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "already_released"
 
 
 def test_list_hosts_returns_leased_hosts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1790,6 +1830,54 @@ def test_list_hosts_returns_leased_hosts(monkeypatch: pytest.MonkeyPatch) -> Non
     assert len(hosts) == 2
     host_ids = {h["host_db_id"] for h in hosts}
     assert host_ids == {"00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000003"}
+
+
+# -- OVH cleanup tests --
+
+
+def test_clean_up_pool_host_in_ovh_strips_tags_then_cancels() -> None:
+    """The per-host OVH cleanup strips the stale tags and cancels by service name."""
+    ovh_ops = FakeOvhOps()
+    clean_up_pool_host_in_ovh(ovh_ops, "vps-test.vps.ovh.us", "us")
+    expected_urn = vps_urn_for("vps-test.vps.ovh.us", "us")
+    assert ovh_ops.deleted_tags == [(expected_urn, "minds_env"), (expected_urn, "mngr-host-id")]
+    assert ovh_ops.cancelled == ["vps-test.vps.ovh.us"]
+
+
+def test_cleanup_sweep_cleans_only_removing_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sweep cleans every 'removing' row and leaves leased/available rows alone."""
+    _client, backend = _make_pool_test_client(monkeypatch)
+    removing = backend.add_removing_host(host_id=UUID("00000000-0000-0000-0000-0000000000a1"), version="v0.1.0")
+    backend.add_leased_host(
+        host_id=UUID("00000000-0000-0000-0000-0000000000a2"), version="v0.1.0", leased_to_user="someone"
+    )
+    backend.add_available_host(host_id=UUID("00000000-0000-0000-0000-0000000000a3"), version="v0.1.0")
+
+    conn = backend.get_connection()
+    success_count, failure_count = run_pool_host_cleanup_sweep(conn, backend.ovh_ops, "us")
+
+    assert (success_count, failure_count) == (1, 0)
+    # The removing row is gone; the leased + available rows remain.
+    remaining_ids = {row.host_id for row in backend.pool_rows}
+    assert remaining_ids == {
+        UUID("00000000-0000-0000-0000-0000000000a2"),
+        UUID("00000000-0000-0000-0000-0000000000a3"),
+    }
+    assert backend.ovh_ops.cancelled == [removing.vps_instance_id]
+
+
+def test_cleanup_sweep_keeps_row_when_ovh_cancel_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A removing row whose OVH cancel fails is kept for the next run."""
+    _client, backend = _make_pool_test_client(monkeypatch)
+    backend.ovh_ops.fail_on_cancel = True
+    backend.add_removing_host(host_id=UUID("00000000-0000-0000-0000-0000000000b1"), version="v0.1.0")
+
+    conn = backend.get_connection()
+    success_count, failure_count = run_pool_host_cleanup_sweep(conn, backend.ovh_ops, "us")
+
+    assert (success_count, failure_count) == (0, 1)
+    assert len(backend.pool_rows) == 1
+    assert backend.pool_rows[0].status == "removing"
 
 
 # -- PAID_ACCOUNT_SUFFIXES gate tests --
