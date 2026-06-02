@@ -145,14 +145,19 @@ def _write_preserved_meta(dest_root: Path, *, provider_name: str, host_id: str, 
 
 
 def _read_json_file(path: Path) -> dict[str, Any] | None:
-    """Read a JSON object from ``path``; return None if missing or not a JSON object."""
+    """Read a JSON object from ``path``; return None if missing or not a JSON object.
+
+    A corrupt preserved file is a genuine anomaly (we wrote it ourselves), so a
+    malformed JSON body is logged at warning level rather than swallowed.
+    """
     try:
         content = path.read_text()
     except OSError:
         return None
     try:
         parsed = json.loads(content)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        logger.warning("Ignoring corrupt preserved JSON file {}: {}", path, e)
         return None
     return parsed if isinstance(parsed, dict) else None
 
