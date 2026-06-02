@@ -380,7 +380,7 @@ def test_assemble_command_resumes_last_conversation_via_set_dash_dash(antigravit
 
     The stored command is replayed verbatim on every `mngr start`, so the
     resume decision is shell-evaluated at launch: read the last line of the
-    per-agent conversation-ids file, and -- if that conversation's `.pb` store
+    per-agent conversation-ids file, and -- if that conversation's `.db` store
     file still exists -- pass `--conversation "$id"` via `set --` / "$@" (which
     avoids unquoted-substitution word splitting so it works in bash and zsh).
     """
