@@ -36,11 +36,33 @@
 {% extends 'base.html' %}
 {% import '_macros.html' as ui %}
 {% block title %}Permission request: {{ display_name }}{% endblock %}
-{% block body_class %}bg-zinc-50 text-zinc-900 font-sans antialiased page-workspace{% endblock %}
+{# Transparent body so the dialog reads as a modal: the desktop client hosts
+   this page in a transparent full-window overlay view stacked over the
+   workspace, and the dim backdrop below reveals the workspace behind it.
+   Opened directly in a browser (no modal host) it degrades to a dimmed,
+   centered card on the default surface. #}
+{% block body_class %}bg-transparent text-zinc-900 font-sans antialiased{% endblock %}
 {% block body_style %}--workspace-accent: {{ accent }};{% endblock %}
 {% block content %}
-  {% call ui.page_container() %}
-    <h1 class="text-2xl font-semibold text-zinc-900 leading-tight">
+  {# The backdrop only centers the dialog; it never scrolls. The dialog is
+     capped at the viewport height and its inner wrapper scrolls, so an
+     overflowing dialog (e.g. after "Adjust" reveals the editor) shows a
+     scrollbar inside the card rather than down the full width of the app. #}
+  <div id="permissions-backdrop"
+       class="fixed inset-0 bg-black/40 flex items-center justify-center p-6"
+       onclick="onBackdropClick(event)">
+    <div id="permissions-dialog"
+         class="relative w-full max-w-[640px] max-h-full flex flex-col bg-white border border-zinc-200 rounded-2xl shadow-xl overflow-hidden">
+      <button type="button" id="permissions-close-btn" aria-label="Close"
+              onclick="closePermissionDialog()"
+              class="absolute top-3 right-3 z-10 inline-flex items-center justify-center w-8 h-8 rounded-md text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 transition-colors cursor-pointer">
+        <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" class="w-5 h-5">
+          <path fill-rule="evenodd" clip-rule="evenodd"
+                d="M4.22 4.22a.75.75 0 0 1 1.06 0L10 8.94l4.72-4.72a.75.75 0 1 1 1.06 1.06L11.06 10l4.72 4.72a.75.75 0 1 1-1.06 1.06L10 11.06l-4.72 4.72a.75.75 0 0 1-1.06-1.06L8.94 10 4.22 5.28a.75.75 0 0 1 0-1.06Z" />
+        </svg>
+      </button>
+      <div class="overflow-y-auto min-h-0 p-6 sm:p-7">
+    <h1 class="text-2xl font-semibold text-zinc-900 leading-tight pr-8">
       Permission request:
       {# Plain heading text: the display name (a service label like #}
       {# "Slack" or a file path) reads better without a boxed monospace #}
@@ -97,10 +119,33 @@
         <p id="permissions-error-message"></p>
       {% endcall %}
     </div>
-  {% endcall %}
+      </div>
+    </div>
+  </div>
 {% endblock %}
 {% block scripts %}
 <script>
+  // Dismiss the dialog: prefer the desktop client's modal host (which hides
+  // the overlay view and returns the user to their untouched workspace);
+  // fall back to navigating home when opened directly in a browser.
+  window.closePermissionDialog = function () {
+    if (window.minds && window.minds.closeModal) {
+      window.minds.closeModal();
+    } else {
+      window.location.href = "/";
+    }
+  };
+  // Only dismiss when the click lands on the backdrop itself, not inside the
+  // dialog card.
+  window.onBackdropClick = function (event) {
+    if (event.target && event.target.id === "permissions-backdrop") {
+      window.closePermissionDialog();
+    }
+  };
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") window.closePermissionDialog();
+  });
+
   (function () {
     const form = document.getElementById("permissions-form");
     const approveBtn = document.getElementById("permissions-approve-btn");
@@ -142,7 +187,7 @@
         }
         const data = await response.json();
         if (data.outcome === "GRANTED") {
-          window.location.href = "/";
+          window.closePermissionDialog();
           return;
         }
         if (progress) progress.classList.add("hidden");
@@ -183,7 +228,7 @@
         credentials: "same-origin",
         keepalive: true,
       }).catch(function () {});
-      window.location.href = "/";
+      window.closePermissionDialog();
     };
   })();
 </script>
