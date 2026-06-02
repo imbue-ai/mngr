@@ -44,6 +44,9 @@ class AgentDisplayInfo(FrozenModel):
     create_time: datetime | None = Field(
         default=None, description="When the agent was created (UTC), if known from discovery"
     )
+    provider_name: str | None = Field(
+        default=None, description="Provider instance the agent's host runs on, if known from discovery"
+    )
 
 
 class ServiceLogParseError(ValueError):
@@ -653,6 +656,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
                         agent_name=str(agent.agent_name),
                         host_id=str(agent.host_id),
                         create_time=agent.create_time,
+                        provider_name=str(agent.provider_name),
                     )
             return None
 

@@ -2003,6 +2003,7 @@ def _build_mngr_host_state_argv(
     mngr_binary: str,
     agent_id: AgentId,
     services_agent_id: AgentId | None,
+    provider_name: str | None,
 ) -> list[str]:
     """Build the argv for the layer-2 probe: list agents to read each host's lifecycle state.
 
@@ -2012,16 +2013,19 @@ def _build_mngr_host_state_argv(
     is a pure read -- it never starts a stopped container.
 
     Scopes the listing to just this workspace's chat agent + system-services
-    agent via a CEL ``id == ...`` include, for a smaller payload.
-    ``--on-error continue`` keeps the listing from hard-failing when one
-    provider couldn't be reached, so the surviving providers still emit their
-    agents.
+    agent via a CEL ``id == ...`` include, for a smaller payload. When the
+    workspace's provider is known it also passes ``--provider`` so discovery
+    only queries that provider: ``--provider`` is a discovery fan-out control
+    (unlike the post-discovery CEL ``--include``), so an unrelated provider
+    being unreachable can no longer make this listing exit nonzero and blank
+    out this workspace's own host state. ``--on-error continue`` still keeps a
+    per-host failure within the scoped provider from hard-failing the listing.
     """
     if services_agent_id is None:
         include = f'id == "{agent_id}"'
     else:
         include = f'id == "{agent_id}" || id == "{services_agent_id}"'
-    return [
+    argv = [
         mngr_binary,
         "list",
         "--format",
@@ -2032,6 +2036,9 @@ def _build_mngr_host_state_argv(
         "--on-error",
         "continue",
     ]
+    if provider_name is not None:
+        argv += ["--provider", provider_name]
+    return argv
 
 
 def _sanitize_recovery_return_to(raw: str) -> str:
@@ -2135,7 +2142,7 @@ def _handle_recovery_page(
 
 
 def _run_mngr(concurrency_group: ConcurrencyGroup, argv: list[str], env: dict[str, str]) -> str:
-    """Run an ``mngr`` subprocess to completion and return its stdout.
+    """Run an ``mngr`` subprocess to completion and return its stdout on a clean exit.
 
     Raises ``MngrCommandError`` for every non-clean outcome, mirroring how the
     rest of minds shells out to mngr (``run_mngr_create``, the destroy cleanup):
@@ -2150,10 +2157,11 @@ def _run_mngr(concurrency_group: ConcurrencyGroup, argv: list[str], env: dict[st
       failures (``ProcessSetupError``, ``StrandTimedOutError``,
       ``EnvironmentStoppedError``, ``InvalidConcurrencyGroupStateError``).
 
-    For the first two the process ran, so its partial ``stdout`` is attached to
-    the error (``MngrCommandError.stdout``) for callers that tolerate partial
-    output (e.g. ``mngr list --on-error continue``). A launch failure produces
-    no output, so ``stdout`` stays empty. On a clean exit the stdout is returned.
+    A non-clean exit yields no usable stdout to the caller -- the only consumer
+    that tolerated partial output (the host-health ``mngr list`` probe) now
+    scopes its listing to the workspace's own provider, so a non-clean exit
+    there reflects a problem with *that* provider/host rather than an unrelated
+    sibling, and the partial listing is not worth trusting.
     """
     try:
         finished = concurrency_group.run_process_to_completion(
@@ -2164,12 +2172,12 @@ def _run_mngr(concurrency_group: ConcurrencyGroup, argv: list[str], env: dict[st
         )
     except (OSError, ConcurrencyGroupError) as exc:
         # The command never ran (a fork/exec failure, or a concurrency-group
-        # setup/strand/shutdown failure), so there is no captured output.
+        # setup/strand/shutdown failure).
         raise MngrCommandError(str(exc)) from exc
     if finished.is_timed_out:
-        raise MngrCommandError(f"timed out after {int(_RESTART_COMMAND_TIMEOUT_SECONDS)}s", stdout=finished.stdout)
+        raise MngrCommandError(f"timed out after {int(_RESTART_COMMAND_TIMEOUT_SECONDS)}s")
     if finished.returncode != 0:
-        raise MngrCommandError(f"exited {finished.returncode}: {finished.stderr.strip()}", stdout=finished.stdout)
+        raise MngrCommandError(f"exited {finished.returncode}: {finished.stderr.strip()}")
     return finished.stdout
 
 
@@ -2411,20 +2419,22 @@ def _run_host_health_probe(
     mngr_binary: str = request.app.state.mngr_binary
     backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
     services_agent_id = backend_resolver.get_system_services_agent_id(agent_id)
-    list_argv = _build_mngr_host_state_argv(mngr_binary, agent_id, services_agent_id)
+    display_info = backend_resolver.get_agent_display_info(agent_id)
+    provider_name = display_info.provider_name if display_info is not None else None
+    list_argv = _build_mngr_host_state_argv(mngr_binary, agent_id, services_agent_id, provider_name)
     list_command = shlex.join(list_argv)
     list_error: str | None = None
+    list_stdout = ""
     try:
         list_stdout = _run_mngr(concurrency_group, list_argv, env)
     except MngrCommandError as exc:
-        # ``--on-error continue`` means the listing can return useful JSON for
-        # this workspace's own host even when it does not exit cleanly (an
-        # unrelated provider was unreachable), so we keep whatever stdout the
-        # command captured. A launch / group failure leaves it empty. Either
-        # way the reason is logged below and threaded into the response so the
-        # recovery page can surface it on the host-state rows when our own row
-        # is missing.
-        list_stdout = exc.stdout
+        # The listing is scoped to this workspace's own provider (see
+        # _build_mngr_host_state_argv), so a non-clean exit reflects a problem
+        # with *this* provider/host rather than an unrelated sibling, and there
+        # is no trustworthy listing to keep. Record the reason and continue with
+        # an empty listing; it is logged here and threaded into the response so
+        # the recovery page can surface it on the host-state rows in place of a
+        # bare "no row".
         list_error = str(exc)
         logger.warning("`mngr list` for host-health probe of {} did not exit cleanly: {}", agent_id, list_error)
     list_json: str | None = list_stdout or None

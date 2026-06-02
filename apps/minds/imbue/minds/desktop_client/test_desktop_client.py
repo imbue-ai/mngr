@@ -1595,29 +1595,45 @@ def test_build_mngr_start_argv_targets_the_agent() -> None:
 
 def test_build_mngr_host_state_argv_scopes_to_workspace_and_continues_on_error() -> None:
     """The host-state probe filters to just this workspace's agents and
-    tolerates per-provider failures so a broken sibling host doesn't blank
+    tolerates per-host failures so a broken sibling host doesn't blank
     out the diagnostic."""
     agent = AgentId.generate()
     services = AgentId.generate()
-    argv = _build_mngr_host_state_argv("/usr/local/bin/mngr", agent, services)
+    argv = _build_mngr_host_state_argv("/usr/local/bin/mngr", agent, services, None)
     assert argv[:5] == ["/usr/local/bin/mngr", "list", "--format", "json", "--quiet"]
     # CEL include matches both the chat agent and the system-services agent.
     assert "--include" in argv
     include_value = argv[argv.index("--include") + 1]
     assert f'id == "{agent}"' in include_value
     assert f'id == "{services}"' in include_value
-    # --on-error continue is required so one broken provider does not abort
-    # the listing for the rest.
+    # --on-error continue is required so one broken host does not abort the
+    # listing for the rest.
     assert argv[argv.index("--on-error") + 1] == "continue"
+    # No provider known -> discovery is not scoped to a provider.
+    assert "--provider" not in argv
 
 
 def test_build_mngr_host_state_argv_omits_services_id_when_unresolved() -> None:
     """When the services-agent id is unknown, the filter degenerates to just
     the chat agent's id -- the listing is still scoped, just with one term."""
     agent = AgentId.generate()
-    argv = _build_mngr_host_state_argv("/usr/local/bin/mngr", agent, None)
+    argv = _build_mngr_host_state_argv("/usr/local/bin/mngr", agent, None, None)
     include_value = argv[argv.index("--include") + 1]
     assert include_value == f'id == "{agent}"'
+
+
+def test_build_mngr_host_state_argv_scopes_discovery_to_provider_when_known() -> None:
+    """When the workspace's provider is known, the probe passes ``--provider`` so
+    discovery only queries that provider.
+
+    ``--provider`` is a discovery fan-out control (unlike the post-discovery CEL
+    ``--include``), so an unrelated provider being unreachable can no longer make
+    this listing exit nonzero and blank out the workspace's own host state.
+    """
+    agent = AgentId.generate()
+    services = AgentId.generate()
+    argv = _build_mngr_host_state_argv("/usr/local/bin/mngr", agent, services, "docker")
+    assert argv[argv.index("--provider") + 1] == "docker"
 
 
 def _classify_host_health_compat(list_json: str | None, agent_id: AgentId) -> dict[str, bool]:

@@ -293,12 +293,22 @@ Tiered system-interface restart for the minds recovery flow.
   the host-health probe now raises a single ``MngrCommandError`` for every
   non-clean outcome -- a timeout, a nonzero exit, or a failure to launch at all
   (``OSError`` on fork/exec, ``ConcurrencyGroupError`` on group setup) -- and
-  returns the captured stdout on a clean exit. This matches how the rest of
-  minds shells out to ``mngr`` (``run_mngr_create``, the destroy cleanup):
-  each call site catches the one domain error instead of a mix of a status
-  field and a ``(OSError, ConcurrencyGroupError)`` tuple. The partial stdout of
-  a process that ran but did not exit cleanly is carried on the error
-  (``MngrCommandError.stdout``), so the ``mngr list --on-error continue`` output
-  is still used by the host-health probe. A restart step still marks the
-  workspace "Restart failed" with the reason; the probe still threads it into
-  its response. No user-visible behavior change.
+  returns stdout on a clean exit. This matches how the rest of minds shells out
+  to ``mngr`` (``run_mngr_create``, the destroy cleanup): each call site catches
+  the one domain error instead of a mix of a status field and a
+  ``(OSError, ConcurrencyGroupError)`` tuple. A restart step still marks the
+  workspace "Restart failed" with the reason; the host-health probe still
+  threads it into its response.
+- The host-health ``mngr list`` probe now scopes discovery to the workspace's
+  own provider via ``--provider`` (a discovery fan-out control, unlike the
+  post-discovery CEL ``--include`` it already used). An unrelated provider being
+  unreachable can therefore no longer make this listing exit nonzero, so the
+  probe no longer needs to salvage partial output on a non-clean exit -- a
+  non-clean exit now reflects a problem with the workspace's own provider/host.
+  The one remaining gap is narrow and accepted: if a *sibling host on the same
+  provider* fails discovery while this workspace needs recovery, the listing
+  still exits nonzero, the host-state rows show the failure reason, and the
+  recovery page falls back to a manual "Restart workspace" click instead of
+  auto-dispatching. This is rare (it needs a concurrent same-provider host
+  failure) and never misclassifies -- it only forgoes the one-click-free
+  auto-dispatch in that window.
