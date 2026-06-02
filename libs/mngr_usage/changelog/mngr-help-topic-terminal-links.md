@@ -1,1 +1,0 @@
-The `usage_cron_recipes` help topic's `DocFile` now carries a GitHub `source_url`, so when `mngr help usage_cron_recipes` is shown in an interactive terminal, its relative links (e.g. `[Waiting on a predicate](../README.md#waiting-on-a-predicate)`) are rewritten to clickable absolute GitHub URLs instead of dead relative targets.
