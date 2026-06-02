@@ -272,7 +272,7 @@ class FileSharingGrantHandler(RequestEventHandler):
 
         Without this the resolved card stays visible in the requests
         panel until the next desktop-client restart. Also wakes the
-        chrome SSE so the new ``request_count`` is pushed without
+        chrome SSE so the new ``requests`` payload is pushed without
         waiting for the 30s heartbeat.
         """
         inbox: RequestInbox | None = request.app.state.request_inbox

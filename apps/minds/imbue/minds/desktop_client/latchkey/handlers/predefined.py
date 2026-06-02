@@ -714,7 +714,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         is just so the requests panel doesn't show the resolved request as
         still pending until the next desktop-client restart.
 
-        Also wakes the chrome SSE so the new ``request_count`` is pushed
+        Also wakes the chrome SSE so the new ``requests`` payload is pushed
         right away -- otherwise the panel would keep showing the resolved
         card for up to 30s while the SSE poll waits for its next tick.
         """
