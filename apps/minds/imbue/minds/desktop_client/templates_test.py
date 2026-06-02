@@ -386,6 +386,33 @@ def test_render_recovery_page_restart_failed_also_runs_probe() -> None:
     assert 'id="recovery-debug-details"' in html
 
 
+def test_render_recovery_page_honors_misconfigured_before_autodispatch_short_circuit() -> None:
+    """The workspace_misconfigured tier must be honored on the restart_failed path.
+
+    A workspace whose services.toml lacks [services.system_interface] lands in
+    restart_failed once its undeclared interface fails to come back up, so the
+    page runs runProbe(false). If the no-auto-dispatch short-circuit
+    (``if (!autoDispatch) renderUnresponsive()``) ran before the
+    workspace_misconfigured check, that workspace would render a misleading
+    "unresponsive" page even though no restart can recover it. Assert the
+    misconfigured branch precedes the short-circuit inside runProbe so the
+    restart_failed path still reaches renderMisconfigured().
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="restart_failed",
+        initial_error="boom",
+    )
+    probe_body = html[html.index("function runProbe(") :]
+    misconfigured_pos = probe_body.index("'workspace_misconfigured'")
+    short_circuit_pos = probe_body.index("if (!autoDispatch)")
+    assert misconfigured_pos < short_circuit_pos, (
+        "the workspace_misconfigured branch must precede the !autoDispatch short-circuit "
+        "so a misconfigured workspace on the restart_failed path renders misconfigured"
+    )
+
+
 def test_render_recovery_page_promotes_button_above_troubleshooting() -> None:
     """The restart button is the page's primary action, so it must appear
     before the de-emphasized troubleshooting block -- not sandwiched between
