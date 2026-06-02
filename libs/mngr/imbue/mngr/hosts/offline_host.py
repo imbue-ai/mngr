@@ -26,6 +26,7 @@ from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.host import HostFileReadInterface
 from imbue.mngr.interfaces.host import HostFileWriteInterface
 from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import AgentId
@@ -519,6 +520,49 @@ class OfflineHostWithVolume(OfflineHost, HostFileReadInterface, HostFileWriteInt
             if recursive and entry.file_type == VolumeFileType.DIRECTORY:
                 results.extend(self._list_volume_dir(volume, entry.path, recursive))
         return results
+
+
+def try_resolve_readable_host(
+    provider: ProviderInstanceInterface,
+    host_id: HostId,
+) -> HostFileReadInterface | None:
+    """Resolve a readable handle for ``host_id``, or ``None`` if none is available.
+
+    Prefers a live online host (so callers can execute commands / tail locally and
+    remote reads use SSH). When the host is not online but its persisted volume is
+    reachable, returns a volume-backed offline host (a
+    :class:`~imbue.mngr.interfaces.host.HostFileReadInterface`) so historical files
+    can still be read off the volume. Returns ``None`` when neither is available.
+
+    This is the single source of truth for the online-or-volume-backed-offline
+    resolution rule shared by the events reader and ``mngr file`` target resolution;
+    each caller adapts the ``None`` case to its own error/skip behavior. ``MngrError``
+    from either ``get_host`` or ``to_offline_host`` is treated as "not available"
+    (logged at trace), not propagated.
+    """
+    try:
+        candidate: HostInterface | None = provider.get_host(host_id)
+    except MngrError as e:
+        logger.trace("Host {} is not available via get_host: {}", host_id, e)
+        candidate = None
+
+    if isinstance(candidate, OnlineHostInterface):
+        return candidate
+
+    if provider.get_volume_for_host(host_id) is None:
+        return None
+
+    if isinstance(candidate, HostFileReadInterface):
+        return candidate
+
+    try:
+        offline = provider.to_offline_host(host_id)
+    except MngrError as e:
+        logger.trace("Host {} has a volume but no offline handle: {}", host_id, e)
+        return None
+    if isinstance(offline, HostFileReadInterface):
+        return offline
+    return None
 
 
 def make_readable_offline_host(host: OfflineHost) -> OfflineHost:

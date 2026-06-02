@@ -31,9 +31,11 @@ from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MalformedJsonlLineError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.hosts.offline_host import try_resolve_readable_host
 from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.host import HostFileReadInterface
+from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
@@ -242,35 +244,20 @@ def _try_get_readable_host_for_events(
     reads use SSH). When the host is not online but its persisted volume is
     reachable, returns a readable offline host so historical events can still
     be read from the volume. Returns ``(None, None)`` when neither is available.
+
+    Delegates the online-or-volume-backed-offline resolution rule to
+    :func:`try_resolve_readable_host`; here we only compute the absolute events
+    path under the resolved host's ``host_dir``.
     """
-    host_interface: HostFileReadInterface | None = None
-    try:
-        candidate = provider.get_host(host_id)
-    except MngrError as e:
-        logger.trace("Host {} is not available via get_host: {}", host_id, e)
-        candidate = None
-
-    if isinstance(candidate, OnlineHostInterface):
-        host_interface = candidate
-    elif provider.get_volume_for_host(host_id) is not None:
-        if isinstance(candidate, HostFileReadInterface):
-            host_interface = candidate
-        else:
-            try:
-                offline = provider.to_offline_host(host_id)
-            except MngrError as e:
-                logger.trace("Host {} has a volume but no offline handle: {}", host_id, e)
-                offline = None
-            if isinstance(offline, HostFileReadInterface):
-                host_interface = offline
-    else:
-        # Neither an online host nor a reachable volume: there is no way to read
-        # this host's events, so leave host_interface as None for the caller.
-        host_interface = None
-
+    host_interface = try_resolve_readable_host(provider, host_id)
     if host_interface is None:
         return None, None
 
+    # Every readable host resolved here is also a HostInterface (an online host
+    # or a volume-backed offline host), so it exposes a real host_dir under which
+    # the events path lives.
+    if not isinstance(host_interface, HostInterface):
+        raise MngrError(f"Resolved readable host for {host_id} does not expose a host_dir")
     events_path = host_interface.host_dir / str(events_subpath)
     return host_interface, events_path
 

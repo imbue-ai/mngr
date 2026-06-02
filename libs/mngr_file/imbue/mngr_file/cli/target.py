@@ -16,6 +16,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import get_agent_state_dir_path
+from imbue.mngr.hosts.offline_host import try_resolve_readable_host
 from imbue.mngr.interfaces.host import HostFileReadInterface
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -134,29 +135,12 @@ def _get_readable_host(
     is stopped, a volume-backed readable host is returned (provided the provider
     surfaces a volume for the host); otherwise a clear error is raised.
     """
-    try:
-        host_interface: HostInterface | None = provider.get_host(host_id)
-    except MngrError as err:
-        logger.trace("Host {} is not available: {}", host_id, err)
-        host_interface = None
-
-    if isinstance(host_interface, OnlineHostInterface):
-        return host_interface
-
-    # Offline: a volume must be available to read the host's persisted files.
-    if provider.get_volume_for_host(host_id) is None:
+    host = try_resolve_readable_host(provider, host_id)
+    if host is None:
         raise MngrError(
             f"{target_display_name} is offline and the provider does not support volume access. Cannot access files."
         )
-
-    if isinstance(host_interface, HostFileReadInterface):
-        return host_interface
-    offline_host = provider.to_offline_host(host_id)
-    if not isinstance(offline_host, HostFileReadInterface):
-        raise MngrError(
-            f"{target_display_name} is offline and the provider does not support volume access. Cannot access files."
-        )
-    return offline_host
+    return host
 
 
 def _host_dir_of(host: HostFileReadInterface) -> Path:
