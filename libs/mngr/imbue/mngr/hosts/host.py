@@ -2131,8 +2131,17 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
             # Resolve the remote home once: bulk uploads stage files under their
             # absolute remote paths, and relative destinations resolve against it.
-            # (Unused for local hosts, which write directly.)
-            remote_home = "" if self.is_local else self.execute_idempotent_command("echo $HOME").stdout.strip()
+            # (Unused for local hosts, which write directly.) Fail loudly if the remote
+            # home cannot be determined -- an empty home would silently misplace every
+            # `~/...` or relative upload at the filesystem root instead of under $HOME.
+            remote_home = ""
+            if not self.is_local:
+                home_result = self.execute_idempotent_command("echo $HOME")
+                if not home_result.success:
+                    raise MngrError(f"Failed to determine remote home directory: {home_result.stderr}")
+                remote_home = home_result.stdout.strip()
+                if not remote_home:
+                    raise MngrError("Failed to determine remote home directory: $HOME resolved to an empty string")
 
             # Validate required files exist and execute transfers
             agent_file_transfer_thread = concurrency_group.start_new_thread(
