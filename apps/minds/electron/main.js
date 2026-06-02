@@ -36,10 +36,18 @@ let hasCompletedInitialStart = false;
 const latestChromeState = {
   workspaces: null, // most recent workspaces payload
   authStatus: null, // most recent auth_status payload
-  requestCount: 0,  // most recent request_count value
+  requestCount: 0,  // most recent pending-request count
+  requestIds: [],   // most recent ordered list of pending request ids
 };
 
 const chromeSseAbortRef = { current: null };
+// Holds the in-flight connection's ``finish`` resolver so a forced reconnect
+// (e.g. after the auth cookie is synced) can resolve the awaited promise
+// directly. Electron's ``ClientRequest`` does not reliably emit a terminal
+// event on ``abort()``, and its ``'close'`` event fires eagerly on a healthy
+// streaming response (causing a reconnect storm), so neither can be relied on
+// to drive reconnection.
+const chromeSseFinishRef = { current: null };
 let chromeSseReconnectTick = 0; // bumped to interrupt the current wait
 
 function getSessionStatePath() {
@@ -536,7 +544,7 @@ function closeRequestsPanel(bundle) {
   updateBundleBounds(bundle);
 }
 
-// Coalesce rapid SSE-triggered reloads. A burst of request_count events
+// Coalesce rapid SSE-triggered reloads. A burst of requests events
 // (e.g. count 1 -> 2 -> 3 within a few ms) would otherwise restart the
 // panel load multiple times in flight, potentially preventing it from
 // ever settling on a rendered state, and multiplying backend HTTP load
@@ -865,28 +873,36 @@ function handleChromeSSEEvent(evt) {
     updateAllOsTitles();
   } else if (evt.type === 'auth_status') {
     latestChromeState.authStatus = evt;
-  } else if (evt.type === 'request_count') {
-    const prevCount = latestChromeState.requestCount;
+  } else if (evt.type === 'requests') {
+    const prevIds = latestChromeState.requestIds || [];
+    const newIds = Array.isArray(evt.request_ids) ? evt.request_ids.map(String) : [];
     const newCount = evt.count || 0;
-    // Backend defaults the setting to true, but treat a missing field the
-    // same way so older backends do not regress to no-auto-open.
+    // Backend defaults auto_open to true; treat a missing field the same way.
     const autoOpen = evt.auto_open !== false;
+    // Diff the pending *set* (ordered ids), not the count, so a swap at
+    // constant size still refreshes the panel. Auto-open keys off a
+    // genuinely new id appearing (not a count increase, which is blind to
+    // replacements), so approving/denying never reopens a panel the user
+    // closed.
+    const prevSet = new Set(prevIds);
+    const hasNewRequest = newIds.some((id) => !prevSet.has(id));
+    const idsChanged = newIds.length !== prevIds.length || hasNewRequest;
+    latestChromeState.requestIds = newIds;
     latestChromeState.requestCount = newCount;
-    // Auto-open only when the count actually went UP. Going down (e.g.
-    // user just approved/denied) should never reopen a panel the user
-    // closed, and equal counts mean nothing inbox-relevant changed.
-    const shouldAutoOpen = autoOpen && newCount > prevCount;
-    // Requests panel HTML is static at load time. Refresh visible panels
-    // so their cards reflect the new pending list, OR open hidden ones
-    // when shouldAutoOpen is set. ``openRequestsPanel`` reloads the panel
-    // itself for the visible-bundle case, so we never need to schedule a
-    // reload on top of an open call. Debounced per-bundle so a burst of
-    // count changes coalesces into one reload per panel.
-    for (const b of bundles) {
-      if (shouldAutoOpen && !b.requestsPanelVisible) {
-        openRequestsPanel(b);
-      } else {
-        scheduleRequestsPanelReload(b);
+    const shouldAutoOpen = autoOpen && hasNewRequest;
+    // Requests panel HTML is static at load time. Refresh visible panels so
+    // their cards reflect the new pending set whenever it changed, OR open
+    // hidden ones when shouldAutoOpen is set. ``openRequestsPanel`` reloads
+    // the panel itself for the visible-bundle case, so we never need to
+    // schedule a reload on top of an open call. Debounced per-bundle so a
+    // burst of changes coalesces into one reload per panel.
+    if (idsChanged || shouldAutoOpen) {
+      for (const b of bundles) {
+        if (shouldAutoOpen && !b.requestsPanelVisible) {
+          openRequestsPanel(b);
+        } else {
+          scheduleRequestsPanelReload(b);
+        }
       }
     }
   }
@@ -914,7 +930,11 @@ function primeViewWithCachedChromeState(wc) {
   if (latestChromeState.authStatus) {
     wc.send('chrome-event', latestChromeState.authStatus);
   }
-  wc.send('chrome-event', { type: 'request_count', count: latestChromeState.requestCount });
+  wc.send('chrome-event', {
+    type: 'requests',
+    count: latestChromeState.requestCount,
+    request_ids: latestChromeState.requestIds,
+  });
 }
 
 function kickChromeSSEReconnect() {
@@ -923,6 +943,11 @@ function kickChromeSSEReconnect() {
   if (req) {
     try { req.abort(); } catch { /* noop */ }
   }
+  // ``req.abort()`` does not reliably emit a terminal event on Electron's
+  // ClientRequest, so resolve the in-flight connection promise directly to
+  // guarantee the loop reconnects rather than wedging on an unresolved await.
+  const finish = chromeSseFinishRef.current;
+  if (finish) finish();
 }
 
 async function runChromeSSELoop() {
@@ -939,6 +964,7 @@ async function runChromeSSELoop() {
         if (finished) return;
         finished = true;
         chromeSseAbortRef.current = null;
+        chromeSseFinishRef.current = null;
         resolve();
       };
       let req;
@@ -953,12 +979,13 @@ async function runChromeSSELoop() {
         return;
       }
       chromeSseAbortRef.current = req;
+      chromeSseFinishRef.current = finish;
       req.setHeader('Accept', 'text/event-stream');
       req.on('response', (response) => {
         if (response.statusCode !== 200) {
           response.on('data', () => {});
-          response.on('end', finish);
-          response.on('error', finish);
+          response.on('end', () => finish());
+          response.on('error', () => finish());
           return;
         }
         let buffer = '';
@@ -976,10 +1003,11 @@ async function runChromeSSELoop() {
             } catch { /* ignore bad frames */ }
           }
         });
-        response.on('end', finish);
-        response.on('error', finish);
+        response.on('end', () => finish());
+        response.on('error', () => finish());
+        response.on('aborted', () => finish());
       });
-      req.on('error', finish);
+      req.on('error', () => finish());
       req.end();
     });
     // Brief backoff before reconnecting.
