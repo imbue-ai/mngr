@@ -40,6 +40,7 @@ from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ModalAuthError
 from imbue.mngr.errors import SnapshotNotFoundError
+from imbue.mngr.hosts.common import build_user_ssh_command
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
 from imbue.mngr.hosts.common import determine_lifecycle_state
@@ -2596,7 +2597,7 @@ log "=== Shutdown script completed ==="
                 host=hostname,
                 port=port,
                 key_path=key_path,
-                command=f"ssh -i {key_path} -p {port} {user}@{hostname}",
+                command=build_user_ssh_command(user, hostname, port, key_path),
             )
 
         # Boot time and uptime from SSH-collected data

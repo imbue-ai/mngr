@@ -35,7 +35,7 @@ def get_ssh_known_hosts_file(host: OnlineHostInterface) -> Path | None:
 
 @pure
 def build_ssh_transport_command(
-    key_path: Path,
+    key_path: Path | None,
     port: int,
     known_hosts_file: Path | None,
 ) -> str:
@@ -45,14 +45,35 @@ def build_ssh_transport_command(
     present in the known_hosts file. When known_hosts_file is provided, that file is
     used via UserKnownHostsFile. When None, the system default (~/.ssh/known_hosts)
     is used without setting UserKnownHostsFile.
+
+    When key_path is None, the ``-i`` flag is omitted entirely so ssh falls back
+    to the user's ssh-agent / ~/.ssh/config, rather than passing an empty key path.
     """
-    parts = ["ssh", "-i", shlex.quote(str(key_path)), "-p", str(port)]
+    parts = ["ssh"]
+    if key_path is not None:
+        parts.extend(["-i", shlex.quote(str(key_path))])
+    parts.extend(["-p", str(port)])
     if known_hosts_file is not None:
         parts.extend(
             ["-o", f"UserKnownHostsFile={shlex.quote(str(known_hosts_file))}", "-o", "StrictHostKeyChecking=yes"]
         )
     else:
         parts.extend(["-o", "StrictHostKeyChecking=yes"])
+    return " ".join(parts)
+
+
+@pure
+def build_user_ssh_command(user: str, hostname: str, port: int, key_path: Path | None) -> str:
+    """Build the human-readable ``ssh`` command shown to users for connecting to a host.
+
+    Omits ``-i`` when key_path is None (no mngr-owned key; ssh uses the user's
+    ssh-agent / ~/.ssh/config), so the displayed command never contains an empty
+    ``-i ''`` argument.
+    """
+    parts = ["ssh"]
+    if key_path is not None:
+        parts.extend(["-i", str(key_path)])
+    parts.extend(["-p", str(port), f"{user}@{hostname}"])
     return " ".join(parts)
 
 

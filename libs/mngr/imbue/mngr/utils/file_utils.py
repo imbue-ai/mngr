@@ -27,7 +27,17 @@ def read_json_dict(path: Path) -> dict[str, Any]:
     except json.JSONDecodeError as e:
         logger.warning("Could not parse {} as JSON ({}); treating as empty.", path, e)
         return {}
-    return loaded if isinstance(loaded, dict) else {}
+    if not isinstance(loaded, dict):
+        # Structurally valid JSON, but not a top-level object: a user mistake
+        # (e.g. a top-level array) that we treat as "no usable config" -- warn
+        # so it is at least visible rather than silently masked as absent.
+        logger.warning(
+            "Expected a JSON object at top level of {} but got {}; treating as empty.",
+            path,
+            type(loaded).__name__,
+        )
+        return {}
+    return loaded
 
 
 def atomic_write(path: Path, content: str) -> None:

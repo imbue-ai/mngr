@@ -813,7 +813,10 @@ class OuterHost(OuterHostInterface):
             try:
                 mtime = path.stat().st_mtime
                 return datetime.fromtimestamp(mtime, tz=timezone.utc)
-            except (FileNotFoundError, OSError):
+            except FileNotFoundError:
+                # A missing file legitimately has no mtime. Other OSErrors
+                # (permission denied, I/O errors) are real problems and must
+                # surface rather than be silently reported as "no file".
                 return None
         result = self.execute_idempotent_command(
             f"stat -c %Y '{str(path)}' 2>/dev/null || stat -f %m '{str(path)}' 2>/dev/null"
@@ -830,8 +833,14 @@ class OuterHost(OuterHostInterface):
         """Return the modification time of a file, or None if the file doesn't exist."""
         return self._get_file_mtime(path)
 
-    def get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
-        """Get SSH connection info for this host if it's remote."""
+    def get_ssh_connection_info(self) -> tuple[str, str, int, Path | None] | None:
+        """Get SSH connection info for this host if it's remote.
+
+        The key path is None when the host has no mngr-owned SSH key (e.g. a
+        user-configured ssh provider host that relies on the user's ssh-agent /
+        ~/.ssh/config). Callers must omit the ``-i`` flag in that case rather
+        than passing an empty path.
+        """
         if self.is_local:
             return None
 
@@ -840,7 +849,6 @@ class OuterHost(OuterHostInterface):
         hostname = self.connector.host.name
         port = host_data.get("ssh_port", 22)
         key_path_str = host_data.get("ssh_key", "")
-        if not key_path_str:
-            return (user, hostname, port, Path(""))
+        key_path = Path(key_path_str) if key_path_str else None
 
-        return (user, hostname, port, Path(key_path_str))
+        return (user, hostname, port, key_path)

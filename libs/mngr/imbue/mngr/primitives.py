@@ -514,7 +514,11 @@ class SSHInfo(FrozenModel):
     user: str = Field(description="SSH username")
     host: str = Field(description="SSH hostname")
     port: int = Field(description="SSH port")
-    key_path: Path = Field(description="Path to SSH private key")
+    key_path: Path | None = Field(
+        default=None,
+        description="Path to SSH private key, or None when the host has no mngr-owned key "
+        "(ssh falls back to the user's ssh-agent / ~/.ssh/config)",
+    )
     command: str = Field(description="Full SSH command to connect")
 
 

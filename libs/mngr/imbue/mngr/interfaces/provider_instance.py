@@ -23,6 +23,7 @@ from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.hosts.common import build_user_ssh_command
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import HostDetails
@@ -97,7 +98,7 @@ def _build_host_details_from_host(
                 host=hostname,
                 port=port,
                 key_path=key_path,
-                command=f"ssh -i {key_path} -p {port} {user}@{hostname}",
+                command=build_user_ssh_command(user, hostname, port, key_path),
             )
         boot_time = host.get_boot_time()
         uptime_seconds = host.get_uptime_seconds()

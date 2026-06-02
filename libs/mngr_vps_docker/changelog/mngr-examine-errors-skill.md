@@ -1,0 +1,1 @@
+Adapted to the mngr SSH-key type change: the SSH key path is now `Path | None`. Since this provider always owns a key, a fail-fast guard was added so a missing key raises rather than silently producing `ssh -i None`. No user-visible behavior change in the normal case.

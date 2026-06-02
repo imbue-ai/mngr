@@ -4,6 +4,7 @@ import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr_notifications.config import NotificationsPluginConfig
+from imbue.mngr_notifications.errors import UnsupportedPlatformError
 from imbue.mngr_notifications.notifier import LinuxNotifier
 from imbue.mngr_notifications.notifier import MacOSNotifier
 from imbue.mngr_notifications.notifier import build_execute_command
@@ -116,7 +117,8 @@ def test_get_notifier_linux(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_get_notifier_unsupported(monkeypatch: pytest.MonkeyPatch) -> None:
     patch_platform(monkeypatch, "Windows")
-    assert get_notifier() is None
+    with pytest.raises(UnsupportedPlatformError, match="Windows"):
+        get_notifier()
 
 
 # --- LinuxNotifier ---

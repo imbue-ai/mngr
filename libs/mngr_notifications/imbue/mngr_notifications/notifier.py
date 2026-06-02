@@ -8,6 +8,7 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr_notifications.config import NotificationsPluginConfig
+from imbue.mngr_notifications.errors import UnsupportedPlatformError
 from imbue.mngr_notifications.terminals import get_terminal_app
 
 _ALERTER_TIMEOUT: Final[int] = 30
@@ -66,15 +67,19 @@ class LinuxNotifier(Notifier):
             logger.warning("notify-send not found; install libnotify to enable notifications")
 
 
-def get_notifier() -> Notifier | None:
-    """Return the appropriate notifier for the current platform, or None if unsupported."""
+def get_notifier() -> Notifier:
+    """Return the appropriate notifier for the current platform.
+
+    Raises UnsupportedPlatformError on platforms other than macOS/Linux so the
+    CLI surfaces a clear user-facing message and exits nonzero, rather than
+    silently no-opping.
+    """
     system = platform.system()
     if system == "Darwin":
         return MacOSNotifier()
     if system == "Linux":
         return LinuxNotifier()
-    logger.warning("Desktop notifications not supported on {}", system)
-    return None
+    raise UnsupportedPlatformError(f"Desktop notifications are not supported on {system}.")
 
 
 def build_execute_command(agent_name: str, config: NotificationsPluginConfig) -> str | None:

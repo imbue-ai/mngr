@@ -21,7 +21,9 @@ class ShutdownEvent(MutableModel):
     (This concept is closely related to ConcurrencyGroups which span the whole codebase in a tree structure.)
     """
 
-    _parent: "ShutdownEvent | None" = PrivateAttr()
+    # Defaults to None so a bare ShutdownEvent() (e.g. the one built inside from_parent/build_root
+    # before _parent is assigned) is always safe to read via is_set(); the classmethods set it.
+    _parent: "ShutdownEvent | None" = PrivateAttr(default=None)
     # This would typically be a threading.Event, but we allow ShutdownEvent as well for consistency in some interfaces.
     _own: "Event | ShutdownEvent" = PrivateAttr(default_factory=Event)
     # Optionally, the shutdown event can also be set through an external event.

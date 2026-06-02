@@ -1,6 +1,7 @@
 from pydantic import Field
 
 from imbue.mngr.config.data_types import PluginConfig
+from imbue.mngr_notifications.errors import MisconfiguredPluginError
 
 
 class NotificationsPluginConfig(PluginConfig):
@@ -32,9 +33,18 @@ class NotificationsPluginConfig(PluginConfig):
     )
 
     def merge_with(self, override: "PluginConfig") -> "NotificationsPluginConfig":
-        """Merge this config with an override config."""
+        """Merge this config with an override config.
+
+        The override is always a NotificationsPluginConfig by construction (the
+        plugin registry ties the 'notifications' key to this exact type). A
+        foreign subtype indicates a registration bug and is rejected loudly
+        rather than silently dropped.
+        """
         if not isinstance(override, NotificationsPluginConfig):
-            return self
+            raise MisconfiguredPluginError(
+                f"Cannot merge NotificationsPluginConfig with override of type "
+                f"{type(override).__name__}; expected NotificationsPluginConfig."
+            )
         return NotificationsPluginConfig(
             enabled=override.enabled if override.enabled is not None else self.enabled,
             notification_only=override.notification_only

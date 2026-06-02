@@ -37,6 +37,7 @@ from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import DiscoverySchemaChangedError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderDiscoveryError
+from imbue.mngr.hosts.common import build_user_ssh_command
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
@@ -249,7 +250,7 @@ def _build_ssh_info_from_host(host: OnlineHostInterface) -> SSHInfo | None:
         host=hostname,
         port=port,
         key_path=key_path,
-        command=f"ssh -i {key_path} -p {port} {user}@{hostname}",
+        command=build_user_ssh_command(user, hostname, port, key_path),
     )
 
 

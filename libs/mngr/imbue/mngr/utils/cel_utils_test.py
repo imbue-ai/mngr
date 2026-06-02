@@ -142,6 +142,53 @@ def test_cel_exclude_filter_eval_error_continues() -> None:
     assert result is True
 
 
+class _RaisingProgram:
+    """A stand-in for a compiled CEL program that raises a given exception on evaluate."""
+
+    def __init__(self, exception_to_raise: Exception) -> None:
+        self._exception_to_raise = exception_to_raise
+
+    def evaluate(self, context: Any) -> Any:
+        raise self._exception_to_raise
+
+
+def test_apply_compiled_cel_filters_propagates_real_typeerror_from_include() -> None:
+    """A genuine TypeError from evaluation is a bug and must propagate, not be swallowed as False."""
+    raising_program = _RaisingProgram(TypeError("unexpected internal bug"))
+    with pytest.raises(TypeError, match="unexpected internal bug"):
+        apply_compiled_cel_filters(
+            cel_context={"name": "test"},
+            include_filters=(raising_program,),
+            exclude_filters=(),
+            error_context_description="test-agent",
+        )
+
+
+def test_apply_compiled_cel_filters_propagates_real_typeerror_from_exclude() -> None:
+    """A genuine TypeError from an exclude filter must propagate rather than be skipped."""
+    raising_program = _RaisingProgram(TypeError("unexpected internal bug"))
+    with pytest.raises(TypeError, match="unexpected internal bug"):
+        apply_compiled_cel_filters(
+            cel_context={"name": "test"},
+            include_filters=(),
+            exclude_filters=(raising_program,),
+            error_context_description="test-agent",
+        )
+
+
+@pytest.mark.allow_warnings
+def test_apply_compiled_cel_filters_handles_celevalerror_from_include() -> None:
+    """A CELEvalError (a real evaluation failure) is still treated as a non-match (False)."""
+    raising_program = _RaisingProgram(CELEvalError("evaluation failed"))
+    result = apply_compiled_cel_filters(
+        cel_context={"name": "test"},
+        include_filters=(raising_program,),
+        exclude_filters=(),
+        error_context_description="test-agent",
+    )
+    assert result is False
+
+
 def test_cel_exclude_filter_matches_returns_false() -> None:
     """apply_cel_filters_to_context should return False when exclude filter matches."""
     includes, excludes = compile_cel_filters(

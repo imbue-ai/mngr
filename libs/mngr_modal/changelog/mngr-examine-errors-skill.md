@@ -1,0 +1,1 @@
+Adapted to the mngr SSH-key type change: the SSH key path threaded through this provider's instance is now `Path | None` rather than relying on an empty-`Path("")` sentinel. No user-visible behavior change.

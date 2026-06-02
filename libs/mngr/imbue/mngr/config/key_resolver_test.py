@@ -250,6 +250,19 @@ def test_resolve_extends_collapses_extend_inside_existing_create_template() -> N
     assert resolved == {"create_templates": {"dev": {"env": ["X=1", "X=2"]}}}
 
 
+def test_resolve_extends_raises_when_base_path_descends_into_scalar() -> None:
+    """An ``a.b__extend`` whose base ``a`` is a scalar is structurally malformed.
+
+    Previously ``_walk_to_field`` returned ``None`` for this untraversable path,
+    silently downgrading the ``__extend`` to an assign and dropping the base
+    entries the user meant to extend. It now raises ``ConfigParseError`` so the
+    malformed nested path is surfaced.
+    """
+    base = {"prefix": "scalar-value"}
+    with pytest.raises(ConfigParseError, match="is not valid: the base value at 'prefix' is a scalar"):
+        resolve_extends(base, {"prefix": {"nested__extend": ["X"]}})
+
+
 def test_resolve_extends_does_not_preserve_extend_outside_create_templates() -> None:
     """The preserve-extend branch is scoped to ``create_templates.<name>`` paths
     only. An ``<opt>__extend`` against a ``None`` base elsewhere

@@ -31,6 +31,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.hosts.common import build_user_ssh_command
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
 from imbue.mngr.hosts.common import determine_lifecycle_state
@@ -899,6 +900,10 @@ def _build_ssh_transport_for_outer(outer: OuterHostInterface) -> tuple[str, str,
     if info is None:
         raise MngrError("Cannot upload directory to a local outer host")
     user, hostname, port, key_path = info
+    if key_path is None:
+        # VPS-docker always provisions an mngr-owned key, so a missing key here
+        # is a real anomaly. Fail fast rather than emitting ``ssh -i None``.
+        raise MngrError("Outer host has no SSH key path; cannot build rsync transport")
     # Mirror docker_over_ssh._SSH_BASE_OPTIONS plus the outer host's known_hosts
     # so rsync's ssh subprocess uses the same trust store as the outer host.
     host_data = outer.connector.host.data
@@ -2443,7 +2448,7 @@ class VpsDockerProvider(BaseProviderInstance):
                 host=hostname,
                 port=port,
                 key_path=key_path,
-                command=f"ssh -i {key_path} -p {port} {user}@{hostname}",
+                command=build_user_ssh_command(user, hostname, port, key_path),
             )
 
         boot_time = timestamp_to_datetime(raw.get("btime"))

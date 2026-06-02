@@ -1,0 +1,1 @@
+Adapted to the mngr SSH-key type change: `RemoteSSHInfo.key_path` is now `Path | None`, and the SSH tunnel (including the paramiko fallback) omits the `-i`/key when no mngr-owned key is present, instead of relying on an empty-`Path("")` sentinel. No user-visible behavior change for the keyed case.

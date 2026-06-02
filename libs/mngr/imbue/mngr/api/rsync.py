@@ -38,7 +38,8 @@ from imbue.mngr.utils.deps import RSYNC
 from imbue.mngr.utils.rsync_utils import parse_rsync_output
 
 # (user, hostname, port, private_key_path) -- matches OnlineHostInterface.get_ssh_connection_info().
-_SshConnectionInfo = tuple[str, str, int, Path]
+# private_key_path is None when the host has no mngr-owned key (ssh-agent / ~/.ssh/config).
+_SshConnectionInfo = tuple[str, str, int, Path | None]
 
 
 # === Errors and result ===

@@ -666,6 +666,7 @@ def test_get_uptime(host_with_temp_dir: tuple[Host, Path]) -> None:
     """Test getting host uptime."""
     host, _ = host_with_temp_dir
     uptime = host.get_uptime_seconds()
+    assert uptime is not None
     assert uptime > 0
 
 
@@ -690,6 +691,7 @@ def test_get_boot_time_and_uptime_are_consistent(host_with_temp_dir: tuple[Host,
     uptime = host.get_uptime_seconds()
 
     assert boot_time is not None
+    assert uptime is not None
 
     # Calculate expected boot time from uptime
     now = datetime.now(timezone.utc)

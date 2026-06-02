@@ -13,17 +13,28 @@ from typing import Self
 from loguru import logger
 
 from imbue.imbue_common.logging import log_span
+from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.utils.interactive_subprocess import popen_interactive_subprocess
 
 FALLBACK_EDITORS: Final[tuple[str, ...]] = ("vim", "vi", "nano", "notepad")
 
 
+class NoEditorAvailableError(UserInputError):
+    """Raised when no usable editor can be found on the host."""
+
+    user_help_text = "Set the $VISUAL or $EDITOR environment variable to a working editor command."
+
+
 def get_editor_command() -> str:
-    """Get the editor command from environment variables or use a fallback.
+    """Get the editor command from environment variables or a fallback found on PATH.
 
     Checks $VISUAL first (for full-screen editors), then $EDITOR,
-    then falls back to common editors.
+    then the first of FALLBACK_EDITORS present on PATH.
+
+    Raises NoEditorAvailableError if none of these yield an editor, rather than
+    returning a command that was already shown to be absent (which would defer
+    the failure to an opaque exec error or hang).
     """
     # Check VISUAL first (preferred for interactive editors)
     editor = os.environ.get("VISUAL")
@@ -35,13 +46,14 @@ def get_editor_command() -> str:
     if editor:
         return editor
 
-    # Try to find a fallback editor
+    # Try to find a fallback editor that is actually present on PATH
     for fallback in FALLBACK_EDITORS:
         if shutil.which(fallback) is not None:
             return fallback
 
-    # Last resort: just try vim
-    return "vim"
+    raise NoEditorAvailableError(
+        f"No editor found: $VISUAL and $EDITOR are unset and none of {', '.join(FALLBACK_EDITORS)} are on PATH."
+    )
 
 
 class EditorSession:
@@ -140,8 +152,11 @@ class EditorSession:
 
     def _monitor_process(self) -> None:
         """Background thread that monitors the editor process and calls the exit callback."""
+        # The monitor thread is only ever spawned inside start() after _process is set,
+        # so a None here is a broken internal invariant -- crash rather than silently
+        # leave the result empty.
         if self._process is None:
-            return
+            raise MngrError("Editor monitor thread started before the editor process was created")
 
         # Wait for the process to exit
         self._process.wait()
@@ -163,8 +178,12 @@ class EditorSession:
         Thread-safe: Uses a lock to ensure only one thread reads the file, and
         signals an event when the result is ready for other threads waiting.
         """
+        # _read_result is only invoked after start() has set _process (from the
+        # monitor thread or from wait_for_result, both of which run post-start),
+        # so a None here is a broken internal invariant -- crash rather than
+        # silently report an empty edit.
         if self._process is None:
-            return
+            raise MngrError("Editor result read before the editor process was created")
 
         # Use lock to ensure only one thread reads the result
         with self._read_lock:

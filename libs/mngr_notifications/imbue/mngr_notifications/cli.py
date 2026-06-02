@@ -20,6 +20,7 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import PluginName
 from imbue.mngr_notifications.config import NotificationsPluginConfig
+from imbue.mngr_notifications.errors import MisconfiguredPluginError
 from imbue.mngr_notifications.notification_verifier import DEFAULT_VERIFY_TIMEOUT
 from imbue.mngr_notifications.notification_verifier import VerifyNotificationResult
 from imbue.mngr_notifications.notification_verifier import check_notifier_binary
@@ -35,9 +36,17 @@ class NotifyCliOptions(CommonCliOptions):
 
 def _get_plugin_config(mngr_ctx: MngrContext) -> NotificationsPluginConfig:
     config = mngr_ctx.config.plugins.get(PluginName("notifications"))
-    if config is not None and isinstance(config, NotificationsPluginConfig):
-        return config
-    return NotificationsPluginConfig()
+    if config is None:
+        # The plugin was simply not configured; fall back to defaults.
+        return NotificationsPluginConfig()
+    if not isinstance(config, NotificationsPluginConfig):
+        # register_plugin_config("notifications", NotificationsPluginConfig) ties
+        # the key to exactly this type, so a mismatch is a registration/parsing
+        # bug. Fail loudly rather than silently discarding the user's settings.
+        raise MisconfiguredPluginError(
+            f"Config registered under 'notifications' is {type(config).__name__}, expected NotificationsPluginConfig."
+        )
+    return config
 
 
 def _is_observe_running(mngr_ctx: MngrContext) -> bool:
@@ -151,8 +160,6 @@ def notify(ctx: click.Context, **kwargs: object) -> None:
         )
 
     notifier = get_notifier()
-    if notifier is None:
-        return
 
     if opts.verify:
         if not _run_verification(notifier, mngr_ctx.concurrency_group):

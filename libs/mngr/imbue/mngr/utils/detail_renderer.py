@@ -57,6 +57,11 @@ def ansi_to_html(text: str) -> str:
     - Bold (1)
     - Foreground 30-37, 90-97 (standard + bright)
     - 256-color foreground 38;5;N
+    - 24-bit truecolor foreground 38;2;r;g;b
+
+    Background-color sequences (48;5;N, 48;2;r;g;b) are not rendered but are
+    parsed so their parameters are not misinterpreted as standalone codes.
+    Other unsupported codes (italic, underline, etc.) are dropped.
     """
     result: list[str] = []
     pos = 0
@@ -101,7 +106,27 @@ def ansi_to_html(text: str) -> str:
                     v = 8 + (n - 232) * 10
                     styles.append(f"color:rgb({v},{v},{v})")
                 i += 2
+            elif c == 38 and i + 4 < len(parts) and parts[i + 1] == "2":
+                # 24-bit truecolor foreground: 38;2;r;g;b
+                r = int(parts[i + 2]) if parts[i + 2].isdigit() else 0
+                g = int(parts[i + 3]) if parts[i + 3].isdigit() else 0
+                b = int(parts[i + 4]) if parts[i + 4].isdigit() else 0
+                styles.append(f"color:rgb({r},{g},{b})")
+                i += 4
+            elif c == 48 and i + 2 < len(parts) and parts[i + 1] == "5":
+                # Background 256-color (48;5;N) is not rendered, but its two
+                # trailing parameters must be consumed so the palette index is
+                # not misread as a standalone SGR code.
+                i += 2
+            elif c == 48 and i + 4 < len(parts) and parts[i + 1] == "2":
+                # Background truecolor (48;2;r;g;b) is not rendered, but its
+                # four trailing parameters must be consumed for the same reason.
+                i += 4
             else:
+                # Unsupported SGR codes (e.g. italic, underline, plain
+                # background colors) are intentionally dropped: this is a
+                # best-effort cosmetic transcript render, not a full terminal
+                # emulator.
                 pass
             i += 1
 

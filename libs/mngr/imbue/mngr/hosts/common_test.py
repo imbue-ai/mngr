@@ -14,6 +14,7 @@ from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.hosts.common import add_safe_directory_on_remote
 from imbue.mngr.hosts.common import build_ssh_transport_command
+from imbue.mngr.hosts.common import build_user_ssh_command
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
 from imbue.mngr.hosts.common import determine_lifecycle_state
@@ -337,6 +338,30 @@ def test_build_ssh_transport_command_without_known_hosts_uses_strict_checking() 
     )
     assert "-o StrictHostKeyChecking=yes" in result
     assert "UserKnownHostsFile" not in result
+
+
+def test_build_user_ssh_command_includes_key_when_present() -> None:
+    result = build_user_ssh_command("root", "example.com", 2222, Path("/tmp/key"))
+    assert result == "ssh -i /tmp/key -p 2222 root@example.com"
+
+
+def test_build_user_ssh_command_omits_key_when_none() -> None:
+    """No empty ``-i ''`` argument when the host has no mngr-owned key."""
+    result = build_user_ssh_command("root", "example.com", 22, None)
+    assert result == "ssh -p 22 root@example.com"
+    assert "-i" not in shlex.split(result)
+
+
+def test_build_ssh_transport_command_omits_key_when_none() -> None:
+    """When key_path is None, the -i flag is omitted so ssh uses the user's agent/config."""
+    result = build_ssh_transport_command(
+        key_path=None,
+        port=2222,
+        known_hosts_file=None,
+    )
+    assert "-i" not in shlex.split(result)
+    assert "-p 2222" in result
+    assert "-o StrictHostKeyChecking=yes" in result
 
 
 def test_build_ssh_transport_command_quotes_key_path_with_spaces() -> None:
