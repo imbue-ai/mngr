@@ -1,9 +1,13 @@
 import base64
 import json
+import threading
 from pathlib import Path
+
+from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.notification import NotificationDispatcher
@@ -132,3 +136,61 @@ def test_start_apply_noop_writes_nothing(
 
     # CONTROL is a no-op, so no background work runs and no file is written.
     assert not (tmp_path / "user_context").exists()
+
+
+class _HandshakeApplier(OnboardingApplier):
+    """Applier whose Q2/Q3 strands each wait on the other's start signal.
+
+    Used to prove the two run concurrently: each strand records whether it
+    observed the other strand start within the timeout. If they ran
+    sequentially, the first strand would never see the second and its wait
+    would return False.
+    """
+
+    _q2_started: threading.Event = PrivateAttr(default_factory=threading.Event)
+    _q3_started: threading.Event = PrivateAttr(default_factory=threading.Event)
+    _is_q3_observed_by_q2: bool = PrivateAttr(default=False)
+    _is_q2_observed_by_q3: bool = PrivateAttr(default=False)
+
+    def _send_initial_problem(self, host_name: str, initial_problem: str) -> None:
+        self._q2_started.set()
+        self._is_q3_observed_by_q2 = self._q3_started.wait(timeout=10.0)
+
+    def _apply_permissions_preference(self, creation_id: CreationId, permissions_text: str) -> None:
+        self._q3_started.set()
+        self._is_q2_observed_by_q3 = self._q2_started.wait(timeout=10.0)
+
+
+def test_q2_and_q3_are_applied_concurrently(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    paths = WorkspacePaths(data_dir=tmp_path)
+    agent_creator = AgentCreator(
+        paths=paths,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
+    )
+    creation_id = CreationId()
+    # Seed a tracked creation with a host name so the Q2 strand has a target
+    # (otherwise it would short-circuit and only one strand would run).
+    with agent_creator._lock:
+        agent_creator._statuses[str(creation_id)] = AgentCreationStatus.WAITING_FOR_READY
+        agent_creator._host_names[str(creation_id)] = "assistant"
+
+    applier = _HandshakeApplier(
+        agent_creator=agent_creator,
+        paths=paths,
+        message_sender=MngrMessageSender(mngr_binary="mngr"),
+        root_concurrency_group=root_concurrency_group,
+    )
+
+    # _apply returns only once both strands have finished (the delivery
+    # group's context-exit joins them).
+    applier._apply(creation_id, OnboardingAnswers(initial_problem="do a thing", permissions_preference="be safe"))
+
+    # Each strand saw the other start -> they ran at the same time.
+    assert applier._is_q3_observed_by_q2 is True
+    assert applier._is_q2_observed_by_q3 is True

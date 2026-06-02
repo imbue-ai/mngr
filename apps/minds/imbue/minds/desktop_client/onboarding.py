@@ -235,37 +235,75 @@ class OnboardingApplier(MutableModel):
         )
 
     def _apply(self, creation_id: CreationId, answers: OnboardingAnswers) -> None:
-        """Apply each answer in turn; each step is best-effort and isolated."""
+        """Apply the answers; best-effort and isolated per side effect."""
         with log_span("Applying onboarding answers for creation {}", creation_id):
             # Q1: local scan. Independent of the workspace, so run it first.
             if answers.is_scan_requested:
                 self._run_user_context_scan(creation_id)
 
-            # Q2 and Q3 both need the workspace to exist. Resolve the host
-            # name and (for Q3) wait for the canonical agent id.
-            info = self.agent_creator.get_creation_info(creation_id)
-            host_name = info.host_name if info is not None else ""
+            # Q2 (send the initial problem to the chat agent) and Q3 (write the
+            # permissions preference into the workspace) are independent and
+            # each blocks on its own condition -- Q2 waits for the bootstrap
+            # chat agent to come online, Q3 waits for the canonical agent id --
+            # so run them concurrently rather than letting a slow one hold up
+            # the other.
+            self._apply_workspace_answers(creation_id, answers)
 
-            # Q2 (initial problem) is applied before Q3 (permissions
-            # preference): it is the answer the user most cares about, and Q3's
-            # wait for the canonical agent id can run long, so delivering Q2
-            # first avoids letting a slow Q3 hold up the user's problem
-            # statement.
-            if answers.initial_problem.strip():
+    def _apply_workspace_answers(self, creation_id: CreationId, answers: OnboardingAnswers) -> None:
+        """Apply Q2 and Q3 concurrently, waiting for both to finish."""
+        is_problem_pending = bool(answers.initial_problem.strip())
+        is_permissions_pending = bool(answers.permissions_preference.strip())
+        if not is_problem_pending and not is_permissions_pending:
+            return
+
+        info = self.agent_creator.get_creation_info(creation_id)
+        host_name = info.host_name if info is not None else ""
+
+        # The child group's exit (the ``with`` block below) waits for both
+        # strands to finish; size its exit timeout to cover their own
+        # deadlines so a long-but-legitimate wait isn't cut short. The
+        # shutdown timeout stays at the default so desktop-client shutdown is
+        # never blocked on onboarding delivery.
+        exit_timeout_seconds = (
+            max(self.chat_agent_message_timeout_seconds, self.canonical_agent_id_wait_timeout_seconds)
+            + self.poll_interval_seconds
+        )
+        delivery_group = self.root_concurrency_group.make_concurrency_group(
+            name=f"onboarding-deliver-{creation_id}",
+            exit_timeout_seconds=exit_timeout_seconds,
+        )
+        with delivery_group:
+            # Each strand is ``is_checked=False`` and swallows / logs its own
+            # failures, so an optional onboarding side effect can never poison
+            # the group or the other strand.
+            if is_problem_pending:
                 if host_name:
-                    self._send_initial_problem(host_name, answers.initial_problem)
+                    delivery_group.start_new_thread(
+                        target=self._send_initial_problem,
+                        args=(host_name, answers.initial_problem),
+                        name=f"onboarding-initial-problem-{creation_id}",
+                        is_checked=False,
+                    )
                 else:
                     logger.warning("Cannot send initial problem for creation {}: unknown host name", creation_id)
+            if is_permissions_pending:
+                delivery_group.start_new_thread(
+                    target=self._apply_permissions_preference,
+                    args=(creation_id, answers.permissions_preference),
+                    name=f"onboarding-permissions-{creation_id}",
+                    is_checked=False,
+                )
 
-            if answers.permissions_preference.strip():
-                agent_id = self._wait_for_canonical_agent_id(creation_id)
-                if agent_id is not None:
-                    self._write_permissions_preference(agent_id, answers.permissions_preference)
-                else:
-                    logger.warning(
-                        "Gave up writing permissions preference for creation {}: no canonical agent id",
-                        creation_id,
-                    )
+    def _apply_permissions_preference(self, creation_id: CreationId, permissions_text: str) -> None:
+        """Wait for the canonical agent id, then write the Q3 permissions preference."""
+        agent_id = self._wait_for_canonical_agent_id(creation_id)
+        if agent_id is not None:
+            self._write_permissions_preference(agent_id, permissions_text)
+        else:
+            logger.warning(
+                "Gave up writing permissions preference for creation {}: no canonical agent id",
+                creation_id,
+            )
 
     def _run_user_context_scan(self, creation_id: CreationId) -> None:
         """Resolve the user's name and write the per-creation user-context JSON file."""
