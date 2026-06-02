@@ -27,10 +27,11 @@ _DEFAULT_AVAILABLE_SERVICES_PAYLOAD: Final[dict[str, object]] = {
         {
             "scope": "slack-api",
             "display_name": "Slack",
+            "description": "Any interaction with the Slack API.",
             "permissions": [
-                "slack-read-all",
-                "slack-write-all",
-                "slack-chat-read",
+                {"name": "slack-read-all", "description": "All read operations across the Slack API."},
+                {"name": "slack-write-all", "description": "All write operations across the Slack API."},
+                {"name": "slack-chat-read", "description": "Get message permalinks and list scheduled messages."},
             ],
         },
     ],

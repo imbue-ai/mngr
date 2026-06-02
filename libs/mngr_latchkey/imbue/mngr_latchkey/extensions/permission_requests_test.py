@@ -458,6 +458,60 @@ def test_post_rejects_extraneous_top_level_field(node_extension: tuple[str, Path
     assert "request_id" in json.loads(body)["error"]
 
 
+def test_post_rejects_unknown_scope_in_predefined(node_extension: tuple[str, Path, Path]) -> None:
+    """Predefined requests must name a scope from the bundled services catalog."""
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "x",
+            "type": "predefined",
+            "payload": {"scope": "made-up-api", "permissions": ["slack-read-all"]},
+        },
+    )
+    assert status == 400, body
+    error = json.loads(body)["error"]
+    assert "scope" in error
+    assert "made-up-api" in error
+
+
+def test_post_rejects_unknown_permission_in_predefined(node_extension: tuple[str, Path, Path]) -> None:
+    """Predefined requests must only name permissions that the catalog lists for the scope."""
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "x",
+            "type": "predefined",
+            "payload": {"scope": "slack-api", "permissions": ["slack-read-all", "made-up-perm"]},
+        },
+    )
+    assert status == 400, body
+    error = json.loads(body)["error"]
+    assert "permissions" in error
+    assert "made-up-perm" in error
+
+
+def test_post_rejects_permission_from_a_different_scope(node_extension: tuple[str, Path, Path]) -> None:
+    """A permission valid under one scope must not be accepted under a different scope."""
+    base_url, *_ = node_extension
+    # ``github-read-all`` lives under the ``github-rest-api`` scope, not ``slack-api``.
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "x",
+            "type": "predefined",
+            "payload": {"scope": "slack-api", "permissions": ["github-read-all"]},
+        },
+    )
+    assert status == 400, body
+    error = json.loads(body)["error"]
+    assert "github-read-all" in error
+
+
 def test_post_rejects_extraneous_payload_field(node_extension: tuple[str, Path, Path]) -> None:
     base_url, *_ = node_extension
     status, body = _post_json(
