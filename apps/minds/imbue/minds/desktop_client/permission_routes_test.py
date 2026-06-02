@@ -159,10 +159,11 @@ _TEST_SERVICES_CATALOG_PAYLOAD: dict[str, object] = {
         {
             "scope": "slack-api",
             "display_name": "Slack",
+            "description": "Any interaction with the Slack API.",
             "permissions": [
-                "slack-read-all",
-                "slack-write-all",
-                "slack-chat-read",
+                {"name": "slack-read-all", "description": "All read operations across the Slack API."},
+                {"name": "slack-write-all"},
+                {"name": "slack-chat-read"},
             ],
         },
     ],
@@ -170,7 +171,7 @@ _TEST_SERVICES_CATALOG_PAYLOAD: dict[str, object] = {
         {
             "scope": "github-rest-api",
             "display_name": "GitHub",
-            "permissions": ["github-read-all"],
+            "permissions": [{"name": "github-read-all"}],
         },
     ],
 }
@@ -297,6 +298,30 @@ def test_get_permission_request_page_pre_checks_agent_requested_permissions(tmp_
     # user confirms / interacts with the form).
     assert 'id="permissions-approve-btn"' in body
     assert "disabled" in body
+
+
+def test_get_permission_request_page_shows_descriptions_when_present(tmp_path: Path) -> None:
+    """detent's per-permission descriptions are rendered next to each permission when present."""
+    agent_id = AgentId()
+    request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        permissions=("slack-read-all",),
+        rationale="reason",
+    )
+    inbox = RequestInbox().add_request(request)
+    handler = _make_recording_handler(tmp_path)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    response = client.get(f"/requests/{request.event_id}")
+
+    assert response.status_code == 200
+    body = response.text
+    # The requested permission's summary comes from the catalog fixture's
+    # per-permission ``description`` field.
+    assert "All read operations across the Slack API." in body
+    # The scope-level description is intentionally not surfaced on the dialog.
+    assert "Any interaction with the Slack API." not in body
 
 
 def test_get_permission_request_page_renders_no_pre_checks_when_request_and_existing_are_empty(
