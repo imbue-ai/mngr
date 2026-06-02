@@ -312,12 +312,29 @@ def render_auth_error_page(message: str) -> str:
 _RECOVERY_STYLE: Final[str] = """\
       .hidden { display: none; }
 
+      /* Keep the whole card within the viewport and lay it out as a vertical
+         stack: the header row and the restart button stay pinned at the top,
+         and only the troubleshooting block scrolls when its disclosures are
+         expanded. Without this the card grows past the viewport as dropdowns
+         open and -- because the body flex-centers it -- the heading and button
+         slide off the top, out of reach of the page scrollbar. This overrides
+         the shared ``.card`` from LOADING_PAGE_CSS (appended after it, so it
+         wins); the proxy loader never pulls in this style, so it is unaffected.
+         The 48px subtracted matches the body's 24px top+bottom padding. */
+      .card {
+        display: flex;
+        flex-direction: column;
+        max-height: calc(100vh - 48px);
+      }
+      .row { flex-shrink: 0; }
+
       /* Primary action. The restart button is the page's focal point: full
          width, prominent, directly under the message. Most users only ever
          need this -- the troubleshooting disclosures below are for the rare
          deep-debugging case. */
       #recovery-host-btn {
         margin-top: 20px;
+        flex-shrink: 0;
         width: 100%;
         background: #18181b;
         color: #fff;
@@ -341,6 +358,12 @@ _RECOVERY_STYLE: Final[str] = """\
         margin-top: 20px;
         padding-top: 16px;
         border-top: 1px solid #f4f4f5;
+        /* The block can shrink below its content height (min-height: 0 frees
+           it from the default flex min-content floor) and scrolls internally
+           once the card hits its viewport cap, so expanding many disclosures
+           never pushes the pinned header and button off-screen. */
+        min-height: 0;
+        overflow-y: auto;
       }
       .recovery-troubleshooting:not(:has(> details:not(.hidden))) { display: none; }
       .recovery-troubleshooting-label {

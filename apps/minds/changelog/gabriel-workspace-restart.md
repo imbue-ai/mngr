@@ -270,6 +270,14 @@ Tiered system-interface restart for the minds recovery flow.
   listing failed rather than concluding the host or agent is genuinely
   absent. When the listing still returns this workspace's own row despite a
   non-clean exit, the real row is shown as before.
+- The "Workspace unresponsive" recovery page no longer pushes its heading and
+  "Restart workspace" button off-screen when several Troubleshooting
+  disclosures are expanded. The card is now capped to the viewport height and
+  laid out as a vertical stack: the heading and the restart button stay pinned
+  at the top, and only the troubleshooting block (error details + diagnostics)
+  scrolls internally once its content overflows. Previously the whole card grew
+  past the viewport and, because it is vertically centered, the heading and
+  button slid above the top edge out of reach of the page scrollbar.
 - Internal: the ``mngr`` subprocess helper that drives the restart steps and
   the host-health probe no longer converts launch failures (``OSError`` on
   fork/exec, ``ConcurrencyGroupError`` on group setup) into a return value.
