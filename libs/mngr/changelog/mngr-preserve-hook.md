@@ -9,13 +9,14 @@ interface.
 - New `OfflineHostWithVolume` (in `hosts/offline_host.py`) implements `HostFileReadInterface`
   on top of a stopped host's persisted volume, addressing files by absolute paths under
   `host_dir` exactly as an online host would. `make_readable_offline_host()` wraps a plain
-  `OfflineHost` in this readable form, and every provider's `to_offline_host` now does so. The
-  volume is resolved lazily on first read (not at construction), so host discovery -- which
-  materializes offline hosts but only reads their metadata -- never pays for it; for providers
-  whose volume lookup is a network probe (e.g. Modal) this matters. When no volume is available,
-  reads behave as "nothing there". This lets callers treat a stopped-but-volume-backed host
-  uniformly with an online one instead of branching on online-vs-offline and reaching for the
-  raw `Volume` API.
+  `OfflineHost` in this readable form, and every provider's offline-host construction now does
+  so -- so a stopped host is readable whether it is reached via `get_host` (the destroy/GC
+  path) or `to_offline_host`. The volume is resolved lazily on first read (not at
+  construction), so host discovery -- which materializes offline hosts but only reads their
+  metadata -- never pays for it; for providers whose volume lookup is a network probe (e.g.
+  Modal) this matters. When no volume is available, reads behave as "nothing there". This lets
+  callers treat a stopped-but-volume-backed host uniformly with an online one instead of
+  branching on online-vs-offline and reaching for the raw `Volume` API.
 - New `api/preservation.py` with `PreservedItem`, `preserve_agent_data()`, and
   `get_preserved_agent_dir()`. Callers declare a list of paths (relative to the agent state
   dir) to keep; the same declaration is executed against either an online host (rsync for

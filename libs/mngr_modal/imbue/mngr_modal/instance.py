@@ -1629,14 +1629,16 @@ log "=== Shutdown script completed ==="
         the host record.
         """
         host_id = HostId(host_record.certified_host_data.host_id)
-        return OfflineHost(
-            id=host_id,
-            certified_host_data=host_record.certified_host_data,
-            provider_instance=self,
-            mngr_ctx=self.mngr_ctx,
-            on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
-                callback_host_id, certified_data
-            ),
+        return make_readable_offline_host(
+            OfflineHost(
+                id=host_id,
+                certified_host_data=host_record.certified_host_data,
+                provider_instance=self,
+                mngr_ctx=self.mngr_ctx,
+                on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
+                    callback_host_id, certified_data
+                ),
+            )
         )
 
     # =========================================================================
@@ -2095,7 +2097,7 @@ log "=== Shutdown script completed ==="
         if host_record is None:
             raise HostNotFoundError(self.name, host_id)
 
-        return make_readable_offline_host(self._create_host_from_host_record(host_record))
+        return self._create_host_from_host_record(host_record)
 
     @handle_modal_auth_error
     def get_host(

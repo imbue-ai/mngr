@@ -14,11 +14,13 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.host import HostFileReadInterface
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.docker.config import DockerProviderConfig
+from imbue.mngr.providers.docker.host_store import HostRecord
 from imbue.mngr.providers.docker.instance import CONTAINER_SSH_PORT
 from imbue.mngr.providers.docker.instance import DockerProviderInstance
 from imbue.mngr.providers.docker.instance import LABEL_HOST_ID
@@ -471,6 +473,41 @@ def test_delete_volume_removes_directory(
 
     provider.delete_volume(vol_id)
     assert not vol_dir.exists()
+
+
+def test_offline_host_from_record_is_readable(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """An offline host built from a host record reads files from its volume.
+
+    The destroy / GC paths obtain a stopped host via ``get_host`` (and thus
+    ``_create_host_from_host_record``), not ``to_offline_host``; both must yield
+    a ``HostFileReadInterface`` so ``on_before_host_destroy`` can still preserve
+    session files from the volume. This guards that the readability wrapping
+    lives at the shared construction site, not only on ``to_offline_host``.
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    record = HostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=HOST_ID_A,
+            host_name="h",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+    )
+
+    host = provider._create_host_from_host_record(record)
+    assert isinstance(host, HostFileReadInterface)
+
+    vol_id = DockerProviderInstance._volume_id_for_host(HostId(HOST_ID_A))
+    agent_dir = tmp_path / "volumes" / str(vol_id) / "agents" / "agent-x"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "f.txt").write_text("hi")
+
+    assert host.read_text_file(host.host_dir / "agents" / "agent-x" / "f.txt") == "hi"
+    assert host.path_exists(host.host_dir / "agents" / "agent-x")
+    assert not host.path_exists(host.host_dir / "agents" / "missing")
 
 
 def test_volume_id_for_host_is_deterministic() -> None:
