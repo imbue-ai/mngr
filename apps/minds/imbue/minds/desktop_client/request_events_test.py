@@ -175,7 +175,13 @@ def test_parse_request_event_round_trips_latchkey_permission_request() -> None:
     assert parsed.rationale == "Need to open a PR."
 
 
-def test_inbox_dedup_includes_latchkey_permission_requests() -> None:
+def test_inbox_keeps_distinct_requests_for_same_scope() -> None:
+    """Two distinct requests for the same scope both stay pending.
+
+    Requests are keyed by ``event_id``, so identical-looking requests
+    (same agent, scope, permissions) are each shown as their own card
+    rather than collapsed into one.
+    """
     first = create_latchkey_predefined_permission_request_event(
         agent_id="agent-1",
         scope="slack-api",
@@ -190,9 +196,22 @@ def test_inbox_dedup_includes_latchkey_permission_requests() -> None:
     inbox = RequestInbox().add_request(first).add_request(second)
     pending = inbox.get_pending_requests()
 
+    assert {str(req.event_id) for req in pending} == {str(first.event_id), str(second.event_id)}
+
+
+def test_inbox_collapses_redelivered_request_by_event_id() -> None:
+    """Re-adding the same request (same ``event_id``) does not duplicate it."""
+    request = create_latchkey_predefined_permission_request_event(
+        agent_id="agent-1",
+        scope="slack-api",
+        rationale="summary",
+    )
+
+    inbox = RequestInbox().add_request(request).add_request(request)
+    pending = inbox.get_pending_requests()
+
     assert len(pending) == 1
-    assert isinstance(pending[0], LatchkeyPredefinedPermissionRequestEvent)
-    assert pending[0].rationale == "second"
+    assert str(pending[0].event_id) == str(request.event_id)
 
 
 def test_inbox_treats_different_services_as_different_requests() -> None:

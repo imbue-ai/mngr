@@ -19,6 +19,7 @@ from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.app import _build_mngr_host_state_argv
 from imbue.minds.desktop_client.app import _build_mngr_start_argv
 from imbue.minds.desktop_client.app import _build_mngr_stop_argv
+from imbue.minds.desktop_client.app import _build_requests_payload
 from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import _destroying_agent_ids
 from imbue.minds.desktop_client.app import _run_restart_sequence
@@ -41,7 +42,9 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import RequestInbox
+from imbue.minds.desktop_client.request_events import RequestStatus
 from imbue.minds.desktop_client.request_events import create_latchkey_predefined_permission_request_event
+from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.primitives import CreationId
@@ -1292,6 +1295,55 @@ def test_destroying_agent_ids_returns_empty_when_paths_is_none() -> None:
     """The test-server helper builds a minimal app without WorkspacePaths;
     the helper must tolerate that without raising."""
     assert _destroying_agent_ids(None, ()) == []
+
+
+def test_build_requests_payload_empty_inbox() -> None:
+    """An empty inbox yields a zero count and no pending ids."""
+    assert _build_requests_payload(None) == {"count": 0, "request_ids": []}
+    assert _build_requests_payload(RequestInbox()) == {"count": 0, "request_ids": []}
+
+
+def test_build_requests_payload_carries_pending_ids() -> None:
+    """A pending request surfaces its event_id alongside the count."""
+    agent_id = str(AgentId())
+    event = create_latchkey_predefined_permission_request_event(
+        agent_id=agent_id, scope="slack-api", rationale="post updates"
+    )
+    payload = _build_requests_payload(RequestInbox().add_request(event))
+    assert payload == {"count": 1, "request_ids": [str(event.event_id)]}
+
+
+def test_build_requests_payload_distinguishes_equal_count_different_contents() -> None:
+    """A swap of the pending set at constant size changes the payload.
+
+    This is the soundness property: keying live updates off the bare count
+    would miss this transition (count stays 1), so the payload must differ.
+    """
+    agent_id = str(AgentId())
+    request_a = create_latchkey_predefined_permission_request_event(
+        agent_id=agent_id, scope="slack-api", rationale="a"
+    )
+    request_b = create_latchkey_predefined_permission_request_event(
+        agent_id=agent_id, scope="github-api", rationale="b"
+    )
+
+    inbox_with_a = RequestInbox().add_request(request_a)
+    # Resolve A and add B: the pending set becomes {B}, same size as {A}.
+    inbox_with_b = inbox_with_a.add_response(
+        create_request_response_event(
+            request_event_id=str(request_a.event_id),
+            status=RequestStatus.GRANTED,
+            agent_id=agent_id,
+            request_type=request_a.request_type,
+            scope="slack-api",
+        )
+    ).add_request(request_b)
+
+    payload_a = _build_requests_payload(inbox_with_a)
+    payload_b = _build_requests_payload(inbox_with_b)
+    assert payload_a["count"] == payload_b["count"] == 1
+    assert payload_a != payload_b
+    assert payload_b["request_ids"] == [str(request_b.event_id)]
 
 
 # -- Tests for new account management and request routes --
