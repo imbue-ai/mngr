@@ -2322,7 +2322,7 @@ def release_host(request: Request, host_db_id: UUID) -> dict[str, object]:
         return ReleaseHostResponse(status="released").model_dump()
 
 
-def _finish_releasing_pool_host(conn: Any, host_db_id: Any, vps_instance_id: str) -> None:
+def _finish_releasing_pool_host(conn: Any, host_db_id: Any, vps_instance_id: str | None) -> None:
     """Best-effort OVH cleanup + row delete for a host already marked ``removing``.
 
     Swallows OVH/DB errors (logging a warning) so a flaky OVH call never
