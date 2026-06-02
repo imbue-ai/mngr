@@ -2,6 +2,10 @@
 
 This file contains the full, verbatim per-PR entries for the `mngr_mapreduce` library. For the curated summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-01
+
+Restored the `changelog/` directory by adding a `.gitkeep` placeholder. The directory had vanished from git after a consolidation run deleted its last entry file (git does not track empty directories), which broke the `test_every_project_has_changelog_layout` meta-ratchet. The `.gitkeep` keeps the directory tracked even when it holds no pending entries, matching every other project. No production code change.
+
 ## 2026-05-29
 
 Move post-finalize ``stop_agent_on_host`` calls off the polling loop's main thread.

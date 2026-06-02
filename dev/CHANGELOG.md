@@ -48,6 +48,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Added `libs/mngr_mapreduce` to the workspace; the root `pyproject.toml` now collects coverage for `imbue.mngr_mapreduce`.
 - Changed: Dropped the now-removed `--use-snapshot` flag from `.github/workflows/tmr.yml` so scheduled / manual TMR runs don't fail at invocation (snapshot building on `--provider modal` is automatic now), and refreshed the stale `--use-snapshot` comment in `.github/workflows/tmr-reintegrate.yml`.
 - Changed: Spec file-tree listings under `specs/electron-desktop-app/` (`concise.md` + `spec.md`) now show `todesktop.js` instead of `todesktop.json`, tracking the apps/minds rename.
+- Changed: Tightened the `test_every_project_has_changelog_layout` meta-ratchet to also require a `.gitkeep` inside each project's `changelog/` directory. Previously only the directory's existence was checked, so a newly added project missing `.gitkeep` would pass until a later consolidation drained its entries and the empty dir silently vanished from git.
 
 ### Removed
 
