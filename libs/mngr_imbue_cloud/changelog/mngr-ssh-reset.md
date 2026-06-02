@@ -1,1 +1,1 @@
-Updated the `provision_agent` override for the new required `local_host` parameter (the local host is passed in as the source for bulk rsync file uploads; it cannot be resolved inside the host layer due to an import cycle). Also adopted the new repo-wide `per-file host uploads inside loops` ratchet check.
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check. No runtime behavior change.
