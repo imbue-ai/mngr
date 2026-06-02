@@ -314,18 +314,6 @@ jobs:
             if [[ -d "$D" ]]; then echo "$D" >> "$GITHUB_PATH"; fi
           done
 
-      - name: disable modal provider (CI has no Modal token)
-        # Without this, `mngr forward` discovery emits a "Modal is not
-        # authorized" warning on every poll. Hundreds of repetitions
-        # bury real signal in minds.log and latchkey_forward.log. The
-        # minds.app's bundled mngr reads ~/.minds/mngr/<scope>.toml at
-        # startup; pre-seeding the user-scope config before launch
-        # silences modal discovery entirely.
-        run: |
-          mkdir -p "$HOME/.minds/mngr"
-          MNGR_HOST_DIR="$HOME/.minds/mngr" \
-            uv run --package imbue-mngr mngr config set providers.modal.is_enabled false --scope user
-
       - name: launch-to-msg + slack flow (Python)
         env:
           GIT_BRANCH:         ${{ inputs.template_ref }}
