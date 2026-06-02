@@ -39,12 +39,6 @@ concurrency:
   group: mac-runner
   cancel-in-progress: false
 
-# Pages deploy in `publish-screenshots` needs these.
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-
 jobs:
   build:
     # Run only when a commit_sha was supplied AND no direct URL was given.
@@ -411,35 +405,34 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-          # ---- Flow screenshots (inline via GitHub Pages) ----------------
-          # Each `<name>.png` is a full-desktop screencapture (per-window
-          # `.win.png` captures are disabled in the e2e script). They are
-          # deployed to GitHub Pages by the `publish-screenshots` job
-          # below; URLs are stable but only the LATEST run's images
-          # are inline -- historical runs' summaries show 404 because
-          # Pages overwrites per deploy. Full forensic copies (including
-          # any future per-window dupes) remain in the run artifact.
+          # ---- Flow screenshot manifest ----------------------------------
+          # Screenshots are not committed to git (an orphan branch of
+          # binary PNGs bloated every clone). They ride in the
+          # `launch-to-first-message-<run_id>` artifact attached to this
+          # run; download + open locally to view. The per-window `.win.png`
+          # shots show the page Playwright asked Electron to render; the
+          # `.desktop.png` shots are full-desktop dupes (often show
+          # whichever BrowserWindow WindowServer had on top -- usually
+          # /welcome -- since CDP page activation does not move OS
+          # z-order).
           artifact_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts"
-          pages_base="https://imbue-ai.github.io/mngr/runs/${{ github.run_id }}"
           {
             echo "## Flow screenshots"
             echo ""
-            echo "Full-desktop screencaptures at each milestone. Forensic copies in the [\`launch-to-first-message-${{ github.run_id }}\` artifact]($artifact_url)."
+            echo "Screenshots ride in the [\`launch-to-first-message-${{ github.run_id }}\` artifact]($artifact_url) (download + open locally)."
             echo ""
-            echo "_Note: macOS WindowServer z-order is not driven by CDP page activation, so 00-06 often capture the unauthenticated /welcome BrowserWindow rather than the page the test was exercising. 07c / 07d (Permission request) reliably show the correct dedicated window._"
-            echo ""
+            echo "| Milestone | Per-window (.win.png) | Full-desktop (.desktop.png) |"
+            echo "|---|---|---|"
           } >> "$GITHUB_STEP_SUMMARY"
           for prefix in 00 01 02 03 04 04b 05 06 07 07a 07b 07c 07d 08 09 10 11 12 99; do
-            for desk in "$shots_dir"/${prefix}-*.png; do
-              [ -f "$desk" ] || continue
-              case "$desk" in *.win.png) continue ;; esac
-              base=$(basename "$desk" .png)
-              {
-                echo "### $base"
-                echo ""
-                echo "![$base]($pages_base/${base}.png)"
-                echo ""
-              } >> "$GITHUB_STEP_SUMMARY"
+            for win in "$shots_dir"/${prefix}-*.win.png; do
+              [ -f "$win" ] || continue
+              base=$(basename "$win" .win.png)
+              desk="$shots_dir/${base}.png"
+              win_cell="\`${base}.win.png\`"
+              desk_cell="—"
+              [ -f "$desk" ] && desk_cell="\`${base}.png\`"
+              echo "| $base | $win_cell | $desk_cell |" >> "$GITHUB_STEP_SUMMARY"
             done
           done
       - name: post-test cleanup (best effort)
@@ -449,55 +442,3 @@ jobs:
           # Pre-test reset on the NEXT run also cleans, this is belt+braces.
           # All steps are best-effort; we never want cleanup to fail the job.
           bash apps/minds/scripts/mac-runner-reset.sh 2>&1 || true
-
-  publish-screenshots:
-    # Deploy the latest run's full-desktop screenshots to GitHub Pages so
-    # the embed step's <img> tags in the run summary render inline.
-    # Pages source must be set to "GitHub Actions" in the repo Settings
-    # (Settings -> Pages -> Build and deployment -> Source). The deploy
-    # OVERWRITES per run -- only the most recent run's images are
-    # available at the published URLs; older runs' summaries 404.
-    needs: [verify]
-    if: ${{ always() && needs.verify.result != 'cancelled' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
-    steps:
-      - name: download verify artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: launch-to-first-message-${{ github.run_id }}
-          path: artifact
-        continue-on-error: true
-      - name: stage desktop pngs under runs/<run_id>/
-        run: |
-          publish_root=_site
-          mkdir -p "$publish_root/runs/${{ github.run_id }}"
-          if [ -d artifact/screenshots ]; then
-            for f in artifact/screenshots/*.png; do
-              [ -f "$f" ] || continue
-              case "$f" in *.win.png) continue ;; esac
-              cp "$f" "$publish_root/runs/${{ github.run_id }}/"
-            done
-          fi
-          # Minimal index so visitors at /runs/<id>/ see a list.
-          (
-            cd "$publish_root/runs/${{ github.run_id }}"
-            echo "<!doctype html><meta charset=utf-8><title>run ${{ github.run_id }}</title>"
-            echo "<h1>minds-launch-to-msg run ${{ github.run_id }}</h1>"
-            for f in *.png; do
-              [ -f "$f" ] || continue
-              printf '<h3>%s</h3><img src="%s" width="900"><hr>\n' "$f" "$f"
-            done
-          ) > "$publish_root/runs/${{ github.run_id }}/index.html"
-          echo "published files:"
-          ls -la "$publish_root/runs/${{ github.run_id }}/" || true
-      - name: upload pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: _site
-      - name: deploy to GitHub Pages
-        id: deploy
-        uses: actions/deploy-pages@v4
