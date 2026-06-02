@@ -39,12 +39,8 @@ it to `false` to discard usage on destroy).
 
 `mngr usage` reads these preserved files back **by default**, so a destroyed
 agent's accumulated cost and rate-limit history still counts toward the totals.
-Preserved agents are filtered by the same
-`--provider` / `--project` / `--local` / label / CEL predicates as live agents
-(evaluated against the agent's preserved `data.json`), and an agent that is still
-alive is never double-counted against its own preserved copy. Pass
-`--no-preserved` (on `mngr usage` and `mngr usage wait`) to consider only live
-agents.
+Pass `--no-preserved` (on `mngr usage` and `mngr usage wait`) to consider only
+live agents.
 
 ## Output formats
 
