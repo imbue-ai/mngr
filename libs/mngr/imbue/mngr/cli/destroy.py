@@ -27,9 +27,9 @@ from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import emit_event
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.cli.stdin_utils import STDIN_PLACEHOLDER
 from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
@@ -593,7 +593,7 @@ def _output_result(destroyed_agents: Sequence[AgentName], output_opts: OutputOpt
     result_data = {"destroyed_agents": [str(n) for n in destroyed_agents], "count": len(destroyed_agents)}
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json(result_data)
+            write_json_line(result_data)
         case OutputFormat.JSONL:
             emit_event("destroy_result", result_data, OutputFormat.JSONL)
         case OutputFormat.HUMAN:

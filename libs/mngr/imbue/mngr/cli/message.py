@@ -16,8 +16,8 @@ from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.output_helpers import emit_event
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.cli.stdin_utils import STDIN_PLACEHOLDER
 from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
@@ -283,7 +283,7 @@ def _emit_json_output(result: MessageResult) -> None:
         "total_sent": len(result.successful_agents),
         "total_failed": len(result.failed_agents),
     }
-    emit_final_json(output_data)
+    write_json_line(output_data)
 
 
 # Register help metadata for git-style help formatting

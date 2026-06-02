@@ -10,7 +10,7 @@ from loguru import logger
 
 from imbue.mngr.api.create import create as api_create
 from imbue.mngr.api.providers import get_provider_instance
-from imbue.mngr.cli.output_helpers import emit_final_json
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -209,9 +209,9 @@ def stream_or_accumulate_response(chunks: Iterator[str], output_format: OutputFo
             sys.stdout.flush()
         case OutputFormat.JSON:
             response = accumulate_chunks(chunks)
-            emit_final_json({"response": response})
+            write_json_line({"response": response})
         case OutputFormat.JSONL:
             response = accumulate_chunks(chunks)
-            emit_final_json({"event": "response", "response": response})
+            write_json_line({"event": "response", "response": response})
         case _ as unreachable:
             assert_never(unreachable)
