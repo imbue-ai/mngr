@@ -103,15 +103,22 @@ def test_garbage_stdin_is_tolerated(tmp_path: Path) -> None:
     assert result.stdout == ""
 
 
-def test_missing_state_dir_exits_cleanly(tmp_path: Path) -> None:
-    """With MNGR_AGENT_STATE_DIR unset the hook is a no-op, not a failure."""
+def test_missing_state_dir_fails_loudly(tmp_path: Path) -> None:
+    """An unset MNGR_AGENT_STATE_DIR is a wiring error: fail loudly, not silently.
+
+    mngr always sets it, and agy invokes this script via a path that embeds it,
+    so reaching the body unset means misconfiguration -- we surface it (stderr,
+    non-zero exit) rather than swallow it or write to the filesystem root. We
+    still keep stdout empty so a PreInvocation hook never injects steps.
+    """
     result = subprocess.run(
         ["bash", str(_SCRIPT_PATH)],
         input=_payload(_CONV_A),
         env={k: v for k, v in os.environ.items() if k != "MNGR_AGENT_STATE_DIR"},
         capture_output=True,
         text=True,
-        check=True,
+        check=False,
     )
-    assert result.returncode == 0
+    assert result.returncode != 0
     assert result.stdout == ""
+    assert "MNGR_AGENT_STATE_DIR" in result.stderr

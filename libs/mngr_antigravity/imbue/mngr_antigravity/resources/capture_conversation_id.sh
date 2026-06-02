@@ -23,10 +23,15 @@
 # avoids `set -e`/non-zero exits on the common paths so a malformed payload
 # never disrupts agy's execution loop.
 
-# Tolerate a missing state dir rather than failing the hook: we have nowhere
-# to record the id, but crashing here could disrupt agy.
+# mngr sets MNGR_AGENT_STATE_DIR for every agent process, and agy invokes this
+# script through a path that embeds it (`$MNGR_AGENT_STATE_DIR/commands/...`),
+# so it is always set in the real hook path -- an unset/empty value means a
+# wiring bug, not a tolerable runtime case. Fail loudly (to stderr, never
+# stdout -- agy treats PreInvocation stdout as injected steps) rather than
+# silently writing the ids file to the filesystem root.
 if [ -z "${MNGR_AGENT_STATE_DIR:-}" ]; then
-    exit 0
+    echo "capture_conversation_id.sh: MNGR_AGENT_STATE_DIR is not set" >&2
+    exit 1
 fi
 
 ids_file="$MNGR_AGENT_STATE_DIR/antigravity_conversation_ids"
