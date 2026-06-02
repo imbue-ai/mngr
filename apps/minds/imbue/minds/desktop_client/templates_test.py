@@ -1,3 +1,4 @@
+import json
 import re
 from pathlib import Path
 
@@ -56,9 +57,6 @@ def _extract_route_payload(html: str) -> dict[str, object]:
     client-side hydration. Tests assert on that payload instead of on
     the previous Jinja-rendered HTML.
     """
-    import json
-    import re
-
     match = re.search(
         r'<script type="application/json" id="__route__">(.+?)</script>',
         html,
