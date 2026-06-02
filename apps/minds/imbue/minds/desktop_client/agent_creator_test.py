@@ -141,6 +141,28 @@ def test_build_mngr_create_command_does_not_inject_minds_api_key() -> None:
         assert "MINDS_API_KEY" not in joined, f"{mode}: command must not mention MINDS_API_KEY"
 
 
+def test_build_mngr_create_command_forwards_fast_mode_for_imbue_cloud() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.IMBUE_CLOUD,
+        host_name=HostName("hello"),
+        imbue_cloud_account="alice@imbue.com",
+        imbue_cloud_fast_mode="require",
+    )
+    # The fast_mode knob must reach mngr as a -b build arg.
+    assert "-b" in command
+    assert "fast_mode=require" in command
+
+
+def test_build_mngr_create_command_omits_fast_mode_when_unset() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.IMBUE_CLOUD,
+        host_name=HostName("hello"),
+        imbue_cloud_account="alice@imbue.com",
+    )
+    joined = " ".join(command)
+    assert "fast_mode" not in joined
+
+
 def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
     """Empty / ``None`` ``latchkey_env`` opts the host out of latchkey wiring entirely."""
     for latchkey_env in (None, {}):
