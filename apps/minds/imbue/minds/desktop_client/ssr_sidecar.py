@@ -14,13 +14,13 @@ and props as JSON so the browser bundle can hydrate without SSR.
 Process model:
     * Packaged Electron app: the binary is invoked as Node via
       ``ELECTRON_RUN_AS_NODE=1`` (set in ``MINDS_ELECTRON_EXEC_PATH``),
-      pointing at ``resources/frontend/server/index.cjs`` (built by
-      ``scripts/build.js`` from ``frontend/src/main/server.js``).
+      pointing at ``resources/frontend/server/assets/server.js`` (built
+      by ``scripts/build.js`` from ``frontend/src/main/server.jsx``).
     * Dev (``uv run minds run``): we invoke ``node`` from ``PATH``
       pointing at the on-disk bundle (or the source entry, if Vite has
       run with ``--mode ssr-dev`` -- the dev workflow is to run
       ``pnpm frontend:dev`` in another terminal and point this at the
-      compiled ``frontend/dist-server/server.js``).
+      compiled ``frontend/dist-server/assets/server.js``).
 
 Health probe: ``GET /__ssr/health`` returns 200 ``{"status":"ok"}`` when
 the sidecar's HTTP server is up. ``wait_ready`` polls for a bounded

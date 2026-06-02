@@ -475,7 +475,7 @@ function bundleClientConfig() {
  * Outputs:
  *   apps/minds/imbue/minds/desktop_client/static/_dist/  (client bundle +
  *     manifest; served by FastAPI's StaticFiles mount under /_static/_dist/)
- *   apps/minds/frontend/dist-server/server.js            (Node SSR bundle;
+ *   apps/minds/frontend/dist-server/assets/server.js     (Node SSR bundle;
  *     invoked by ssr_sidecar.py; copied into resources for packaging)
  *
  * Also emits a `bin/ssr-sidecar` shim that wraps the SSR server bundle

@@ -11,7 +11,7 @@ import { resolve } from 'node:path';
 //   * default (no --ssr): client bundles (multi-page, one entry per
 //     Electron WebContentsView: app, chrome, sidebar). Emits manifest.json
 //     so the Python SSR sidecar can resolve hashed asset paths.
-//   * --ssr frontend/src/main/server.js: a Node bundle for the SSR HTTP
+//   * --ssr frontend/src/main/server.jsx: a Node bundle for the SSR HTTP
 //     sidecar. Loaded by Python via the ssr_sidecar.py supervisor.
 //
 // Output convention:
