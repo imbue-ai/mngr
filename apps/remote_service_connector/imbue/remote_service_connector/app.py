@@ -1849,11 +1849,16 @@ class HttpOvhOps:
 
     def set_delete_at_expiration(self, service_name: str, delete_at_expiration: bool) -> None:
         # Read-modify-write so we don't clobber unrelated serviceInfos fields.
-        info = dict(self.client.call("GET", f"/vps/{service_name}/serviceInfos", None, True) or {})
-        renew = dict(info.get("renew") or {})
-        renew["deleteAtExpiration"] = delete_at_expiration
-        info["renew"] = renew
-        self.client.call("PUT", f"/vps/{service_name}/serviceInfos", info, True)
+        # Idempotent: a missing service means OVH already removed the VPS, so
+        # there is nothing left to cancel (treat as success, like delete_tag).
+        try:
+            info = dict(self.client.call("GET", f"/vps/{service_name}/serviceInfos", None, True) or {})
+            renew = dict(info.get("renew") or {})
+            renew["deleteAtExpiration"] = delete_at_expiration
+            info["renew"] = renew
+            self.client.call("PUT", f"/vps/{service_name}/serviceInfos", info, True)
+        except ResourceNotFoundError:
+            pass
 
     def list_vps_resources(self) -> list[OvhVpsResource]:
         payload = self.client.call("GET", "/v2/iam/resource?resourceType=vps", None, True)

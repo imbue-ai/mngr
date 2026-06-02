@@ -7,6 +7,7 @@ from uuid import UUID
 import httpx
 import pytest
 from fastapi import HTTPException
+from ovh.exceptions import ResourceNotFoundError as OvhResourceNotFoundError
 from starlette.testclient import TestClient
 from supertokens_python.exceptions import GeneralError as SuperTokensGeneralError
 from supertokens_python.recipe.session.exceptions import SuperTokensSessionError
@@ -16,6 +17,7 @@ from imbue.remote_service_connector.app import AdminAuth
 from imbue.remote_service_connector.app import AuthPolicy
 from imbue.remote_service_connector.app import CloudflareApiError
 from imbue.remote_service_connector.app import HttpCloudflareOps
+from imbue.remote_service_connector.app import HttpOvhOps
 from imbue.remote_service_connector.app import InvalidR2BucketNameError
 from imbue.remote_service_connector.app import InvalidTunnelComponentError
 from imbue.remote_service_connector.app import R2BucketOwnershipError
@@ -1864,6 +1866,19 @@ def test_cleanup_sweep_cleans_only_removing_rows(monkeypatch: pytest.MonkeyPatch
         UUID("00000000-0000-0000-0000-0000000000a3"),
     }
     assert backend.ovh_ops.cancelled == [removing.vps_instance_id]
+
+
+def test_http_ovh_ops_set_delete_at_expiration_is_idempotent_for_gone_vps() -> None:
+    """A 404 from OVH (VPS already removed) is treated as success, not an error."""
+
+    class _NotFoundClient:
+        def call(self, method: str, path: str, data: object, need_auth: bool) -> object:
+            raise OvhResourceNotFoundError(f"{method} {path} not found")
+
+    ops = HttpOvhOps(application_key="ak", application_secret="as", consumer_key="ck", endpoint="ovh-us")
+    ops.client = _NotFoundClient()
+    # Must not raise: a missing service means there is nothing left to cancel.
+    ops.set_delete_at_expiration("vps-gone.vps.ovh.us", True)
 
 
 def test_cleanup_sweep_keeps_row_when_ovh_cancel_fails(monkeypatch: pytest.MonkeyPatch) -> None:
