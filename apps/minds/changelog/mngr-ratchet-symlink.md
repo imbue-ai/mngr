@@ -1,0 +1,1 @@
+`scripts/launch-and-verify.sh` now uses `set -euo pipefail` (added `-e`). `scripts/first-message-verify.sh` keeps `set -uo pipefail` and documents why `-e` is intentionally omitted: its polling loops rely on commands exiting non-zero while they retry, and it handles errors explicitly via a `fail` helper and `PIPESTATUS`.

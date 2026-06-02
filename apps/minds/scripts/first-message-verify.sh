@@ -7,6 +7,12 @@
 #   - /Applications/minds.app already running, with ~/.minds/logs/minds-events.jsonl
 #     containing a fresh "Login URL" event (use launch-and-verify.sh first).
 #   - ANTHROPIC_API_KEY in env.
+#
+# Deliberately omits `set -e`: the create/reply/destroy polling loops rely on
+# commands exiting non-zero while they retry (e.g. the reply-wait loop runs a
+# python filter that exits 2 until a matching assistant_message arrives), and
+# error handling is done explicitly via the `fail` helper, status `case`
+# blocks, and PIPESTATUS. `-e` would abort those loops instead of retrying.
 set -uo pipefail
 
 EVENTS_LOG="$HOME/.minds/logs/minds-events.jsonl"

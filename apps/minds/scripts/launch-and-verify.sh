@@ -2,7 +2,7 @@
 # Launch the installed minds.app and wait for its backend to come up.
 # Success: ~/.minds/logs/minds-events.jsonl is written within the timeout.
 # Failure: timeout, log macOS console + any partial state, exit non-zero.
-set -uo pipefail
+set -euo pipefail
 
 EVENTS_LOG="$HOME/.minds/logs/minds-events.jsonl"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-120}"
