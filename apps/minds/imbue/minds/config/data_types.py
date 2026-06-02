@@ -240,6 +240,28 @@ class ScaledownWindowConfig(FrozenModel):
     )
 
 
+class PaidDefaultsConfig(FrozenModel):
+    """Default paid-access entries seeded into the connector's paid tables on deploy.
+
+    After the pool-hosts schema migrations run, ``minds env deploy`` seeds
+    these into ``paid_domains`` / ``paid_emails`` (as ``is_paid = true``)
+    using ``INSERT ... ON CONFLICT DO NOTHING`` -- i.e. **seed-if-absent**:
+    it sets the tier's initial default but never re-activates an entry an
+    operator later soft-removed, so a redeploy doesn't fight manual changes.
+    Values are lowercased to match the connector's normalized lookups.
+    Empty lists (the default) seed nothing.
+    """
+
+    domains: tuple[NonEmptyStr, ...] = Field(
+        default=(),
+        description="Domains seeded into paid_domains (e.g. ``imbue.com``); exact-domain match grants paid access.",
+    )
+    emails: tuple[NonEmptyStr, ...] = Field(
+        default=(),
+        description="Full email addresses seeded into paid_emails.",
+    )
+
+
 class DeployEnvConfig(FrozenModel):
     """Per-tier deploy-time config read by deploy scripts and `minds env create`.
 
@@ -290,6 +312,13 @@ class DeployEnvConfig(FrozenModel):
             "tier ships. Threaded into the matching ``modal deploy`` as an env var "
             "(``MINDS_CONNECTOR_SCALEDOWN_WINDOW`` / ``MINDS_LITELLM_PROXY_SCALEDOWN_WINDOW``); "
             "0 means use Modal's own default."
+        ),
+    )
+    paid: PaidDefaultsConfig = Field(
+        default_factory=PaidDefaultsConfig,
+        description=(
+            "Default paid-access entries seeded (seed-if-absent) into the connector's "
+            "paid_domains / paid_emails tables after migrations on each deploy."
         ),
     )
 

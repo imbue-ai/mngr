@@ -47,3 +47,9 @@ creates_resources = true
 modal_env_strategy = "PER_ENV"
 writes_local_state = true
 tracks_generation = false
+
+# Default paid-access entries seeded (seed-if-absent) into the connector's
+# paid_domains table after migrations, so the imbue team can use paid features
+# (host pool, LiteLLM keys, R2 buckets) on a fresh env without manual setup.
+[paid]
+domains = ["imbue.com"]

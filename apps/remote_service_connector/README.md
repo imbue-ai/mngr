@@ -79,6 +79,8 @@ Paid-feature access is gated on two Neon tables instead of an env-var allowlist:
 
 A caller is "paid" when they have a verified SuperTokens email AND that email (or its exact domain) has an active (`is_paid = true`) row in either table. Both tables are managed via the `/paid/*` CRUD endpoints (admin-key authenticated) or the `mngr imbue_cloud admin paid` CLI. Rows are never hard-deleted -- "remove" sets `is_paid = false` so we retain history of when an account stopped paying. The schema is created by `migrations/005_paid_lists.sql`.
 
+On deploy, `minds env deploy` seeds each tier's configured default entries (the `[paid]` block in that tier's `deploy.toml`) into these tables right after migrations. Every tier currently defaults `domains = ["imbue.com"]`. Seeding is **seed-if-absent** (`INSERT ... ON CONFLICT DO NOTHING`), so it sets the initial default but never re-activates an entry an operator soft-removed.
+
 ### Cloudflare token requirements for R2
 
 The R2 bucket routes require `CLOUDFLARE_API_TOKEN` to be an **account-owned** token (`cfat_`) -- not a user-owned token (`cfut_`) -- because the connector mints account-owned per-bucket R2 tokens on the user's behalf. The token needs these permissions:

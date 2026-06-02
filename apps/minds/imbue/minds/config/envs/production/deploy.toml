@@ -39,3 +39,8 @@ tracks_generation = true
 [min_containers]
 connector = 1
 litellm_proxy = 1
+
+# Default paid-access entries seeded (seed-if-absent) into paid_domains after
+# migrations, so the imbue team can exercise paid features on production.
+[paid]
+domains = ["imbue.com"]

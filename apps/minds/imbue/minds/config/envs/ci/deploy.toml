@@ -32,3 +32,8 @@ creates_resources = true
 modal_env_strategy = "PER_ENV"
 writes_local_state = true
 tracks_generation = false
+
+# Default paid-access entries seeded (seed-if-absent) into paid_domains after
+# migrations, so CI / deployment-test envs can exercise paid features.
+[paid]
+domains = ["imbue.com"]

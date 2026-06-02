@@ -252,6 +252,9 @@ ListModalSecretsFn = Callable[[str, ConcurrencyGroup], tuple[str, ...]]
 # schema_migrations runner against the per-env host_pool DB. Tests
 # pass a no-op fake; the real implementation shells out to psql.
 ApplyPoolHostsMigrationsFn = Callable[[SecretStr, ConcurrencyGroup], tuple[Path, ...]]
+# (host_pool_dsn, domains, emails, cg) -> None. Seed-if-absent default paid
+# domains/emails into the host_pool DB after migrations. Tests pass a no-op fake.
+SeedPaidListDefaultsFn = Callable[[SecretStr, tuple[str, ...], tuple[str, ...], ConcurrencyGroup], None]
 # (app_name, modal_env, cg) -> latest deployed version id, or None for
 # never-deployed. Used at deploy start to capture pre-deploy state so
 # ``minds env recover`` can `modal app rollback` to it on failure.
@@ -351,6 +354,12 @@ class Providers(FrozenModel):
         description=(
             "(host_pool_dsn, cg) -> tuple of applied migration files. "
             "Runs the schema_migrations runner against the per-env host_pool DB."
+        ),
+    )
+    seed_paid_list_defaults: SeedPaidListDefaultsFn = Field(
+        description=(
+            "(host_pool_dsn, domains, emails, cg) -> seed-if-absent the tier's default "
+            "paid domains/emails into the host_pool DB after migrations."
         ),
     )
     get_modal_app_latest_version: GetModalAppLatestVersionFn = Field(
@@ -772,6 +781,17 @@ def _deploy_env_locked(
         applied = providers.apply_pool_hosts_migrations(host_pool_dsn, parent_concurrency_group)
         if applied:
             logger.info("Applied {} pool-hosts migration(s): {}", len(applied), [m.name for m in applied])
+
+    # Seed the tier's default paid domains/emails (seed-if-absent) now that the
+    # paid_domains / paid_emails tables exist. Runs every deploy for every tier;
+    # idempotent and a no-op when the tier configures no defaults.
+    paid_domains = tuple(str(d) for d in deploy_config.paid.domains)
+    paid_emails = tuple(str(e) for e in deploy_config.paid.emails)
+    if paid_domains or paid_emails:
+        with info_span(
+            "Seeding default paid-list entries (domains={}, emails={})", list(paid_domains), list(paid_emails)
+        ):
+            providers.seed_paid_list_defaults(host_pool_dsn, paid_domains, paid_emails, parent_concurrency_group)
 
     # Resolve the Modal deploy strategy now that we know whether a
     # migration ran. Done here (rather than at the CLI boundary) so the
