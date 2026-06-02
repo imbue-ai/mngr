@@ -1,10 +1,10 @@
-"""Unit tests for the SSR sidecar supervisor.
+"""Unit tests for the SSR sidecar fallback path.
 
-The full integration with a running Node process lives in
-``apps/minds/test_ssr_sidecar.py`` (acceptance-marked); this file
-exercises the fallback path: ``render_*`` shims with ``sidecar=None``
-return a deterministic client-render shell that hydrates the right
-route key and props.
+Exercises the ``render_*`` shims in ``templates.py``: when ``sidecar``
+is ``None`` (or the sidecar's ``render`` raises), the shim returns a
+deterministic client-render shell that hydrates the right route key
+and props. Sidecar process-lifecycle integration with a running Node
+process is out of scope for the current migration phase.
 """
 
 from imbue.minds.desktop_client.ssr_sidecar import SsrSidecarError
