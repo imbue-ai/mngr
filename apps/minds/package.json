@@ -11,16 +11,28 @@
     "build": "node scripts/build.js",
     "dist": "pnpm build && pnpm exec todesktop build",
     "todesktop:beforeInstall": "./scripts/download-binaries.js",
-    "fetch-tailwind": "bash scripts/fetch_tailwind.sh",
-    "postinstall": "bash scripts/fetch_tailwind.sh"
+    "frontend:dev": "vite",
+    "frontend:build": "vite build && vite build --ssr src/main/server.jsx --outDir ../frontend/dist-server --emptyOutDir",
+    "frontend:test": "vitest run",
+    "frontend:test:watch": "vitest"
   },
   "dependencies": {
     "@todesktop/runtime": "^1.6.0",
-    "latchkey": "^2.15.0"
+    "latchkey": "^2.15.0",
+    "solid-js": "1.9.3",
+    "@solidjs/router": "0.15.1"
   },
   "devDependencies": {
     "electron": "40.10.1",
-    "@todesktop/cli": "^1.8.0"
+    "@todesktop/cli": "^1.8.0",
+    "vite": "5.4.11",
+    "vite-plugin-solid": "2.11.0",
+    "tailwindcss": "^4.1.0",
+    "@tailwindcss/vite": "^4.1.0",
+    "vitest": "2.1.8",
+    "@solidjs/testing-library": "0.8.10",
+    "@testing-library/jest-dom": "6.6.3",
+    "jsdom": "25.0.1"
   },
   "engines": {
     "node": "24.15.0",

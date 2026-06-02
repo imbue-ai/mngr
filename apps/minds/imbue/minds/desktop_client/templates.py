@@ -9,21 +9,26 @@ that we moved from inline strings to file-based templates.
 
 import hashlib
 import html
+import json
 import os
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 from typing import Final
 
 from jinja2 import Environment
 from jinja2 import FileSystemLoader
 from jinja2 import select_autoescape
+from loguru import logger
 
 from imbue.imbue_common.pure import pure
 from imbue.minds.bootstrap import DEFAULT_MINDS_ROOT_NAME
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.onboarding import expected_creation_duration_seconds
+from imbue.minds.desktop_client.ssr_sidecar import SsrSidecar
+from imbue.minds.desktop_client.ssr_sidecar import SsrSidecarError
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupEncryptionMethod
 from imbue.minds.primitives import BackupProvider
@@ -39,6 +44,76 @@ JINJA_ENV: Final[Environment] = Environment(
     loader=FileSystemLoader(str(TEMPLATE_DIR)),
     autoescape=select_autoescape(default_for_string=True, default=True),
 )
+
+
+# -- SSR helpers --
+#
+# Each ``render_*`` shim that's been migrated to Solid takes an optional
+# ``sidecar`` and a ``route`` key + props dict. The shim attempts the SSR
+# render and falls back to the client-render shell if the sidecar is
+# unhealthy (or absent in unit tests). Keeping the function signatures
+# stable means existing route handlers and unit tests don't change shape.
+
+
+def _client_render_shell(*, route: str, props: dict[str, Any]) -> str:
+    """Inline shell HTML that boots the client bundle without SSR.
+
+    Used when the SSR sidecar is unhealthy or in tests that don't spin up
+    a Node process. The page is identical in observable behavior to the
+    SSR'd version once the client hydrates, except that the user sees an
+    empty ``#app`` mount point for one tick before Solid takes over.
+
+    The route key and props are inlined as a JSON ``<script>`` blob; the
+    client entry (``frontend/src/main/app.entry.jsx``) reads it on boot.
+    """
+    payload = (
+        json.dumps({"route": route, "props": props})
+        .replace("<", "\\u003c")
+        .replace(" ", "\\u2028")
+        .replace(" ", "\\u2029")
+    )
+    # We can't predict the hashed asset paths without the Vite manifest
+    # here (the sidecar normally reads it), so we emit a single module
+    # script pointing at a stable filename via Vite's manifest convention.
+    # The Vite build is configured to emit the entry as the import path
+    # below; in dev mode the user must run ``pnpm frontend:dev`` and set
+    # ``MINDS_VITE_DEV_URL`` so the SSR path is taken instead.
+    return (
+        "<!doctype html>\n"
+        '<html lang="en">\n'
+        "<head>\n"
+        '<meta charset="UTF-8"><title>Minds</title>\n'
+        '<link rel="stylesheet" href="/_static/_dist/assets/app.css">\n'
+        "</head>\n"
+        '<body class="bg-zinc-50 text-zinc-900 font-sans antialiased">\n'
+        '<div id="app"></div>\n'
+        f'<script type="application/json" id="__route__">{payload}</script>\n'
+        '<script type="module" src="/_static/_dist/assets/app.js"></script>\n'
+        "</body>\n"
+        "</html>\n"
+    )
+
+
+def _render_ssr_or_fallback(
+    *,
+    sidecar: SsrSidecar | None,
+    route: str,
+    props: dict[str, Any],
+) -> str:
+    """Try SSR; fall back to the client-render shell on any failure.
+
+    The shell is byte-identical regardless of which page is being
+    rendered -- only the inlined ``{ route, props }`` payload differs --
+    so tests can assert on the payload to verify behavior without
+    standing up a Node sidecar.
+    """
+    if sidecar is None:
+        return _client_render_shell(route=route, props=props)
+    try:
+        return sidecar.render(route=route, props=props)
+    except SsrSidecarError as exc:
+        logger.warning("SSR sidecar render failed for route {!r}; using fallback shell: {}", route, exc)
+        return _client_render_shell(route=route, props=props)
 
 
 # -- Per-workspace identity color --
@@ -309,28 +384,46 @@ def render_creating_page(
     )
 
 
-@pure
-def render_welcome_page() -> str:
-    """Render the welcome/splash page for first-time users."""
-    return JINJA_ENV.get_template("welcome.html").render()
+def render_welcome_page(sidecar: SsrSidecar | None = None) -> str:
+    """Render the welcome/splash page for first-time users.
+
+    The page itself is a Solid component (``routes/welcome.jsx``); this
+    shim asks the sidecar to render it and falls back to the
+    client-render shell when the sidecar isn't available.
+    """
+    return _render_ssr_or_fallback(sidecar=sidecar, route="welcome", props={})
 
 
-@pure
-def render_login_page() -> str:
+def render_login_page(sidecar: SsrSidecar | None = None) -> str:
     """Render the login prompt page for unauthenticated users."""
-    return JINJA_ENV.get_template("login.html").render()
+    return _render_ssr_or_fallback(sidecar=sidecar, route="login", props={})
 
 
-@pure
-def render_login_redirect_page(one_time_code: OneTimeCode) -> str:
-    """Render the JS redirect page that forwards to /authenticate."""
-    return JINJA_ENV.get_template("login_redirect.html").render(one_time_code=one_time_code)
+def render_login_redirect_page(
+    one_time_code: OneTimeCode,
+    sidecar: SsrSidecar | None = None,
+) -> str:
+    """Render the JS redirect page that forwards to /authenticate.
+
+    The one-time code is passed verbatim as a Solid prop and encoded
+    with ``encodeURIComponent`` at navigation time on the client. We
+    never interpolate it into a string literal here, matching the
+    safety contract of the original Jinja template.
+    """
+    return _render_ssr_or_fallback(
+        sidecar=sidecar,
+        route="login_redirect",
+        props={"one_time_code": str(one_time_code)},
+    )
 
 
-@pure
-def render_auth_error_page(message: str) -> str:
+def render_auth_error_page(message: str, sidecar: SsrSidecar | None = None) -> str:
     """Render an error page for failed authentication."""
-    return JINJA_ENV.get_template("auth_error.html").render(message=message)
+    return _render_ssr_or_fallback(
+        sidecar=sidecar,
+        route="auth_error",
+        props={"message": message},
+    )
 
 
 # CSS for the recovery page's restart controls, appended to the shared

@@ -1,9 +1,13 @@
 {#
-  Base layout: every page extends this. Pulls in the Tailwind Play CDN JS
-  (downloaded once into /_static/tailwind.js and served locally, so this is
-  offline-safe after the first fetch) plus the hand-written tokens.css.
-  The Play CDN script generates utility classes at runtime, so there is no
-  "rebuild when you add a class" step.
+  Base layout: every page extends this. Pulls in the Vite-built Tailwind
+  v4 CSS bundle (built by `pnpm --dir apps/minds frontend:build`). The
+  build scans both the Solid components and the Jinja templates for
+  class usage, so the emitted CSS covers every page until the migration
+  removes the remaining Jinja templates.
+
+  The legacy `tokens.css` content (workspace-accent variables, spinner
+  keyframes, .opt onboarding cards) is now part of `globals.css`, which
+  Vite emits inside `app.css`.
 
   Blocks:
     title           -- <title> contents. Defaults to "Minds".
@@ -21,8 +25,7 @@
 <head>
   <meta charset="UTF-8">
   <title>{% block title %}Minds{% endblock %}</title>
-  <script src="/_static/tailwind.js"></script>
-  <link rel="stylesheet" href="/_static/tokens.css">
+  <link rel="stylesheet" href="/_static/_dist/assets/app.css">
   {% block head %}{% endblock %}
 </head>
 <body class="{% block body_class %}bg-zinc-50 text-zinc-900 font-sans antialiased{% endblock %}"

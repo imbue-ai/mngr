@@ -1,0 +1,21 @@
+@import "tailwindcss";
+
+/*
+ * Pull in the legacy tokens + component CSS that the old base.html
+ * shipped as ``static/tokens.css``. Keeping the file separate (rather
+ * than inlining its contents here) means the existing
+ * test_dev_styleguide_token_swatches_enumerate_root_declarations drift
+ * guard keeps working unchanged. When the Jinja templates are fully
+ * gone (Phase 8) we'll move the contents in and delete tokens.css.
+ */
+@import "../../../imbue/minds/desktop_client/static/tokens.css";
+
+/*
+ * Source detection. Tailwind v4 auto-detects by default, but our Solid
+ * components live one level up from the Vite root and the still-Jinja
+ * templates live in the Python package; we point at both explicitly so
+ * the emitted CSS covers every class used anywhere in the app.
+ */
+@source "../../**/*.{jsx,js}";
+@source "../../../imbue/minds/desktop_client/templates/**/*.html";
+@source "../../../imbue/minds/desktop_client/static/**/*.js";

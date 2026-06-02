@@ -47,24 +47,40 @@ def test_render_landing_page_discovering_shows_auto_refresh() -> None:
     assert "/goto/" not in html
 
 
-def test_render_login_redirect_page_contains_redirect_script() -> None:
-    html = render_login_redirect_page(
-        one_time_code=OneTimeCode("abc123-secret-82341"),
+def _extract_route_payload(html: str) -> dict[str, object]:
+    """Pull the ``{ route, props }`` JSON payload out of the SSR fallback shell.
+
+    The four trivial pages now render through the Solid SSR sidecar; when
+    the sidecar is absent (as in these unit tests) the shim returns a
+    deterministic shell with the route key and props inlined as JSON for
+    client-side hydration. Tests assert on that payload instead of on
+    the previous Jinja-rendered HTML.
+    """
+    import json
+    import re
+
+    match = re.search(
+        r'<script type="application/json" id="__route__">(.+?)</script>',
+        html,
+        re.DOTALL,
     )
-    assert "window.location.href" in html
-    # The URL is built at runtime with encodeURIComponent, so the code appears
-    # as a JS string literal (via Jinja's `tojson` filter) rather than inlined
-    # into the URL directly.
-    assert "abc123-secret-82341" in html
-    assert "/authenticate?one_time_code=" in html
-    assert "encodeURIComponent" in html
+    if match is None:
+        raise AssertionError(f"No __route__ payload found in SSR shell: {html[:200]!r}")
+    return json.loads(match.group(1))
 
 
-def test_render_auth_error_page_shows_error_message() -> None:
+def test_render_login_redirect_page_inlines_one_time_code_for_client_hydration() -> None:
+    html = render_login_redirect_page(one_time_code=OneTimeCode("abc123-secret-82341"))
+    payload = _extract_route_payload(html)
+    assert payload["route"] == "login_redirect"
+    assert payload["props"]["one_time_code"] == "abc123-secret-82341"
+
+
+def test_render_auth_error_page_inlines_error_message_for_client_hydration() -> None:
     html = render_auth_error_page(message="This code has already been used.")
-    assert "This code has already been used." in html
-    assert "Authentication Failed" in html
-    assert "restart the server" in html
+    payload = _extract_route_payload(html)
+    assert payload["route"] == "auth_error"
+    assert payload["props"]["message"] == "This code has already been used."
 
 
 def test_agent_id_rejects_invalid_format() -> None:
@@ -194,9 +210,11 @@ def test_render_create_form_ignores_workspace_env_vars_when_unactivated(monkeypa
     assert "mngr/some-feature" not in html
 
 
-def test_render_login_page_shows_prompt() -> None:
+def test_render_login_page_emits_solid_route_payload() -> None:
     html = render_login_page()
-    assert "login URL" in html.lower() or "Login" in html
+    payload = _extract_route_payload(html)
+    assert payload["route"] == "login"
+    assert payload["props"] == {}
 
 
 def test_render_chrome_page_contains_titlebar() -> None:

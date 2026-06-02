@@ -88,6 +88,8 @@ from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.request_handler import find_handler_for_event
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.ssr_sidecar import SsrSidecar
+from imbue.minds.desktop_client.ssr_sidecar import SsrSidecarError
 from imbue.minds.desktop_client.sharing_handler import SharingError
 from imbue.minds.desktop_client.sharing_handler import enable_sharing_via_cloudflare
 from imbue.minds.desktop_client.sharing_handler import parse_emails_form_value
@@ -280,6 +282,12 @@ async def _managed_lifespan(
             # (which uses read=None timeout and otherwise blocks forever
             # waiting for the gateway to push the next request).
             permission_requests_consumer.stop()
+        ssr_sidecar = inner_app.state.ssr_sidecar
+        if ssr_sidecar is not None:
+            # Terminates the Node SSR subprocess and closes its httpx
+            # client. The supervisor thread (registered on the root
+            # ConcurrencyGroup) exits via its ``_shutting_down`` event.
+            ssr_sidecar.stop()
         # Exit the root ConcurrencyGroup. ``__exit__`` waits up to
         # ``shutdown_timeout_seconds`` for any still-in-flight strands (e.g.
         # a detached tunnel-setup task) to finish.
@@ -309,7 +317,7 @@ def _handle_login(
         return Response(status_code=307, headers={"Location": "/"})
 
     # Render JS redirect to /authenticate (prevents prefetch consumption)
-    html = render_login_redirect_page(one_time_code=code)
+    html = render_login_redirect_page(one_time_code=code, sidecar=request.app.state.ssr_sidecar)
     return HTMLResponse(content=html)
 
 
@@ -323,7 +331,10 @@ def _handle_authenticate(
     is_valid = auth_store.validate_and_consume_code(code=code)
 
     if not is_valid:
-        html = render_auth_error_page(message="This login code is invalid or has already been used.")
+        html = render_auth_error_page(
+            message="This login code is invalid or has already been used.",
+            sidecar=request.app.state.ssr_sidecar,
+        )
         return HTMLResponse(content=html, status_code=403)
 
     # Set a host-only session cookie on the bare origin. We do NOT try to
@@ -349,9 +360,9 @@ def _handle_authenticate(
 def _handle_welcome_page(request: Request, auth_store: AuthStoreDep) -> Response:
     """Render the welcome/splash page for first-time users."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        html = render_login_page()
+        html = render_login_page(sidecar=request.app.state.ssr_sidecar)
         return HTMLResponse(content=html)
-    html = render_welcome_page()
+    html = render_welcome_page(sidecar=request.app.state.ssr_sidecar)
     return HTMLResponse(content=html)
 
 
@@ -361,7 +372,7 @@ def _handle_landing_page(
     backend_resolver: BackendResolverDep,
 ) -> Response:
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        html = render_login_page()
+        html = render_login_page(sidecar=request.app.state.ssr_sidecar)
         return HTMLResponse(content=html)
 
     all_agent_ids = backend_resolver.list_known_workspace_ids()
@@ -2127,7 +2138,7 @@ def _handle_recovery_page(
 ) -> Response:
     """Render the workspace-recovery page (shown by the 503 redirect or by direct nav)."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return HTMLResponse(content=render_login_page(), status_code=403)
+        return HTMLResponse(content=render_login_page(sidecar=request.app.state.ssr_sidecar), status_code=403)
     aid = AgentId(agent_id)
     tracker: SystemInterfaceHealthTracker | None = request.app.state.system_interface_health_tracker
     initial_status = tracker.get_health(aid).value if tracker is not None else AgentHealth.HEALTHY.value
@@ -3350,6 +3361,12 @@ def create_desktop_client(
     app.state.mngr_forward_preauth_cookie = mngr_forward_preauth_cookie
     app.state.auth_output_format = output_format or OutputFormat.JSONL
     app.state.root_concurrency_group = root_concurrency_group
+    # Initialized to None here; the sidecar setup further down (after the
+    # static mount) replaces it with the live ``SsrSidecar`` instance when
+    # the Solid bundle is present. Route handlers always read this slot
+    # via ``app.state.ssr_sidecar`` so any timing window (e.g. tests that
+    # bypass the lifespan) sees a valid attribute.
+    app.state.ssr_sidecar = None
     app.state.system_interface_health_tracker = system_interface_health_tracker
     app.state.mngr_binary = mngr_binary
     app.state.mngr_host_dir = mngr_host_dir if mngr_host_dir is not None else Path.home() / ".mngr"
@@ -3398,14 +3415,60 @@ def create_desktop_client(
         # stays in sync if a future code path ever rotates the key.
         app.mount("/api/v1/files", create_webdav_app(lambda: app.state.minds_api_key))
 
-    # Static assets: Tailwind Play CDN JS + hand-written tokens.css +
-    # per-page JS. The Tailwind JS is fetched once by `just minds-tailwind`
-    # (plain curl, no build step) and is gitignored; if it's missing, the
-    # mount still works and the server logs a hint at startup.
+    # Static assets. The Vite-built client bundle lands under
+    # ``static/_dist/`` via ``pnpm frontend:build``; legacy hand-written
+    # JS files coexist there until the migration consumes them.
     _static_dir = Path(__file__).resolve().parent / "static"
-    if not (_static_dir / "tailwind.js").exists():
-        logger.warning("Missing static/tailwind.js. Run `just minds-tailwind` from the repo root to fetch it.")
     app.mount("/_static", StaticFiles(directory=str(_static_dir)), name="static")
+    _dist_dir = _static_dir / "_dist"
+    _manifest_path = _dist_dir / ".vite" / "manifest.json"
+    _vite_dev_url = os.environ.get("MINDS_VITE_DEV_URL", "").rstrip("/") or None
+    if _vite_dev_url is None and not _manifest_path.exists():
+        logger.warning(
+            "Frontend bundle missing: neither MINDS_VITE_DEV_URL nor {} is present. "
+            "Run `pnpm --dir apps/minds frontend:build` or `pnpm --dir apps/minds frontend:dev` "
+            "before serving traffic.",
+            _manifest_path,
+        )
+
+    # SSR sidecar: a Node subprocess that renders Solid components to
+    # HTML. The Python side proxies HTML routes to it; on failure each
+    # render_* shim falls back to a client-render shell. The entry is
+    # produced by ``pnpm --dir apps/minds frontend:build``; absent it,
+    # we run with the fallback shell only (and log loudly).
+    _server_entry_override = os.environ.get("MINDS_SSR_SERVER_ENTRY")
+    if _server_entry_override:
+        _server_entry: Path | None = Path(_server_entry_override)
+    else:
+        _server_entry = (
+            Path(__file__).resolve().parent.parent.parent.parent
+            / "frontend"
+            / "dist-server"
+            / "assets"
+            / "server.js"
+        )
+    ssr_sidecar: SsrSidecar | None = None
+    if _server_entry is not None and _server_entry.exists() and root_concurrency_group is not None:
+        ssr_sidecar = SsrSidecar(
+            server_entry=_server_entry,
+            manifest_path=_manifest_path if _manifest_path.exists() else None,
+            vite_dev_url=_vite_dev_url,
+            parent_cg=root_concurrency_group,
+        )
+        try:
+            ssr_sidecar.start()
+        except SsrSidecarError as exc:
+            logger.warning("SSR sidecar failed to start; using client-render fallback: {}", exc)
+            ssr_sidecar = None
+    else:
+        logger.warning(
+            "SSR sidecar disabled (server_entry={} exists={} root_cg={}); "
+            "HTML routes will use the client-render fallback shell.",
+            _server_entry,
+            _server_entry.exists() if _server_entry else False,
+            root_concurrency_group is not None,
+        )
+    app.state.ssr_sidecar = ssr_sidecar
 
     # Chrome (persistent shell) routes
     app.get("/_chrome")(_handle_chrome_page)

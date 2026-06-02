@@ -1,6 +1,7 @@
 import json
 import os
 import queue
+import re
 from pathlib import Path
 
 import httpx
@@ -173,15 +174,39 @@ def _authenticate_client(
 
 
 def test_landing_page_shows_login_when_unauthenticated(tmp_path: Path) -> None:
+    """An unauthenticated GET / returns the login route's SSR fallback shell.
+
+    The page's interactivity (mounting the Solid component, displaying
+    the "Sign in to Minds" copy) lives in the client bundle and is
+    covered by the Vitest component tests. Here we just assert that the
+    server told the client to mount the ``login`` route.
+    """
     client, _, _ = _setup_test_server(tmp_path)
 
     response = client.get("/")
 
     assert response.status_code == 200
-    assert "Login" in response.text
+    assert response.status_code == 200
+    payload = json.loads(
+        re.search(
+            r'<script type="application/json" id="__route__">(.+?)</script>',
+            response.text,
+            re.DOTALL,
+        ).group(1)
+    )
+    assert payload["route"] == "login"
 
 
 def test_login_redirects_to_authenticate_via_js(tmp_path: Path) -> None:
+    """GET /login?one_time_code=... returns the login_redirect SSR shell.
+
+    The actual ``window.location.href = ...`` navigation lives in the
+    Solid ``LoginRedirectRoute`` component (covered by Vitest); the
+    server's job is to inline the one-time code so the client can
+    perform the redirect after hydration. The route mapping
+    (server → ``route: "login_redirect"`` + ``props.one_time_code``) is
+    the contract this test asserts.
+    """
     client, auth_store, _ = _setup_test_server(tmp_path)
     code = OneTimeCode("login-code-{}".format(AgentId()))
     auth_store.add_one_time_code(code=code)
@@ -193,8 +218,15 @@ def test_login_redirects_to_authenticate_via_js(tmp_path: Path) -> None:
     )
 
     assert response.status_code == 200
-    assert "window.location.href" in response.text
-    assert "/authenticate" in response.text
+    payload = json.loads(
+        re.search(
+            r'<script type="application/json" id="__route__">(.+?)</script>',
+            response.text,
+            re.DOTALL,
+        ).group(1)
+    )
+    assert payload["route"] == "login_redirect"
+    assert payload["props"]["one_time_code"] == str(code)
 
 
 def test_authenticate_with_valid_code_sets_cookie_and_redirects(tmp_path: Path) -> None:
