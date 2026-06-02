@@ -81,30 +81,25 @@ def _build_ovh_ops() -> OvhOps:
     )
 
 
-def _load_active_and_known_rows(
-    database_urls: tuple[str, ...],
-) -> tuple[dict[str, str], list[tuple[str, str, str]]]:
-    """Read pool_hosts rows from every database.
+def _load_active_status_by_vps(database_urls: tuple[str, ...]) -> dict[str, str]:
+    """Map each VPS to its active pool status across every database.
 
-    Returns ``(status_by_vps_instance_id, all_rows)`` where ``all_rows`` is a
-    list of ``(database_url, vps_instance_id, status)``. The status map keeps
-    the strongest active status per VPS so a host leased in any DB is treated
-    as active.
+    A VPS is included only if some database has it in an active status
+    (``available`` / ``leased``), so a host leased in any DB is protected. This
+    backs the runbook's safety check that leaves live-leased VPSes alone.
     """
     status_by_vps_instance_id: dict[str, str] = {}
-    all_rows: list[tuple[str, str, str]] = []
     for database_url in database_urls:
         conn = psycopg2.connect(database_url)
         try:
             with conn.cursor() as cur:
                 cur.execute("SELECT vps_instance_id, status FROM pool_hosts")
                 for vps_instance_id, status in cur.fetchall():
-                    all_rows.append((database_url, vps_instance_id, status))
                     if status in _ACTIVE_STATUSES:
                         status_by_vps_instance_id[vps_instance_id] = status
         finally:
             conn.close()
-    return status_by_vps_instance_id, all_rows
+    return status_by_vps_instance_id
 
 
 def _strip_all_non_provider_tags(ovh_ops: OvhOps, resource: OvhVpsResource, region_code: str) -> list[str]:
@@ -166,7 +161,7 @@ def cleanup_released_hosts(database_urls: tuple[str, ...], include_active: bool,
     region_code = ovh_region_code_for_endpoint(os.environ.get("OVH_ENDPOINT", _OVH_DEFAULT_ENDPOINT))
 
     # Read DB state up front so we can protect VPSes backing live leases.
-    active_status_by_vps, _all_rows = _load_active_and_known_rows(database_urls)
+    active_status_by_vps = _load_active_status_by_vps(database_urls)
 
     # Find every mngr-provider-tagged VPS in the account.
     resources = [r for r in ovh_ops.list_vps_resources() if OVH_PROVIDER_TAG_KEY in r.tags]
