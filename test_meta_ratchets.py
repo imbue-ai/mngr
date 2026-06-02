@@ -608,7 +608,7 @@ def test_pr_has_changelog_entry() -> None:
 def test_every_project_has_changelog_layout() -> None:
     """Ensure every project (libs/<name>, apps/<name>, and the synthetic dev)
     has the full changelog layout: ``CHANGELOG.md``, ``UNABRIDGED_CHANGELOG.md``,
-    and a ``changelog/`` directory (with a ``.gitkeep``) for per-PR entries.
+    and a ``changelog/.gitkeep`` anchoring the directory for per-PR entries.
 
     Mirrors ``test_every_project_has_test_ratchets_file`` and
     ``test_every_project_has_pypi_readme``: a symmetric requirement that
