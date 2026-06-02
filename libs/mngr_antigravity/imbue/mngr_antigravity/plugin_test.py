@@ -380,22 +380,21 @@ def test_assemble_command_resumes_last_conversation_via_set_dash_dash(antigravit
 
     The stored command is replayed verbatim on every `mngr start`, so the
     resume decision is shell-evaluated at launch: read the last line of the
-    per-agent conversation-ids file, and -- if that conversation's `.db` store
-    file still exists -- pass `--conversation "$id"` via `set --` / "$@" (which
-    avoids unquoted-substitution word splitting so it works in bash and zsh).
+    per-agent conversation-ids file and, when present, pass `--conversation
+    "$id"` via `set --` / "$@" (which avoids unquoted-substitution word
+    splitting so it works in bash and zsh). We do not stat agy's store to
+    pre-check existence -- agy warns and starts fresh on its own for a pruned
+    conversation -- so the command stays decoupled from agy's on-disk layout.
     """
     command = str(antigravity_agent.assemble_command(antigravity_agent.host, (), command_override=None))
     ids_file = str(antigravity_agent._get_conversation_ids_file_path())
     # Reads the last recorded id from the per-agent ids file.
     assert f"__mngr_cid=$(tail -n 1 {ids_file} 2>/dev/null || true)" in command
-    # Guarded on the conversation's .db store file still existing. The .db (not
-    # the .pb) is what agy writes incrementally and resumes from, so it survives
-    # the hard kill `mngr stop` performs (the .pb is clean-exit only).
-    assert (
-        '[ -f "${ANTIGRAVITY_APP_DATA_DIR:-$HOME/.gemini/antigravity-cli}/conversations/$__mngr_cid.db" ]' in command
-    )
-    # Passes the flag positionally (no unquoted-substitution word splitting).
-    assert 'set -- --conversation "$__mngr_cid"' in command
+    # Passes the flag positionally whenever an id is recorded (no store stat).
+    assert 'if [ -n "$__mngr_cid" ]; then set -- --conversation "$__mngr_cid"; fi' in command
+    # No coupling to agy's conversation store path/extension.
+    assert ".db" not in command
+    assert "conversations/" not in command
     assert "agy " in command and '"$@"' in command
 
 

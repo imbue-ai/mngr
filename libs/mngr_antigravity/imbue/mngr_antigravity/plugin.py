@@ -118,11 +118,9 @@ _RAW_TRANSCRIPT_SCRIPT_NAME: Final[str] = "stream_transcript.sh"
 _BACKGROUND_TASKS_SCRIPT_NAME: Final[str] = "antigravity_background_tasks.sh"
 
 # Relative path under $MNGR_AGENT_STATE_DIR for the agy --log-file. Keeping
-# it under logs/ groups it with the other per-agent log artifacts. agy's
-# internal log is no longer used for conversation-id discovery (the
-# ``capture_conversation_id.sh`` hook records IDs directly; see
-# ``CONVERSATION_IDS_FILENAME``), but a durable per-agent agy log is still
-# worth keeping for debugging.
+# it under logs/ groups it with the other per-agent log artifacts. This is a
+# debugging log; conversation-id discovery uses the capture-hook file (see
+# ``CONVERSATION_IDS_FILENAME``), not this log.
 _AGY_LOG_FILE_RELATIVE_PATH: Final[str] = "logs/agy_cli.log"
 
 # Parent directory for the per-agent symlinks that work around agy's
@@ -632,21 +630,10 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
            ``--dangerously-skip-permissions`` flag is appended only when
            ``auto_allow_permissions`` is set.
 
-        The resume-prelude resumes the most-recently-active conversation on
-        restart. ``capture_conversation_id.sh`` records this agent's
-        conversation IDs as it works (see ``CONVERSATION_IDS_FILENAME``); the
-        last line is the current one. The stored command is replayed verbatim
-        on every ``mngr start`` (``assemble_command`` runs only at create
-        time), so the resume decision must be evaluated by the shell at launch
-        -- not in Python here, where no conversation exists yet. We pass the
-        flag via ``set --`` / ``"$@"`` rather than splitting an unquoted command
-        substitution, so it survives both bash and zsh (the agent's login shell
-        runs the command). The resume is guarded on the conversation's ``.db``
-        store file still existing (agy writes it incrementally, so it survives
-        the hard kill ``mngr stop`` performs -- unlike the ``.pb``, which is
-        only written on a clean in-TUI exit); if it's gone we launch fresh
-        rather than make agy print a "not found" warning. The whole step is a
-        ``{ ...; }`` group gated on the ``cd`` succeeding.
+        The resume-prelude resumes the agent's most-recently-active
+        conversation via ``agy --conversation`` on restart; it is shell-
+        evaluated at launch because the stored command is replayed on every
+        ``mngr start`` (see the inline comment on its construction below).
 
         Bash precedence note: ``A & B && C && D && E`` parses as ``A &``
         followed by ``B && C && D && E``. The supervisor's subshell is
@@ -657,9 +644,9 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         restarts) updates the symlink in place; ``/tmp`` wipes self-repair
         on the next launch.
 
-        The ``--log-file`` arg pipes agy's internal log to a per-agent path,
-        kept for debugging (conversation-ID discovery no longer reads it; the
-        capture hook records IDs directly).
+        The ``--log-file`` arg writes agy's internal log to a per-agent path
+        for debugging. (Conversation-ID discovery reads the capture-hook file,
+        ``CONVERSATION_IDS_FILENAME``, not this log.)
         """
         log_file_path = self._get_agy_log_file_path()
         hooks_dir = self._get_agy_hooks_dir()
@@ -691,24 +678,19 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         hooks_ln_cmd = f"ln -sfn {shlex.quote(str(hooks_dir))} {shlex.quote(hooks_symlink_path)}"
         cd_cmd = f"cd {shlex.quote(symlink_path)}"
 
-        # Shell-evaluated at launch (the stored command is replayed on each
-        # restart): resume the last-recorded conversation via `--conversation`
-        # iff its `.db` store file still exists. We check the `.db` (not the
-        # `.pb`): agy writes the conversation incrementally to
-        # `conversations/<id>.db`, so it survives the hard process kill that
-        # `mngr stop` performs and is what `agy --conversation` resumes from --
-        # whereas `conversations/<id>.pb` is only written on a clean in-TUI
-        # exit and is absent after a stop (verified live against agy 1.0.4).
-        # `set --` / "$@" appends the flag without relying on
-        # unquoted-substitution word splitting, so it behaves identically under
-        # bash and zsh. The default store dir mirrors stream_transcript.sh's
-        # ANTIGRAVITY_APP_DATA_DIR fallback.
+        # Resume the last-recorded conversation via `agy --conversation`,
+        # evaluated here in the shell because the stored command is replayed on
+        # each restart. agy resumes from its own incrementally-written store
+        # (which survives the hard kill `mngr stop` performs) and, if the
+        # conversation was pruned, warns and starts fresh on its own -- so we
+        # pass the flag whenever an id is recorded and don't stat the store
+        # ourselves (which would couple us to agy's on-disk layout). `set --` /
+        # "$@" appends the flag without unquoted-substitution word splitting,
+        # so it works under both bash and zsh.
         quoted_ids_file = shlex.quote(str(self._get_conversation_ids_file_path()))
-        conv_store = "${ANTIGRAVITY_APP_DATA_DIR:-$HOME/.gemini/antigravity-cli}/conversations"
         resume_prelude = (
             f"__mngr_cid=$(tail -n 1 {quoted_ids_file} 2>/dev/null || true); set --; "
-            f'if [ -n "$__mngr_cid" ] && [ -f "{conv_store}/$__mngr_cid.db" ]; then '
-            'set -- --conversation "$__mngr_cid"; fi'
+            'if [ -n "$__mngr_cid" ]; then set -- --conversation "$__mngr_cid"; fi'
         )
         agy_invocation = f"{base_command} {' '.join(extra_args)}"
 
