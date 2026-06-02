@@ -9,7 +9,9 @@ from typing import Iterator
 import pytest
 from loguru import logger
 
+from imbue.mngr.api.preservation import get_preserved_agent_dir
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentName
 from imbue.mngr_claude_subagent_proxy import subagent_wait
 from imbue.mngr_claude_subagent_proxy.subagent_wait import AgentLocation
 from imbue.mngr_claude_subagent_proxy.subagent_wait import TailState
@@ -288,7 +290,7 @@ def test_destroyed_fallback_from_preserved_sessions(tmp_path: Path) -> None:
     location = AgentLocation(host_dir=host_dir, agent_id=agent_id, work_dir=work_dir)
 
     events_dir = (
-        host_dir / "plugin" / "mngr_claude" / "preserved_sessions" / f"{target_name}--{agent_id}" / "common_transcript"
+        get_preserved_agent_dir(host_dir, AgentName(target_name), agent_id) / "events" / "claude" / "common_transcript"
     )
     events_dir.mkdir(parents=True)
     events_path = events_dir / "events.jsonl"

@@ -58,6 +58,8 @@ from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.common import LOCAL_CONNECTOR_NAME
 from imbue.mngr.interfaces.data_types import CommandResult
+from imbue.mngr.interfaces.data_types import VolumeFile
+from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.host import OuterHostInterface
 
 
@@ -102,6 +104,84 @@ def create_ssh_pyinfra_host_using_user_config(
     pyinfra_host = inventory.get_host(hostname)
     pyinfra_host.init(state)
     return pyinfra_host
+
+
+# Cross-platform directory listing executed on remote hosts via `python3 -c`.
+# Emits one tab-separated line per entry: <type><TAB><size><TAB><mtime_epoch><TAB><abs_path>
+# where <type> is 'd' for directories and 'f' for everything else. Uses Python's
+# os/stat modules so it works identically on macOS and Linux.
+_LIST_DIRECTORY_SCRIPT: str = r"""
+import os, stat, sys
+d = sys.argv[1]
+is_recursive = sys.argv[2] == '1'
+def emit(path):
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return
+    tc = 'd' if stat.S_ISDIR(st.st_mode) else 'f'
+    sys.stdout.write(f'{tc}\t{st.st_size}\t{int(st.st_mtime)}\t{path}\n')
+if is_recursive:
+    for root, dirs, files in os.walk(d):
+        for name in dirs + files:
+            emit(os.path.join(root, name))
+else:
+    try:
+        names = os.listdir(d)
+    except OSError:
+        names = []
+    for name in names:
+        emit(os.path.join(d, name))
+"""
+
+
+def _parse_list_directory_output(output: str) -> list[VolumeFile]:
+    """Parse the tab-separated output of ``_LIST_DIRECTORY_SCRIPT`` into VolumeFiles."""
+    entries: list[VolumeFile] = []
+    for line in output.splitlines():
+        if not line:
+            continue
+        parts = line.split("\t", 3)
+        if len(parts) != 4:
+            logger.trace("Skipping malformed list_directory line: {}", line)
+            continue
+        type_char, size_str, mtime_str, path = parts
+        file_type = VolumeFileType.DIRECTORY if type_char == "d" else VolumeFileType.FILE
+        try:
+            size = int(size_str)
+            mtime = int(mtime_str)
+        except ValueError:
+            logger.trace("Skipping list_directory line with bad size/mtime: {}", line)
+            continue
+        entries.append(VolumeFile(path=path, file_type=file_type, mtime=mtime, size=size))
+    return entries
+
+
+def _list_directory_local(path: Path, recursive: bool) -> list[VolumeFile]:
+    """List a directory on the local filesystem, mirroring the remote script's output."""
+    entries: list[VolumeFile] = []
+
+    def emit(entry_path: str) -> None:
+        try:
+            st = os.lstat(entry_path)
+        except OSError:
+            return
+        file_type = VolumeFileType.DIRECTORY if os.path.isdir(entry_path) else VolumeFileType.FILE
+        entries.append(VolumeFile(path=entry_path, file_type=file_type, mtime=int(st.st_mtime), size=st.st_size))
+
+    str_path = str(path)
+    if recursive:
+        for root, dirs, files in os.walk(str_path):
+            for name in dirs + files:
+                emit(os.path.join(root, name))
+    else:
+        try:
+            names = os.listdir(str_path)
+        except OSError:
+            return []
+        for name in names:
+            emit(os.path.join(str_path, name))
+    return entries
 
 
 def _is_transient_ssh_error(exception: BaseException) -> bool:
@@ -829,6 +909,24 @@ class OuterHost(OuterHostInterface):
     def get_file_mtime(self, path: Path) -> datetime | None:
         """Return the modification time of a file, or None if the file doesn't exist."""
         return self._get_file_mtime(path)
+
+    def list_directory(self, path: Path, *, recursive: bool = False) -> list[VolumeFile]:
+        """List the entries under ``path`` on this host.
+
+        Returns one VolumeFile per entry, each with an absolute ``path``. On
+        local hosts this reads the filesystem directly; on remote hosts it runs
+        a small cross-platform Python script over SSH. A non-existent directory
+        yields an empty list rather than raising.
+        """
+        if self.is_local:
+            return _list_directory_local(path, recursive)
+        flag = "1" if recursive else "0"
+        command = f"python3 -c {shlex.quote(_LIST_DIRECTORY_SCRIPT)} {shlex.quote(str(path))} {flag}"
+        result = self.execute_idempotent_command(command, timeout_seconds=30.0)
+        if not result.success:
+            logger.trace("list_directory failed for {}: {}", path, result.stderr.strip())
+            return []
+        return _parse_list_directory_output(result.stdout)
 
     def get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
         """Get SSH connection info for this host if it's remote."""

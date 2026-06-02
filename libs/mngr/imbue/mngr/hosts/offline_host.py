@@ -9,6 +9,7 @@ from typing import Callable
 
 from loguru import logger
 from pydantic import Field
+from pydantic import PrivateAttr
 
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
@@ -16,11 +17,16 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import DuplicateAgentNameError
+from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import ActivityConfig
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import SnapshotInfo
+from imbue.mngr.interfaces.data_types import VolumeFile
+from imbue.mngr.interfaces.data_types import VolumeFileType
+from imbue.mngr.interfaces.host import HostFileReadInterface
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
+from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
@@ -363,3 +369,150 @@ class OfflineHost(BaseHost):
                     certified_data=updated,
                 )
             raise AgentNotFoundOnHostError(agent_ref.agent_id, self.id)
+
+
+class OfflineHostWithVolume(OfflineHost, HostFileReadInterface):
+    """An offline host whose persisted storage volume is still readable.
+
+    A plain :class:`OfflineHost` exposes only last-known metadata. When the
+    provider also surfaces a persistent volume for the host, the host's files
+    survive it being stopped, so we can still *read* them even though no
+    SSH/command execution is possible. This class implements
+    :class:`~imbue.mngr.interfaces.host.HostFileReadInterface` on top of that
+    volume, so callers that only need to read files (session preservation,
+    ``mngr file get``/``list``, event/transcript readers, map-reduce output
+    pulling) can treat a stopped-but-volume-backed host uniformly with an online
+    one.
+
+    The volume is resolved **lazily** -- on first file access, not at
+    construction. This keeps host *discovery* cheap: ``to_offline_host`` is
+    called in discovery fallbacks, and for some providers (e.g. Modal) resolving
+    the volume requires a network probe. Deferring the probe to the first read
+    means listing/discovering stopped hosts never pays for it; only code that
+    actually reads files does. The resolved volume (or its absence) is cached.
+    If no volume is available, reads behave as "nothing there": ``path_exists``
+    is False, ``list_directory`` is empty, and ``read_file`` raises
+    ``FileNotFoundError``.
+
+    Paths are addressed exactly as on an online host -- absolute paths under
+    ``host_dir``. The host volume is rooted at ``host_dir`` (it is the host's
+    persisted state directory), so an absolute path is translated to a
+    volume-relative one by stripping the ``host_dir`` prefix.
+    """
+
+    _resolved_volume: Volume | None = PrivateAttr(default=None)
+    _is_volume_resolved: bool = PrivateAttr(default=False)
+
+    @classmethod
+    def from_offline_host(cls, host: OfflineHost, host_volume: Volume | None = None) -> "OfflineHostWithVolume":
+        """Build a readable offline host from a plain OfflineHost.
+
+        ``host_volume`` may be passed to seed the volume eagerly (e.g. in tests
+        or when it is already known); otherwise it is resolved lazily from the
+        provider on first read.
+        """
+        readable = cls(
+            id=host.id,
+            certified_host_data=host.certified_host_data,
+            provider_instance=host.provider_instance,
+            mngr_ctx=host.mngr_ctx,
+            on_updated_host_data=host.on_updated_host_data,
+        )
+        if host_volume is not None:
+            readable._resolved_volume = host_volume
+            readable._is_volume_resolved = True
+        return readable
+
+    def _volume(self) -> Volume | None:
+        """Return the host's volume, resolving (and caching) it on first use."""
+        if not self._is_volume_resolved:
+            try:
+                host_volume = self.provider_instance.get_volume_for_host(self.id)
+            except (MngrError, OSError) as e:
+                logger.trace("Failed to resolve volume for offline host {}: {}", self.id, e)
+                host_volume = None
+            self._resolved_volume = host_volume.volume if host_volume is not None else None
+            self._is_volume_resolved = True
+        return self._resolved_volume
+
+    def _to_volume_path(self, path: Path) -> str:
+        """Translate an absolute path under host_dir to a volume-relative path."""
+        candidate = Path(path)
+        try:
+            relative = candidate.relative_to(self.host_dir)
+        except ValueError as e:
+            raise MngrError(
+                f"Path {candidate} is not under host_dir {self.host_dir}; "
+                "OfflineHostWithVolume can only read files within the host's volume."
+            ) from e
+        text = str(relative)
+        return "" if text == "." else text
+
+    def read_file(self, path: Path) -> bytes:
+        """Read a file from the host volume."""
+        volume = self._volume()
+        if volume is None:
+            raise FileNotFoundError(f"No readable volume for offline host {self.id}; cannot read {path}")
+        return volume.read_file(self._to_volume_path(path))
+
+    def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
+        """Read a file from the host volume and decode it."""
+        return self.read_file(path).decode(encoding)
+
+    def path_exists(self, path: Path) -> bool:
+        """Whether a path exists on the host volume."""
+        volume = self._volume()
+        if volume is None:
+            return False
+        return volume.path_exists(self._to_volume_path(path))
+
+    def get_file_mtime(self, path: Path) -> datetime | None:
+        """Return the modification time of a file via its parent directory listing."""
+        target = str(Path(path))
+        for entry in self.list_directory(Path(path).parent):
+            if entry.path == target:
+                return datetime.fromtimestamp(entry.mtime, tz=timezone.utc)
+        return None
+
+    def list_directory(self, path: Path, *, recursive: bool = False) -> list[VolumeFile]:
+        """List entries under ``path`` on the host volume.
+
+        Returns VolumeFiles with absolute ``path`` values under ``host_dir`` so
+        the addressing matches online hosts.
+        """
+        volume = self._volume()
+        if volume is None:
+            return []
+        return self._list_volume_dir(volume, self._to_volume_path(path), recursive)
+
+    def _list_volume_dir(self, volume: Volume, volume_path: str, recursive: bool) -> list[VolumeFile]:
+        try:
+            raw_entries = volume.listdir(volume_path)
+        except (MngrError, OSError) as e:
+            logger.trace("Failed to list volume directory '{}': {}", volume_path, e)
+            return []
+        results: list[VolumeFile] = []
+        for entry in raw_entries:
+            results.append(
+                VolumeFile(
+                    path=str(self.host_dir / entry.path),
+                    file_type=entry.file_type,
+                    mtime=entry.mtime,
+                    size=entry.size,
+                )
+            )
+            if recursive and entry.file_type == VolumeFileType.DIRECTORY:
+                results.extend(self._list_volume_dir(volume, entry.path, recursive))
+        return results
+
+
+def make_readable_offline_host(host: OfflineHost) -> OfflineHost:
+    """Return a readable form of an offline host.
+
+    Providers call this from ``to_offline_host`` so the returned offline host
+    implements :class:`~imbue.mngr.interfaces.host.HostFileReadInterface`,
+    reading the host's persisted volume when one is available. The volume is
+    resolved lazily on first read (see :class:`OfflineHostWithVolume`), so this
+    call is cheap and adds no per-host probe to host discovery.
+    """
+    return OfflineHostWithVolume.from_offline_host(host)

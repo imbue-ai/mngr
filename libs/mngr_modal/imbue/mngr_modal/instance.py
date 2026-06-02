@@ -48,6 +48,7 @@ from imbue.mngr.hosts.common import timestamp_to_datetime
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import derive_offline_host_state
+from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
@@ -2094,7 +2095,7 @@ log "=== Shutdown script completed ==="
         if host_record is None:
             raise HostNotFoundError(self.name, host_id)
 
-        return self._create_host_from_host_record(host_record)
+        return make_readable_offline_host(self._create_host_from_host_record(host_record))
 
     @handle_modal_auth_error
     def get_host(

@@ -36,6 +36,7 @@ from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.hosts.outer_host import create_local_pyinfra_host
 from imbue.mngr.hosts.outer_host import create_ssh_pyinfra_host_using_user_config
@@ -1450,7 +1451,7 @@ kill -TERM 1
         if host_record is None:
             raise HostNotFoundError(self.name, host_id)
 
-        return self._create_host_from_host_record(host_record)
+        return make_readable_offline_host(self._create_host_from_host_record(host_record))
 
     def get_host(
         self,

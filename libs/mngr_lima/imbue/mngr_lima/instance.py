@@ -22,6 +22,7 @@ from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
@@ -854,7 +855,7 @@ sudo poweroff
         host_record = self._host_store.read_host_record(host_id, use_cache=False)
         if host_record is None:
             raise HostNotFoundError(self.name, host_id)
-        return self._create_offline_host(host_record)
+        return make_readable_offline_host(self._create_offline_host(host_record))
 
     def discover_hosts(
         self,

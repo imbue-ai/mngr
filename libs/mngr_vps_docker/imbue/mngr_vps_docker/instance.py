@@ -39,6 +39,7 @@ from imbue.mngr.hosts.common import timestamp_to_datetime
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import derive_offline_host_state
+from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
 from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -2086,7 +2087,7 @@ class VpsDockerProvider(BaseProviderInstance):
         host_record = self._find_host_record(host_id)
         if host_record is None:
             raise HostNotFoundError(self.name, host_id)
-        return self._create_offline_host(host_record)
+        return make_readable_offline_host(self._create_offline_host(host_record))
 
     def discover_hosts(
         self,
