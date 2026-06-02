@@ -38,6 +38,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client.backend_resolver import SYSTEM_SERVICES_AGENT_NAME
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import configure_backups_for_host
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
@@ -76,6 +77,13 @@ from imbue.mngr_latchkey.store import LatchkeyStoreError
 # together.
 _MNGR_FORWARD_SESSION_COOKIE_NAME: Final[str] = "mngr_forward_session"
 
+# Path the workspace-readiness / health probes hit through the plugin. We probe
+# ``/`` and treat any 200 as "ready" -- deliberately *not* coupled to any
+# particular application running inside the workspace. The probe only confirms
+# that some web server is up and answering on the inner port; it makes no
+# assumption about which app that is or which routes it implements.
+_WORKSPACE_PROBE_PATH: Final[str] = "/"
+
 
 def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: float) -> httpx.Client:
     """Construct a reusable httpx.Client preconfigured for workspace probes.
@@ -91,8 +99,14 @@ def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: floa
     )
 
 
-def _probe_once(probe_client: httpx.Client, probe_url: str) -> int | None:
+def _probe_once(probe_client: httpx.Client, probe_url: str, host_header: str) -> int | None:
     """Issue a single GET through ``probe_client`` and return the status code.
+
+    ``probe_url`` targets loopback directly; ``host_header`` carries the
+    ``agent-<hex>.localhost`` vhost the plugin routes on. Sending the subdomain
+    as an explicit ``Host`` header rather than in the URL keeps the probe from
+    depending on ``*.localhost`` name resolution, which is not available on a
+    bare Linux host (only loopback ``localhost`` itself reliably resolves).
 
     Returns ``None`` if the probe failed at the transport layer (connect
     error, mid-stream EOF, read timeout). Module-private helper used by
@@ -100,7 +114,7 @@ def _probe_once(probe_client: httpx.Client, probe_url: str) -> int | None:
     project's no-inner-functions ratchet.
     """
     try:
-        response = probe_client.get(probe_url)
+        response = probe_client.get(probe_url, headers={"Host": host_header})
     except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.TimeoutException):
         return None
     return response.status_code
@@ -113,26 +127,28 @@ def probe_workspace_through_plugin(
     probe_timeout_seconds: float,
     client: httpx.Client | None = None,
 ) -> int | None:
-    """Issue a single probe through the plugin to the agent's system_interface.
+    """Issue a single probe through the plugin to the agent's inner web server.
 
-    Returns the HTTP status code observed (any 200 means ready), or ``None``
-    if the probe failed at the transport layer (connect error, mid-stream
-    EOF, read timeout). Shared by ``_wait_for_workspace_ready`` (creation
-    flow) and the system-interface-health tracker's background probe loop
-    so both paths agree on what "ready" means.
+    Probes ``/`` (see ``_WORKSPACE_PROBE_PATH``). Returns the HTTP status code
+    observed (a 200 means some web server is up and answering on the inner
+    port), or ``None`` if the probe failed at the transport layer (connect
+    error, mid-stream EOF, read timeout). Shared by ``_wait_for_workspace_ready``
+    (creation flow) and the system-interface-health tracker's background
+    probe loop so both paths agree on what "ready" means.
 
     Pass a pre-constructed ``client`` (via ``make_workspace_probe_client``)
     to reuse the connection pool across a tight poll loop. When omitted, a
     one-shot client is constructed for this single probe -- fine for
     one-off / sporadic callers but wasteful in a loop.
     """
-    probe_url = f"http://{agent_id}.localhost:{mngr_forward_port}/"
+    probe_url = f"http://127.0.0.1:{mngr_forward_port}{_WORKSPACE_PROBE_PATH}"
+    host_header = f"{agent_id}.localhost"
     if client is not None:
-        return _probe_once(client, probe_url)
+        return _probe_once(client, probe_url, host_header)
     with make_workspace_probe_client(
         preauth_cookie=preauth_cookie, probe_timeout_seconds=probe_timeout_seconds
     ) as one_shot:
-        return _probe_once(one_shot, probe_url)
+        return _probe_once(one_shot, probe_url, host_header)
 
 
 def _make_child_cg(name: str, parent: ConcurrencyGroup | None) -> ConcurrencyGroup:
@@ -406,8 +422,10 @@ def _rsync_worktree_over_clone(
 # Constant agent name for every minds-created agent. Minds runs one agent
 # per host, so the agent name carries no per-workspace information; the
 # workspace is identified by its host name. Kept as a SafeName-typed
-# constant so callers can pass it to ``mngr`` without re-validating.
-_DEFAULT_AGENT_NAME: Final[AgentName] = AgentName("system-services")
+# constant so callers can pass it to ``mngr`` without re-validating. The
+# bare string lives in ``backend_resolver`` (the lower-level module that
+# also needs it, for the recovery flow's system-services lookup).
+_DEFAULT_AGENT_NAME: Final[AgentName] = AgentName(SYSTEM_SERVICES_AGENT_NAME)
 
 
 def _build_mngr_create_command(
@@ -884,11 +902,11 @@ class AgentCreator(MutableModel):
         description=(
             "Per-process health tracker shared with the ``mngr forward`` ``system_interface_backend_failure`` "
             "envelope consumer and the background system-interface-health probe loop. ``_wait_for_workspace_ready`` "
-            "calls ``record_success`` on the probe that breaks out of its readiness loop, which cancels "
-            "any pending HEALTHY->STUCK timer the warmup failures have already armed. Without this call, "
-            "every workspace creation that takes >5s for its container's ``system-interface`` to "
-            "bind ``:8000`` (i.e. most of them) trips a spurious STUCK transition and the chrome jumps "
-            "to the recovery page right after the user lands on the workspace."
+            "calls ``record_probe_success`` on the probe that breaks out of its readiness loop, which clears "
+            "the probe-failure run the container's warmup failures have accumulated. Without this call, "
+            "a workspace creation whose ``system-interface`` takes a while to bind ``:8000`` would let the "
+            "background probe loop drive the agent to STUCK and jump the chrome to the recovery page right "
+            "after the user lands on the workspace."
         ),
     )
     workspace_ready_timeout_seconds: float = Field(
@@ -1451,8 +1469,9 @@ class AgentCreator(MutableModel):
     def _wait_for_workspace_ready(self, agent_id: AgentId, log_queue: queue.Queue[str]) -> None:
         """Poll the agent's system_interface through the plugin until it responds 200.
 
-        Probes ``http://<agent_id>.localhost:<plugin_port>/`` with the preauth
-        cookie set, treating any 200 as ready. Other status codes (typically
+        Probes the plugin on loopback (with the agent's ``agent-<hex>.localhost``
+        vhost in the ``Host`` header) and the preauth cookie set, treating any
+        200 as ready. Other status codes (typically
         503 from the plugin's auto-refresh page when the system_interface
         isn't yet listening, or 502 when SSH info hasn't propagated) are
         treated as not-yet-ready and re-polled until the timeout elapses.
@@ -1489,20 +1508,14 @@ class AgentCreator(MutableModel):
                     if status == 200:
                         logger.debug("Workspace ready for {} after {} probe(s)", agent_id, attempt)
                         log_queue.put("[minds] System interface is ready.")
-                        # Propagate the success into the shared health tracker.
-                        # Earlier probes in this loop go through ``mngr forward``
-                        # too, and each one's connect-refused failure trips a
-                        # ``system_interface_backend_failure`` envelope that arms
-                        # a 5-second HEALTHY->STUCK timer on the tracker. Without
-                        # this explicit ``record_success`` the timer fires
-                        # *after* we return (because no other success path
-                        # flows back into the tracker until the background
-                        # probe loop next ticks, ~2s later), the chrome jumps
-                        # to the recovery page, and the user sees a "System
-                        # interface not responding" page seconds after their
-                        # freshly-created agent appeared healthy. Idempotent
-                        # if the tracker has no record for this agent.
-                        self.system_interface_health_tracker.record_success(agent_id)
+                        # Propagate the success into the shared health tracker,
+                        # clearing the suspect flag and probe-failure run that
+                        # the warmup failures enrolled, so the chrome does not
+                        # jump to the recovery page right after the user lands on
+                        # their freshly-created workspace. (See the tracker's
+                        # ``system_interface_health_tracker`` field docstring.)
+                        # Idempotent if the tracker has no record for this agent.
+                        self.system_interface_health_tracker.record_probe_success(agent_id)
                         return
                 threading.Event().wait(timeout=self.workspace_ready_poll_interval_seconds)
         logger.warning(

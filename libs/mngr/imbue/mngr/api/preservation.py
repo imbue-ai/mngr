@@ -94,6 +94,9 @@ def preserve_agent_data(
             dest = dest_root / item.rel_path
             try:
                 if not source.path_exists(src):
+                    # Items are usually expected to be present; a debug line helps
+                    # diagnose why something did not get preserved.
+                    logger.debug("Skipping preservation of {}: not present on source at {}", item.rel_path, src)
                     continue
                 if item.kind == VolumeFileType.FILE:
                     _write_local_file(dest, source.read_file(src))

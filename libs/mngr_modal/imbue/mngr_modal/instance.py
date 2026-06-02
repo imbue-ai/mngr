@@ -504,9 +504,31 @@ class ModalProviderInstance(BaseProviderInstance):
         the sandbox. Returns None if the volume does not exist or if
         host volume creation is disabled.
 
-        Probes the volume with a listdir to verify it actually exists, since
-        volume_from_name returns a lazy reference that doesn't fail
-        for deleted volumes.
+        Probes the volume with a ``listdir`` to verify it actually exists, since
+        ``volume_from_name`` returns a lazy reference that doesn't fail for a
+        deleted volume. Callers that only need a reference and want to skip that
+        network probe should use :meth:`get_volume_reference_for_host`.
+        """
+        host_volume = self.get_volume_reference_for_host(host)
+        if host_volume is None:
+            return None
+        try:
+            # Probe the volume to verify it exists (from_name returns lazy references).
+            host_volume.volume.listdir("/")
+        except (ModalProxyNotFoundError, ModalProxyInvalidError):
+            return None
+        return host_volume
+
+    @handle_modal_auth_error
+    def get_volume_reference_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
+        """Return a host-volume *reference* without verifying it exists.
+
+        Cheap: constructs the lazy ``volume_from_name`` reference and skips the
+        ``listdir`` existence probe that :meth:`get_volume_for_host` performs, so
+        this does no network round-trip beyond resolving the reference. Returns
+        None only when host volumes are disabled for this provider. A reference
+        to a since-deleted volume is still returned; operations on it fail at
+        access time.
         """
         if not self.config.is_host_volume_created:
             return None
@@ -516,12 +538,9 @@ class ModalProviderInstance(BaseProviderInstance):
             vol_iface = self._modal_interface.volume_from_name(
                 volume_name, create_if_missing=False, environment_name=self.environment_name
             )
-            # Probe the volume to verify it exists (from_name returns lazy references)
-            vol_iface.listdir("/")
-            modal_volume = ModalVolume.model_construct(modal_volume=vol_iface)
-            return HostVolume.model_construct(volume=modal_volume)
         except (ModalProxyNotFoundError, ModalProxyInvalidError):
             return None
+        return HostVolume.model_construct(volume=ModalVolume.model_construct(modal_volume=vol_iface))
 
     # =========================================================================
     # Volume-based Host Record Methods
