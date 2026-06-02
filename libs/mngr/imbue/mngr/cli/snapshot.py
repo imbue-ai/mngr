@@ -32,7 +32,7 @@ from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
-from imbue.mngr.errors import BaseMngrError
+from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.data_types import SnapshotInfo
@@ -129,7 +129,7 @@ def _discover_all_hosts(mngr_ctx: MngrContext) -> list[DiscoveredHost]:
             include_destroyed=False,
             reset_caches=False,
         )
-    except BaseMngrError as e:
+    except MngrError as e:
         logger.warning("Failed to discover hosts: {}", e)
         return []
     return list(agents_by_host.keys())
@@ -504,7 +504,7 @@ def _snapshot_create_impl(ctx: click.Context, **kwargs: Any) -> None:
                     {"message": f"Created snapshot {snapshot_id} for host {host_id_str}{agents_str}", **result},
                     output_opts.output_format,
                 )
-        except BaseMngrError as e:
+        except MngrError as e:
             error_msg = f"Failed to create snapshot for host {host_id_str}: {e}"
             errors.append({"host_id": host_id_str, "error": str(e)})
             on_error(error_msg, error_behavior, output_opts.output_format, exc=e)

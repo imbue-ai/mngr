@@ -1,8 +1,8 @@
-from imbue.mngr.errors import BaseMngrError
+from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 
 
-class UncappedClaudeError(BaseMngrError):
+class UncappedClaudeError(MngrError):
     """Base exception for the mngr_uncapped_claude plugin."""
 
 

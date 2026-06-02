@@ -4,16 +4,23 @@ import click
 import pytest
 from click.testing import CliRunner
 
+from imbue.mngr.errors import AgentError
 from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import AgentStartError
+from imbue.mngr.errors import CommandTimeoutError
+from imbue.mngr.errors import DuplicateAgentNameError
+from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostDataSchemaError
+from imbue.mngr.errors import HostError
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import HostNotRunningError
 from imbue.mngr.errors import HostNotStoppedError
 from imbue.mngr.errors import ImageNotFoundError
+from imbue.mngr.errors import LockNotHeldError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import ProviderError
 from imbue.mngr.errors import ProviderInstanceNotFoundError
 from imbue.mngr.errors import ProviderNotAuthorizedError
@@ -261,6 +268,88 @@ def test_mngr_error_displays_single_error_prefix_via_click() -> None:
     assert result.output.startswith("Error: ")
     assert "Error: Error:" not in result.output
     assert "Agent not found: test-agent" in result.output
+
+
+@pytest.mark.parametrize(
+    "host_error_subclass",
+    [HostError, HostConnectionError, CommandTimeoutError, LockNotHeldError, HostDataSchemaError],
+    ids=lambda c: c.__name__,
+)
+def test_host_errors_are_mngr_errors(host_error_subclass: type) -> None:
+    """HostError and its subclasses are MngrError (and thus ClickException) subclasses.
+
+    This is the single-parent-class consolidation: every host error is now a
+    user-facing MngrError, so `except MngrError` handlers catch it and the CLI
+    renders it cleanly instead of as a traceback.
+    """
+    assert issubclass(host_error_subclass, MngrError)
+    assert issubclass(host_error_subclass, click.ClickException)
+
+
+def test_host_connection_error_displays_single_error_prefix_via_click() -> None:
+    """A host error raised inside a command renders as a clean 'Error: ' message.
+
+    Before host errors inherited MngrError, an uncaught HostError reached Click
+    as a non-ClickException and printed a full traceback. Now Click formats it
+    like any other user-facing error.
+    """
+
+    @click.command()
+    def cmd() -> None:
+        raise HostConnectionError("could not reach host")
+
+    runner = CliRunner()
+    result = runner.invoke(cmd)
+
+    assert result.exit_code == 1
+    assert result.output.startswith("Error: ")
+    assert "Error: Error:" not in result.output
+    assert "could not reach host" in result.output
+
+
+@pytest.mark.parametrize(
+    "agent_error_subclass",
+    [
+        AgentError,
+        NoCommandDefinedError,
+        AgentNotFoundError,
+        AgentNotFoundOnHostError,
+        SendMessageError,
+        DuplicateAgentNameError,
+        AgentStartError,
+    ],
+    ids=lambda c: c.__name__,
+)
+def test_agent_errors_are_mngr_errors(agent_error_subclass: type) -> None:
+    """AgentError and its subclasses are MngrError (and thus ClickException) subclasses.
+
+    This is the single-parent-class consolidation: every agent error is now a
+    user-facing MngrError, so `except MngrError` handlers catch it and the CLI
+    renders it cleanly instead of as a traceback.
+    """
+    assert issubclass(agent_error_subclass, MngrError)
+    assert issubclass(agent_error_subclass, click.ClickException)
+
+
+def test_agent_start_error_displays_single_error_prefix_via_click() -> None:
+    """An agent error raised inside a command renders as a clean 'Error: ' message.
+
+    Before agent errors inherited MngrError, an uncaught AgentStartError reached
+    Click as a non-ClickException and printed a full traceback. Now Click formats
+    it like any other user-facing error.
+    """
+
+    @click.command()
+    def cmd() -> None:
+        raise AgentStartError("my-agent", "session already exists")
+
+    runner = CliRunner()
+    result = runner.invoke(cmd)
+
+    assert result.exit_code == 1
+    assert result.output.startswith("Error: ")
+    assert "Error: Error:" not in result.output
+    assert "my-agent" in result.output
 
 
 def test_host_data_schema_error_includes_path_and_fix() -> None:

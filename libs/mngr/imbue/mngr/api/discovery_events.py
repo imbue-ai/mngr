@@ -34,8 +34,8 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
-from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import DiscoverySchemaChangedError
+from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderDiscoveryError
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -513,7 +513,7 @@ def emit_discovery_events_for_host(
         # Emit agent events with full certified_data from the host's filesystem
         for discovered_agent in discovered_agents:
             emit_agent_discovered(config, discovered_agent)
-    except (BaseMngrError, OSError, ValueError) as e:
+    except (MngrError, OSError, ValueError) as e:
         logger.warning("Failed to emit discovery events: {}", e)
 
 
