@@ -274,6 +274,19 @@ def _is_same_machine(a: OnlineHostInterface, b: OnlineHostInterface) -> bool:
 # mngr's preferred length of tmux's status-left.
 _TMUX_STATUS_LEFT_LENGTH: Final[int] = 20
 
+# Per-command timeout for the individual shell steps that make up the
+# stop/cleanup path (tmux list-windows/list-panes/kill-session, the pgrep
+# descendant walk, and the MNGR_AGENT_ID env scan). A wedged tmux client can
+# hang indefinitely -- tmux occasionally fails to return under CI load, which
+# is why the test-cleanup helpers in utils/testing.py already bound every tmux
+# subprocess. Without a bound here, a single stuck `tmux list-panes` blocks
+# stop_agents forever (observed hanging an entire offload batch). These steps
+# are idempotent and best-effort: a timeout simply yields no PIDs for that
+# step, and the remaining steps (kill-session, env-scan fallback) still run, so
+# cleanup keeps making forward progress instead of stalling. Matches the 5.0s
+# bound already used by get_lifecycle_state for its tmux/ps calls.
+_STOP_AGENT_COMMAND_TIMEOUT_SECONDS: Final[float] = 5.0
+
 
 class Host(OuterHost, BaseHost, OnlineHostInterface):
     """Host implementation that proxies operations through a pyinfra connector.
@@ -2517,7 +2530,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         descendant_pids: list[str] = []
 
         # Get immediate children
-        result = self.execute_idempotent_command(f"pgrep -P {parent_pid} 2>/dev/null || true")
+        result = self.execute_idempotent_command(
+            f"pgrep -P {parent_pid} 2>/dev/null || true",
+            timeout_seconds=_STOP_AGENT_COMMAND_TIMEOUT_SECONDS,
+        )
         if result.success and result.stdout.strip():
             child_pids = result.stdout.strip().split("\n")
             for child_pid in child_pids:
@@ -2543,7 +2559,8 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         risk entirely.
         """
         windows_result = self.execute_idempotent_command(
-            f"tmux list-windows -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()} -F '#I' 2>/dev/null"
+            f"tmux list-windows -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()} -F '#I' 2>/dev/null",
+            timeout_seconds=_STOP_AGENT_COMMAND_TIMEOUT_SECONDS,
         )
         if not windows_result.success or not windows_result.stdout.strip():
             return []
@@ -2553,7 +2570,8 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         for window_idx in window_indices:
             window_target = TmuxWindowTarget(session_name=session_name, window=window_idx)
             result = self.execute_idempotent_command(
-                f"tmux list-panes -t {window_target.as_shell_arg()} -F '#{{pane_pid}}' 2>/dev/null"
+                f"tmux list-panes -t {window_target.as_shell_arg()} -F '#{{pane_pid}}' 2>/dev/null",
+                timeout_seconds=_STOP_AGENT_COMMAND_TIMEOUT_SECONDS,
             )
             if result.success and result.stdout.strip():
                 pane_pids = [p.strip() for p in result.stdout.strip().split("\n") if p.strip()]
@@ -2617,7 +2635,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             "  done; "
             "fi; true"
         )
-        result = self.execute_idempotent_command(cmd)
+        result = self.execute_idempotent_command(cmd, timeout_seconds=_STOP_AGENT_COMMAND_TIMEOUT_SECONDS)
         if not result.stdout.strip():
             return []
         return [pid for pid in result.stdout.strip().split("\n") if pid.strip()]
@@ -2659,17 +2677,21 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 # process (e.g., interactive bash which ignores SIGTERM) would consume the entire
                 # timeout budget in a serial loop, preventing SIGKILL from reaching other processes.
                 grace_seconds = min(1.0, timeout_seconds)
+                # Bound by the grace sleep plus a fixed margin so a stuck kill
+                # loop can't hang cleanup; the command itself only sleeps once.
                 self.execute_idempotent_command(
                     f"for p in {pid_list}; do kill -TERM $p 2>/dev/null; done; "
                     f"sleep {grace_seconds}; "
-                    f"for p in {pid_list}; do kill -KILL $p 2>/dev/null; done; true"
+                    f"for p in {pid_list}; do kill -KILL $p 2>/dev/null; done; true",
+                    timeout_seconds=grace_seconds + _STOP_AGENT_COMMAND_TIMEOUT_SECONDS,
                 )
 
             # Finally kill the tmux sessions themselves
             for agent in current_agents:
                 session_name = f"{self.mngr_ctx.config.prefix}{agent.name}"
                 self.execute_idempotent_command(
-                    f"tmux kill-session -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()} 2>/dev/null || true"
+                    f"tmux kill-session -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()} 2>/dev/null || true",
+                    timeout_seconds=_STOP_AGENT_COMMAND_TIMEOUT_SECONDS,
                 )
 
     def _get_agent_by_id(self, agent_id: AgentId) -> AgentInterface | None:

@@ -1,0 +1,3 @@
+Fixed a hang in `mngr stop` / cleanup: the stop path ran its tmux and process-collection shell commands (`tmux list-windows`, `tmux list-panes`, `tmux kill-session`, the `pgrep` descendant walk, the `MNGR_AGENT_ID` env scan, and the SIGTERM/SIGKILL loop) without a timeout. A `tmux list-panes` client occasionally wedges under load and never returns, which blocked `Host.stop_agents` indefinitely (observed stalling an entire CI test batch).
+
+Each of these steps is now bounded by a 5-second per-command timeout, matching the bound already used by `get_lifecycle_state` and the test-cleanup helpers. The steps are idempotent and best-effort, so a timed-out step simply contributes no PIDs while the rest of cleanup proceeds.

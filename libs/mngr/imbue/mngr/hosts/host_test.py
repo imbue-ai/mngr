@@ -13,6 +13,7 @@ from typing import cast
 import pytest
 from paramiko import ChannelException
 from paramiko import SSHException
+from pydantic import PrivateAttr
 from pyinfra.api.command import StringCommand
 from pyinfra.api.host import Host as PyinfraHost
 from pyinfra.connectors.util import CommandOutput
@@ -39,6 +40,8 @@ from imbue.mngr.hosts.host import _is_transient_ssh_error
 from imbue.mngr.hosts.host import _merge_agent_type_provisioning
 from imbue.mngr.hosts.host import _parse_boot_time_output
 from imbue.mngr.hosts.host import _parse_uptime_output
+from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
@@ -57,6 +60,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.testing import get_short_random_string
+from imbue.mngr.utils.testing import make_test_agent_details
 
 
 class _TestableAgent(BaseAgent):
@@ -1077,6 +1081,71 @@ def _create_host_with_fake_connector(
         provider_instance=local_provider,
         mngr_ctx=local_provider.mngr_ctx,
     )
+
+
+def test_stop_agents_bounds_every_command_with_a_timeout(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """stop_agents must pass a timeout to every shell command it runs.
+
+    Regression for an offload hang: a wedged ``tmux list-panes`` client (tmux
+    occasionally fails to return under CI load) blocked the unbounded command in
+    the stop path forever, stalling the whole test batch. Every step in the
+    stop/cleanup path is idempotent and best-effort, so each must carry a
+    timeout; a timed-out step simply yields no PIDs while the rest of cleanup
+    proceeds. This records the timeout passed to each command and asserts none
+    is unbounded.
+    """
+    agent = make_test_agent_details("cleanup-timeout-agent")
+    fake_pid = "12345"
+
+    class _RecordingHost(Host):
+        """Host that records the timeout for every execute_idempotent_command call.
+
+        Returns canned output (a window index for list-windows and a pane PID for
+        list-panes) so stop_agents walks its full collect-then-kill sequence
+        without touching real tmux or processes.
+        """
+
+        _recorded_timeouts: list[tuple[str, float | None]] = PrivateAttr(default_factory=list)
+
+        def execute_idempotent_command(
+            self,
+            command: str,
+            user: str | None = None,
+            cwd: Path | None = None,
+            env: Any = None,
+            timeout_seconds: float | None = None,
+        ) -> CommandResult:
+            self._recorded_timeouts.append((command, timeout_seconds))
+            if "list-windows" in command:
+                stdout = "0"
+            elif "list-panes" in command:
+                stdout = fake_pid
+            else:
+                stdout = ""
+            return CommandResult(stdout=stdout, stderr="", success=True)
+
+        def _get_agent_by_id(self, agent_id: AgentId) -> AgentInterface | None:
+            return cast(AgentInterface, agent)
+
+    host = _RecordingHost(
+        id=HostId.generate(),
+        host_name=HostName("test"),
+        connector=PyinfraConnector(cast(PyinfraHost, _FakePyinfraHost())),
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+
+    host.stop_agents([agent.id])
+
+    recorded = host._recorded_timeouts
+    # Sanity: we actually exercised the tmux pid-collection path and the kill step.
+    assert any("list-panes" in command for command, _ in recorded)
+    assert any("kill-session" in command for command, _ in recorded)
+    # The regression guard: no command in the stop path may be unbounded.
+    unbounded = [command for command, timeout in recorded if timeout is None]
+    assert unbounded == [], f"stop_agents ran command(s) without a timeout: {unbounded}"
 
 
 @pytest.mark.parametrize(
