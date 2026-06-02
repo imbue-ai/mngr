@@ -47,8 +47,11 @@ from typing import Final
 
 import httpx
 from loguru import logger
+from pydantic import Field
+from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.mutable_model import MutableModel
 
 
 _HEALTH_PATH: Final[str] = "/__ssr/health"
@@ -94,7 +97,7 @@ def _resolve_node_command(server_entry: Path) -> list[str]:
     return [node_path, str(server_entry)]
 
 
-class SsrSidecar:
+class SsrSidecar(MutableModel):
     """Owns a single Node SSR subprocess and an HTTP client aimed at it.
 
     Thread-safety: ``start``, ``stop``, and ``render`` are safe to call
@@ -112,29 +115,42 @@ class SsrSidecar:
     port, and respawns. ``stop`` sets the shutdown event and terminates
     the subprocess, which the supervisor observes between iterations
     and exits.
+
+    Follows the codebase pattern of ``MutableModel`` with public
+    ``Field`` constructor args and ``PrivateAttr`` internal state, the
+    same shape ``EnvelopeStreamConsumer`` and ``PermissionRequestsConsumer``
+    use.
     """
 
-    def __init__(
-        self,
-        *,
-        server_entry: Path,
-        manifest_path: Path | None = None,
-        vite_dev_url: str | None = None,
-        ready_timeout_seconds: float = _DEFAULT_READY_TIMEOUT_SECONDS,
-        render_timeout_seconds: float = _RENDER_TIMEOUT_SECONDS,
-    ) -> None:
-        self._server_entry = server_entry
-        self._manifest_path = manifest_path
-        self._vite_dev_url = vite_dev_url
-        self._ready_timeout_seconds = ready_timeout_seconds
-        self._render_timeout_seconds = render_timeout_seconds
-        # ``_port`` is rebound on every spawn so a re-leased port doesn't
-        # produce a permanent EADDRINUSE backoff after the first restart.
-        self._port: int | None = None
-        self._proc: subprocess.Popen[bytes] | None = None
-        self._client: httpx.Client | None = None
-        self._lock = threading.RLock()
-        self._shutting_down = threading.Event()
+    server_entry: Path = Field(frozen=True, description="On-disk Node entry point for the SSR HTTP server.")
+    manifest_path: Path | None = Field(
+        default=None,
+        frozen=True,
+        description="Path to the Vite client manifest (consumed by the SSR sidecar to resolve hashed asset paths).",
+    )
+    vite_dev_url: str | None = Field(
+        default=None,
+        frozen=True,
+        description="If set, instructs the sidecar to source its client bundle from this Vite dev server.",
+    )
+    ready_timeout_seconds: float = Field(
+        default=_DEFAULT_READY_TIMEOUT_SECONDS,
+        frozen=True,
+        description="Max time wait_ready will spend polling the health endpoint before raising.",
+    )
+    render_timeout_seconds: float = Field(
+        default=_RENDER_TIMEOUT_SECONDS,
+        frozen=True,
+        description="Per-call timeout for the underlying httpx render request.",
+    )
+
+    # ``_port`` is rebound on every spawn so a re-leased port doesn't
+    # produce a permanent EADDRINUSE backoff after the first restart.
+    _port: int | None = PrivateAttr(default=None)
+    _proc: subprocess.Popen[bytes] | None = PrivateAttr(default=None)
+    _client: httpx.Client | None = PrivateAttr(default=None)
+    _lock: threading.RLock = PrivateAttr(default_factory=threading.RLock)
+    _shutting_down: threading.Event = PrivateAttr(default_factory=threading.Event)
 
     @property
     def base_url(self) -> str:
@@ -185,7 +201,7 @@ class SsrSidecar:
         the project ratchet against ``time.sleep`` (see
         ``cli/run.py::_sleep_then_open`` for the same pattern).
         """
-        deadline = time.monotonic() + (timeout if timeout is not None else self._ready_timeout_seconds)
+        deadline = time.monotonic() + (timeout if timeout is not None else self.ready_timeout_seconds)
         last_exc: Exception | None = None
         while time.monotonic() < deadline:
             if self._shutting_down.is_set():
@@ -209,7 +225,7 @@ class SsrSidecar:
             if self._shutting_down.wait(timeout=_PROBE_INTERVAL_SECONDS):
                 raise SsrSidecarError("SSR sidecar wait_ready interrupted by shutdown")
         raise SsrSidecarError(
-            f"SSR sidecar did not become ready within {self._ready_timeout_seconds}s "
+            f"SSR sidecar did not become ready within {self.ready_timeout_seconds}s "
             f"(last error: {last_exc})"
         )
 
@@ -241,7 +257,7 @@ class SsrSidecar:
             response = client.post(
                 _RENDER_PATH,
                 json={"route": route, "props": props},
-                timeout=self._render_timeout_seconds,
+                timeout=self.render_timeout_seconds,
             )
         except httpx.HTTPError as exc:
             raise SsrSidecarError(f"SSR sidecar transport error: {exc}") from exc
@@ -280,7 +296,7 @@ class SsrSidecar:
         packaged sidecar, so the file is identical regardless of how the
         bundle got there.
         """
-        marker = self._server_entry.parent / "package.json"
+        marker = self.server_entry.parent / "package.json"
         if marker.exists():
             return
         marker.write_text(
@@ -305,12 +321,12 @@ class SsrSidecar:
         port = _pick_free_port()
         env = os.environ.copy()
         env["MINDS_SSR_PORT"] = str(port)
-        if self._manifest_path is not None:
-            env["MINDS_VITE_MANIFEST"] = str(self._manifest_path)
-        if self._vite_dev_url is not None:
-            env["MINDS_VITE_DEV_URL"] = self._vite_dev_url
+        if self.manifest_path is not None:
+            env["MINDS_VITE_MANIFEST"] = str(self.manifest_path)
+        if self.vite_dev_url is not None:
+            env["MINDS_VITE_DEV_URL"] = self.vite_dev_url
         env["ELECTRON_RUN_AS_NODE"] = "1"
-        cmd = _resolve_node_command(self._server_entry)
+        cmd = _resolve_node_command(self.server_entry)
         logger.info("Starting SSR sidecar: {} (port={})", " ".join(cmd), port)
         proc = subprocess.Popen(
             cmd,
@@ -322,7 +338,7 @@ class SsrSidecar:
         )
         client = httpx.Client(
             base_url=f"http://127.0.0.1:{port}",
-            timeout=self._render_timeout_seconds,
+            timeout=self.render_timeout_seconds,
         )
         with self._lock:
             previous_client = self._client

@@ -278,6 +278,14 @@ def test_prevent_direct_subprocess() -> None:
         "scripts/*.py",
         "*/latchkey/_spawn.py",
         "*/desktop_client/forward_cli.py",
+        # ``ssr_sidecar.py`` similarly holds the Node SSR subprocess's
+        # ``Popen`` directly: it needs ``proc.stdout`` (the supervisor
+        # thread pumps it into loguru), ``proc.terminate()`` /
+        # ``proc.kill()`` for clean shutdown, and ``proc.poll()`` for
+        # the crash-detection loop -- none of which the
+        # ``ConcurrencyGroup.RunningProcess`` abstraction exposes today.
+        # Same justification class as ``forward_cli.py``.
+        "*/desktop_client/ssr_sidecar.py",
         # ``destroying.py`` spawns a detached ``bash -c '<mngr destroy ...>'``
         # so the destroy survives a minds-backend exit; same justification as
         # ``latchkey/_spawn.py``. See specs/detached-destroy-flow/spec.md.
