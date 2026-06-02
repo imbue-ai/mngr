@@ -35,7 +35,7 @@ from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import UncommittedChangesMode
 from imbue.mngr.utils.deps import RSYNC
-from imbue.mngr.utils.interactive_subprocess import run_command_in_terminal
+from imbue.mngr.utils.interactive_subprocess import run_interactive_subprocess
 from imbue.mngr.utils.rsync_utils import parse_rsync_output
 
 # (user, hostname, port, private_key_path) -- matches OnlineHostInterface.get_ssh_connection_info().
@@ -208,7 +208,9 @@ def _do_rsync(
         if run_in_terminal:
             with log_span("{} files from {} to {}", direction, source_str, destination_str):
                 logger.debug("Running rsync command: {}", shlex.join(rsync_cmd))
-                run_command_in_terminal(rsync_cmd)
+                terminal_result = run_interactive_subprocess(rsync_cmd)
+            if terminal_result.returncode != 0:
+                raise MngrError(f"rsync exited with status {terminal_result.returncode}")
             rsync_stdout = ""
         elif remote_host.is_local:
             cmd_str = shlex.join(rsync_cmd)

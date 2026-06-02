@@ -39,7 +39,7 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import UncommittedChangesMode
 from imbue.mngr.utils.git_utils import get_current_branch
 from imbue.mngr.utils.git_utils import is_git_repository
-from imbue.mngr.utils.interactive_subprocess import run_command_in_terminal
+from imbue.mngr.utils.interactive_subprocess import run_interactive_subprocess
 
 # (user, hostname, port, private_key_path) -- matches OnlineHostInterface.get_ssh_connection_info().
 _SshConnectionInfo = tuple[str, str, int, Path]
@@ -375,7 +375,9 @@ def _default_push_refspec(
 def _run_git_command(cmd: list[str], env: dict[str, str] | None, cg: ConcurrencyGroup, run_in_terminal: bool) -> None:
     """Run ``cmd`` either via cg (captured) or with terminal-stdio passthrough."""
     if run_in_terminal:
-        run_command_in_terminal(cmd, env=env, error_class=GitSyncError)
+        result = run_interactive_subprocess(cmd, env=env)
+        if result.returncode != 0:
+            raise GitSyncError(f"git exited with status {result.returncode}")
         return
     try:
         cg.run_process_to_completion(cmd, env=env)
