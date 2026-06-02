@@ -1677,14 +1677,14 @@ async def _handle_chrome_events(
             last_providers_data = _build_providers_state_payload(backend_resolver)
             yield "data: {}\n\n".format(json.dumps({"type": "providers_state", **last_providers_data}))
             inbox: RequestInbox | None = request.app.state.request_inbox
-            last_request_count = inbox.get_pending_count() if inbox else 0
-            # ``auto_open`` is bundled with ``request_count`` (rather than its
-            # own SSE event) so the Electron shell sees both atomically when
-            # deciding whether to auto-open the panel on count increases.
+            last_requests_payload = _build_requests_payload(inbox)
+            # ``auto_open`` is bundled with the requests payload (rather than
+            # its own SSE event) so the Electron shell sees both atomically
+            # when deciding whether to auto-open the panel.
             minds_config: MindsConfig | None = request.app.state.minds_config
             auto_open = minds_config.get_auto_open_requests_panel() if minds_config else True
             yield "data: {}\n\n".format(
-                json.dumps({"type": "request_count", "count": last_request_count, "auto_open": auto_open})
+                json.dumps({"type": "requests", **last_requests_payload, "auto_open": auto_open})
             )
 
             if tracker is not None:
@@ -1757,12 +1757,15 @@ async def _handle_chrome_events(
                     yield "data: {}\n\n".format(json.dumps({"type": "providers_state", **current_providers_data}))
 
                 inbox = request.app.state.request_inbox
-                current_request_count = inbox.get_pending_count() if inbox else 0
-                if current_request_count != last_request_count:
-                    last_request_count = current_request_count
+                current_requests_payload = _build_requests_payload(inbox)
+                # Diff the full payload (count + ordered pending ids), not just
+                # the count, so a change to the pending *set* at constant size
+                # still pushes an update and the panel refreshes.
+                if current_requests_payload != last_requests_payload:
+                    last_requests_payload = current_requests_payload
                     auto_open = minds_config.get_auto_open_requests_panel() if minds_config else True
                     yield "data: {}\n\n".format(
-                        json.dumps({"type": "request_count", "count": current_request_count, "auto_open": auto_open})
+                        json.dumps({"type": "requests", **current_requests_payload, "auto_open": auto_open})
                     )
         finally:
             if isinstance(backend_resolver, MngrCliBackendResolver):
@@ -1890,6 +1893,25 @@ def _build_workspace_list(
                 entry["account"] = account.email
         workspaces.append(entry)
     return workspaces
+
+
+def _build_requests_payload(inbox: RequestInbox | None) -> dict[str, Any]:
+    """Build the content-based requests payload pushed over the chrome SSE.
+
+    The chrome's live request UI (badge, panel refresh, auto-open) must react
+    to any change in the *set* of pending requests, not merely its size. A
+    bare count is a lossy summary: if one request is resolved while another
+    arrives, the count is unchanged even though the inbox contents are not.
+    Keying updates off the count therefore silently drops those transitions.
+
+    To make change detection sound, we surface the actual pending request
+    ids (in a deterministic order) alongside the count. Consumers diff
+    ``request_ids`` to decide whether to refresh the panel and which ids are
+    newly arrived (for auto-open); the count remains for the badge.
+    """
+    pending = inbox.get_pending_requests() if inbox else []
+    request_ids = [str(req.event_id) for req in pending]
+    return {"count": len(request_ids), "request_ids": request_ids}
 
 
 # -- System-interface recovery / restart --
@@ -2742,7 +2764,7 @@ def _handle_request_event_callback(agent_id_str: str, raw_line: str) -> None:
     """Process an incoming request event and add it to the app's inbox.
 
     After mutating the inbox, fires the resolver's change notification so
-    the chrome SSE wakes up and pushes the new ``request_count`` immediately
+    the chrome SSE wakes up and pushes the new ``requests`` payload immediately
     (otherwise it would lag up to 30s for the next poll tick, breaking the
     requests panel auto-open and badge UX).
 
