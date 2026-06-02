@@ -52,8 +52,15 @@ class InvalidRelativePathError(MngrError, ValueError):
         super().__init__(f"Path must be relative, got absolute path: {path}")
 
 
-class HostError(BaseMngrError):
-    """Base class for host-related errors."""
+class HostError(MngrError):
+    """Base class for host-related errors.
+
+    Inherits from MngrError (not just BaseMngrError) so that host errors are
+    ClickException instances: when they reach the CLI they render as a clean
+    ``Error: ...`` message (plus any user_help_text) instead of a traceback,
+    and ``except MngrError`` handlers treat them as the user-facing errors
+    they are.
+    """
 
 
 class InvalidActivityTypeError(HostError, ValueError):
