@@ -59,6 +59,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.common import LOCAL_CONNECTOR_NAME
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
+from imbue.mngr.utils.tcp_utils import harden_tcp_socket
 
 
 def create_local_pyinfra_host() -> PyinfraHost:
@@ -137,6 +138,14 @@ def _get_ssh_transport(pyinfra_host: Any) -> Transport | None:
     if client is not None:
         return client.get_transport()
     return None
+
+
+def _harden_ssh_transport(pyinfra_host: Any) -> None:
+    """Apply ``harden_tcp_socket`` to the SSH transport's underlying socket, if any."""
+    transport = _get_ssh_transport(pyinfra_host)
+    if transport is None or transport.sock is None:
+        return
+    harden_tcp_socket(transport.sock)
 
 
 class _StreamingOutputAccumulator(MutableModel):
@@ -244,6 +253,7 @@ class OuterHost(OuterHostInterface):
         try:
             if not self.connector.host.connected:
                 self.connector.host.connect(raise_exceptions=True)
+                _harden_ssh_transport(self.connector.host)
         except ConnectError as e:
             message = str(e).lower()
             # Missing/unverifiable host keys are a trust failure: we have no basis to

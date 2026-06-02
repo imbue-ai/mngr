@@ -1100,6 +1100,10 @@ class _FakeTransport:
 
     def __init__(self, *, is_active: bool = True) -> None:
         self._is_active = is_active
+        # Real paramiko Transport always exposes ``sock``; expose it as None
+        # so ``_harden_ssh_transport`` short-circuits cleanly during tests
+        # that don't care about socket hardening.
+        self.sock = None
 
     def is_active(self) -> bool:
         return self._is_active
