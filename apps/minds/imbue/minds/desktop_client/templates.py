@@ -490,6 +490,23 @@ def render_workspace_settings(
     )
 
 
+# -- Dev styleguide --
+
+
+@pure
+def render_dev_styleguide_page() -> str:
+    """Render the styleguide page (mounted at ``/_dev/styleguide``).
+
+    The page is a hand-authored catalog of UI patterns and tokens. When a
+    new ``:root`` token is added to ``static/tokens.css``, add a swatch
+    in ``templates/dev_styleguide.html`` with ``data-token="--<name>"``
+    on its wrapper -- the ``templates_test.py`` ratchet cross-checks the
+    set of declared ``:root`` tokens against the set of ``data-token``
+    swatches and fails if either side drifts.
+    """
+    return JINJA_ENV.get_template("dev_styleguide.html").render()
+
+
 @pure
 def render_accounts_page(
     accounts: Sequence[object],
