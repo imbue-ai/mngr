@@ -201,7 +201,8 @@ class SsrSidecar(MutableModel):
         the project ratchet against ``time.sleep`` (see
         ``cli/run.py::_sleep_then_open`` for the same pattern).
         """
-        deadline = time.monotonic() + (timeout if timeout is not None else self.ready_timeout_seconds)
+        effective_timeout = timeout if timeout is not None else self.ready_timeout_seconds
+        deadline = time.monotonic() + effective_timeout
         last_exc: Exception | None = None
         while time.monotonic() < deadline:
             if self._shutting_down.is_set():
@@ -225,7 +226,7 @@ class SsrSidecar(MutableModel):
             if self._shutting_down.wait(timeout=_PROBE_INTERVAL_SECONDS):
                 raise SsrSidecarError("SSR sidecar wait_ready interrupted by shutdown")
         raise SsrSidecarError(
-            f"SSR sidecar did not become ready within {self.ready_timeout_seconds}s "
+            f"SSR sidecar did not become ready within {effective_timeout}s "
             f"(last error: {last_exc})"
         )
 
