@@ -21,15 +21,18 @@
   // oklch(L C H) -- the three shapes the server and JS emit today. Anything
   // else is treated as "no signal" and leaves the markup default in place.
   function parseRgb(value) {
-    var m = /^#([0-9a-f]{3,8})$/i.exec(value);
+    // Anchor the regex to the exact hex lengths we know how to handle
+    // (3 / 4 / 6 / 8). A permissive {3,8} would silently match length 5
+    // or 7 and then fall through to a null return, which is misleading.
+    // Alpha digits in #rgba / #rrggbbaa are dropped for luminance.
+    var m = /^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(value);
     if (m) {
       var hex = m[1];
-      if (hex.length === 3) {
+      if (hex.length === 3 || hex.length === 4) {
         return [parseInt(hex[0] + hex[0], 16), parseInt(hex[1] + hex[1], 16), parseInt(hex[2] + hex[2], 16)];
       }
-      if (hex.length === 6 || hex.length === 8) {
-        return [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16)];
-      }
+      // length === 6 || length === 8
+      return [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16)];
     }
     var rgb = /^rgba?\(\s*(\d+(?:\.\d+)?)\s*[, ]\s*(\d+(?:\.\d+)?)\s*[, ]\s*(\d+(?:\.\d+)?)/.exec(value);
     if (rgb) {
