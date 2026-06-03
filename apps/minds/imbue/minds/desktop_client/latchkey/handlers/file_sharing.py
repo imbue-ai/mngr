@@ -50,6 +50,7 @@ from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import append_response_event
 from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
+from imbue.minds.desktop_client.ssr_sidecar import SsrSidecar
 from imbue.mngr.primitives import AgentId
 
 # Label shown on the requests-panel card (lower-case, short).
@@ -144,6 +145,7 @@ class FileSharingGrantHandler(RequestEventHandler):
         req_event: RequestEvent,
         backend_resolver: BackendResolverInterface,
         mngr_forward_origin: str,
+        sidecar: SsrSidecar | None = None,
     ) -> Response:
         if not isinstance(req_event, LatchkeyFileSharingPermissionRequestEvent):
             return HTMLResponse(content="<p>Unsupported request type</p>", status_code=500)
@@ -158,6 +160,7 @@ class FileSharingGrantHandler(RequestEventHandler):
             access=req_event.access,
             access_human_label=_access_human_label(req_event.access),
             mngr_forward_origin=mngr_forward_origin,
+            sidecar=sidecar,
         )
         return HTMLResponse(content=rendered)
 

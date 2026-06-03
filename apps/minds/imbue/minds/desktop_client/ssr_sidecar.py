@@ -224,8 +224,13 @@ class SsrSidecar(MutableModel):
                 raise SsrSidecarError("SSR sidecar wait_ready interrupted by shutdown")
         raise SsrSidecarError(f"SSR sidecar did not become ready within {effective_timeout}s (last error: {last_exc})")
 
-    def render(self, *, route: str, props: dict[str, Any]) -> str:
+    def render(self, *, route: str, props: dict[str, Any], bundle: str = "app") -> str:
         """Render a route to an HTML string via the sidecar.
+
+        ``bundle`` selects which client bundle's route registry to use
+        (one of ``"app"`` / ``"chrome"`` / ``"sidebar"``). Defaults to
+        ``"app"`` so legacy callers that pre-date the multi-bundle split
+        keep working without changes.
 
         Raises :class:`SsrSidecarError` on any transport or render-side
         failure (including the brief window when the supervisor is
@@ -237,7 +242,7 @@ class SsrSidecar(MutableModel):
         try:
             response = client.post(
                 _RENDER_PATH,
-                json={"route": route, "props": props},
+                json={"bundle": bundle, "route": route, "props": props},
                 timeout=self.render_timeout_seconds,
             )
         except httpx.HTTPError as exc:

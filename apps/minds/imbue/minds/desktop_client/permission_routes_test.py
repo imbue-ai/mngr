@@ -43,6 +43,8 @@ from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import create_latchkey_predefined_permission_request_event
 from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
+from imbue.minds.desktop_client.ssr_sidecar import SsrSidecar
+from imbue.minds.desktop_client.testing import extract_ssr_route_payload
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import Latchkey
@@ -279,37 +281,25 @@ def test_get_permission_request_page_pre_checks_agent_requested_permissions(tmp_
     response = client.get(f"/requests/{request.event_id}")
 
     assert response.status_code == 200
-    body = response.text
-    assert "Slack" in body
-    assert "I need to read" in body
-    # The agent-requested permission appears checked.
-    read_idx = body.find('value="slack-read-all"')
-    assert read_idx != -1
-    tag_start = body.rfind("<input", 0, read_idx)
-    tag_end = body.find(">", read_idx)
-    assert "checked" in body[tag_start:tag_end]
-    # ``any`` is offered as a checkbox but must not be pre-checked.
-    any_idx = body.find('value="any"')
-    assert any_idx != -1
-    any_tag_start = body.rfind("<input", 0, any_idx)
-    any_tag_end = body.find(">", any_idx)
-    assert "checked" not in body[any_tag_start:any_tag_end]
-    # Approve must be disabled in initial markup (JS enables it once the
-    # user confirms / interacts with the form).
-    assert 'id="permissions-approve-btn"' in body
-    assert "disabled" in body
+    payload = extract_ssr_route_payload(response.text)
+    assert payload["route"] == "permissions/predefined"
+    assert payload["props"]["displayName"] == "Slack"
+    assert "I need to read" in payload["props"]["rationale"]
+    # The agent-requested permission is pre-checked, the catch-all is not.
+    assert "slack-read-all" in payload["props"]["checkedPermissions"]
+    assert "any" not in payload["props"]["checkedPermissions"]
+    # The catch-all is still offered in the editor view.
+    assert "any" in payload["props"]["permissionSchemas"]
 
 
 def test_get_permission_request_page_renders_as_modal(tmp_path: Path) -> None:
-    """The request page is rendered as a dismissable modal overlay.
+    """The request page surfaces the SSR payload the Solid modal hydrates from.
 
-    The desktop client hosts it in a transparent full-window overlay view
-    stacked over the workspace, so the page provides a dim backdrop, a
-    centered dialog card, and a close affordance. Dismissal (close button,
-    backdrop click, Escape, or a completed grant/deny) must prefer the
-    Electron modal host (``window.minds.closeModal``) so the workspace view
-    is left untouched, falling back to navigating home only when no modal
-    host is present (page opened directly in a browser).
+    The Vitest tests for the PermissionRequest component assert on the
+    modal scaffolding (backdrop, dialog card, close affordance, Electron
+    closeModal preference). This test merely confirms the Python side
+    emits the right route key + props so the right Solid component
+    mounts.
     """
     agent_id = AgentId()
     request = create_latchkey_predefined_permission_request_event(
@@ -325,32 +315,13 @@ def test_get_permission_request_page_renders_as_modal(tmp_path: Path) -> None:
     response = client.get(f"/requests/{request.event_id}")
 
     assert response.status_code == 200
-    body = response.text
-    # Modal scaffolding: a dim backdrop, a dialog card, and a close button.
-    assert 'id="permissions-backdrop"' in body
-    assert 'id="permissions-dialog"' in body
-    assert 'id="permissions-close-btn"' in body
-    # The transparent body lets the overlay reveal the workspace behind it.
-    assert "bg-transparent" in body
-    # Dismissal prefers the Electron modal host over a home navigation.
-    assert "window.minds.closeModal" in body
-    closemodal_idx = body.find("window.minds.closeModal")
-    href_idx = body.find('window.location.href = "/"')
-    assert closemodal_idx != -1 and href_idx != -1
-    assert closemodal_idx < href_idx, "closeModal must be preferred over the home-nav fallback"
-    # Backdrop click and Escape are wired to the same dismissal helper.
-    assert "onBackdropClick" in body
-    assert 'e.key === "Escape"' in body
-    # Overflow scrolls inside the dialog card (capped at the viewport height
-    # with an inner scroll region), not down the full width of the app.
-    dialog_idx = body.find('id="permissions-dialog"')
-    dialog_tag_end = body.find(">", dialog_idx)
-    assert "max-h-full" in body[dialog_idx:dialog_tag_end]
-    assert "overflow-y-auto" in body
+    payload = extract_ssr_route_payload(response.text)
+    assert payload["route"] == "permissions/predefined"
+    assert payload["props"]["requestId"] == str(request.event_id)
 
 
 def test_get_permission_request_page_shows_descriptions_when_present(tmp_path: Path) -> None:
-    """detent's per-permission descriptions are rendered next to each permission when present."""
+    """detent's per-permission descriptions are threaded through SSR props."""
     agent_id = AgentId()
     request = create_latchkey_predefined_permission_request_event(
         agent_id=str(agent_id),
@@ -365,12 +336,11 @@ def test_get_permission_request_page_shows_descriptions_when_present(tmp_path: P
     response = client.get(f"/requests/{request.event_id}")
 
     assert response.status_code == 200
-    body = response.text
+    payload = extract_ssr_route_payload(response.text)
+    descriptions = payload["props"]["descriptionByPermissionName"]
     # The requested permission's summary comes from the catalog fixture's
     # per-permission ``description`` field.
-    assert "All read operations across the Slack API." in body
-    # The scope-level description is intentionally not surfaced on the dialog.
-    assert "Any interaction with the Slack API." not in body
+    assert descriptions.get("slack-read-all") == "All read operations across the Slack API."
 
 
 def test_get_permission_request_page_renders_no_pre_checks_when_request_and_existing_are_empty(
@@ -394,20 +364,11 @@ def test_get_permission_request_page_renders_no_pre_checks_when_request_and_exis
     response = client.get(f"/requests/{request.event_id}")
 
     assert response.status_code == 200
-    body = response.text
-    # No input element should carry the ``checked`` attribute.
-    for value_marker in ('value="any"', 'value="slack-read-all"', 'value="slack-write-all"'):
-        idx = body.find(value_marker)
-        assert idx != -1
-        tag_start = body.rfind("<input", 0, idx)
-        tag_end = body.find(">", idx)
-        assert "checked" not in body[tag_start:tag_end], (
-            f"unexpected pre-check on {value_marker}: {body[tag_start : tag_end + 1]}"
-        )
-    # Approve stays disabled in the initial markup -- the JS re-enables
-    # it as soon as the user ticks any checkbox.
-    assert 'id="permissions-approve-btn"' in body
-    assert "disabled" in body
+    payload = extract_ssr_route_payload(response.text)
+    assert payload["props"]["checkedPermissions"] == []
+    # All three permission schemas remain offered so the user can opt in.
+    for schema in ("any", "slack-read-all", "slack-write-all"):
+        assert schema in payload["props"]["permissionSchemas"]
 
 
 def test_post_permission_grant_calls_handler_and_resolves_inbox(tmp_path: Path) -> None:
@@ -667,14 +628,8 @@ def test_get_permission_request_page_pre_checks_existing_grants(tmp_path: Path) 
     response = client.get(f"/requests/{request.event_id}")
 
     assert response.status_code == 200
-    body = response.text
-    # The previously-granted permission appears checked.
-    chat_read_idx = body.find('value="slack-chat-read"')
-    assert chat_read_idx != -1
-    # Find the surrounding <input ...> tag and assert it has 'checked'.
-    tag_start = body.rfind("<input", 0, chat_read_idx)
-    tag_end = body.find(">", chat_read_idx)
-    assert "checked" in body[tag_start:tag_end]
+    payload = extract_ssr_route_payload(response.text)
+    assert "slack-chat-read" in payload["props"]["checkedPermissions"]
 
 
 def test_get_permission_request_page_pre_checks_union_of_existing_and_requested(tmp_path: Path) -> None:
@@ -705,22 +660,16 @@ def test_get_permission_request_page_pre_checks_union_of_existing_and_requested(
     response = client.get(f"/requests/{request.event_id}")
 
     assert response.status_code == 200
-    body = response.text
-    for expected_checked in ("slack-chat-read", "slack-write-all"):
-        idx = body.find(f'value="{expected_checked}"')
-        assert idx != -1, f"checkbox for {expected_checked} missing from dialog"
-        tag_start = body.rfind("<input", 0, idx)
-        tag_end = body.find(">", idx)
-        assert "checked" in body[tag_start:tag_end], (
-            f"expected {expected_checked} to be pre-checked: {body[tag_start : tag_end + 1]}"
-        )
-    # ``slack-read-all`` is in the catalog but neither requested nor
-    # previously granted, so it must not be pre-checked.
-    read_all_idx = body.find('value="slack-read-all"')
-    assert read_all_idx != -1
-    read_all_tag_start = body.rfind("<input", 0, read_all_idx)
-    read_all_tag_end = body.find(">", read_all_idx)
-    assert "checked" not in body[read_all_tag_start:read_all_tag_end]
+    payload = extract_ssr_route_payload(response.text)
+    checked = set(payload["props"]["checkedPermissions"])
+    schemas = set(payload["props"]["permissionSchemas"])
+    # The existing grant + the newly-requested permission are both
+    # pre-checked.
+    assert {"slack-chat-read", "slack-write-all"}.issubset(checked)
+    # ``slack-read-all`` is offered but neither requested nor previously
+    # granted, so it must not be pre-checked.
+    assert "slack-read-all" in schemas
+    assert "slack-read-all" not in checked
 
 
 def test_post_permission_grant_returns_503_when_host_not_yet_discovered(tmp_path: Path) -> None:
@@ -805,6 +754,7 @@ class _StubOtherHandler(RequestEventHandler):
         req_event: RequestEvent,
         backend_resolver: BackendResolverInterface,
         mngr_forward_origin: str,
+        sidecar: SsrSidecar | None = None,
     ) -> Response:
         return Response(content="ok", status_code=200)
 

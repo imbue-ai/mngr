@@ -1,26 +1,28 @@
-import { WelcomeRoute } from './welcome.jsx';
-import { LoginRoute } from './login.jsx';
-import { AuthErrorRoute } from './auth_error.jsx';
-import { LoginRedirectRoute } from './login_redirect.jsx';
+import * as appRegistry from './registry.app.js';
+import * as chromeRegistry from './registry.chrome.js';
+import * as sidebarRegistry from './registry.sidebar.js';
 
-// Maps a "route key" (the Python side picks the key by URL) to its Solid
-// component. The key is passed verbatim through the SSR sidecar HTTP
-// boundary, so it lives in one shared place.
-//
-// As pages migrate they get added to this map. Trying to render a key
-// that isn't here is a hard error -- caught by the sidecar before any
-// HTML is returned.
-export const ROUTES = {
-  welcome: WelcomeRoute,
-  login: LoginRoute,
-  auth_error: AuthErrorRoute,
-  login_redirect: LoginRedirectRoute,
+// Top-level multi-bundle registry. Each bundle key matches a rollup
+// entry name in vite.config.mjs (app / chrome / sidebar) and carries its
+// own route -> component map. The SSR sidecar selects the right bundle
+// using the "bundle" field of the render request, then resolves the
+// route key inside that bundle.
+const BUNDLES = {
+  app: appRegistry,
+  chrome: chromeRegistry,
+  sidebar: sidebarRegistry,
 };
 
-export function getRouteComponent(key) {
-  const Component = ROUTES[key];
-  if (!Component) {
-    throw new Error(`Unknown route key: ${key}`);
+export function getRouteComponentForBundle(bundle, key) {
+  const registry = BUNDLES[bundle];
+  if (!registry) {
+    throw new Error(`Unknown bundle: ${bundle}`);
   }
-  return Component;
+  return registry.getRouteComponent(key);
+}
+
+// Legacy convenience export so the client app-bundle entry that imports
+// the bare app registry keeps working without an additional adapter.
+export function getRouteComponent(key) {
+  return appRegistry.getRouteComponent(key);
 }

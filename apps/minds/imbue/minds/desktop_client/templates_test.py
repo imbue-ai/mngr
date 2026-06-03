@@ -196,39 +196,36 @@ def test_render_login_page_emits_solid_route_payload() -> None:
     assert payload["props"] == {}
 
 
-def test_render_chrome_page_contains_titlebar() -> None:
+def test_render_chrome_page_emits_solid_route_payload() -> None:
+    """The chrome page is now a Solid component; the shim returns the
+    SSR-shell HTML carrying the route key and initial props for client
+    hydration. Per-element assertions live in the Vitest layer."""
     html = render_chrome_page()
-    assert "minds-titlebar" in html
-    assert "sidebar-toggle" in html
-    assert "home-btn" in html
-    assert "back-btn" in html
-    assert "content-frame" in html
+    payload = extract_ssr_route_payload(html)
+    assert payload["route"] == "chrome"
+    assert payload["props"]["isMac"] is False
+    assert payload["props"]["isAuthenticated"] is False
 
 
-def test_render_chrome_page_hides_window_controls_on_mac() -> None:
-    """On macOS, the window-controls row carries the 'hidden' Tailwind class
-    so the native traffic lights are used instead."""
+def test_render_chrome_page_passes_mac_flag_to_solid_props() -> None:
     html_mac = render_chrome_page(is_mac=True)
     html_other = render_chrome_page(is_mac=False)
-    # The 'hidden' class only appears on the window-controls wrapper in
-    # mac mode; on other platforms the same element is visible.
-    assert 'class="flex hidden"' in html_mac or 'class="flex  hidden"' in html_mac
-    assert 'class="flex hidden"' not in html_other and 'class="flex  hidden"' not in html_other
+    assert extract_ssr_route_payload(html_mac)["props"]["isMac"] is True
+    assert extract_ssr_route_payload(html_other)["props"]["isMac"] is False
 
 
-def test_render_chrome_page_shows_window_controls_on_non_mac() -> None:
-    html = render_chrome_page(is_mac=False)
-    assert "min-btn" in html
-    assert "max-btn" in html
-    assert "close-btn" in html
+def test_render_chrome_page_passes_initial_workspaces() -> None:
+    workspaces = [{"id": "agent-1", "name": "Demo"}]
+    html = render_chrome_page(initial_workspaces=workspaces)
+    payload = extract_ssr_route_payload(html)
+    assert payload["props"]["initialWorkspaces"] == workspaces
 
 
-def test_render_sidebar_page_contains_workspace_list() -> None:
-    html = render_sidebar_page()
-    assert "sidebar-workspaces" in html
-    # The interactivity (including the SSE EventSource fallback) now lives
-    # in the external /_static/sidebar.js file; the template should pull it in.
-    assert "/_static/sidebar.js" in html
+def test_render_sidebar_page_emits_solid_route_payload() -> None:
+    html = render_sidebar_page(mngr_forward_origin="http://forward:8421")
+    payload = extract_ssr_route_payload(html)
+    assert payload["route"] == "sidebar"
+    assert payload["props"]["mngrForwardOrigin"] == "http://forward:8421"
 
 
 def test_render_recovery_page_includes_agent_id_and_return_to() -> None:

@@ -5,7 +5,7 @@
 //
 // Endpoints:
 //   GET  /__ssr/health      -> 200 {"status":"ok"} when the server is up
-//   POST /__ssr/render      body: {route, props}; returns rendered HTML
+//   POST /__ssr/render      body: {bundle, route, props}; returns rendered HTML
 //
 // Listening port:
 //   process.env.MINDS_SSR_PORT (required; the Python supervisor picks a
@@ -14,13 +14,13 @@
 // The Vite client manifest is read from the path in MINDS_VITE_MANIFEST
 // (relative paths land under the client build's outDir). When unset --
 // typical in dev when the bundle hasn't been built yet -- we emit
-// /src/main/app.entry.jsx as the script src so Vite's dev server serves
-// the source directly.
+// /src/main/<bundle>.entry.jsx as the script src so Vite's dev server
+// serves the source directly.
 
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { renderToStringAsync, generateHydrationScript } from 'solid-js/web';
-import { getRouteComponent } from '../routes/registry.js';
+import { getRouteComponentForBundle } from '../routes/registry.js';
 
 const PORT = Number(process.env.MINDS_SSR_PORT || 0);
 if (!PORT) {
@@ -30,6 +30,15 @@ if (!PORT) {
 
 const MANIFEST_PATH = process.env.MINDS_VITE_MANIFEST || null;
 const VITE_DEV_URL = process.env.MINDS_VITE_DEV_URL || null;
+
+// Per-bundle metadata. Each bundle name corresponds to a Vite rollup
+// input (vite.config.mjs:rollupOptions.input) and its on-disk source
+// entry path the manifest is keyed by.
+const BUNDLES = {
+  app: { manifestKey: 'src/main/app.entry.jsx', devEntry: 'src/main/app.entry.jsx' },
+  chrome: { manifestKey: 'src/main/chrome.entry.jsx', devEntry: 'src/main/chrome.entry.jsx' },
+  sidebar: { manifestKey: 'src/main/sidebar.entry.jsx', devEntry: 'src/main/sidebar.entry.jsx' },
+};
 
 let cachedManifest = null;
 async function getManifest() {
@@ -45,24 +54,28 @@ async function getManifest() {
   }
 }
 
-function resolveAssetTags(manifest) {
-  // Returns { scriptTag, linkTags } for the `app` entry. The convention
-  // matches Vite's manifest format -- look up the entry by its source
-  // path, read `file` for the hashed bundle name, and emit any `css`
-  // entries as preloaded stylesheets.
+function resolveAssetTags(manifest, bundle) {
+  // Returns { scriptTag, linkTags } for the bundle's entry. The
+  // convention matches Vite's manifest format -- look up the entry by
+  // its source path, read `file` for the hashed bundle name, and emit
+  // any `css` entries as preloaded stylesheets.
+  const meta = BUNDLES[bundle];
+  if (!meta) {
+    throw new Error(`Unknown bundle for asset resolution: ${bundle}`);
+  }
   if (!manifest) {
     const devSrc = VITE_DEV_URL
-      ? `${VITE_DEV_URL}/src/main/app.entry.jsx`
-      : '/_static/src/main/app.entry.jsx';
+      ? `${VITE_DEV_URL}/${meta.devEntry}`
+      : `/_static/${meta.devEntry}`;
     const devCss = VITE_DEV_URL ? `${VITE_DEV_URL}/src/styles/globals.css` : null;
     return {
       scriptTag: `<script type="module" src="${devSrc}"></script>`,
       linkTags: devCss ? `<link rel="stylesheet" href="${devCss}">` : '',
     };
   }
-  const entry = manifest['src/main/app.entry.jsx'];
+  const entry = manifest[meta.manifestKey];
   if (!entry) {
-    throw new Error('Vite manifest missing src/main/app.entry.jsx entry');
+    throw new Error(`Vite manifest missing ${meta.manifestKey} entry`);
   }
   const scriptTag = `<script type="module" src="/_static/_dist/${entry.file}"></script>`;
   const cssFiles = entry.css || [];
@@ -83,12 +96,12 @@ function escapeJsonForScript(value) {
     .replace(/\u2029/g, '\\u2029');
 }
 
-async function renderRoute({ route, props }) {
-  const Component = getRouteComponent(route);
+async function renderRoute({ bundle, route, props }) {
+  const Component = getRouteComponentForBundle(bundle, route);
   const body = await renderToStringAsync(() => <Component {...props} />);
   const hydrationScript = generateHydrationScript();
   const manifest = await getManifest();
-  const { scriptTag, linkTags } = resolveAssetTags(manifest);
+  const { scriptTag, linkTags } = resolveAssetTags(manifest, bundle);
   const payload = escapeJsonForScript({ route, props });
 
   return `<!doctype html>
@@ -142,6 +155,7 @@ const server = createServer(async (req, res) => {
         return;
       }
       const route = typeof request.route === 'string' ? request.route : null;
+      const bundle = typeof request.bundle === 'string' ? request.bundle : 'app';
       const props = request.props || {};
       if (!route) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -149,7 +163,7 @@ const server = createServer(async (req, res) => {
         return;
       }
       try {
-        const html = await renderRoute({ route, props });
+        const html = await renderRoute({ bundle, route, props });
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(html);
         return;

@@ -48,7 +48,7 @@ def test_render_ssr_or_fallback_with_no_sidecar_returns_shell() -> None:
 class _BoomSidecar:
     """A fake SsrSidecar that always raises -- exercises the fallback path."""
 
-    def render(self, *, route: str, props: dict[str, object]) -> str:
+    def render(self, *, route: str, props: dict[str, object], bundle: str = "app") -> str:
         raise SsrSidecarError("sidecar exploded")
 
 
@@ -62,10 +62,10 @@ def test_render_ssr_or_fallback_with_failing_sidecar_returns_shell() -> None:
 
 class _SuccessSidecar:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, dict[str, object]]] = []
+        self.calls: list[tuple[str, dict[str, object], str]] = []
 
-    def render(self, *, route: str, props: dict[str, object]) -> str:
-        self.calls.append((route, props))
+    def render(self, *, route: str, props: dict[str, object], bundle: str = "app") -> str:
+        self.calls.append((route, props, bundle))
         return f"<html><body>SSR for {route}</body></html>"
 
 
@@ -73,4 +73,4 @@ def test_render_ssr_or_fallback_with_healthy_sidecar_returns_ssr_html() -> None:
     sidecar = _SuccessSidecar()
     html = _render_ssr_or_fallback(sidecar=sidecar, route="welcome", props={"a": 1})
     assert html == "<html><body>SSR for welcome</body></html>"
-    assert sidecar.calls == [("welcome", {"a": 1})]
+    assert sidecar.calls == [("welcome", {"a": 1}, "app")]
