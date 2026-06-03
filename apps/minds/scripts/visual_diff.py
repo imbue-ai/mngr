@@ -594,6 +594,24 @@ def _structural_html_diff(left_html: str, right_html: str) -> str | None:
 
 
 def _do_compare(label_a: str, label_b: str) -> Path:
+    """Compare two captures.
+
+    Verdict priority:
+
+    - ``ok``: PNG bytes identical (truly visually identical). HTML may
+      differ in whitespace, entity encoding, attribute ordering -- those
+      are cosmetic and shown for reference only.
+    - ``cosmetic``: PNGs missing (browser pass skipped) but HTML
+      normalizes to the same tree.
+    - ``differs``: PNGs differ pixel-for-pixel, OR PNGs missing and HTML
+      normalizes differently.
+    - ``missing_in_a`` / ``missing_in_b``: scenario only present in one
+      capture.
+
+    PNG hash beats HTML diff because the Jinja-to-JinjaX migration
+    legitimately reshuffles whitespace and prefers literal Unicode over
+    HTML entities (``--`` vs ``&mdash;``), both of which render identically.
+    """
     dir_a = OUTPUT_ROOT / label_a
     dir_b = OUTPUT_ROOT / label_b
     if not dir_a.exists():
@@ -613,24 +631,35 @@ def _do_compare(label_a: str, label_b: str) -> Path:
             continue
         html_left = path_a.read_text()
         html_right = path_b.read_text()
-        diff = _structural_html_diff(html_left, html_right)
+        html_diff = _structural_html_diff(html_left, html_right)
 
         png_a = dir_a / "png" / f"{name}.png"
         png_b = dir_b / "png" / f"{name}.png"
-        png_status = "missing"
-        if png_a.exists() and png_b.exists():
-            ha, hb = _hash_bytes(png_a), _hash_bytes(png_b)
-            if ha == hb:
-                png_status = "identical"
-            else:
-                dim_a = _read_png_dimensions(png_a)
-                dim_b = _read_png_dimensions(png_b)
-                png_status = "differ" if dim_a == dim_b else f"differ ({dim_a} vs {dim_b})"
+        png_present = png_a.exists() and png_b.exists()
+        png_identical = png_present and _hash_bytes(png_a) == _hash_bytes(png_b)
+        if not png_present:
+            png_status = "missing"
+        elif png_identical:
+            png_status = "identical"
+        else:
+            dim_a = _read_png_dimensions(png_a)
+            dim_b = _read_png_dimensions(png_b)
+            png_status = "differ" if dim_a == dim_b else f"differ ({dim_a} vs {dim_b})"
+
+        if png_identical:
+            verdict = "ok"  # visually identical; HTML cosmetics ignored
+        elif png_present:
+            verdict = "differs"  # pixel-level regression
+        elif html_diff is None:
+            verdict = "cosmetic"  # no png to check, but HTML normalizes equal
+        else:
+            verdict = "differs"  # HTML normalization disagrees
+
         rows.append(
             {
                 "name": name,
-                "verdict": "ok" if (diff is None and png_status == "identical") else "differs",
-                "html_diff": diff or "(structurally equivalent)",
+                "verdict": verdict,
+                "html_diff": html_diff or "(structurally equivalent)",
                 "png_status": png_status,
                 "png_a_rel": f"{label_a}/png/{name}.png",
                 "png_b_rel": f"{label_b}/png/{name}.png",
@@ -644,8 +673,16 @@ def _do_compare(label_a: str, label_b: str) -> Path:
 
     report_path = OUTPUT_ROOT / f"report-{label_a}-vs-{label_b}.html"
     report_path.write_text(_render_report(label_a, label_b, rows))
-    print(f"[compare] {sum(1 for r in rows if r['verdict'] == 'ok')} ok / "
-          f"{sum(1 for r in rows if r['verdict'] != 'ok')} different")
+    n_ok = sum(1 for r in rows if r["verdict"] == "ok")
+    n_cosmetic = sum(1 for r in rows if r["verdict"] == "cosmetic")
+    n_differs = sum(1 for r in rows if r["verdict"] == "differs")
+    n_missing = sum(1 for r in rows if r["verdict"].startswith("missing"))
+    print(
+        f"[compare] {n_ok} pixel-identical / "
+        f"{n_cosmetic} html-cosmetic / "
+        f"{n_differs} differ / "
+        f"{n_missing} missing"
+    )
     print(f"[compare] report: {report_path}")
     return report_path
 
@@ -665,13 +702,23 @@ def _render_report(label_a: str, label_b: str, rows: list[dict[str, Any]]) -> st
         "  td.shots img { max-width: 100%; border: 1px solid #d4d4d8; }",
         "  pre { background: #fafafa; padding: 8px; overflow: auto; max-height: 280px; font-size: 12px; }",
         "  .verdict-ok { color: #047857; font-weight: 600; }",
+        "  .verdict-cosmetic { color: #525252; font-weight: 600; }",
         "  .verdict-differs { color: #b91c1c; font-weight: 600; }",
         "  .verdict-missing { color: #92400e; font-weight: 600; }",
         "</style></head><body>",
         f"<h1>visual diff: <code>{html.escape(label_a)}</code> vs <code>{html.escape(label_b)}</code></h1>",
-        f"<p>{sum(1 for r in rows if r['verdict'] == 'ok')} ok / "
-        f"{sum(1 for r in rows if r['verdict'] != 'ok')} different "
-        f"/ total {len(rows)}</p>",
+        f"<p>"
+        f"{sum(1 for r in rows if r['verdict'] == 'ok')} pixel-identical &middot; "
+        f"{sum(1 for r in rows if r['verdict'] == 'cosmetic')} html-cosmetic &middot; "
+        f"{sum(1 for r in rows if r['verdict'] == 'differs')} differ &middot; "
+        f"{sum(1 for r in rows if r['verdict'].startswith('missing'))} missing &middot; "
+        f"total {len(rows)}"
+        f"</p>"
+        f"<p style='font-size:13px;color:#525252'>"
+        f"<strong>ok</strong> = PNG byte-identical. "
+        f"<strong>cosmetic</strong> = no PNGs, HTML normalizes equal. "
+        f"<strong>differs</strong> = real visual or structural difference."
+        f"</p>",
         "<table><thead><tr>"
         "<th>scenario</th><th>verdict</th>"
         f"<th>{html.escape(label_a)} screenshot</th>"
@@ -683,6 +730,7 @@ def _render_report(label_a: str, label_b: str, rows: list[dict[str, Any]]) -> st
         verdict = row["verdict"]
         cls = (
             "verdict-ok" if verdict == "ok"
+            else "verdict-cosmetic" if verdict == "cosmetic"
             else "verdict-missing" if verdict.startswith("missing")
             else "verdict-differs"
         )
