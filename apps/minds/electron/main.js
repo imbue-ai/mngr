@@ -1468,7 +1468,7 @@ async function onReady() {
   await runStartupSequence(initialBundle);
 }
 
-// User-initiated update check from File > Check for Updates.
+// User-initiated update check from the app menu's Check for Updates item.
 // autoUpdater.checkForUpdates() resolves to { updateInfo }: present when a
 // newer version exists (then downloaded in the background), absent when current.
 async function triggerUpdateCheck() {
