@@ -6,6 +6,7 @@ import pytest
 
 from imbue.mngr.api.rsync import RsyncResult
 from imbue.mngr.cli.output_helpers import AbortError
+from imbue.mngr.cli.output_helpers import emit_error_event
 from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import emit_info
@@ -469,3 +470,35 @@ def test_on_error_jsonl_format_abort(capsys: pytest.CaptureFixture[str]) -> None
     output = json.loads(captured.out.strip())
     assert output["event"] == "error"
     assert output["message"] == "jsonl error"
+
+
+def test_on_error_jsonl_includes_error_class_when_exc_given(capsys: pytest.CaptureFixture[str]) -> None:
+    """on_error attaches the exception's class name to the JSONL error event."""
+    on_error("boom", ErrorBehavior.CONTINUE, OutputFormat.JSONL, exc=MngrError("boom"))
+    output = json.loads(capsys.readouterr().out.strip())
+    assert output["event"] == "error"
+    assert output["error_class"] == "MngrError"
+
+
+# =============================================================================
+# Tests for emit_error_event
+# =============================================================================
+
+
+def test_emit_error_event_jsonl_emits_event_with_error_class(capsys: pytest.CaptureFixture[str]) -> None:
+    """In JSONL mode, emit a structured error record carrying the exception class name."""
+    emit_error_event(MngrError("no exact match"), OutputFormat.JSONL)
+    output = json.loads(capsys.readouterr().out.strip())
+    assert output == {"event": "error", "error_class": "MngrError", "message": "no exact match"}
+
+
+def test_emit_error_event_human_format_is_noop(capsys: pytest.CaptureFixture[str]) -> None:
+    """HUMAN mode must not emit a JSONL error record."""
+    emit_error_event(MngrError("boom"), OutputFormat.HUMAN)
+    assert capsys.readouterr().out == ""
+
+
+def test_emit_error_event_none_format_is_noop(capsys: pytest.CaptureFixture[str]) -> None:
+    """A missing (None) output format -- e.g. failure before option parsing -- is a no-op."""
+    emit_error_event(MngrError("boom"), None)
+    assert capsys.readouterr().out == ""

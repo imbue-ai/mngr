@@ -90,6 +90,8 @@ from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sharing_handler import SharingError
 from imbue.minds.desktop_client.sharing_handler import enable_sharing_via_cloudflare
+from imbue.minds.desktop_client.sharing_handler import is_probeable_share_url
+from imbue.minds.desktop_client.sharing_handler import is_share_ready_from_edge_response
 from imbue.minds.desktop_client.sharing_handler import parse_emails_form_value
 from imbue.minds.desktop_client.sharing_handler import resolve_account_email_for_workspace
 from imbue.minds.desktop_client.supertokens_routes import create_supertokens_router
@@ -113,6 +115,7 @@ from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates import status_text_for
 from imbue.minds.desktop_client.templates import workspace_accent
+from imbue.minds.desktop_client.tunnel_token_injection import clear_tunnel_token_from_agent
 from imbue.minds.desktop_client.tunnel_token_injection import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.webdav import create_webdav_app
 from imbue.minds.errors import BackupProvisioningError
@@ -2638,12 +2641,16 @@ async def _handle_workspace_disassociate(
         account = session_store.get_account_for_workspace(agent_id)
         if account:
             # Tear down the Cloudflare tunnel for this agent (if any). The
-            # plugin owns tunnel state -- minds keeps no local cache.
+            # plugin owns tunnel state -- minds keeps no local cache. After
+            # deleting the tunnel server-side, also clear the token file inside
+            # the agent so its cloudflare-tunnel service stops cloudflared
+            # rather than spinning against a now-deleted tunnel.
             if cli is not None:
                 try:
                     tunnel = cli.find_tunnel_for_agent(account=str(account.email), agent_id=agent_id)
                     if tunnel is not None:
                         cli.delete_tunnel(account=str(account.email), tunnel_name=tunnel.tunnel_name)
+                        clear_tunnel_token_from_agent(AgentId(agent_id))
                 except ImbueCloudCliError as e:
                     logger.warning("Failed to delete tunnel during disassociation: {}", e)
             session_store.disassociate_workspace(str(account.user_id), agent_id)
@@ -3030,6 +3037,50 @@ def _handle_sharing_status_api(
         ),
         media_type="application/json",
     )
+
+
+_SHARE_READINESS_PROBE_TIMEOUT_SECONDS: Final[float] = 4.0
+
+
+async def _probe_share_url_readiness(http_client: httpx.AsyncClient, url: str) -> bool:
+    """Fetch ``url`` once and report whether the Cloudflare Access app is live.
+
+    Uses the app's shared (``follow_redirects=False``) client so the Access
+    login redirect is observed rather than followed. Any transport error or
+    timeout is treated as "not ready yet".
+    """
+    try:
+        response = await http_client.get(url, timeout=_SHARE_READINESS_PROBE_TIMEOUT_SECONDS)
+    except httpx.HTTPError as exc:
+        logger.debug("Probed share URL {} but it is not ready yet: {}", url, exc)
+        return False
+    return is_share_ready_from_edge_response(response.status_code, response.headers.get("location"))
+
+
+async def _handle_sharing_readiness_api(
+    agent_id: str,
+    service_name: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Probe a shared service's hostname to see if Cloudflare Access is live yet.
+
+    Cloudflare can take a few seconds after sharing is enabled to publish the
+    Access application at the edge. Until then the hostname does not return the
+    Access login redirect, so showing the URL immediately makes forwarding look
+    broken. The editor JS polls this endpoint and only reveals the link once the
+    edge returns the Access redirect (or a short client-side timeout elapses).
+    Probing from minds keeps the connector request short and lets the browser
+    drive the wait. Contract: ``{"ready": bool}``.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    probe_url = request.query_params.get("url", "")
+    http_client: httpx.AsyncClient | None = request.app.state.http_client
+    if http_client is None or not is_probeable_share_url(probe_url):
+        return Response(content=json.dumps({"ready": False}), media_type="application/json")
+    is_ready = await _probe_share_url_readiness(http_client, probe_url)
+    return Response(content=json.dumps({"ready": is_ready}), media_type="application/json")
 
 
 async def _handle_request_grant(
@@ -3442,6 +3493,7 @@ def create_desktop_client(
     app.post("/sharing/{agent_id}/{service_name}/enable")(_handle_sharing_enable)
     app.post("/sharing/{agent_id}/{service_name}/disable")(_handle_sharing_disable)
     app.get("/api/sharing-status/{agent_id}/{service_name}")(_handle_sharing_status_api)
+    app.get("/api/sharing-readiness/{agent_id}/{service_name}")(_handle_sharing_readiness_api)
 
     # Agent creation routes
     app.get("/create")(_handle_create_page)
