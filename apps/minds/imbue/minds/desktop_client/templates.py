@@ -1028,10 +1028,10 @@ def render_dev_styleguide_page() -> str:
 
     The page is a hand-authored catalog of UI patterns and tokens. When a
     new ``:root`` token is added to ``static/tokens.css``, add a swatch
-    in ``templates/dev_styleguide.html`` with ``data-token="--<name>"``
-    on its wrapper -- the ``templates_test.py`` ratchet cross-checks the
-    set of declared ``:root`` tokens against the set of ``data-token``
-    swatches and fails if either side drifts.
+    in ``templates/pages/DevStyleguide.jinja`` with
+    ``data-token="--<name>"`` on its wrapper -- the ``templates_test.py``
+    ratchet cross-checks the set of declared ``:root`` tokens against the
+    set of ``data-token`` swatches and fails if either side drifts.
     """
     return CATALOG.render("pages.DevStyleguide")
 
