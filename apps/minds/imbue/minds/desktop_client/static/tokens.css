@@ -12,10 +12,15 @@
  *   :root[data-theme="dark"]           -- dark-theme overrides only for
  *                                         semantic tokens whose value differs.
  *
- * ``--workspace-surface`` is set per-page (server inlines it on <body> via
- * the existing workspace_accent() helper, or falls back to pure black on
- * non-workspace pages). static/theme.js reads its computed luminance and
- * writes data-theme="dark"|"light" on <html>, which is what picks the right
+ * ``--workspace-surface`` is the per-page surface signal that drives the
+ * theme flip. Today only the dev styleguide picker writes it (on <body>);
+ * unmigrated production pages don't, so static/theme.js falls back to the
+ * ``--workspace-accent`` value the server already inlines on workspace
+ * pages, and to no signal at all on bare pages (in which case <html>
+ * stays at the data-theme="light" default declared in base.html). A
+ * future PR will switch the server over to writing --workspace-surface
+ * directly. static/theme.js reads the surface's luminance and writes
+ * data-theme="dark"|"light" on <html>, which is what picks the right
  * semantic token set. macros consume semantic tokens via Tailwind classes
  * (bg-surface, text-ink, border-line, ...) configured in
  * static/tailwind_config.js, or via bg-[var(--surface-base)] arbitrary-
