@@ -665,7 +665,7 @@ class VpsDockerProvider(BaseProviderInstance):
         if list_result.success:
             for container_id in list_result.stdout.split():
                 try:
-                    _remove_container(outer, container_id, force=True)
+                    remove_container(outer, container_id, force=True)
                 except (HostConnectionError, MngrError) as e:
                     logger.warning("Failed to remove container {} for host {}: {}", container_id, host_id, e)
         else:
@@ -675,15 +675,15 @@ class VpsDockerProvider(BaseProviderInstance):
         # volume) so the rebuild can recreate it cleanly.
         subvolume_path = self.config.btrfs_mount_path / host_id.get_uuid().hex
         try:
-            _delete_btrfs_subvolume_on_outer(outer, subvolume_path)
+            delete_btrfs_subvolume_on_outer(outer, subvolume_path)
         except (HostConnectionError, MngrError) as e:
             logger.warning("Failed to delete btrfs subvolume {}: {}", subvolume_path, e)
 
         # Remove the named docker volumes so a recreate with the same names
         # doesn't collide.
-        for volume_name in (_host_volume_name_for(host_id), _snapshot_trigger_volume_name_for(host_id)):
+        for volume_name in (host_volume_name_for(host_id), snapshot_trigger_volume_name_for(host_id)):
             try:
-                _remove_volume(outer, volume_name)
+                remove_volume(outer, volume_name)
             except (HostConnectionError, MngrError) as e:
                 logger.warning("Failed to remove volume {} for host {}: {}", volume_name, host_id, e)
 

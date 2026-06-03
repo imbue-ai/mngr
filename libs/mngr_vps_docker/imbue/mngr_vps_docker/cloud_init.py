@@ -14,7 +14,7 @@ def generate_cloud_init_user_data(
     knob the lima provider applies to its VMs.
 
     ``rsync`` is explicit in the package list because
-    ``mngr_vps_docker._upload_directory_to_outer`` requires it for the
+    ``mngr_vps_docker.container_setup.upload_directory_to_outer`` requires it for the
     build-context push. Standard Debian/Ubuntu cloud images ship rsync
     by default so this is belt-and-suspenders on cloud-init backends;
     non-cloud-init backends (e.g. OVH) install it from their own
