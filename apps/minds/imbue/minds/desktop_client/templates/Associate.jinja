@@ -15,8 +15,7 @@
         {% endfor %}
       </select>
       {% if redirect_url %}<input type="hidden" name="redirect" value="{{ redirect_url }}">{% endif %}
-      <button type="submit"
-              class="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-md font-medium text-sm bg-zinc-900 text-zinc-50 hover:bg-zinc-800 cursor-pointer">Associate</button>
+      <ButtonSubmit variant="primary">Associate</ButtonSubmit>
     </form>
   {% else %}
     <p class="mt-2"><a href="/auth/login" class="text-blue-600 hover:underline">Sign in or create an account</a> to enable sharing.</p>
