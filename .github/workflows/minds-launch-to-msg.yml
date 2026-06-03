@@ -326,20 +326,39 @@ jobs:
           rm -rf /tmp/launch-to-msg-screenshots /tmp/launch-to-msg-logs
           rm -f /tmp/launch-to-msg-* /tmp/slack-mock-* 2>/dev/null || true
 
+      - name: install Google Chrome + prime latchkey browser config
+        # The bundled latchkey's "ensure-browser" iterates four sources
+        # in order: existing-config, system-browser, existing-playwright-
+        # browser, download-playwright-browser. The first two are pure
+        # JS and need no playwright internals; the last two call into
+        # playwright-core deep imports (lib/server/registry, lib/zip
+        # Bundle) that the .app's bundled playwright-core does NOT ship
+        # -- those imports fail with "Browser-based features are not
+        # available in the standalone latchkey binary" (see task #97).
+        # Installing Google Chrome.app lets the "system-browser" source
+        # succeed first and skips the broken sources entirely. After
+        # this the agent's chat panel can complete the Slack OAuth
+        # round-trip when the user clicks Approve in the requests
+        # panel.
+        run: |
+          set -euo pipefail
+          for BREW in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+            [[ -x "$BREW" ]] && export PATH="$(dirname "$BREW"):$PATH" && break
+          done
+          if [[ ! -d /Applications/Google\ Chrome.app ]]; then
+            brew install --cask google-chrome
+          fi
+          # Sanity check + write browser.json so future runs hit
+          # existing-config and skip the system-browser probe.
+          MINDS_ELECTRON_EXEC_PATH=/Applications/Minds.app/Contents/MacOS/Minds \
+            /Applications/Minds.app/Contents/Resources/latchkey/bin/latchkey ensure-browser
+
       - name: launch-to-msg + slack flow (Python)
         env:
           GIT_BRANCH:         ${{ inputs.template_ref }}
           GIT_URL:            ${{ inputs.template_url }}
           SKIP_FIRST_MESSAGE: ${{ inputs.skip_first_message && '1' || '0' }}
-          # Force-skip the slack flow until the bundled latchkey
-          # ships as the "full" variant (currently it self-reports as
-          # standalone and refuses browser-based OAuth even with
-          # playwright on disk -- see run 26873540627 / task #97).
-          # The launch + first-message path is the one the released
-          # binary is verified against and is the green-CI baseline.
-          # Once the bundled latchkey is fixed this can revert to the
-          # plain `${{ inputs.skip_slack_flow && '1' || '0' }}`.
-          SKIP_SLACK_FLOW:    '1'
+          SKIP_SLACK_FLOW:    ${{ inputs.skip_slack_flow    && '1' || '0' }}
         run: |
           # pipefail is REQUIRED: without it, the pipeline below exits
           # with tee's status (always 0), so an e2e failure (exit 1) is
