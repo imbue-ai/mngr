@@ -1,0 +1,2 @@
+- `mngr snapshot create`, `mngr snapshot list`, and `mngr snapshot destroy` now take agent and host targets as a single positional list. The `--agent`/`--host` flags have been removed; write `agent`, `agent@host[.provider]`, `@host[.provider]`, or a bare `host-...` ID instead.
+- `mngr event @host[.provider]` now narrows discovery to the pinned provider, matching the agent path's behavior.

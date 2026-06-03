@@ -8,9 +8,11 @@ from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.api.address_parsers import parse_host_location_address
 from imbue.mngr.api.find import AgentMatch
+from imbue.mngr.api.find import _agent_identifiers_for_targets
 from imbue.mngr.api.find import _filter_all_agents
 from imbue.mngr.api.find import _filter_one_agent
 from imbue.mngr.api.find import _find_agents_by_identifiers_or_state
+from imbue.mngr.api.find import _required_providers_for_targets
 from imbue.mngr.api.find import determine_resolved_path
 from imbue.mngr.api.find import ensure_agent_started
 from imbue.mngr.api.find import filter_all_hosts
@@ -25,6 +27,7 @@ from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
@@ -1034,3 +1037,55 @@ def test_ensure_agent_started_respects_config_when_data_unset(
     ensure_agent_started(agent, agent.host, is_start_desired=True)
 
     assert agent.captured_timeouts == [37.5]
+
+
+def test__required_providers_for_targets_returns_none_for_unpinned_agent() -> None:
+    """A bare agent address (no host/provider) disables provider narrowing."""
+    assert _required_providers_for_targets([AgentAddress(agent=AgentName("a"))]) is None
+
+
+def test__required_providers_for_targets_returns_none_for_unpinned_host() -> None:
+    """A host address without a provider disables provider narrowing."""
+    assert _required_providers_for_targets([HostAddress(host=HostName("h"))]) is None
+
+
+def test__required_providers_for_targets_dedupes_pinned_providers() -> None:
+    """When every address pins a provider, the deduped sorted tuple is returned."""
+    addrs = [
+        AgentAddress(
+            agent=AgentName("a"),
+            host=HostAddress(host=HostName("h1"), provider=ProviderInstanceName("modal")),
+        ),
+        HostAddress(host=HostName("h2"), provider=ProviderInstanceName("local")),
+        HostAddress(host=HostName("h3"), provider=ProviderInstanceName("modal")),
+    ]
+    assert _required_providers_for_targets(addrs) == (
+        ProviderInstanceName("local"),
+        ProviderInstanceName("modal"),
+    )
+
+
+def test__required_providers_for_targets_empty_input_returns_none() -> None:
+    assert _required_providers_for_targets([]) is None
+
+
+def test__agent_identifiers_for_targets_returns_none_when_any_host_address_present() -> None:
+    """A mixed list with any HostAddress disqualifies event-stream narrowing."""
+    addrs = [
+        AgentAddress(agent=AgentName("a")),
+        HostAddress(host=HostName("h")),
+    ]
+    assert _agent_identifiers_for_targets(addrs) is None
+
+
+def test__agent_identifiers_for_targets_collects_when_all_agents() -> None:
+    """When every address is an AgentAddress, identifiers are collected in order."""
+    addrs = [
+        AgentAddress(agent=AgentName("a")),
+        AgentAddress(agent=AgentName("b")),
+    ]
+    assert _agent_identifiers_for_targets(addrs) == ("a", "b")
+
+
+def test__agent_identifiers_for_targets_empty_input_returns_none() -> None:
+    assert _agent_identifiers_for_targets([]) is None

@@ -6,10 +6,10 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
+from imbue.mngr.cli.address_params import parse_agent_or_host_addresses_or_raise
 from imbue.mngr.cli.snapshot import SnapshotCreateCliOptions
 from imbue.mngr.cli.snapshot import SnapshotDestroyCliOptions
 from imbue.mngr.cli.snapshot import SnapshotListCliOptions
-from imbue.mngr.cli.snapshot import _bucketize_mixed_identifiers
 from imbue.mngr.cli.snapshot import _emit_create_result
 from imbue.mngr.cli.snapshot import _emit_destroy_result
 from imbue.mngr.cli.snapshot import _emit_list_snapshots
@@ -35,9 +35,7 @@ from imbue.mngr.primitives import SnapshotName
 def test_snapshot_create_cli_options_fields() -> None:
     """Test SnapshotCreateCliOptions has required fields."""
     opts = SnapshotCreateCliOptions(
-        identifiers=("agent1",),
-        agent_list=(AgentAddress(agent=AgentName("agent2")),),
-        hosts=(HostAddress(host=HostName("host1")),),
+        identifiers=("agent1", "@host1"),
         name="my-snapshot",
         on_error="continue",
         tag=(),
@@ -53,9 +51,7 @@ def test_snapshot_create_cli_options_fields() -> None:
         plugin=(),
         disable_plugin=(),
     )
-    assert opts.identifiers == ("agent1",)
-    assert opts.agent_list == (AgentAddress(agent=AgentName("agent2")),)
-    assert opts.hosts == (HostAddress(host=HostName("host1")),)
+    assert opts.identifiers == ("agent1", "@host1")
     assert opts.name == "my-snapshot"
     assert opts.on_error == "continue"
 
@@ -63,9 +59,7 @@ def test_snapshot_create_cli_options_fields() -> None:
 def test_snapshot_list_cli_options_fields() -> None:
     """Test SnapshotListCliOptions has required fields."""
     opts = SnapshotListCliOptions(
-        identifiers=("agent1",),
-        agent_list=(),
-        hosts=(HostAddress(host=HostName("host1")),),
+        identifiers=("agent1", "@host1"),
         limit=10,
         after=None,
         before=None,
@@ -77,16 +71,14 @@ def test_snapshot_list_cli_options_fields() -> None:
         plugin=(),
         disable_plugin=(),
     )
-    assert opts.identifiers == ("agent1",)
-    assert opts.hosts == (HostAddress(host=HostName("host1")),)
+    assert opts.identifiers == ("agent1", "@host1")
     assert opts.limit == 10
 
 
 def test_snapshot_destroy_cli_options_fields() -> None:
     """Test SnapshotDestroyCliOptions has required fields."""
     opts = SnapshotDestroyCliOptions(
-        agents=("agent1",),
-        agent_list=(),
+        identifiers=("agent1",),
         snapshots=("snap-123",),
         all_snapshots=False,
         force=True,
@@ -167,53 +159,44 @@ def test_snapshot_destroy_subcommand_not_forwarded(
 
 
 # =============================================================================
-# _bucketize_mixed_identifiers tests
+# parse_agent_or_host_addresses_or_raise tests
 # =============================================================================
 
 
-def test_bucketize_mixed_identifiers_empty_input_returns_empty_lists() -> None:
-    """Empty identifier list returns two empty lists."""
-    agent_addrs, host_addrs = _bucketize_mixed_identifiers([])
-    assert agent_addrs == []
-    assert host_addrs == []
+def test_parse_agent_or_host_addresses_empty_input_returns_empty_list() -> None:
+    """Empty identifier list returns an empty list."""
+    assert parse_agent_or_host_addresses_or_raise([]) == []
 
 
-def test_bucketize_mixed_identifiers_bare_names_are_agents() -> None:
+def test_parse_agent_or_host_addresses_bare_names_are_agents() -> None:
     """Bare names parse as agents under text-only disambiguation."""
-    agent_addrs, host_addrs = _bucketize_mixed_identifiers(["foo", "bar"])
-    assert agent_addrs == [
+    assert parse_agent_or_host_addresses_or_raise(["foo", "bar"]) == [
         AgentAddress(agent=AgentName("foo")),
         AgentAddress(agent=AgentName("bar")),
     ]
-    assert host_addrs == []
 
 
-def test_bucketize_mixed_identifiers_at_prefix_is_host() -> None:
+def test_parse_agent_or_host_addresses_at_prefix_is_host() -> None:
     """A leading ``@`` forces host parsing."""
-    agent_addrs, host_addrs = _bucketize_mixed_identifiers(["@my-host", "@my-host.modal"])
-    assert agent_addrs == []
-    assert host_addrs == [
+    assert parse_agent_or_host_addresses_or_raise(["@my-host", "@my-host.modal"]) == [
         HostAddress(host=HostName("my-host")),
         HostAddress(host=HostName("my-host"), provider=ProviderInstanceName("modal")),
     ]
 
 
-def test_bucketize_mixed_identifiers_host_id_is_host() -> None:
+def test_parse_agent_or_host_addresses_host_id_is_host() -> None:
     """A bare HostId is recognized as a host without the ``@`` prefix."""
     host_id = HostId.generate()
-    agent_addrs, host_addrs = _bucketize_mixed_identifiers([str(host_id)])
-    assert agent_addrs == []
-    assert host_addrs == [HostAddress(host=host_id)]
+    assert parse_agent_or_host_addresses_or_raise([str(host_id)]) == [HostAddress(host=host_id)]
 
 
-def test_bucketize_mixed_identifiers_mix_of_agents_and_hosts() -> None:
-    """Agent tokens and host tokens go to their respective buckets."""
-    agent_addrs, host_addrs = _bucketize_mixed_identifiers(["my-agent", "@my-host", "other-agent"])
-    assert agent_addrs == [
+def test_parse_agent_or_host_addresses_mix_of_agents_and_hosts() -> None:
+    """Agent tokens and host tokens are parsed into a single mixed list, preserving order."""
+    assert parse_agent_or_host_addresses_or_raise(["my-agent", "@my-host", "other-agent"]) == [
         AgentAddress(agent=AgentName("my-agent")),
+        HostAddress(host=HostName("my-host")),
         AgentAddress(agent=AgentName("other-agent")),
     ]
-    assert host_addrs == [HostAddress(host=HostName("my-host"))]
 
 
 # =============================================================================
@@ -266,8 +249,7 @@ def test_emit_destroy_result_format_template(capsys: pytest.CaptureFixture[str])
 def test_snapshot_destroy_cli_options_can_be_instantiated() -> None:
     """Test SnapshotDestroyCliOptions can be instantiated with all fields."""
     opts = SnapshotDestroyCliOptions(
-        agents=(),
-        agent_list=(),
+        identifiers=(),
         snapshots=(),
         all_snapshots=True,
         force=False,
@@ -289,8 +271,6 @@ def test_snapshot_list_cli_options_can_be_instantiated() -> None:
     """Test SnapshotListCliOptions can be instantiated with various field values."""
     opts = SnapshotListCliOptions(
         identifiers=("a1", "a2"),
-        agent_list=(AgentAddress(agent=AgentName("a3")),),
-        hosts=(),
         limit=5,
         after=None,
         before=None,
