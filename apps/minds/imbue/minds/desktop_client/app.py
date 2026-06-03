@@ -3458,6 +3458,13 @@ def create_desktop_client(
             ssr_sidecar.start(root_concurrency_group)
         except SsrSidecarError as exc:
             logger.warning("SSR sidecar failed to start; using client-render fallback: {}", exc)
+            # ``start()`` calls ``_spawn()`` (which assigns the subprocess
+            # and httpx client to the instance) before ``wait_ready()``,
+            # so by the time a timeout raises here we already have a live
+            # Node process and an open httpx client bound on the instance.
+            # Tear them down explicitly -- Python's GC does not terminate
+            # subprocesses, so otherwise the failed-start path leaks both.
+            ssr_sidecar.stop()
             ssr_sidecar = None
     else:
         logger.warning(
