@@ -236,7 +236,8 @@ PushPerEnvSecretFn = Callable[[str, dict[str, str], str, ConcurrencyGroup], None
 # ``<svc>-<tier>-<id>`` Modal Secrets. ``strategy`` is forwarded to
 # ``modal deploy --strategy`` so a single deploy can cycle both apps
 # the same way (see :class:`DeployStrategy`).
-DeployModalAppFn = Callable[[str, str, int, str, DeployStrategy, ConcurrencyGroup], AnyUrl]
+# (modal_env, tier, min_containers, scaledown_window, deploy_id, strategy, cg) -> deployed URL.
+DeployModalAppFn = Callable[[str, str, int, int, str, DeployStrategy, ConcurrencyGroup], AnyUrl]
 # (app_name, modal_env, cg) -> None. Used by tier destroys to ``modal
 # app stop`` each deployed app. Idempotent in the underlying call.
 StopModalAppFn = Callable[[str, str, ConcurrencyGroup], None]
@@ -251,6 +252,9 @@ ListModalSecretsFn = Callable[[str, ConcurrencyGroup], tuple[str, ...]]
 # schema_migrations runner against the per-env host_pool DB. Tests
 # pass a no-op fake; the real implementation shells out to psql.
 ApplyPoolHostsMigrationsFn = Callable[[SecretStr, ConcurrencyGroup], tuple[Path, ...]]
+# (host_pool_dsn, domains, emails, cg) -> None. Seed-if-absent default paid
+# domains/emails into the host_pool DB after migrations. Tests pass a no-op fake.
+SeedPaidListDefaultsFn = Callable[[SecretStr, tuple[str, ...], tuple[str, ...], ConcurrencyGroup], None]
 # (app_name, modal_env, cg) -> latest deployed version id, or None for
 # never-deployed. Used at deploy start to capture pre-deploy state so
 # ``minds env recover`` can `modal app rollback` to it on failure.
@@ -350,6 +354,12 @@ class Providers(FrozenModel):
         description=(
             "(host_pool_dsn, cg) -> tuple of applied migration files. "
             "Runs the schema_migrations runner against the per-env host_pool DB."
+        ),
+    )
+    seed_paid_list_defaults: SeedPaidListDefaultsFn = Field(
+        description=(
+            "(host_pool_dsn, domains, emails, cg) -> seed-if-absent the tier's default "
+            "paid domains/emails into the host_pool DB after migrations."
         ),
     )
     get_modal_app_latest_version: GetModalAppLatestVersionFn = Field(
@@ -772,6 +782,17 @@ def _deploy_env_locked(
         if applied:
             logger.info("Applied {} pool-hosts migration(s): {}", len(applied), [m.name for m in applied])
 
+    # Seed the tier's default paid domains/emails (seed-if-absent) now that the
+    # paid_domains / paid_emails tables exist. Runs every deploy for every tier;
+    # idempotent and a no-op when the tier configures no defaults.
+    paid_domains = tuple(str(d) for d in deploy_config.paid.domains)
+    paid_emails = tuple(str(e) for e in deploy_config.paid.emails)
+    if paid_domains or paid_emails:
+        with info_span(
+            "Seeding default paid-list entries (domains={}, emails={})", list(paid_domains), list(paid_emails)
+        ):
+            providers.seed_paid_list_defaults(host_pool_dsn, paid_domains, paid_emails, parent_concurrency_group)
+
     # Resolve the Modal deploy strategy now that we know whether a
     # migration ran. Done here (rather than at the CLI boundary) so the
     # decision sees the full deploy context the policy depends on; the
@@ -874,18 +895,22 @@ def _deploy_env_locked(
     # Step 5: modal deploys.
     litellm_proxy_min_containers = int(deploy_config.min_containers.litellm_proxy)
     connector_min_containers = int(deploy_config.min_containers.connector)
+    litellm_proxy_scaledown_window = int(deploy_config.scaledown_window.litellm_proxy)
+    connector_scaledown_window = int(deploy_config.scaledown_window.connector)
 
     with info_span(
-        "Deploying llm-{} into env {!r} (min_containers={}, strategy={})",
+        "Deploying llm-{} into env {!r} (min_containers={}, scaledown_window={}, strategy={})",
         tier,
         modal_env,
         litellm_proxy_min_containers,
+        litellm_proxy_scaledown_window,
         deploy_strategy.value,
     ):
         litellm_proxy_url = providers.deploy_litellm_proxy(
             modal_env,
             tier,
             litellm_proxy_min_containers,
+            litellm_proxy_scaledown_window,
             deploy_id,
             deploy_strategy,
             parent_concurrency_group,
@@ -893,16 +918,18 @@ def _deploy_env_locked(
     _assert_deploy_url_matches(actual=litellm_proxy_url, expected=expected_litellm_proxy_url, app=f"llm-{tier}")
 
     with info_span(
-        "Deploying rsc-{} into env {!r} (min_containers={}, strategy={})",
+        "Deploying rsc-{} into env {!r} (min_containers={}, scaledown_window={}, strategy={})",
         tier,
         modal_env,
         connector_min_containers,
+        connector_scaledown_window,
         deploy_strategy.value,
     ):
         connector_url = providers.deploy_remote_service_connector(
             modal_env,
             tier,
             connector_min_containers,
+            connector_scaledown_window,
             deploy_id,
             deploy_strategy,
             parent_concurrency_group,

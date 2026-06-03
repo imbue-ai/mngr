@@ -66,7 +66,9 @@ _PER_ENV_SECRET_SERVICES: Final[tuple[str, ...]] = (
     "cloudflare",
     "neon",
     "pool-ssh",
-    "paid-accounts",
+    # OVH AK/AS/CK -- the connector's release route + cleanup cron make signed
+    # OVH calls at runtime to strip per-lease tags and cancel released VPSes.
+    "ovh",
 )
 
 # Placeholder key written when a Vault entry isn't populated yet. Modal
@@ -86,6 +88,13 @@ _MODAL_ENV_CREATE_TIMEOUT_SECONDS: Final[float] = 60.0
 # isolation would silently fall back to the in-app default (0).
 CONNECTOR_MIN_CONTAINERS_ENV_VAR: Final[str] = "MINDS_CONNECTOR_MIN_CONTAINERS"
 LITELLM_PROXY_MIN_CONTAINERS_ENV_VAR: Final[str] = "MINDS_LITELLM_PROXY_MIN_CONTAINERS"
+
+# Env-var names the deployed modal apps read at module load to set their
+# idle-before-scaledown window (seconds). Same lockstep contract as the
+# min-containers names above. ``0`` (the in-app default) means "use Modal's
+# own default scaledown window".
+CONNECTOR_SCALEDOWN_WINDOW_ENV_VAR: Final[str] = "MINDS_CONNECTOR_SCALEDOWN_WINDOW"
+LITELLM_PROXY_SCALEDOWN_WINDOW_ENV_VAR: Final[str] = "MINDS_LITELLM_PROXY_SCALEDOWN_WINDOW"
 
 # Env-var name the deployed modal apps read at module load to pick
 # which timestamped Modal Secret bundle to attach. Mirrors the same
@@ -294,6 +303,7 @@ def deploy_litellm_proxy(
     modal_env: str,
     tier: str,
     min_containers: int,
+    scaledown_window: int,
     deploy_id: str,
     strategy: DeployStrategy,
     parent_cg: ConcurrencyGroup,
@@ -319,6 +329,10 @@ def deploy_litellm_proxy(
     ``min_containers`` controls the deployed function's warm-pool size.
     Threaded into the subprocess env as ``MINDS_LITELLM_PROXY_MIN_CONTAINERS``
     so the modal app picks it up at module load.
+
+    ``scaledown_window`` is the idle-before-scaledown window (seconds);
+    threaded as ``MINDS_LITELLM_PROXY_SCALEDOWN_WINDOW``. ``0`` means
+    "use Modal's own default".
     """
     app_file = _litellm_app_file()
     with info_span(
@@ -342,7 +356,10 @@ def deploy_litellm_proxy(
             tier=tier,
             deploy_id=deploy_id,
             strategy=strategy,
-            extra_env={LITELLM_PROXY_MIN_CONTAINERS_ENV_VAR: str(min_containers)},
+            extra_env={
+                LITELLM_PROXY_MIN_CONTAINERS_ENV_VAR: str(min_containers),
+                LITELLM_PROXY_SCALEDOWN_WINDOW_ENV_VAR: str(scaledown_window),
+            },
             parent_cg=parent_cg,
         )
 
@@ -398,7 +415,10 @@ def stop_modal_app(
     stopped" as success so re-running ``destroy`` after a failed first
     pass is safe. Any other non-zero exit raises :class:`ModalDeployError`.
     """
-    command = ["modal", "app", "stop", "--env", modal_env, app_name]
+    # ``-y`` skips Modal's interactive confirmation prompt; without it the
+    # command aborts with "no interactive terminal detected" whenever it runs
+    # without a TTY (auto-recover after a failed deploy, CI, background runs).
+    command = ["modal", "app", "stop", "-y", "--env", modal_env, app_name]
     cg = parent_cg.make_concurrency_group(name=f"modal-app-stop-{app_name}")
     with cg:
         result = cg.run_process_to_completion(
@@ -428,6 +448,7 @@ def deploy_remote_service_connector(
     modal_env: str,
     tier: str,
     min_containers: int,
+    scaledown_window: int,
     deploy_id: str,
     strategy: DeployStrategy,
     parent_cg: ConcurrencyGroup,
@@ -437,7 +458,9 @@ def deploy_remote_service_connector(
     See :func:`deploy_litellm_proxy` for return-value semantics and the
     meaning of ``modal_env``. ``min_containers`` is threaded into the
     subprocess env as ``MINDS_CONNECTOR_MIN_CONTAINERS`` and consumed
-    by the modal app at module load.
+    by the modal app at module load. ``scaledown_window`` (idle seconds
+    before scaledown; ``0`` = Modal default) is threaded as
+    ``MINDS_CONNECTOR_SCALEDOWN_WINDOW``.
 
     ``deploy_id`` is threaded into the subprocess env as ``MINDS_DEPLOY_ID``
     so the deployed connector attaches to the matching ``<svc>-<tier>-<id>``
@@ -452,7 +475,10 @@ def deploy_remote_service_connector(
             tier=tier,
             deploy_id=deploy_id,
             strategy=strategy,
-            extra_env={CONNECTOR_MIN_CONTAINERS_ENV_VAR: str(min_containers)},
+            extra_env={
+                CONNECTOR_MIN_CONTAINERS_ENV_VAR: str(min_containers),
+                CONNECTOR_SCALEDOWN_WINDOW_ENV_VAR: str(scaledown_window),
+            },
             parent_cg=parent_cg,
         )
 

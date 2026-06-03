@@ -141,6 +141,73 @@ def test_activate_deploy_mode_refuses_when_modal_toml_has_wrong_profile(_isolate
     assert "no profile named 'minds-dev'" in result.output
 
 
+# -- activate: recover-target guard (catch-22 avoidance) --
+
+
+def test_activate_allows_when_only_this_envs_recover_target_exists(
+    _isolated_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pending recover-target for the env being activated must NOT block activation.
+
+    Otherwise `minds env recover` (which requires an activated env) could
+    never run to clear it -- the activate/recover catch-22.
+    """
+    monkeypatch.chdir(_isolated_env)
+    # monorepo-root marker for find_monorepo_root
+    (_isolated_env / "apps").mkdir()
+    (_isolated_env / ".minds-deploy-recover-target-dev-foo.json").write_text("{}")
+    runner = CliRunner()
+    result = runner.invoke(env, ["activate", "--create", "dev-foo"])
+    assert result.exit_code == 0, result.output
+    assert "export MINDS_ROOT_NAME=minds-dev-foo" in result.output
+
+
+def test_activate_refuses_when_another_envs_recover_target_exists(
+    _isolated_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A recover-target for a DIFFERENT env still blocks activating an unaffected env.
+
+    This surfaces a forgotten failed deploy rather than letting the operator
+    silently proceed past it.
+    """
+    monkeypatch.chdir(_isolated_env)
+    (_isolated_env / "apps").mkdir()
+    (_isolated_env / ".minds-deploy-recover-target-dev-other.json").write_text("{}")
+    runner = CliRunner()
+    result = runner.invoke(env, ["activate", "--create", "dev-foo"])
+    assert result.exit_code != 0, result.output
+    assert "dev-other" in result.output
+
+
+def test_activate_succeeds_when_run_outside_the_monorepo(_isolated_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Activation works from outside the monorepo: the recover-target guard is
+    skipped (no monorepo root means no recover-target file can exist there)
+    rather than erroring on NotInMonorepoError.
+    """
+    # Deliberately do NOT create an `apps/` marker, so find_monorepo_root
+    # raises NotInMonorepoError from this cwd and the guard tolerates it.
+    monkeypatch.chdir(_isolated_env)
+    runner = CliRunner()
+    result = runner.invoke(env, ["activate", "--create", "dev-foo"])
+    assert result.exit_code == 0, result.output
+    assert "export MINDS_ROOT_NAME=minds-dev-foo" in result.output
+
+
+def test_activate_allowed_for_affected_env_even_when_another_target_exists(
+    _isolated_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Activating an affected env is allowed even when another env also has a
+    pending recover-target; the other is surfaced as a warning, not a block."""
+    monkeypatch.chdir(_isolated_env)
+    (_isolated_env / "apps").mkdir()
+    (_isolated_env / ".minds-deploy-recover-target-dev-foo.json").write_text("{}")
+    (_isolated_env / ".minds-deploy-recover-target-dev-other.json").write_text("{}")
+    runner = CliRunner()
+    result = runner.invoke(env, ["activate", "--create", "dev-foo"])
+    assert result.exit_code == 0, result.output
+    assert "export MINDS_ROOT_NAME=minds-dev-foo" in result.output
+
+
 # -- env deploy / destroy gate --
 
 
