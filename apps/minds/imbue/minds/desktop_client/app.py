@@ -86,6 +86,8 @@ from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sharing_handler import SharingError
 from imbue.minds.desktop_client.sharing_handler import enable_sharing_via_cloudflare
+from imbue.minds.desktop_client.sharing_handler import is_probeable_share_url
+from imbue.minds.desktop_client.sharing_handler import is_share_ready_from_edge_response
 from imbue.minds.desktop_client.sharing_handler import parse_emails_form_value
 from imbue.minds.desktop_client.sharing_handler import resolve_account_email_for_workspace
 from imbue.minds.desktop_client.supertokens_routes import create_supertokens_router
@@ -2670,6 +2672,50 @@ def _handle_sharing_status_api(
     )
 
 
+_SHARE_READINESS_PROBE_TIMEOUT_SECONDS: Final[float] = 4.0
+
+
+async def _probe_share_url_readiness(http_client: httpx.AsyncClient, url: str) -> bool:
+    """Fetch ``url`` once and report whether the Cloudflare Access app is live.
+
+    Uses the app's shared (``follow_redirects=False``) client so the Access
+    login redirect is observed rather than followed. Any transport error or
+    timeout is treated as "not ready yet".
+    """
+    try:
+        response = await http_client.get(url, timeout=_SHARE_READINESS_PROBE_TIMEOUT_SECONDS)
+    except httpx.HTTPError as exc:
+        logger.debug("Probed share URL {} but it is not ready yet: {}", url, exc)
+        return False
+    return is_share_ready_from_edge_response(response.status_code, response.headers.get("location"))
+
+
+async def _handle_sharing_readiness_api(
+    agent_id: str,
+    service_name: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Probe a shared service's hostname to see if Cloudflare Access is live yet.
+
+    Cloudflare can take a few seconds after sharing is enabled to publish the
+    Access application at the edge. Until then the hostname does not return the
+    Access login redirect, so showing the URL immediately makes forwarding look
+    broken. The editor JS polls this endpoint and only reveals the link once the
+    edge returns the Access redirect (or a short client-side timeout elapses).
+    Probing from minds keeps the connector request short and lets the browser
+    drive the wait. Contract: ``{"ready": bool}``.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    probe_url = request.query_params.get("url", "")
+    http_client: httpx.AsyncClient | None = request.app.state.http_client
+    if http_client is None or not is_probeable_share_url(probe_url):
+        return Response(content=json.dumps({"ready": False}), media_type="application/json")
+    is_ready = await _probe_share_url_readiness(http_client, probe_url)
+    return Response(content=json.dumps({"ready": is_ready}), media_type="application/json")
+
+
 async def _handle_request_grant(
     request_id: str,
     request: Request,
@@ -3073,6 +3119,7 @@ def create_desktop_client(
     app.post("/sharing/{agent_id}/{service_name}/enable")(_handle_sharing_enable)
     app.post("/sharing/{agent_id}/{service_name}/disable")(_handle_sharing_disable)
     app.get("/api/sharing-status/{agent_id}/{service_name}")(_handle_sharing_status_api)
+    app.get("/api/sharing-readiness/{agent_id}/{service_name}")(_handle_sharing_readiness_api)
 
     # Agent creation routes
     app.get("/create")(_handle_create_page)

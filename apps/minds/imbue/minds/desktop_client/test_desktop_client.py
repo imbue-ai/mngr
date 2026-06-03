@@ -1762,3 +1762,96 @@ def test_recovery_page_does_not_redirect_when_stuck_even_with_return_to(tmp_path
 
     assert response.status_code == 200
     assert 'data-initial-status="stuck"' in response.text
+
+
+def _create_readiness_test_client(
+    tmp_path: Path,
+    edge_response: httpx.Response,
+) -> tuple[TestClient, FileAuthStore, list[httpx.Request]]:
+    """Build a desktop client whose http_client returns ``edge_response`` for any probe.
+
+    Captures every probe request so tests can assert which URL was fetched.
+    """
+    probed: list[httpx.Request] = []
+
+    async def _handle(request: httpx.Request) -> httpx.Response:
+        probed.append(request)
+        return edge_response
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(_handle), follow_redirects=False)
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        http_client=http_client,
+    )
+    return client, auth_store, probed
+
+
+def test_sharing_readiness_returns_ready_when_edge_returns_access_redirect(tmp_path: Path) -> None:
+    """When the probed hostname returns the Cloudflare Access 302, the endpoint reports ready."""
+    edge_response = httpx.Response(
+        302, headers={"location": "https://team.cloudflareaccess.com/cdn-cgi/access/login/x"}
+    )
+    client, auth_store, probed = _create_readiness_test_client(tmp_path, edge_response)
+    _authenticate_client(client, auth_store)
+    agent_id = AgentId()
+
+    share_url = "https://web-abc123.tunnels.example.com"
+    response = client.get(
+        f"/api/sharing-readiness/{agent_id}/web",
+        params={"url": share_url},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ready": True}
+    assert len(probed) == 1
+    assert str(probed[0].url) == share_url
+
+
+def test_sharing_readiness_returns_not_ready_when_edge_not_live(tmp_path: Path) -> None:
+    """A non-redirect edge response (Access not published yet) reports not-ready."""
+    edge_response = httpx.Response(200, text="origin is up but Access is not enforced")
+    client, auth_store, probed = _create_readiness_test_client(tmp_path, edge_response)
+    _authenticate_client(client, auth_store)
+    agent_id = AgentId()
+
+    response = client.get(
+        f"/api/sharing-readiness/{agent_id}/web",
+        params={"url": "https://web-abc123.tunnels.example.com"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ready": False}
+    assert len(probed) == 1
+
+
+def test_sharing_readiness_does_not_probe_non_https_url(tmp_path: Path) -> None:
+    """A non-probeable URL (e.g. http/localhost) reports not-ready without any network probe."""
+    edge_response = httpx.Response(302, headers={"location": "https://team.cloudflareaccess.com/login"})
+    client, auth_store, probed = _create_readiness_test_client(tmp_path, edge_response)
+    _authenticate_client(client, auth_store)
+    agent_id = AgentId()
+
+    response = client.get(
+        f"/api/sharing-readiness/{agent_id}/web",
+        params={"url": "http://web-abc123.tunnels.example.com"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ready": False}
+    assert len(probed) == 0
+
+
+def test_sharing_readiness_requires_authentication(tmp_path: Path) -> None:
+    """The readiness endpoint rejects unauthenticated callers."""
+    edge_response = httpx.Response(302, headers={"location": "https://team.cloudflareaccess.com/login"})
+    client, _, probed = _create_readiness_test_client(tmp_path, edge_response)
+    agent_id = AgentId()
+
+    response = client.get(
+        f"/api/sharing-readiness/{agent_id}/web",
+        params={"url": "https://web-abc123.tunnels.example.com"},
+    )
+
+    assert response.status_code == 403
+    assert len(probed) == 0
