@@ -11,6 +11,7 @@ from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discover import discover_by_address
+from imbue.mngr.api.discover import discover_by_host_location_address
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
@@ -238,6 +239,61 @@ def resolve_host_location_address(
     return ResolvedHostLocationAddress(
         location=HostLocation(host=online_host, path=resolved_path),
         agent=resolved_agent,
+    )
+
+
+def get_local_online_host(
+    mngr_ctx: MngrContext,
+    *,
+    is_start_desired: bool,
+) -> OnlineHostInterface:
+    """Return the local provider's only host, starting it if it's offline.
+
+    Shared helper for callers that already know the location is purely local
+    (no agent, no remote host) and want to skip the cost of querying every
+    provider.
+    """
+    provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
+    host = provider.get_host(HostName(LOCAL_HOST_NAME))
+    online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
+    return online_host
+
+
+def resolve_host_location(
+    parsed: HostLocationAddress,
+    mngr_ctx: MngrContext,
+    *,
+    is_start_desired: bool = True,
+) -> ResolvedHostLocationAddress:
+    """Resolve a :class:`HostLocationAddress` to a host, path, and optional agent.
+
+    Convenience wrapper that drives discovery on the caller's behalf:
+
+    - If ``parsed`` has no agent and no host, the path is returned with the
+      local host (no discovery is performed, so unrelated providers like
+      Docker or Modal are not touched).
+    - Otherwise, performs discovery narrowed to the address's provider (when
+      pinned) and delegates to :func:`resolve_host_location_address`.
+
+    Callers that need to drive discovery themselves (e.g. ``mngr create``,
+    which caches a single discovery result across multiple address
+    resolutions) should call :func:`resolve_host_location_address` directly.
+
+    Raises :class:`UserInputError` if ``parsed`` has no path, no agent, and
+    no host.
+    """
+    if parsed.agent is None and parsed.host is None:
+        if parsed.path is None:
+            raise UserInputError("Location must include an agent, a host, or a path")
+        online_host = get_local_online_host(mngr_ctx, is_start_desired=is_start_desired)
+        return ResolvedHostLocationAddress(location=HostLocation(host=online_host, path=parsed.path))
+
+    agents_by_host, _providers = discover_by_host_location_address(parsed, mngr_ctx)
+    return resolve_host_location_address(
+        parsed,
+        agents_by_host,
+        mngr_ctx,
+        is_start_desired=is_start_desired,
     )
 
 
