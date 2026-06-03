@@ -113,6 +113,27 @@ class LimaProviderConfig(ProviderInstanceConfig):
         default=(),
         description="Default limactl start arguments applied to all VMs",
     )
+    docker_runtime: str | None = Field(
+        default=None,
+        description=(
+            "Container runtime to pass to `docker run --runtime` for the agent container in "
+            "is_host_in_docker mode (e.g. 'runsc' for gVisor). When None (the default), no "
+            "`--runtime` flag is added and the in-VM Docker daemon uses its configured default. "
+            "The named runtime must be installed and registered inside the VM (see "
+            "`install_gvisor_runtime`), otherwise container creation fails with Docker's native "
+            "'unknown runtime' error. Override via MNGR__PROVIDERS__<NAME>__DOCKER_RUNTIME. "
+            "Ignored when is_host_in_docker is False (no container is run)."
+        ),
+    )
+    install_gvisor_runtime: bool = Field(
+        default=False,
+        description=(
+            "When True, the is_host_in_docker VM provisioning installs and registers the gVisor "
+            "`runsc` runtime with the in-VM Docker daemon (idempotent; a no-op when runsc is already "
+            "present). This only installs the runtime -- set `docker_runtime='runsc'` to actually run "
+            "the agent container under it. Ignored when is_host_in_docker is False."
+        ),
+    )
     default_idle_timeout: int = Field(
         default=800,
         description="Default host idle timeout in seconds",

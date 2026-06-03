@@ -119,7 +119,7 @@ def test_prevent_yaml_usage() -> None:
     # lima native config only accepts yaml; is_host_in_docker mode adds a second
     # code path that generates a Lima YAML config, and the docker release test
     # writes a Lima override.yaml to make the VM bootable in CI.
-    rc.check_yaml_usage(_DIR, snapshot(109))
+    rc.check_yaml_usage(_DIR, snapshot(113))
 
 
 def test_prevent_functools_partial() -> None:

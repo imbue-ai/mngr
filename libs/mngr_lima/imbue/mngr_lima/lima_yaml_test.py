@@ -301,6 +301,46 @@ def test_generate_docker_mode_lima_yaml_has_container_port_forward_and_no_mounts
     assert "ln -sfn" not in script
 
 
+def test_generate_docker_mode_lima_yaml_omits_gvisor_install_by_default() -> None:
+    config = generate_default_lima_yaml(
+        volume_host_path=None,
+        host_dir="/mngr",
+        host_private_key_pem="PRIVKEY",
+        host_public_key_openssh="ssh-ed25519 AAAAPUB",
+        host_data_disk_name="mngr-abc-data",
+        host_data_disk_size="100GiB",
+        is_docker_mode=True,
+        outer_authorized_public_key="ssh-ed25519 AAAAOUTER",
+        container_forward_guest_port=2222,
+        container_forward_host_port=49152,
+    )
+    script = config["provision"][0]["script"]
+    assert "runsc" not in script
+    assert "gvisor" not in script
+
+
+def test_generate_docker_mode_lima_yaml_includes_gvisor_install_when_requested() -> None:
+    config = generate_default_lima_yaml(
+        volume_host_path=None,
+        host_dir="/mngr",
+        host_private_key_pem="PRIVKEY",
+        host_public_key_openssh="ssh-ed25519 AAAAPUB",
+        host_data_disk_name="mngr-abc-data",
+        host_data_disk_size="100GiB",
+        is_docker_mode=True,
+        outer_authorized_public_key="ssh-ed25519 AAAAOUTER",
+        container_forward_guest_port=2222,
+        container_forward_host_port=49152,
+        install_gvisor_runtime=True,
+    )
+    script = config["provision"][0]["script"]
+    # Installs runsc from gVisor's APT repo and registers it; guarded for idempotency.
+    assert "apt-get install -y runsc" in script
+    assert "gvisor.dev/archive.key" in script
+    assert "runsc install" in script
+    assert "docker info" in script
+
+
 def test_generate_docker_mode_lima_yaml_requires_forward_ports() -> None:
     with pytest.raises(MngrError):
         generate_default_lima_yaml(

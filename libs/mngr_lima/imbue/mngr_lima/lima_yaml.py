@@ -97,6 +97,7 @@ def generate_default_lima_yaml(
     outer_authorized_public_key: str | None = None,
     container_forward_guest_port: int | None = None,
     container_forward_host_port: int | None = None,
+    install_gvisor_runtime: bool = False,
 ) -> dict:
     """Generate the default Lima YAML configuration.
 
@@ -132,6 +133,7 @@ def generate_default_lima_yaml(
             host_private_key_pem,
             host_public_key_openssh,
             outer_authorized_public_key=outer_authorized_public_key,
+            install_gvisor_runtime=install_gvisor_runtime,
         )
     else:
         port_forwards = _disable_port_forwards_rules()
@@ -246,10 +248,25 @@ fi
 """
 
 
+# Idempotent block that installs and registers the gVisor `runsc` runtime with the
+# in-VM Docker daemon via gVisor's official APT repository, then re-registers it
+# with `runsc install` and restarts Docker. Guarded so it is a no-op when runsc is
+# already registered (e.g. baked into the VM image).
+_GVISOR_RUNSC_INSTALL_BLOCK = """\
+if ! docker info 2>/dev/null | grep -q runsc; then
+    curl -fsSL https://gvisor.dev/archive.key | gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" > /etc/apt/sources.list.d/gvisor.list
+    apt-get update && apt-get install -y runsc
+    runsc install
+    systemctl restart docker
+fi"""
+
+
 def _build_docker_provisioning_script(
     host_private_key_pem: str | None,
     host_public_key_openssh: str | None,
     outer_authorized_public_key: str | None,
+    install_gvisor_runtime: bool,
 ) -> str:
     """Build the Lima ``provision[mode=system]`` script for is_host_in_docker mode.
 
@@ -258,10 +275,16 @@ def _build_docker_provisioning_script(
     The VM only needs Docker, btrfs-progs, and the snapshot-helper's runtime
     deps (inotify-tools, jq), plus key-based root SSH so mngr's "outer" can
     drive docker/btrfs/systemctl as root. The injected ed25519 host key gives
-    the VM a known sshd identity (no TOFU).
+    the VM a known sshd identity (no TOFU). When ``install_gvisor_runtime`` is
+    True, an idempotent block installs and registers the gVisor ``runsc`` runtime.
     """
     host_key_block = _build_host_key_block(host_private_key_pem, host_public_key_openssh)
     root_authorized_keys_block = _build_root_authorized_keys_block(outer_authorized_public_key)
+    gvisor_install_block = (
+        f"\n# Install and register the gVisor runsc runtime (idempotent).\n{_GVISOR_RUNSC_INSTALL_BLOCK}\n"
+        if install_gvisor_runtime
+        else ""
+    )
     return f"""\
 #!/bin/bash
 set -eux -o pipefail
@@ -283,7 +306,7 @@ if [ -n "$PKGS_TO_INSTALL" ]; then
 fi
 
 systemctl enable --now docker
-
+{gvisor_install_block}
 mkdir -p /run/sshd
 
 # Install the caller-provided sshd host key (when given).

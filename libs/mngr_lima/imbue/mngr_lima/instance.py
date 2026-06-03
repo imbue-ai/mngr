@@ -527,6 +527,7 @@ sudo poweroff
             outer_authorized_public_key=outer_public_key,
             container_forward_guest_port=container_ssh_port,
             container_forward_host_port=container_host_port,
+            install_gvisor_runtime=self.config.install_gvisor_runtime,
         )
         yaml_path = write_lima_yaml(lima_config)
         effective_start_args = tuple(self.config.default_start_args) + tuple(start_args or ())
@@ -674,7 +675,11 @@ sudo poweroff
                     f"{snapshots_dir}:{SNAPSHOT_READ_MOUNT_PATH}:ro",
                 ],
                 labels=labels,
-                extra_args=[],
+                # Select a non-default container runtime (e.g. 'runsc' for gVisor) when
+                # configured; absent by default. The runtime must be registered in the VM.
+                extra_args=(
+                    ["--runtime", self.config.docker_runtime] if self.config.docker_runtime is not None else []
+                ),
                 entrypoint_cmd=CONTAINER_ENTRYPOINT_CMD,
             )
 

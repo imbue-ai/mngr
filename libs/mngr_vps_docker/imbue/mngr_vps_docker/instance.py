@@ -611,7 +611,9 @@ class VpsDockerProvider(BaseProviderInstance):
         time ``_finalize_host_creation`` writes ``host_state.json``.
         """
         base_image = str(image) if image else self.config.default_image
-        effective_start_args = tuple(self.config.default_start_args) + tuple(start_args or ())
+        # Prepend `--runtime <value>` (e.g. 'runsc' for gVisor) when configured; absent by default.
+        runtime_args = ("--runtime", self.config.docker_runtime) if self.config.docker_runtime is not None else ()
+        effective_start_args = runtime_args + tuple(self.config.default_start_args) + tuple(start_args or ())
         parsed = self._parse_build_args(build_args)
 
         container_name, container_id, volume_name = self._setup_container_on_vps(
@@ -706,6 +708,7 @@ class VpsDockerProvider(BaseProviderInstance):
         user_data = generate_cloud_init_user_data(
             host_private_key=vps_host_private_key,
             host_public_key=vps_host_public_key,
+            install_gvisor_runtime=self.config.install_gvisor_runtime,
         )
 
         logger.log(LogLevel.BUILD.value, "Creating VPS instance (region: {}, plan: {})...", region, plan, source="vps")
