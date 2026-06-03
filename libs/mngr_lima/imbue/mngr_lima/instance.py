@@ -106,6 +106,7 @@ from imbue.mngr_vps_docker.container_setup import seed_host_volume_layout_on_out
 from imbue.mngr_vps_docker.container_setup import setup_container_ssh
 from imbue.mngr_vps_docker.container_setup import snapshot_trigger_volume_name_for
 from imbue.mngr_vps_docker.container_setup import start_container
+from imbue.mngr_vps_docker.container_setup import start_container_sshd
 
 # Lima instance status values mapped to mngr HostState
 _LIMA_STATUS_TO_HOST_STATE: dict[str, HostState] = {
@@ -796,6 +797,9 @@ sudo poweroff
         with self._make_outer_for_vm(host_id, ssh_config) as outer:
             with log_span("Starting agent container in VM"):
                 start_container(outer, config.container_name)
+            # sshd was launched via `docker exec` at create time and does not
+            # survive the container going down with the VM, so relaunch it.
+            start_container_sshd(outer, config.container_name)
             with log_span("Waiting for container SSH to be ready..."):
                 wait_for_sshd("127.0.0.1", container_host_port, self.config.container_ssh_connect_timeout)
             host_obj = self._create_container_host_object(

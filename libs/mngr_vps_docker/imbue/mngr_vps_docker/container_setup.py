@@ -709,11 +709,23 @@ def setup_container_ssh(
     if auth_keys_cmd is not None:
         exec_in_container(outer, container_name, auth_keys_cmd)
 
+    start_container_sshd(outer, container_name)
+
+
+def start_container_sshd(outer: OuterHostInterface, container_name: str) -> None:
+    """(Re)start sshd inside a container in the background.
+
+    Used both during initial container setup and after a container restart.
+    The latter matters because sshd is launched via ``docker exec`` rather than
+    the container's entrypoint, so it does not survive a ``docker stop``/``start``
+    (or a host VM reboot that takes the container down with it); ``/run/sshd``
+    is on tmpfs and is recreated here for the same reason.
+    """
     with log_span("Starting sshd in container"):
         exec_in_container(
             outer,
             container_name,
-            "/usr/sbin/sshd -D -o MaxSessions=100 &",
+            "mkdir -p /run/sshd && /usr/sbin/sshd -D -o MaxSessions=100 &",
         )
 
 
