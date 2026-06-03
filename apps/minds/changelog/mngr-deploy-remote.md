@@ -87,3 +87,12 @@ Vault reads now distinguish "secret absent" from a transient failure. Added
 found"); `minds env deploy`'s optional-OVH-entry fallback now catches only that,
 so a transient/auth Vault error no longer gets silently turned into empty OVH
 credentials (which would deploy a broken `ovh` Modal Secret on a Vault blip).
+
+Fixed a slow-path create failure on shared tiers (staging / production). The
+create form there defaults to the remote FCT URL, which minds shallow-cloned;
+the imbue_cloud slow path then transfers the clone to the leased host via mngr's
+git-mirror push, which git rejects for shallow history ("shallow update not
+allowed") -- so any create that fell back to the slow path (no fast/adopt match)
+failed outright. minds now full-clones the remote URL for imbue_cloud
+(`_may_shallow_clone_remote_repo`), mirroring the local-worktree branch that
+already full-cloned for the same reason.

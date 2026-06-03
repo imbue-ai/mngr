@@ -247,6 +247,20 @@ def _is_local_path(repo_source: str) -> bool:
     return repo_source.startswith(("/", "./", "../", "~"))
 
 
+def _may_shallow_clone_remote_repo(launch_mode: LaunchMode) -> bool:
+    """Whether a remote-URL clone for ``launch_mode`` may be shallow (``--depth 1``).
+
+    Shallow is fine for modes that rsync the workspace into place, but the
+    imbue_cloud *slow path* transfers the clone to the leased host via mngr's
+    git-mirror PUSH (``host.py:_git_push_to_target``), which git rejects for
+    shallow history (``shallow update not allowed``). So imbue_cloud requires a
+    full clone -- otherwise a slow-path fallback (no fast/adopt match) fails
+    outright. Shared tiers (staging / production) hit this because their create
+    form defaults to the remote FCT URL rather than a local worktree.
+    """
+    return launch_mode is not LaunchMode.IMBUE_CLOUD
+
+
 def _redact_url_credentials(url: str) -> str:
     """Strip any ``user[:password]@`` userinfo from a URL's netloc for logging.
 
@@ -1255,11 +1269,15 @@ class AgentCreator(MutableModel):
                     if clone_target.exists():
                         shutil.rmtree(clone_target)
                     log_queue.put("[minds] Cloning {}...".format(_redact_url_credentials(repo_source)))
+                    # See _may_shallow_clone_remote_repo: imbue_cloud's slow-path
+                    # git-mirror push rejects shallow history, so it needs a full
+                    # clone (the remote-URL twin of the local-worktree branch
+                    # above, which full-clones for the same reason).
                     clone_git_repo(
                         GitUrl(repo_source),
                         clone_target,
                         on_output=emit_log,
-                        is_shallow=True,
+                        is_shallow=_may_shallow_clone_remote_repo(launch_mode),
                         parent_cg=self.root_concurrency_group,
                     )
                     workspace_dir = clone_target

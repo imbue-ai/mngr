@@ -28,6 +28,7 @@ from imbue.minds.desktop_client.agent_creator import _CreateEventCapture
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_git_worktree
 from imbue.minds.desktop_client.agent_creator import _is_local_path
+from imbue.minds.desktop_client.agent_creator import _may_shallow_clone_remote_repo
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
@@ -54,6 +55,18 @@ def test_extract_repo_name_strips_dot_git_and_trailing_slash() -> None:
 def test_extract_repo_name_falls_back_to_workspace() -> None:
     assert extract_repo_name("/") == "workspace"
     assert extract_repo_name("///") == "workspace"
+
+
+def test_imbue_cloud_remote_clone_is_never_shallow() -> None:
+    """imbue_cloud must full-clone a remote URL.
+
+    Regression test for the staging slow-path failure: a shallow clone can't be
+    git-mirror-pushed to the leased host ("shallow update not allowed"), so the
+    slow-path fallback failed. Every other mode may shallow-clone.
+    """
+    assert _may_shallow_clone_remote_repo(LaunchMode.IMBUE_CLOUD) is False
+    for mode in (LaunchMode.DOCKER, LaunchMode.LIMA, LaunchMode.CLOUD):
+        assert _may_shallow_clone_remote_repo(mode) is True
 
 
 def test_create_event_capture_records_error_class_from_jsonl_error_event() -> None:
