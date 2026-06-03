@@ -38,6 +38,10 @@
       ('cream',       'var(--palette-cream)',       false),
       ('taupe',       'var(--palette-taupe)',       false),
 ] %}
+{# Shared class list for the surface-picker swatch buttons. Kept here so
+   the pure-black / pure-white hardcoded buttons and the palette-loop
+   buttons cannot drift from each other. #}
+{% set _SWATCH_CLS = 'flex flex-col items-start gap-1 px-3 py-2 rounded-md border border-line transition hover:border-line-strong' %}
 <div class="max-w-5xl mx-auto px-8 py-10 space-y-12">
 
   <header>
@@ -61,13 +65,13 @@
     <div class="bg-surface-elevated border border-line rounded-xl p-4 shadow-card">
       <div class="flex flex-wrap items-stretch gap-2" id="surface-swatches">
         <button type="button" data-surface="#000000"
-                class="surface-swatch group flex flex-col items-start gap-1 px-3 py-2 rounded-md border border-line transition hover:border-line-strong"
+                class="{{ _SWATCH_CLS }}"
                 style="background: #000000; color: #ffffff;">
           <span class="text-caption font-medium">pure black</span>
           <span class="font-mono text-[11px] opacity-70">#000000</span>
         </button>
         <button type="button" data-surface="#ffffff"
-                class="surface-swatch group flex flex-col items-start gap-1 px-3 py-2 rounded-md border border-line transition hover:border-line-strong"
+                class="{{ _SWATCH_CLS }}"
                 style="background: #ffffff; color: #18181b;">
           <span class="text-caption font-medium">pure white</span>
           <span class="font-mono text-[11px] opacity-70">#ffffff</span>
@@ -81,7 +85,7 @@
         #}
         {% for name, css, is_dark in _PALETTE %}
         <button type="button" data-surface="{{ css }}"
-                class="surface-swatch group flex flex-col items-start gap-1 px-3 py-2 rounded-md border border-line transition hover:border-line-strong"
+                class="{{ _SWATCH_CLS }}"
                 style="background: {{ css }}; color: {% if is_dark %}rgba(255,255,255,0.95){% else %}#18181b{% endif %};">
           <span class="text-caption font-medium">{{ name }}</span>
           <span class="font-mono text-[11px] opacity-70">--palette-{{ name }}</span>
