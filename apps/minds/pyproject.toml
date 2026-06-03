@@ -92,6 +92,9 @@ omit = [
   "*/telegram/credential_extractor.py",
   "*/telegram/bot_creator.py",
   "*/telegram/injector.py",
+  # Cloudflare tunnel token inject/clear shell out via `mngr exec` -- exercised
+  # via acceptance/release tests. The path constant is pinned in the *_test.py.
+  "*/desktop_client/tunnel_token_injection.py",
   # SuperTokens routes require a live Core connection -- tested via release test.
   "*/desktop_client/supertokens_routes.py",
   # Docker state-container teardown shells out to the `docker` CLI and needs a
