@@ -53,7 +53,6 @@ from pydantic import PrivateAttr
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
 
-
 _HEALTH_PATH: Final[str] = "/__ssr/health"
 _RENDER_PATH: Final[str] = "/__ssr/render"
 _DEFAULT_READY_TIMEOUT_SECONDS: Final[float] = 15.0
@@ -211,9 +210,7 @@ class SsrSidecar(MutableModel):
                 proc = self._proc
                 client = self._client
             if proc is not None and proc.poll() is not None:
-                raise SsrSidecarError(
-                    f"SSR sidecar exited during startup with code {proc.returncode}"
-                )
+                raise SsrSidecarError(f"SSR sidecar exited during startup with code {proc.returncode}")
             if client is None:
                 raise SsrSidecarError("SSR sidecar wait_ready called before spawn")
             try:
@@ -225,10 +222,7 @@ class SsrSidecar(MutableModel):
                 last_exc = exc
             if self._shutting_down.wait(timeout=_PROBE_INTERVAL_SECONDS):
                 raise SsrSidecarError("SSR sidecar wait_ready interrupted by shutdown")
-        raise SsrSidecarError(
-            f"SSR sidecar did not become ready within {effective_timeout}s "
-            f"(last error: {last_exc})"
-        )
+        raise SsrSidecarError(f"SSR sidecar did not become ready within {effective_timeout}s (last error: {last_exc})")
 
     def render(self, *, route: str, props: dict[str, Any]) -> str:
         """Render a route to an HTML string via the sidecar.
@@ -249,9 +243,7 @@ class SsrSidecar(MutableModel):
         except httpx.HTTPError as exc:
             raise SsrSidecarError(f"SSR sidecar transport error: {exc}") from exc
         if response.status_code != 200:
-            raise SsrSidecarError(
-                f"SSR sidecar render returned {response.status_code}: {response.text[:200]}"
-            )
+            raise SsrSidecarError(f"SSR sidecar render returned {response.status_code}: {response.text[:200]}")
         return response.text
 
     def stop(self) -> None:
@@ -369,9 +361,7 @@ class SsrSidecar(MutableModel):
             if self._shutting_down.is_set():
                 return
             exit_code = proc.poll()
-            logger.warning(
-                "SSR sidecar exited with code {}; restarting in {}s", exit_code, backoff
-            )
+            logger.warning("SSR sidecar exited with code {}; restarting in {}s", exit_code, backoff)
             if self._shutting_down.wait(timeout=backoff):
                 return
             try:

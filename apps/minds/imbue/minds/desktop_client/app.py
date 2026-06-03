@@ -3441,11 +3441,7 @@ def create_desktop_client(
         _server_entry = Path(_server_entry_override)
     else:
         _server_entry = (
-            Path(__file__).resolve().parent.parent.parent.parent
-            / "frontend"
-            / "dist-server"
-            / "assets"
-            / "server.js"
+            Path(__file__).resolve().parent.parent.parent.parent / "frontend" / "dist-server" / "assets" / "server.js"
         )
     ssr_sidecar: SsrSidecar | None = None
     if _server_entry.exists() and root_concurrency_group is not None:

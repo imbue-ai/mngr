@@ -5,6 +5,8 @@ import os
 import re
 import subprocess
 from pathlib import Path
+from typing import Any
+from typing import TypedDict
 
 # Matches the JSON payload that ``_client_render_shell`` and the Node SSR
 # sidecar both emit so the client bundle can hydrate the right route.
@@ -15,7 +17,21 @@ _SSR_PAYLOAD_RE = re.compile(
 )
 
 
-def extract_ssr_route_payload(html: str) -> dict[str, object]:
+class SsrRoutePayload(TypedDict):
+    """Shape of the JSON blob the SSR shell inlines for client hydration.
+
+    ``route`` is the key the client's route registry uses to pick a Solid
+    component. ``props`` are the per-route arguments rendered into the
+    component; the per-route schema varies (e.g. ``login_redirect``
+    carries a one-time code, ``auth_error`` carries an error message) so
+    we leave the value type as ``Any`` to keep test assertions terse.
+    """
+
+    route: str
+    props: dict[str, Any]
+
+
+def extract_ssr_route_payload(html: str) -> SsrRoutePayload:
     """Return the ``{route, props}`` payload embedded in an SSR-shell page.
 
     Raises ``AssertionError`` if the payload script tag is missing. Used

@@ -16,6 +16,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from typing import Final
+from typing import Protocol
 
 from jinja2 import Environment
 from jinja2 import FileSystemLoader
@@ -53,6 +54,19 @@ JINJA_ENV: Final[Environment] = Environment(
 # render and falls back to the client-render shell if the sidecar is
 # unhealthy (or absent in unit tests). Keeping the function signatures
 # stable means existing route handlers and unit tests don't change shape.
+
+
+class _RendersHtml(Protocol):
+    """Structural type accepted by ``_render_ssr_or_fallback``.
+
+    Concrete production callers pass an ``SsrSidecar``. Tests pass
+    lightweight fakes that don't subclass it (the production class is a
+    ``MutableModel`` so subclassing is awkward); this Protocol lets the
+    type checker accept both shapes without requiring an inheritance
+    relationship.
+    """
+
+    def render(self, *, route: str, props: dict[str, Any]) -> str: ...
 
 
 def _client_render_shell(*, route: str, props: dict[str, Any]) -> str:
@@ -96,7 +110,7 @@ def _client_render_shell(*, route: str, props: dict[str, Any]) -> str:
 
 def _render_ssr_or_fallback(
     *,
-    sidecar: SsrSidecar | None,
+    sidecar: _RendersHtml | None,
     route: str,
     props: dict[str, Any],
 ) -> str:
