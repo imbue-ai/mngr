@@ -6,10 +6,10 @@ slimmed to the parts the plugin needs:
 - One ``mngr observe --discovery-only --quiet`` subprocess produces discovery
   events. Lines pass through to the envelope writer's ``observe`` stream and
   drive the ``ForwardResolver``'s known-agent set + per-host SSH info.
-- One ``mngr event <id> services requests refresh --follow --quiet`` per
-  filter-matching agent produces service-registration / request / refresh
-  events. Lines pass through to the envelope writer's ``event`` stream and
-  drive the resolver's per-agent service map.
+- One ``mngr event <id> services requests --follow --quiet`` per
+  filter-matching agent produces service-registration / request events.
+  Lines pass through to the envelope writer's ``event`` stream and drive
+  the resolver's per-agent service map.
 - ``bounce_observe()`` terminates only the observe subprocess and respawns it
   with the same args; per-agent event subprocesses, registered callbacks, and
   resolver state survive.
@@ -52,7 +52,6 @@ from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 _SERVICES_SOURCE = "services"
 _REQUESTS_SOURCE = "requests"
-_REFRESH_SOURCE = "refresh"
 
 
 OnAgentDiscoveredCallback = Callable[[AgentId, RemoteSSHInfo | None, str], None]
@@ -76,7 +75,7 @@ class ForwardStreamManager(MutableModel):
         description="CEL exclude filters for which agents the plugin tracks",
     )
     event_sources: tuple[str, ...] = Field(
-        default=(_SERVICES_SOURCE, _REQUESTS_SOURCE, _REFRESH_SOURCE),
+        default=(_SERVICES_SOURCE, _REQUESTS_SOURCE),
         frozen=True,
         description="Source streams to follow per-agent (passed to ``mngr event``)",
     )
@@ -460,8 +459,8 @@ class ForwardStreamManager(MutableModel):
             return
         source = raw.get("source")
         if source != _SERVICES_SOURCE:
-            # Requests / refresh events are passed through to consumers via
-            # the envelope; the plugin doesn't consume them itself.
+            # Request events are passed through to consumers via the
+            # envelope; the plugin doesn't consume them itself.
             return
 
         event_type = raw.get("type", "service_registered")

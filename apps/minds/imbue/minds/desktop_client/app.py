@@ -1,5 +1,4 @@
 import asyncio
-import concurrent.futures
 import html
 import json
 import os
@@ -223,7 +222,7 @@ async def _managed_lifespan(
     inner_app: FastAPI,
     is_externally_managed_client: bool,
 ) -> AsyncGenerator[None, None]:
-    """Manage the httpx client lifecycle and capture the running event loop.
+    """Manage the httpx client lifecycle and root concurrency group teardown.
 
     SSH tunnels (forward + reverse) live in ``cli/run.py``'s
     ``SSHTunnelManager``, which is solely used by the surviving Latchkey
@@ -234,10 +233,6 @@ async def _managed_lifespan(
             follow_redirects=False,
             timeout=_PROXY_TIMEOUT_SECONDS,
         )
-    # Captured here so background callbacks (e.g. the mngr event refresh
-    # dispatch) can schedule async work on the server's running loop via
-    # asyncio.run_coroutine_threadsafe.
-    inner_app.state.event_loop = asyncio.get_running_loop()
     try:
         yield
     finally:
@@ -252,10 +247,6 @@ async def _managed_lifespan(
         backend_resolver = inner_app.state.backend_resolver
         if isinstance(backend_resolver, MngrCliBackendResolver):
             backend_resolver.notify_change()
-        # Clear the captured loop reference first so background callbacks that
-        # race with shutdown see None and drop their events instead of trying
-        # to schedule on a loop that is about to close.
-        inner_app.state.event_loop = None
         if not is_externally_managed_client:
             await inner_app.state.http_client.aclose()
         # Stop every long-lived strand that's blocked on external I/O
@@ -3201,7 +3192,6 @@ async def _dispatch_request_action(
 
 
 _request_event_apps: dict[int, FastAPI] = {}
-_refresh_event_apps: dict[int, FastAPI] = {}
 
 
 def _handle_request_event_callback(agent_id_str: str, raw_line: str) -> None:
@@ -3237,105 +3227,6 @@ def _handle_request_event_callback(agent_id_str: str, raw_line: str) -> None:
             backend_resolver: BackendResolverInterface = app.state.backend_resolver
             if isinstance(backend_resolver, MngrCliBackendResolver):
                 backend_resolver.notify_change()
-
-
-def _parse_refresh_service_name(raw_line: str) -> str | None:
-    """Extract service_name from a refresh event line, or None if unparseable."""
-    try:
-        data = json.loads(raw_line)
-    except json.JSONDecodeError:
-        return None
-    service_name = data.get("service_name")
-    if not isinstance(service_name, str) or not service_name:
-        return None
-    return service_name
-
-
-async def _dispatch_refresh_broadcast(app: FastAPI, agent_id: AgentId, service_name: str) -> None:
-    """POST to the agent's system interface so it emits a refresh_service WS broadcast.
-
-    Routed through the ``mngr forward`` plugin's per-agent subdomain so we
-    reuse the plugin's existing SSH tunnel to the agent rather than
-    maintaining one in minds. The request connects to the plugin on loopback
-    and carries the agent's ``agent-<hex>.localhost`` vhost in the ``Host``
-    header (the plugin routes on that header), so it does not depend on
-    ``*.localhost`` name resolution. Auth on the plugin uses the same
-    ``preauth_cookie`` value the plugin trusts for the Electron-shell
-    pre-set; minds knows that value because it minted it in ``cli/run.py``.
-    Errors are logged but swallowed -- a missed refresh is never worth
-    crashing on.
-    """
-    plugin_port: int = app.state.mngr_forward_port or 8421
-    preauth_cookie: str | None = app.state.mngr_forward_preauth_cookie
-    if preauth_cookie is None:
-        logger.debug("Refresh broadcast skipped for {}/{}: no preauth cookie wired", agent_id, service_name)
-        return
-    url = f"http://127.0.0.1:{plugin_port}/api/refresh-service/{service_name}/broadcast"
-    host_header = f"{agent_id}.localhost"
-    http_client: httpx.AsyncClient = app.state.http_client
-    try:
-        response = await http_client.post(
-            url,
-            headers={"Host": host_header},
-            cookies={"mngr_forward_session": preauth_cookie},
-        )
-        response.raise_for_status()
-    except httpx.HTTPError as e:
-        logger.warning("Refresh broadcast POST to {} ({}) failed: {}", url, host_header, e)
-
-
-def _log_refresh_dispatch_result(
-    future: concurrent.futures.Future[None], agent_id_str: str, service_name: str
-) -> None:
-    """Surface any exception stashed on a scheduled refresh-dispatch future.
-
-    ``run_coroutine_threadsafe`` stores exceptions on the returned
-    ``concurrent.futures.Future``; if nothing calls ``.exception()`` they are
-    never logged. This callback runs when the coroutine finishes and logs
-    anything other than cancellation.
-    """
-    try:
-        exc = future.exception()
-    except asyncio.CancelledError:
-        logger.debug("Refresh dispatch cancelled for agent {} service {}", agent_id_str, service_name)
-        return
-    if exc is not None:
-        logger.warning("Refresh dispatch failed for agent {} service {}: {}", agent_id_str, service_name, exc)
-
-
-def _handle_refresh_event_callback(agent_id_str: str, raw_line: str) -> None:
-    """Fan a refresh event out to every registered app's system interface.
-
-    Runs on the mngr-events reader thread, so the async POST is scheduled
-    on each app's captured event loop via run_coroutine_threadsafe.
-    """
-    service_name = _parse_refresh_service_name(raw_line)
-    if service_name is None:
-        logger.debug("Ignoring malformed refresh event from {}: {}", agent_id_str, raw_line[:200])
-        return
-    agent_id = AgentId(agent_id_str)
-    for app in _refresh_event_apps.values():
-        # event_loop is set to None in create_desktop_client and populated by
-        # _managed_lifespan on startup. In production, stream_manager.start()
-        # (which feeds this callback) runs before uvicorn.run(app) starts the
-        # lifespan, so there is a brief window during which refresh events
-        # can arrive before the loop is captured. Drop such events rather
-        # than crashing the reader thread with AttributeError. The same guard
-        # also covers loops that have already been closed (e.g. the app was
-        # torn down but its entry in _refresh_event_apps has not yet been
-        # removed) -- scheduling on a closed loop would raise RuntimeError
-        # and leak an unawaited coroutine.
-        loop: asyncio.AbstractEventLoop | None = app.state.event_loop
-        if loop is None or loop.is_closed():
-            logger.debug(
-                "Dropping refresh for agent {} service {}: app event loop unavailable",
-                agent_id_str,
-                service_name,
-            )
-            continue
-        future = asyncio.run_coroutine_threadsafe(_dispatch_refresh_broadcast(app, agent_id, service_name), loop)
-        future.add_done_callback(lambda f, aid=agent_id_str, sn=service_name: _log_refresh_dispatch_result(f, aid, sn))
-        logger.info("Scheduled refresh broadcast for agent {} service {}", agent_id_str, service_name)
 
 
 # -- App factory --
@@ -3458,11 +3349,6 @@ def create_desktop_client(
     app.state.system_interface_health_tracker = system_interface_health_tracker
     app.state.mngr_binary = mngr_binary
     app.state.mngr_host_dir = mngr_host_dir if mngr_host_dir is not None else Path.home() / ".mngr"
-    # Populated with the running loop by _managed_lifespan on startup. Defined
-    # up-front as None so background callbacks fired before startup (e.g. mngr
-    # events produced between consumer.start() and uvicorn.run()) see a
-    # valid attribute and can choose to drop the event instead of crashing.
-    app.state.event_loop = None
     # Always-set (possibly None) so consumers can read directly via
     # ``app.state.api_v1_paths`` instead of using a defaulting attribute
     # lookup -- the latter is flagged by the project ratchet.
@@ -3478,8 +3364,6 @@ def create_desktop_client(
     if isinstance(backend_resolver, MngrCliBackendResolver):
         _request_event_apps[id(backend_resolver)] = app
         backend_resolver.add_on_request_callback(_handle_request_event_callback)
-        _refresh_event_apps[id(backend_resolver)] = app
-        backend_resolver.add_on_refresh_callback(_handle_refresh_event_callback)
 
     # Mount the auth routes (proxy to the mngr_imbue_cloud plugin's auth subcommands)
     if session_store is not None and imbue_cloud_cli is not None:
