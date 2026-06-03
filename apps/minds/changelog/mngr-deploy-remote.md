@@ -93,9 +93,9 @@ create form there defaults to the remote FCT URL, which minds shallow-cloned;
 the imbue_cloud slow path then transfers the clone to the leased host via mngr's
 git-mirror push, which git rejects for shallow history ("shallow update not
 allowed") -- so any create that fell back to the slow path (no fast/adopt match)
-failed outright. minds now full-clones the remote URL for imbue_cloud
-(`_may_shallow_clone_remote_repo`), mirroring the local-worktree branch that
-already full-cloned for the same reason.
+failed outright. minds now full-clones the remote URL (a single-branch,
+non-shallow clone), mirroring the local-worktree branch that already
+full-cloned for the same reason.
 
 The sharing editor now waits for Cloudflare Access to go live before showing the
 URL as ready. After enabling sharing, Cloudflare can take a few seconds to
