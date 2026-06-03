@@ -2,8 +2,9 @@
  * Design tokens + a handful of custom CSS that Tailwind doesn't cover
  * (per-workspace accent stripe, spinner keyframes, titlebar drop shadow).
  *
- * This file is committed and loaded alongside the Tailwind Play CDN JS
- * (which generates utility classes at runtime -- see static/tailwind.js).
+ * Imported by ``frontend/src/styles/globals.css`` and emitted as part
+ * of the Vite-built ``app.css`` bundle that ``base.html``,
+ * ``chrome.html``, and ``sidebar.html`` load.
  *
  * Chrome colors / focus rings / link color are not tokens here -- chrome
  * uses raw Tailwind classes (bg-zinc-900, text-zinc-200, border-white/10,
