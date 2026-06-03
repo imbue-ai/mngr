@@ -470,5 +470,5 @@ def write_cli_completions_cache(
 
         cache_path = get_completion_cache_dir() / COMPLETION_CACHE_FILENAME
         atomic_write(cache_path, json.dumps(cache_data._asdict()))
-    except OSError:
-        logger.debug("Failed to write CLI completions cache")
+    except OSError as e:
+        logger.warning("Failed to write CLI completions cache: {}", e)

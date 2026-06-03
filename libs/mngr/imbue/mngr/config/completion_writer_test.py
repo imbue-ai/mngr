@@ -62,8 +62,9 @@ def test_get_completion_cache_dir_ignores_double_underscore_form(
     assert result == tmp_path / "default_host"
 
 
+@pytest.mark.allow_warnings(match=r"Failed to write CLI completions cache")
 def test_write_cli_completions_cache_handles_oserror(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """write_cli_completions_cache should silently handle OSError."""
+    """write_cli_completions_cache should handle OSError without raising (logs a warning)."""
     # Monkeypatch atomic_write to simulate a write failure. We can't use chmod
     # because Modal sandboxes run as root, which bypasses permission checks.
     monkeypatch.setenv("MNGR_COMPLETION_CACHE_DIR", str(tmp_path))
