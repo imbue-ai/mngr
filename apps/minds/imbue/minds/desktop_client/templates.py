@@ -1,10 +1,15 @@
 """HTML rendering for the desktop client.
 
-Each ``render_*`` function is a thin wrapper around a Jinja2 template that
-lives under ``templates/`` in this directory. Tests call these functions
-directly; the FastAPI route handlers call them the same way. Keeping the
-public signatures stable lets the unit tests keep working without caring
-that we moved from inline strings to file-based templates.
+Each ``render_*`` function is a thin wrapper around a JinjaX component
+under ``templates/`` in this directory, rendered through the shared
+``CATALOG``. Primitive components (Button, Card, Notice, Spinner,
+TextInput, Opt, ...) and the page layout (``Base``) sit at the top of
+``templates/``; full pages live under ``templates/pages/`` as PascalCase
+``.jinja`` files; auth pages and the OAuth icon component live under
+``templates/auth/``. Tests call these functions directly; the FastAPI
+route handlers call them the same way. The public signatures are stable
+so neither callers nor tests have to know the templates moved from raw
+Jinja2 macros + ``{% extends %}`` to JinjaX components.
 """
 
 import hashlib
