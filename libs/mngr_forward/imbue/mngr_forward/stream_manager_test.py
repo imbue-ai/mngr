@@ -322,7 +322,7 @@ def test_event_exclude_filters_event_sources_at_startup() -> None:
         envelope_writer=writer,
         event_exclude=("event.source == 'requests'",),
     )
-    assert manager._filtered_event_sources == ("services", "refresh")  # noqa: SLF001 - asserts internal state
+    assert manager._filtered_event_sources == ("services",)  # noqa: SLF001 - asserts internal state
 
 
 def test_event_filters_unset_keeps_all_sources() -> None:
@@ -333,7 +333,6 @@ def test_event_filters_unset_keeps_all_sources() -> None:
     assert manager._filtered_event_sources == (  # noqa: SLF001 - asserts internal state
         "services",
         "requests",
-        "refresh",
     )
 
 

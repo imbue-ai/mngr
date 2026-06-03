@@ -330,7 +330,7 @@ def test_host_destroyed_destroys_all_agents_on_host(consumer: EnvelopeStreamCons
     assert consumer.resolver.list_known_agent_ids() == ()
 
 
-# --- event stream: services / requests / refresh --------------------------
+# --- event stream: services / requests ------------------------------------
 
 
 def test_event_services_envelope_updates_resolver_services(consumer: EnvelopeStreamConsumer) -> None:
@@ -377,21 +377,6 @@ def test_event_requests_envelope_dispatches_to_request_callback(consumer: Envelo
         "request_id": "req-1",
     }
     _dispatch(consumer, _event_envelope(_AGENT_ID_1, request_payload))
-    assert len(fired) == 1
-    assert fired[0][0] == str(_AGENT_ID_1)
-
-
-def test_event_refresh_envelope_dispatches_to_refresh_callback(consumer: EnvelopeStreamConsumer) -> None:
-    fired: list[tuple[str, str]] = []
-    consumer.resolver.add_on_refresh_callback(lambda aid_str, raw: fired.append((aid_str, raw)))
-    refresh_payload = {
-        "timestamp": _TIMESTAMP,
-        "event_id": "evt-" + "0" * 32,
-        "type": "refresh",
-        "source": "refresh",
-        "service": "web",
-    }
-    _dispatch(consumer, _event_envelope(_AGENT_ID_1, refresh_payload))
     assert len(fired) == 1
     assert fired[0][0] == str(_AGENT_ID_1)
 
