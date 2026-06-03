@@ -21,12 +21,26 @@ class ImbueCloudLeaseUnavailableError(ImbueCloudError):
     """Raised when the connector returns 503 (no matching pool host)."""
 
 
+class FastPathUnavailableError(ImbueCloudError):
+    """Raised when ``fast_mode=require`` finds no exact-attribute pool match.
+
+    Distinct from ``ImbueCloudLeaseUnavailableError`` (which means the pool is
+    genuinely empty): this signals that the fast/adopt path specifically could
+    not be satisfied, so a caller (e.g. minds) can fall back to the slow path
+    by re-running with ``fast_mode=prevent``.
+    """
+
+
 class ImbueCloudKeyError(ImbueCloudError):
     """Raised when a LiteLLM key operation fails."""
 
 
 class ImbueCloudTunnelError(ImbueCloudError):
     """Raised when a Cloudflare tunnel operation fails."""
+
+
+class ImbueCloudPaidListError(ImbueCloudError):
+    """Raised when a paid-list (paid domains / emails) admin operation fails."""
 
 
 class PoolHostNotMatchedError(ImbueCloudError):

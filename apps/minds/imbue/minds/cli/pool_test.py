@@ -92,7 +92,9 @@ def test_build_list_admin_args() -> None:
 
 
 def test_build_destroy_admin_args_without_force() -> None:
-    assert build_destroy_admin_args(pool_host_id="abc-123", database_url="postgres://x", force=False) == [
+    assert build_destroy_admin_args(
+        pool_host_id="abc-123", database_url="postgres://x", force=False, skip_vps_cancel=False
+    ) == [
         "destroy",
         "abc-123",
         "--database-url",
@@ -101,11 +103,23 @@ def test_build_destroy_admin_args_without_force() -> None:
 
 
 def test_build_destroy_admin_args_with_force() -> None:
-    args = build_destroy_admin_args(pool_host_id="abc-123", database_url="postgres://x", force=True)
+    args = build_destroy_admin_args(
+        pool_host_id="abc-123", database_url="postgres://x", force=True, skip_vps_cancel=False
+    )
     assert "--force" in args
     # ``--force`` is a flag, not an arg-value, so order is the only thing
     # that matters: ensure it comes after the id + db url.
     assert args.index("--force") > args.index("abc-123")
+
+
+def test_build_destroy_admin_args_skip_vps_cancel() -> None:
+    args = build_destroy_admin_args(pool_host_id="abc-123", database_url=None, force=True, skip_vps_cancel=True)
+    assert "--skip-vps-cancel" in args
+    # Default teardown (skip_vps_cancel=False) must NOT pass the flag, so the
+    # admin command's VPS-cancel path stays the default.
+    assert "--skip-vps-cancel" not in build_destroy_admin_args(
+        pool_host_id="abc-123", database_url=None, force=True, skip_vps_cancel=False
+    )
 
 
 def test_pool_create_requires_activated_env(_isolated_env: Path) -> None:
