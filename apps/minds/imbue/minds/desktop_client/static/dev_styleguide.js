@@ -28,9 +28,12 @@
     });
   }
 
-  // Legacy hue slider: drives --workspace-accent only (the chrome-stripe
-  // and accent-spine rules read it). Picking a surface above also seeds
-  // --workspace-accent to keep the stripe coherent with the chosen tint.
+  // Legacy hue slider: writes --workspace-surface so the whole page
+  // re-tints and theme.js re-picks <html data-theme>, and also writes
+  // --workspace-accent so the chrome-stripe / accent-spine / accent-swatch
+  // rules (which read --workspace-accent) stay coherent with the picked
+  // tint. Picking a surface swatch above does the same thing, so the two
+  // pickers compose -- whichever was clicked last wins.
   var hue = document.getElementById('styleguide-accent-hue');
   var value = document.getElementById('styleguide-accent-value');
   if (hue && value) {
