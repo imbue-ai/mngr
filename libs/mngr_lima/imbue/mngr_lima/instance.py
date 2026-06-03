@@ -741,13 +741,9 @@ sudo poweroff
             created_at=now,
             updated_at=now,
         )
-        host.record_activity(ActivitySource.BOOT)
-        host.set_certified_data(host_data)
-
-        self._create_docker_shutdown_script(host)
-        with log_span("Starting activity watcher in container"):
-            exec_in_container(outer, container_name, build_start_activity_watcher_command(str(self.host_dir)))
-
+        # Persist the host record *before* set_certified_data: that call fires
+        # the on_updated_host_data callback, which reads the record back from
+        # the store (and raises HostNotFoundError if it isn't there yet).
         lima_config_record = LimaHostConfig(
             instance_name=instance_name,
             start_args=effective_start_args,
@@ -770,6 +766,13 @@ sudo poweroff
             resources=resources,
         )
         self._host_store.write_host_record(host_record)
+
+        host.record_activity(ActivitySource.BOOT)
+        host.set_certified_data(host_data)
+
+        self._create_docker_shutdown_script(host)
+        with log_span("Starting activity watcher in container"):
+            exec_in_container(outer, container_name, build_start_activity_watcher_command(str(self.host_dir)))
         if tags:
             self._write_tags(host_id, dict(tags))
         return host
