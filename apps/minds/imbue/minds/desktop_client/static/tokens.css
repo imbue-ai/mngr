@@ -153,7 +153,9 @@
 
   --text-primary:   rgb(244 244 245);
   --text-secondary: rgb(212 212 216);
-  --text-muted:     rgb(161 161 170);
+  /* --text-muted is identical between light and dark themes; inherited
+     from the bare :root block above to keep the dark override block to
+     "only tokens whose value differs", per the file header. */
   --text-on-accent: rgb(9 9 11);
 
   --border-default: rgba(255, 255, 255, 0.10);
