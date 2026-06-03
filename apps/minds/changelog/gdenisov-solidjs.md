@@ -15,7 +15,7 @@ Solid.js UI migration, Phases 1 and 2.
   props for client hydration when the sidecar is absent.
 * Dropped the runtime Tailwind Play CDN. `base.html`, `chrome.html`,
   and `sidebar.html` now load the Vite-built Tailwind v4 bundle from
-  `/_static/_dist/assets/app.css`. The build scans both the Solid
+  `/_static/_dist/assets/globals.css`. The build scans both the Solid
   components and the still-Jinja templates for class usage.
 * Removed `scripts/fetch_tailwind.sh` and the corresponding
   `postinstall` hook.

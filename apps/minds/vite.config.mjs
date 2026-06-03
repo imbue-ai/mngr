@@ -35,9 +35,10 @@ export default defineConfig({
       },
       output: {
         // Stable filenames so still-Jinja templates can load the CSS by
-        // name (``/_static/_dist/assets/app.css``) until the migration
-        // consumes them; hashed JS bundles still cache-bust correctly via
-        // the manifest the SSR sidecar reads.
+        // name (``/_static/_dist/assets/globals.css`` -- Vite names CSS
+        // bundles after the imported ``.css`` source, not the JS entry)
+        // until the migration consumes them; hashed JS bundles still
+        // cache-bust correctly via the manifest the SSR sidecar reads.
         entryFileNames: 'assets/[name].js',
         chunkFileNames: 'assets/[name]-[hash].js',
         assetFileNames: 'assets/[name].[ext]',

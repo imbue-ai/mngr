@@ -3,7 +3,7 @@
  * (per-workspace accent stripe, spinner keyframes, titlebar drop shadow).
  *
  * Imported by ``frontend/src/styles/globals.css`` and emitted as part
- * of the Vite-built ``app.css`` bundle that ``base.html``,
+ * of the Vite-built ``globals.css`` bundle that ``base.html``,
  * ``chrome.html``, and ``sidebar.html`` load.
  *
  * Chrome colors / focus rings / link color are not tokens here -- chrome
