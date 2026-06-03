@@ -3,6 +3,7 @@ import { LoginRoute } from './login.jsx';
 import { AuthErrorRoute } from './auth_error.jsx';
 import { LoginRedirectRoute } from './login_redirect.jsx';
 import { AccountsRoute } from './accounts.jsx';
+import { CreateRoute } from './create.jsx';
 import { DestroyingRoute } from './destroying.jsx';
 import { LandingRoute } from './landing.jsx';
 import { RecoveryRoute } from './recovery.jsx';
@@ -24,6 +25,7 @@ export const ROUTES = {
   auth_error: AuthErrorRoute,
   login_redirect: LoginRedirectRoute,
   accounts: AccountsRoute,
+  create: CreateRoute,
   destroying: DestroyingRoute,
   landing: LandingRoute,
   recovery: RecoveryRoute,

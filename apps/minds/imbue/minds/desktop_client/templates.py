@@ -253,7 +253,11 @@ def _dev_only_workspace_default(env_var: str, fallback: str) -> str:
     return os.environ.get(env_var, fallback)
 
 
-@pure
+def _serialize_account(account: AccountSession) -> dict[str, str]:
+    """Flatten an ``AccountSession`` to the JSON-serializable shape the Solid create form expects."""
+    return {"user_id": str(account.user_id), "email": account.email}
+
+
 def render_create_form(
     git_url: str = "",
     host_name: str = "",
@@ -264,10 +268,11 @@ def render_create_form(
     backup_encryption_method: BackupEncryptionMethod | None = None,
     backup_api_key_env: str = "",
     has_saved_backup_password: bool = False,
-    accounts: Sequence[object] | None = None,
+    accounts: Sequence[AccountSession] | None = None,
     default_account_id: str = "",
     anthropic_api_key: str = "",
     error_message: str = "",
+    sidecar: SsrSidecar | None = None,
 ) -> str:
     """Render the agent creation form page.
 
@@ -308,26 +313,26 @@ def render_create_form(
     effective_backup_encryption = (
         backup_encryption_method if backup_encryption_method is not None else BackupEncryptionMethod.NO_PASSWORD
     )
-    template = JINJA_ENV.get_template("create.html")
-    return template.render(
-        git_url=effective_url,
-        host_name=effective_name,
-        branch=effective_branch,
-        launch_modes=list(LaunchMode),
-        selected_launch_mode=effective_launch_mode.value,
-        ai_providers=list(AIProvider),
-        selected_ai_provider=effective_ai_provider.value,
-        backup_providers=list(BackupProvider),
-        selected_backup_provider=effective_backup_provider.value,
-        backup_encryption_methods=list(BackupEncryptionMethod),
-        selected_backup_encryption_method=effective_backup_encryption.value,
-        backup_api_key_env=backup_api_key_env,
-        has_saved_backup_password=has_saved_backup_password,
-        accounts=accounts or [],
-        default_account_id=default_account_id,
-        anthropic_api_key=anthropic_api_key,
-        error_message=error_message,
-    )
+    props: dict[str, Any] = {
+        "git_url": effective_url,
+        "host_name": effective_name,
+        "branch": effective_branch,
+        "launch_modes": [mode.value for mode in LaunchMode],
+        "selected_launch_mode": effective_launch_mode.value,
+        "ai_providers": [provider.value for provider in AIProvider],
+        "selected_ai_provider": effective_ai_provider.value,
+        "backup_providers": [provider.value for provider in BackupProvider],
+        "selected_backup_provider": effective_backup_provider.value,
+        "backup_encryption_methods": [method.value for method in BackupEncryptionMethod],
+        "selected_backup_encryption_method": effective_backup_encryption.value,
+        "backup_api_key_env": backup_api_key_env,
+        "has_saved_backup_password": has_saved_backup_password,
+        "accounts": [_serialize_account(account) for account in (accounts or [])],
+        "default_account_id": default_account_id,
+        "anthropic_api_key": anthropic_api_key,
+        "error_message": error_message,
+    }
+    return _render_ssr_or_fallback(sidecar=sidecar, route="create", props=props)
 
 
 _STATUS_TEXT_DEFAULT: Final[dict[str, str]] = {

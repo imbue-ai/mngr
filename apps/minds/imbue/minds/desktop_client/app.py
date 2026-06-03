@@ -433,6 +433,7 @@ def _handle_landing_page(
         accounts=accounts,
         default_account_id=default_account_id or "",
         has_saved_backup_password=is_backup_password_saved,
+        sidecar=request.app.state.ssr_sidecar,
     )
     return HTMLResponse(content=html)
 
@@ -749,69 +750,74 @@ def _build_backup_request_or_error(
     )
 
 
+def _json_error_response(message: str, status: int = 400) -> Response:
+    """Build the JSON error envelope the create-form Solid component expects.
+
+    Mirrors the ``{ ok, errors, data }`` shape ``api.postJson`` returns
+    on failure: ``_`` is the top-level "form-wide" error key (the only
+    one used today; future iterations can add field-keyed errors).
+    """
+    body = json.dumps({"ok": False, "errors": {"_": message}, "data": None})
+    return Response(content=body, status_code=status, media_type="application/json")
+
+
 async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep) -> Response:
-    """Handle form submission to create a new agent."""
+    """Handle form submission to create a new agent.
+
+    The Solid create form posts a JSON body and expects a JSON
+    ``{ ok, errors, data }`` envelope back: on success ``data`` carries
+    a ``redirect_url`` for the client-side navigation; on failure
+    ``errors`` carries the per-field (or form-wide ``_``) messages.
+    """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated")
+        return _json_error_response("Not authenticated", status=403)
 
     agent_creator: AgentCreator | None = request.app.state.agent_creator
     if agent_creator is None:
-        return Response(status_code=501, content="Agent creation not configured")
+        return _json_error_response("Agent creation not configured", status=501)
 
-    form = await request.form()
-    git_url = str(form.get("git_url", "")).strip()
-    host_name = str(form.get("host_name", "")).strip()
-    branch = str(form.get("branch", "")).strip()
     try:
-        launch_mode = LaunchMode(str(form.get("launch_mode", LaunchMode.DOCKER.value)))
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError) as exc:
+        # Log so the corruption is observable: this endpoint is hit by
+        # the Solid create form and a malformed body almost certainly
+        # means the client serializer drifted.
+        logger.warning("POST /create received invalid JSON body: {}", exc)
+        return _json_error_response("Invalid JSON body")
+    if not isinstance(body, dict):
+        return _json_error_response("Invalid JSON body")
+
+    git_url = str(body.get("git_url", "")).strip()
+    host_name = str(body.get("host_name", "")).strip()
+    branch = str(body.get("branch", "")).strip()
+    try:
+        launch_mode = LaunchMode(str(body.get("launch_mode", LaunchMode.DOCKER.value)))
     except ValueError:
         launch_mode = LaunchMode.DOCKER
     try:
-        ai_provider = AIProvider(str(form.get("ai_provider", AIProvider.SUBSCRIPTION.value)))
+        ai_provider = AIProvider(str(body.get("ai_provider", AIProvider.SUBSCRIPTION.value)))
     except ValueError:
         ai_provider = AIProvider.SUBSCRIPTION
-    account_id = str(form.get("account_id", "")).strip()
-    anthropic_api_key = str(form.get("anthropic_api_key", "")).strip()
+    account_id = str(body.get("account_id", "")).strip()
+    anthropic_api_key = str(body.get("anthropic_api_key", "")).strip()
     try:
-        backup_provider = BackupProvider(str(form.get("backup_provider", BackupProvider.CONFIGURE_LATER.value)))
+        backup_provider = BackupProvider(str(body.get("backup_provider", BackupProvider.CONFIGURE_LATER.value)))
     except ValueError:
         backup_provider = BackupProvider.CONFIGURE_LATER
     try:
         backup_encryption_method = BackupEncryptionMethod(
-            str(form.get("backup_encryption_method", BackupEncryptionMethod.NO_PASSWORD.value))
+            str(body.get("backup_encryption_method", BackupEncryptionMethod.NO_PASSWORD.value))
         )
     except ValueError:
         backup_encryption_method = BackupEncryptionMethod.NO_PASSWORD
-    backup_master_password = str(form.get("backup_master_password", ""))
-    is_save_backup_password = str(form.get("backup_save_password", "")).strip() != ""
-    backup_api_key_env = str(form.get("backup_api_key_env", ""))
+    backup_master_password = str(body.get("backup_master_password", ""))
+    is_save_backup_password = bool(body.get("backup_save_password", False))
+    backup_api_key_env = str(body.get("backup_api_key_env", ""))
 
     session_store_inst: MultiAccountSessionStore | None = request.app.state.session_store
 
-    def _re_render_with_error(message: str, status: int = 400) -> Response:
-        accounts_list = session_store_inst.list_accounts() if session_store_inst else []
-        # Re-render with the user's submitted account_id pre-selected
-        # (including "" -> "No account") rather than the config default,
-        # so a validation error doesn't silently revert their choice.
-        html_body = render_create_form(
-            git_url=git_url,
-            host_name=host_name,
-            branch=branch,
-            launch_mode=launch_mode,
-            ai_provider=ai_provider,
-            accounts=accounts_list,
-            default_account_id=account_id,
-            anthropic_api_key=anthropic_api_key,
-            backup_provider=backup_provider,
-            backup_encryption_method=backup_encryption_method,
-            backup_api_key_env=backup_api_key_env,
-            has_saved_backup_password=has_saved_backup_password(agent_creator.paths),
-            error_message=message,
-        )
-        return HTMLResponse(content=html_body, status_code=status)
-
     if not git_url:
-        return _re_render_with_error("Repository URL is required.")
+        return _json_error_response("Repository URL is required.")
 
     # Validate the host name eagerly so the user sees the error inline on
     # the form rather than as a deferred "FAILED" status on the creating
@@ -821,18 +827,18 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
         try:
             HostName(host_name)
         except InvalidName as exc:
-            return _re_render_with_error(str(exc))
+            return _json_error_response(str(exc))
 
     is_imbue_cloud_compute = launch_mode is LaunchMode.IMBUE_CLOUD
     is_imbue_cloud_ai = ai_provider is AIProvider.IMBUE_CLOUD
     if not account_id and (is_imbue_cloud_compute or is_imbue_cloud_ai):
-        return _re_render_with_error(
+        return _json_error_response(
             "imbue_cloud requires an account. Select an account or pick a different "
             "option for both the compute and AI providers."
         )
 
     if ai_provider is AIProvider.API_KEY and not anthropic_api_key:
-        return _re_render_with_error("An Anthropic API key is required when AI provider is set to api_key.")
+        return _json_error_response("An Anthropic API key is required when AI provider is set to api_key.")
 
     # Resolve the account email when needed (imbue_cloud compute, AI, or
     # backup). The mngr_imbue_cloud plugin owns the SuperTokens session and
@@ -860,7 +866,7 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
         paths=agent_creator.paths,
     )
     if backup_error is not None:
-        return _re_render_with_error(backup_error)
+        return _json_error_response(backup_error)
 
     branch_or_tag = branch
     if is_imbue_cloud_compute and not branch_or_tag:
@@ -888,7 +894,11 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
     )
 
     creating_url = "/creating/{}".format(creation_id)
-    return Response(status_code=303, headers={"Location": creating_url})
+    return Response(
+        content=json.dumps({"ok": True, "errors": {}, "data": {"redirect_url": creating_url}}),
+        status_code=200,
+        media_type="application/json",
+    )
 
 
 def _handle_create_page(
@@ -913,6 +923,7 @@ def _handle_create_page(
         accounts=accounts,
         default_account_id=default_account_id or "",
         has_saved_backup_password=is_backup_password_saved,
+        sidecar=request.app.state.ssr_sidecar,
     )
     return HTMLResponse(content=html)
 

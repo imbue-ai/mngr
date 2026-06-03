@@ -49,61 +49,56 @@ def test_agent_id_accepts_valid_format() -> None:
 
 
 def test_render_create_form_has_default_values() -> None:
-    html = render_create_form()
-    assert "assistant" in html
-    assert "forever-claude-template" in html
-    assert "host_name" in html
-    assert "launch_mode" in html
+    payload = extract_ssr_route_payload(render_create_form())
+    assert payload["route"] == "create"
+    props = payload["props"]
+    assert props["host_name"] == "assistant"
+    assert "forever-claude-template" in props["git_url"]
 
 
 def test_render_create_form_prefills_values() -> None:
-    html = render_create_form(git_url="https://custom/repo", host_name="my-workspace", branch="feature/test")
-    assert "https://custom/repo" in html
-    assert "my-workspace" in html
-    assert "feature/test" in html
+    payload = extract_ssr_route_payload(
+        render_create_form(git_url="https://custom/repo", host_name="my-workspace", branch="feature/test")
+    )
+    props = payload["props"]
+    assert props["git_url"] == "https://custom/repo"
+    assert props["host_name"] == "my-workspace"
+    assert props["branch"] == "feature/test"
 
 
 def test_render_create_form_contains_all_launch_modes() -> None:
-    html = render_create_form()
-    for mode in LaunchMode:
-        assert mode.value.lower() in html
+    payload = extract_ssr_route_payload(render_create_form())
+    assert payload["props"]["launch_modes"] == [mode.value for mode in LaunchMode]
 
 
 def test_render_create_form_selects_lima_by_default_without_account() -> None:
     # With no account selected the compute provider defaults to LIMA (the
     # local self-served default); IMBUE_CLOUD is only the default when an
     # account is present.
-    html = render_create_form()
-    assert 'value="LIMA" selected' in html
+    payload = extract_ssr_route_payload(render_create_form())
+    assert payload["props"]["selected_launch_mode"] == "LIMA"
 
 
 def test_render_create_form_selects_specified_launch_mode() -> None:
     # CLOUD instead of the default LIMA so the "selection honored over the
     # default" assertion is meaningful.
-    html = render_create_form(launch_mode=LaunchMode.CLOUD)
-    assert 'value="CLOUD" selected' in html
-    assert 'value="LIMA" selected' not in html
+    payload = extract_ssr_route_payload(render_create_form(launch_mode=LaunchMode.CLOUD))
+    assert payload["props"]["selected_launch_mode"] == "CLOUD"
 
 
 def test_render_create_form_contains_ai_provider_options() -> None:
-    html = render_create_form()
-    for provider in AIProvider:
-        assert f'value="{provider.value}"' in html
+    payload = extract_ssr_route_payload(render_create_form())
+    assert payload["props"]["ai_providers"] == [provider.value for provider in AIProvider]
 
 
 def test_render_create_form_defaults_ai_provider_to_subscription_without_account() -> None:
-    html = render_create_form()
-    assert 'value="SUBSCRIPTION" selected' in html
-
-
-def test_render_create_form_omits_env_file_checkbox() -> None:
-    html = render_create_form()
-    assert "include_env_file" not in html
+    payload = extract_ssr_route_payload(render_create_form())
+    assert payload["props"]["selected_ai_provider"] == "SUBSCRIPTION"
 
 
 def test_render_create_form_shows_error_message_when_supplied() -> None:
-    html = render_create_form(error_message="Imbue cloud requires an account.")
-    assert "Imbue cloud requires an account." in html
+    payload = extract_ssr_route_payload(render_create_form(error_message="Imbue cloud requires an account."))
+    assert payload["props"]["error_message"] == "Imbue cloud requires an account."
 
 
 def test_render_create_form_honors_workspace_env_vars_in_dev_tier(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -116,10 +111,10 @@ def test_render_create_form_honors_workspace_env_vars_in_dev_tier(monkeypatch: p
     monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/fct/path")
     monkeypatch.setenv("MINDS_WORKSPACE_NAME", "mindtest")
     monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
-    html = render_create_form()
-    assert "/local/fct/path" in html
-    assert "mindtest" in html
-    assert "mngr/some-feature" in html
+    props = extract_ssr_route_payload(render_create_form())["props"]
+    assert props["git_url"] == "/local/fct/path"
+    assert props["host_name"] == "mindtest"
+    assert props["branch"] == "mngr/some-feature"
 
 
 def test_render_create_form_ignores_workspace_env_vars_in_staging(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -136,21 +131,21 @@ def test_render_create_form_ignores_workspace_env_vars_in_staging(monkeypatch: p
     monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/fct/path")
     monkeypatch.setenv("MINDS_WORKSPACE_NAME", "mindtest")
     monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
-    html = render_create_form()
-    assert "/local/fct/path" not in html
-    assert "mindtest" not in html
-    assert "mngr/some-feature" not in html
+    props = extract_ssr_route_payload(render_create_form())["props"]
+    assert props["git_url"] != "/local/fct/path"
+    assert props["host_name"] != "mindtest"
+    assert props["branch"] != "mngr/some-feature"
     # And the hardcoded fallbacks DO appear (form is still usable).
-    assert "forever-claude-template" in html
-    assert "assistant" in html
+    assert "forever-claude-template" in props["git_url"]
+    assert props["host_name"] == "assistant"
 
 
 def test_render_create_form_ignores_workspace_env_vars_in_production(monkeypatch: pytest.MonkeyPatch) -> None:
     """Production -- like staging -- must not honor the dev-iteration env vars."""
     monkeypatch.setenv("MINDS_ROOT_NAME", "minds")
     monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
-    html = render_create_form()
-    assert "mngr/some-feature" not in html
+    props = extract_ssr_route_payload(render_create_form())["props"]
+    assert props["branch"] != "mngr/some-feature"
 
 
 def test_render_create_form_ignores_workspace_env_vars_when_unactivated(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -161,8 +156,8 @@ def test_render_create_form_ignores_workspace_env_vars_when_unactivated(monkeypa
     """
     monkeypatch.delenv("MINDS_ROOT_NAME", raising=False)
     monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
-    html = render_create_form()
-    assert "mngr/some-feature" not in html
+    props = extract_ssr_route_payload(render_create_form())["props"]
+    assert props["branch"] != "mngr/some-feature"
 
 
 def test_render_login_page_emits_solid_route_payload() -> None:

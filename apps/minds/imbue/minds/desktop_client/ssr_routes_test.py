@@ -1,4 +1,4 @@
-"""End-to-end tests for the four routes that have migrated to Solid SSR.
+"""End-to-end tests for the routes that have migrated to Solid SSR.
 
 These exercise the FastAPI handlers themselves (rather than the
 ``render_*`` shims directly): the handler pulls the sidecar off
@@ -155,3 +155,34 @@ def test_recovery_endpoint_emits_recovery_route_payload(tmp_path: Path) -> None:
     payload = extract_ssr_route_payload(response.text)
     assert payload["route"] == "recovery"
     assert payload["props"]["agent_id"] == agent_id
+
+
+def test_create_endpoint_emits_solid_route_payload(tmp_path: Path) -> None:
+    """GET /create renders the ``create`` Solid route with the props the Jinja form used.
+
+    Asserts the route key + a few load-bearing prop fields: the default
+    host_name (``assistant``), the launch_modes enum list (so the
+    component can render the compute-provider <select>), and the
+    default selection (``LIMA`` without an account). Any missing field
+    would have broken the Jinja template's render call -- mirroring
+    that gate.
+    """
+    client, auth_store = _make_client(tmp_path)
+    _authenticate(client, auth_store)
+    response = client.get("/create")
+    assert response.status_code == 200
+    payload = extract_ssr_route_payload(response.text)
+    assert payload["route"] == "create"
+    props = payload["props"]
+    assert props["host_name"] == "assistant"
+    # The launch_modes prop must include every LaunchMode enum value so
+    # the Solid component can render them all; assert IMBUE_CLOUD and
+    # LIMA specifically because the account-driven disable logic +
+    # the no-account default both key off them.
+    assert "IMBUE_CLOUD" in props["launch_modes"]
+    assert "LIMA" in props["launch_modes"]
+    # Default selection without an account is LIMA / SUBSCRIPTION /
+    # CONFIGURE_LATER -- mirrors the assertions in templates_test.py.
+    assert props["selected_launch_mode"] == "LIMA"
+    assert props["selected_ai_provider"] == "SUBSCRIPTION"
+    assert props["selected_backup_provider"] == "CONFIGURE_LATER"
