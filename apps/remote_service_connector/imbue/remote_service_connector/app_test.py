@@ -1785,16 +1785,22 @@ def test_release_host_idempotent_when_already_removing(monkeypatch: pytest.Monke
     assert backend.ovh_ops.cancelled == [row.vps_instance_id]
 
 
-def test_release_host_returns_200_even_when_ovh_cancel_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    """If the OVH cancel fails after the row is 'removing', release still returns 200."""
+def test_release_host_fails_loudly_when_ovh_cancel_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed OVH cancel makes release return an error -- never a false success.
+
+    Synchronous release contract: a "released" 200 must mean the VPS is actually
+    cancelled. When the cancel fails the endpoint returns 5xx and keeps the row
+    as 'removing' so the client (or the sweep backstop) retries -- the opposite
+    of the old behavior, which returned 200 and silently stranded the VPS.
+    """
     client, backend = _make_pool_test_client(monkeypatch)
     backend.ovh_ops.fail_on_cancel = True
     backend.add_leased_host(
         host_id=UUID("00000000-0000-0000-0000-000000000099"), version="v0.1.0", leased_to_user=_ADMIN_STUB_USERNAME
     )
     resp = client.post("/hosts/00000000-0000-0000-0000-000000000099/release", headers=_admin_headers())
-    assert resp.status_code == 200
-    # The row stays 'removing' for the cron to retry (not deleted).
+    assert resp.status_code == 502
+    # The row is NOT deleted; it stays 'removing' so the teardown is retryable.
     assert len(backend.pool_rows) == 1
     assert backend.pool_rows[0].status == "removing"
 

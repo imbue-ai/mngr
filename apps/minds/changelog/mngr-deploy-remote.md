@@ -75,3 +75,9 @@ Dev tooling: the minds desktop client launchers now pin Node automatically.
   restarting the desktop client (`electron_start`), so the iteration loop no
   longer fails with `ERR_PNPM_UNSUPPORTED_ENGINE` when the shell's Node has
   drifted off the pin.
+
+`minds pool destroy` now does a full teardown: it injects the activated tier's
+OVH credentials from Vault (like `minds pool create`) and forwards to the admin
+command, which cancels the OVH VPS before dropping the row -- so destroying a
+pool host can no longer leave a stranded, still-billing VPS. Pass
+`--skip-vps-cancel` only when the VPS is already gone.

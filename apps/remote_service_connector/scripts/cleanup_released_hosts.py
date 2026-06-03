@@ -88,18 +88,24 @@ def _load_active_status_by_vps(database_urls: tuple[str, ...]) -> dict[str, str]
     (``available`` / ``leased``), so a host leased in any DB is protected. This
     backs the runbook's safety check that leaves live-leased VPSes alone.
     """
-    status_by_vps_instance_id: dict[str, str] = {}
+    # Key on vps_address: it is the OVH service name (the `vps-xxxx.vps.ovh.us`
+    # hostname), which is exactly what OvhVpsResource.name carries, so the
+    # caller's `active_status_by_vps.get(resource.name)` lookup matches. We do
+    # NOT key on vps_instance_id -- that column historically held the mngr
+    # host_id (a `host-...` id) instead of the service name, which made this
+    # protection silently never match and would have cancelled live hosts.
+    status_by_service_name: dict[str, str] = {}
     for database_url in database_urls:
         conn = psycopg2.connect(database_url)
         try:
             with conn.cursor() as cur:
-                cur.execute("SELECT vps_instance_id, status FROM pool_hosts")
-                for vps_instance_id, status in cur.fetchall():
+                cur.execute("SELECT vps_address, status FROM pool_hosts")
+                for vps_address, status in cur.fetchall():
                     if status in _ACTIVE_STATUSES:
-                        status_by_vps_instance_id[vps_instance_id] = status
+                        status_by_service_name[vps_address] = status
         finally:
             conn.close()
-    return status_by_vps_instance_id
+    return status_by_service_name
 
 
 def _strip_all_non_provider_tags(ovh_ops: OvhOps, resource: OvhVpsResource, region_code: str) -> list[str]:
@@ -121,11 +127,13 @@ def _delete_matching_db_rows(database_urls: tuple[str, ...], cleaned_service_nam
         conn = psycopg2.connect(database_url)
         try:
             with conn.cursor() as cur:
-                cur.execute("SELECT id, vps_instance_id, status FROM pool_hosts")
+                cur.execute("SELECT id, vps_address, status FROM pool_hosts")
                 rows = cur.fetchall()
-                for row_id, vps_instance_id, status in rows:
+                for row_id, vps_address, status in rows:
                     is_stale_status = status in ("released", "removing")
-                    is_cleaned_host = vps_instance_id in cleaned_service_names
+                    # Match on vps_address: it is the OVH service name carried in
+                    # cleaned_service_names (resource.name), unlike vps_instance_id.
+                    is_cleaned_host = vps_address in cleaned_service_names
                     if is_stale_status or is_cleaned_host:
                         cur.execute("DELETE FROM pool_hosts WHERE id = %s", (str(row_id),))
                         deleted_count += 1

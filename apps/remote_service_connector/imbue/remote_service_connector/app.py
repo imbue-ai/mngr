@@ -300,6 +300,14 @@ class R2BucketLimitError(RuntimeError):
         super().__init__(f"Account is at the maximum of {limit} buckets; destroy one before creating another.")
 
 
+class PoolHostCleanupError(RuntimeError):
+    """Raised when a pool-host release/teardown cannot complete its OVH cleanup.
+
+    Surfaced (rather than swallowed to a warning) so a release that fails to
+    actually cancel the VPS reports failure instead of a false success.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
@@ -1855,6 +1863,17 @@ def raise_as_http(exc: Exception) -> NoReturn:
     if isinstance(exc, CloudflareApiError):
         logger.warning("Cloudflare API error: %s", exc)
         raise HTTPException(status_code=exc.status_code, detail={"errors": exc.cf_errors}) from exc
+    if isinstance(exc, PoolHostCleanupError):
+        # A release that could not finish its teardown -- surface as a server
+        # error so the client retries rather than treating the lease as gone.
+        logger.error("Pool host cleanup error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if isinstance(exc, (OvhApiError, OvhHttpError)):
+        # OVH calls during teardown (tag strip / cancel) failed. Surface as a
+        # bad-gateway so the failed cancel is visible and retryable instead of
+        # being swallowed into a false "released" success.
+        logger.error("OVH API error during pool-host teardown: %s", exc)
+        raise HTTPException(status_code=502, detail=f"OVH API error during teardown: {exc}") from exc
     if isinstance(exc, TunnelNotFoundError):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     if isinstance(exc, TunnelOwnershipError):
@@ -2411,15 +2430,16 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
 def release_host(request: Request, host_db_id: UUID) -> dict[str, object]:
     """Release a leased host: cancel the OVH VPS, strip its tags, drop the row.
 
-    Runs the full cleanup chain inline (best-effort): flip the row to
-    ``removing`` (the durable intent marker the periodic sweep keys off),
-    strip the per-lease OVH tags, cancel the VPS, then delete the row.
+    Runs the full cleanup chain inline and **synchronously**: flip the row to
+    ``removing`` (the durable, retryable in-progress marker), strip the
+    per-lease OVH tags, cancel the VPS, then delete the row.
 
-    Returns 200 once the row has reached ``removing`` -- from the caller's
-    view the release succeeded, and any OVH/DB step that fails afterward is
-    finished by the hourly sweep. A failure *before* ``removing`` is committed
-    (lookup, ownership, the status flip) surfaces as an error so the client
-    retries.
+    Returns 200 only once *every* step has succeeded -- a "released" result
+    truly means the VPS is cancelled. If any teardown step fails, the row stays
+    ``removing`` and the endpoint returns an error (5xx) so the client (or the
+    hourly sweep backstop) retries; we never report success on a failed cancel.
+    A failure before ``removing`` is committed (lookup, ownership, the status
+    flip) surfaces as an error too.
 
     Idempotent at the HTTP layer: a release on a row that is already gone
     (deleted) or no longer leased returns 200 ``status: already_released``.
@@ -2468,24 +2488,21 @@ def release_host(request: Request, host_db_id: UUID) -> dict[str, object]:
 
 
 def _finish_releasing_pool_host(conn: Any, host_db_id: Any, vps_instance_id: str | None) -> None:
-    """Best-effort OVH cleanup + row delete for a host already marked ``removing``.
+    """Synchronous OVH cleanup + row delete for a host already marked ``removing``.
 
-    Swallows OVH/DB errors (logging a warning) so a flaky OVH call never
-    fails the user-facing release -- the row stays ``removing`` and the
-    hourly sweep retries it.
+    Strips the per-lease OVH tags, cancels the VPS, then deletes the row -- and
+    **raises** on any failure rather than swallowing it. The caller has already
+    committed the row to ``removing`` (a durable, retryable in-progress marker),
+    so a failure here propagates to the HTTP layer as an error: the release
+    reports failure, the row stays ``removing``, and the client (or the hourly
+    sweep backstop) retries. A release that cannot actually cancel the VPS must
+    never report success -- that false success is what previously left VPSes
+    running and billing with no error anywhere.
     """
-    try:
-        if vps_instance_id:
-            clean_up_pool_host_in_ovh(
-                _get_ovh_ops(), vps_instance_id, ovh_region_code_for_endpoint(_get_ovh_endpoint())
-            )
-        else:
-            logger.warning("Releasing pool host %s has no vps_instance_id; skipping OVH cleanup", host_db_id)
-        _delete_pool_host_row(conn, host_db_id)
-    except (OvhApiError, OvhHttpError, psycopg2.Error) as exc:
-        logger.warning(
-            "Inline cleanup for released pool host %s did not finish; sweep will retry: %s", host_db_id, exc
-        )
+    if not vps_instance_id:
+        raise PoolHostCleanupError(f"pool host {host_db_id} has no vps_instance_id; cannot cancel its VPS")
+    clean_up_pool_host_in_ovh(_get_ovh_ops(), vps_instance_id, ovh_region_code_for_endpoint(_get_ovh_endpoint()))
+    _delete_pool_host_row(conn, host_db_id)
 
 
 @web_app.get("/hosts")

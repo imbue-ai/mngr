@@ -12,3 +12,19 @@ This pairs with the FCT `imbue_cloud` create template gaining the same build
 config as `ovh` (`--file=Dockerfile .`, `target_path=/mngr/code/`, `fct-seed`
 post-create) so the rebuild produces the FCT image rather than a bare
 `debian:bookworm-slim`; those build args are ignored on the fast/adopt path.
+
+Fixed the pool-host bake writing the wrong value into `pool_hosts.vps_instance_id`:
+the INSERT passed the mngr `host_id` where the OVH service name belongs, which
+broke every connector-side OVH teardown (they key on `vps_instance_id`). The bake
+now writes `vps_address` (the service name) via the new pure
+`build_pool_host_insert_values()`, pinned by a regression test using the real
+`host-`/`vps-` shapes.
+
+`mngr imbue_cloud admin pool destroy` (and the `minds pool destroy` wrapper) now
+do a full teardown: cancel the OVH VPS (strip per-lease tags + `deleteAtExpiration`)
+before dropping the row, so it can no longer strand a still-billing VPS. Pass
+`--skip-vps-cancel` only when the VPS is already gone. The wrapper injects the
+tier's OVH credentials from Vault, like `pool create`. Relatedly, the imbue_cloud
+provider's `destroy_host` now raises when the connector release fails instead of
+silently cleaning up local state, so a failed release no longer makes mngr
+"forget" a host whose lease/VPS is still live.

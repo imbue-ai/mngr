@@ -1694,7 +1694,17 @@ class ImbueCloudProvider(BaseProviderInstance):
         if host_db_id is not None:
             account = self._require_account()
             token = self._get_access_token(account)
-            self.client.release_host(token, host_db_id)
+            released = self.client.release_host(token, host_db_id)
+            if not released:
+                # Do NOT swallow a failed release: the lease may still be held
+                # and the VPS still running/billing. Raise so the failure is
+                # visible and the local host record survives for a retry --
+                # cleaning up local state here would make mngr "forget" a host
+                # that was never actually released (the old silent-orphan bug).
+                raise MngrError(
+                    f"failed to release imbue_cloud lease {host_db_id} for host {host_id}; "
+                    "the VPS may still be running -- re-run destroy to retry."
+                )
         self._cleanup_local_host_state(host_id)
 
     def _resolve_host_db_id(
