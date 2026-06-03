@@ -331,19 +331,28 @@ def clone_git_repo(
     clone_dir: Path,
     on_output: OutputCallback | None = None,
     *,
-    is_shallow: bool = False,
+    branch: GitBranch | None = None,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> None:
     """Clone a git repository into the specified directory.
 
     The clone_dir must not already exist -- git clone will create it.
-    When is_shallow is True, clones with --depth 1 to skip history.
-    Raises GitCloneError if the clone fails.
+
+    When ``branch`` is given, only that branch is fetched (``--single-branch
+    --branch``), which avoids downloading every other branch's history. This is
+    still a *complete* (non-shallow) clone of that branch -- its full ancestry is
+    present. We deliberately do NOT offer a shallow (``--depth 1``) clone: this
+    clone is the source ``mngr create`` mirror-pushes into the agent container's
+    bare repo, and git rejects pushes from a shallow source with "shallow update
+    not allowed" (the pushed tip's parent is missing from the pack).
+
+    Raises GitCloneError if the clone fails (including when ``branch`` does not
+    exist on the remote).
     """
     logger.debug("Cloning {} to {}", _redact_url_credentials(str(git_url)), clone_dir)
     command = ["git", "clone"]
-    if is_shallow:
-        command.extend(["--depth", "1"])
+    if branch is not None:
+        command.extend(["--single-branch", "--branch", str(branch)])
     command.extend([str(git_url), str(clone_dir)])
 
     # Wrap the caller's on_output so git's per-line stdout/stderr is scrubbed
@@ -1180,11 +1189,18 @@ class AgentCreator(MutableModel):
                     if clone_target.exists():
                         shutil.rmtree(clone_target)
                     log_queue.put("[minds] Cloning {}...".format(_redact_url_credentials(repo_source)))
+                    # Clone only the requested branch (non-shallow) when one is
+                    # given: cheaper than a full clone, yet keeps the complete
+                    # ancestry that the downstream mirror-push into the agent
+                    # container requires (a shallow clone would be rejected with
+                    # "shallow update not allowed"). The checkout below is then a
+                    # no-op for this path, but still does the work when the source
+                    # is a pre-existing local directory.
                     clone_git_repo(
                         GitUrl(repo_source),
                         clone_target,
                         on_output=emit_log,
-                        is_shallow=True,
+                        branch=GitBranch(branch) if branch else None,
                         parent_cg=self.root_concurrency_group,
                     )
                     workspace_dir = clone_target
