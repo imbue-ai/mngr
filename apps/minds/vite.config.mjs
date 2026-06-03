@@ -30,6 +30,8 @@ export default defineConfig({
     rollupOptions: {
       input: {
         app: resolve(__dirname, 'frontend/src/main/app.entry.jsx'),
+        chrome: resolve(__dirname, 'frontend/src/main/chrome.entry.jsx'),
+        sidebar: resolve(__dirname, 'frontend/src/main/sidebar.entry.jsx'),
       },
       output: {
         // Stable filenames so still-Jinja templates can load the CSS by
