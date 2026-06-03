@@ -61,10 +61,16 @@ def _destroy_new_host_on_create_failure(
     ``MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1``, which retains the
     failed host for debugging (the same flag that retains the lock).
     """
+    # Track whether the wrapped create completed normally. Using a try/finally
+    # with this flag (rather than a broad catch-all handler) tears the host down
+    # on *any* abnormal exit -- exceptions, KeyboardInterrupt, SystemExit --
+    # while letting the original exception propagate untouched.
+    is_create_successful = False
     try:
         yield
-    except BaseException:
-        if provider is not None:
+        is_create_successful = True
+    finally:
+        if not is_create_successful and provider is not None:
             if os.environ.get(_RETAIN_FAILED_HOSTS_ENV_VAR) == "1":
                 logger.debug("Retaining failed host {} for debugging ({}=1)", host.id, _RETAIN_FAILED_HOSTS_ENV_VAR)
             else:
@@ -79,7 +85,6 @@ def _destroy_new_host_on_create_failure(
                     logger.opt(exception=destroy_error).warning(
                         "Failed to destroy host {} after a failed create", host.id
                     )
-        raise
 
 
 def _call_on_before_create_hooks(

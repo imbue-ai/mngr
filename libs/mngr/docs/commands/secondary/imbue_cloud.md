@@ -692,6 +692,7 @@ mngr imbue_cloud admin pool destroy [OPTIONS] POOL_HOST_ID
 | ---- | ---- | ----------- | ------- |
 | `--database-url` | text | Neon PostgreSQL direct connection string for the pool DB. Defaults to MINDS_HOST_POOL_DSN env var, or the activated minds env's secrets.toml NEON_HOST_POOL_DSN field (so `minds env activate <dev-env>` is enough). Pass this explicitly when operating outside an activated env. | None |
 | `--force` | boolean | Drop the row even if status != 'released' | `False` |
+| `--skip-vps-cancel` | boolean | Only drop the DB row; do NOT cancel the OVH VPS. Use exclusively when the VPS is already gone/cancelled -- otherwise the default path cancels it so no billing orphan is left behind. | `False` |
 
 ## mngr imbue_cloud admin paid
 
