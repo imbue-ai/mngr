@@ -2810,7 +2810,7 @@ def _handle_request_page(
     if inbox.is_request_resolved(request_id):
         return HTMLResponse(
             content=render_request_unavailable_page(
-                message="It has already been approved or denied."
+                message="It has already been processed."
             ),
             status_code=200,
         )
