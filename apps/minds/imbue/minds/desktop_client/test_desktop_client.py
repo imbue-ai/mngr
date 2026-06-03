@@ -372,8 +372,10 @@ def test_landing_page_shows_discovering_when_initial_discovery_not_done(tmp_path
 
     response = client.get("/")
     assert response.status_code == 200
-    assert "Discovering agents" in response.text
-    assert "reload" in response.text
+    payload = extract_ssr_route_payload(response.text)
+    assert payload["route"] == "landing"
+    assert payload["props"]["is_discovering"] is True
+    assert payload["props"]["agent_ids"] == []
 
 
 def test_landing_page_shows_create_form_after_discovery_finds_no_agents(tmp_path: Path) -> None:
@@ -777,7 +779,9 @@ def test_landing_page_shows_create_link_when_multiple_agents_known(tmp_path: Pat
 
     response = client.get("/")
     assert response.status_code == 200
-    assert "/create" in response.text
+    payload = extract_ssr_route_payload(response.text)
+    assert payload["route"] == "landing"
+    assert sorted(payload["props"]["agent_ids"]) == sorted([str(agent_id_1), str(agent_id_2)])
 
 
 def test_create_page_rejects_unauthenticated(tmp_path: Path) -> None:
@@ -1411,7 +1415,9 @@ def test_accounts_page_shows_empty_when_no_accounts(tmp_path: Path) -> None:
     _authenticate_client(client, auth_store)
     response = client.get("/accounts")
     assert response.status_code == 200
-    assert "No accounts logged in" in response.text
+    payload = extract_ssr_route_payload(response.text)
+    assert payload["route"] == "accounts"
+    assert payload["props"]["accounts"] == []
 
 
 def test_accounts_page_shows_logged_in_accounts(tmp_path: Path) -> None:
@@ -1423,7 +1429,10 @@ def test_accounts_page_shows_logged_in_accounts(tmp_path: Path) -> None:
 
     response = client.get("/accounts")
     assert response.status_code == 200
-    assert "test@example.com" in response.text
+    payload = extract_ssr_route_payload(response.text)
+    assert payload["route"] == "accounts"
+    emails = {acct["email"] for acct in payload["props"]["accounts"]}
+    assert "test@example.com" in emails
 
 
 def test_workspace_settings_page_requires_auth(tmp_path: Path) -> None:
@@ -1783,14 +1792,11 @@ def test_recovery_page_renders_for_authenticated_user(tmp_path: Path) -> None:
         follow_redirects=False,
     )
     assert response.status_code == 200
-    assert str(agent_id) in response.text
-    assert safe_return_to in response.text
-    # The recovery page chrome rendered: the host-restart button (the
-    # surgical tier is auto-dispatched, so it has no button) and the
-    # surgical-restart endpoint the page's JS posts to when the probe
-    # reports the container reachable.
-    assert "Restart workspace" in response.text
-    assert "restart-system-interface" in response.text
+    payload = extract_ssr_route_payload(response.text)
+    assert payload["route"] == "recovery"
+    assert payload["props"]["agent_id"] == str(agent_id)
+    assert payload["props"]["return_to"] == safe_return_to
+    assert payload["props"]["initial_status"] == "stuck"
 
 
 def test_recovery_page_drops_open_redirect_return_to(tmp_path: Path) -> None:
@@ -1808,9 +1814,10 @@ def test_recovery_page_drops_open_redirect_return_to(tmp_path: Path) -> None:
         follow_redirects=False,
     )
     assert response.status_code == 200
-    assert "evil.com" not in response.text
-    # The data-return-to attribute should be empty so the page falls back to reload().
-    assert 'data-return-to=""' in response.text
+    payload = extract_ssr_route_payload(response.text)
+    assert payload["route"] == "recovery"
+    # The return_to prop must be empty -- the open-redirect URL was dropped.
+    assert payload["props"]["return_to"] == ""
 
 
 def test_recovery_page_drops_protocol_relative_return_to(tmp_path: Path) -> None:
@@ -1887,8 +1894,9 @@ def test_recovery_page_renders_copy_ssh_button_from_resolver(tmp_path: Path) -> 
 
     response = client.get(f"/agents/{agent_id}/recovery", follow_redirects=False)
     assert response.status_code == 200
-    assert 'id="copy-ssh-btn"' in response.text
-    assert 'data-ssh-command="ssh -i /home/u/.mngr/key -p 60022 root@127.0.0.1"' in response.text
+    payload = extract_ssr_route_payload(response.text)
+    assert payload["route"] == "recovery"
+    assert payload["props"]["ssh_command"] == "ssh -i /home/u/.mngr/key -p 60022 root@127.0.0.1"
 
 
 def test_restart_api_requires_authentication(tmp_path: Path) -> None:
@@ -1954,7 +1962,8 @@ def test_recovery_page_initial_status_reflects_tracker_stuck(tmp_path: Path) -> 
     response = client.get(f"/agents/{agent_id}/recovery", follow_redirects=False)
 
     assert response.status_code == 200
-    assert 'data-initial-status="stuck"' in response.text
+    payload = extract_ssr_route_payload(response.text)
+    assert payload["props"]["initial_status"] == "stuck"
 
 
 def test_recovery_page_initial_status_reflects_tracker_restarting(tmp_path: Path) -> None:
@@ -1967,7 +1976,8 @@ def test_recovery_page_initial_status_reflects_tracker_restarting(tmp_path: Path
     response = client.get(f"/agents/{agent_id}/recovery", follow_redirects=False)
 
     assert response.status_code == 200
-    assert 'data-initial-status="restarting"' in response.text
+    payload = extract_ssr_route_payload(response.text)
+    assert payload["props"]["initial_status"] == "restarting"
 
 
 def test_recovery_page_redirects_to_return_to_when_agent_already_healthy(tmp_path: Path) -> None:
@@ -2015,9 +2025,10 @@ def test_recovery_page_renders_for_healthy_agent_with_explicit_restart_intent(tm
     )
 
     assert response.status_code == 200
+    payload = extract_ssr_route_payload(response.text)
     # An explicit restart of a healthy workspace renders as STUCK so the page
     # probes and dispatches rather than sitting idle.
-    assert 'data-initial-status="stuck"' in response.text
+    assert payload["props"]["initial_status"] == "stuck"
 
 
 def test_recovery_page_renders_normally_when_healthy_but_no_return_to(tmp_path: Path) -> None:
@@ -2033,7 +2044,8 @@ def test_recovery_page_renders_normally_when_healthy_but_no_return_to(tmp_path: 
     response = client.get(f"/agents/{agent_id}/recovery", follow_redirects=False)
 
     assert response.status_code == 200
-    assert 'data-initial-status="healthy"' in response.text
+    payload = extract_ssr_route_payload(response.text)
+    assert payload["props"]["initial_status"] == "healthy"
 
 
 def test_recovery_page_does_not_redirect_when_stuck_even_with_return_to(tmp_path: Path) -> None:
@@ -2053,7 +2065,8 @@ def test_recovery_page_does_not_redirect_when_stuck_even_with_return_to(tmp_path
     )
 
     assert response.status_code == 200
-    assert 'data-initial-status="stuck"' in response.text
+    payload = extract_ssr_route_payload(response.text)
+    assert payload["props"]["initial_status"] == "stuck"
 
 
 def _create_readiness_test_client(
