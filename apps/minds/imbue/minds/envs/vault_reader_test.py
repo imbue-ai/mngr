@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from imbue.minds.envs.primitives import VaultReadError
+from imbue.minds.envs.primitives import VaultSecretNotFoundError
 from imbue.minds.envs.vault_reader import VaultPath
 from imbue.minds.envs.vault_reader import read_vault_kv
 
@@ -55,9 +56,27 @@ def test_read_vault_kv_rejects_bad_prefix(tmp_path: Path) -> None:
 
 
 def test_read_vault_kv_propagates_cli_failure(tmp_path: Path) -> None:
-    fake = _make_fake_vault_binary(tmp_path, stdout="", exit_code=2, stderr="permission denied")
-    with pytest.raises(VaultReadError, match="permission denied"):
+    # exit 1 (not 2) -> a generic/transient failure, which must stay a plain
+    # VaultReadError, NOT the not-found subclass (so callers don't treat a
+    # connectivity/auth blip as "secret absent").
+    fake = _make_fake_vault_binary(tmp_path, stdout="", exit_code=1, stderr="Error making API request: timeout")
+    with pytest.raises(VaultReadError) as exc_info:
         read_vault_kv(VaultPath("secrets/minds/dev/cloudflare"), vault_binary=str(fake))
+    assert not isinstance(exc_info.value, VaultSecretNotFoundError)
+
+
+def test_read_vault_kv_not_found_raises_secret_not_found(tmp_path: Path) -> None:
+    """Vault CLI exit code 2 ("No value found") -> VaultSecretNotFoundError.
+
+    The distinct type lets deploy treat a genuinely-absent optional secret
+    (e.g. a tier with no OVH entry) as empty without also swallowing transient
+    failures.
+    """
+    fake = _make_fake_vault_binary(
+        tmp_path, stdout="", exit_code=2, stderr="No value found at secrets/data/minds/dev/ovh"
+    )
+    with pytest.raises(VaultSecretNotFoundError):
+        read_vault_kv(VaultPath("secrets/minds/dev/ovh"), vault_binary=str(fake))
 
 
 def test_read_vault_kv_rejects_non_string_values(tmp_path: Path) -> None:

@@ -22,11 +22,20 @@
       <div id="editor-content" class="hidden">
         <div id="url-section" class="hidden mb-4">
           <p class="font-medium mb-1">Shared URL</p>
-          <div class="flex gap-2 items-center bg-zinc-100 border border-zinc-200 rounded-md px-3 py-2 my-2">
-            <input type="text" id="share-url" readonly
-                   class="flex-1 bg-transparent border-0 text-sm text-zinc-900 font-mono outline-none"
-                   onclick="this.select()">
-            {{ ui.btn_button('Copy', variant='secondary', id='copy-btn', onclick='copyUrl()') }}
+          <div id="url-provisioning" class="hidden flex gap-2 items-center text-sm text-zinc-500 my-2">
+            {{ ui.spinner(size='sm') }}
+            <span>Provisioning share&hellip;</span>
+          </div>
+          <div id="url-ready" class="hidden">
+            <div class="flex gap-2 items-center bg-zinc-100 border border-zinc-200 rounded-md px-3 py-2 my-2">
+              <input type="text" id="share-url" readonly
+                     class="flex-1 bg-transparent border-0 text-sm text-zinc-900 font-mono outline-none"
+                     onclick="this.select()">
+              {{ ui.btn_button('Copy', variant='secondary', id='copy-btn', onclick='copyUrl()') }}
+            </div>
+            <p id="url-fallback-note" class="hidden text-xs text-zinc-400 mt-1">
+              This link may take a moment to become reachable.
+            </p>
           </div>
         </div>
 

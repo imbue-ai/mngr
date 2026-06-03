@@ -440,6 +440,11 @@ def render_auth_error_page(message: str, sidecar: SsrSidecar | None = None) -> s
     )
 
 
+def render_request_unavailable_page(message: str) -> str:
+    """Render the page shown when a request is already resolved or missing."""
+    return JINJA_ENV.get_template("request_unavailable.html").render(message=message)
+
+
 # CSS for the recovery page's restart controls, appended to the shared
 # ``LOADING_PAGE_CSS``. The card itself, spinner, heading and message all come
 # from the shared loading page, so the recovery page's loading state is
