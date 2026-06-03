@@ -544,8 +544,9 @@ def test_get_installed_plugin_package_names_filters_non_plugin_extras(tmp_path: 
     assert result == ["imbue-mngr-claude", "imbue-mngr-modal"]
 
 
+@pytest.mark.allow_warnings(match=r"Could not read uv-tool receipt")
 def test_get_installed_plugin_package_names_handles_malformed_receipt(tmp_path: Path) -> None:
-    """Best-effort: a garbled receipt yields an empty list rather than raising."""
+    """Best-effort: a garbled receipt yields an empty list (and warns) rather than raising."""
     receipt_path = tmp_path / "uv-receipt.toml"
     receipt_path.write_text("this is not valid toml = = =\n")
 
