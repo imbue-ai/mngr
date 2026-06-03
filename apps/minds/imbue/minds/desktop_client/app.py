@@ -402,6 +402,7 @@ def _handle_landing_page(
             telegram_status_by_agent_id=telegram_status,
             agent_names=agent_names,
             destroying_status_by_agent_id=destroying_status_by_agent_id,
+            sidecar=request.app.state.ssr_sidecar,
         )
         return HTMLResponse(content=html)
 
@@ -414,6 +415,7 @@ def _handle_landing_page(
             accessible_agent_ids=(),
             mngr_forward_origin=_get_mngr_forward_origin(request),
             is_discovering=True,
+            sidecar=request.app.state.ssr_sidecar,
         )
         return HTMLResponse(content=html)
 
@@ -1480,6 +1482,7 @@ def _handle_destroying_page(
         agent_name=workspace_name or agent_id,
         pid=record.pid,
         status=str(record.status).lower(),
+        sidecar=request.app.state.ssr_sidecar,
     )
     return HTMLResponse(content=html)
 
@@ -2184,6 +2187,7 @@ def _handle_recovery_page(
         initial_status=render_status,
         initial_error=initial_error,
         ssh_command=_ssh_command_for_agent(backend_resolver, aid),
+        sidecar=request.app.state.ssr_sidecar,
     )
     return HTMLResponse(content=html_body)
 
@@ -2538,6 +2542,7 @@ def _handle_accounts_page(
         accounts=accounts,
         default_account_id=default_account_id,
         enabled_by_user_id=enabled_by_user_id,
+        sidecar=request.app.state.ssr_sidecar,
     )
     return HTMLResponse(content=html)
 

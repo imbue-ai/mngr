@@ -2,6 +2,10 @@ import { WelcomeRoute } from './welcome.jsx';
 import { LoginRoute } from './login.jsx';
 import { AuthErrorRoute } from './auth_error.jsx';
 import { LoginRedirectRoute } from './login_redirect.jsx';
+import { AccountsRoute } from './accounts.jsx';
+import { DestroyingRoute } from './destroying.jsx';
+import { LandingRoute } from './landing.jsx';
+import { RecoveryRoute } from './recovery.jsx';
 import { PermissionsIndexRoute } from './permissions/index.jsx';
 import { PermissionsPredefinedRoute } from './permissions/predefined.jsx';
 import { PermissionsFileSharingRoute } from './permissions/file_sharing.jsx';
@@ -19,6 +23,10 @@ export const ROUTES = {
   login: LoginRoute,
   auth_error: AuthErrorRoute,
   login_redirect: LoginRedirectRoute,
+  accounts: AccountsRoute,
+  destroying: DestroyingRoute,
+  landing: LandingRoute,
+  recovery: RecoveryRoute,
   'permissions/index': PermissionsIndexRoute,
   'permissions/predefined': PermissionsPredefinedRoute,
   'permissions/file_sharing': PermissionsFileSharingRoute,
