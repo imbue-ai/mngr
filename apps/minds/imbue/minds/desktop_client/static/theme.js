@@ -1,6 +1,6 @@
 // Luminance-driven theme switcher.
 //
-// Reads --workspace-surface from <body>'s computed style, parses it into a
+// Reads --workspace-surface from <body>'s computed style, parses its
 // relative luminance, and writes data-theme="dark"|"light" on <html>. The
 // semantic CSS variables in static/tokens.css are scoped under
 // :root[data-theme=...] so the component palette flips automatically.
@@ -8,13 +8,18 @@
 // Usage:
 //   window.mindsTheme.refresh()  -- recompute after changing --workspace-surface
 //
-// The pure-black non-workspace baseline (no --workspace-surface set) lands
-// on dark theme because luminance(#000) === 0. Workspace-scoped pages with
-// a pastel/cream surface land on light theme.
+// Behavior on a page with no workspace surface signal (no --workspace-surface,
+// no --workspace-accent fallback): we leave <html data-theme> alone. base.html
+// ships data-theme="light" so semantic tokens resolve to the light defaults
+// declared directly on :root in tokens.css -- which match the existing
+// bg-zinc-50/text-zinc-900 bodies of unmigrated production pages.
+//
+// Loaded with `defer`, so it runs after the document is parsed and after
+// tokens.css has applied. A single call at script time is enough.
 (function () {
   // Accept hex (#rgb, #rrggbb), rgb(...) / rgba(...), and oklch(L% C H) /
   // oklch(L C H) -- the three shapes the server and JS emit today. Anything
-  // else falls through to dark theme as a safe default.
+  // else is treated as "no signal" and leaves the markup default in place.
   function parseRgb(value) {
     var m = /^#([0-9a-f]{3,8})$/i.exec(value);
     if (m) {
@@ -50,14 +55,17 @@
     return m[2] === '%' ? l / 100 : l;
   }
 
+  // Returns 'light' / 'dark' / null. ``null`` means "no usable signal, leave
+  // the markup default alone".
   function pickTheme(surfaceValue) {
-    if (!surfaceValue) return 'dark';
+    if (!surfaceValue) return null;
     var trimmed = surfaceValue.trim();
+    if (!trimmed) return null;
     var okl = oklchLightness(trimmed);
     if (okl !== null) return okl >= 0.6 ? 'light' : 'dark';
     var rgb = parseRgb(trimmed);
     if (rgb) return srgbLuminance(rgb) >= 0.5 ? 'light' : 'dark';
-    return 'dark';
+    return null;
   }
 
   function readSurface() {
@@ -75,23 +83,16 @@
       var bodyAccent = styles && styles.getPropertyValue('--workspace-accent');
       surface = bodyAccent || '';
     }
-    return surface.trim();
+    return (surface || '').trim();
   }
 
   function refresh() {
     var theme = pickTheme(readSurface());
+    if (theme === null) return;
     document.documentElement.setAttribute('data-theme', theme);
     document.documentElement.style.colorScheme = theme;
   }
 
   window.mindsTheme = { refresh: refresh, pickTheme: pickTheme };
-
-  // First pass runs as soon as the script is parsed so the <html> attribute
-  // is set before the first paint. A second pass on DOMContentLoaded covers
-  // the case where <body>'s inline --workspace-surface only becomes
-  // readable once the body element exists.
   refresh();
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', refresh, { once: true });
-  }
 })();

@@ -132,9 +132,17 @@
       maps to a single Tailwind class (<code class="font-mono">text-h1</code>,
       <code class="font-mono">text-body</code>, ...).
     </p>
-    <div class="hidden" data-token="--font-sans">sans</div>
-    <div class="hidden" data-token="--font-mono">mono</div>
     <div class="bg-surface-elevated border border-line rounded-xl p-5 shadow-card space-y-5">
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div data-token="--font-sans" class="rounded-md border border-line p-3" style="font-family: var(--font-sans);">
+          <div class="font-mono text-[11px] text-ink-muted mb-1">--font-sans</div>
+          <div class="text-body text-ink">The quick brown fox jumps over the lazy dog</div>
+        </div>
+        <div data-token="--font-mono" class="rounded-md border border-line p-3" style="font-family: var(--font-mono);">
+          <div class="font-mono text-[11px] text-ink-muted mb-1">--font-mono</div>
+          <div class="text-body text-ink">The quick brown fox jumps over the lazy dog</div>
+        </div>
+      </div>
       {% for level, sample in [
             ('display', 'Display — large statement'),
             ('h1',      'Heading 1 — section title'),

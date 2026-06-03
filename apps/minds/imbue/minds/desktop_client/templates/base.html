@@ -17,10 +17,13 @@
                                <html data-theme="dark"|"light"> so semantic
                                tokens resolve to the right palette.
 
-  ``data-theme="dark"`` is the default in markup so the page is never
-  unstyled (semantic tokens always have a resolved value). theme.js refines
-  it after computing luminance from --workspace-surface; the data-theme
-  reflow is paint-only.
+  ``data-theme="light"`` is the default in markup. The light-theme values
+  are declared directly on the bare ``:root`` block in tokens.css, so any
+  page that has not yet been migrated -- whose body still uses raw zinc
+  utilities like ``bg-zinc-50 text-zinc-900`` -- renders semantic-token
+  macro children in light-theme colors that match the surrounding zinc
+  classes. theme.js refines the attribute on workspace-scoped pages once a
+  --workspace-surface is set; the data-theme reflow is paint-only.
 
   Blocks:
     title           -- <title> contents. Defaults to "Minds".
@@ -34,7 +37,7 @@
                        <script src="/_static/foo.js"> over inline JS.
 #}
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="UTF-8">
   <title>{% block title %}Minds{% endblock %}</title>
