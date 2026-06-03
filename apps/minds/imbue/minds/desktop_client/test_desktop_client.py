@@ -377,7 +377,7 @@ def test_landing_page_shows_discovering_when_initial_discovery_not_done(tmp_path
 
 
 def test_landing_page_shows_create_form_after_discovery_finds_no_agents(tmp_path: Path) -> None:
-    """After discovery completes with no agents, show the create form."""
+    """After discovery completes with no agents, show the create form route."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
@@ -388,8 +388,8 @@ def test_landing_page_shows_create_form_after_discovery_finds_no_agents(tmp_path
 
     response = client.get("/")
     assert response.status_code == 200
-    assert "Create workspace" in response.text
-    assert "git_url" in response.text
+    payload = extract_ssr_route_payload(response.text)
+    assert payload["route"] == "create"
 
 
 def test_landing_page_prefills_git_url_from_query_param(tmp_path: Path) -> None:
@@ -404,11 +404,12 @@ def test_landing_page_prefills_git_url_from_query_param(tmp_path: Path) -> None:
 
     response = client.get("/", params={"git_url": "file:///nonexistent-repo"})
     assert response.status_code == 200
-    assert "file:///nonexistent-repo" in response.text
+    payload = extract_ssr_route_payload(response.text)
+    assert payload["props"]["git_url"] == "file:///nonexistent-repo"
 
 
 def test_create_page_shows_form(tmp_path: Path) -> None:
-    """GET /create shows the agent creation form."""
+    """GET /create renders the create Solid route with default props."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
@@ -419,7 +420,9 @@ def test_create_page_shows_form(tmp_path: Path) -> None:
 
     response = client.get("/create")
     assert response.status_code == 200
-    assert "Create workspace" in response.text
+    payload = extract_ssr_route_payload(response.text)
+    assert payload["route"] == "create"
+    assert payload["props"]["host_name"] == "assistant"
 
 
 def test_creation_status_returns_404_for_unknown_agent(tmp_path: Path) -> None:
@@ -467,8 +470,11 @@ def test_create_form_submit_returns_501_without_agent_creator(tmp_path: Path) ->
     )
     _authenticate_client(client=client, auth_store=auth_store)
 
-    response = client.post("/create", data={"git_url": "file:///nonexistent-repo"})
+    response = client.post("/create", json={"git_url": "file:///nonexistent-repo"})
     assert response.status_code == 501
+    body = response.json()
+    assert body["ok"] is False
+    assert "errors" in body
 
 
 def test_create_agent_api_returns_501_without_agent_creator(tmp_path: Path) -> None:
@@ -532,26 +538,31 @@ def _create_test_server_with_agent_creator(
     return client, auth_store, agent_creator
 
 
-def test_create_form_submit_redirects_to_creating_page(tmp_path: Path) -> None:
-    """POST /create with valid git_url redirects to /creating/{agent_id}."""
+def test_create_form_submit_returns_redirect_url_on_success(tmp_path: Path) -> None:
+    """POST /create with valid git_url returns a JSON envelope carrying redirect_url."""
     client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
 
     response = client.post(
         "/create",
-        data={"git_url": "file:///nonexistent-repo"},
-        follow_redirects=False,
+        json={"git_url": "file:///nonexistent-repo"},
     )
-    assert response.status_code == 303
-    assert response.headers["location"].startswith("/creating/")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["errors"] == {}
+    assert body["data"]["redirect_url"].startswith("/creating/")
     agent_creator.wait_for_all()
 
 
 def test_create_form_submit_rejects_empty_git_url(tmp_path: Path) -> None:
-    """POST /create with empty git_url returns 400."""
+    """POST /create with empty git_url returns 400 with a form-wide error."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
-    response = client.post("/create", data={"git_url": "", "host_name": "test"})
+    response = client.post("/create", json={"git_url": "", "host_name": "test"})
     assert response.status_code == 400
+    body = response.json()
+    assert body["ok"] is False
+    assert "required" in body["errors"]["_"].lower()
 
 
 def test_create_form_submit_passes_host_name(tmp_path: Path) -> None:
@@ -560,10 +571,10 @@ def test_create_form_submit_passes_host_name(tmp_path: Path) -> None:
 
     response = client.post(
         "/create",
-        data={"git_url": "file:///nonexistent-repo", "host_name": "my-workspace"},
-        follow_redirects=False,
+        json={"git_url": "file:///nonexistent-repo", "host_name": "my-workspace"},
     )
-    assert response.status_code == 303
+    assert response.status_code == 200
+    assert response.json()["data"]["redirect_url"].startswith("/creating/")
     agent_creator.wait_for_all()
 
 
@@ -663,17 +674,17 @@ def test_onboarding_submit_requires_authentication(tmp_path: Path) -> None:
 
 
 def test_create_form_submit_rejects_invalid_host_name(tmp_path: Path) -> None:
-    """POST /create with a host_name that fails HostName validation re-renders the form with an error."""
+    """POST /create with a host_name that fails HostName validation returns a JSON error."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
     response = client.post(
         "/create",
-        data={"git_url": "file:///nonexistent-repo", "host_name": "bad.name"},
-        follow_redirects=False,
+        json={"git_url": "file:///nonexistent-repo", "host_name": "bad.name"},
     )
     assert response.status_code == 400
-    assert "alphanumeric" in response.text
-    assert "bad.name" in response.text
+    body = response.json()
+    assert body["ok"] is False
+    assert "alphanumeric" in body["errors"]["_"]
 
 
 def test_create_agent_api_rejects_invalid_host_name(tmp_path: Path) -> None:
@@ -750,12 +761,13 @@ def test_creation_status_api_returns_status_for_tracked_agent(tmp_path: Path) ->
 
 
 def test_create_page_prefills_git_url_from_query(tmp_path: Path) -> None:
-    """GET /create?git_url=... pre-fills the form."""
+    """GET /create?git_url=... pre-fills the form prop."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
     response = client.get("/create", params={"git_url": "file:///nonexistent-repo"})
     assert response.status_code == 200
-    assert "file:///nonexistent-repo" in response.text
+    payload = extract_ssr_route_payload(response.text)
+    assert payload["props"]["git_url"] == "file:///nonexistent-repo"
 
 
 def test_landing_page_shows_create_link_when_multiple_agents_known(tmp_path: Path) -> None:
@@ -794,7 +806,7 @@ def test_create_page_rejects_unauthenticated(tmp_path: Path) -> None:
 
 
 def test_create_form_submit_rejects_unauthenticated(tmp_path: Path) -> None:
-    """POST /create returns 403 without authentication."""
+    """POST /create returns a 403 JSON envelope without authentication."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     client, _ = _create_test_desktop_client(
         tmp_path=tmp_path,
@@ -802,8 +814,10 @@ def test_create_form_submit_rejects_unauthenticated(tmp_path: Path) -> None:
         http_client=None,
     )
 
-    response = client.post("/create", data={"git_url": "file:///nonexistent-repo"})
+    response = client.post("/create", json={"git_url": "file:///nonexistent-repo"})
     assert response.status_code == 403
+    body = response.json()
+    assert body["ok"] is False
 
 
 def test_create_agent_api_rejects_unauthenticated(tmp_path: Path) -> None:
@@ -966,14 +980,14 @@ def test_create_form_submit_passes_launch_mode(tmp_path: Path) -> None:
 
     response = client.post(
         "/create",
-        data={
+        json={
             "git_url": "file:///nonexistent-repo",
             "host_name": "my-agent",
             "launch_mode": "DOCKER",
         },
-        follow_redirects=False,
     )
-    assert response.status_code == 303
+    assert response.status_code == 200
+    assert response.json()["data"]["redirect_url"].startswith("/creating/")
     agent_creator.wait_for_all()
 
 
@@ -1012,28 +1026,23 @@ def test_create_agent_api_rejects_invalid_launch_mode(tmp_path: Path) -> None:
 
 
 def test_create_form_shows_launch_mode_dropdown(tmp_path: Path) -> None:
-    """GET /create form includes the launch mode dropdown."""
+    """GET /create includes every LaunchMode enum value in the launch_modes prop."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
     response = client.get("/create")
     assert response.status_code == 200
-    assert "launch_mode" in response.text
-    assert "docker" in response.text
-    assert "cloud" in response.text
-    assert "lima" in response.text
-    assert "imbue_cloud" in response.text
+    payload = extract_ssr_route_payload(response.text)
+    assert {"DOCKER", "CLOUD", "LIMA", "IMBUE_CLOUD"}.issubset(set(payload["props"]["launch_modes"]))
 
 
 def test_create_form_shows_ai_provider_dropdown(tmp_path: Path) -> None:
-    """GET /create form includes the AI provider dropdown with all three options."""
+    """GET /create includes every AIProvider value in the ai_providers prop."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
     response = client.get("/create")
     assert response.status_code == 200
-    assert 'name="ai_provider"' in response.text
-    assert 'value="IMBUE_CLOUD"' in response.text
-    assert 'value="API_KEY"' in response.text
-    assert 'value="SUBSCRIPTION"' in response.text
+    payload = extract_ssr_route_payload(response.text)
+    assert {"IMBUE_CLOUD", "API_KEY", "SUBSCRIPTION"}.issubset(set(payload["props"]["ai_providers"]))
 
 
 def test_create_form_does_not_show_env_file_checkbox(tmp_path: Path) -> None:
@@ -1042,64 +1051,64 @@ def test_create_form_does_not_show_env_file_checkbox(tmp_path: Path) -> None:
 
     response = client.get("/create")
     assert response.status_code == 200
-    assert "include_env_file" not in response.text
+    # The Solid component does not surface include_env_file in the
+    # route payload at all -- a stronger assertion than the old text-match.
+    payload = extract_ssr_route_payload(response.text)
+    assert "include_env_file" not in payload["props"]
 
 
 def test_create_form_submit_rejects_imbue_cloud_compute_without_account(tmp_path: Path) -> None:
-    """Selecting IMBUE_CLOUD compute without an account is rejected with a clear message."""
+    """Selecting IMBUE_CLOUD compute without an account returns a clear JSON error."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
     response = client.post(
         "/create",
-        data={
+        json={
             "git_url": "file:///nonexistent-repo",
             "host_name": "my-agent",
             "launch_mode": "IMBUE_CLOUD",
             "ai_provider": "SUBSCRIPTION",
             "account_id": "",
         },
-        follow_redirects=False,
     )
     assert response.status_code == 400
-    assert "imbue_cloud requires an account" in response.text
+    assert "imbue_cloud requires an account" in response.json()["errors"]["_"]
 
 
 def test_create_form_submit_rejects_imbue_cloud_ai_without_account(tmp_path: Path) -> None:
-    """Selecting IMBUE_CLOUD AI provider without an account is rejected."""
+    """Selecting IMBUE_CLOUD AI provider without an account returns a JSON error."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
     response = client.post(
         "/create",
-        data={
+        json={
             "git_url": "file:///nonexistent-repo",
             "host_name": "my-agent",
             "launch_mode": "DOCKER",
             "ai_provider": "IMBUE_CLOUD",
             "account_id": "",
         },
-        follow_redirects=False,
     )
     assert response.status_code == 400
-    assert "imbue_cloud requires an account" in response.text
+    assert "imbue_cloud requires an account" in response.json()["errors"]["_"]
 
 
 def test_create_form_submit_rejects_api_key_provider_without_key(tmp_path: Path) -> None:
-    """Selecting AI provider API_KEY without supplying a key is rejected."""
+    """Selecting AI provider API_KEY without supplying a key returns a JSON error."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
     response = client.post(
         "/create",
-        data={
+        json={
             "git_url": "file:///nonexistent-repo",
             "host_name": "my-agent",
             "launch_mode": "DOCKER",
             "ai_provider": "API_KEY",
             "anthropic_api_key": "",
         },
-        follow_redirects=False,
     )
     assert response.status_code == 400
-    assert "Anthropic API key is required" in response.text
+    assert "Anthropic API key is required" in response.json()["errors"]["_"]
 
 
 def test_create_form_submit_accepts_subscription_with_no_account(tmp_path: Path) -> None:
@@ -1108,16 +1117,16 @@ def test_create_form_submit_accepts_subscription_with_no_account(tmp_path: Path)
 
     response = client.post(
         "/create",
-        data={
+        json={
             "git_url": "file:///nonexistent-repo",
             "host_name": "my-agent",
             "launch_mode": "DOCKER",
             "ai_provider": "SUBSCRIPTION",
             "account_id": "",
         },
-        follow_redirects=False,
     )
-    assert response.status_code == 303
+    assert response.status_code == 200
+    assert response.json()["data"]["redirect_url"].startswith("/creating/")
     agent_creator.wait_for_all()
 
 
@@ -1184,30 +1193,29 @@ def test_create_agent_api_rejects_imbue_cloud_ai_without_account(tmp_path: Path)
     assert "account_id is required" in response.json()["error"]
 
 
-def test_create_form_submit_preserves_account_id_on_validation_error(tmp_path: Path) -> None:
-    """When validation fails and the form re-renders, the user's account_id choice
-    must survive instead of reverting to the config default. The form submits
-    ``account_id=""`` for "No account"; the re-rendered page must show that
-    option as ``selected`` and must NOT show any other account as selected."""
+def test_create_form_submit_returns_json_error_envelope_on_validation_failure(tmp_path: Path) -> None:
+    """On validation failure the handler returns the JSON ``{ ok, errors, data }``
+    envelope the Solid form component reads -- the previous behavior of
+    re-rendering the form HTML with the user's account_id pre-selected is
+    now the client's responsibility (it keeps its own form state)."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
     # Trigger a validation error (IMBUE_CLOUD AI without an account).
     response = client.post(
         "/create",
-        data={
+        json={
             "git_url": "file:///nonexistent-repo",
             "host_name": "my-agent",
             "launch_mode": "DOCKER",
             "ai_provider": "IMBUE_CLOUD",
             "account_id": "",
         },
-        follow_redirects=False,
     )
     assert response.status_code == 400
-    # The "No account (private project)" option is selected when default_account_id is empty.
-    assert 'value=""' in response.text and "No account" in response.text
-    # And the IMBUE_CLOUD warning should be present.
-    assert "imbue_cloud requires an account" in response.text
+    body = response.json()
+    assert body["ok"] is False
+    assert "imbue_cloud requires an account" in body["errors"]["_"]
+    assert body["data"] is None
 
 
 def test_unhandled_exception_returns_500_with_message(tmp_path: Path) -> None:
