@@ -3,16 +3,11 @@
   <button type="submit">. Use inside a <form> (or pass ``form="..."``) for
   form submission. Usage:
     <ButtonSubmit variant="primary" form="create-form">Save</ButtonSubmit>
+
+  Pulls its base class string and variants map from the Catalog globals
+  ``BTN_BASE`` / ``BTN_VARIANTS`` (defined in templates.py).
 #}
-{% set _btn_base = "inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-md font-medium text-sm leading-tight transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer no-underline whitespace-nowrap" %}
-{% set _btn_variants = {
-  "primary":   "bg-zinc-900 text-zinc-50 border border-transparent hover:bg-zinc-800",
-  "secondary": "bg-zinc-100 text-zinc-900 border border-zinc-200 hover:bg-zinc-200",
-  "danger":    "bg-red-50 text-red-600 border border-red-200 hover:bg-red-100",
-  "success":   "bg-emerald-800 text-emerald-50 border border-transparent hover:bg-emerald-900",
-  "ghost":     "bg-transparent text-zinc-600 border border-transparent hover:bg-zinc-100 hover:text-zinc-900",
-} %}
 <button type="submit"
-        class="{{ _btn_base }} {{ _btn_variants[variant] }} {% if block %}w-full{% endif %} {{ extra }}"
+        class="{{ BTN_BASE }} {{ BTN_VARIANTS[variant] }} {% if block %}w-full{% endif %} {{ extra }}"
         {% if id %}id="{{ id }}"{% endif %}
         {% if form %}form="{{ form }}"{% endif %}>{{ content }}</button>

@@ -35,6 +35,26 @@ from imbue.mngr_forward.loading_page import render_loading_page
 
 TEMPLATE_DIR: Final[Path] = Path(__file__).resolve().parent / "templates"
 
+# Shared Tailwind class strings for the three button components
+# (Button.jinja, ButtonLink.jinja, ButtonSubmit.jinja). Exposed as JinjaX
+# Catalog globals so a single edit here updates every button variant; the
+# alternative -- inlining the same class string in three sibling templates
+# -- drifted across files trivially. Surface as uppercase to match the
+# `CATALOG` constant convention and to mark them as Jinja globals (not
+# per-render context).
+_BTN_BASE: Final[str] = (
+    "inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-md "
+    "font-medium text-sm leading-tight transition-colors disabled:opacity-50 "
+    "disabled:cursor-not-allowed cursor-pointer no-underline whitespace-nowrap"
+)
+_BTN_VARIANTS: Final[Mapping[str, str]] = {
+    "primary": "bg-zinc-900 text-zinc-50 border border-transparent hover:bg-zinc-800",
+    "secondary": "bg-zinc-100 text-zinc-900 border border-zinc-200 hover:bg-zinc-200",
+    "danger": "bg-red-50 text-red-600 border border-red-200 hover:bg-red-100",
+    "success": "bg-emerald-800 text-emerald-50 border border-transparent hover:bg-emerald-900",
+    "ghost": "bg-transparent text-zinc-600 border border-transparent hover:bg-zinc-100 hover:text-zinc-900",
+}
+
 
 def _build_catalog() -> Catalog:
     """Build the JinjaX Catalog used to render every desktop-client template.
@@ -43,11 +63,18 @@ def _build_catalog() -> Catalog:
     filters from any seed env you pass in. We seed with the same autoescape
     config the old standalone JINJA_ENV used so user-controlled strings (form
     errors, agent IDs, etc.) stay HTML-escaped exactly as before.
+
+    ``BTN_BASE`` / ``BTN_VARIANTS`` are exposed as Jinja globals so the
+    three button components can share a single source of truth instead of
+    each redeclaring the same class string + variants map.
     """
     seed_env = Environment(
         autoescape=select_autoescape(default_for_string=True, default=True),
     )
-    catalog = Catalog(jinja_env=seed_env)
+    catalog = Catalog(
+        jinja_env=seed_env,
+        globals={"BTN_BASE": _BTN_BASE, "BTN_VARIANTS": _BTN_VARIANTS},
+    )
     catalog.add_folder(str(TEMPLATE_DIR))
     return catalog
 
