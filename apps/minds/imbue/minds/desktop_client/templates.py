@@ -28,6 +28,7 @@ from imbue.minds.bootstrap import DEFAULT_MINDS_ROOT_NAME
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.onboarding import expected_creation_duration_seconds
+from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.ssr_sidecar import SsrSidecar
 from imbue.minds.desktop_client.ssr_sidecar import SsrSidecarError
 from imbue.minds.primitives import AIProvider
@@ -247,19 +248,9 @@ def _dev_only_workspace_default(env_var: str, fallback: str) -> str:
     return os.environ.get(env_var, fallback)
 
 
-def _serialize_account(account: object) -> dict[str, str]:
-    """Pull ``user_id`` and ``email`` off an ``AccountSession``-like object.
-
-    The session-store layer hands us ``AccountSession`` instances, but
-    historical callers (and a few tests) also pass plain objects with
-    the same two public attributes -- so we use ``getattr`` rather than
-    importing ``AccountSession`` here to avoid the circular dependency
-    that would create (session_store imports from templates today).
-    """
-    return {
-        "user_id": str(getattr(account, "user_id", "")),
-        "email": str(getattr(account, "email", "")),
-    }
+def _serialize_account(account: AccountSession) -> dict[str, str]:
+    """Flatten an ``AccountSession`` to the JSON-serializable shape the Solid create form expects."""
+    return {"user_id": str(account.user_id), "email": account.email}
 
 
 def render_create_form(
@@ -272,7 +263,7 @@ def render_create_form(
     backup_encryption_method: BackupEncryptionMethod | None = None,
     backup_api_key_env: str = "",
     has_saved_backup_password: bool = False,
-    accounts: Sequence[object] | None = None,
+    accounts: Sequence[AccountSession] | None = None,
     default_account_id: str = "",
     anthropic_api_key: str = "",
     error_message: str = "",

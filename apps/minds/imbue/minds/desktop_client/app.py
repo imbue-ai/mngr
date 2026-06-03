@@ -772,7 +772,11 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
 
     try:
         body = await request.json()
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError) as exc:
+        # Log so the corruption is observable: this endpoint is hit by
+        # the Solid create form and a malformed body almost certainly
+        # means the client serializer drifted.
+        logger.warning("POST /create received invalid JSON body: {}", exc)
         return _json_error_response("Invalid JSON body")
     if not isinstance(body, dict):
         return _json_error_response("Invalid JSON body")
