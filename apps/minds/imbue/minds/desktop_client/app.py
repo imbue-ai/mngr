@@ -109,6 +109,7 @@ from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_recovery_page
+from imbue.minds.desktop_client.templates import render_request_unavailable_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
@@ -2804,7 +2805,18 @@ def _handle_request_page(
         return HTMLResponse(content="<p>Request inbox not available</p>", status_code=500)
     req_event = inbox.get_request_by_id(request_id)
     if req_event is None:
-        return HTMLResponse(content="<p>Request not found</p>", status_code=404)
+        return HTMLResponse(
+            content=render_request_unavailable_page(message="It may have expired, or it was opened from an old link."),
+            status_code=404,
+        )
+    # A granted/denied request lingers in the append-only log, so re-rendering
+    # the grant/deny form would let the user act on it again. Show a friendly
+    # "no longer available" page instead.
+    if inbox.is_request_resolved(request_id):
+        return HTMLResponse(
+            content=render_request_unavailable_page(message="It has already been processed."),
+            status_code=200,
+        )
 
     handlers: tuple[RequestEventHandler, ...] = request.app.state.request_event_handlers
     handler = find_handler_for_event(handlers, req_event)
@@ -3137,6 +3149,10 @@ async def _dispatch_request_action(
     req_event = inbox.get_request_by_id(request_id)
     if req_event is None:
         return _json_error("Request not found", status_code=404)
+    # Reject a second grant/deny on an already-resolved request so a stale
+    # (e.g. cached) form cannot re-apply side effects.
+    if inbox.is_request_resolved(request_id):
+        return _json_error("This request has already been approved or denied.", status_code=409)
 
     handlers: tuple[RequestEventHandler, ...] = request.app.state.request_event_handlers
     handler = find_handler_for_event(handlers, req_event)
