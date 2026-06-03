@@ -17,6 +17,27 @@
 {% block title %}Minds Design System{% endblock %}
 {% block body_class %}bg-surface text-ink font-sans antialiased{% endblock %}
 {% block content %}
+{#
+  Canonical workspace palette: name, var() expression, and an ``is_dark`` flag
+  that mirrors the OKLCH ``L >= 0.6`` threshold theme.js uses to pick the
+  data-theme. Shared by the surface picker (uses all three fields) and the
+  workspace-palette swatch grid (uses ``name`` only), so a palette change is
+  a single-edit operation rather than a two-place lockstep.
+#}
+{% set _PALETTE = [
+      ('forest-deep', 'var(--palette-forest-deep)', true),
+      ('forest',      'var(--palette-forest)',      true),
+      ('claret',      'var(--palette-claret)',      true),
+      ('olive',       'var(--palette-olive)',       true),
+      ('charcoal',    'var(--palette-charcoal)',    true),
+      ('sky',         'var(--palette-sky)',         false),
+      ('blush',       'var(--palette-blush)',       false),
+      ('lime',        'var(--palette-lime)',        false),
+      ('lavender',    'var(--palette-lavender)',    false),
+      ('sage',        'var(--palette-sage)',        false),
+      ('cream',       'var(--palette-cream)',       false),
+      ('taupe',       'var(--palette-taupe)',       false),
+] %}
 <div class="max-w-5xl mx-auto px-8 py-10 space-y-12">
 
   <header>
@@ -52,28 +73,13 @@
           <span class="font-mono text-[11px] opacity-70">#ffffff</span>
         </button>
         {#
-          Each palette entry carries an ``is_dark`` flag that mirrors the
-          OKLCH ``L >= 0.6`` threshold theme.js uses to pick the data-theme.
-          We use it here so the swatch label color matches what the surface
-          will eventually render -- white text on the dark swatches, near-
-          black text on the light ones (otherwise sky / blush / lime /
-          lavender / sage / cream / taupe labels are illegible against
-          their own backgrounds).
+          Each palette entry's ``is_dark`` flag (defined in ``_PALETTE``
+          above) drives the swatch label color -- white text on the dark
+          swatches, near-black text on the light ones (otherwise sky /
+          blush / lime / lavender / sage / cream / taupe labels would be
+          illegible against their own backgrounds).
         #}
-        {% for name, css, is_dark in [
-              ('forest-deep', 'var(--palette-forest-deep)', true),
-              ('forest',      'var(--palette-forest)',      true),
-              ('claret',      'var(--palette-claret)',      true),
-              ('olive',       'var(--palette-olive)',       true),
-              ('charcoal',    'var(--palette-charcoal)',    true),
-              ('sky',         'var(--palette-sky)',         false),
-              ('blush',       'var(--palette-blush)',       false),
-              ('lime',        'var(--palette-lime)',        false),
-              ('lavender',    'var(--palette-lavender)',    false),
-              ('sage',        'var(--palette-sage)',        false),
-              ('cream',       'var(--palette-cream)',       false),
-              ('taupe',       'var(--palette-taupe)',       false),
-        ] %}
+        {% for name, css, is_dark in _PALETTE %}
         <button type="button" data-surface="{{ css }}"
                 class="surface-swatch group flex flex-col items-start gap-1 px-3 py-2 rounded-md border border-line transition hover:border-line-strong"
                 style="background: {{ css }}; color: {% if is_dark %}rgba(255,255,255,0.95){% else %}#18181b{% endif %};">
@@ -98,12 +104,11 @@
       variable on <code class="font-mono">:root</code>.
     </p>
     <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-      {% for name in ['forest-deep', 'forest', 'claret', 'olive', 'charcoal', 'sky',
-                      'blush', 'lime', 'lavender', 'sage', 'cream', 'taupe'] %}
+      {% for name, css, is_dark in _PALETTE %}
       <div data-token="--palette-{{ name }}"
            class="flex items-center gap-3 bg-surface-elevated border border-line rounded-lg p-3 shadow-card">
         <div class="w-10 h-10 rounded-md border border-line shrink-0"
-             style="background: var(--palette-{{ name }});"></div>
+             style="background: {{ css }};"></div>
         <div class="min-w-0 flex-1">
           <div class="font-mono text-caption text-ink truncate">--palette-{{ name }}</div>
         </div>
