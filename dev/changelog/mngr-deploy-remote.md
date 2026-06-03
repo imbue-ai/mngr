@@ -16,3 +16,11 @@ justfile error hints:
 `runtime/secrets/cloudflare_tunnel.env` (one of the per-secret env files in the
 `runtime/secrets/` directory) instead of the old single `runtime/secrets` file,
 matching the directory-based secrets layout the FCT runner and minds now use.
+
+`just minds-start` and `just minds-build` now select the Node version pinned in
+`apps/minds/.nvmrc` (via nvm) before launching, so they no longer fail with
+`ERR_PNPM_UNSUPPORTED_ENGINE` when the shell's default Node has drifted off the
+pin. The selection is a no-op when the active Node already matches and errors
+with an actionable hint when nvm or the pinned version is missing (it never
+auto-installs Node). Shared with `propagate_changes` via the new
+`apps/minds/scripts/select_node_version.sh` helper.

@@ -427,6 +427,9 @@ minds-start agent_name="mindtest" branch="":
         echo "       Then re-run \`just minds-start\`." >&2
         exit 2
     fi
+    # Put the Node version apps/minds pins (.nvmrc) first on PATH so pnpm's
+    # engine-strict check passes regardless of the shell's default node.
+    . apps/minds/scripts/select_node_version.sh || exit 2
     cd apps/minds && pnpm start
 
 # Stop the minds desktop client started in this worktree by `just minds-start`.
@@ -526,6 +529,10 @@ minds-stop:
 
 # Build the minds desktop client distributable (slow; uses todesktop).
 minds-build:
+    #!/bin/bash
+    set -ueo pipefail
+    # Match apps/minds's pinned Node (.nvmrc) so pnpm's engine-strict passes.
+    . apps/minds/scripts/select_node_version.sh || exit 2
     cd apps/minds && pnpm build
 
 # Sync this repo's mngr changes (and the FCT worktree's template state)

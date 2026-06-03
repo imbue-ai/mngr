@@ -62,3 +62,16 @@ sharing whenever host backups were configured:
   now-deleted tunnel. Previously nothing ever cleared the token.
 - The Telegram bot token now lives at `runtime/secrets/telegram.env`
   (overwrite in place) so it no longer collides with the other secrets.
+
+Dev tooling: the minds desktop client launchers now pin Node automatically.
+
+- Added `apps/minds/scripts/select_node_version.sh`, a sourced helper that
+  selects the Node version pinned in `apps/minds/.nvmrc` (via nvm) before
+  launching the client, so pnpm/npm's `engine-strict` check passes regardless
+  of the shell's default Node. It's a no-op when the active Node already
+  matches, and errors with an actionable hint (e.g. `nvm install <version>`)
+  rather than auto-installing.
+- `apps/minds/scripts/propagate_changes` now sources that helper before
+  restarting the desktop client (`electron_start`), so the iteration loop no
+  longer fails with `ERR_PNPM_UNSUPPORTED_ENGINE` when the shell's Node has
+  drifted off the pin.
