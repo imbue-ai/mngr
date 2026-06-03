@@ -81,3 +81,9 @@ OVH credentials from Vault (like `minds pool create`) and forwards to the admin
 command, which cancels the OVH VPS before dropping the row -- so destroying a
 pool host can no longer leave a stranded, still-billing VPS. Pass
 `--skip-vps-cancel` only when the VPS is already gone.
+
+Vault reads now distinguish "secret absent" from a transient failure. Added
+`VaultSecretNotFoundError` (raised when the Vault CLI exits 2 / "No value
+found"); `minds env deploy`'s optional-OVH-entry fallback now catches only that,
+so a transient/auth Vault error no longer gets silently turned into empty OVH
+credentials (which would deploy a broken `ovh` Modal Secret on a Vault blip).

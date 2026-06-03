@@ -233,8 +233,17 @@ class ImbueCloudConnectorClient(MutableModel):
         body_json = self._check(response, ImbueCloudConnectorError)
         return LeaseResult.model_validate(body_json)
 
-    def release_host(self, access_token: SecretStr, host_db_id: str) -> bool:
-        """Release a leased host. Returns True on success, False otherwise (logs warning)."""
+    def release_host(self, access_token: SecretStr, host_db_id: str) -> None:
+        """Release a leased host. Raises ``ImbueCloudConnectorError`` on any failure.
+
+        Returns normally only on a 2xx (including the idempotent
+        ``already_released``). A transport error (couldn't reach the connector)
+        or a non-2xx response -- e.g. the synchronous release returning 5xx
+        because the OVH cancel failed -- raises. A failed release must never
+        look like success, or the caller silently drops a host whose VPS is
+        still running. Callers that want best-effort semantics (e.g. the
+        create-rollback path) catch this explicitly.
+        """
         try:
             response = httpx.post(
                 self._url(f"/hosts/{host_db_id}/release"),
@@ -242,12 +251,14 @@ class ImbueCloudConnectorClient(MutableModel):
                 timeout=self.timeout_seconds,
             )
         except httpx.HTTPError as exc:
-            logger.warning("Release HTTP request failed: {}", exc)
-            return False
+            raise ImbueCloudConnectorError(
+                f"release request for host {host_db_id} could not reach the connector: {exc}"
+            ) from exc
         if response.status_code in (200, 204):
-            return True
-        logger.warning("Release returned {}: {}", response.status_code, response.text[:200])
-        return False
+            return
+        raise ImbueCloudConnectorError(
+            f"release of host {host_db_id} returned {response.status_code}: {response.text[:200]}"
+        )
 
     def list_hosts(self, access_token: SecretStr) -> list[LeasedHostInfo]:
         response = httpx.get(

@@ -153,7 +153,8 @@ def test_activate_allows_when_only_this_envs_recover_target_exists(
     never run to clear it -- the activate/recover catch-22.
     """
     monkeypatch.chdir(_isolated_env)
-    (_isolated_env / "apps").mkdir()  # monorepo-root marker for find_monorepo_root
+    # monorepo-root marker for find_monorepo_root
+    (_isolated_env / "apps").mkdir()
     (_isolated_env / ".minds-deploy-recover-target-dev-foo.json").write_text("{}")
     runner = CliRunner()
     result = runner.invoke(env, ["activate", "--create", "dev-foo"])

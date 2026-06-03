@@ -967,7 +967,8 @@ def test_deploy_env_skips_paid_seed_when_no_defaults(_isolated_home: Path, _root
     deploy_env(
         DevEnvName("dev-josh"),
         tier="dev",
-        deploy_config=_deploy_config(tier="dev"),  # PaidDefaultsConfig() -> empty
+        # PaidDefaultsConfig() -> empty
+        deploy_config=_deploy_config(tier="dev"),
         credentials=_credentials(),
         providers=providers,
         parent_concurrency_group=_root_cg,

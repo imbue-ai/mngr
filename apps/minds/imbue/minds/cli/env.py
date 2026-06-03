@@ -77,6 +77,7 @@ from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.primitives import DevEnvNotFoundError
 from imbue.minds.envs.primitives import InvalidDevEnvNameError
 from imbue.minds.envs.primitives import VaultReadError
+from imbue.minds.envs.primitives import VaultSecretNotFoundError
 from imbue.minds.envs.providers.cloudflare_tunnels import delete_tunnels as real_delete_cloudflare_tunnels
 from imbue.minds.envs.providers.cloudflare_tunnels import list_tunnels_for_env as real_list_cloudflare_tunnels_for_env
 from imbue.minds.envs.providers.modal_env import delete_modal_env as real_delete_modal_env
@@ -402,14 +403,17 @@ def _load_dev_credentials_from_vault(vault_prefix: str, *, cg: ConcurrencyGroup)
     """
     neon_admin = read_vault_kv(VaultPath(f"{vault_prefix}/neon-admin"), parent_concurrency_group=cg)
     supertokens = read_vault_kv(VaultPath(f"{vault_prefix}/supertokens"), parent_concurrency_group=cg)
-    # The ovh entry is optional -- a tier with no OVH provisioning yet
-    # may not have it populated. Treat a missing entry as empty so the
-    # deploy still progresses; per-env OVH-touching operations will fail
-    # later if/when the operator wires them up without populating Vault.
+    # The ovh entry is optional -- a tier with no OVH provisioning yet may not
+    # have it populated. Treat a genuinely *missing* entry as empty so the
+    # deploy still progresses; per-env OVH-touching operations will fail later
+    # if/when the operator wires them up without populating Vault. Only catch
+    # VaultSecretNotFoundError here: a transient/auth VaultReadError must NOT be
+    # silently turned into empty OVH credentials (that would deploy a broken
+    # `ovh` Modal Secret on a Vault blip), so let those propagate.
     try:
         ovh_secret = read_vault_kv(VaultPath(f"{vault_prefix}/ovh"), parent_concurrency_group=cg)
-    except VaultReadError as exc:
-        logger.warning("No ovh Vault entry yet ({}); proceeding with empty OVH credentials.", exc)
+    except VaultSecretNotFoundError as exc:
+        logger.warning("No ovh Vault entry at {}/ovh ({}); proceeding with empty OVH credentials.", vault_prefix, exc)
         ovh_secret = {}
 
     org_id = neon_admin.get("NEON_ORG_ID", "")

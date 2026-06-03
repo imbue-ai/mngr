@@ -28,3 +28,18 @@ tier's OVH credentials from Vault, like `pool create`. Relatedly, the imbue_clou
 provider's `destroy_host` now raises when the connector release fails instead of
 silently cleaning up local state, so a failed release no longer makes mngr
 "forget" a host whose lease/VPS is still live.
+
+Stopped masking errors in the lease/teardown paths (error-handling audit):
+- `_list_leased_hosts_cached` no longer swallows a `list_hosts` failure to an
+  empty list -- a transient connector outage / expired token now propagates
+  (the method already raised via `_require_account`, so callers tolerate it)
+  rather than making the account look like it has zero leased hosts.
+- `client.release_host` now raises `ImbueCloudConnectorError` on a transport
+  error or non-2xx (e.g. the synchronous release returning 5xx because the OVH
+  cancel failed) instead of returning a quiet `False`. `destroy_host` lets it
+  propagate (so a failed release surfaces and local state isn't cleaned up);
+  the create-rollback path (`_release_lease_quietly`) catches it explicitly to
+  stay best-effort.
+- The leased-host TOFU host-key scan now logs (debug) the cause when it can't
+  read a remote key, so the later StrictHostKeyChecking SSH failure is
+  diagnosable.

@@ -105,6 +105,7 @@ from imbue.mngr_imbue_cloud.data_types import LeaseResult
 from imbue.mngr_imbue_cloud.data_types import LeasedHostInfo
 from imbue.mngr_imbue_cloud.data_types import parse_imbue_cloud_build_args
 from imbue.mngr_imbue_cloud.errors import FastPathUnavailableError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 from imbue.mngr_imbue_cloud.host import ImbueCloudHost
 from imbue.mngr_imbue_cloud.primitives import FastMode
@@ -362,7 +363,12 @@ def _scan_ssh_host_key(host: str, port: int) -> str | None:
     try:
         transport.start_client(timeout=10.0)
         host_key = transport.get_remote_server_key()
-    except (paramiko.SSHException, OSError):
+    except (paramiko.SSHException, OSError) as exc:
+        # Returning None is intentional (TOFU is best-effort), but log the
+        # cause: without the scanned key the caller can't add a known_hosts
+        # entry, so a later StrictHostKeyChecking SSH will fail -- this debug
+        # line makes the root cause of that downstream failure visible.
+        logger.debug("SSH host-key scan of {}:{} failed ({}); known_hosts entry will be missing", host, port, exc)
         return None
     finally:
         try:
@@ -515,11 +521,13 @@ class ImbueCloudProvider(BaseProviderInstance):
             return self._leased_hosts_cache
         account = self._require_account()
         token = self._get_access_token(account)
-        try:
-            self._leased_hosts_cache = self.client.list_hosts(token)
-        except MngrError as exc:
-            logger.warning("imbue_cloud[{}] list_hosts failed: {}", self.name, exc)
-            self._leased_hosts_cache = []
+        # Do NOT swallow a discovery failure to an empty list: a transient
+        # connector outage / expired token would then look like "this account
+        # has zero leased hosts", which the discovery layer cannot distinguish
+        # from a real empty result (and which defeats mngr's mark-UNKNOWN-on-
+        # provider-failure safeguard). Let it propagate -- this method already
+        # raises (via _require_account), so callers tolerate it.
+        self._leased_hosts_cache = self.client.list_hosts(token)
         return self._leased_hosts_cache
 
     def discover_hosts(
@@ -1429,10 +1437,16 @@ class ImbueCloudProvider(BaseProviderInstance):
                 self._cleanup_local_host_state(host_id)
 
     def _release_lease_quietly(self, token: SecretStr, host_db_id: str) -> None:
-        """Best-effort release of a lease; logs (never raises) on failure."""
-        released = self.client.release_host(token, host_db_id)
-        if not released:
-            logger.warning("imbue_cloud[{}] release of lease {} did not succeed", self.name, host_db_id)
+        """Best-effort release of a lease; logs (never raises) on failure.
+
+        Used only by the create-rollback path, where the *original* failure is
+        what the operator needs to see -- a release problem here must not mask
+        it, so we catch and log rather than propagate.
+        """
+        try:
+            self.client.release_host(token, host_db_id)
+        except ImbueCloudConnectorError as exc:
+            logger.warning("imbue_cloud[{}] release of lease {} did not succeed: {}", self.name, host_db_id, exc)
 
     def _prepare_pending_keypair(self) -> tuple[Path, Path, str]:
         """Generate a per-lease SSH keypair in a temp dir (host_id not yet known)."""
@@ -1694,17 +1708,13 @@ class ImbueCloudProvider(BaseProviderInstance):
         if host_db_id is not None:
             account = self._require_account()
             token = self._get_access_token(account)
-            released = self.client.release_host(token, host_db_id)
-            if not released:
-                # Do NOT swallow a failed release: the lease may still be held
-                # and the VPS still running/billing. Raise so the failure is
-                # visible and the local host record survives for a retry --
-                # cleaning up local state here would make mngr "forget" a host
-                # that was never actually released (the old silent-orphan bug).
-                raise MngrError(
-                    f"failed to release imbue_cloud lease {host_db_id} for host {host_id}; "
-                    "the VPS may still be running -- re-run destroy to retry."
-                )
+            # release_host raises ImbueCloudConnectorError on failure (transport
+            # error or non-2xx, e.g. the synchronous release returning 5xx when
+            # the OVH cancel failed). Let it propagate so the failure is visible
+            # and local state is NOT cleaned up below -- cleaning up here would
+            # make mngr "forget" a host that was never actually released (the
+            # old silent-orphan bug).
+            self.client.release_host(token, host_db_id)
         self._cleanup_local_host_state(host_id)
 
     def _resolve_host_db_id(
