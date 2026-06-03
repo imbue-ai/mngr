@@ -389,6 +389,15 @@ class LocalHostNotDestroyableError(ProviderError):
         super().__init__(provider_name, "Cannot destroy the local host - it is your local computer")
 
 
+class HostShutdownNotSupportedError(ProviderError):
+    """Provider does not support stopping hosts."""
+
+    user_help_text = "Stop the agent without --stop-host, or use a provider that supports stopping hosts."
+
+    def __init__(self, provider_name: ProviderInstanceName) -> None:
+        super().__init__(provider_name, f"Provider {provider_name} does not support stopping hosts")
+
+
 class PluginSpecifierError(MngrError, ValueError):
     """Raised when a plugin specifier is invalid or cannot be resolved."""
 
