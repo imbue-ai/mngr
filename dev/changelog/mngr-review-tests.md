@@ -11,4 +11,10 @@ under test had a real bug. Unlike the other skills it deliberately reads the `_t
 files (which the repo conventions normally skip), and it defers raw pattern occurrences already
 counted by `test_ratchets.py` to those ratchets, reporting only the semantic test-quality problem.
 
+Also fixed a contradictory instruction shared by the existing `identify-*` skills
+(`identify-style-issues`, `identify-doc-code-disagreements`, `identify-outdated-docstrings`,
+`identify-inconsistencies`, `identify-suspicious-edge-cases`): their intro said to commit when
+finished, but their output files are gitignored and the closing line says no commit is needed.
+Removed the contradictory parenthetical from each.
+
 No runtime or tooling change.

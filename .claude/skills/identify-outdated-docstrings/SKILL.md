@@ -13,7 +13,7 @@ Before doing anything else, resolve these two things from `$1` and state them ex
 
 Go gather all the context for the containing library (per instructions in CLAUDE.md). Even when the scan scope is a small subdirectory, you still need the whole containing library's context (style guide, primitives, data_types, interfaces, utils) to evaluate the code in context. Be sure to read the containing library's non_issues.md as well.
 
-Once you've gathered that context, please do the below (and commit when you're finished).
+Once you've gathered that context, please do the below.
 
 Your task is to identify outdated docstrings within the scan scope.
 

@@ -13,7 +13,7 @@ Before doing anything else, resolve these two things from `$1` and state them ex
 
 Go gather all the context for the containing library (per instructions in CLAUDE.md). Even when the scan scope is a small subdirectory, you still need the whole containing library's context (style guide, primitives, data_types, interfaces, utils) to judge whether an edge case is handled correctly. Be sure to read the containing library's non_issues.md as well, and read the error-handling and control-flow sections of style_guide.md (the "If/elif/else", "Match statements with assert_never", "Exception hierarchy", and "Try/except" sections in particular).
 
-Once you've gathered that context, please do the below (and commit when you're finished).
+Once you've gathered that context, please do the below.
 
 Your task is to identify suspicious edge-case handling within the scan scope. The motivation is that defensively written code tends to *over-handle* edge cases: catching errors that should be allowed to crash, adding fallback `else` branches that paper over states that should be impossible, and inserting defensive guards that mask bugs. This skill is an intermittent cleanup pass to counteract that tendency. **The default stance is suspicion: assume each edge-case handler is unjustified until you can articulate not just that *some* handling must be there, but that *this specific logic* is the right way to handle the case.** It will often be true that the edge case needs handling of some kind; that is not enough. The bar is that the chosen behavior (this default, this caught type, this fallback value, this early return) is demonstrably the correct response to the case, not merely a plausible one.
 
