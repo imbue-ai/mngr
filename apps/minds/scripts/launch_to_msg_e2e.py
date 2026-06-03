@@ -81,12 +81,19 @@ LAUNCH_BACKEND_TIMEOUT = 120
 CANNED_BODY = "CI MOCK: greetings from the localhost slack mock."
 
 NONCE = secrets.token_urlsafe(6)
+# The previous prompt asked claude to "respond with the prefix 'TOK <NONCE>:'
+# followed by the EXACT text of the message you read, character-for-character"
+# -- that shape (read content + echo verbatim behind a token marker) trips
+# claude's prompt-injection / exfiltration heuristics, so claude refused
+# the slack call and the canned body never landed in chat. Reframe as a
+# normal user task: read the latest message and just tell me what it says.
+# The script only asserts CANNED_BODY appears in chat, so claude quoting
+# the message (with or without a prefix) is enough.
 SLACK_PROMPT = (
-    "Read-only Slack task. DO NOT post, send, or write any message anywhere. "
-    "Use only read-style Slack tool calls. Read one message from any channel "
-    "and respond ONLY here in this chat panel (no Slack post) with the prefix "
-    f'"TOK {NONCE}:" followed by the EXACT text of the message you read, '
-    "character-for-character."
+    "Please read the most recent message from any Slack channel using a "
+    "read-only Slack tool. Don't post anything. Then tell me here in chat "
+    "what the message says -- you can quote it inline or summarise; "
+    "either is fine, but I need to see the message text. Thanks!"
 )
 
 SKIP_FIRST_MESSAGE = os.environ.get("SKIP_FIRST_MESSAGE", "0") == "1"
