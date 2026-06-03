@@ -56,7 +56,7 @@ JINJA_ENV: Final[Environment] = Environment(
 
 
 class _RendersHtml(Protocol):
-    """Structural type accepted by ``_render_ssr_or_fallback``.
+    """Structural type accepted by ``render_ssr_or_fallback``.
 
     Concrete production callers pass an ``SsrSidecar``. Tests pass
     lightweight fakes that don't subclass it (the production class is a
@@ -113,7 +113,7 @@ def _client_render_shell(*, route: str, props: dict[str, Any], bundle: str = "ap
     )
 
 
-def _render_ssr_or_fallback(
+def render_ssr_or_fallback(
     *,
     sidecar: _RendersHtml | None,
     route: str,
@@ -208,7 +208,7 @@ def render_landing_page(
         "agent_names": agent_names or {},
         "destroying_status_by_agent_id": destroying_status_by_agent_id or {},
     }
-    return _render_ssr_or_fallback(sidecar=sidecar, route="landing", props=props)
+    return render_ssr_or_fallback(sidecar=sidecar, route="landing", props=props)
 
 
 # Hardcoded fallbacks for the workspace-creation form. Overridable via
@@ -332,7 +332,7 @@ def render_create_form(
         "anthropic_api_key": anthropic_api_key,
         "error_message": error_message,
     }
-    return _render_ssr_or_fallback(sidecar=sidecar, route="create", props=props)
+    return render_ssr_or_fallback(sidecar=sidecar, route="create", props=props)
 
 
 _STATUS_TEXT_DEFAULT: Final[dict[str, str]] = {
@@ -416,12 +416,12 @@ def render_welcome_page(sidecar: SsrSidecar | None = None) -> str:
     shim asks the sidecar to render it and falls back to the
     client-render shell when the sidecar isn't available.
     """
-    return _render_ssr_or_fallback(sidecar=sidecar, route="welcome", props={})
+    return render_ssr_or_fallback(sidecar=sidecar, route="welcome", props={})
 
 
 def render_login_page(sidecar: SsrSidecar | None = None) -> str:
     """Render the login prompt page for unauthenticated users."""
-    return _render_ssr_or_fallback(sidecar=sidecar, route="login", props={})
+    return render_ssr_or_fallback(sidecar=sidecar, route="login", props={})
 
 
 def render_login_redirect_page(
@@ -435,7 +435,7 @@ def render_login_redirect_page(
     never interpolate it into a string literal here, matching the
     safety contract of the original Jinja template.
     """
-    return _render_ssr_or_fallback(
+    return render_ssr_or_fallback(
         sidecar=sidecar,
         route="login_redirect",
         props={"one_time_code": str(one_time_code)},
@@ -444,7 +444,7 @@ def render_login_redirect_page(
 
 def render_auth_error_page(message: str, sidecar: SsrSidecar | None = None) -> str:
     """Render an error page for failed authentication."""
-    return _render_ssr_or_fallback(
+    return render_ssr_or_fallback(
         sidecar=sidecar,
         route="auth_error",
         props={"message": message},
@@ -488,7 +488,7 @@ def render_recovery_page(
         "ssh_command": ssh_command,
         "accent": workspace_accent(str(agent_id)),
     }
-    return _render_ssr_or_fallback(sidecar=sidecar, route="recovery", props=props)
+    return render_ssr_or_fallback(sidecar=sidecar, route="recovery", props=props)
 
 
 def render_destroying_page(
@@ -513,7 +513,7 @@ def render_destroying_page(
         "status": status,
         "accent": workspace_accent(str(agent_id)),
     }
-    return _render_ssr_or_fallback(sidecar=sidecar, route="destroying", props=props)
+    return render_ssr_or_fallback(sidecar=sidecar, route="destroying", props=props)
 
 
 # -- Chrome (persistent shell) templates --
@@ -542,7 +542,7 @@ def render_chrome_page(
     this shim asks the chrome SSR bundle to render it and falls back to
     the client-render shell when the sidecar isn't available.
     """
-    return _render_ssr_or_fallback(
+    return render_ssr_or_fallback(
         sidecar=sidecar,
         route="chrome",
         props={
@@ -571,7 +571,7 @@ def render_sidebar_page(
     asks the sidebar SSR bundle to render it and falls back to the
     client-render shell when the sidecar isn't available.
     """
-    return _render_ssr_or_fallback(
+    return render_ssr_or_fallback(
         sidecar=sidecar,
         route="sidebar",
         props={"mngrForwardOrigin": mngr_forward_origin},
@@ -692,4 +692,4 @@ def render_accounts_page(
         "default_account_id": default_account_id or "",
         "enabled_by_user_id": dict(enabled_by_user_id or {}),
     }
-    return _render_ssr_or_fallback(sidecar=sidecar, route="accounts", props=props)
+    return render_ssr_or_fallback(sidecar=sidecar, route="accounts", props=props)

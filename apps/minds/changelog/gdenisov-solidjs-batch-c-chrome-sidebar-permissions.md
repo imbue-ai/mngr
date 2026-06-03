@@ -21,7 +21,7 @@ bundles:
 
 The SSR sidecar's `/__ssr/render` endpoint now accepts a `bundle` field
 selecting which client bundle's route registry to use; the Python
-`SsrSidecar.render` shim and the `_render_ssr_or_fallback` helper carry
+`SsrSidecar.render` shim and the `render_ssr_or_fallback` helper carry
 the same `bundle` parameter through so the fallback client-render shell
 loads the matching entry script. The `_chrome` / `_chrome/sidebar`
 routes and the latchkey permission renderers all dispatch through the

@@ -26,7 +26,7 @@ from collections.abc import Sequence
 
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
 from imbue.minds.desktop_client.ssr_sidecar import SsrSidecar
-from imbue.minds.desktop_client.templates import _render_ssr_or_fallback
+from imbue.minds.desktop_client.templates import render_ssr_or_fallback
 from imbue.minds.desktop_client.templates import workspace_accent
 
 
@@ -56,7 +56,7 @@ def render_predefined_permission_dialog(
     this shim asks the SSR sidecar to render it and falls back to the
     client-render shell when the sidecar isn't available.
     """
-    return _render_ssr_or_fallback(
+    return render_ssr_or_fallback(
         sidecar=sidecar,
         route="permissions/predefined",
         props={
@@ -102,7 +102,7 @@ def render_file_sharing_permission_dialog(
     ``mngr_forward_origin`` is the bare origin of the ``mngr forward`` plugin;
     the workspace link in the dialog points at ``{mngr_forward_origin}/goto/<agent>/``.
     """
-    return _render_ssr_or_fallback(
+    return render_ssr_or_fallback(
         sidecar=sidecar,
         route="permissions/file_sharing",
         props={

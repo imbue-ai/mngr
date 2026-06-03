@@ -9,7 +9,7 @@ process is out of scope for the current migration phase.
 
 from imbue.minds.desktop_client.ssr_sidecar import SsrSidecarError
 from imbue.minds.desktop_client.templates import _client_render_shell
-from imbue.minds.desktop_client.templates import _render_ssr_or_fallback
+from imbue.minds.desktop_client.templates import render_ssr_or_fallback
 from imbue.minds.desktop_client.testing import extract_ssr_route_payload
 
 
@@ -39,7 +39,7 @@ def test_client_render_shell_escapes_script_terminators() -> None:
 
 
 def test_render_ssr_or_fallback_with_no_sidecar_returns_shell() -> None:
-    html = _render_ssr_or_fallback(sidecar=None, route="login", props={})
+    html = render_ssr_or_fallback(sidecar=None, route="login", props={})
     payload = extract_ssr_route_payload(html)
     assert payload["route"] == "login"
     assert payload["props"] == {}
@@ -53,7 +53,7 @@ class _BoomSidecar:
 
 
 def test_render_ssr_or_fallback_with_failing_sidecar_returns_shell() -> None:
-    html = _render_ssr_or_fallback(sidecar=_BoomSidecar(), route="welcome", props={})
+    html = render_ssr_or_fallback(sidecar=_BoomSidecar(), route="welcome", props={})
     payload = extract_ssr_route_payload(html)
     # The shell still embeds the route key so client hydration can take
     # over -- the user sees the page as soon as the JS bundle loads.
@@ -71,6 +71,6 @@ class _SuccessSidecar:
 
 def test_render_ssr_or_fallback_with_healthy_sidecar_returns_ssr_html() -> None:
     sidecar = _SuccessSidecar()
-    html = _render_ssr_or_fallback(sidecar=sidecar, route="welcome", props={"a": 1})
+    html = render_ssr_or_fallback(sidecar=sidecar, route="welcome", props={"a": 1})
     assert html == "<html><body>SSR for welcome</body></html>"
     assert sidecar.calls == [("welcome", {"a": 1}, "app")]

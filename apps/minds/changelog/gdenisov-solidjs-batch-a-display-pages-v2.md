@@ -4,7 +4,7 @@ Continues the Solid.js UI migration. Routes ``/``, ``/accounts``,
 ``/agents/<id>/recovery``, and ``/destroying/<id>`` are now backed by
 Solid components under ``apps/minds/frontend/src/routes/``. The Python
 ``render_*`` shims build a JSON-serializable props dict and call the
-shared ``_render_ssr_or_fallback`` helper, falling back to the client
+shared ``render_ssr_or_fallback`` helper, falling back to the client
 shell when the SSR sidecar is unhealthy. Behavior is unchanged from the
 user's perspective; the migration is structural.
 
