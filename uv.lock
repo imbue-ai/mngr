@@ -1770,7 +1770,7 @@ requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-claude"
-version = "0.2.10"
+version = "0.2.11"
 source = { editable = "libs/mngr_claude" }
 dependencies = [
     { name = "imbue-mngr" },

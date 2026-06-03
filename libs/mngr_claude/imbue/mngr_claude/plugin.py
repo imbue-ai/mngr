@@ -1970,6 +1970,24 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         # 3. Write generated files to config_dir
         _write_generated_files(host, config_dir, generated_files, mngr_ctx)
 
+        # 4. Bridge .credentials.json to the remote's default Claude home so
+        # any nested mngr_claude (e.g. system_interface's mngr creating its
+        # own inner agents inside this workspace VM) finds them at the
+        # standard ~/.claude/.credentials.json path. Without this, the
+        # host's mngr_claude correctly delivers .credentials.json to this
+        # outer agent's per-agent dir, but inner agents created by nested
+        # mngr inside the VM look at ~/.claude/.credentials.json (which is
+        # empty since Claude CLI 2.x moved host-side storage to the macOS
+        # Keychain). Symlink so credential refreshes on the host propagate
+        # without re-rsync; -fn ensures we replace any stale link without
+        # dereferencing.
+        if not host.is_local and generated_files.get(Path(".credentials.json")):
+            bridged_target = config_dir / ".credentials.json"
+            host.execute_idempotent_command(
+                f"mkdir -p ~/.claude && ln -sfn {shlex.quote(str(bridged_target))} ~/.claude/.credentials.json",
+                timeout_seconds=5.0,
+            )
+
     def provision(
         self,
         host: OnlineHostInterface,
