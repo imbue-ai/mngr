@@ -108,3 +108,5 @@ def test_generate_cloud_init_includes_gvisor_install_when_requested() -> None:
     assert "runsc install" in result
     # Guarded so it is a no-op when runsc is already registered.
     assert "docker info" in result
+    # gnupg is needed for `gpg --dearmor` on minimal images that lack it.
+    assert "gnupg" in result

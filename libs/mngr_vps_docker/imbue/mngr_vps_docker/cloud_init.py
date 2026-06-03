@@ -47,6 +47,9 @@ def generate_cloud_init_user_data(
     runsc is already present).
     """
     gvisor_install_block = f"\n{_GVISOR_RUNSC_INSTALL_RUNCMD}" if install_gvisor_runtime else ""
+    # The gVisor install block dearmors the archive key with `gpg`, which is not
+    # guaranteed to be present on minimal cloud images; install gnupg when needed.
+    gvisor_packages = "\n  - gnupg" if install_gvisor_runtime else ""
     return f"""#cloud-config
 ssh_deletekeys: true
 ssh_keys:
@@ -60,7 +63,7 @@ packages:
   - ca-certificates
   - rsync
   - inotify-tools
-  - jq
+  - jq{gvisor_packages}
 runcmd:
   - curl -fsSL https://get.docker.com | sh
   - systemctl enable docker
