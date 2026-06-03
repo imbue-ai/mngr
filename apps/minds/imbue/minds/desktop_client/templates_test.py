@@ -444,19 +444,25 @@ def test_render_dev_styleguide_page_surfaces_tokens_and_macro_widgets() -> None:
     silently from the macros it documents)."""
     html = render_dev_styleguide_page()
     assert "--shadow-seam" in html
-    # The accent picker section is a separate runtime variable, not a :root token.
-    assert "--workspace-accent" in html
-    # Each pattern block should be present.
+    # Each section heading / catalog block should be present.
     for header in (
+        "Surface",
+        "Workspace palette",
+        "Brand",
+        "Typography",
+        "Spacing",
+        "Radii",
+        "Shadows",
+        "Semantic colors",
+        "State colors",
+        "Components",
+        "Chrome patterns",
         "Titlebar buttons",
         "Window controls",
         "Sidebar items",
         "Accent spine",
-        "Spinner",
-        "Buttons",
-        "Notices",
     ):
-        assert header in html, f"missing pattern: {header}"
+        assert header in html, f"missing section/pattern: {header}"
     # The buttons / notices / inputs are rendered through _macros.html; these
     # assertions verify that the macro output (button label, notice copy, input
     # name) actually reaches the rendered page.
@@ -465,13 +471,53 @@ def test_render_dev_styleguide_page_surfaces_tokens_and_macro_widgets() -> None:
     assert 'name="styleguide-focus-ring-input"' in html
 
 
+def test_render_dev_styleguide_page_has_surface_picker() -> None:
+    """The surface picker is the entry point for inspecting the design
+    system on any workspace surface -- it must include the pure-black
+    baseline, at least one Figma palette swatch, and the legacy hue
+    slider used to dial in arbitrary OKLCH workspace accents."""
+    html = render_dev_styleguide_page()
+    assert "data-surface-picker" in html
+    assert 'data-surface="#000000"' in html
+    assert 'data-surface="var(--palette-forest)"' in html
+    assert 'id="styleguide-accent-hue"' in html
+
+
+def test_render_dev_styleguide_page_renders_typography_ramp() -> None:
+    """Every type-ramp level surfaces its size, line height and weight
+    primitives so they participate in the drift ratchet."""
+    html = render_dev_styleguide_page()
+    for level in ("display", "h1", "h2", "h3", "body", "caption", "label"):
+        for facet in ("size", "line", "weight"):
+            token = f"--type-{level}-{facet}"
+            assert token in html, f"missing type-ramp token: {token}"
+
+
+def test_render_dev_styleguide_page_renders_spacing_and_radius_scales() -> None:
+    """Every spacing / radius primitive surfaces as a data-token swatch."""
+    html = render_dev_styleguide_page()
+    for n in (1, 2, 3, 4, 5, 6, 8, 10, 12):
+        assert f'data-token="--space-{n}"' in html, f"missing space token --space-{n}"
+    for level in ("sm", "md", "lg", "xl", "pill"):
+        assert f'data-token="--radius-{level}"' in html, f"missing radius token --radius-{level}"
+
+
 def test_dev_styleguide_token_swatches_enumerate_root_declarations() -> None:
-    """Drift guard: every ``:root`` token in ``tokens.css`` must have a
-    matching ``data-token`` swatch in the styleguide template (and vice
-    versa). Failure means the catalog is out of sync with the live tokens.
+    """Drift guard: every token declared in the bare ``:root { ... }`` block
+    of ``tokens.css`` must have a matching ``data-token`` swatch in the
+    styleguide template (and vice versa). Failure means the catalog is out
+    of sync with the live tokens.
+
+    Scoped to the bare ``:root { ... }`` block (the first occurrence, with
+    no attribute selector); the dark-theme override block under
+    ``:root[data-theme="dark"]`` only ever redeclares names from the bare
+    block, so enumerating the bare block alone is sufficient to catch drift
+    in either direction.
     """
-    root_block = re.search(r":root\s*\{([^}]*)\}", _TOKENS_CSS_PATH.read_text(), re.DOTALL)
-    assert root_block is not None, "tokens.css must declare a :root block"
+    # The leading newline + ``:root {`` (no attribute) anchors the regex to
+    # the bare :root block; ``:root[data-theme="dark"]`` does not match.
+    root_block = re.search(r"\n:root\s*\{([^}]*)\}", _TOKENS_CSS_PATH.read_text(), re.DOTALL)
+    assert root_block is not None, "tokens.css must declare a bare :root block"
     declared = {f"--{name}" for name in re.findall(r"--([a-z][a-z0-9-]*)\s*:", root_block.group(1))}
 
     html = render_dev_styleguide_page()

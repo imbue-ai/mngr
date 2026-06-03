@@ -2,20 +2,175 @@
  * Design tokens + a handful of custom CSS that Tailwind doesn't cover
  * (per-workspace accent stripe, spinner keyframes, titlebar drop shadow).
  *
- * This file is committed and loaded alongside the Tailwind Play CDN JS
- * (which generates utility classes at runtime -- see static/tailwind.js).
+ * Layered like this:
+ *   :root                              -- primitives (Figma palette, type
+ *                                         ramp, spacing/radius/shadow scales)
+ *                                         PLUS the light-theme values for
+ *                                         every semantic token. Acts as the
+ *                                         default theme for any page that
+ *                                         hasn't set a data-theme attribute.
+ *   :root[data-theme="dark"]           -- dark-theme overrides only for
+ *                                         semantic tokens whose value differs.
  *
- * Chrome colors / focus rings / link color are not tokens here -- chrome
- * uses raw Tailwind classes (bg-zinc-900, text-zinc-200, border-white/10,
- * focus:ring-blue-600/15, ...) directly. The only token consumed by
- * non-styleguide code is --shadow-seam (titlebar drop shadow, chrome.html)
- * and the implicit --workspace-accent (set per-workspace via inline
- * style, consumed by the .page-workspace / .accent-spine / .sidebar-item
- * / .accent-swatch rules below).
+ * ``--workspace-surface`` is set per-page (server inlines it on <body> via
+ * the existing workspace_accent() helper, or falls back to pure black on
+ * non-workspace pages). static/theme.js reads its computed luminance and
+ * writes data-theme="dark"|"light" on <html>, which is what picks the right
+ * semantic token set. macros consume semantic tokens via Tailwind classes
+ * (bg-surface, text-ink, border-line, ...) configured in
+ * static/tailwind_config.js, or via bg-[var(--surface-base)] arbitrary-
+ * value classes.
+ *
+ * Drift guard: every --token: declaration in the bare :root block must
+ * have a matching data-token="--name" swatch on /_dev/styleguide. See
+ * templates_test.py::test_dev_styleguide_token_swatches_enumerate_root_declarations.
+ * The dark-theme overrides intentionally repeat the same token names, so
+ * the ratchet doesn't need to enumerate them separately -- the swatch on
+ * the styleguide flips visually when the surface picker engages
+ * data-theme="dark".
  */
 
 :root {
-  --shadow-seam: 0 4px 10px -6px rgba(0, 0, 0, 0.35);
+  /* --- Workspace palette (primitives) ---------------------------------
+     Picker source for new workspaces. Existing workspaces continue to
+     use the hash-derived oklch(L% 0.15 H) accent until they're migrated
+     onto this palette in a future PR. */
+  --palette-forest-deep:  oklch(28% 0.04 165);
+  --palette-forest:       oklch(38% 0.07 150);
+  --palette-claret:       oklch(38% 0.08 25);
+  --palette-olive:        oklch(48% 0.09 110);
+  --palette-charcoal:     oklch(35% 0.02 270);
+  --palette-sky:          oklch(78% 0.06 235);
+  --palette-blush:        oklch(82% 0.05 25);
+  --palette-lime:         oklch(86% 0.16 115);
+  --palette-lavender:     oklch(82% 0.05 290);
+  --palette-sage:         oklch(86% 0.04 145);
+  --palette-cream:        oklch(92% 0.05 80);
+  --palette-taupe:        oklch(70% 0.03 65);
+
+  /* --- Brand / state primitives -------------------------------------- */
+  --palette-brand-red:      rgb(220 38 38);
+  --palette-brand-red-soft: rgb(254 202 202);
+  --palette-accent-blue:    rgb(37 99 235);
+
+  /* --- Typography ramp ----------------------------------------------- */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --type-display-size:   32px;
+  --type-display-line:   40px;
+  --type-display-weight: 600;
+  --type-h1-size:        24px;
+  --type-h1-line:        32px;
+  --type-h1-weight:      600;
+  --type-h2-size:        18px;
+  --type-h2-line:        26px;
+  --type-h2-weight:      600;
+  --type-h3-size:        15px;
+  --type-h3-line:        22px;
+  --type-h3-weight:      600;
+  --type-body-size:      14px;
+  --type-body-line:      21px;
+  --type-body-weight:    400;
+  --type-caption-size:   12px;
+  --type-caption-line:   18px;
+  --type-caption-weight: 400;
+  --type-label-size:     11px;
+  --type-label-line:     16px;
+  --type-label-weight:   500;
+
+  /* --- Spacing ramp -------------------------------------------------- */
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3:  12px;
+  --space-4:  16px;
+  --space-5:  20px;
+  --space-6:  24px;
+  --space-8:  32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* --- Radius scale -------------------------------------------------- */
+  --radius-sm:   6px;
+  --radius-md:   8px;
+  --radius-lg:   12px;
+  --radius-xl:   16px;
+  --radius-pill: 9999px;
+
+  /* --- Shadows ------------------------------------------------------- */
+  --shadow-seam:    0 4px 10px -6px rgba(0, 0, 0, 0.35);
+  --shadow-card:    0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-popover: 0 10px 30px -10px rgba(0, 0, 0, 0.25);
+
+  /* --- Semantic tokens (light-theme defaults) -----------------------
+     These are the values used when no data-theme is set OR when
+     data-theme="light". The dark-theme block below overrides each one
+     that differs. Macros and pages should reference these semantic
+     tokens (bg-surface / text-ink / border-line / ...) rather than the
+     primitives above. */
+  --surface-base:     var(--workspace-surface, #ffffff);
+  --surface-elevated: #ffffff;
+  --surface-overlay:  #ffffff;
+  --surface-sunken:   rgb(244 244 245);
+
+  --text-primary:   rgb(24 24 27);
+  --text-secondary: rgb(82 82 91);
+  --text-muted:     rgb(161 161 170);
+  --text-on-accent: #ffffff;
+
+  --border-default: rgb(228 228 231);
+  --border-strong:  rgb(212 212 216);
+  --border-focus:   var(--palette-accent-blue);
+
+  --accent:       var(--palette-accent-blue);
+  --accent-hover: rgb(29 78 216);
+  --accent-soft:  rgb(219 234 254);
+
+  --state-info-bg:       rgb(239 246 255);
+  --state-info-fg:       rgb(30 58 138);
+  --state-info-border:   rgb(219 234 254);
+  --state-warn-bg:       rgb(255 251 235);
+  --state-warn-fg:       rgb(146 64 14);
+  --state-warn-border:   rgb(253 230 138);
+  --state-success-bg:    rgb(236 253 245);
+  --state-success-fg:    rgb(4 120 87);
+  --state-success-border: rgb(167 243 208);
+  --state-error-bg:      rgb(254 242 242);
+  --state-error-fg:      var(--palette-brand-red);
+  --state-error-border:  var(--palette-brand-red-soft);
+}
+
+:root[data-theme="dark"] {
+  --surface-base:     var(--workspace-surface, #000000);
+  --surface-elevated: rgba(255, 255, 255, 0.04);
+  --surface-overlay:  rgb(24 24 27);
+  --surface-sunken:   rgba(0, 0, 0, 0.25);
+
+  --text-primary:   rgb(244 244 245);
+  --text-secondary: rgb(212 212 216);
+  --text-muted:     rgb(161 161 170);
+  --text-on-accent: rgb(9 9 11);
+
+  --border-default: rgba(255, 255, 255, 0.10);
+  --border-strong:  rgba(255, 255, 255, 0.20);
+  --border-focus:   rgb(147 197 253);
+
+  --accent:       rgb(96 165 250);
+  --accent-hover: rgb(147 197 253);
+  --accent-soft:  rgba(96, 165, 250, 0.15);
+
+  --state-info-bg:        rgba(96, 165, 250, 0.12);
+  --state-info-fg:        rgb(191 219 254);
+  --state-info-border:    rgba(96, 165, 250, 0.30);
+  --state-warn-bg:        rgba(251, 191, 36, 0.12);
+  --state-warn-fg:        rgb(253 224 71);
+  --state-warn-border:    rgba(251, 191, 36, 0.30);
+  --state-success-bg:     rgba(52, 211, 153, 0.12);
+  --state-success-fg:     rgb(110 231 183);
+  --state-success-border: rgba(52, 211, 153, 0.30);
+  --state-error-bg:       rgba(220, 38, 38, 0.15);
+  --state-error-fg:       rgb(252 165 165);
+  --state-error-border:   rgba(220, 38, 38, 0.35);
 }
 
 /*
@@ -77,43 +232,44 @@ html {
  * Onboarding option cards (creating-page question flow). Selection state
  * and the editable-textarea reveal are driven by the `.opt-selected` class
  * (toggled by static/creating.js); kept here rather than as Tailwind
- * utilities because they depend on parent-state selectors.
+ * utilities because they depend on parent-state selectors. Colors now flow
+ * through the semantic tokens so the cards auto-flip on a dark surface.
  */
 .opt {
   display: flex;
   gap: 12px;
   padding: 13px 14px;
-  border: 1px solid rgba(9, 9, 11, 0.1);
+  border: 1px solid var(--border-default);
   border-radius: 11px;
   cursor: pointer;
-  background: #f5f5f7;
+  background: var(--surface-sunken);
   transition: border-color 150ms, background 150ms;
 }
 .opt:hover {
-  border-color: rgba(9, 9, 11, 0.2);
+  border-color: var(--border-strong);
 }
 .opt-selected {
-  border-color: #2563eb;
-  background: rgba(37, 99, 235, 0.06);
+  border-color: var(--accent);
+  background: var(--accent-soft);
 }
 .opt-radio {
   flex: 0 0 auto;
   width: 17px;
   height: 17px;
   border-radius: 50%;
-  border: 1.5px solid rgba(9, 9, 11, 0.25);
+  border: 1.5px solid var(--border-strong);
   margin-top: 2px;
   position: relative;
 }
 .opt-selected .opt-radio {
-  border-color: #2563eb;
+  border-color: var(--accent);
 }
 .opt-selected .opt-radio::after {
   content: '';
   position: absolute;
   inset: 3.5px;
   border-radius: 50%;
-  background: #2563eb;
+  background: var(--accent);
 }
 .opt-body {
   flex: 1;
@@ -130,8 +286,8 @@ html {
 }
 
 .spinner {
-  border: 2px solid #e4e4e7;
-  border-top-color: #18181b;
+  border: 2px solid var(--border-default);
+  border-top-color: var(--text-primary);
   border-radius: 50%;
   animation: spin 800ms linear infinite;
 }

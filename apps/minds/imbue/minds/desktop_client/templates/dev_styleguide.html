@@ -1,238 +1,426 @@
 {#
-  Dev styleguide: hand-authored inventory of design tokens and UI
-  patterns. Mounted at /_dev/styleguide. Always visible (no tier gate).
+  Dev styleguide: hand-authored inventory of every design token plus a
+  live preview of the macro-driven components against any workspace
+  surface. Mounted at /_dev/styleguide. Always visible (no tier gate).
+
+  Drift guard: every ``--name:`` declaration in the bare ``:root { ... }``
+  block of static/tokens.css must have a matching ``data-token="--name"``
+  swatch on this page (and vice versa). The ratchet in templates_test.py
+  enforces this in both directions.
+
+  The whole page renders on the active workspace surface -- the picker at
+  the top writes ``--workspace-surface`` on <body> and static/theme.js
+  recomputes ``<html data-theme>`` so the entire page flips palette.
 #}
 {% extends 'base.html' %}
 {% import '_macros.html' as ui %}
-{% block title %}Minds Styleguide{% endblock %}
+{% block title %}Minds Design System{% endblock %}
+{% block body_class %}bg-surface text-ink font-sans antialiased{% endblock %}
 {% block content %}
-<div class="max-w-5xl mx-auto px-8 py-10">
+<div class="max-w-5xl mx-auto px-8 py-10 space-y-12">
 
-  <header class="mb-10">
-    <h1 class="text-2xl font-semibold text-zinc-900">Minds Styleguide</h1>
-    <p class="text-sm text-zinc-500 mt-1">
-      Tokens are in
-      <code class="text-zinc-700">apps/minds/imbue/minds/desktop_client/static/tokens.css</code>.
+  <header>
+    <h1 class="text-h1 text-ink">Minds Design System</h1>
+    <p class="text-body text-ink-secondary mt-2 max-w-2xl">
+      The page below renders on the surface you pick. Every component, every
+      token reacts: light surfaces get dark-on-light components, dark surfaces
+      get light-on-dark. Tokens live in
+      <code class="font-mono text-caption text-ink">apps/minds/imbue/minds/desktop_client/static/tokens.css</code>.
     </p>
   </header>
 
-  {# ----- Tokens ------------------------------------------------------- #}
-  <section class="mb-12">
-    <h2 class="text-lg font-semibold text-zinc-900 mb-1">Tokens</h2>
-    <p class="text-xs text-zinc-500 mb-4">
-      CSS custom properties declared on <code>:root</code> in
-      <code>static/tokens.css</code>.
+  {# ----- Surface picker -------------------------------------------------- #}
+  <section data-surface-picker>
+    <h2 class="text-h2 text-ink mb-1">Surface</h2>
+    <p class="text-caption text-ink-secondary mb-4">
+      Pick a workspace color (or the pure-black non-workspace baseline). The
+      whole page re-tints and components flip between light- and dark-theme
+      palettes automatically based on the surface's luminance.
     </p>
-    {#
-      Each swatch declares its token via ``data-token="--<name>"``. The
-      ratchet in ``templates_test.py`` cross-checks this set against the
-      ``:root`` declarations in ``static/tokens.css`` and fails if either
-      side drifts.
-    #}
-    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-      <div data-token="--shadow-seam"
-           class="flex items-center gap-3 bg-white border border-zinc-200 rounded-lg p-3 shadow-sm">
-        <div class="w-10 h-10 rounded-md bg-white shrink-0"
-             style="box-shadow: var(--shadow-seam);"></div>
+    <div class="bg-surface-elevated border border-line rounded-xl p-4 shadow-card">
+      <div class="flex flex-wrap items-stretch gap-2" id="surface-swatches">
+        <button type="button" data-surface="#000000"
+                class="surface-swatch group flex flex-col items-start gap-1 px-3 py-2 rounded-md border border-line transition hover:border-line-strong"
+                style="background: #000000; color: #ffffff;">
+          <span class="text-caption font-medium">pure black</span>
+          <span class="font-mono text-[11px] opacity-70">#000000</span>
+        </button>
+        <button type="button" data-surface="#ffffff"
+                class="surface-swatch group flex flex-col items-start gap-1 px-3 py-2 rounded-md border border-line transition hover:border-line-strong"
+                style="background: #ffffff; color: #18181b;">
+          <span class="text-caption font-medium">pure white</span>
+          <span class="font-mono text-[11px] opacity-70">#ffffff</span>
+        </button>
+        {% for name, css in [
+              ('forest-deep', 'var(--palette-forest-deep)'),
+              ('forest',      'var(--palette-forest)'),
+              ('claret',      'var(--palette-claret)'),
+              ('olive',       'var(--palette-olive)'),
+              ('charcoal',    'var(--palette-charcoal)'),
+              ('sky',         'var(--palette-sky)'),
+              ('blush',       'var(--palette-blush)'),
+              ('lime',        'var(--palette-lime)'),
+              ('lavender',    'var(--palette-lavender)'),
+              ('sage',        'var(--palette-sage)'),
+              ('cream',       'var(--palette-cream)'),
+              ('taupe',       'var(--palette-taupe)'),
+        ] %}
+        <button type="button" data-surface="{{ css }}"
+                class="surface-swatch group flex flex-col items-start gap-1 px-3 py-2 rounded-md border border-line transition hover:border-line-strong"
+                style="background: {{ css }}; color: rgba(255,255,255,0.95);">
+          <span class="text-caption font-medium">{{ name }}</span>
+          <span class="font-mono text-[11px] opacity-70">--palette-{{ name }}</span>
+        </button>
+        {% endfor %}
+        <div class="flex items-center gap-3 ml-2">
+          <label for="styleguide-accent-hue" class="text-caption text-ink-secondary">workspace hue</label>
+          <input id="styleguide-accent-hue" type="range" min="0" max="360" value="230" class="w-32">
+          <code id="styleguide-accent-value" class="font-mono text-[11px] text-ink-secondary"></code>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {# ----- Workspace palette ---------------------------------------------- #}
+  <section>
+    <h2 class="text-h2 text-ink mb-1">Workspace palette</h2>
+    <p class="text-caption text-ink-secondary mb-4">
+      Picker source for new workspaces (future PR). Each swatch is a CSS
+      variable on <code class="font-mono">:root</code>.
+    </p>
+    <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+      {% for name in ['forest-deep', 'forest', 'claret', 'olive', 'charcoal', 'sky',
+                      'blush', 'lime', 'lavender', 'sage', 'cream', 'taupe'] %}
+      <div data-token="--palette-{{ name }}"
+           class="flex items-center gap-3 bg-surface-elevated border border-line rounded-lg p-3 shadow-card">
+        <div class="w-10 h-10 rounded-md border border-line shrink-0"
+             style="background: var(--palette-{{ name }});"></div>
         <div class="min-w-0 flex-1">
-          <div class="text-xs font-mono text-zinc-900 truncate">--shadow-seam</div>
-          <div class="text-[11px] font-mono text-zinc-500 truncate">0 4px 10px -6px rgba(0, 0, 0, 0.35)</div>
+          <div class="font-mono text-caption text-ink truncate">--palette-{{ name }}</div>
         </div>
       </div>
+      {% endfor %}
     </div>
   </section>
 
-  {# ----- Workspace accent picker ------------------------------------- #}
-  <section class="mb-12">
-    <h2 class="text-lg font-semibold text-zinc-900 mb-1">Workspace accent</h2>
-    <p class="text-xs text-zinc-500 mb-4">
-      Per-workspace identity color. Drag the hue slider; everything below
-      that uses <code>--workspace-accent</code> updates live.
+  {# ----- Brand primitives ----------------------------------------------- #}
+  <section>
+    <h2 class="text-h2 text-ink mb-1">Brand</h2>
+    <p class="text-caption text-ink-secondary mb-4">
+      State-color seeds and the default interactive accent. Semantic tokens
+      (below) reference these.
     </p>
-    <div class="bg-white border border-zinc-200 rounded-lg p-4 shadow-sm">
-      <div class="flex items-center gap-4">
-        <div class="accent-swatch w-12 h-12 rounded-md border border-zinc-300 shrink-0"></div>
-        <div class="flex-1">
-          <label for="styleguide-accent-hue" class="block text-xs text-zinc-500 mb-1">
-            hue (0-360)
-          </label>
-          <input id="styleguide-accent-hue" type="range" min="0" max="360" value="230"
-                 class="w-full">
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+      {% for name in ['brand-red', 'brand-red-soft', 'accent-blue'] %}
+      <div data-token="--palette-{{ name }}"
+           class="flex items-center gap-3 bg-surface-elevated border border-line rounded-lg p-3 shadow-card">
+        <div class="w-10 h-10 rounded-md border border-line shrink-0"
+             style="background: var(--palette-{{ name }});"></div>
+        <div class="min-w-0 flex-1">
+          <div class="font-mono text-caption text-ink truncate">--palette-{{ name }}</div>
         </div>
-        <code id="styleguide-accent-value" class="text-xs text-zinc-700"></code>
       </div>
+      {% endfor %}
     </div>
   </section>
 
-  {# ----- Pattern catalog --------------------------------------------- #}
-  <section class="mb-12">
-    <h2 class="text-lg font-semibold text-zinc-900 mb-1">Patterns</h2>
-    <p class="text-xs text-zinc-500 mb-4">
-      Common chrome and workspace UI patterns. Source files linked under
-      each example.
+  {# ----- Typography ramp ------------------------------------------------ #}
+  <section>
+    <h2 class="text-h2 text-ink mb-1">Typography</h2>
+    <p class="text-caption text-ink-secondary mb-4">
+      Sizes, line heights and weights are CSS variables; each ramp level
+      maps to a single Tailwind class (<code class="font-mono">text-h1</code>,
+      <code class="font-mono">text-body</code>, ...).
+    </p>
+    <div class="hidden" data-token="--font-sans">sans</div>
+    <div class="hidden" data-token="--font-mono">mono</div>
+    <div class="bg-surface-elevated border border-line rounded-xl p-5 shadow-card space-y-5">
+      {% for level, sample in [
+            ('display', 'Display — large statement'),
+            ('h1',      'Heading 1 — section title'),
+            ('h2',      'Heading 2 — subsection'),
+            ('h3',      'Heading 3 — group label'),
+            ('body',    'Body — running prose, paragraphs, descriptions.'),
+            ('caption', 'Caption — secondary copy, helper text, captions.'),
+            ('label',   'LABEL — uppercase metadata'),
+      ] %}
+      <div class="flex items-baseline gap-6 border-b border-line pb-4 last:border-b-0 last:pb-0">
+        <div class="w-24 shrink-0 font-mono text-[11px] text-ink-muted leading-tight">
+          <span data-token="--type-{{ level }}-size">size</span> /
+          <span data-token="--type-{{ level }}-line">line</span> /
+          <span data-token="--type-{{ level }}-weight">weight</span>
+        </div>
+        <div class="text-{{ level }} text-ink flex-1">{{ sample }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+
+  {# ----- Spacing scale ------------------------------------------------- #}
+  <section>
+    <h2 class="text-h2 text-ink mb-1">Spacing</h2>
+    <p class="text-caption text-ink-secondary mb-4">
+      Pixel values exposed both as CSS variables and as Tailwind
+      <code class="font-mono">s-*</code> classes (additive; default
+      Tailwind <code class="font-mono">1</code>..<code class="font-mono">96</code>
+      stays available).
+    </p>
+    <div class="bg-surface-elevated border border-line rounded-xl p-5 shadow-card space-y-2">
+      {% for n in [1, 2, 3, 4, 5, 6, 8, 10, 12] %}
+      <div data-token="--space-{{ n }}" class="flex items-center gap-4">
+        <div class="font-mono text-caption text-ink-muted w-24 shrink-0">--space-{{ n }}</div>
+        <div class="bg-accent rounded-sm" style="height: 12px; width: var(--space-{{ n }});"></div>
+        <div class="font-mono text-[11px] text-ink-muted">{{ {1:4,2:8,3:12,4:16,5:20,6:24,8:32,10:40,12:48}[n] }}px</div>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+
+  {# ----- Radius scale -------------------------------------------------- #}
+  <section>
+    <h2 class="text-h2 text-ink mb-1">Radii</h2>
+    <p class="text-caption text-ink-secondary mb-4">
+      Available as Tailwind <code class="font-mono">rounded-ds-*</code>
+      classes (default <code class="font-mono">rounded-sm/md/lg/xl</code>
+      pixel values are unchanged).
+    </p>
+    <div class="bg-surface-elevated border border-line rounded-xl p-5 shadow-card flex flex-wrap gap-4">
+      {% for level, px in [('sm', '6'), ('md', '8'), ('lg', '12'), ('xl', '16'), ('pill', '9999')] %}
+      <div data-token="--radius-{{ level }}" class="flex flex-col items-center gap-2">
+        <div class="w-16 h-16 bg-accent" style="border-radius: var(--radius-{{ level }});"></div>
+        <div class="font-mono text-[11px] text-ink-muted">--radius-{{ level }}</div>
+        <div class="font-mono text-[11px] text-ink-muted">{{ px }}px</div>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+
+  {# ----- Shadows ------------------------------------------------------- #}
+  <section>
+    <h2 class="text-h2 text-ink mb-1">Shadows</h2>
+    <p class="text-caption text-ink-secondary mb-4">
+      Available as Tailwind <code class="font-mono">shadow-seam</code>,
+      <code class="font-mono">shadow-card</code>,
+      <code class="font-mono">shadow-popover</code>.
+    </p>
+    <div class="bg-surface-sunken rounded-xl p-8 grid grid-cols-1 sm:grid-cols-3 gap-6">
+      {% for name in ['seam', 'card', 'popover'] %}
+      <div data-token="--shadow-{{ name }}" class="flex flex-col items-center gap-2">
+        <div class="bg-surface-elevated rounded-md p-4 text-ink text-caption" style="box-shadow: var(--shadow-{{ name }});">
+          Surface
+        </div>
+        <div class="font-mono text-[11px] text-ink-muted">--shadow-{{ name }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+
+  {# ----- Semantic tokens (surface / ink / line / accent) -------------- #}
+  <section>
+    <h2 class="text-h2 text-ink mb-1">Semantic colors</h2>
+    <p class="text-caption text-ink-secondary mb-4">
+      These flip with the surface above. The square shows the actual color;
+      the label shows the CSS variable name and its Tailwind class.
+    </p>
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+      {% for var_name, tw_class in [
+            ('surface-base',     'bg-surface'),
+            ('surface-elevated', 'bg-surface-elevated'),
+            ('surface-overlay',  'bg-surface-overlay'),
+            ('surface-sunken',   'bg-surface-sunken'),
+            ('text-primary',     'text-ink'),
+            ('text-secondary',   'text-ink-secondary'),
+            ('text-muted',       'text-ink-muted'),
+            ('text-on-accent',   'text-ink-on-accent'),
+            ('border-default',   'border-line'),
+            ('border-strong',    'border-line-strong'),
+            ('border-focus',     'border-line-focus'),
+            ('accent',           'bg-accent'),
+            ('accent-hover',     'bg-accent-hover'),
+            ('accent-soft',      'bg-accent-soft'),
+      ] %}
+      <div data-token="--{{ var_name }}"
+           class="flex items-center gap-3 bg-surface-elevated border border-line rounded-lg p-3 shadow-card">
+        <div class="w-10 h-10 rounded-md border border-line shrink-0"
+             style="background: var(--{{ var_name }});"></div>
+        <div class="min-w-0 flex-1">
+          <div class="font-mono text-caption text-ink truncate">--{{ var_name }}</div>
+          <div class="font-mono text-[11px] text-ink-muted truncate">{{ tw_class }}</div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+
+  {# ----- State colors (info / warn / success / error) ----------------- #}
+  <section>
+    <h2 class="text-h2 text-ink mb-1">State colors</h2>
+    <p class="text-caption text-ink-secondary mb-4">
+      Each state has a background / foreground / border trio used by the
+      notice component.
+    </p>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+      {% for state in ['info', 'warn', 'success', 'error'] %}
+      <div class="bg-surface-elevated border border-line rounded-lg p-3 shadow-card">
+        <div class="font-mono text-caption text-ink mb-2">--state-{{ state }}-*</div>
+        <div class="grid grid-cols-3 gap-2">
+          {% for facet in ['bg', 'fg', 'border'] %}
+          <div data-token="--state-{{ state }}-{{ facet }}" class="flex items-center gap-2">
+            <div class="w-6 h-6 rounded-md border border-line shrink-0"
+                 style="background: var(--state-{{ state }}-{{ facet }});"></div>
+            <div class="font-mono text-[11px] text-ink-muted truncate">{{ facet }}</div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+
+  {# ----- Components ---------------------------------------------------- #}
+  <section>
+    <h2 class="text-h2 text-ink mb-1">Components</h2>
+    <p class="text-caption text-ink-secondary mb-4">
+      Rendered through the Jinja macros in
+      <code class="font-mono">templates/_macros.html</code> so the catalog
+      can't drift silently from the macros it documents.
     </p>
 
-    {# Titlebar buttons #}
-    <div class="mb-6">
-      <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Titlebar buttons</div>
-      <div class="rounded-lg overflow-hidden border border-zinc-200 bg-zinc-900">
-        <div class="h-[38px] flex items-center select-none border-b border-white/10 px-1">
-          <div class="flex gap-0.5">
-            <button title="Projects"
-                    class="bg-transparent border-none text-zinc-400 cursor-pointer w-8 h-7 flex items-center justify-center rounded hover:text-zinc-200 hover:bg-white/5 active:bg-white/10">
-              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+    <div class="space-y-6">
+
+      <div>
+        <div class="text-label uppercase tracking-wide text-ink-muted mb-2">Buttons</div>
+        <div class="bg-surface-elevated border border-line rounded-xl p-4 shadow-card flex flex-wrap items-center gap-2">
+          {{ ui.btn_button('Primary', variant='primary') }}
+          {{ ui.btn_button('Secondary', variant='secondary') }}
+          {{ ui.btn_button('Danger', variant='danger') }}
+          {{ ui.btn_button('Success', variant='success') }}
+          {{ ui.btn_button('Ghost', variant='ghost') }}
+        </div>
+      </div>
+
+      <div>
+        <div class="text-label uppercase tracking-wide text-ink-muted mb-2">Text input</div>
+        <div class="bg-surface-elevated border border-line rounded-xl p-4 shadow-card max-w-md">
+          {{ ui.text_input(name='styleguide-focus-ring-input', placeholder='Click to focus') }}
+        </div>
+      </div>
+
+      <div>
+        <div class="text-label uppercase tracking-wide text-ink-muted mb-2">Notices</div>
+        <div class="bg-surface-elevated border border-line rounded-xl p-4 shadow-card">
+          {% call ui.notice(variant='info') %}Heads up: informational message.{% endcall %}
+          {% call ui.notice(variant='warn') %}Careful: something may need attention.{% endcall %}
+          {% call ui.notice(variant='success') %}All set: action completed.{% endcall %}
+          {% call ui.notice(variant='error') %}Failed: something went wrong.{% endcall %}
+        </div>
+      </div>
+
+      <div>
+        <div class="text-label uppercase tracking-wide text-ink-muted mb-2">Card</div>
+        {% call ui.card() %}
+          <p class="text-body text-ink">A simple card body. Adapts to the active surface.</p>
+        {% endcall %}
+      </div>
+
+      <div>
+        <div class="text-label uppercase tracking-wide text-ink-muted mb-2">Spinner</div>
+        <div class="bg-surface-elevated border border-line rounded-xl p-4 shadow-card flex items-center gap-4">
+          {{ ui.spinner(size='sm') }}
+          {{ ui.spinner(size='md') }}
+          {{ ui.spinner(size='lg') }}
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  {# ----- Chrome patterns ---------------------------------------------- #}
+  <section>
+    <h2 class="text-h2 text-ink mb-1">Chrome patterns</h2>
+    <p class="text-caption text-ink-secondary mb-4">
+      Production chrome surfaces (titlebar, sidebar, accent stripe). These
+      still ship today's raw zinc utilities; they'll migrate onto the
+      semantic tokens in a follow-up PR.
+    </p>
+
+    <div class="space-y-6">
+
+      <div>
+        <div class="text-label uppercase tracking-wide text-ink-muted mb-2">Titlebar buttons</div>
+        <div class="rounded-lg overflow-hidden border border-line bg-zinc-900">
+          <div class="h-[38px] flex items-center select-none border-b border-white/10 px-1">
+            <div class="flex gap-0.5">
+              <button title="Projects"
+                      class="bg-transparent border-none text-zinc-400 cursor-pointer w-8 h-7 flex items-center justify-center rounded hover:text-zinc-200 hover:bg-white/5 active:bg-white/10">
+                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+              </button>
+              <button title="Home"
+                      class="bg-transparent border-none text-zinc-400 cursor-pointer w-8 h-7 flex items-center justify-center rounded hover:text-zinc-200 hover:bg-white/5 active:bg-white/10">
+                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12L12 3l9 9"/><path d="M5 10v10a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V10"/></svg>
+              </button>
+              <button title="Back"
+                      class="bg-transparent border-none text-zinc-400 cursor-pointer w-8 h-7 flex items-center justify-center rounded hover:text-zinc-200 hover:bg-white/5 active:bg-white/10">
+                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+              </button>
+              <button title="Forward"
+                      class="bg-transparent border-none text-zinc-400 cursor-pointer w-8 h-7 flex items-center justify-center rounded hover:text-zinc-200 hover:bg-white/5 active:bg-white/10">
+                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg>
+              </button>
+            </div>
+            <div class="flex-1 flex items-center justify-center gap-2 px-2 min-w-0">
+              <span class="accent-swatch w-2.5 h-2.5 rounded-sm shrink-0"></span>
+              <span class="text-zinc-200 text-xs whitespace-nowrap overflow-hidden text-ellipsis">my-workspace</span>
+            </div>
+            <button title="Requests"
+                    class="relative bg-transparent border-none text-zinc-400 cursor-pointer w-8 h-7 flex items-center justify-center rounded hover:text-zinc-200 hover:bg-white/5">
+              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
             </button>
-            <button title="Home"
-                    class="bg-transparent border-none text-zinc-400 cursor-pointer w-8 h-7 flex items-center justify-center rounded hover:text-zinc-200 hover:bg-white/5 active:bg-white/10">
-              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12L12 3l9 9"/><path d="M5 10v10a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V10"/></svg>
+          </div>
+        </div>
+        <div class="mt-1 text-[11px] text-ink-muted font-mono">templates/chrome.html</div>
+      </div>
+
+      <div>
+        <div class="text-label uppercase tracking-wide text-ink-muted mb-2">Window controls</div>
+        <div class="rounded-lg overflow-hidden border border-line bg-zinc-900">
+          <div class="h-[38px] flex items-center justify-end">
+            <button title="Minimize"
+                    class="bg-transparent border-none text-zinc-400 cursor-pointer w-9 h-[38px] flex items-center justify-center hover:bg-white/5 hover:text-zinc-200" style="border-radius: 0;">
+              <svg viewBox="0 0 12 12" class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="6" x2="10" y2="6"/></svg>
             </button>
-            <button title="Back"
-                    class="bg-transparent border-none text-zinc-400 cursor-pointer w-8 h-7 flex items-center justify-center rounded hover:text-zinc-200 hover:bg-white/5 active:bg-white/10">
-              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+            <button title="Maximize"
+                    class="bg-transparent border-none text-zinc-400 cursor-pointer w-9 h-[38px] flex items-center justify-center hover:bg-white/5 hover:text-zinc-200" style="border-radius: 0;">
+              <svg viewBox="0 0 12 12" class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="8" height="8" rx="0.5"/></svg>
             </button>
-            <button title="Forward"
-                    class="bg-transparent border-none text-zinc-400 cursor-pointer w-8 h-7 flex items-center justify-center rounded hover:text-zinc-200 hover:bg-white/5 active:bg-white/10">
-              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg>
+            <button title="Close"
+                    class="bg-transparent border-none text-zinc-400 cursor-pointer w-9 h-[38px] flex items-center justify-center hover:bg-red-600 hover:text-white" style="border-radius: 0;">
+              <svg viewBox="0 0 12 12" class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="2" x2="10" y2="10"/><line x1="10" y1="2" x2="2" y2="10"/></svg>
             </button>
           </div>
-          <div class="flex-1 flex items-center justify-center gap-2 px-2 min-w-0">
-            <span class="accent-swatch w-2.5 h-2.5 rounded-sm shrink-0"></span>
-            <span class="text-zinc-200 text-xs whitespace-nowrap overflow-hidden text-ellipsis">my-workspace</span>
-          </div>
-          <button title="Requests"
-                  class="relative bg-transparent border-none text-zinc-400 cursor-pointer w-8 h-7 flex items-center justify-center rounded hover:text-zinc-200 hover:bg-white/5">
-            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-          </button>
         </div>
+        <p class="mt-1 text-[11px] text-ink-muted">Only on non-mac platforms in real chrome (macOS uses native traffic lights).</p>
       </div>
-      <div class="mt-1 text-[11px] text-zinc-500 font-mono">templates/chrome.html</div>
-    </div>
 
-    {# Notification badge #}
-    <div class="mb-6">
-      <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Notification badge</div>
-      <div class="rounded-lg overflow-hidden border border-zinc-200 bg-zinc-900">
-        <div class="h-[38px] flex items-center justify-end px-1">
-          <button title="Requests"
-                  class="relative bg-transparent border-none text-zinc-400 cursor-pointer w-8 h-7 flex items-center justify-center rounded hover:text-zinc-200 hover:bg-white/5">
-            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-            <span class="absolute top-0.5 right-0.5 w-2 h-2 rounded-full bg-red-500"></span>
-          </button>
-        </div>
-      </div>
-      <div class="mt-1 text-[11px] text-zinc-500 font-mono">templates/chrome.html :: #requests-badge</div>
-    </div>
-
-    {# Window controls (only rendered on non-mac in real chrome) #}
-    <div class="mb-6">
-      <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Window controls</div>
-      <div class="rounded-lg overflow-hidden border border-zinc-200 bg-zinc-900">
-        <div class="h-[38px] flex items-center justify-end">
-          <button title="Minimize"
-                  class="bg-transparent border-none text-zinc-400 cursor-pointer w-9 h-[38px] flex items-center justify-center hover:bg-white/5 hover:text-zinc-200" style="border-radius: 0;">
-            <svg viewBox="0 0 12 12" class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="6" x2="10" y2="6"/></svg>
-          </button>
-          <button title="Maximize"
-                  class="bg-transparent border-none text-zinc-400 cursor-pointer w-9 h-[38px] flex items-center justify-center hover:bg-white/5 hover:text-zinc-200" style="border-radius: 0;">
-            <svg viewBox="0 0 12 12" class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="8" height="8" rx="0.5"/></svg>
-          </button>
-          <button title="Close"
-                  class="bg-transparent border-none text-zinc-400 cursor-pointer w-9 h-[38px] flex items-center justify-center hover:bg-red-600 hover:text-white" style="border-radius: 0;">
-            <svg viewBox="0 0 12 12" class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="2" x2="10" y2="10"/><line x1="10" y1="2" x2="2" y2="10"/></svg>
-          </button>
-        </div>
-      </div>
-      <p class="mt-1 text-[11px] text-zinc-500">
-        Only rendered on non-mac platforms in real chrome (macOS has native traffic lights).
-      </p>
-      <div class="mt-0.5 text-[11px] text-zinc-500 font-mono">templates/chrome.html :: #min-btn / #max-btn / #close-btn</div>
-    </div>
-
-    {# Sidebar items #}
-    <div class="mb-6">
-      <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Sidebar items</div>
-      <div class="w-[260px] rounded-lg overflow-hidden border border-zinc-200 bg-zinc-900">
-        <div class="py-2">
-          <div class="sidebar-item is-current cursor-pointer text-sm font-medium text-zinc-200 rounded-md mx-1.5 my-0.5 py-2.5 pl-4 pr-3 transition-colors bg-white/5">
-            current-workspace
-          </div>
-          <div class="sidebar-item cursor-pointer text-sm font-medium text-zinc-200 rounded-md mx-1.5 my-0.5 py-2.5 pl-4 pr-3 transition-colors hover:bg-white/5">
-            another-workspace
-          </div>
-          <div class="sidebar-item cursor-pointer text-sm font-medium text-zinc-200 rounded-md mx-1.5 my-0.5 py-2.5 pl-4 pr-3 transition-colors hover:bg-white/5">
-            third-one
+      <div>
+        <div class="text-label uppercase tracking-wide text-ink-muted mb-2">Sidebar items</div>
+        <div class="w-[260px] rounded-lg overflow-hidden border border-line bg-zinc-900">
+          <div class="py-2">
+            <div class="sidebar-item is-current cursor-pointer text-sm font-medium text-zinc-200 rounded-md mx-1.5 my-0.5 py-2.5 pl-4 pr-3 transition-colors bg-white/5">current-workspace</div>
+            <div class="sidebar-item cursor-pointer text-sm font-medium text-zinc-200 rounded-md mx-1.5 my-0.5 py-2.5 pl-4 pr-3 transition-colors hover:bg-white/5">another-workspace</div>
+            <div class="sidebar-item cursor-pointer text-sm font-medium text-zinc-200 rounded-md mx-1.5 my-0.5 py-2.5 pl-4 pr-3 transition-colors hover:bg-white/5">third-one</div>
           </div>
         </div>
       </div>
-      <div class="mt-1 text-[11px] text-zinc-500 font-mono">static/sidebar.js + static/chrome.js (rendered dynamically) :: .sidebar-item from tokens.css</div>
-    </div>
 
-    {# Accent spine #}
-    <div class="mb-6">
-      <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Accent spine</div>
-      <div class="accent-spine relative flex items-center gap-3 bg-white border border-zinc-200 rounded-xl px-4 py-3.5 overflow-hidden">
-        <div class="text-sm text-zinc-700">Card with workspace accent stripe on the left edge.</div>
-      </div>
-      <div class="mt-1 text-[11px] text-zinc-500 font-mono">templates/landing.html, templates/recovery.html :: .accent-spine from tokens.css</div>
-    </div>
-
-    {# Focus ring #}
-    <div class="mb-6">
-      <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Focus ring</div>
-      <div class="bg-white border border-zinc-200 rounded-lg p-4">
-        {{ ui.text_input(name='styleguide-focus-ring-input', placeholder='Click to focus') }}
-      </div>
-      <div class="mt-1 text-[11px] text-zinc-500 font-mono">_macros.html :: text_input() (focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15)</div>
-    </div>
-
-    {# Shadow seam #}
-    <div class="mb-6">
-      <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Shadow seam</div>
-      <div class="bg-zinc-50 p-6 rounded-lg">
-        <div class="bg-white rounded-md p-4 text-sm text-zinc-700"
-             style="box-shadow: var(--shadow-seam);">
-          Below the titlebar, separating chrome from workspace content.
+      <div>
+        <div class="text-label uppercase tracking-wide text-ink-muted mb-2">Accent spine</div>
+        <div class="accent-spine relative flex items-center gap-3 bg-surface-elevated border border-line rounded-xl px-4 py-3.5 overflow-hidden">
+          <div class="text-body text-ink">Card with workspace accent stripe on the left edge.</div>
         </div>
       </div>
-      <div class="mt-1 text-[11px] text-zinc-500 font-mono">tokens.css :: --shadow-seam</div>
-    </div>
 
-    {# Spinner #}
-    <div class="mb-6">
-      <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Spinner</div>
-      <div class="bg-white border border-zinc-200 rounded-lg p-4 flex items-center gap-4">
-        {{ ui.spinner(size='sm') }}
-        {{ ui.spinner(size='md') }}
-        {{ ui.spinner(size='lg') }}
-      </div>
-      <div class="mt-1 text-[11px] text-zinc-500 font-mono">tokens.css :: .spinner + _macros.html :: spinner()</div>
     </div>
-
-    {# Buttons #}
-    <div class="mb-6">
-      <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Buttons</div>
-      <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-wrap items-center gap-2">
-        {{ ui.btn_button('Primary', variant='primary') }}
-        {{ ui.btn_button('Secondary', variant='secondary') }}
-        {{ ui.btn_button('Danger', variant='danger') }}
-        {{ ui.btn_button('Success', variant='success') }}
-        {{ ui.btn_button('Ghost', variant='ghost') }}
-      </div>
-      <div class="mt-1 text-[11px] text-zinc-500 font-mono">_macros.html :: btn_button()</div>
-    </div>
-
-    {# Notices #}
-    <div class="mb-6">
-      <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Notices</div>
-      <div class="bg-white border border-zinc-200 rounded-lg p-4">
-        {% call ui.notice(variant='info') %}Heads up: informational message.{% endcall %}
-        {% call ui.notice(variant='warn') %}Careful: something may need attention.{% endcall %}
-        {% call ui.notice(variant='success') %}All set: action completed.{% endcall %}
-        {% call ui.notice(variant='error') %}Failed: something went wrong.{% endcall %}
-      </div>
-      <div class="mt-1 text-[11px] text-zinc-500 font-mono">_macros.html :: notice()</div>
-    </div>
-
   </section>
 
 </div>
