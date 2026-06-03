@@ -164,6 +164,45 @@ def test_lima_host_config_btrfs_mode_round_trips(tmp_path: Path) -> None:
     assert loaded.config.host_data_disk_name == "mngr-abc123-data"
 
 
+def test_lima_host_config_docker_mode_defaults() -> None:
+    """A LimaHostConfig defaults to direct-in-VM mode (is_host_in_docker False)
+    with no container fields, so pre-docker-mode records behave unchanged."""
+    config = LimaHostConfig(instance_name="mngr-test")
+    assert config.is_host_in_docker is False
+    assert config.container_name is None
+    assert config.container_host_port is None
+    assert config.base_image is None
+
+
+def test_lima_host_config_docker_mode_round_trips(tmp_path: Path) -> None:
+    """docker-mode hosts persist the container name/forwarded-port/image and the
+    is_host_in_docker flag, and the values survive a write/read cycle."""
+    store = _make_store(tmp_path)
+    host_id = HostId.generate()
+    record = HostRecord(
+        certified_host_data=_make_certified_data(host_id),
+        config=LimaHostConfig(
+            instance_name="mngr-docker-test",
+            is_host_data_volume_exposed=False,
+            host_data_disk_name="mngr-abc123-data",
+            is_host_in_docker=True,
+            container_name="mngr-docker-test",
+            container_host_port=49152,
+            base_image="mngr-build-host-abc123",
+        ),
+    )
+    store.write_host_record(record)
+
+    store.clear_cache()
+    loaded = store.read_host_record(host_id)
+    assert loaded is not None
+    assert loaded.config is not None
+    assert loaded.config.is_host_in_docker is True
+    assert loaded.config.container_name == "mngr-docker-test"
+    assert loaded.config.container_host_port == 49152
+    assert loaded.config.base_image == "mngr-build-host-abc123"
+
+
 def test_lima_host_config_legacy_record_defaults_to_bind_mount(tmp_path: Path) -> None:
     """Records written before is_host_data_volume_exposed existed must
     deserialize with the field defaulting to True (today's behavior). We
