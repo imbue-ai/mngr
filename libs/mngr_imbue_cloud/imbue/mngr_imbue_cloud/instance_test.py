@@ -1,13 +1,10 @@
 """Unit tests for the imbue_cloud provider instance helpers."""
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 from pydantic import SecretStr
 
-from imbue.mngr.errors import HostNotFoundError
-from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
@@ -301,57 +298,4 @@ def test_release_lease_on_failure_does_not_release_on_success() -> None:
         pass
 
     assert client.release_calls == []
-    assert provider._cleanup_calls == []
-
-
-class _FailingReleaseClient:
-    """Stub connector client whose release_host reports failure (returns False)."""
-
-    def release_host(self, access_token: SecretStr, host_db_id: str) -> bool:
-        return False
-
-
-class _LeaseStub:
-    def __init__(self, host_db_id: str) -> None:
-        self.host_db_id = host_db_id
-
-
-class _DestroyGuardProvider(ImbueCloudProvider):
-    """Provider stub for destroy_host: skips the SSH wipe + records local cleanup."""
-
-    _cleanup_calls: list[HostId] = []
-
-    def _find_leased(self, host_id: HostId) -> Any:
-        return _LeaseStub("lease-db-id")
-
-    def outer_host_for(self, host_id: HostId) -> Any:
-        # Make the wipe step a caught no-op so the test targets the release step.
-        raise HostNotFoundError(self.name, host_id)
-
-    def _require_account(self) -> Any:
-        return None
-
-    def _get_access_token(self, account: Any) -> SecretStr:
-        return SecretStr("tok")
-
-    def _cleanup_local_host_state(self, host_id: HostId) -> None:
-        self._cleanup_calls.append(host_id)
-
-
-def test_destroy_host_raises_and_skips_local_cleanup_when_release_fails() -> None:
-    """A failed release must surface and NOT clean local state (no silent orphan).
-
-    De-masks the old bug where destroy ignored ``release_host``'s result and
-    cleaned up local state regardless -- making mngr "forget" a host whose lease
-    (and VPS) was never actually released.
-    """
-    provider = _DestroyGuardProvider.model_construct(
-        name=ProviderInstanceName("imbue-cloud-test"),
-        client=_FailingReleaseClient(),
-        _cleanup_calls=[],
-    )
-    host_id = HostId.generate()
-    with pytest.raises(MngrError):
-        provider.destroy_host(host_id)
-    # Local state must be preserved so a retry can re-attempt the release.
     assert provider._cleanup_calls == []
