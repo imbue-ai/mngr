@@ -339,6 +339,8 @@ def test_generate_docker_mode_lima_yaml_includes_gvisor_install_when_requested()
     assert "gvisor.dev/archive.key" in script
     assert "runsc install" in script
     assert "docker info" in script
+    # gnupg is needed for `gpg --dearmor` on minimal images that lack it.
+    assert "gnupg" in script
 
 
 def test_generate_docker_mode_lima_yaml_requires_forward_ports() -> None:

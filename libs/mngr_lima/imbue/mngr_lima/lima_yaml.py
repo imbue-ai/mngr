@@ -285,6 +285,13 @@ def _build_docker_provisioning_script(
         if install_gvisor_runtime
         else ""
     )
+    # The gVisor install block dearmors the archive key with `gpg`, which is not
+    # guaranteed to be present on minimal images; install gnupg when needed.
+    gvisor_pkg_line = (
+        '\ncommand -v gpg >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL gnupg"'
+        if install_gvisor_runtime
+        else ""
+    )
     return f"""\
 #!/bin/bash
 set -eux -o pipefail
@@ -299,7 +306,7 @@ command -v jq >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL jq"
 command -v rsync >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL rsync"
 command -v curl >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL curl"
 test -x /usr/sbin/sshd || PKGS_TO_INSTALL="$PKGS_TO_INSTALL openssh-server"
-test -f /etc/ssl/certs/ca-certificates.crt || PKGS_TO_INSTALL="$PKGS_TO_INSTALL ca-certificates"
+test -f /etc/ssl/certs/ca-certificates.crt || PKGS_TO_INSTALL="$PKGS_TO_INSTALL ca-certificates"{gvisor_pkg_line}
 
 if [ -n "$PKGS_TO_INSTALL" ]; then
     apt-get update -qq && apt-get install -y -qq $PKGS_TO_INSTALL
