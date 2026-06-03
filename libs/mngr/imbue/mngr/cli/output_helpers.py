@@ -159,8 +159,10 @@ def on_error(
         case OutputFormat.HUMAN:
             logger.error(error_msg)
         case OutputFormat.JSONL:
-            event = {"event": "error", "message": error_msg}
-            write_json_line(event)
+            error_event: dict[str, Any] = {"event": "error", "message": error_msg}
+            if exc is not None:
+                error_event["error_class"] = type(exc).__name__
+            write_json_line(error_event)
         case OutputFormat.JSON:
             # JSON mode: errors collected and shown in final output
             pass
@@ -170,6 +172,20 @@ def on_error(
     # Abort if requested
     if error_behavior == ErrorBehavior.ABORT:
         raise AbortError(error_msg, original_exception=exc)
+
+
+def emit_error_event(error: BaseException, output_format: OutputFormat | None) -> None:
+    """Emit a machine-readable JSONL error record so subprocess callers can detect the error type.
+
+    No-op unless ``output_format`` is JSONL. Called from the top-level CLI
+    exception handler so every command surfaces a structured
+    ``{"event": "error", "error_class": ..., "message": ...}`` line in
+    ``--format jsonl`` mode -- letting callers (e.g. minds) branch on the
+    exception *type* without parsing human-formatted error text.
+    """
+    if output_format is not OutputFormat.JSONL:
+        return
+    write_json_line({"event": "error", "error_class": type(error).__name__, "message": str(error)})
 
 
 @pure

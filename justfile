@@ -347,7 +347,7 @@ minds-start agent_name="mindtest" branch="":
     if [ ! -e "$fct_wt/.git" ]; then
         echo "error: no FCT worktree at $fct_wt" >&2
         echo "       run \`git -C ~/project/forever-claude-template worktree add -b <branch> $fct_wt <base>\`" >&2
-        echo "       (e.g. base = josh/start-minds) before re-running minds-start." >&2
+        echo "       (e.g. base = origin/main) before re-running minds-start." >&2
         exit 2
     fi
     vendor_mngr="$fct_wt/vendor/mngr"
@@ -384,7 +384,7 @@ minds-start agent_name="mindtest" branch="":
     if [ ! -e "$fct_wt/.git" ]; then
         echo "error: no FCT worktree at $fct_wt" >&2
         echo "       run \`git -C ~/project/forever-claude-template worktree add -b <branch> $fct_wt <base>\`" >&2
-        echo "       (e.g. base = josh/start-minds) before re-running minds-start." >&2
+        echo "       (e.g. base = origin/main) before re-running minds-start." >&2
         exit 2
     fi
     if [ -f .env ]; then
@@ -427,6 +427,9 @@ minds-start agent_name="mindtest" branch="":
         echo "       Then re-run \`just minds-start\`." >&2
         exit 2
     fi
+    # Put the Node version apps/minds pins (.nvmrc) first on PATH so pnpm's
+    # engine-strict check passes regardless of the shell's default node.
+    . apps/minds/scripts/select_node_version.sh || exit 2
     cd apps/minds && pnpm start
 
 # Stop the minds desktop client started in this worktree by `just minds-start`.
@@ -526,6 +529,10 @@ minds-stop:
 
 # Build the minds desktop client distributable (slow; uses todesktop).
 minds-build:
+    #!/bin/bash
+    set -ueo pipefail
+    # Match apps/minds's pinned Node (.nvmrc) so pnpm's engine-strict passes.
+    . apps/minds/scripts/select_node_version.sh || exit 2
     cd apps/minds && pnpm build
 
 # Sync this repo's mngr changes (and the FCT worktree's template state)
@@ -633,13 +640,14 @@ forward-system-interface agent_name:
     fi
 
     # Inject the token where the agent's cloudflare-tunnel service
-    # (libs/cloudflare_tunnel/.../runner.py) watches for it. Strip any
-    # existing CLOUDFLARE_TUNNEL_TOKEN line first so we don't keep two
-    # copies, then atomic-rename so the watcher never observes a
-    # half-written file. CF tokens are base64url-y, so single-quoting
-    # the value is safe.
+    # (libs/cloudflare_tunnel/.../runner.py) watches for it:
+    # runtime/secrets/cloudflare_tunnel.env, one of the per-secret env files
+    # in the runtime/secrets/ directory. We own that file outright, so just
+    # write it via an atomic rename so the watcher never observes a
+    # half-written file. CF tokens are base64url-y, so single-quoting the
+    # value is safe.
     uv run mngr exec "$AGENT_ID" \
-        "mkdir -p runtime && { [ -f runtime/secrets ] && grep -Ev '^export[[:space:]]+CLOUDFLARE_TUNNEL_TOKEN=' runtime/secrets || true; printf 'export CLOUDFLARE_TUNNEL_TOKEN=%s\n' '$TOKEN'; } > runtime/secrets.tmp && mv runtime/secrets.tmp runtime/secrets"
+        "mkdir -p runtime/secrets && printf 'export CLOUDFLARE_TUNNEL_TOKEN=%s\n' '$TOKEN' > runtime/secrets/cloudflare_tunnel.env.tmp && mv runtime/secrets/cloudflare_tunnel.env.tmp runtime/secrets/cloudflare_tunnel.env"
 
     URL=$(uv run mngr imbue_cloud tunnels services add \
         "$TUNNEL_NAME" system_interface http://localhost:8000 \

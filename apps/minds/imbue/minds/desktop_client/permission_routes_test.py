@@ -543,6 +543,85 @@ def test_post_permission_deny_calls_handler_and_resolves_inbox(tmp_path: Path) -
     assert final_inbox.get_pending_count() == 0
 
 
+def test_get_permission_request_page_shows_unavailable_after_resolution(tmp_path: Path) -> None:
+    """Re-opening a granted/denied request shows the "no longer available" page.
+
+    The granted request lingers in the append-only log, so the page handler
+    must detect the recorded response and render the friendly notice instead
+    of the (re-submittable) grant/deny form.
+    """
+    agent_id = AgentId()
+    request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        rationale="reason",
+    )
+    inbox = RequestInbox().add_request(request)
+    handler = _make_recording_handler(tmp_path)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    # Deny resolves the request without needing a discovered host.
+    deny = client.post(f"/requests/{request.event_id}/deny")
+    assert deny.status_code == 200
+
+    page = client.get(f"/requests/{request.event_id}")
+    assert page.status_code == 200
+    body = page.text
+    assert "This permission request is no longer available" in body
+    # The actionable form must be gone so it cannot be submitted again.
+    assert 'id="permissions-approve-btn"' not in body
+    assert 'action="/requests/' not in body
+
+
+def test_post_permission_grant_after_resolution_returns_409(tmp_path: Path) -> None:
+    """A second grant on an already-resolved request is rejected, not re-applied."""
+    agent_id = AgentId()
+    host_id = HostId()
+    request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        rationale="reason",
+    )
+    inbox = RequestInbox().add_request(request)
+    handler = _make_recording_handler(tmp_path)
+    client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id, host_id=host_id)
+
+    first = client.post(
+        f"/requests/{request.event_id}/grant",
+        data={"permissions": ["slack-read-all"]},
+    )
+    assert first.status_code == 200
+    assert len(handler.grant_calls) == 1
+
+    second = client.post(
+        f"/requests/{request.event_id}/grant",
+        data={"permissions": ["slack-read-all"]},
+    )
+    assert second.status_code == 409
+    # The handler must not have been invoked a second time.
+    assert len(handler.grant_calls) == 1
+
+
+def test_post_permission_deny_after_resolution_returns_409(tmp_path: Path) -> None:
+    """A second deny on an already-resolved request is rejected, not re-applied."""
+    agent_id = AgentId()
+    request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        rationale="reason",
+    )
+    inbox = RequestInbox().add_request(request)
+    handler = _make_recording_handler(tmp_path)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    assert client.post(f"/requests/{request.event_id}/deny").status_code == 200
+    assert len(handler.deny_calls) == 1
+
+    second = client.post(f"/requests/{request.event_id}/deny")
+    assert second.status_code == 409
+    assert len(handler.deny_calls) == 1
+
+
 def test_post_permission_grant_unknown_service_returns_400(tmp_path: Path) -> None:
     agent_id = AgentId()
     request = create_latchkey_predefined_permission_request_event(
