@@ -1,6 +1,5 @@
 import { Show } from 'solid-js';
 import {
-  isElectron as isElectronBridge,
   toggleSidebar,
   toggleRequestsPanel,
   minimizeWindow,
@@ -250,8 +249,4 @@ export function Titlebar(props) {
       </Show>
     </div>
   );
-}
-
-export function isElectron() {
-  return isElectronBridge();
 }
