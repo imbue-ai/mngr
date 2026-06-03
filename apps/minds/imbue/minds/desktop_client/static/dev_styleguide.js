@@ -37,7 +37,10 @@
   var hue = document.getElementById('styleguide-accent-hue');
   var value = document.getElementById('styleguide-accent-value');
   if (hue && value) {
-    function applyHue() {
+    // Function expression (not a block-level function declaration) so the
+    // binding stays well-defined under strict mode and matches the ES5 idiom
+    // used in the rest of /_static/*.js.
+    var applyHue = function () {
       var color = 'oklch(70% 0.15 ' + hue.value + ')';
       document.body.style.setProperty('--workspace-accent', color);
       document.body.style.setProperty('--workspace-surface', color);
@@ -45,7 +48,7 @@
       if (window.mindsTheme && window.mindsTheme.refresh) {
         window.mindsTheme.refresh();
       }
-    }
+    };
     hue.addEventListener('input', applyHue);
     applyHue();
   }
