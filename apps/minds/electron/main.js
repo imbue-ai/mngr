@@ -1476,7 +1476,9 @@ async function triggerUpdateCheck() {
     dialog.showMessageBox({
       type: 'info',
       message: 'Update check unavailable.',
-      detail: 'This build is running in draft mode; the auto-updater is disabled until the build is released to the latest channel.',
+      detail: app.isPackaged
+        ? 'The auto-updater is disabled until this build is released to the latest channel.'
+        : 'Updates are only available in installed builds.',
     });
     return;
   }
