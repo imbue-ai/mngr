@@ -608,12 +608,18 @@ async def amain() -> int:
             if not creation_id:
                 raise RuntimeError(f"no agent_id in create-agent response: {resp['body']}")
             logger.info("creation_id={}", creation_id)
-            # Wait for the form to actually transition to the progress UI
-            # before snapping. Without this `03-create-agent-submitted`
-            # is just `02-home-after-auth` again -- the screenshot lies
-            # about which phase we're in. The progress UI ships
-            # "Setting up your workspace" as a heading.
+            # Drive `win` to the /creating/<id> progress page so the
+            # 03 + 04b screenshots actually show the "Setting up your
+            # workspace" UI instead of the unchanged Create-form. The
+            # API path the script uses (POST /api/create-agent) does
+            # not transition the form; the form-submit UI flow would
+            # navigate here automatically, so we mirror that. Using
+            # ``win.goto`` reuses the existing window; an earlier
+            # attempt used ctx.new_page() which left a stray
+            # BrowserWindow that ended up in front of every later
+            # screencapture (see git blame on 04b's comment).
             with contextlib.suppress(Exception):
+                await win.goto(origin + f"/creating/{creation_id}")
                 await win.wait_for_function(
                     "document.body.innerText.includes('Setting up your workspace')",
                     timeout=15_000,
