@@ -80,15 +80,6 @@ LAUNCH_BACKEND_TIMEOUT = 120
 # Canned slack-mock body the agent should quote back.
 CANNED_BODY = "CI MOCK: greetings from the localhost slack mock."
 
-NONCE = secrets.token_urlsafe(6)
-# The previous prompt asked claude to "respond with the prefix 'TOK <NONCE>:'
-# followed by the EXACT text of the message you read, character-for-character"
-# -- that shape (read content + echo verbatim behind a token marker) trips
-# claude's prompt-injection / exfiltration heuristics, so claude refused
-# the slack call and the canned body never landed in chat. Reframe as a
-# normal user task: read the latest message and just tell me what it says.
-# The script only asserts CANNED_BODY appears in chat, so claude quoting
-# the message (with or without a prefix) is enough.
 SLACK_PROMPT = (
     "Please read the most recent message from any Slack channel using a "
     "read-only Slack tool. Don't post anything. Then tell me here in chat "
@@ -306,12 +297,16 @@ def start_mock() -> _ThreadedHTTP:
 
 
 def ensure_cert() -> Path:
-    """Generate self-signed cert for slack.com + files.slack.com once."""
+    """Generate a fresh self-signed cert for slack.com + files.slack.com every run.
+
+    A stale cert (from a prior run, possibly expired) would still pass the
+    ``exists()`` check; regenerate unconditionally so the keychain-trust
+    step below operates on the cert socat actually serves."""
     SLACK_MOCK_STATE.mkdir(parents=True, exist_ok=True)
     cert = SLACK_MOCK_STATE / "cert.pem"
     key = SLACK_MOCK_STATE / "key.pem"
-    if cert.exists() and key.exists():
-        return cert
+    cert.unlink(missing_ok=True)
+    key.unlink(missing_ok=True)
     logger.info("generating self-signed cert for slack.com")
     subprocess.run(
         [
@@ -336,6 +331,60 @@ def ensure_cert() -> Path:
         capture_output=True,
     )
     return cert
+
+
+def trust_cert_in_keychain(cert: Path) -> None:
+    """Install ``cert`` as a trusted root in /Library/Keychains/System.keychain.
+
+    Latchkey's bundled checkApiCredentials uses curl-via-SecureTransport
+    (system curl ignores CURL_CA_BUNDLE) and the auth-browser OAuth flow
+    uses Chrome; both consult the system keychain. Without trust, the
+    socat TLS handshake fails with "ssl/tls alert certificate unknown",
+    ``services_info`` reports INVALID, ``grant()`` triggers ``auth_browser``
+    which can't sign in, and the request resolves DENIED."""
+    logger.info("trusting slack-mock cert in /Library/Keychains/System.keychain")
+    # Drop any prior trust entry for this CN so re-runs are idempotent.
+    subprocess.run(
+        [
+            "sudo",
+            "security",
+            "delete-certificate",
+            "-c",
+            "slack.com",
+            "/Library/Keychains/System.keychain",
+        ],
+        check=False,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "sudo",
+            "security",
+            "add-trusted-cert",
+            "-d",
+            "-r",
+            "trustRoot",
+            "-k",
+            "/Library/Keychains/System.keychain",
+            str(cert),
+        ],
+        check=True,
+    )
+
+
+def untrust_cert_in_keychain() -> None:
+    subprocess.run(
+        [
+            "sudo",
+            "security",
+            "delete-certificate",
+            "-c",
+            "slack.com",
+            "/Library/Keychains/System.keychain",
+        ],
+        check=False,
+        capture_output=True,
+    )
 
 
 def ensure_brew_curl() -> Path:
@@ -529,6 +578,7 @@ async def amain() -> int:
 
     brew_curl = ensure_brew_curl()
     cert = ensure_cert()
+    trust_cert_in_keychain(cert)
     logger.info("brew curl: {}", brew_curl)
 
     # 1. Launch minds.app ourselves with --remote-debugging-port so Playwright
@@ -834,9 +884,9 @@ async def amain() -> int:
                             target = await find_chat_window(ctx)
                             if target is not None:
                                 kick_msg = (
-                                    "Slack permission approved. Please retry the read-only Slack "
-                                    f'read now and respond with the prefix "TOK {NONCE}:" '
-                                    "followed by the message text."
+                                    "Slack permission is now granted -- please retry the "
+                                    "read-only Slack read and then quote the message you read "
+                                    "back to me here in chat."
                                 )
                                 try:
                                     inp = await target.wait_for_selector(
@@ -885,6 +935,7 @@ async def amain() -> int:
                 revert_etc_hosts()
                 stop_socat()
                 mock.shutdown()
+                untrust_cert_in_keychain()
 
         await browser.close()
         minds_proc.terminate()
