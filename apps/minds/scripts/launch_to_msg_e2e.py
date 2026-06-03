@@ -333,58 +333,21 @@ def ensure_cert() -> Path:
     return cert
 
 
-def trust_cert_in_keychain(cert: Path) -> None:
-    """Install ``cert`` as a trusted root in /Library/Keychains/System.keychain.
+def ensure_combined_cert_bundle(cert: Path) -> Path:
+    """Concatenate the self-signed slack cert with the system root CAs.
 
-    Latchkey's bundled checkApiCredentials uses curl-via-SecureTransport
-    (system curl ignores CURL_CA_BUNDLE) and the auth-browser OAuth flow
-    uses Chrome; both consult the system keychain. Without trust, the
-    socat TLS handshake fails with "ssl/tls alert certificate unknown",
-    ``services_info`` reports INVALID, ``grant()`` triggers ``auth_browser``
-    which can't sign in, and the request resolves DENIED."""
-    logger.info("trusting slack-mock cert in /Library/Keychains/System.keychain")
-    # Drop any prior trust entry for this CN so re-runs are idempotent.
-    subprocess.run(
-        [
-            "sudo",
-            "security",
-            "delete-certificate",
-            "-c",
-            "slack.com",
-            "/Library/Keychains/System.keychain",
-        ],
-        check=False,
-        capture_output=True,
-    )
-    subprocess.run(
-        [
-            "sudo",
-            "security",
-            "add-trusted-cert",
-            "-d",
-            "-r",
-            "trustRoot",
-            "-k",
-            "/Library/Keychains/System.keychain",
-            str(cert),
-        ],
-        check=True,
-    )
-
-
-def untrust_cert_in_keychain() -> None:
-    subprocess.run(
-        [
-            "sudo",
-            "security",
-            "delete-certificate",
-            "-c",
-            "slack.com",
-            "/Library/Keychains/System.keychain",
-        ],
-        check=False,
-        capture_output=True,
-    )
+    Setting ``CURL_CA_BUNDLE`` to a single self-signed cert makes curl
+    distrust everything else (anthropic.com, github.com, ...). Combining
+    with the system roots keeps non-slack calls working while still
+    adding our cert for the /etc/hosts-mapped slack.com hits."""
+    bundle = SLACK_MOCK_STATE / "ca_bundle.pem"
+    parts = [cert.read_text()]
+    for sys_bundle in ("/etc/ssl/cert.pem", "/etc/ssl/certs/ca-certificates.crt"):
+        if Path(sys_bundle).exists():
+            parts.append(Path(sys_bundle).read_text())
+            break
+    bundle.write_text("".join(parts))
+    return bundle
 
 
 def ensure_brew_curl() -> Path:
@@ -578,16 +541,22 @@ async def amain() -> int:
 
     brew_curl = ensure_brew_curl()
     cert = ensure_cert()
-    trust_cert_in_keychain(cert)
-    logger.info("brew curl: {}", brew_curl)
+    ca_bundle = ensure_combined_cert_bundle(cert)
+    logger.info("brew curl: {}; ca_bundle: {}", brew_curl, ca_bundle)
 
     # 1. Launch minds.app ourselves with --remote-debugging-port so Playwright
     # can attach via CDP. Use a free port to avoid clashes.
     cdp_port = _free_port()
     env = {
         **os.environ,
+        # ``LATCHKEY_CURL`` (read by latchkey's config.ts) pins the curl
+        # binary to brew curl (OpenSSL) so checkApiCredentials never falls
+        # back to /usr/bin/curl (SecureTransport, ignores CURL_CA_BUNDLE).
+        # Otherwise services_info would report INVALID, grant() would
+        # invoke auth_browser, and the request would resolve DENIED.
+        "LATCHKEY_CURL": str(brew_curl),
         "PATH": f"{brew_curl.parent}:" + os.environ.get("PATH", ""),
-        "CURL_CA_BUNDLE": str(cert),
+        "CURL_CA_BUNDLE": str(ca_bundle),
     }
     env.pop("ELECTRON_RUN_AS_NODE", None)
     logger.info("launching {} --remote-debugging-port={}", MINDS_APP_PATH, cdp_port)
@@ -935,7 +904,6 @@ async def amain() -> int:
                 revert_etc_hosts()
                 stop_socat()
                 mock.shutdown()
-                untrust_cert_in_keychain()
 
         await browser.close()
         minds_proc.terminate()
