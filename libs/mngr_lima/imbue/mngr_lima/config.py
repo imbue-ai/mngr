@@ -85,7 +85,10 @@ class LimaProviderConfig(ProviderInstanceConfig):
     )
     docker_install_timeout: float = Field(
         default=600.0,
-        description="Timeout in seconds for waiting on cloud-init to finish installing Docker in the VM.",
+        description=(
+            "Timeout in seconds for pulling the agent container's base image inside the VM. Only used when "
+            "is_host_in_docker=True and no Dockerfile build args are supplied (the no-build pull path)."
+        ),
     )
     container_ssh_connect_timeout: float = Field(
         default=180.0,
