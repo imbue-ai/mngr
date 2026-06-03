@@ -393,6 +393,16 @@ jobs:
       - name: Install Electron + minds JS deps
         run: pnpm install --dir apps/minds --frozen-lockfile
 
+      - name: Build minds frontend bundles
+        # The Solid SSR sidecar reads
+        # apps/minds/frontend/dist-server/assets/server.js and the FastAPI
+        # backend serves the client bundle from
+        # apps/minds/imbue/minds/desktop_client/static/_dist/. Without this
+        # build step neither exists, so the create form's #create-form
+        # selector never appears and the Playwright wait_for_selector
+        # times out.
+        run: pnpm --dir apps/minds frontend:build
+
       - name: Configure Docker Hub mirror
         run: |
           echo '{"registry-mirrors": ["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json
