@@ -71,3 +71,54 @@ def test_authenticate_with_invalid_code_emits_auth_error_payload(tmp_path: Path)
     payload = extract_ssr_route_payload(response.text)
     assert payload["route"] == "auth_error"
     assert "invalid" in payload["props"]["message"].lower()
+
+
+def test_accounts_endpoint_emits_accounts_route_payload(tmp_path: Path) -> None:
+    client, auth_store = _make_client(tmp_path)
+    _authenticate(client, auth_store)
+    response = client.get("/accounts")
+    assert response.status_code == 200
+    payload = extract_ssr_route_payload(response.text)
+    assert payload["route"] == "accounts"
+    # No session store is wired in this harness, so the accounts list is
+    # empty and the default account id and enabled map are both empty too.
+    assert payload["props"]["accounts"] == []
+    assert payload["props"]["default_account_id"] == ""
+    assert payload["props"]["enabled_by_user_id"] == {}
+
+
+def test_landing_endpoint_emits_landing_route_payload(tmp_path: Path) -> None:
+    client, auth_store = _make_client(tmp_path)
+    _authenticate(client, auth_store)
+    response = client.get("/")
+    assert response.status_code == 200
+    payload = extract_ssr_route_payload(response.text)
+    # No agents discovered yet in this harness; the handler falls through to
+    # the create form on completed-empty discovery. We assert only that the
+    # response is an SSR payload (route key may be ``landing`` when the
+    # discovery path is taken, or another route in fallback paths).
+    assert payload["route"] in {"landing", "create"}
+
+
+def test_destroying_endpoint_returns_404_without_record(tmp_path: Path) -> None:
+    client, auth_store = _make_client(tmp_path)
+    _authenticate(client, auth_store)
+    # No api_v1_paths configured in this harness, so the handler short-circuits
+    # to 404 before reading any record. Smoke-tests that the handler still
+    # constructs after the SSR migration.
+    response = client.get("/destroying/does-not-exist")
+    assert response.status_code == 404
+
+
+def test_recovery_endpoint_emits_recovery_route_payload(tmp_path: Path) -> None:
+    client, auth_store = _make_client(tmp_path)
+    _authenticate(client, auth_store)
+    response = client.get(
+        "/agents/some-agent/recovery",
+        params={"return_to": ""},
+        follow_redirects=False,
+    )
+    assert response.status_code == 200
+    payload = extract_ssr_route_payload(response.text)
+    assert payload["route"] == "recovery"
+    assert payload["props"]["agent_id"] == "some-agent"
