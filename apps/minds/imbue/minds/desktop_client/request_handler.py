@@ -22,6 +22,7 @@ from fastapi.responses import Response
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.request_events import RequestEvent
+from imbue.minds.desktop_client.ssr_sidecar import SsrSidecar
 
 
 class RequestEventHandler(MutableModel, ABC):
@@ -58,6 +59,7 @@ class RequestEventHandler(MutableModel, ABC):
         req_event: RequestEvent,
         backend_resolver: BackendResolverInterface,
         mngr_forward_origin: str,
+        sidecar: SsrSidecar | None = None,
     ) -> Response:
         """Render the request-detail page (``GET /requests/{id}``).
 
@@ -69,6 +71,12 @@ class RequestEventHandler(MutableModel, ABC):
         ``mngr forward`` plugin (e.g. ``"http://localhost:8421"``);
         handlers thread it into rendered templates so workspace links
         target the plugin's ``/goto/<agent>/`` route rather than minds.
+
+        ``sidecar`` is the SSR sidecar; when present, handlers that have
+        migrated to Solid render via the sidecar and fall back to the
+        client-render shell on failure. When ``None`` (legacy callers,
+        unit tests) handlers must still produce a working response --
+        the migrated paths fall back to the inline client-render shell.
         """
 
     @abstractmethod

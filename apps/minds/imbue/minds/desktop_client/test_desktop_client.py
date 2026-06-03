@@ -1235,33 +1235,36 @@ def test_unhandled_exception_returns_500_with_message(tmp_path: Path) -> None:
 
 
 def test_chrome_page_renders_without_auth(tmp_path: Path) -> None:
-    """The /_chrome route is unauthenticated and returns the chrome HTML."""
+    """The /_chrome route is unauthenticated and returns the chrome SSR shell."""
     client, _, _ = _setup_test_server(tmp_path)
 
     response = client.get("/_chrome")
     assert response.status_code == 200
-    assert "minds-titlebar" in response.text
-    assert "content-frame" in response.text
+    payload = extract_ssr_route_payload(response.text)
+    assert payload["route"] == "chrome"
+    assert "isMac" in payload["props"]
 
 
-def test_chrome_page_includes_sidebar_toggle(tmp_path: Path) -> None:
+def test_chrome_page_includes_authentication_flag(tmp_path: Path) -> None:
     client, _, _ = _setup_test_server(tmp_path)
 
     response = client.get("/_chrome")
     assert response.status_code == 200
-    assert "sidebar-toggle" in response.text
-    assert "sidebar-panel" in response.text
+    payload = extract_ssr_route_payload(response.text)
+    # Unauthenticated request reports isAuthenticated=False so the Solid
+    # titlebar shows the "Log in" affordance on first paint.
+    assert payload["props"]["isAuthenticated"] is False
 
 
 def test_chrome_sidebar_page_renders(tmp_path: Path) -> None:
-    """The /_chrome/sidebar route returns the standalone sidebar HTML."""
+    """The /_chrome/sidebar route returns the sidebar SSR shell."""
     client, _, _ = _setup_test_server(tmp_path)
 
     response = client.get("/_chrome/sidebar")
     assert response.status_code == 200
-    assert "sidebar-workspaces" in response.text
-    # Interactivity including the SSE fallback has moved to the external JS.
-    assert "/_static/sidebar.js" in response.text
+    payload = extract_ssr_route_payload(response.text)
+    assert payload["route"] == "sidebar"
+    assert "mngrForwardOrigin" in payload["props"]
 
 
 def test_chrome_events_sse_returns_auth_required_when_unauthenticated(tmp_path: Path) -> None:

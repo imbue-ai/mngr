@@ -27,6 +27,7 @@ from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import create_latchkey_file_sharing_permission_request_event
 from imbue.minds.desktop_client.request_events import load_response_events
+from imbue.minds.desktop_client.testing import extract_ssr_route_payload
 from imbue.mngr.primitives import AgentId
 
 _HttpxHandler: Final = Callable[[httpx.Request], httpx.Response]
@@ -126,16 +127,14 @@ def test_render_request_page_shows_path_and_rationale(tmp_path: Path) -> None:
     )
     assert response.status_code == 200
     body = bytes(response.body).decode("utf-8")
-    assert "/home/user/important.txt" in body
-    assert "summarize the doc" in body
-    assert "Approve" in body and "Deny" in body
-    # The dialog must show the human-readable access label so the user
-    # knows what's being granted.
-    assert "read-only" in body
-    # The dialog must escape user-controlled values; ensure quoting
-    # uses HTML-safe attributes rather than raw interpolation.
-    # Presence of the form-submit JS tag confirms the dialog wired in.
-    assert "<script>" in body
+    payload = extract_ssr_route_payload(body)
+    assert payload["route"] == "permissions/file_sharing"
+    assert payload["props"]["filePath"] == "/home/user/important.txt"
+    assert payload["props"]["rationale"] == "summarize the doc"
+    # The dialog must surface the human-readable access label so the
+    # user knows what's being granted.
+    assert payload["props"]["accessHumanLabel"] == "read-only"
+    assert payload["props"]["access"] == "READ"
 
 
 def test_render_request_page_marks_write_grants_distinctly(tmp_path: Path) -> None:
@@ -153,10 +152,9 @@ def test_render_request_page_marks_write_grants_distinctly(tmp_path: Path) -> No
         mngr_forward_origin="",
     )
     body = bytes(response.body).decode("utf-8")
-    assert "read &amp; write" in body or "read & write" in body
-    # The read-only label must not appear when WRITE access is being
-    # requested, otherwise the dialog would be misleading.
-    assert "read-only" not in body
+    payload = extract_ssr_route_payload(body)
+    assert payload["props"]["access"] == "WRITE"
+    assert payload["props"]["accessHumanLabel"] == "read & write"
 
 
 def test_render_request_page_escapes_html_in_inputs(tmp_path: Path) -> None:
@@ -173,10 +171,17 @@ def test_render_request_page_escapes_html_in_inputs(tmp_path: Path) -> None:
         mngr_forward_origin="",
     )
     body = bytes(response.body).decode("utf-8")
-    # Raw HTML must not appear; entities must.
+    # Raw HTML payloads must not leak into the SSR-shell DOM. The Solid
+    # component renders user-controlled values as text, never as HTML;
+    # the JSON payload escapes ``<`` -> ``<`` so the embedded blob
+    # cannot terminate the surrounding <script> tag.
     assert "<script>alert(1)" not in body
-    assert "&lt;script&gt;alert(1)" in body
     assert "<img src=x" not in body
+    # The verbatim raw strings are carried in the SSR JSON payload so
+    # the client component receives them as data.
+    payload = extract_ssr_route_payload(body)
+    assert payload["props"]["filePath"] == "/tmp/<script>alert(1)</script>.txt"
+    assert payload["props"]["rationale"] == "<img src=x onerror=alert(2)>"
 
 
 # -- apply_grant_request --

@@ -50,6 +50,7 @@ from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
+from imbue.minds.desktop_client.ssr_sidecar import SsrSidecar
 from imbue.minds.desktop_client.request_events import RequestResponseEvent
 from imbue.minds.desktop_client.request_events import RequestStatus
 from imbue.minds.desktop_client.request_events import RequestType
@@ -466,6 +467,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         req_event: RequestEvent,
         backend_resolver: BackendResolverInterface,
         mngr_forward_origin: str,
+        sidecar: SsrSidecar | None = None,
     ) -> Response:
         """Render the dialog HTML for a latchkey permission request.
 
@@ -509,6 +511,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             checked_permissions=pre_checked,
             will_open_browser=will_open_browser,
             mngr_forward_origin=mngr_forward_origin,
+            sidecar=sidecar,
         )
         return HTMLResponse(content=rendered)
 

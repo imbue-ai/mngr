@@ -1641,13 +1641,17 @@ def _handle_chrome_page(
         is_authenticated=authenticated,
         mngr_forward_origin=_get_mngr_forward_origin(request),
         initial_workspaces=initial_workspaces,
+        sidecar=request.app.state.ssr_sidecar,
     )
     return HTMLResponse(content=html)
 
 
 def _handle_chrome_sidebar(request: Request) -> Response:
     """Serve the standalone sidebar page for the Electron sidebar WebContentsView."""
-    html = render_sidebar_page(mngr_forward_origin=_get_mngr_forward_origin(request))
+    html = render_sidebar_page(
+        mngr_forward_origin=_get_mngr_forward_origin(request),
+        sidecar=request.app.state.ssr_sidecar,
+    )
     return HTMLResponse(content=html)
 
 
@@ -2821,6 +2825,7 @@ def _handle_request_page(
         req_event=req_event,
         backend_resolver=backend_resolver,
         mngr_forward_origin=_get_mngr_forward_origin(request),
+        sidecar=request.app.state.ssr_sidecar,
     )
 
 

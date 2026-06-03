@@ -66,10 +66,13 @@ class _RendersHtml(Protocol):
     relationship.
     """
 
-    def render(self, *, route: str, props: dict[str, Any]) -> str: ...
+    def render(self, *, route: str, props: dict[str, Any], bundle: str = ...) -> str: ...
 
 
-def _client_render_shell(*, route: str, props: dict[str, Any]) -> str:
+_VALID_BUNDLES: Final[frozenset[str]] = frozenset({"app", "chrome", "sidebar"})
+
+
+def _client_render_shell(*, route: str, props: dict[str, Any], bundle: str = "app") -> str:
     """Inline shell HTML that boots the client bundle without SSR.
 
     Used when the SSR sidecar is unhealthy or in tests that don't spin up
@@ -77,32 +80,35 @@ def _client_render_shell(*, route: str, props: dict[str, Any]) -> str:
     SSR'd version once the client hydrates, except that the user sees an
     empty ``#app`` mount point for one tick before Solid takes over.
 
+    ``bundle`` selects which client entry to load (one of
+    ``"app"``/``"chrome"``/``"sidebar"``). The Vite build emits each
+    entry under a stable filename so the shim doesn't need the manifest.
+
     The route key and props are inlined as a JSON ``<script>`` blob; the
-    client entry (``frontend/src/main/app.entry.jsx``) reads it on boot.
+    matching client entry reads it on boot.
     """
+    if bundle not in _VALID_BUNDLES:
+        raise SsrSidecarError(f"Unknown bundle for fallback shell: {bundle!r}")
     payload = (
         json.dumps({"route": route, "props": props})
         .replace("<", "\\u003c")
         .replace(" ", "\\u2028")
         .replace(" ", "\\u2029")
     )
-    # We can't predict the hashed asset paths without the Vite manifest
-    # here (the sidecar normally reads it), so we emit a single module
-    # script pointing at a stable filename via Vite's manifest convention.
-    # The Vite build is configured to emit the entry as the import path
-    # below; in dev mode the user must run ``pnpm frontend:dev`` and set
-    # ``MINDS_VITE_DEV_URL`` so the SSR path is taken instead.
+    # All three bundles import ``globals.css`` so Vite emits one shared
+    # stylesheet under ``globals.css``; loading it works whichever bundle
+    # owns the page.
     return (
         "<!doctype html>\n"
         '<html lang="en">\n'
         "<head>\n"
         '<meta charset="UTF-8"><title>Minds</title>\n'
-        '<link rel="stylesheet" href="/_static/_dist/assets/app.css">\n'
+        '<link rel="stylesheet" href="/_static/_dist/assets/globals.css">\n'
         "</head>\n"
         '<body class="bg-zinc-50 text-zinc-900 font-sans antialiased">\n'
         '<div id="app"></div>\n'
         f'<script type="application/json" id="__route__">{payload}</script>\n'
-        '<script type="module" src="/_static/_dist/assets/app.js"></script>\n'
+        f'<script type="module" src="/_static/_dist/assets/{bundle}.js"></script>\n'
         "</body>\n"
         "</html>\n"
     )
@@ -113,6 +119,7 @@ def _render_ssr_or_fallback(
     sidecar: _RendersHtml | None,
     route: str,
     props: dict[str, Any],
+    bundle: str = "app",
 ) -> str:
     """Try SSR; fall back to the client-render shell on any failure.
 
@@ -122,12 +129,12 @@ def _render_ssr_or_fallback(
     standing up a Node sidecar.
     """
     if sidecar is None:
-        return _client_render_shell(route=route, props=props)
+        return _client_render_shell(route=route, props=props, bundle=bundle)
     try:
-        return sidecar.render(route=route, props=props)
+        return sidecar.render(route=route, props=props, bundle=bundle)
     except SsrSidecarError as exc:
         logger.warning("SSR sidecar render failed for route {!r}; using fallback shell: {}", route, exc)
-        return _client_render_shell(route=route, props=props)
+        return _client_render_shell(route=route, props=props, bundle=bundle)
 
 
 # -- Per-workspace identity color --
@@ -993,12 +1000,12 @@ def render_destroying_page(
 # -- Chrome (persistent shell) templates --
 
 
-@pure
 def render_chrome_page(
     is_mac: bool = False,
     is_authenticated: bool = False,
     mngr_forward_origin: str = "",
     initial_workspaces: Sequence[dict[str, str]] | None = None,
+    sidecar: SsrSidecar | None = None,
 ) -> str:
     """Render the persistent chrome page (title bar + sidebar + content iframe).
 
@@ -1011,17 +1018,28 @@ def render_chrome_page(
 
     In Electron mode, the iframe and browser sidebar are hidden via JS; the content
     and sidebar are handled by separate WebContentsViews.
+
+    The page is implemented as a Solid component (``routes/chrome.jsx``);
+    this shim asks the chrome SSR bundle to render it and falls back to
+    the client-render shell when the sidecar isn't available.
     """
-    return JINJA_ENV.get_template("chrome.html").render(
-        is_mac=is_mac,
-        is_authenticated=is_authenticated,
-        mngr_forward_origin=mngr_forward_origin,
-        initial_workspaces=initial_workspaces or [],
+    return _render_ssr_or_fallback(
+        sidecar=sidecar,
+        route="chrome",
+        props={
+            "isMac": bool(is_mac),
+            "isAuthenticated": bool(is_authenticated),
+            "mngrForwardOrigin": mngr_forward_origin,
+            "initialWorkspaces": list(initial_workspaces or []),
+        },
+        bundle="chrome",
     )
 
 
-@pure
-def render_sidebar_page(mngr_forward_origin: str = "") -> str:
+def render_sidebar_page(
+    mngr_forward_origin: str = "",
+    sidecar: SsrSidecar | None = None,
+) -> str:
     """Render the standalone sidebar page for the Electron sidebar WebContentsView.
 
     This page shows the workspace list and subscribes to SSE updates. In Electron,
@@ -1029,9 +1047,16 @@ def render_sidebar_page(mngr_forward_origin: str = "") -> str:
     the content WebContentsView. ``mngr_forward_origin`` is exposed via
     ``data-mngr-forward-origin`` so sidebar.js can build the cross-origin
     ``/goto/<agent>/`` URL the plugin serves.
+
+    Implemented as a Solid component (``routes/sidebar.jsx``); the shim
+    asks the sidebar SSR bundle to render it and falls back to the
+    client-render shell when the sidecar isn't available.
     """
-    return JINJA_ENV.get_template("sidebar.html").render(
-        mngr_forward_origin=mngr_forward_origin,
+    return _render_ssr_or_fallback(
+        sidecar=sidecar,
+        route="sidebar",
+        props={"mngrForwardOrigin": mngr_forward_origin},
+        bundle="sidebar",
     )
 
 

@@ -24,13 +24,12 @@ out of the generic template module.
 
 from collections.abc import Sequence
 
-from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
-from imbue.minds.desktop_client.templates import JINJA_ENV
+from imbue.minds.desktop_client.ssr_sidecar import SsrSidecar
+from imbue.minds.desktop_client.templates import _render_ssr_or_fallback
 from imbue.minds.desktop_client.templates import workspace_accent
 
 
-@pure
 def render_predefined_permission_dialog(
     agent_id: str,
     request_id: str,
@@ -40,6 +39,7 @@ def render_predefined_permission_dialog(
     checked_permissions: Sequence[str],
     will_open_browser: bool,
     mngr_forward_origin: str = "",
+    sidecar: SsrSidecar | None = None,
 ) -> str:
     """Render the predefined (catalog-backed) permission approval dialog.
 
@@ -51,24 +51,31 @@ def render_predefined_permission_dialog(
 
     ``mngr_forward_origin`` is the bare origin of the ``mngr forward`` plugin;
     the workspace link in the dialog points at ``{mngr_forward_origin}/goto/<agent>/``.
+
+    Implemented as a Solid component (``routes/permissions/predefined.jsx``);
+    this shim asks the SSR sidecar to render it and falls back to the
+    client-render shell when the sidecar isn't available.
     """
-    return JINJA_ENV.get_template("latchkey_predefined_permission.html").render(
-        agent_id=agent_id,
-        request_id=request_id,
-        ws_name=ws_name,
-        rationale=rationale,
-        display_name=service.display_name,
-        scope=service.scope,
-        permission_schemas=service.permission_schemas,
-        description_by_permission_name=service.description_by_permission_name,
-        checked_permissions=set(checked_permissions),
-        accent=workspace_accent(agent_id),
-        will_open_browser=will_open_browser,
-        mngr_forward_origin=mngr_forward_origin,
+    return _render_ssr_or_fallback(
+        sidecar=sidecar,
+        route="permissions/predefined",
+        props={
+            "agentId": agent_id,
+            "requestId": request_id,
+            "wsName": ws_name,
+            "rationale": rationale,
+            "displayName": service.display_name,
+            "scope": service.scope,
+            "permissionSchemas": list(service.permission_schemas),
+            "descriptionByPermissionName": dict(service.description_by_permission_name),
+            "checkedPermissions": sorted(set(checked_permissions)),
+            "accent": workspace_accent(agent_id),
+            "willOpenBrowser": will_open_browser,
+            "mngrForwardOrigin": mngr_forward_origin,
+        },
     )
 
 
-@pure
 def render_file_sharing_permission_dialog(
     agent_id: str,
     request_id: str,
@@ -78,13 +85,14 @@ def render_file_sharing_permission_dialog(
     access: str,
     access_human_label: str,
     mngr_forward_origin: str = "",
+    sidecar: SsrSidecar | None = None,
 ) -> str:
     """Render the file-sharing permission approval dialog.
 
     Mirrors the predefined dialog's chrome, header, rationale card, and
-    submission JS (via the shared ``templates/permissions.html`` base);
-    swaps the per-permission checkbox list for a short explanation of
-    what the agent will be allowed to do with the path.
+    submission JS (via the shared ``permissions/PermissionRequest`` Solid
+    component); swaps the per-permission checkbox list for a short
+    explanation of what the agent will be allowed to do with the path.
 
     ``access`` carries the agent's requested access mode (``READ`` or
     ``WRITE``) verbatim; ``access_human_label`` is the lower-case
@@ -94,15 +102,19 @@ def render_file_sharing_permission_dialog(
     ``mngr_forward_origin`` is the bare origin of the ``mngr forward`` plugin;
     the workspace link in the dialog points at ``{mngr_forward_origin}/goto/<agent>/``.
     """
-    return JINJA_ENV.get_template("latchkey_file_sharing_permission.html").render(
-        agent_id=agent_id,
-        request_id=request_id,
-        ws_name=ws_name,
-        rationale=rationale,
-        file_path=file_path,
-        access=access,
-        access_human_label=access_human_label,
-        display_name=file_path,
-        accent=workspace_accent(agent_id),
-        mngr_forward_origin=mngr_forward_origin,
+    return _render_ssr_or_fallback(
+        sidecar=sidecar,
+        route="permissions/file_sharing",
+        props={
+            "agentId": agent_id,
+            "requestId": request_id,
+            "wsName": ws_name,
+            "rationale": rationale,
+            "filePath": file_path,
+            "access": access,
+            "accessHumanLabel": access_human_label,
+            "displayName": file_path,
+            "accent": workspace_accent(agent_id),
+            "mngrForwardOrigin": mngr_forward_origin,
+        },
     )
