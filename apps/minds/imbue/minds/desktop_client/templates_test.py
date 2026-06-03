@@ -439,10 +439,10 @@ def test_render_recovery_page_promotes_button_above_troubleshooting() -> None:
     assert button_pos < block_pos < error_pos < debug_pos
 
 
-def test_render_dev_styleguide_page_surfaces_tokens_and_macro_widgets() -> None:
+def test_render_dev_styleguide_page_surfaces_tokens_and_component_widgets() -> None:
     """The styleguide must surface the live ``:root`` tokens and render
-    each catalog widget through its real macro (so the catalog can't drift
-    silently from the macros it documents)."""
+    each catalog widget through its real JinjaX component (so the catalog
+    can't drift silently from the components it documents)."""
     html = render_dev_styleguide_page()
     assert "--shadow-seam" in html
     # The accent picker section is a separate runtime variable, not a :root token.
@@ -458,9 +458,10 @@ def test_render_dev_styleguide_page_surfaces_tokens_and_macro_widgets() -> None:
         "Notices",
     ):
         assert header in html, f"missing pattern: {header}"
-    # The buttons / notices / inputs are rendered through _macros.html; these
-    # assertions verify that the macro output (button label, notice copy, input
-    # name) actually reaches the rendered page.
+    # The buttons / notices / inputs are rendered through their JinjaX
+    # components (Button, Notice, TextInput); these assertions verify that
+    # the component output (button label, notice copy, input name) actually
+    # reaches the rendered page.
     assert ">Primary<" in html and ">Danger<" in html
     assert "All set: action completed." in html
     assert 'name="styleguide-focus-ring-input"' in html
