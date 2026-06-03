@@ -19,9 +19,13 @@ services = [
     "cloudflare",
     "litellm",
     "neon",
-    "paid-accounts",
     "pool-ssh",
     "supertokens",
+    # OVH AK/AS/CK -- the connector's release route + cleanup cron make signed
+    # OVH calls at runtime to strip per-lease tags and cancel released VPSes.
+    # The rsc app references `ovh-<tier>-<deploy_id>` via Secret.from_name, so
+    # this must be pushed or `modal deploy rsc-<tier>` fails.
+    "ovh",
 ]
 
 # Tier-shape flags consumed by `minds env deploy` / `destroy`. Matches
@@ -33,3 +37,8 @@ creates_resources = true
 modal_env_strategy = "PER_ENV"
 writes_local_state = true
 tracks_generation = false
+
+# Default paid-access entries seeded (seed-if-absent) into paid_domains after
+# migrations, so CI / deployment-test envs can exercise paid features.
+[paid]
+domains = ["imbue.com"]

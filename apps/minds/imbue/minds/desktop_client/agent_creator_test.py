@@ -25,9 +25,11 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.agent_creator import _CreateEventCapture
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_git_worktree
 from imbue.minds.desktop_client.agent_creator import _is_local_path
+from imbue.minds.desktop_client.agent_creator import _may_shallow_clone_remote_repo
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
@@ -38,6 +40,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.errors import MngrCommandError
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
@@ -54,6 +57,59 @@ def test_extract_repo_name_strips_dot_git_and_trailing_slash() -> None:
 def test_extract_repo_name_falls_back_to_workspace() -> None:
     assert extract_repo_name("/") == "workspace"
     assert extract_repo_name("///") == "workspace"
+
+
+def test_imbue_cloud_remote_clone_is_never_shallow() -> None:
+    """imbue_cloud must full-clone a remote URL.
+
+    Regression test for the staging slow-path failure: a shallow clone can't be
+    git-mirror-pushed to the leased host ("shallow update not allowed"), so the
+    slow-path fallback failed. Every other mode may shallow-clone.
+    """
+    assert _may_shallow_clone_remote_repo(LaunchMode.IMBUE_CLOUD) is False
+    for mode in (LaunchMode.DOCKER, LaunchMode.LIMA, LaunchMode.CLOUD):
+        assert _may_shallow_clone_remote_repo(mode) is True
+
+
+def test_create_event_capture_records_error_class_from_jsonl_error_event() -> None:
+    """A structured ``{"event":"error","error_class":...}`` line populates ``error_class``.
+
+    This is what lets the fast->slow fallback branch on the error *type* rather
+    than substring-matching human text.
+    """
+    capture = _CreateEventCapture()
+    capture(
+        '{"event": "error", "error_class": "FastPathUnavailableError", "message": "no match"}',
+        is_stdout=True,
+    )
+    assert capture.error_class == "FastPathUnavailableError"
+    assert capture.canonical_agent_id is None
+
+
+def test_create_event_capture_still_records_created_event() -> None:
+    """The error-event handling must not regress the existing ``created`` parsing."""
+    capture = _CreateEventCapture()
+    capture(
+        '{"event": "created", "agent_id": "agent-b40593cc326a41cd832e3dc5c3d951de", "host_id": "host-xyz"}',
+        is_stdout=True,
+    )
+    assert str(capture.canonical_agent_id) == "agent-b40593cc326a41cd832e3dc5c3d951de"
+    assert capture.canonical_host_id == "host-xyz"
+    assert capture.error_class is None
+
+
+def test_create_event_capture_ignores_error_event_without_error_class() -> None:
+    """An error event lacking ``error_class`` leaves the field unset (no crash)."""
+    capture = _CreateEventCapture()
+    capture('{"event": "error", "message": "something failed"}', is_stdout=True)
+    assert capture.error_class is None
+
+
+def test_mngr_command_error_carries_error_class() -> None:
+    """MngrCommandError exposes the parsed error class for fallback decisions."""
+    err = MngrCommandError("mngr create failed", error_class="FastPathUnavailableError")
+    assert err.error_class == "FastPathUnavailableError"
+    assert MngrCommandError("plain failure").error_class is None
 
 
 def test_is_local_path_recognises_relative_and_absolute_paths() -> None:
@@ -141,6 +197,28 @@ def test_build_mngr_create_command_does_not_inject_minds_api_key() -> None:
         )
         joined = " ".join(command)
         assert "MINDS_API_KEY" not in joined, f"{mode}: command must not mention MINDS_API_KEY"
+
+
+def test_build_mngr_create_command_forwards_fast_mode_for_imbue_cloud() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.IMBUE_CLOUD,
+        host_name=HostName("hello"),
+        imbue_cloud_account="alice@imbue.com",
+        imbue_cloud_fast_mode="require",
+    )
+    # The fast_mode knob must reach mngr as a -b build arg.
+    assert "-b" in command
+    assert "fast_mode=require" in command
+
+
+def test_build_mngr_create_command_omits_fast_mode_when_unset() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.IMBUE_CLOUD,
+        host_name=HostName("hello"),
+        imbue_cloud_account="alice@imbue.com",
+    )
+    joined = " ".join(command)
+    assert "fast_mode" not in joined
 
 
 def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:

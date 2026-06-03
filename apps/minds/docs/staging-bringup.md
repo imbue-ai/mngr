@@ -213,10 +213,6 @@ Modal-pushed entries (consumed by the deployed apps at runtime):
 - [ ] **`secrets/minds/staging/neon`** -- `DATABASE_URL` (pooled DSN
   for the `host_pool` DB).
 
-- [ ] **`secrets/minds/staging/paid-accounts`** --
-  `PAID_ACCOUNT_SUFFIXES` (e.g. `@imbue.com`). Leave empty if you
-  want paid features off in staging.
-
 - [ ] **`secrets/minds/staging/pool-ssh`** -- `POOL_SSH_PRIVATE_KEY`.
   Push via the `@<path>` syntax so the key file never leaves your
   laptop:
@@ -233,7 +229,9 @@ Modal-pushed entries (consumed by the deployed apps at runtime):
   `AUTH_WEBSITE_DOMAIN`
   (`https://minds-staging--rsc-staging-api.modal.run`),
   `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GITHUB_CLIENT_ID`,
-  `GITHUB_CLIENT_SECRET`.
+  `GITHUB_CLIENT_SECRET`, `MINDS_PAID_ADMIN_KEY` (the fixed key for
+  the `/paid/*` admin API; leave empty to disable it),
+  `MINDS_PAID_LIST_CACHE_TTL_SECONDS` (optional; default 60).
 
 Operator-only entries (read by `minds env deploy` on the laptop;
 never pushed to Modal):
@@ -300,8 +298,6 @@ Watch the deploy logs. On the first run, expect:
 
 - `WARNING: Vault read for ovh failed ...` if you skipped the OVH
   entry. Safe to ignore.
-- A `paid-accounts` placeholder warning if you left
-  `PAID_ACCOUNT_SUFFIXES` empty. Safe to ignore.
 - Per-app deploy lines ending with
   `https://minds-staging--rsc-staging-api.modal.run` and
   `https://minds-staging--llm-staging-proxy.modal.run`. The deploy

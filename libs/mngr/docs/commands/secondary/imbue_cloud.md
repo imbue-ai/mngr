@@ -692,3 +692,132 @@ mngr imbue_cloud admin pool destroy [OPTIONS] POOL_HOST_ID
 | ---- | ---- | ----------- | ------- |
 | `--database-url` | text | Neon PostgreSQL direct connection string for the pool DB. Defaults to MINDS_HOST_POOL_DSN env var, or the activated minds env's secrets.toml NEON_HOST_POOL_DSN field (so `minds env activate <dev-env>` is enough). Pass this explicitly when operating outside an activated env. | None |
 | `--force` | boolean | Drop the row even if status != 'released' | `False` |
+| `--skip-vps-cancel` | boolean | Only drop the DB row; do NOT cancel the OVH VPS. Use exclusively when the VPS is already gone/cancelled -- otherwise the default path cancels it so no billing orphan is left behind. | `False` |
+
+## mngr imbue_cloud admin paid
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin paid [OPTIONS] COMMAND [ARGS]...
+```
+**Options:**
+
+
+## mngr imbue_cloud admin paid domain
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin paid domain [OPTIONS] COMMAND [ARGS]...
+```
+**Options:**
+
+
+## mngr imbue_cloud admin paid domain add
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin paid domain add [OPTIONS] VALUE
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--api-key` | text | Paid-list admin API key. Defaults to $MINDS_PAID_ADMIN_KEY. | None |
+| `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
+
+## mngr imbue_cloud admin paid domain remove
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin paid domain remove [OPTIONS] VALUE
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--api-key` | text | Paid-list admin API key. Defaults to $MINDS_PAID_ADMIN_KEY. | None |
+| `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
+
+## mngr imbue_cloud admin paid domain list
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin paid domain list [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--paid-only` | boolean | Only show currently-active (is_paid) domains. | `False` |
+| `--api-key` | text | Paid-list admin API key. Defaults to $MINDS_PAID_ADMIN_KEY. | None |
+| `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
+
+## mngr imbue_cloud admin paid email
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin paid email [OPTIONS] COMMAND [ARGS]...
+```
+**Options:**
+
+
+## mngr imbue_cloud admin paid email add
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin paid email add [OPTIONS] VALUE
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--api-key` | text | Paid-list admin API key. Defaults to $MINDS_PAID_ADMIN_KEY. | None |
+| `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
+
+## mngr imbue_cloud admin paid email remove
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin paid email remove [OPTIONS] VALUE
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--api-key` | text | Paid-list admin API key. Defaults to $MINDS_PAID_ADMIN_KEY. | None |
+| `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
+
+## mngr imbue_cloud admin paid email list
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin paid email list [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--paid-only` | boolean | Only show currently-active (is_paid) emails. | `False` |
+| `--api-key` | text | Paid-list admin API key. Defaults to $MINDS_PAID_ADMIN_KEY. | None |
+| `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |

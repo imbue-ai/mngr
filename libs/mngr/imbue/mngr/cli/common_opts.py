@@ -288,6 +288,11 @@ def setup_command_context(
     # so AliasAwareGroup.invoke() can check them when catching exceptions
     if ctx.parent is not None:
         ctx.parent.meta["is_interactive"] = is_interactive
+        # Expose the resolved output format on the group context so
+        # AliasAwareGroup.invoke() can emit a structured JSONL error event
+        # (with the exception's class name) when a command fails -- letting
+        # subprocess callers detect the error *type* without parsing text.
+        ctx.parent.meta["output_format"] = output_opts.output_format
         if mngr_ctx.config.is_error_reporting_enabled and is_interactive:
             ctx.parent.meta["is_error_reporting_enabled"] = True
 
