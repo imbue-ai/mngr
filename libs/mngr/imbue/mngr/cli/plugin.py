@@ -1,4 +1,3 @@
-import importlib.metadata
 import json
 import os
 import sys
@@ -44,6 +43,7 @@ from imbue.mngr.utils.toml_config import set_plugin_enabled
 from imbue.mngr.uv_tool import ToolRequirement
 from imbue.mngr.uv_tool import build_uv_tool_install_add_requirements
 from imbue.mngr.uv_tool import build_uv_tool_install_remove_multiple
+from imbue.mngr.uv_tool import has_mngr_entry_points
 from imbue.mngr.uv_tool import read_receipt
 from imbue.mngr.uv_tool import require_uv_tool_receipt
 
@@ -267,19 +267,6 @@ def _read_package_name_from_pyproject(local_path: str) -> str:
     if not name:
         raise PluginSpecifierError(f"pyproject.toml at '{resolved}' does not have a project.name field")
     return name
-
-
-def _check_for_mngr_entry_points(package_name: str) -> bool:
-    """Check whether an installed package registered any mngr entry points.
-
-    Returns True if entry points were found, False otherwise.
-    """
-    try:
-        dist = importlib.metadata.distribution(package_name)
-    except importlib.metadata.PackageNotFoundError:
-        return False
-    entry_points = dist.entry_points
-    return any(ep.group == "mngr" for ep in entry_points)
 
 
 def _emit_plugin_add_result(
@@ -645,7 +632,7 @@ def _plugin_add_impl(ctx: click.Context) -> None:
 
     # Report results for each source
     for specifier, resolved_package_name, _ in source_info:
-        has_entry_points = _check_for_mngr_entry_points(resolved_package_name)
+        has_entry_points = has_mngr_entry_points(resolved_package_name)
         _emit_plugin_add_result(specifier, resolved_package_name, has_entry_points, output_opts)
 
 

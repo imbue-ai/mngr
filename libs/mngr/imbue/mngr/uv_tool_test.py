@@ -17,6 +17,7 @@ from imbue.mngr.uv_tool import build_uv_tool_install_remove
 from imbue.mngr.uv_tool import build_uv_tool_install_remove_multiple
 from imbue.mngr.uv_tool import get_installed_plugin_package_names
 from imbue.mngr.uv_tool import get_receipt_path
+from imbue.mngr.uv_tool import has_mngr_entry_points
 from imbue.mngr.uv_tool import read_receipt
 from imbue.mngr.uv_tool import require_uv_tool_receipt
 
@@ -489,6 +490,17 @@ def test_build_uv_tool_install_remove_multiple_all_deps() -> None:
 # =============================================================================
 
 
+def test_has_mngr_entry_points_false_for_missing_package() -> None:
+    """A package that is not installed has no mngr entry points."""
+    assert has_mngr_entry_points("definitely-not-installed-package-zzz") is False
+
+
+def test_has_mngr_entry_points_false_for_non_plugin_library() -> None:
+    """An installed library that declares no mngr entry points is not a plugin."""
+    # pytest is always installed in the test environment and is not an mngr plugin.
+    assert has_mngr_entry_points("pytest") is False
+
+
 def test_get_installed_plugin_package_names_returns_empty_in_dev_mode() -> None:
     """Best-effort: returns empty when mngr was not installed via uv tool (no receipt)."""
     assert get_installed_plugin_package_names() == []
@@ -506,7 +518,30 @@ def test_get_installed_plugin_package_names_sorted_and_deduped(tmp_path: Path) -
         "]\n"
     )
 
-    assert get_installed_plugin_package_names(receipt_path) == ["imbue-mngr-claude", "imbue-mngr-modal"]
+    # Inject a deterministic plugin predicate so the test does not depend on
+    # which packages happen to be installed in the test environment.
+    result = get_installed_plugin_package_names(receipt_path, is_plugin_package=lambda name: True)
+    assert result == ["imbue-mngr-claude", "imbue-mngr-modal"]
+
+
+def test_get_installed_plugin_package_names_filters_non_plugin_extras(tmp_path: Path) -> None:
+    """Non-plugin extras (libraries with no mngr entry points) are excluded."""
+    receipt_path = tmp_path / "uv-receipt.toml"
+    # Mirrors a real editable dev install: plugins plus workspace libraries.
+    receipt_path.write_text(
+        "[tool]\nrequirements = [\n"
+        '  { name = "imbue-mngr" },\n'
+        '  { name = "concurrency-group" },\n'
+        '  { name = "imbue-common" },\n'
+        '  { name = "modal-proxy" },\n'
+        '  { name = "imbue-mngr-modal" },\n'
+        '  { name = "imbue-mngr-claude" },\n'
+        "]\n"
+    )
+
+    is_plugin = {"imbue-mngr-modal", "imbue-mngr-claude"}.__contains__
+    result = get_installed_plugin_package_names(receipt_path, is_plugin_package=is_plugin)
+    assert result == ["imbue-mngr-claude", "imbue-mngr-modal"]
 
 
 def test_get_installed_plugin_package_names_handles_malformed_receipt(tmp_path: Path) -> None:
