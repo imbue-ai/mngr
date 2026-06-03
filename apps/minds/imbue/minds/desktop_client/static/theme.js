@@ -72,9 +72,12 @@
   }
 
   function readSurface() {
-    // The server inlines --workspace-surface on <body>; fall back to <html>
-    // and to a literal --workspace-accent (the existing per-workspace var
-    // used on pages that haven't been migrated to --workspace-surface yet).
+    // Read --workspace-surface from <body> first (the dev styleguide
+    // picker writes it there; a future PR will have the server inline it
+    // on production workspace pages too). Then fall back to <html>, and
+    // finally to --workspace-accent -- the per-workspace var the server
+    // currently inlines on workspace-scoped production pages, which is
+    // the only luminance signal those pages emit today.
     var body = document.body;
     var styles = body ? window.getComputedStyle(body) : null;
     var surface = styles && styles.getPropertyValue('--workspace-surface');
