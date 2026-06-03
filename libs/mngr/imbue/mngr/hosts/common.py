@@ -45,8 +45,25 @@ def build_ssh_transport_command(
     present in the known_hosts file. When known_hosts_file is provided, that file is
     used via UserKnownHostsFile. When None, the system default (~/.ssh/known_hosts)
     is used without setting UserKnownHostsFile.
+
+    `IdentitiesOnly=yes` + `IdentityAgent=none` pin authentication to the
+    explicit `-i` key. Without this, ssh first consults `SSH_AUTH_SOCK` --
+    on a macOS user session that's the Apple launchd agent socket which
+    forwards to 1Password's biometric prompt. In a BatchMode child like
+    `git push` or `rsync` that prompt cannot fire, and ssh blocks
+    indefinitely on the agent reply with no error surfaced upstream.
     """
-    parts = ["ssh", "-i", shlex.quote(str(key_path)), "-p", str(port)]
+    parts = [
+        "ssh",
+        "-i",
+        shlex.quote(str(key_path)),
+        "-p",
+        str(port),
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "IdentityAgent=none",
+    ]
     if known_hosts_file is not None:
         parts.extend(
             ["-o", f"UserKnownHostsFile={shlex.quote(str(known_hosts_file))}", "-o", "StrictHostKeyChecking=yes"]
