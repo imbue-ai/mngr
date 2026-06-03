@@ -10,6 +10,7 @@ from imbue.mngr.api.data_types import ConnectionOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NestedTmuxError
+from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.utils.duration import parse_duration_to_seconds
@@ -23,10 +24,11 @@ SIGNAL_EXIT_CODE_DESTROY: Final[int] = 10
 SIGNAL_EXIT_CODE_STOP: Final[int] = 11
 
 
+@pure
 def build_post_attach_resize_script(session_name: str) -> str:
     """Build a shell command that resizes tmux windows and sends SIGWINCH.
 
-    After a tmux client attaches, resize all windows to match the client
+    After a tmux client attaches, resize each window to match the client
     (resize-window -A), then explicitly send SIGWINCH to each pane's child
     processes. The explicit SIGWINCH is needed because resize-window -A can
     be a no-op (and thus not trigger SIGWINCH) when the window already
@@ -36,15 +38,23 @@ def build_post_attach_resize_script(session_name: str) -> str:
     dependency on matching the agent's process name, which is unreliable
     (on macOS, Claude's process title shows as its version number rather
     than "claude").
+
+    The session component is rendered via :class:`TmuxSessionTarget`;
+    ``:$W`` stays as a literal shell-variable suffix so the loop iterates
+    over windows at runtime.
     """
+    session_target = TmuxSessionTarget(session_name=session_name).as_shell_arg()
     return (
-        f"tmux list-windows -t '={session_name}' -F '#I' | "
-        f"xargs -I{{}} tmux resize-window -t '{session_name}':{{}} -A; "
-        f"tmux list-panes -t '{session_name}' -F '#{{pane_pid}}' | "
-        f"xargs -I{{}} sh -c 'kill -WINCH {{}} $(pgrep -P {{}})' 2>/dev/null"
+        f"tmux list-windows -t {session_target} -F '#I' | "
+        f"while read W; do "
+        f"tmux resize-window -t {session_target}:$W -A; "
+        f"tmux list-panes -t {session_target}:$W -F '#{{pane_pid}}' "
+        f"| xargs -I{{}} sh -c 'kill -WINCH {{}} $(pgrep -P {{}})' 2>/dev/null; "
+        f"done"
     )
 
 
+@pure
 def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path) -> str:
     """Build a shell script that tracks SSH activity while running tmux.
 
@@ -76,8 +86,11 @@ def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path) -> str
         "MNGR_ACTIVITY_PID=$!; "
         # Force a terminal resize after attaching to trigger SIGWINCH delivery.
         f"(sleep 3; {build_post_attach_resize_script(session_name)}) 2>/dev/null & "
-        # actually attach
-        f"tmux attach -t '={session_name}'; "
+        # actually attach. Route the -t target through TmuxSessionTarget so the
+        # = exact-match prefix and shell-escaping rule are uniform with the rest
+        # of the codebase (see TmuxSessionTarget docstring for the prefix-matching
+        # bug this guards against).
+        f"tmux attach -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()}; "
         "kill $MNGR_ACTIVITY_PID 2>/dev/null; "
         # Check for signal files written by tmux key bindings (Ctrl-q writes "destroy", Ctrl-t writes "stop")
         f"SIGNAL_FILE='{signal_file}'; "
@@ -224,6 +237,14 @@ def connect_to_agent(
             # Copy and remove TMUX so tmux allows the nested attachment
             env = dict(os.environ)
             del env["TMUX"]
+        # Pass the raw `=name` form straight to argv. We deliberately do NOT
+        # route this through TmuxSessionTarget.as_shell_arg() (the helper used
+        # everywhere else in the codebase): as_shell_arg() shlex-quotes the
+        # value for safe interpolation into a shell command string, but argv
+        # to os.execvpe is verbatim, so an extra layer of shell-quoting would
+        # wrong-shape the argument whenever session_name contains a
+        # shell-special character. The leading `=` still forces tmux's
+        # exact-session matching (same rule TmuxSessionTarget encodes).
         os.execvpe("tmux", ["tmux", "attach", "-t", f"={session_name}"], env)
     else:
         ssh_args = _build_ssh_args(host, connection_opts)

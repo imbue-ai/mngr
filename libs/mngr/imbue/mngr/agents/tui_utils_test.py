@@ -16,6 +16,7 @@ from imbue.mngr.agents.tui_utils import send_enter_keystroke
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.errors import SendMessageError
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -84,13 +85,13 @@ class _ProbeAgent(BaseAgent[AgentTypeConfig]):
     pane_capture_count: int = pydantic.Field(default=0)
     always_missing_indicator: bool = pydantic.Field(default=False)
 
-    def _capture_pane_content(self, tmux_target: str, include_scrollback: bool = False) -> str | None:
+    def _capture_pane_content(self, tmux_target: TmuxWindowTarget, include_scrollback: bool = False) -> str | None:
         self.pane_capture_count += 1
         if self.always_missing_indicator:
             return "user typed message but Enter was swallowed"
         return "input row cleared -- probe-cleared visible"
 
-    def _check_pane_contains(self, tmux_target: str, text: str) -> bool:
+    def _check_pane_contains(self, tmux_target: TmuxWindowTarget, text: str) -> bool:
         content = self._capture_pane_content(tmux_target)
         return content is not None and text in content
 
@@ -122,26 +123,28 @@ def _make_probe(*, command_succeeds: bool = True, always_missing_indicator: bool
 
 def test_send_enter_keystroke_runs_tmux_send_keys() -> None:
     agent = _make_probe()
-    send_enter_keystroke(agent, "probe-target")
-    assert agent.captured_commands == ["tmux send-keys -t 'probe-target' Enter"]
+    send_enter_keystroke(agent, TmuxWindowTarget(session_name="probe-target", window=0))
+    assert agent.captured_commands == ["tmux send-keys -t =probe-target:0 Enter"]
 
 
 def test_send_enter_keystroke_raises_on_command_failure() -> None:
     agent = _make_probe(command_succeeds=False)
     with pytest.raises(SendMessageError, match="tmux send-keys Enter failed"):
-        send_enter_keystroke(agent, "probe-target")
+        send_enter_keystroke(agent, TmuxWindowTarget(session_name="probe-target", window=0))
 
 
 def test_send_enter_best_effort_sends_single_keystroke() -> None:
     agent = _make_probe()
-    send_enter_best_effort(agent, "probe-target")
-    assert agent.captured_commands == ["tmux send-keys -t 'probe-target' Enter"]
+    send_enter_best_effort(agent, TmuxWindowTarget(session_name="probe-target", window=0))
+    assert agent.captured_commands == ["tmux send-keys -t =probe-target:0 Enter"]
 
 
 def test_send_enter_and_poll_returns_when_indicator_appears() -> None:
     agent = _make_probe()
-    send_enter_and_poll_for_cleared_indicator(agent, "probe-target", cleared_indicator="probe-cleared")
-    assert agent.captured_commands == ["tmux send-keys -t 'probe-target' Enter"]
+    send_enter_and_poll_for_cleared_indicator(
+        agent, TmuxWindowTarget(session_name="probe-target", window=0), cleared_indicator="probe-cleared"
+    )
+    assert agent.captured_commands == ["tmux send-keys -t =probe-target:0 Enter"]
     assert agent.pane_capture_count >= 1
 
 
@@ -155,9 +158,13 @@ def test_send_enter_and_poll_retries_when_indicator_missing() -> None:
     agent = _make_probe(always_missing_indicator=True)
     with pytest.raises(SendMessageError, match="Timeout waiting for TUI input prompt to clear"):
         send_enter_and_poll_for_cleared_indicator(
-            agent, "probe-target", cleared_indicator="probe-cleared", max_attempts=2, per_attempt_timeout_seconds=0.1
+            agent,
+            TmuxWindowTarget(session_name="probe-target", window=0),
+            cleared_indicator="probe-cleared",
+            max_attempts=2,
+            per_attempt_timeout_seconds=0.1,
         )
-    assert agent.captured_commands == ["tmux send-keys -t 'probe-target' Enter"] * 2
+    assert agent.captured_commands == ["tmux send-keys -t =probe-target:0 Enter"] * 2
 
 
 # =========================================================================
@@ -191,7 +198,7 @@ def signal_agent(
 def test_send_enter_via_hook_returns_when_signal_received(signal_agent: _ProbeAgent) -> None:
     """The wait-for-hook strategy returns when the channel is signaled."""
     session_name = f"{signal_agent.mngr_ctx.config.prefix}{signal_agent.name}"
-    tmux_target = f"{session_name}:0"
+    tmux_target = TmuxWindowTarget(session_name=session_name, window=0)
     wait_channel = f"mngr-submit-{session_name}"
 
     signal_agent.host.execute_idempotent_command(
@@ -225,7 +232,7 @@ def test_send_enter_via_hook_returns_when_signal_received(signal_agent: _ProbeAg
 def test_send_enter_via_hook_raises_on_timeout(signal_agent: _ProbeAgent) -> None:
     """The wait-for-hook strategy raises SendMessageError on timeout."""
     session_name = f"{signal_agent.mngr_ctx.config.prefix}{signal_agent.name}"
-    tmux_target = f"{session_name}:0"
+    tmux_target = TmuxWindowTarget(session_name=session_name, window=0)
     wait_channel = f"mngr-submit-never-signaled-{session_name}"
 
     signal_agent.host.execute_idempotent_command(

@@ -27,10 +27,10 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
-from imbue.minds.desktop_client.latchkey.permissions import GrantOutcome
-from imbue.minds.desktop_client.latchkey.permissions import GrantResult
-from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionGrantHandler
-from imbue.minds.desktop_client.latchkey.permissions import MngrMessageSender
+from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
+from imbue.minds.desktop_client.latchkey.handlers.predefined import GrantOutcome
+from imbue.minds.desktop_client.latchkey.handlers.predefined import GrantResult
+from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
@@ -40,7 +40,7 @@ from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestResponseEvent
 from imbue.minds.desktop_client.request_events import RequestStatus
 from imbue.minds.desktop_client.request_events import RequestType
-from imbue.minds.desktop_client.request_events import create_latchkey_permission_request_event
+from imbue.minds.desktop_client.request_events import create_latchkey_predefined_permission_request_event
 from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.mngr.primitives import AgentId
@@ -124,13 +124,15 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
         self,
         request_event_id: str,
         agent_id: AgentId,
-        service_info: ServicePermissionInfo,
+        scope: str,
+        display_name: str,
     ) -> tuple[str, RequestResponseEvent]:
         self.deny_calls.append(
             {
                 "request_event_id": request_event_id,
                 "agent_id": str(agent_id),
-                "scope": service_info.scope,
+                "scope": scope,
+                "display_name": display_name,
             }
         )
         response_event = create_request_response_event(
@@ -138,7 +140,7 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
             status=RequestStatus.DENIED,
             agent_id=str(agent_id),
             request_type=str(RequestType.LATCHKEY_PERMISSION),
-            scope=service_info.scope,
+            scope=scope,
         )
         return self.deny_message, response_event
 
@@ -153,20 +155,25 @@ def _get_app_request_inbox(client: TestClient) -> RequestInbox:
 
 
 _TEST_SERVICES_CATALOG_PAYLOAD: dict[str, object] = {
-    "slack": {
-        "scope": "slack-api",
-        "display_name": "Slack",
-        "permissions": [
-            "slack-read-all",
-            "slack-write-all",
-            "slack-chat-read",
-        ],
-    },
-    "github": {
-        "scope": "github-rest-api",
-        "display_name": "GitHub",
-        "permissions": ["github-read-all"],
-    },
+    "slack": [
+        {
+            "scope": "slack-api",
+            "display_name": "Slack",
+            "description": "Any interaction with the Slack API.",
+            "permissions": [
+                {"name": "slack-read-all", "description": "All read operations across the Slack API."},
+                {"name": "slack-write-all"},
+                {"name": "slack-chat-read"},
+            ],
+        },
+    ],
+    "github": [
+        {
+            "scope": "github-rest-api",
+            "display_name": "GitHub",
+            "permissions": [{"name": "github-read-all"}],
+        },
+    ],
 }
 
 
@@ -259,7 +266,7 @@ def test_get_permission_request_page_pre_checks_agent_requested_permissions(tmp_
     listed as an available option; the user must opt into it explicitly.
     """
     agent_id = AgentId()
-    request = create_latchkey_permission_request_event(
+    request = create_latchkey_predefined_permission_request_event(
         agent_id=str(agent_id),
         scope="slack-api",
         permissions=("slack-read-all",),
@@ -293,6 +300,79 @@ def test_get_permission_request_page_pre_checks_agent_requested_permissions(tmp_
     assert "disabled" in body
 
 
+def test_get_permission_request_page_renders_as_modal(tmp_path: Path) -> None:
+    """The request page is rendered as a dismissable modal overlay.
+
+    The desktop client hosts it in a transparent full-window overlay view
+    stacked over the workspace, so the page provides a dim backdrop, a
+    centered dialog card, and a close affordance. Dismissal (close button,
+    backdrop click, Escape, or a completed grant/deny) must prefer the
+    Electron modal host (``window.minds.closeModal``) so the workspace view
+    is left untouched, falling back to navigating home only when no modal
+    host is present (page opened directly in a browser).
+    """
+    agent_id = AgentId()
+    request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        permissions=("slack-read-all",),
+        rationale="reason",
+    )
+    inbox = RequestInbox().add_request(request)
+    handler = _make_recording_handler(tmp_path)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    response = client.get(f"/requests/{request.event_id}")
+
+    assert response.status_code == 200
+    body = response.text
+    # Modal scaffolding: a dim backdrop, a dialog card, and a close button.
+    assert 'id="permissions-backdrop"' in body
+    assert 'id="permissions-dialog"' in body
+    assert 'id="permissions-close-btn"' in body
+    # The transparent body lets the overlay reveal the workspace behind it.
+    assert "bg-transparent" in body
+    # Dismissal prefers the Electron modal host over a home navigation.
+    assert "window.minds.closeModal" in body
+    closemodal_idx = body.find("window.minds.closeModal")
+    href_idx = body.find('window.location.href = "/"')
+    assert closemodal_idx != -1 and href_idx != -1
+    assert closemodal_idx < href_idx, "closeModal must be preferred over the home-nav fallback"
+    # Backdrop click and Escape are wired to the same dismissal helper.
+    assert "onBackdropClick" in body
+    assert 'e.key === "Escape"' in body
+    # Overflow scrolls inside the dialog card (capped at the viewport height
+    # with an inner scroll region), not down the full width of the app.
+    dialog_idx = body.find('id="permissions-dialog"')
+    dialog_tag_end = body.find(">", dialog_idx)
+    assert "max-h-full" in body[dialog_idx:dialog_tag_end]
+    assert "overflow-y-auto" in body
+
+
+def test_get_permission_request_page_shows_descriptions_when_present(tmp_path: Path) -> None:
+    """detent's per-permission descriptions are rendered next to each permission when present."""
+    agent_id = AgentId()
+    request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        permissions=("slack-read-all",),
+        rationale="reason",
+    )
+    inbox = RequestInbox().add_request(request)
+    handler = _make_recording_handler(tmp_path)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    response = client.get(f"/requests/{request.event_id}")
+
+    assert response.status_code == 200
+    body = response.text
+    # The requested permission's summary comes from the catalog fixture's
+    # per-permission ``description`` field.
+    assert "All read operations across the Slack API." in body
+    # The scope-level description is intentionally not surfaced on the dialog.
+    assert "Any interaction with the Slack API." not in body
+
+
 def test_get_permission_request_page_renders_no_pre_checks_when_request_and_existing_are_empty(
     tmp_path: Path,
 ) -> None:
@@ -302,7 +382,7 @@ def test_get_permission_request_page_renders_no_pre_checks_when_request_and_exis
     so the user must actively tick a permission before they can approve.
     """
     agent_id = AgentId()
-    request = create_latchkey_permission_request_event(
+    request = create_latchkey_predefined_permission_request_event(
         agent_id=str(agent_id),
         scope="slack-api",
         rationale="reason",
@@ -333,7 +413,7 @@ def test_get_permission_request_page_renders_no_pre_checks_when_request_and_exis
 def test_post_permission_grant_calls_handler_and_resolves_inbox(tmp_path: Path) -> None:
     agent_id = AgentId()
     host_id = HostId()
-    request = create_latchkey_permission_request_event(
+    request = create_latchkey_predefined_permission_request_event(
         agent_id=str(agent_id),
         scope="slack-api",
         rationale="reason",
@@ -364,7 +444,7 @@ def test_post_permission_grant_calls_handler_and_resolves_inbox(tmp_path: Path) 
 
 def test_post_permission_grant_rejects_empty_permissions(tmp_path: Path) -> None:
     agent_id = AgentId()
-    request = create_latchkey_permission_request_event(
+    request = create_latchkey_predefined_permission_request_event(
         agent_id=str(agent_id),
         scope="slack-api",
         rationale="reason",
@@ -384,7 +464,7 @@ def test_post_permission_grant_rejects_empty_permissions(tmp_path: Path) -> None
 
 def test_post_permission_grant_with_failed_signin_returns_denied_outcome(tmp_path: Path) -> None:
     agent_id = AgentId()
-    request = create_latchkey_permission_request_event(
+    request = create_latchkey_predefined_permission_request_event(
         agent_id=str(agent_id),
         scope="slack-api",
         rationale="reason",
@@ -413,7 +493,7 @@ def test_post_permission_grant_with_failed_signin_returns_denied_outcome(tmp_pat
 def test_post_permission_grant_with_manual_credentials_keeps_request_pending(tmp_path: Path) -> None:
     """NEEDS_MANUAL_CREDENTIALS must echo the example command and not resolve the inbox."""
     agent_id = AgentId()
-    request = create_latchkey_permission_request_event(
+    request = create_latchkey_predefined_permission_request_event(
         agent_id=str(agent_id),
         scope="slack-api",
         rationale="reason",
@@ -445,7 +525,7 @@ def test_post_permission_grant_with_manual_credentials_keeps_request_pending(tmp
 
 def test_post_permission_deny_calls_handler_and_resolves_inbox(tmp_path: Path) -> None:
     agent_id = AgentId()
-    request = create_latchkey_permission_request_event(
+    request = create_latchkey_predefined_permission_request_event(
         agent_id=str(agent_id),
         scope="slack-api",
         rationale="reason",
@@ -465,7 +545,7 @@ def test_post_permission_deny_calls_handler_and_resolves_inbox(tmp_path: Path) -
 
 def test_post_permission_grant_unknown_service_returns_400(tmp_path: Path) -> None:
     agent_id = AgentId()
-    request = create_latchkey_permission_request_event(
+    request = create_latchkey_predefined_permission_request_event(
         agent_id=str(agent_id),
         scope="not-a-real-scope",
         rationale="reason",
@@ -496,7 +576,7 @@ def test_get_permission_request_page_pre_checks_existing_grants(tmp_path: Path) 
         permissions_path_for_host(tmp_path / "mngr_latchkey", host_id),
         LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-chat-read"]},)),
     )
-    request = create_latchkey_permission_request_event(
+    request = create_latchkey_predefined_permission_request_event(
         agent_id=str(agent_id),
         scope="slack-api",
         rationale="reason",
@@ -533,7 +613,7 @@ def test_get_permission_request_page_pre_checks_union_of_existing_and_requested(
         permissions_path_for_host(tmp_path / "mngr_latchkey", host_id),
         LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-chat-read"]},)),
     )
-    request = create_latchkey_permission_request_event(
+    request = create_latchkey_predefined_permission_request_event(
         agent_id=str(agent_id),
         scope="slack-api",
         permissions=("slack-write-all",),
@@ -574,7 +654,7 @@ def test_post_permission_grant_returns_503_when_host_not_yet_discovered(tmp_path
     retry, instead of silently mis-keying state.
     """
     agent_id = AgentId()
-    request = create_latchkey_permission_request_event(
+    request = create_latchkey_predefined_permission_request_event(
         agent_id=str(agent_id),
         scope="slack-api",
         rationale="reason",
@@ -598,7 +678,7 @@ def test_post_permission_grant_returns_503_when_host_not_yet_discovered(tmp_path
 
 def test_unauthenticated_grant_post_returns_403(tmp_path: Path) -> None:
     agent_id = AgentId()
-    request = create_latchkey_permission_request_event(
+    request = create_latchkey_predefined_permission_request_event(
         agent_id=str(agent_id),
         scope="slack-api",
         rationale="reason",
@@ -696,7 +776,7 @@ def test_dispatcher_routes_grant_to_handler_matching_request_type(tmp_path: Path
     other_agent_id = AgentId()
     permission_agent_id = AgentId()
     other_request = _make_other_request_event(agent_id=str(other_agent_id))
-    permission_request = create_latchkey_permission_request_event(
+    permission_request = create_latchkey_predefined_permission_request_event(
         agent_id=str(permission_agent_id),
         scope="slack-api",
         rationale="reason",

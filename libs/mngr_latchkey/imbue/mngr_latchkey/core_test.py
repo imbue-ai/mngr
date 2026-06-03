@@ -12,6 +12,8 @@ from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.primitives import AgentId
+from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
+from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import LATCHKEY_MIN_VERSION
@@ -23,8 +25,6 @@ from imbue.mngr_latchkey.core import LatchkeyNotInitializedError
 from imbue.mngr_latchkey.core import LatchkeyVersionError
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
-from imbue.mngr_latchkey.ssh_tunnel import RemoteSSHInfo
-from imbue.mngr_latchkey.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.store import admin_permissions_path
 from imbue.mngr_latchkey.store import default_permissions_path
 from imbue.mngr_latchkey.store import ensure_browser_log_path
@@ -111,8 +111,8 @@ def test_initialize_accepts_newer_version(tmp_path: Path) -> None:
 
 
 def test_initialize_tolerates_leading_v_prefix(tmp_path: Path) -> None:
-    """Some CLIs print ``v2.9.0`` rather than the bare semver string."""
-    binary = _make_version_binary(tmp_path, version_output="v2.9.0")
+    """Some CLIs print ``v<version>`` rather than the bare semver string."""
+    binary = _make_version_binary(tmp_path, version_output=f"v{LATCHKEY_MIN_VERSION}")
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
     manager.initialize()
 
@@ -187,7 +187,7 @@ def _make_fake_latchkey_binary(tmp_path: Path) -> Path:
         "#!/usr/bin/env python3\n"
         "import sys\n"
         'if sys.argv[1] == "--version":\n'
-        "    print('2.9.0')\n"
+        f"    print('{LATCHKEY_MIN_VERSION}')\n"
         "    sys.exit(0)\n"
         'if sys.argv[1] == "ensure-browser":\n'
         "    sys.exit(0)\n"
@@ -290,7 +290,7 @@ def test_start_gateway_drops_bundled_extensions(tmp_path: Path) -> None:
         port = manager.start_gateway(cg)
         assert _wait_for_listening("127.0.0.1", port)
         mjs_files = sorted(p.name for p in extensions_dir.iterdir() if p.suffix == ".mjs")
-        assert mjs_files == ["permission_requests.mjs", "permissions.mjs"]
+        assert mjs_files == ["minds_api_proxy.mjs", "permission_requests.mjs", "permissions.mjs"]
         # The destination files must be non-empty -- ``importlib.resources``
         # silently produces empty reads if the wheel does not actually
         # ship the .mjs payloads.
@@ -303,12 +303,26 @@ def test_start_gateway_drops_bundled_extensions(tmp_path: Path) -> None:
         assert services_json_path.is_file()
         services_catalog = json.loads(services_json_path.read_text())
         assert isinstance(services_catalog, dict) and len(services_catalog) > 0
-        for service_name, entry in services_catalog.items():
+        for service_name, entries in services_catalog.items():
             assert isinstance(service_name, str) and len(service_name) > 0
-            assert set(entry.keys()) == {"scope", "display_name", "permissions"}
-            assert isinstance(entry["scope"], str) and len(entry["scope"]) > 0
-            assert isinstance(entry["display_name"], str) and len(entry["display_name"]) > 0
-            assert isinstance(entry["permissions"], list)
+            # Each service maps to a list of scope entries (a service may
+            # expose more than one detent scope).
+            assert isinstance(entries, list) and len(entries) > 0
+            for entry in entries:
+                assert {"scope", "display_name", "permissions"} <= set(entry.keys())
+                assert isinstance(entry["scope"], str) and len(entry["scope"]) > 0
+                assert isinstance(entry["display_name"], str) and len(entry["display_name"]) > 0
+                # The scope-level ``description`` carries detent's ``$comment``
+                # summary. It is optional -- consumers must not depend on it --
+                # so only assert its type when present.
+                assert isinstance(entry.get("description", ""), str)
+                # Each permission is an object whose ``name`` is required; the
+                # ``description`` (detent's ``$comment``) is colocated with it
+                # but optional.
+                assert isinstance(entry["permissions"], list)
+                for permission in entry["permissions"]:
+                    assert isinstance(permission["name"], str) and len(permission["name"]) > 0
+                    assert isinstance(permission.get("description", ""), str)
         manager.stop_gateway()
 
 
@@ -375,7 +389,7 @@ def test_start_gateway_sets_extension_permissions_root_env_var(tmp_path: Path) -
         "#!/usr/bin/env python3\n"
         "import os, socket, signal, sys\n"
         'if sys.argv[1] == "--version":\n'
-        "    print('2.9.0')\n"
+        f"    print('{LATCHKEY_MIN_VERSION}')\n"
         "    sys.exit(0)\n"
         'if sys.argv[1] == "ensure-browser":\n'
         "    sys.exit(0)\n"
@@ -446,7 +460,7 @@ def test_concurrent_start_gateway_spawns_at_most_one_subprocess(tmp_path: Path) 
         "#!/usr/bin/env python3\n"
         "import os, socket, signal, sys, time\n"
         'if sys.argv[1] == "--version":\n'
-        "    print('2.9.0')\n"
+        f"    print('{LATCHKEY_MIN_VERSION}')\n"
         "    sys.exit(0)\n"
         'if sys.argv[1] == "ensure-browser":\n'
         "    sys.exit(0)\n"
@@ -554,7 +568,7 @@ def test_derive_gateway_password_propagates_failure(tmp_path: Path) -> None:
         "#!/usr/bin/env python3\n"
         "import sys\n"
         'if sys.argv[1] == "--version":\n'
-        "    print('2.9.0')\n"
+        f"    print('{LATCHKEY_MIN_VERSION}')\n"
         "    sys.exit(0)\n"
         "sys.stderr.write('No encryption key available.\\n')\n"
         "sys.exit(1)\n"
@@ -582,7 +596,7 @@ def test_create_permissions_override_jwt_propagates_failure(tmp_path: Path) -> N
         "#!/usr/bin/env python3\n"
         "import sys\n"
         'if sys.argv[1] == "--version":\n'
-        "    print('2.9.0')\n"
+        f"    print('{LATCHKEY_MIN_VERSION}')\n"
         "    sys.exit(0)\n"
         "sys.exit(2)\n"
     )
@@ -609,7 +623,7 @@ def test_create_permissions_override_jwt_clears_latchkey_gateway_env(
         "#!/usr/bin/env python3\n"
         "import os, sys\n"
         'if sys.argv[1] == "--version":\n'
-        "    print('2.9.0')\n"
+        f"    print('{LATCHKEY_MIN_VERSION}')\n"
         "    sys.exit(0)\n"
         f"open({str(report_path)!r}, 'w').write(os.environ.get('LATCHKEY_GATEWAY', '<unset>'))\n"
         "print('jwt')\n"
@@ -629,7 +643,7 @@ def test_start_gateway_passes_password_to_subprocess(tmp_path: Path) -> None:
         "#!/usr/bin/env python3\n"
         "import os, socket, signal, sys\n"
         'if sys.argv[1] == "--version":\n'
-        "    print('2.9.0')\n"
+        f"    print('{LATCHKEY_MIN_VERSION}')\n"
         "    sys.exit(0)\n"
         'if sys.argv[1] == "ensure-browser":\n'
         "    sys.exit(0)\n"
@@ -814,7 +828,7 @@ def _make_fake_latchkey_binary_with_ensure_browser_counter(tmp_path: Path, count
         "#!/usr/bin/env python3\n"
         "import os, socket, signal, sys\n"
         'if sys.argv[1] == "--version":\n'
-        "    print('2.9.0')\n"
+        f"    print('{LATCHKEY_MIN_VERSION}')\n"
         "    sys.exit(0)\n"
         'if sys.argv[1] == "ensure-browser":\n'
         "    counter_path = os.environ['FAKE_LATCHKEY_COUNTER']\n"
@@ -1099,3 +1113,104 @@ def test_auth_browser_uses_auth_browser_subcommand(tmp_path: Path) -> None:
     line = report_path.read_text().strip()
     record = json.loads(line)
     assert record == {"argv": ["auth", "browser", "slack"], "env_LATCHKEY_DIRECTORY": str(tmp_path)}
+
+
+def _make_prepare_required_binary(
+    tmp_path: Path,
+    *,
+    prepare_exit_code: int = 0,
+    prepare_stderr: str = "",
+) -> Path:
+    """Build a fake latchkey CLI that mimics the 'requires preparation first' workflow.
+
+    ``auth browser <service>`` exits 1 with latchkey's actual error
+    message until ``auth browser-prepare <service>`` has been run; the
+    prepare step writes a sentinel file that subsequent ``auth browser``
+    calls look for. ``prepare_exit_code`` / ``prepare_stderr`` let tests
+    force the prepare step itself to fail.
+    """
+    script = tmp_path / "latchkey"
+    report_path = tmp_path / "latchkey_report.jsonl"
+    prepared_marker = tmp_path / "prepared_marker"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "argv = sys.argv[1:]\n"
+        f"with open({str(report_path)!r}, 'a') as f:\n"
+        "    f.write(json.dumps({'argv': argv, 'env_LATCHKEY_DIRECTORY': os.environ.get('LATCHKEY_DIRECTORY', '')}) + '\\n')\n"
+        f"prepared_marker = {str(prepared_marker)!r}\n"
+        "if argv[:2] == ['auth', 'browser-prepare']:\n"
+        f"    if {prepare_exit_code} == 0:\n"
+        "        open(prepared_marker, 'w').close()\n"
+        f"    if {prepare_stderr!r}:\n"
+        f"        sys.stderr.write({prepare_stderr!r})\n"
+        f"    sys.exit({prepare_exit_code})\n"
+        "if argv[:2] == ['auth', 'browser']:\n"
+        "    if not os.path.exists(prepared_marker):\n"
+        "        service = argv[2] if len(argv) > 2 else '<svc>'\n"
+        "        sys.stderr.write(\n"
+        "            'Error: Service ' + service + ' requires preparation first. '\n"
+        '            "Run \'latchkey auth browser-prepare " + service + "\' before logging in.\\n"\n'
+        "        )\n"
+        "        sys.exit(1)\n"
+        "    sys.exit(0)\n"
+        "sys.exit(2)\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def _read_recording_report(tmp_path: Path) -> list[dict[str, object]]:
+    report_path = tmp_path / "latchkey_report.jsonl"
+    return [json.loads(line) for line in report_path.read_text().splitlines() if line.strip()]
+
+
+def test_auth_browser_runs_browser_prepare_and_retries_when_preparation_required(tmp_path: Path) -> None:
+    """Auto-recovery path: latchkey signals preparation-required, we prepare and retry."""
+    binary = _make_prepare_required_binary(tmp_path)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    is_success, detail = latchkey.auth_browser("slack")
+
+    assert is_success is True
+    assert detail == ""
+    records = _read_recording_report(tmp_path)
+    argv_calls = [record["argv"] for record in records]
+    assert argv_calls == [
+        ["auth", "browser", "slack"],
+        ["auth", "browser-prepare", "slack"],
+        ["auth", "browser", "slack"],
+    ]
+
+
+def test_auth_browser_reports_failure_when_browser_prepare_fails(tmp_path: Path) -> None:
+    """If the prepare step itself fails, surface that failure and do not retry the browser flow."""
+    binary = _make_prepare_required_binary(
+        tmp_path,
+        prepare_exit_code=1,
+        prepare_stderr="prepare blew up",
+    )
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    is_success, detail = latchkey.auth_browser("slack")
+
+    assert is_success is False
+    assert detail == "prepare blew up"
+    argv_calls = [record["argv"] for record in _read_recording_report(tmp_path)]
+    assert argv_calls == [
+        ["auth", "browser", "slack"],
+        ["auth", "browser-prepare", "slack"],
+    ]
+
+
+def test_auth_browser_does_not_retry_on_unrelated_failure(tmp_path: Path) -> None:
+    """A failure without the preparation-required marker is returned as-is, with no extra calls."""
+    binary = _make_recording_binary(tmp_path, exit_code=1, stderr="user cancelled")
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    is_success, detail = latchkey.auth_browser("slack")
+
+    assert is_success is False
+    assert detail == "user cancelled"
+    argv_calls = [record["argv"] for record in _read_recording_report(tmp_path)]
+    assert argv_calls == [["auth", "browser", "slack"]]

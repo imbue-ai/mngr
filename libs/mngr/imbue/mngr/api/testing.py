@@ -13,7 +13,7 @@ from pydantic import Field
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.mngr.api.sync import LocalGitContext
+from imbue.mngr.api.git import LocalGitContext
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.primitives import AgentName
 

@@ -197,9 +197,11 @@ mngr schedule --template my-daily-hook "look at any flaky tests over the past da
 
 ```bash
 mngr connect my-agent       # directly connect to remote agents via SSH for debugging
-mngr pull my-agent          # pull changes from an agent to your local machine
-mngr push my-agent          # push your changes to an agent
-mngr pair my-agent          # or sync changes continuously!
+mngr rsync my-agent ./       # rsync changes from an agent to your local machine
+mngr rsync ./ my-agent       # rsync your changes to an agent
+mngr git pull my-agent       # pull git commits from an agent
+mngr git push my-agent       # push git commits to an agent
+mngr pair my-agent           # or sync changes continuously!
 ```
 
 **mngr is easy to learn:**
@@ -291,8 +293,8 @@ mngr <command> [options]
 
 ### For moving data in and out:
 
-- [`pull`](libs/mngr/docs/commands/primary/pull.md): Pull data from agent
-- [`push`](libs/mngr/docs/commands/primary/push.md): Push data to agent
+- [`rsync`](libs/mngr/docs/commands/primary/rsync.md): Rsync files between local and a remote host or agent
+- [`git`](libs/mngr/docs/commands/primary/git.md): Push or pull git commits between local and a remote host or agent
 - [`pair`](libs/mngr/docs/commands/primary/pair.md): Continually sync data with an agent
 - [`message`](libs/mngr/docs/commands/secondary/message.md): Send a message to an agent
 - [`transcript`](libs/mngr/docs/commands/secondary/transcript.md): View the message transcript for an agent
@@ -386,7 +388,7 @@ As well as the code for some plugins that we maintain, including:
 - [libs/mngr_uncapped_claude/](libs/mngr_uncapped_claude/README.md)
 - [libs/mngr_pair/](libs/mngr_pair/README.md)
 - [libs/mngr_opencode/](libs/mngr_opencode/README.md)
-- [libs/mngr_gemini/](libs/mngr_gemini/README.md)
+- [libs/mngr_antigravity/](libs/mngr_antigravity/README.md)
 
 The repo also contains code for some dependencies and related projects, including:
 

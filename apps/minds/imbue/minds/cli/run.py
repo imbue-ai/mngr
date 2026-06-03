@@ -6,18 +6,17 @@ forwarding logic lives in the ``mngr_forward`` plugin now; this command:
 1. Spawns ``mngr forward --service system_interface --preauth-cookie ...`` as
    a subprocess via ``EnvelopeStreamConsumer`` (which feeds the surviving
    ``MngrCliBackendResolver`` from the plugin's envelope stream).
-2. Registers minds' ``LocalAgentDiscoveryHandler`` on the consumer so local
-   agents still get their ``minds_api_url`` files written and stored
-   Cloudflare tunnel tokens get re-injected on (re-)discovery.
-3. Registers ``MindsApiUrlWriter`` on the consumer's
-   ``reverse_tunnel_established`` callback so remote agents get their
-   ``minds_api_url`` written after each tunnel (re-)establishment.
-4. Builds the slimmed minds-side bare-origin FastAPI app and runs it on
+2. Builds the slimmed minds-side bare-origin FastAPI app and runs it on
    ``--port`` (default 8420).
-5. Emits a ``mngr_forward_started`` JSONL event on stdout carrying the
+3. Emits a ``mngr_forward_started`` JSONL event on stdout carrying the
    preauth cookie value, so the Electron shell can pre-set
    ``mngr_forward_session=<value>`` on ``localhost:<mngr-forward-port>``
    before the first agent-subdomain navigation.
+
+Agents reach the Minds API via the latchkey gateway's bundled
+``minds-api-proxy`` extension rather than over a per-agent reverse SSH
+tunnel; the supervisor handles the reverse SSH tunnel used to expose
+the gateway itself into each agent's container.
 """
 
 import os
@@ -36,8 +35,6 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.minds.bootstrap import disable_imbue_cloud_provider_for_account
-from imbue.minds.bootstrap import imbue_cloud_provider_name_for_account
 from imbue.minds.bootstrap import minds_data_dir_for
 from imbue.minds.bootstrap import reconcile_imbue_cloud_providers_from_sessions
 from imbue.minds.bootstrap import resolve_minds_root_name
@@ -47,30 +44,33 @@ from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.config.loader import load_client_config
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.api_key_store import generate_api_key
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.app import start_system_interface_health_probe_loop
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
-from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.forward_cli import ForwardSubprocessConfig
-from imbue.minds.desktop_client.forward_cli import LocalAgentDiscoveryHandler
-from imbue.minds.desktop_client.forward_cli import MindsApiUrlWriter
 from imbue.minds.desktop_client.forward_cli import start_mngr_forward
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
+from imbue.minds.desktop_client.latchkey.handlers.file_sharing import FileSharingGrantHandler
+from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
+from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
-from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionGrantHandler
-from imbue.minds.desktop_client.latchkey.permissions import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
+from imbue.minds.desktop_client.latchkey_auto_register import LatchkeyAutoRegister
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.desktop_client.request_events import LatchkeyPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.system_interface_health import should_enroll_suspect_for_backend_failure
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
@@ -81,8 +81,28 @@ from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
-_DEFAULT_MNGR_FORWARD_PORT: Final[int] = 8421
-_AUTH_ERROR_TYPE: Final[str] = "ImbueCloudAuthError"
+# How long `minds run` waits for the spawned `mngr forward` plugin to report
+# its bound port via a `listening` envelope before treating startup as failed.
+# The plugin emits this from its FastAPI lifespan startup, so the wait only
+# needs to cover the subprocess's own interpreter start and imports.
+_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS: Final[float] = 5.0
+
+# Env var read by the bundled ``minds-api-proxy`` gateway extension to
+# decide where to forward inbound proxy requests. Published to the
+# detached ``mngr latchkey forward`` supervisor (and from there to the
+# gateway, and from there to the extension) on every minds startup so
+# the proxy always points at the current bare-origin port, even when
+# minds re-binds to a different port across restarts.
+MINDS_API_PROXY_URL_ENV_VAR: Final[str] = "LATCHKEY_EXTENSION_MINDS_API_URL"
+
+# Env var read by the bundled ``minds-api-proxy`` gateway extension on
+# each request; the proxy injects this value as ``Authorization: Bearer
+# <key>`` on every forwarded request. Freshly generated per ``minds
+# run`` and never persisted to disk -- the supervisor is restarted on
+# every minds startup and gets the current value in its env, the bare-
+# origin server sees the same in-memory value, and the agent itself
+# never sees the key at all.
+MINDS_API_PROXY_KEY_ENV_VAR: Final[str] = "LATCHKEY_EXTENSION_MINDS_API_KEY"
 
 
 @click.command()
@@ -97,19 +117,6 @@ _AUTH_ERROR_TYPE: Final[str] = "ImbueCloudAuthError"
     default=DEFAULT_DESKTOP_CLIENT_PORT,
     show_default=True,
     help="Port to bind the minds bare-origin server to",
-)
-@click.option(
-    "--mngr-forward-port",
-    default=_DEFAULT_MNGR_FORWARD_PORT,
-    show_default=True,
-    envvar="MINDS_MNGR_FORWARD_PORT",
-    help=(
-        "Port to bind the spawned `mngr forward` subprocess to. "
-        "Falls back to the MINDS_MNGR_FORWARD_PORT env var so test "
-        "harnesses can dodge a hardcoded port collision when an "
-        "existing `just minds-start` (or a prior crashed run) still "
-        "holds the default."
-    ),
 )
 @click.option(
     "--no-browser",
@@ -136,11 +143,9 @@ def run(
     ctx: click.Context,
     host: str,
     port: int,
-    mngr_forward_port: int,
     no_browser: bool,
     config_file: Path | None,
 ) -> None:
-    # noqa: PLR0913 — flag count matches the legacy `minds forward` interface
     """Run the minds bare-origin server with `mngr forward` as a subprocess."""
     if config_file is None:
         raise click.ClickException(
@@ -158,7 +163,6 @@ def run(
 
     logger.info("Starting `minds run`...")
     logger.info("  Bare-origin: http://{}:{}", host, port)
-    logger.info("  mngr forward: http://127.0.0.1:{}", mngr_forward_port)
     logger.info("  MINDS_ROOT_NAME: {}", root_name)
     logger.info("  Data directory: {}", data_directory)
     logger.info("  Config file: {}", client_config_path)
@@ -173,9 +177,21 @@ def run(
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
     is_electron = os.getenv("MINDS_ELECTRON") == "1"
     notification_dispatcher = NotificationDispatcher(is_electron=is_electron)
-    backend_resolver = MngrCliBackendResolver()
+    backend_resolver = MngrCliBackendResolver(
+        last_good_agents_path=paths.data_dir / "last_good_agent_topology.json",
+    )
     latchkey = _build_latchkey(data_directory=data_directory)
     latchkey.initialize()
+
+    # Mint a fresh central minds API key for this process. The same
+    # value is handed to the latchkey gateway's ``minds-api-proxy``
+    # extension (via the supervisor restart below, so it can inject
+    # ``Authorization: Bearer <key>`` on every forwarded request) and
+    # to the desktop client's own bearer-auth gates (so they accept
+    # the header the proxy just injected). Generated in memory rather
+    # than persisted because the supervisor is always restarted on
+    # minds startup and there is no other cross-process consumer.
+    minds_api_key = generate_api_key()
 
     root_concurrency_group = ConcurrencyGroup(name="minds-run")
     root_concurrency_group.__enter__()
@@ -197,7 +213,7 @@ def run(
     # process lifetime.
     root_concurrency_group.start_new_thread(
         _restart_supervisor_then_prewarm_gateway_client,
-        args=(latchkey, gateway_client),
+        args=(latchkey, gateway_client, port, minds_api_key),
         name="mngr-latchkey-supervisor-and-gateway-init",
     )
 
@@ -210,12 +226,18 @@ def run(
     # orphan tree running across restarts.
     start_grandparent_death_watcher(root_concurrency_group)
 
+    mngr_message_sender = MngrMessageSender()
     latchkey_permission_handler = LatchkeyPermissionGrantHandler(
         data_dir=data_directory,
         latchkey=latchkey,
         services_catalog=ServicesCatalog(gateway_client=gateway_client),
-        mngr_message_sender=MngrMessageSender(),
+        mngr_message_sender=mngr_message_sender,
         gateway_client=gateway_client,
+    )
+    file_sharing_handler = FileSharingGrantHandler(
+        data_dir=data_directory,
+        gateway_client=gateway_client,
+        mngr_message_sender=mngr_message_sender,
     )
     imbue_cloud_cli = ImbueCloudCli(
         parent_concurrency_group=root_concurrency_group,
@@ -229,12 +251,14 @@ def run(
         request_inbox = request_inbox.add_response(resp)
 
     # Spawn the plugin and attach the envelope consumer that feeds the
-    # surviving resolver from the plugin's stdout stream.
+    # surviving resolver from the plugin's stdout stream. We no longer
+    # ask the plugin to set up a per-agent reverse SSH tunnel for the
+    # Minds API: agents reach it through the latchkey gateway's bundled
+    # ``minds-api-proxy`` extension instead, so no ``--reverse`` specs
+    # are needed here.
     mngr_host_dir_str = os.environ.get("MNGR_HOST_DIR")
     mngr_host_dir = Path(mngr_host_dir_str).expanduser() if mngr_host_dir_str else (Path.home() / ".mngr")
     forward_config = ForwardSubprocessConfig(
-        port=mngr_forward_port,
-        reverse_specs=(f"0:{port}",),
         mngr_host_dir=mngr_host_dir,
     )
     consumer, preauth_cookie = start_mngr_forward(
@@ -247,19 +271,46 @@ def run(
     # the plugin (registered as a callback below) and on the readiness-probe
     # success that ``_wait_for_workspace_ready`` reports through AgentCreator.
     # Constructed here (instead of inside create_desktop_client) so it can
-    # be threaded into both AgentCreator (for record_success) and consumer's
-    # failure callback (registered before consumer.start() below; otherwise
-    # early failures would dispatch against an empty list).
+    # be threaded into both AgentCreator (for record_probe_success) and the
+    # consumer's failure callback (registered before consumer.start() below;
+    # otherwise early failures would dispatch against an empty list).
     system_interface_health_tracker = SystemInterfaceHealthTracker()
+    # The plugin reports every non-2xx response; minds decides which ones count.
+    # Only connection-level failures and infrastructure 5xx enroll a suspect --
+    # application errors are left for the background probe to adjudicate.
     consumer.add_on_system_interface_backend_failure_callback(
-        lambda agent_id, _reason, _status: system_interface_health_tracker.record_failure(agent_id)
+        lambda agent_id, _reason, status_code: system_interface_health_tracker.record_failure(agent_id)
+        if should_enroll_suspect_for_backend_failure(status_code)
+        else None
     )
+
+    # All callbacks registered -- now safe to start the envelope reader
+    # threads. Doing this earlier (e.g. inside ``start_mngr_forward``)
+    # would open a race window where envelopes arriving before the
+    # callbacks were registered would be dispatched against an empty
+    # callback list and silently dropped.
+    consumer.start(root_concurrency_group)
+
+    # Block until the plugin reports the port it bound. The plugin owns its
+    # port: it picks one (its default, or an OS-assigned fallback when the
+    # default is taken) and reports it via a ``listening`` envelope.
+    # Everything below that needs the port (AgentCreator, the desktop app,
+    # the health probe, the Electron ``mngr_forward_started`` event) is
+    # built only after this returns.
+    mngr_forward_port = consumer.wait_for_listening(timeout=_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS)
+    if mngr_forward_port is None:
+        consumer.terminate()
+        raise click.ClickException(
+            "`mngr forward` did not report a listening port within "
+            f"{_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS:.0f}s; the plugin likely failed to start. "
+            "Check the logs above for its stderr and retry."
+        )
+    logger.info("  mngr forward: http://127.0.0.1:{}", mngr_forward_port)
 
     # AgentCreator is constructed *after* ``start_mngr_forward`` so the
     # readiness probe can use the same preauth cookie the plugin accepts and
-    # Electron pre-sets. Building it earlier would force us to either pre-mint
-    # the cookie out of band or expose a setter on AgentCreator, both of which
-    # are worse than just keeping the construction order linear.
+    # Electron pre-sets, and after ``wait_for_listening`` so it has the
+    # plugin's actual bound port.
     agent_creator = AgentCreator(
         paths=paths,
         server_port=port,
@@ -272,34 +323,10 @@ def run(
         system_interface_health_tracker=system_interface_health_tracker,
     )
 
-    # Local-agent ``minds_api_url`` writes (Cloudflare-token re-injection
-    # has moved into the agent's own container; see commit 97f40d02d).
-    consumer.add_on_agent_discovered_callback(
-        LocalAgentDiscoveryHandler(
-            minds_api_port=port,
-            mngr_host_dir=mngr_host_dir,
-        )
-    )
-    # Remote-agent ``minds_api_url`` writes happen via the plugin's
-    # reverse_tunnel_established envelope.
-    consumer.add_on_reverse_tunnel_established_callback(MindsApiUrlWriter(resolver=backend_resolver))
-    # Latchkey discovery / destruction wiring now lives in the detached
-    # ``mngr latchkey forward`` subprocess started above; no callbacks to
-    # register here.
-
-    # Auto-disable an ``imbue_cloud_<slug>`` provider if its session is
-    # revoked server-side, so the rest of the user's accounts keep working
-    # instead of every observe poll re-trying the dead session.
-    consumer.add_on_provider_error_callback(
-        _ImbueCloudAuthErrorDisabler(consumer=consumer, session_store=session_store)
-    )
-
-    # All callbacks registered -- now safe to start the envelope reader
-    # threads. Doing this earlier (e.g. inside ``start_mngr_forward``)
-    # would open a race window where envelopes arriving before the
-    # callbacks were registered would be dispatched against an empty
-    # callback list and silently dropped.
-    consumer.start(root_concurrency_group)
+    # Every newly-discovered agent on a minds-managed host gets
+    # its id appended to the host's ``latchkey_permissions.json``
+    # allowed-agent list.
+    LatchkeyAutoRegister(backend_resolver=backend_resolver, latchkey=latchkey).start()
 
     # Emit the started event so Electron can pre-set the cookie before the
     # first navigation. ``minds run`` itself does not open the browser at
@@ -335,7 +362,7 @@ def run(
         minds_config=minds_config,
         client_env_config=client_env_config,
         request_inbox=request_inbox,
-        request_event_handlers=(latchkey_permission_handler,),
+        request_event_handlers=(latchkey_permission_handler, file_sharing_handler),
         server_port=port,
         mngr_forward_port=mngr_forward_port,
         mngr_forward_preauth_cookie=preauth_cookie,
@@ -344,6 +371,7 @@ def run(
         system_interface_health_tracker=system_interface_health_tracker,
         mngr_binary=MNGR_BINARY,
         mngr_host_dir=mngr_host_dir,
+        minds_api_key=minds_api_key,
     )
 
     # Background probe loop: flips STUCK/RESTARTING agents back to HEALTHY
@@ -473,7 +501,7 @@ class _StreamedPermissionRequestHandler(FrozenModel):
     # natives; tolerate them with ``arbitrary_types_allowed``.
     model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
 
-    def __call__(self, event: LatchkeyPermissionRequestEvent) -> None:
+    def __call__(self, event: RequestEvent) -> None:
         current: RequestInbox | None = self.app.state.request_inbox
         if current is None:
             return
@@ -487,12 +515,27 @@ class _StreamedPermissionRequestHandler(FrozenModel):
         if current.get_request_by_id(str(event.event_id)) is not None:
             return
         self.app.state.request_inbox = current.add_request(event)
-        logger.info(
-            "Streamed latchkey permission request for agent {} (scope={}, request_id={})",
-            event.agent_id,
-            event.scope,
-            event.event_id,
-        )
+        if isinstance(event, LatchkeyPredefinedPermissionRequestEvent):
+            logger.info(
+                "Streamed latchkey permission request for agent {} (scope={}, request_id={})",
+                event.agent_id,
+                event.scope,
+                event.event_id,
+            )
+        elif isinstance(event, LatchkeyFileSharingPermissionRequestEvent):
+            logger.info(
+                "Streamed file-sharing permission request for agent {} (path={}, request_id={})",
+                event.agent_id,
+                event.path,
+                event.event_id,
+            )
+        else:
+            logger.info(
+                "Streamed permission request for agent {} (request_type={}, request_id={})",
+                event.agent_id,
+                event.request_type,
+                event.event_id,
+            )
         self.backend_resolver.notify_change()
 
 
@@ -539,14 +582,27 @@ def _sleep_then_open(url: str, delay: float = 1.0) -> None:
 def _restart_supervisor_then_prewarm_gateway_client(
     latchkey: Latchkey,
     gateway_client: LatchkeyGatewayClient,
+    minds_api_port: int,
+    minds_api_key: str,
 ) -> None:
     """Restart the latchkey supervisor, then pre-warm the gateway client.
 
     Order matters: the gateway client's ``ensure_initialized`` reads
     the bound port from the supervisor's on-disk record, so it must
     run after the supervisor restart has stamped the fresh port.
+
+    ``minds_api_port`` is the port the minds bare-origin server is
+    bound to in *this* process; it's threaded through to the
+    supervisor as ``LATCHKEY_EXTENSION_MINDS_API_URL`` so the gateway's
+    bundled ``minds-api-proxy`` extension knows where to forward agent
+    traffic. Restarting the supervisor on every minds start is what
+    makes this work across port changes: the env var is re-read at
+    spawn time, not cached anywhere. ``minds_api_key`` is published
+    alongside as ``LATCHKEY_EXTENSION_MINDS_API_KEY`` so the proxy
+    can inject ``Authorization: Bearer <key>`` on every forwarded
+    request.
     """
-    _ensure_mngr_latchkey_forward_supervisor(latchkey)
+    _ensure_mngr_latchkey_forward_supervisor(latchkey, minds_api_port, minds_api_key)
     try:
         gateway_client.ensure_initialized()
     except LatchkeyGatewayClientError as e:
@@ -556,7 +612,7 @@ def _restart_supervisor_then_prewarm_gateway_client(
         )
 
 
-def _ensure_mngr_latchkey_forward_supervisor(latchkey: Latchkey) -> None:
+def _ensure_mngr_latchkey_forward_supervisor(latchkey: Latchkey, minds_api_port: int, minds_api_key: str) -> None:
     """Restart the detached ``mngr latchkey forward`` supervisor on minds startup.
 
     Reuses ``latchkey``'s already-resolved binary + directory paths so
@@ -567,6 +623,13 @@ def _ensure_mngr_latchkey_forward_supervisor(latchkey: Latchkey) -> None:
     :class:`MngrMessageSender` and ``mngr forward`` subprocess paths
     already make the same assumption).
 
+    ``minds_api_port`` is published to the spawned supervisor as the
+    ``LATCHKEY_EXTENSION_MINDS_API_URL`` env var so the gateway's
+    bundled ``minds-api-proxy`` extension knows the bare-origin URL
+    to forward agent traffic to. The supervisor inherits this env var
+    into the ``latchkey gateway`` subprocess it owns and from there
+    into the extension's ``process.env``.
+
     Uses :meth:`LatchkeyForwardSupervisor.restart` rather than
     ``ensure_running`` so that minds upgrades always run with a
     freshly-spawned supervisor: an older supervisor running stale
@@ -574,7 +637,10 @@ def _ensure_mngr_latchkey_forward_supervisor(latchkey: Latchkey) -> None:
     on every minds start. A running supervisor that minds is happy
     to adopt does not exist in practice -- the supervisor's lifetime
     is tied to the gateway it owns, and the gateway is a minds-only
-    consumer today.
+    consumer today. Restarting on every minds start is also what
+    keeps ``LATCHKEY_EXTENSION_MINDS_API_URL`` in sync with the
+    current bare-origin port -- minds re-binds its server on every
+    start, and the supervisor restart re-publishes the env var.
 
     Failures are logged as warnings rather than raised: a broken
     supervisor degrades latchkey to "unreachable from inside agents"
@@ -584,6 +650,10 @@ def _ensure_mngr_latchkey_forward_supervisor(latchkey: Latchkey) -> None:
         mngr_binary=MNGR_BINARY,
         latchkey_binary=latchkey.latchkey_binary,
         latchkey_directory=latchkey.latchkey_directory,
+        extra_env={
+            MINDS_API_PROXY_URL_ENV_VAR: f"http://127.0.0.1:{minds_api_port}",
+            MINDS_API_PROXY_KEY_ENV_VAR: minds_api_key,
+        },
     )
     try:
         info = supervisor.restart()
@@ -591,63 +661,3 @@ def _ensure_mngr_latchkey_forward_supervisor(latchkey: Latchkey) -> None:
         logger.warning("Could not start detached mngr latchkey forward supervisor: {}", e)
         return
     logger.info("mngr latchkey forward supervisor running (pid={})", info.pid)
-
-
-class _ImbueCloudAuthErrorDisabler(FrozenModel):
-    """Auto-disables an ``imbue_cloud_<slug>`` provider on session-revoke errors.
-
-    Discovery surfaces ``ImbueCloudAuthError`` whenever the connector
-    rejects a refresh (token theft detected, refresh token expired past
-    the family lifetime, etc.). Without intervention every subsequent
-    ``mngr observe`` poll re-tries the same dead session and the whole
-    discovery stream errors out, blocking the rest of the user's
-    accounts. ``__call__`` walks ``session_store`` to map the offending
-    provider name back to an email, flips ``is_enabled = false`` on the
-    block in settings.toml, and bounces the plugin's observe child so the
-    change takes effect within the same minds session. Re-enabling
-    happens only on an explicit signin
-    (``set_imbue_cloud_provider_for_account(..., force_enable=True)``).
-
-    The bounce is dispatched onto a daemon thread because ``__call__``
-    runs on ``EnvelopeStreamConsumer``'s envelope-stream reader thread --
-    sending ``SIGHUP`` is itself non-blocking, but keeping the off-thread
-    dispatch matches the prior ``MngrStreamManager.restart_observe()``
-    behaviour and isolates any future expansion of the bounce path from
-    the reader thread.
-    """
-
-    consumer: EnvelopeStreamConsumer = Field(
-        frozen=True, description="Envelope consumer to bounce observe on after disable"
-    )
-    session_store: MultiAccountSessionStore = Field(
-        frozen=True, description="Session mirror used to map provider name to account email"
-    )
-
-    def __call__(self, provider_name: str, error_type: str, error_message: str) -> None:
-        if error_type != _AUTH_ERROR_TYPE:
-            return
-        offending_email: str | None = None
-        for account in self.session_store.list_accounts():
-            try:
-                if imbue_cloud_provider_name_for_account(str(account.email)) == provider_name:
-                    offending_email = str(account.email)
-                    break
-            except ValueError:
-                continue
-        if offending_email is None:
-            logger.warning(
-                "Auth error from provider {} but no matching minds session found; skipping auto-disable",
-                provider_name,
-            )
-            return
-        if disable_imbue_cloud_provider_for_account(offending_email):
-            logger.warning(
-                "Auto-disabled imbue_cloud provider for {} after auth error: {}",
-                offending_email,
-                error_message,
-            )
-            threading.Thread(
-                target=self.consumer.bounce_observe,
-                name=f"bounce-observe-after-disable-{provider_name}",
-                daemon=True,
-            ).start()

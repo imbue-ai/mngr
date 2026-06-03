@@ -29,7 +29,6 @@ from imbue.mngr_kanpan.data_sources.repo_paths import repo_path_from_labels
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
 from imbue.mngr_kanpan.fetcher import _get_local_work_dir
-from imbue.mngr_kanpan.fetcher import _is_agent_muted
 from imbue.mngr_kanpan.fetcher import _run_data_sources_parallel
 from imbue.mngr_kanpan.fetcher import collect_data_sources
 from imbue.mngr_kanpan.fetcher import compute_section
@@ -126,7 +125,7 @@ def test_compute_section_open_pr_no_ci() -> None:
 
 @pytest.mark.parametrize(
     "ci_status",
-    [CiStatus.PASSING, CiStatus.FAILING, CiStatus.PENDING, CiStatus.UNKNOWN],
+    [CiStatus.SUCCESS, CiStatus.FAILURE, CiStatus.PENDING, CiStatus.UNKNOWN],
 )
 def test_compute_section_open_pr_ignores_ci(ci_status: CiStatus) -> None:
     # Regression: compute_section no longer dispatches on FIELD_CI for open PRs.
@@ -161,33 +160,6 @@ def test_compute_section_wrong_pr_type() -> None:
     }
     with pytest.raises(KanpanFieldTypeError, match="Expected PrField"):
         compute_section(fields)
-
-
-# === _is_agent_muted ===
-
-
-def test_is_agent_muted_true() -> None:
-    certified_data = {"plugin": {"kanpan": {"muted": True}}}
-    assert _is_agent_muted(certified_data) is True
-
-
-def test_is_agent_muted_false() -> None:
-    certified_data = {"plugin": {"kanpan": {"muted": False}}}
-    assert _is_agent_muted(certified_data) is False
-
-
-def test_is_agent_muted_missing_key() -> None:
-    assert _is_agent_muted({}) is False
-
-
-def test_is_agent_muted_no_kanpan_key() -> None:
-    certified_data = {"plugin": {}}
-    assert _is_agent_muted(certified_data) is False
-
-
-def test_is_agent_muted_no_muted_key() -> None:
-    certified_data = {"plugin": {"kanpan": {}}}
-    assert _is_agent_muted(certified_data) is False
 
 
 # === _run_data_sources_parallel ===
@@ -283,7 +255,7 @@ def test_run_data_sources_parallel_source_raises_exception() -> None:
 def test_run_data_sources_parallel_multiple_sources() -> None:
     a1 = AgentName("a1")
     pr = make_pr_field(created=datetime(2026, 1, 1, 0, 0, 13, tzinfo=timezone.utc))
-    ci = CiField(status=CiStatus.PASSING, created=datetime(2026, 1, 1, 0, 0, 14, tzinfo=timezone.utc))
+    ci = CiField(status=CiStatus.SUCCESS, created=datetime(2026, 1, 1, 0, 0, 14, tzinfo=timezone.utc))
     s1 = _MockDataSource("github", {a1: {"pr": pr}})
     s2 = _MockDataSource("git_info", {a1: {"ci": ci}})
     results, errors = _run_data_sources_parallel([s1, s2], (), {}, make_mngr_ctx())

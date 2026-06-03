@@ -24,10 +24,13 @@ dependencies = [
     "playwright>=1.40.0",
     "pydantic>=2.0",
     "python-multipart>=0.0.9",
+    "tenacity",
     "tomlkit>=0.12.0",
     "telethon>=1.40.0",
     "uvicorn>=0.32.0",
     "websockets>=13.0",
+    "wsgidav>=4.3",
+    "a2wsgi>=1.10",
 ]
 license = {text = "FCL-1.0-MIT"}
 license-files = [
@@ -91,6 +94,10 @@ omit = [
   "*/telegram/injector.py",
   # SuperTokens routes require a live Core connection -- tested via release test.
   "*/desktop_client/supertokens_routes.py",
+  # Docker state-container teardown shells out to the `docker` CLI and needs a
+  # real daemon -- exercised via a docker-marked test. The pure functions
+  # (user-id resolution, name building) are tested in docker_cleanup_test.py.
+  "*/envs/docker_cleanup.py",
   # The deployment_tests importable helper package is exercised only by the
   # minds_deployment / minds_services pytest suites against real cloud
   # (see apps/minds/deployment_tests/). Those suites are excluded from

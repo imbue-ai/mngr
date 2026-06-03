@@ -25,7 +25,7 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.env_utils import parse_env_file
 from imbue.mngr.utils.git_utils import delete_git_branch
@@ -63,7 +63,7 @@ def _call_on_before_create_hooks(
     hookimpls = pm.hook.on_before_create.get_hookimpls()
     for hookimpl in hookimpls:
         # Call the hook with current args
-        result = cast(OnBeforeCreateArgs | None, hookimpl.function(args=current_args))
+        result = cast(OnBeforeCreateArgs | None, hookimpl.function(args=current_args, mngr_ctx=mngr_ctx))
         # If the hook returned a new args object, use it for subsequent hooks
         if result is not None:
             current_args = result
@@ -143,7 +143,7 @@ def create(
     # Run agent-type-specific preflight checks before creating the host.
     # This lets agent types fail fast on configuration errors (e.g. missing
     # gitignore entries) before expensive operations like host creation.
-    agent_type = agent_options.agent_type or AgentTypeName("claude")
+    agent_type = agent_options.agent_type
     resolved = resolve_agent_type(agent_type, mngr_ctx.config)
     agent_class = cast(type[AgentInterface], resolved.agent_class)
     with log_span("Running preflight checks for agent type {}", agent_type):
@@ -164,6 +164,13 @@ def create(
     if is_new_host:
         with log_span("Calling on_host_created hooks"):
             mngr_ctx.pm.hook.on_host_created(host=host, mngr_ctx=mngr_ctx)
+
+        # Run post-host-create commands synchronously. The host is fully
+        # online (sshd/exec ready) but no agent work_dir has been touched
+        # yet, so this is the safe window for an image to do first-boot
+        # setup (e.g. seed a volume from an in-image bake) that any
+        # subsequent exec depends on.
+        _run_post_host_create_commands(host, target_host.provisioning.post_host_create_commands)
 
     # ``host.pre_baked_agent_id`` (default None on the base Host class,
     # populated by providers whose ``create_host`` returns a host with a
@@ -257,7 +264,11 @@ def create(
                 # Start agent with signal-based readiness detection
                 # Raises AgentStartError if the agent doesn't signal readiness in time
                 logger.info("Starting agent {} ...", agent.name)
-                timeout = agent_options.ready_timeout_seconds
+                timeout = (
+                    agent_options.ready_timeout_seconds
+                    if agent_options.ready_timeout_seconds is not None
+                    else mngr_ctx.config.agent_ready_timeout
+                )
                 agent.wait_for_ready_signal(
                     is_creating=True,
                     start_action=lambda: host.start_agents([agent.id]),
@@ -285,6 +296,28 @@ def create(
                 _cleanup_failed_worktree_create(work_dir_path, created_branch_name, mngr_ctx)
 
     return result
+
+
+def _run_post_host_create_commands(
+    host: OnlineHostInterface,
+    commands: tuple[CommandString, ...],
+) -> None:
+    """Run the configured post-host-create commands on a freshly-created host.
+
+    Each command runs in order via ``host.execute_idempotent_command``; a
+    non-zero exit raises ``MngrError`` and aborts the create. Output goes
+    through the standard host exec plumbing so the user sees what ran.
+    """
+    if not commands:
+        return
+    with log_span("Running post-host-create commands", count=len(commands)):
+        for cmd in commands:
+            with log_span("post-host-create: {}", cmd):
+                result = host.execute_idempotent_command(cmd)
+                if not result.success:
+                    raise MngrError(
+                        f"post-host-create command failed: {cmd}\nstdout: {result.stdout}\nstderr: {result.stderr}"
+                    )
 
 
 def _write_host_env_vars(
@@ -342,7 +375,7 @@ def _create_new_host(
 ) -> OnlineHostInterface:
     """Create a new host and write its environment variables."""
     with log_span("Calling on_before_host_create hooks"):
-        mngr_ctx.pm.hook.on_before_host_create(name=host_name, provider_name=target_host.provider)
+        mngr_ctx.pm.hook.on_before_host_create(name=host_name, provider_name=target_host.provider, mngr_ctx=mngr_ctx)
     with log_span(
         "Creating new host '{}' using provider '{}'",
         host_name,

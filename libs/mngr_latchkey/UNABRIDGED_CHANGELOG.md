@@ -1,8 +1,350 @@
 # Unabridged Changelog - mngr_latchkey
 
-Full, unedited changelog entries consolidated nightly from individual files in the `changelog/mngr_latchkey/` directory.
+Full, unedited changelog entries consolidated nightly from individual files in `libs/mngr_latchkey/changelog/`.
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
+
+## 2026-06-01
+
+Bump Latchkey to version 2.14.0 to support GitHub git operations via Latchkey gateway.
+
+Changed the `services.json` catalog (and the `permissions` gateway extension that reads it) so each raw service name now maps to a *list* of scope entries instead of a single entry. This lets one service expose more than one detent scope. The `GET /permissions/available` and `GET /permissions/available/<service_name>` endpoints now return arrays of `{scope, display_name, permissions}` objects per service.
+
+## 2026-05-28
+
+- `Latchkey.auth_browser` now transparently recovers from latchkey's "Service `<name>` requires preparation first" error: when it sees that message it runs `latchkey auth browser-prepare <service>` and then retries `latchkey auth browser <service>` once, so callers (e.g. minds' predefined-permission grant flow) succeed on the first user-visible attempt instead of failing with a confusing error. Failures of either the prepare step or the retry are surfaced as the usual `(False, message)` result.
+
+## 2026-05-28
+
+# Dropped redundant per-project ty/ruff ratchet tests
+
+Removed this project's `test_no_type_errors` and `test_no_ruff_errors` from its
+`test_ratchets.py`. ty resolves the uv workspace root and ruff (run from the repo
+root) both scan across projects, so the per-project copies just re-ran the same
+checks. The single repo-wide equivalents now live in `test_meta_ratchets.py`
+(`test_no_type_errors` and `test_no_ruff_errors`).
+
+No user-facing behavior change.
+
+## 2026-05-26
+
+# Minds-api-proxy: authorization injection + schema editing + baseline notification grant
+
+The `minds-api-proxy` gateway extension now authenticates the
+forwarded request *to* the upstream Minds API on the agent's behalf:
+
+- It reads `LATCHKEY_EXTENSION_MINDS_API_KEY` on every request and,
+  when set, overwrites the inbound `Authorization` header with
+  `Bearer <LATCHKEY_EXTENSION_MINDS_API_KEY>` before forwarding.
+  Agents therefore never see the key and cannot spoof one. With the
+  env var unset, the inbound `Authorization` header is forwarded
+  unchanged (used by tests).
+
+The `permissions` extension grew matching CRUD for inline detent
+schemas alongside its existing rule editor:
+
+- `POST /permissions/schemas?path=<file>&schema_name=<name>` adds or
+  replaces an inline schema. The body is a JSON object (the schema
+  definition). Schema names must match the conservative pattern
+  `^[A-Za-z0-9][A-Za-z0-9._-]*$` so they round-trip safely through
+  URL path segments and detent's name lookup.
+- `DELETE /permissions/schemas?path=<file>&schema_name=<name>` removes
+  the named schema.
+
+These let minds install per-agent path-pattern schemas (`"only
+`/minds-api-proxy/api/v1/agents/<agent_id>/...`"`) at agent-creation
+time without having to direct-write the per-host permissions file
+itself.
+
+The agent baseline (`_AGENT_BASELINE_PERMISSIONS` in
+`mngr_latchkey/agent_setup.py`) now ships an extra permission schema
+out of the box: every minds-created agent can
+`POST /minds-api-proxy/api/v1/agents/<...>/notifications`. New
+helpers expose the per-agent scope / permission names + inline
+schemas that the desktop client adds for each agent on top of the
+baseline:
+
+- `agent_minds_api_proxy_scope_name(agent_id)`
+- `agent_minds_api_proxy_permission_name(agent_id)`
+- `build_agent_minds_api_proxy_schemas(agent_id)`
+
+`mngr_imbue_cloud/host.py`'s `build_combined_inject_command` /
+`normalize_inject_args` (and the helpers only they called) are
+gone entirely: there is exactly one `MINDS_API_KEY` per minds
+installation now, the latchkey gateway injects it transparently, and
+agents never see the value -- so there was nothing left to push
+down onto a leased pool host, and the functions had no caller in
+the monorepo outside their own tests.
+
+## Narrower interface for per-agent Minds API proxy permissions
+
+The per-agent `minds-api-proxy` permissioning model has been simplified.
+Instead of installing a per-agent scope schema + per-agent permission
+schema + per-agent rule at agent creation time (via the low-level
+`POST /permissions/schemas` extension endpoint), the baseline
+permissions file carries two cooperating rules + a plain JSON list of
+allowed agent ids. To allow a new agent, the desktop client (or an
+operator running the CLI) just appends an entry to that list.
+
+Concretely:
+
+- The baseline now has **two** rules, in this exact order:
+  1. `{minds-api-proxy-unauthorized: []}` -- scope matches any
+     `/minds-api-proxy/api/v1/agents/<id>/...` request whose `<id>`
+     is NOT in the allowed list (encoded as `not + anyOf` on the
+     path schema). The empty permission list rejects the request
+     immediately; detent stops at the first matching scope, so the
+     rule below never gets a chance to allow it.
+  2. `{latchkey-self: [...gateway-self baseline..., minds-api-proxy]}`
+     -- the existing gateway-self rule, extended with a *generic*
+     `minds-api-proxy` permission that matches any path under the
+     proxy's `/agents/<id>/` subtree without enumerating ids.
+     Authorized agents (those past Rule 1's `not + anyOf`) hit this
+     rule and are let through by the generic permission.
+- The source-of-truth list of allowed agent ids is a plain JSON
+  `anyOf` array inside Rule 1's scope schema -- one entry per allowed
+  agent of the form `{"pattern": "^/minds-api-proxy/api/v1/agents/<id>(/.*)?$"}`.
+  No regex alternation parsing/building; reading the list is iteration,
+  appending is `list.append`.
+- New library helper: `imbue.mngr_latchkey.agent_setup.register_agent_for_host(plugin_data_dir, host_id, agent_id)`.
+  Reads the host's permissions file (or starts from the baseline if it
+  doesn't yet exist), extracts the existing allowed-agent list out of
+  the `anyOf` block, appends a new entry if not already there, and
+  writes back atomically. Idempotent.
+- New CLI: `mngr latchkey register-agent --host-id ID --agent-id ID`
+  wraps the helper for operators. Documented in the README's "Wiring a
+  new agent using the CLI interface" section.
+- `imbue.mngr_latchkey.store.load_permissions` is the new public
+  reader that `register_agent_for_host` uses; symmetric with `save_permissions`.
+- The shared `minds-api-proxy-notifications` baseline grant from the
+  earliest design in this branch is gone entirely; notifications are
+  reached via the same allowed-agent list as every other
+  `/api/v1/agents/<id>/` endpoint.
+- The per-agent helpers `agent_minds_api_proxy_scope_name`,
+  `agent_minds_api_proxy_permission_name`, and
+  `build_agent_minds_api_proxy_schemas` are gone -- nobody needs to
+  mint a per-agent schema name anymore.
+- The `POST /permissions/schemas` and `DELETE /permissions/schemas`
+  endpoints I added to `permissions.mjs` in an earlier round of this
+  branch are gone. The user-facing interface for granting Minds API
+  access is now "add the agent id to the host's allowed-agent list"
+  (via the helper or the CLI), not "install arbitrary inline schemas".
+
+A permissions file whose `anyOf` block has been hand-edited into a
+shape the parser doesn't recognize is left alone (the helper raises
+`LatchkeyStoreError` rather than rebuild from scratch), so operators
+who customize the file by hand won't lose their edits silently.
+
+## Consolidation: shared `SSHTunnelManager`
+
+The `SSHTunnelManager` (and `RemoteSSHInfo`, `ReverseTunnelInfo`,
+`SSHTunnelError`) used to exist in two places: this package's own
+`mngr_latchkey/ssh_tunnel.py` (driving the latchkey gateway's
+reverse-into-each-agent tunnels) and the `mngr_forward` plugin's
+`mngr_forward/ssh_tunnel.py` (driving forward + `--reverse` tunnels).
+The two implementations were ~70% verbatim duplicates that diverged on
+three things: latchkey added a per-tunnel exponential backoff for the
+repair loop (capped at 5 minutes), an `agent_id` tag on each
+`ReverseTunnelInfo`, and a `remove_reverse_tunnels_for_agent` cleanup
+hook used by the destruction path.
+
+All three latchkey improvements moved into the `mngr_forward` manager
+(they're strictly better behavior for both callers), and
+`mngr_latchkey/ssh_tunnel.py` is gone:
+
+- `mngr_latchkey/discovery.py`, `cli.py`, `discovery_stream.py`,
+  `discovery_stream_test.py`, and `core_test.py` now import
+  `RemoteSSHInfo`, `SSHTunnelError`, `SSHTunnelManager` from
+  `imbue.mngr_forward.ssh_tunnel` instead.
+- The 635-line `mngr_latchkey/ssh_tunnel_test.py` has been
+  consolidated into `mngr_forward/ssh_tunnel_test.py` (which now
+  carries the previously-thin manager unit tests plus the new
+  exponential-backoff + `remove_reverse_tunnels_for_agent` coverage).
+- The reverse-tunnel repair loop in `mngr_forward` no longer uses a
+  flat 30s retry; it uses per-tunnel exponential backoff with a 5min
+  cap. Same recovery latency for healthy targets; much less wasted
+  paramiko handshake against permanently-gone ones.
+- `remove_reverse_tunnels_for_agent` is careful not to close an SSH
+  client out from under any live *forward* tunnel using the same
+  host, so the two flavors of tunnel can coexist on one connection.
+
+- Internal: simplified `mngr_latchkey.store.LatchkeyPermissionsConfig` save/load to rely on Pydantic's built-in JSON serialization and validation instead of hand-rolled JSON parsing. The on-disk file format is unchanged; the model now uses `extra="ignore"` so unknown top-level keys (e.g. detent's `include`) continue to be silently dropped on load and not re-emitted on the next save.
+
+- Pruned non-notable entries (test-only changes, internal refactors, and doc-only tweaks with no user-facing effect) from this project's CHANGELOG.md, per the new notable-only changelog policy.
+
+Adopted the `PREVENT_BARE_TMUX_TARGETS` ratchet rule (added in `imbue_common`) via
+`rc.check_bare_tmux_targets(_DIR, snapshot(0))` in this project's `test_ratchets.py`.
+This ratchet prevents new occurrences of `tmux <subcmd> -t '<bare-name>'` -- targets
+without a leading `=` exact-match prefix, which can silently route commands to a
+sibling session whose name shares a prefix with the intended one. No production code
+changes in this project; the adopting test starts at a baseline of zero violations.
+
+## 2026-05-25
+
+### permission-requests extension: preserve symlinks at the approval target
+
+`POST /permission-requests/approve/<id>` previously replaced the
+target `permissions.json` with a regular file when the target path
+was a symlink. This broke the per-agent opaque symlinks that
+`mngr latchkey link-permissions` swings into the canonical host
+permissions file: subsequent agents sharing the canonical file
+silently desynced from the granted permissions.
+
+The atomic-write helper now `lstat`s the target and, if it is a
+symlink, resolves it via `realpath` before computing the temp path
+and renaming. The atomic swap lands on the underlying file and the
+symlink stays in place. Approving against a non-symlink target,
+or a target that does not yet exist, is unchanged.
+
+`permissions.mjs` was already safe: its write paths resolve symlinks
+up front via `resolvePathParamUnderRoot`.
+
+## 2026-05-22
+
+- Latchkey gateway ships a new bundled `minds-api-proxy` extension that
+  transparently reverse-proxies requests under
+  `/minds-api-proxy` to the minds desktop client's bare-origin
+  "Minds API". The upstream URL is read at request time from the
+  `LATCHKEY_EXTENSION_MINDS_API_URL` environment variable, and is
+  published to the detached `mngr latchkey forward` supervisor (via the
+  new `LatchkeyForwardSupervisor.extra_env`) on every `minds run`
+  startup, so the proxy always points at the live Minds API port even
+  when minds re-binds on restart. The extension responds 503 when the
+  env var is not configured; requests still go through the gateway's
+  normal permission check.
+- The Latchkey gateway's `permission-requests` extension grows a typed
+  request schema and a new approve endpoint:
+  - `POST /permission-requests` now takes
+    `{agent_id, rationale, type, payload}` instead of the legacy flat
+    `{scope, permissions, ...}` shape. The `type` field is
+    `"predefined"` (payload `{scope, permissions}`) or `"file-sharing"`
+    (payload `{path}`, absolute-only, no `..` segments).
+  - Each pending request is persisted with the additional `target`
+    (the extension's per-request `permissionsConfigPath`) and `effect`
+    (a precomputed `{rules?, schemas?}` patch) fields. Pending requests
+    live under `<latchkey-directory>/permission_requests/v2/` -- the
+    `v2` segment is the on-disk schema version so future shape changes
+    can land in a fresh directory rather than trying to migrate files
+    in place.
+  - `POST /permission-requests/approve/<request_id>` is new. It reads
+    the pending request, merges its `effect.rules` (union by scope key)
+    and `effect.schemas` (overwrite by name) into the stored `target`
+    permissions.json (creating it if missing), and deletes the pending
+    request file. Returns the fresh permissions file in the response
+    body.
+  - The legacy `DELETE /permission-requests/<id>` continues to remove
+    a pending request without applying its effect; the minds desktop
+    client uses it for the deny path.
+- The `file-sharing` permission effect was rewritten to target the new
+  WebDAV mount that replaced `/api/v1/file-server` on the minds side:
+  - The effect no longer mints its own scope schema. The rule now
+    attaches the per-file permission to the pre-existing `latchkey-self`
+    scope from the agent baseline (defined in `agent_setup.py`), which
+    already matches any request whose `domain` is
+    `latchkey-self.invalid`. The per-file permission schema is what
+    restricts the grant to a single WebDAV URL + verb set; the scope
+    just identifies which rule list the permission belongs to.
+  - The per-file permission schema now pins `path` (the URL path) to
+    the WebDAV URL for the requested file -- the WebDAV mount serves
+    each absolute path at the URL
+    `/minds-api-proxy/api/v1/files<absolute_path>`, so a
+    grant for `/home/user/foo.txt` matches exactly
+    `/minds-api-proxy/api/v1/files/home/user/foo.txt`. The match is a
+    regex `pattern` (`^<base>(/.*)?$`), not a `const`, so the grant
+    also admits the same URL with a trailing slash (WebDAV clients
+    commonly emit one when treating the target as a collection) and
+    any sub-path nested below it: a grant on `/home/user/share`
+    therefore transitively covers every file and sub-directory
+    inside the share. We do not need to reject `..` segments in the
+    pattern itself because the gateway feeds the permission check a
+    WHATWG `Request`, and the WHATWG URL parser already collapses
+    both literal `..` and percent-encoded `%2e%2e` segments out of
+    `pathname` before the pattern is ever applied. The legacy
+    `queryParams.path` constraint is gone (WebDAV identifies the
+    file in the URL path, not via a query parameter).
+  - The allowed `method` enum grew from `GET` / `POST` to the full set
+    of WebDAV verbs needed to read, write, query, lock, copy, and
+    delete the file: `GET`, `HEAD`, `OPTIONS`, `PUT`, `DELETE`,
+    `PROPFIND`, `PROPPATCH`, `MKCOL`, `COPY`, `MOVE`, `LOCK`,
+    `UNLOCK`.
+  - The wire shape grew an `access` field; the agent now POSTs
+    `{type: "file-sharing", payload: {path: "<absolute>", access: "READ" | "WRITE"}}`.
+    `access` is required and must be one of the two literal strings
+    above (case-sensitive). `READ` unlocks only the non-mutating WebDAV
+    verbs (`GET`, `HEAD`, `OPTIONS`, `PROPFIND`); `WRITE` is a strict
+    superset that also unlocks the single-path mutating ones (`PUT`,
+    `DELETE`, `PROPPATCH`, `MKCOL`, `LOCK`, `UNLOCK`). Per-file
+    permission schemas now embed the access mode and the full file
+    path in their name (`minds-file-server-read-<absolute-path>` /
+    `minds-file-server-write-<absolute-path>`, e.g.
+    `minds-file-server-read-/home/user/notes.txt`) so a user can hold
+    both grants for the same path independently and a later WRITE
+    grant does not silently override an earlier READ grant (or vice
+    versa). Re-approving the same `(path, access)` pair remains
+    idempotent (same schema name, schemas merge by name on approve).
+  - `COPY` and `MOVE` are intentionally **not** in the WRITE verb set.
+    Both carry a second path in the WebDAV `Destination` HTTP header,
+    and the per-file permission schema only constrains the request
+    URL; granting either would let an agent write to any file under
+    the WebDAV mount's share roots (`~/` or `/tmp/`) via the
+    `Destination` header, regardless of what was actually shared. A
+    single-file WRITE grant means "change this one file"; cross-path
+    copy/move requires an explicit grant on the destination too.
+    Agents that need copy semantics can `GET` the source and `PUT` to
+    a destination they have a separate grant for; likewise for move
+    (`GET` + `PUT` + `DELETE`).
+
+## 2026-05-21
+
+Fix the intro in `UNABRIDGED_CHANGELOG.md` so it references the correct entries directory. The path was `changelog/<project>/` (which never existed); the actual layout is `<project_dir>/changelog/`.
+
+- Bumped pinned `imbue-mngr` / `imbue-common` / `concurrency-group` versions to match the current monorepo.
+
+## 2026-05-20
+
+- The `permission-requests` latchkey gateway extension now expects POST
+  bodies with the fields `agent_id`, `scope` (string), `permissions`
+  (list of strings), and `rationale` in place of the previous
+  `service_name` field. Pending requests are stored under
+  `<latchkey-directory>/permission_requests/v1/` so any existing files
+  left over from the old shape are silently ignored.
+- The `permissions` latchkey gateway extension now exposes two new
+  catalog endpoints: `GET /permissions/available` returns the full
+  catalog as a JSON object keyed by raw service name, and
+  `GET /permissions/available/<service_name>` returns a single entry
+  (or 404 if the service is unknown). Each catalog value has the
+  shape `{"scope": "<schema_name>", "display_name": "...",
+  "permissions": [...]}`. The catalog is backed by a `services.json`
+  data file that ships alongside the extensions and is materialized
+  into `LATCHKEY_DIRECTORY/extensions/` together with the `.mjs` files
+  at gateway-spawn time.
+- The default permissions seeded for every new agent are broadened to
+  let the agent read its own current permissions
+  (`GET /permissions/self`) and read the per-service catalog entry
+  (`GET /permissions/available/<service_name>`) in addition to the
+  existing ability to file a new permission request
+  (`POST /permission-requests`). The catalog read is granted under a
+  path-pattern Detent permission schema (matching
+  `/permissions/available/<service_name>` only) so the agent baseline
+  does not also expose the unbounded collection endpoint.
+- ``LatchkeyGatewayClient.get_available_services`` now returns a typed
+  ``dict[str, AvailableServiceEntry]`` (pydantic-validated) instead of
+  the previous untyped ``dict[str, object]``. Wire-shape validation
+  (missing fields, wrong types, empty strings) now happens inside the
+  client and surfaces as ``LatchkeyGatewayClientError``.
+
+Fixed a race condition in `mngr_latchkey`'s per-directory encryption-key
+resolution where a concurrent caller could read the on-disk key file
+while another process was mid-write, observing an empty string. The key
+file is now published atomically by writing to a sibling temp file,
+`fsync`ing it, and `os.link`-ing it into the final path -- so the final
+path only ever exists with complete contents.
+
+Project now participates in the per-project changelog layout: a `changelog/` subdirectory holds per-PR entry files, and `CHANGELOG.md` / `UNABRIDGED_CHANGELOG.md` at the project root hold the consolidated history. See the full rationale in `dev/changelog/mngr-changelog-per-project.md`.
+
+Stop caching the latchkey per-directory encryption key on the long-lived `Latchkey` pydantic model. The optional `encryption_key: SecretStr | None` field is gone; instead, `Latchkey._load_encryption_key()` reads (and on first call mints) the key on every subprocess-spawn call, so the secret only lives in parent-process memory for the duration of a single env-builder + process-spawn call frame. `apps/minds/imbue/minds/cli/run.py:_build_latchkey` and `libs/mngr_latchkey/imbue/mngr_latchkey/cli.py:_build_initialized_latchkey` no longer pre-load the key at construction time.
+
+`load_or_create_encryption_key` now validates the on-disk key file's permission bits every load. Any group or other access bit set (i.e. anything that isn't owner-only -- `0o400`, `0o600`, `0o700` are accepted) raises a new `LatchkeyEncryptionKeyPermissionError` with a copy-pasteable `chmod 600 <path>` hint, so an operator who relaxed the mode finds out loudly instead of silently leaking the key to other local users. The operator override branch (`LATCHKEY_ENCRYPTION_KEY` in the env) still wins and is unaffected. Adds `encryption_key_test.py` covering precedence, idempotence, owner-only mode acceptance, group/other rejection, and the umask-permissive minting path.
 
 ## 2026-05-14
 

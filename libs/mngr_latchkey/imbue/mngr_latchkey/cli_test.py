@@ -36,16 +36,17 @@ from imbue.mngr_latchkey.cli import _resolve_latchkey_settings
 from imbue.mngr_latchkey.cli import latchkey
 from imbue.mngr_latchkey.config import LatchkeyPluginConfig
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
+from imbue.mngr_latchkey.core import LATCHKEY_MIN_VERSION
 from imbue.mngr_latchkey.store import LatchkeyForwardInfo
 from imbue.mngr_latchkey.store import load_forward_info
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 from imbue.mngr_latchkey.store import save_forward_info
 
-# A version string the upstream ``Latchkey.initialize`` is happy with
-# (``LATCHKEY_MIN_VERSION`` is 2.8.0). Kept as a constant so the fake
-# binary we drop on $PATH doesn't drift if the floor is bumped.
-_FAKE_LATCHKEY_VERSION: Final[str] = "2.9.0"
+# A version string the upstream ``Latchkey.initialize`` is happy with.
+# Pinned to ``LATCHKEY_MIN_VERSION`` so the fake binary we drop on $PATH
+# always satisfies the floor, even when the floor is bumped.
+_FAKE_LATCHKEY_VERSION: Final[str] = LATCHKEY_MIN_VERSION
 
 # Globally-unique deterministic host IDs (matches the convention in
 # ``mngr_forward/testing.py`` so test output is stable). The 32-char
@@ -597,11 +598,12 @@ def test_forward_refuses_to_start_when_another_supervisor_is_alive(
 # -- Group wiring -----------------------------------------------------------
 
 
-def test_group_exposes_three_subcommands() -> None:
+def test_group_exposes_documented_subcommands() -> None:
     """The ``mngr latchkey`` group exposes the documented subcommands."""
     assert set(latchkey.commands.keys()) == {
         "create-agent-env",
         "link-permissions",
+        "register-agent",
         "forward",
         "admin-jwt",
         "gateway-info",
@@ -611,5 +613,12 @@ def test_group_exposes_three_subcommands() -> None:
 def test_help_text_lists_subcommands(cli_runner: CliRunner) -> None:
     result = cli_runner.invoke(latchkey, ["--help"], catch_exceptions=False)
     assert result.exit_code == 0
-    for subcommand in ("create-agent-env", "link-permissions", "forward", "admin-jwt", "gateway-info"):
+    for subcommand in (
+        "create-agent-env",
+        "link-permissions",
+        "register-agent",
+        "forward",
+        "admin-jwt",
+        "gateway-info",
+    ):
         assert subcommand in result.output

@@ -59,6 +59,7 @@ Only after doing all of the above should you begin writing code.
 - If you see a flaky test, YOU MUST HIGHLIGHT THIS IN YOUR RESPONSE. Mark it with `@pytest.mark.flaky` so offload retries it automatically. Then try to fix the underlying flakiness in a separate commit.
 - Do not add TODO or FIXME unless explicitly asked to do so
 - Code must work on both macOS and Linux. It's ok if it doesn't work on Windows.
+- `mngr` is installed by end users from PyPI, so the built wheel must be self-contained: it only packages the `imbue` package (`packages = ["imbue"]`), so production code must not read files outside it at runtime unless they're shipped into the package (e.g. via wheel `force-include`, as the help-topic docs are).
 - To reiterate: code correctness and quality is the most important concern when writing code.
 
 # Running tests
@@ -83,6 +84,8 @@ Only after doing all of the above should you begin writing code.
 # Ratchets
 
 Each project has a `test_ratchets.py` file containing automated code quality checks ("ratchets"). Each ratchet tracks a count of violations for a specific anti-pattern (e.g. raising built-in exceptions, using monkeypatch.setattr). The count can only stay the same or decrease -- increasing it fails the test. To add or modify ratchets, use `/writing-ratchet-tests`.
+
+When your change *reduces* a ratchet's violations, lock in the improvement by tightening its recorded count: run `uv run pytest --inline-snapshot=trim <path/to/test_ratchets.py>` (scoped to the affected file(s), and without xdist so inline-snapshot stays enabled).
 
 Ratchets are guidance and reminders about good code, not rules to be blindly obeyed. When a ratchet fires on your code:
 

@@ -104,7 +104,7 @@ def test_preflight_send_message_raises(
 ) -> None:
     agent = _make_agent(local_host, temp_mngr_ctx, tmp_path)
     with pytest.raises(SendMessageError, match="do not accept interactive messages"):
-        agent._preflight_send_message("some-target")
+        agent._preflight_send_message(agent.tmux_target)
 
 
 def test_send_message_raises(

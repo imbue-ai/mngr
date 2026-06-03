@@ -1,8 +1,322 @@
 # Unabridged Changelog - dev
 
-Full, unedited changelog entries consolidated nightly from individual files in the `changelog/dev/` directory. Covers repo-level dev tooling: CI workflows, repo scripts, top-level configuration, build tooling, ratchets, and the changelog tooling itself.
+Full, unedited changelog entries consolidated nightly from individual files in `dev/changelog/`. Covers repo-level dev tooling: CI workflows, repo scripts, top-level configuration, build tooling, ratchets, and the changelog tooling itself.
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
+
+## 2026-06-01
+
+`markdown-it-py` is now an explicit (rather than only transitive) dependency in the lockfile: mngr uses rich's own CommonMark parser directly to rewrite links when rendering help topics for the terminal.
+
+## 2026-05-29
+
+# Spec file-tree updates for the apps/minds todesktop config rename
+
+- `specs/electron-desktop-app/concise.md` and `specs/electron-desktop-app/spec.md`:
+  the file-tree listings for `apps/minds/` now show `todesktop.js` instead of
+  `todesktop.json`. The rename happens in the apps/minds slice of this PR (see
+  `apps/minds/changelog/mngr-activate-todesktop-binary-hook.md`); these spec
+  updates keep the documented layout in sync with the actual one.
+
+- Added a design spec under `specs/docker-cleanup-state-and-images/` documenting the Docker build-image and state-container cleanup work.
+
+Added the implementation spec for Imbue Cloud R2 bucket support
+(`specs/imbue-cloud-r2-buckets/spec.md`).
+
+Updated the `.minds/template/cloudflare.sh` secret template to document that
+`CLOUDFLARE_API_TOKEN` must now be an account-owned (`cfat_`) token carrying
+`Workers R2 Storage: Edit` + `Account API Tokens: Edit` (on top of the existing
+tunnel/DNS/Access/KV permissions), and that R2 must be enabled on the Cloudflare
+account.
+
+- Drop the now-removed `--use-snapshot` flag from the TMR GHA workflow (`.github/workflows/tmr.yml`) so the scheduled/manual TMR runs don't fail at invocation. Snapshot building on `--provider modal` is automatic now, so behavior is unchanged. Also refresh a stale comment in `.github/workflows/tmr-reintegrate.yml` that mentioned the same removed flag.
+
+# Self-hosted Mac runner + launch-to-first-message workflow
+
+- Added `.github/workflows/minds-launch-to-msg.yml`, a `workflow_dispatch` job that (given a minds commit SHA and forever-claude-template ref) either reuses an existing ToDesktop build matching the commit or runs `pnpm dist` to build a fresh draft, then on the self-hosted `minds-runner` macOS host downloads the resulting `.app`, launches it, waits for the backend to come up, and optionally round-trips a real first-message chat against a LIMA agent before cleaning up. Collects diagnostic artifacts on failure.
+- Added `.github/workflows/minds-runner-reset.yml`, a `workflow_dispatch` job to manually reset the self-hosted runner to a clean state (and optionally install a fresh `.app` from a ToDesktop `.zip` URL).
+- Companion infrastructure (the runner Mac itself: Tailscale-tagged, LaunchAgent-installed GitHub Actions runner) lives outside this repo. The runner is registered at the `imbue-ai` org level and is targeted by `runs-on: [self-hosted, macOS, minds-runner]`.
+
+Added `specs/minds-backup-provider/concise.md`, the spec for wiring the
+imbue_cloud bucket capability into the minds workspace-creation flow (backup
+provider toggle, async post-creation restic config injection, and the
+forever-claude-template `host_backup` contract changes).
+
+Added spec `specs/host-backup/concise.md` for a new continuous-backup
+service that runs inside every mind workspace. The service uses restic
+against a Cloudflare R2 bucket by default and takes consistent btrfs
+subvolume snapshots on lima / vps-docker (no-op on plain docker). The
+in-container `host_backup` library + bootstrap config wiring lives in
+forever-claude-template (separate PR). This monorepo's changes provision
+the outer-side `snapshot_helper.sh` systemd unit on vps-docker hosts;
+see `libs/mngr_vps_docker/changelog/mngr-mind-backup.md` and
+`libs/mngr_ovh/changelog/mngr-mind-backup.md` for the per-project
+details.
+
+- Added a spec (``specs/symlink-code-onto-mngr-volume/concise.md``) describing the relocation of the forever-claude-template workspace from ``/code/`` onto the ``/mngr/`` persistent volume (as ``/mngr/code/``), with safety-net ``/code -> /mngr/code`` and ``/worktree -> /mngr/worktree`` symlinks. The spec covers the Dockerfile bake-and-relocate dance (workspace baked at ``/mngr/code/`` then renamed to ``/docker_build_code`` so the volume mount path is empty in the image), the first-boot atomic-seed CMD logic, the per-template scope (``docker``/``vultr``/``ovh`` run the full dance; ``lima`` aligns the path but skips the dance; ``imbue_cloud`` inherits from the ``ovh`` bake), and the no-auto-migration story for existing live hosts. The actual implementation lives in the forever-claude-template repo on the ``mngr/symlink-code`` branch.
+
+Added the design doc for putting the per-host VPS docker unified volume onto
+a loop-mounted btrfs subvolume (`specs/vps-docker-btrfs/concise.md`). See the
+per-project entries under `libs/mngr_vps_docker/`, `libs/mngr_vultr/`, and
+`libs/mngr_ovh/` for the implementation details.
+
+Added a new design spec under `specs/vps-docker-unified-volume/concise.md`
+that documents the docker_vps provider's move from a two-volume layout
+(per-user state container + per-host data volume) to a single unified
+per-host Docker volume on the VPS. The spec captures the rationale,
+expected on-volume layout (`host_state.json`, `agents/<agent_id>.json`,
+`host_dir/`), discovery behavior (find the volume via the agent
+container's `com.imbue.mngr.host-id` label), and the breaking-change
+caveat that pre-existing docker_vps hosts cannot be discovered after
+upgrade.
+
+## 2026-05-28
+
+Bump the `test-docker-electron` CI job's Node.js to 24.15.0 and pnpm to 10.33.4 to match the new exact-version pins in `apps/minds/package.json`. Also refresh the example `pyproject.toml` block in `specs/electron-desktop-app/spec.md` so it matches the real packaged file (`requires-python = "==3.12.13"` and the actual three-dependency list) instead of the older `>=3.12` / single-`imbue-minds` snapshot, and correct the standalone-pyproject path reference in that spec from `electron/pyproject.toml` to `electron/pyproject/pyproject.toml`.
+
+# Changelog consolidation: accuracy review of new bullets
+
+The nightly changelog consolidation agent now reviews the `CHANGELOG.md`
+bullets it just generated for factual accuracy against the code, before
+opening its PR. After committing the consolidation, it spawns one or more
+fresh-context `general-purpose` reviewer subagents (spec in
+`scripts/changelog_accuracy_reviewer.md`, relative to the repo root) and
+partitions the projects that gained new bullets across them at its
+discretion -- so a trivial change touching every package needn't spawn a
+reviewer per package -- running them in parallel. Each verifies its
+assigned projects' newly-added bullets against the actual code, correcting
+or removing inaccurate ones and collapsing bullets that another bullet
+materially supersedes. This guards against stale or inaccurate changelog
+entries.
+
+Each reviewer edits only the `CHANGELOG.md` files of its assigned projects
+(the code is treated as ground truth -- reviewers never modify source) and
+commits its own corrections, staging only those files so the parallel
+reviewers don't clobber each other. Reviewers run unattended -- they
+self-review rather than asking a user -- and report their findings back to
+the consolidation agent, which decides what to do with them. The run's
+outcome JSON reports `pr_url` on success and `notes` (the failing step and
+error detail) on failure.
+
+# Enforce the supply-chain cooldown via `[tool.uv] exclude-newer`, refreshed at release
+
+- Moved the two-week dependency cooldown from a time-relative test to uv's native
+  resolver enforcement. Added `[tool.uv] exclude-newer` to the root `pyproject.toml`
+  (initial value `2026-05-23T00:00:00Z`), so `uv lock` simply refuses to consider any
+  package version uploaded after the cutoff. This is proactive (you cannot lock a
+  too-new package) rather than after-the-fact detection.
+- `scripts/release.py` now advances the cutoff at each release: it sets
+  `exclude-newer` to (today's UTC date - 2 weeks) just before regenerating
+  `uv.lock`, and commits the root `pyproject.toml` alongside the version bumps. The
+  update is **forward-only** -- it takes `max(current_cutoff, release_date - 2 weeks)`,
+  so a release cut while the current cutoff is still younger than two weeks leaves it
+  untouched rather than pushing it back. This avoids re-excluding a deliberately-pinned
+  fresh dependency and breaking resolution. The
+  initial value is set to just past the newest locked package for the same reason,
+  which makes per-package exemptions unnecessary.
+- Removed `test_no_dependencies_younger_than_two_weeks` (and its
+  `_FRESHNESS_EXEMPT_PACKAGES` / `_lock_package_upload_time` helpers) from
+  `test_meta_ratchets.py`; uv now enforces the cooldown at lock time, so the test is
+  redundant. Its `ty`/`modal` exemptions are no longer needed because the cutoff is
+  kept recent enough to admit them directly.
+- Added unit tests (`scripts/release_test.py`) covering the forward-only advance, the
+  no-op when the cutoff is still within the window, and the boundary case.
+- The cooldown does not protect against a compromise that stays undetected past the
+  window; its only value is the detection delay before we adopt a release.
+
+# Dropped the removed `MNGR_ALLOW_PYTEST` from the env-settings spec
+
+`MNGR_ALLOW_PYTEST` was removed from mngr in this PR (the pytest config guard is
+now per-config via `is_allowed_in_pytest`). Removed the now-stale reference to it
+from `specs/env-settings-overrides/concise.md`.
+
+Added `libs/mngr_mapreduce` to the workspace; root `pyproject.toml` now collects coverage for `imbue.mngr_mapreduce` alongside the other workspace packages.
+
+Add a `uv-sync-pre-push` hook to `.pre-commit-config.yaml` (registered for the `pre-push` stage, ordered as the first local hook) that runs `uv sync --all-packages` before a push whenever that push touches dependency files (`uv.lock` or any `pyproject.toml`). This keeps the local environment in sync with just-merged dependencies, primarily for the case where the code-guardian stop hook merges `origin/main` and then pushes the merge commit. Pushes that do not change dependency files are unaffected (the hook is skipped).
+
+The hook runs before the other pre-push hooks (`ruff`, `ty`, `regenerate-cli-docs`, `compile-style-guide`) on purpose: those all shell out to `uv run`, which does not install all workspace members on its own. When a merge of `origin/main` adds a new workspace member (or otherwise changes dependencies), those hooks would otherwise import a member missing from the shared `.venv` and fail with `ModuleNotFoundError`. Syncing `--all-packages` first populates the environment so they pass. (The complementary removed-member case is already handled by the existing `clean-stale-workspace-dirs` post-checkout hook.)
+
+Retire the hand-written git-hook installer: delete `scripts/githooks/install.sh` and `scripts/githooks/pre-commit`, and update `scripts/ruff-precommit-setup-guide.md` to install hooks with `uv run pre-commit install` instead. The hand-written shim existed to avoid `pre-commit install` depending on the system Python, but running `pre-commit install` through `uv` already pins the generated hooks to the uv-managed virtual environment (`.venv`), so the shim was redundant. The symlink-based installer was also incomplete -- it only ever installed the `pre-commit` hook, never the `pre-push` or `post-checkout` hooks the configuration relies on -- whereas `pre-commit install` installs every hook type in `default_install_hook_types`.
+
+# Test-efficiency groundwork: offload v0.9.6 + minds e2e snapshot script
+
+Two changes that together lay the groundwork for much faster minds
+end-to-end tests:
+
+- Bumped the offload CI pin from `0.9.5` to `0.9.6` (`.github/workflows/ci.yml`).
+  v0.9.6 adds `offload run --override-image-id <ID>`, which lets us point
+  offload at a pre-built Modal image and skip the entire image-setup
+  pipeline (Modal provider only). See
+  https://github.com/imbue-ai/offload/releases/tag/v0.9.6 for the full
+  release notes.
+- Added `scripts/snapshot_minds_e2e_state.py`, a demonstration script that
+  creates a Modal sandbox with `experimental_options={"vm_runtime": True}`,
+  installs the Docker + Node + pnpm + xvfb stack the
+  `test-docker-electron` CI job needs, calls the shared
+  `imbue.minds.desktop_client.e2e_workspace_runner.create_workspace_via_electron`
+  driver directly (no pytest) while deliberately skipping the
+  `mngr destroy` cleanup so the workspace agent + Docker container
+  survive into the snapshot, and then calls
+  `sandbox.snapshot_filesystem()` to capture the state. The resulting
+  Modal image ID can be fed back to offload via `--override-image-id` so
+  future test runs boot from an already-warm workspace + Docker
+  container in seconds instead of rebuilding from scratch every time.
+  The script intentionally opts in to `vm_runtime` only for itself --
+  Modal has capacity issues with that runtime, so we do not flip it on
+  for the general mngr_modal provider.
+
+# Consolidated ty/ruff ratchet tests to run once repo-wide
+
+The per-project `test_no_type_errors` and `test_no_ruff_errors` tests (~36 copies,
+one per workspace member) were redundant: `ty check` resolves the uv workspace
+root (root `pyproject.toml` declares `[tool.uv.workspace] members = ["libs/*",
+"apps/*"]`) and scans every member on each invocation regardless of the directory
+it runs from, and the repo-wide ruff check is a strict superset of the per-project
+ruff checks. Each duplicate invocation was a full ~0.8s cold workspace scan with
+no cross-process cache benefit.
+
+Removed the per-project copies and kept a single repo-wide `test_no_type_errors`
+and `test_no_ruff_errors` in `test_meta_ratchets.py`, updating the meta-ratchet
+expected-test-name set accordingly.
+
+Because `ty` (unlike `ruff`) was not in pre-commit, scoped local runs such as
+`just test-quick libs/<project>` no longer type-checked at all after the
+consolidation. Added a `ty` hook to `.pre-commit-config.yaml` that runs
+`uv run ty check` over the whole workspace at the `pre-push` stage (ty can't
+scope to staged files, so running it per-commit would add a fixed full-workspace
+scan to every commit). Pushes now get a type-check gate; the single
+`test_no_type_errors` in `test_meta_ratchets.py` remains the CI backstop.
+
+No user-facing behavior change.
+
+## 2026-05-27
+
+# Bump `ty` to 0.0.39, plus paramiko/coolname dependency bumps
+
+- Raised the `ty` type checker floor from `0.0.24` to `0.0.39` (root `pyproject.toml`).
+- Bumped pinned dependencies in `uv.lock`: `paramiko` 3.5.1 -> 4.0.0 and `coolname` 3.0.0 -> 5.0.0. The paramiko bump also pulls `pyinfra` 3.6.1 -> 3.8.0 and adds `invoke` and `types-paramiko` transitively (pyinfra 3.8.0 depends on `types-paramiko`).
+  - Note: paramiko 4.0.0 is the ceiling while we depend on `pyinfra`; pyinfra 3.8.0 constrains `paramiko<5`, so paramiko 5.0.0 is not yet installable.
+  - The newly-present `types-paramiko` stubs make ty type-check paramiko usage for the first time; resulting type errors were fixed across the affected projects.
+- Behavioral note for contributors: `ty` 0.0.39 no longer honors the bracketed PEP-484 form `# type: ignore[<mypy-code>]`. Only bare `# type: ignore` and `ty`'s own `# ty: ignore[<ty-rule>]` are respected. All bracketed `# type: ignore[...]` comments in the repo were converted to `# ty: ignore[...]` using ty's rule names.
+- Documented in `CLAUDE.md` (the "# Ratchets" section) how to tighten a ratchet count after reducing violations: `uv run pytest --inline-snapshot=trim <test_ratchets.py>` (only `=trim` lowers a count that already passes its `<=` check; `=fix`/`=update` do not).
+- Tightened recorded ratchet violation counts to their current exact values across all projects via `--inline-snapshot=trim`, locking in previously-unrecorded reductions (test-config only; no source or behavior change).
+- Ran `uv lock --upgrade` under a two-week supply-chain cooldown (adopting only releases that have been public for at least two weeks) to bump floating dependencies. Notable bumps within that window: `starlette` 0.50 -> 1.0, `urwid` 3.0 -> 4.0, `pydantic` 2.12 -> 2.13, `cryptography` 46 -> 48, `typer` 0.21 -> 0.25, `uvicorn` 0.40 -> 0.46. The cooldown holds back even-newer releases, e.g. `wsgidav` stays 4.3.3 rather than 4.3.4 (4.3.4 adds a `bcrypt<5` cap and a `passlib` dep), so `bcrypt` stays at 5.0.
+  - Bumped the `supertokens-python` floor (see the `remote_service_connector` changelog) so the resolver keeps it at the latest 0.31.3 instead of backtracking to 0.30.3; that also keeps `aiosmtplib` at 5.x for free.
+- Added `test_no_dependencies_younger_than_two_weeks` (in `test_meta_ratchets.py`) to enforce the cooldown: it fails if any locked dependency was published within the last two weeks, except deliberately-trusted exemptions (`ty` -- our dev-only type checker, pinned to the latest 0.0.39; `modal` -- explicitly pinned to ==1.4.3). uv's static `[tool.uv] exclude-newer` only accepts a fixed date, so the relative cutoff lives in this (time-relative) test instead; regenerate compliant locks with `uv lock --upgrade --exclude-newer "2 weeks"`. The cooldown does not protect us from a compromise that stays undetected past the window, nor the first project to lock a release -- its only value is the detection delay before we adopt (and, for runtime deps in published wheels, re-propagate) a release.
+
+## 2026-05-26
+
+# Repo-root spec annotation
+
+[`specs/minds-rest-api/spec.md`](../../specs/minds-rest-api/spec.md)
+got a top-of-file banner noting that the per-agent `MINDS_API_KEY` and
+the per-agent reverse SSH tunnel for the Minds API are both gone --
+agents now reach the API exclusively through the latchkey gateway's
+`minds-api-proxy` extension, with a single installation-wide
+`MINDS_API_KEY`. See the changelogs for the `minds` and `mngr_latchkey`
+projects for the full design + implementation notes.
+
+- Updated the minds Electron acceptance test spec (``specs/minds-electron-acceptance-test/spec.md``) to reference ``launch_mode=DOCKER`` instead of ``launch_mode=LOCAL``, matching the corresponding minds enum rename. The test code in ``apps/minds`` was already updated; this brings the spec in sync.
+
+- Updated the nightly changelog consolidation prompt (`scripts/changelog_consolidation_prompt.md`) so the concise `CHANGELOG.md` is a notable-only summary: non-notable changes (canonically, changes that only affect tests rather than user-facing behavior) are now omitted from `CHANGELOG.md` entirely instead of being forced into a `Changed` bullet. Such entries are still preserved verbatim in each project's `UNABRIDGED_CHANGELOG.md`.
+- Added a `dev`-project exception to that rule: because `dev` tracks repo-level developer tooling (CI, scripts, build config, ratchets, the changelog system) rather than product behavior, `dev` entries are judged by developer/maintainer impact rather than end-user-facing behavior.
+
+# CI guard for stale generated CLI docs
+
+`scripts/make_cli_docs.py` gained a `--check` mode that reports any stale
+generated docs (and the exact regen command) and exits non-zero without writing
+anything. Its content generation was refactored so a single
+`collect_generated_files()` function is the shared source of truth for both
+writing the docs and checking them, so the writer and checker cannot drift.
+
+A new `test_cli_docs_are_up_to_date` (in `test_meta_ratchets.py`, alongside the
+existing repo-wide ruff check) runs that `--check` mode and fails if the
+committed CLI docs or PyPI README are out of date, pointing you at
+`uv run python scripts/make_cli_docs.py`. This complements the existing
+`test_all_non_hidden_commands_have_generated_docs`, which only checks that a doc
+file exists per command, by also verifying the file contents are current.
+
+Workspace + scripts metadata follows the rename of `libs/mngr_gemini` to `libs/mngr_antigravity`: workspace `pyproject.toml` cov target, `test_profiles.toml` mngr-suite test paths, top-level `README.md`, and the package list in `scripts/utils.py`.
+
+- Added `specs/env-settings-overrides/concise.md` documenting the new `MNGR__*` env-var override scheme, the `__extend` operator, and the assign-by-default merge semantics shipped with this PR. See the `mngr` changelog entry for the user-visible behavior.
+
+Broadened the autofix auto-accept rules to cover any pure DRY cleanup that is a clear
+improvement and doesn't change behavior (e.g. inline-re-construction folded into a
+pre-existing local). Previously the rule only listed specific cases.
+
+## 2026-05-26
+
+## dev
+
+- TMR workflows (`tmr.yml`, `tmr-reintegrate.yml`) now re-assert `mngr tmr`'s exit code via `exit "${PIPESTATUS[0]}"` after the `| tee tmr-report/events.jsonl` pipeline. The implicit `pipefail` propagation was observed to not catch the left-side failure in this step, letting a failed run be reported as successful.
+
+## 2026-05-22
+
+- New direct dependencies recorded in `uv.lock` to support the minds
+  WebDAV file-server mount: `wsgidav` (the WebDAV server itself) and
+  `a2wsgi` (the WSGI-to-ASGI adapter that bridges it onto Starlette /
+  FastAPI). Both are pulled in via `apps/minds/pyproject.toml`.
+
+- The `TMR` GitHub Actions workflow now runs on a daily cron at 08:00 UTC (00:00 PST; shifts to 01:00 PDT in summer, since GitHub Actions cron has no timezone support). The cron lives in a new `TMR (scheduled)` workflow that gates on a prior periodic PR and then invokes the main `TMR` workflow via `workflow_call`; manual `workflow_dispatch` runs of TMR remain independent of the gate.
+- The default `test_paths` workflow input now points at the whole `libs/mngr/imbue/mngr/e2e/` directory instead of only `test_basic.py`, so both scheduled and one-click runs exercise the full e2e suite.
+- Scheduled-run gate behavior:
+  - If a prior scheduled run's PR (label: `tmr-periodic`) is open and 4 days old or younger, today's scheduled run is skipped and a new comment is posted on the open PR explaining the policy. The recurring daily nudge is intentional.
+  - If the prior PR is more than 4 days old, the gate posts a closing comment, closes the PR (with `--delete-branch`), proceeds with a fresh run, and after the new PR is opened posts a follow-up "Superseded by #N" comment on the closed PR.
+- The auto-opened PR from scheduled runs is labeled `tmr-periodic` (the label is created on demand) and assigned to `qi-imbue` and `joshalbrecht`. Manual-run PRs are unlabeled, unassigned, and therefore invisible to the gate.
+
+## Spec: discovery providers and errors
+
+- Add `specs/discovery-providers-and-errors/concise.md` describing the cross-project change that promotes per-provider state (successfully loaded providers, per-provider discovery errors) to first-class fields on `FullDiscoverySnapshotEvent`, replaces minds' silent auto-disable-on-auth-error machinery with a visible providers panel + explicit Enable/Disable toggle, adds a new `UNKNOWN` value to `AgentLifecycleState` / `HostState` for previously-tracked agents whose provider just failed, and teaches `mngr_notifications` to recognize the indirect `RUNNING -> UNKNOWN -> WAITING` transition. See the per-project changelog entries in `libs/mngr/`, `libs/mngr_forward/`, `libs/mngr_imbue_cloud/`, `libs/mngr_notifications/`, and `apps/minds/` for the actual code changes this spec describes.
+
+## 2026-05-21
+
+- `CLAUDE.local.md` is now copied into agent workdirs by default, so user-specific Claude instructions from the host repo are available inside agents.
+
+Adds a `just minds-test-electron` recipe that wraps the new `test_create_local_docker_workspace_via_electron` Electron acceptance test in `xvfb-run -a`, and wires the existing `test-docker` CI job to install Node, pnpm, xvfb, and the apps/minds pnpm dependencies so the Electron binary is available for the run.
+
+Fix the intro in `UNABRIDGED_CHANGELOG.md` so it references the correct entries directory. The path was `changelog/<project>/` (which never existed); the actual layout is `<project_dir>/changelog/`.
+
+Add `specs/minds-env-activate-split/concise.md`: design for splitting
+`minds env activate` into a default use-mode (no `MODAL_PROFILE`) and an
+opt-in `--deploy` mode. Fixes the spurious Modal-discovery warnings and
+Latchkey breakage hit by users who activated `staging` only to *use* the
+deployed tier but had no Modal token for the `minds-staging` workspace.
+
+Root-level surface changes for the `mngr_uncapped_claude` plugin: README updated to advertise the new `uncapped-claude` command and link to the new sub-project, and the auto-generated CLI docs gained an entry at `libs/mngr/docs/commands/secondary/uncapped-claude.md` so `mngr ask` and `mngr --help` know about the command.
+
+## 2026-05-20
+
+Restructure the changelog system from a single repo-wide changelog to one set of changelog artifacts per project, owned inside each project's own directory.
+
+- Each project (every `libs/<name>` and `apps/<name>`, plus the synthetic top-level `dev/`) now holds three things at its root: `changelog/` (per-PR entry files), `CHANGELOG.md` (concise summary), and `UNABRIDGED_CHANGELOG.md` (verbatim per-date sections).
+- Per-PR entry files now live at `<project_dir>/changelog/<branch>.md` (one per project the PR touches), instead of a single `changelog/<branch>.md` at the repo root.
+- The consolidator (`scripts/consolidate_changelog.py`) walks each project's `<project_dir>/changelog/` and routes its entries into `<project_dir>/UNABRIDGED_CHANGELOG.md`. The machine-readable output format is now one `SECTION <project> <date>` line per inserted section.
+- The `test_pr_has_changelog_entry` ratchet now computes the projects the PR diff touches and requires `<project_dir>/changelog/<branch>.md` for each. Adding the entry file inherently satisfies the requirement for the project that owns it; the consolidation cron's own branch prefix is the only special-cased exemption.
+- New `test_every_project_has_changelog_layout` meta-ratchet enforces that every project has `CHANGELOG.md`, `UNABRIDGED_CHANGELOG.md`, and a `changelog/` directory. Stubs were added for projects without entries yet.
+- `scripts/changelog_consolidation_prompt.md` updated to parse `SECTION` lines and summarize each project's section into that project's `CHANGELOG.md` `[Unreleased]`.
+- `scripts/release.py` finalizes each bumped package's and each first-time-publish package's `libs/<name>/CHANGELOG.md` `[Unreleased]` section. `apps/<name>/CHANGELOG.md` and `dev/CHANGELOG.md` are not versioned, so their `[Unreleased]` accumulates entries indefinitely.
+- New shared `scripts/changelog_projects.py` owns the path-to-project mapping (used by the consolidator, the ratchet, and the release script).
+- `test_meta_ratchets._get_all_project_dirs` and `all_known_projects` now both build on a shared `pyproject_projects()` helper in `scripts/changelog_projects.py`, instead of `_get_all_project_dirs` going through `all_known_projects` and filtering out the synthetic `dev` bucket.
+- The `test_pr_has_changelog_entry` ratchet's "missing entries" failure message now names the resolved diff base and warns that a misconfigured/stale base can make unrelated `main` files appear as if they changed on this branch, falsely implicating projects the PR didn't touch — in which case the right fix is to refetch the base, not to add placebo entries for projects you didn't actually change.
+
+The existing top-level `CHANGELOG.md` and `UNABRIDGED_CHANGELOG.md` were retroactively split into per-project files; see each project's `CHANGELOG.md` for its history.
+
+`scripts/release.py` now refuses to cut a release when there are unconsolidated entries in `changelog/`, since those would otherwise be omitted from the version's release notes. When the gate fires it prints the exact one-liner that triggers the `changelog-consolidation` schedule on demand (the same one that normally runs nightly), so the human can run it, land its PR, and re-run the release. The predicate ("are there pending entries?") lives next to the consolidator's own filter in `scripts/consolidate_changelog.py`, and the plugin-disable args used around `mngr schedule` invocations live in `scripts/trigger_changelog_consolidation.py` and are shared by `scripts/setup_changelog_agent.sh`.
+
+Collapse Modal environments across an offload-acceptance / offload-release
+run to a single shared env (opt-in via `MNGR_TEST_SHARED_MODAL_ENV_NAME`).
+Each fanned-out sandbox in `just test-offload-acceptance` and
+`just test-offload-release` used to mint its own Modal environment and
+delete it on teardown -- dozens to hundreds per run, driving the
+1500-env-per-workspace cap into transient failures. The justfile recipes
+now pre-create a single `mngr_test-YYYY-MM-DD-HH-MM-SS-shared-<uuid>` env
+once, forward its name into every sandbox via `--env`, and `trap`-delete
+it at recipe exit.
+
+- The TMR GitHub Actions workflow now defaults `MNGR_USER_ID` to the shared `tmr-ci` namespace and reads inbound-SSH authorized keys from the checked-in `.github/tmr-authorized-keys` file (in addition to the existing `additional_authorized_hosts` workflow input). To register your key, run `uv run --project libs/mngr_tmr python libs/mngr_tmr/scripts/setup_tmr_ci_debug.py` and append the printed public key to that file via PR; then debug CI-created modal agents locally with `MNGR_HOST_DIR=~/.mngr-tmr-ci uv run mngr list` / `mngr connect`.
+- The TMR GitHub Actions workflow passes the AWS secrets through for the S3 report mirror and uses the public URL in the auto-opened PR body, falling back to the existing `tmr-report` artifact when no upload happened.
+- The main `TMR` GitHub Actions workflow accepts a corresponding `run_name` workflow_dispatch input, and a new `TMR (reintegrate)` workflow takes that run name back as a required input and runs `mngr tmr --reintegrate <run>` against it (re-running just the integrator phase, opening the same kind of draft PR).
+- The two TMR workflows share a new `.github/actions/tmr-setup` composite action for their common setup steps.
 
 ## 2026-05-14
 

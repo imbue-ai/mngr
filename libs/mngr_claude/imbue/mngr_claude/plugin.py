@@ -38,6 +38,7 @@ from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_di
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentStartError
@@ -47,6 +48,7 @@ from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import is_macos
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.data_types import FileTransferSpec
@@ -1392,7 +1394,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
             _CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAME: _load_claude_resource_script(_CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAME)
         }
 
-    def _send_enter_and_validate(self, tmux_target: str) -> None:
+    def _send_enter_and_validate(self, tmux_target: TmuxWindowTarget) -> None:
         # Claude wires a UserPromptSubmit hook that fires `tmux wait-for -S`
         # on the per-session channel; wait for it. If the hook misfires
         # (occasionally happens while another message is being processed),
@@ -1486,7 +1488,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         CostThresholdDialogIndicator(),
     )
 
-    def _preflight_send_message(self, tmux_target: str) -> None:
+    def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
         """Check for blocking dialogs before sending a message.
 
         Checks the permissions_waiting file (set by the PermissionRequest hook)
@@ -2783,18 +2785,23 @@ def register_cli_options(command_name: str) -> Mapping[str, list[OptionStackItem
 
 
 @hookimpl
-def on_before_create(args: OnBeforeCreateArgs) -> OnBeforeCreateArgs | None:
-    """Validate create args when --adopt-session is used: agent type must
-    be claude (or unset), and the option is incompatible with cloning via
-    ``--from <agent>`` (both adopt a session into the new agent).
+def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
+    """Validate create args when --adopt-session is used: the agent type must
+    be claude (or a subtype of claude), and the option is incompatible with
+    cloning via ``--from <agent>`` (both adopt a session into the new agent).
     """
     adopt_session = args.agent_options.plugin_data.get("adopt_session", ())
     if not adopt_session:
         return None
 
-    agent_type = args.agent_options.agent_type
-    if agent_type is not None and str(agent_type) != "claude":
-        raise UserInputError(f"--adopt-session can only be used with the claude agent type, not '{agent_type}'.")
+    # Resolve through the centralized agent-type registry so any subtype of the
+    # claude agent is accepted, not just the literal "claude" type name.
+    resolved = resolve_agent_type(args.agent_options.agent_type, mngr_ctx.config)
+    if not issubclass(resolved.agent_class, ClaudeAgent):
+        raise UserInputError(
+            f"--adopt-session can only be used with a Claude agent type (claude or a subtype of it), "
+            f"not '{args.agent_options.agent_type}'."
+        )
 
     if args.agent_options.source_agent_state_location is not None:
         raise UserInputError(

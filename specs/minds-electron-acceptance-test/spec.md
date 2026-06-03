@@ -85,7 +85,7 @@ The single test:
   - Find the first non-`devtools://` page in `browser.contexts[0].pages` (poll up to `_LOGIN_NAVIGATION_TIMEOUT_SECONDS` because Electron may still be spawning the backend and navigating).
   - Wait for the URL to match the `/` or `/create` route on the backend (the auth handshake completes via the `/login?one_time_code=...` redirect Electron loads on startup).
   - If we land on `/`, click the "Create workspace" affordance (or `goto("<backend>/create")` if explicit nav is easier).
-  - On `/create`: assert the form's `git_url` field reads back `str(fct_path)` (env-var prefill in dev tiers) or type it explicitly via `page.fill('[name="git_url"]', str(fct_path))` (shared tiers). Same for `agent_name`. Leave `launch_mode=LOCAL` (default with no account) and `ai_provider=SUBSCRIPTION` (default with no account).
+  - On `/create`: assert the form's `git_url` field reads back `str(fct_path)` (env-var prefill in dev tiers) or type it explicitly via `page.fill('[name="git_url"]', str(fct_path))` (shared tiers). Same for `agent_name`. Leave `launch_mode=DOCKER` (default with no account) and `ai_provider=SUBSCRIPTION` (default with no account).
   - Click Submit. Wait for the URL to reach `/agents/<some-agent-id>/` within `_CREATE_FORM_TIMEOUT_SECONDS`.
   - Capture the agent id from the URL via regex.
   - Wait for a stable dockview DOM marker (e.g. `page.locator('[data-dockview]').first.wait_for(state="visible", timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000)`).

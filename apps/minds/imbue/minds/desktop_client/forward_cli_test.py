@@ -26,16 +26,11 @@ from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.event_envelope import IsoTimestamp
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
-from imbue.minds.desktop_client.forward_cli import LocalAgentDiscoveryHandler
-from imbue.minds.desktop_client.forward_cli import MindsApiUrlWriter
-from imbue.minds.desktop_client.forward_cli import ReverseTunnelEstablishedInfo
 from imbue.minds.desktop_client.forward_cli import _redact_secrets
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
-from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
-from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
@@ -45,6 +40,7 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
+from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 _TIMESTAMP = IsoTimestamp("2026-05-03T00:00:00.000000000+00:00")
 _EVENT_SOURCE = EventSource("mngr/discovery")
@@ -334,83 +330,6 @@ def test_host_destroyed_destroys_all_agents_on_host(consumer: EnvelopeStreamCons
     assert consumer.resolver.list_known_agent_ids() == ()
 
 
-# --- observe stream: discovery error --------------------------------------
-
-
-def test_discovery_error_with_provider_name_fires_provider_error_callback(
-    consumer: EnvelopeStreamConsumer,
-) -> None:
-    counter = [0]
-    fired: list[tuple[str, str, str]] = []
-    consumer.add_on_provider_error_callback(lambda name, etype, emsg: fired.append((name, etype, emsg)))
-
-    error_event = DiscoveryErrorEvent(
-        timestamp=_TIMESTAMP,
-        event_id=_next_event_id(counter),
-        source=_EVENT_SOURCE,
-        error_type="ImbueCloudAuthError",
-        error_message="Refresh rejected by connector: token theft detected",
-        source_name="discovery_poll",
-        provider_name="imbue_cloud_thejash-gmail-com",
-    )
-    _dispatch(consumer, _observe_envelope(error_event))
-
-    assert fired == [
-        (
-            "imbue_cloud_thejash-gmail-com",
-            "ImbueCloudAuthError",
-            "Refresh rejected by connector: token theft detected",
-        )
-    ]
-
-
-def test_discovery_error_without_provider_name_does_not_fire_callback(
-    consumer: EnvelopeStreamConsumer,
-) -> None:
-    counter = [0]
-    fired: list[tuple[str, str, str]] = []
-    consumer.add_on_provider_error_callback(lambda name, etype, emsg: fired.append((name, etype, emsg)))
-
-    error_event = DiscoveryErrorEvent(
-        timestamp=_TIMESTAMP,
-        event_id=_next_event_id(counter),
-        source=_EVENT_SOURCE,
-        error_type="VpsApiError",
-        error_message="VPS API error 502",
-        source_name="discovery_poll",
-        provider_name=None,
-    )
-    _dispatch(consumer, _observe_envelope(error_event))
-
-    assert fired == []
-
-
-def test_provider_error_callback_failure_does_not_block_other_callbacks(
-    consumer: EnvelopeStreamConsumer,
-) -> None:
-    counter = [0]
-    fired: list[str] = []
-
-    def _bad_callback(_name: str, _etype: str, _emsg: str) -> None:
-        raise RuntimeError("boom")
-
-    consumer.add_on_provider_error_callback(_bad_callback)
-    consumer.add_on_provider_error_callback(lambda name, _etype, _emsg: fired.append(name))
-
-    error_event = DiscoveryErrorEvent(
-        timestamp=_TIMESTAMP,
-        event_id=_next_event_id(counter),
-        source=_EVENT_SOURCE,
-        error_type="ImbueCloudAuthError",
-        error_message="msg",
-        source_name="discovery_poll",
-        provider_name="imbue_cloud_alice",
-    )
-    _dispatch(consumer, _observe_envelope(error_event))
-
-    assert fired == ["imbue_cloud_alice"]
-
-
 # --- event stream: services / requests / refresh --------------------------
 
 
@@ -480,11 +399,18 @@ def test_event_refresh_envelope_dispatches_to_refresh_callback(consumer: Envelop
 # --- forward stream: reverse_tunnel_established ---------------------------
 
 
-def test_reverse_tunnel_established_fires_callback_with_parsed_info(
+def test_reverse_tunnel_established_is_silently_ignored(
     consumer: EnvelopeStreamConsumer,
 ) -> None:
-    fired: list[ReverseTunnelEstablishedInfo] = []
-    consumer.add_on_reverse_tunnel_established_callback(lambda info: fired.append(info))
+    """Minds no longer asks the plugin for per-agent reverse tunnels.
+
+    The plugin may still emit ``reverse_tunnel_established`` envelopes
+    on behalf of other callers (e.g. the latchkey supervisor); the
+    consumer must drop them on the floor without crashing or routing
+    them to any callback. This test pins that behaviour so a future
+    consumer that re-adds a callback channel does so explicitly
+    rather than by accident.
+    """
     payload = {
         "type": "reverse_tunnel_established",
         "agent_id": str(_AGENT_ID_1),
@@ -493,53 +419,68 @@ def test_reverse_tunnel_established_fires_callback_with_parsed_info(
         "ssh_host": "1.2.3.4",
         "ssh_port": 22,
     }
+    # Must not raise -- the consumer should just trace-log and move on.
     _dispatch(consumer, _forward_envelope(payload, agent_id=_AGENT_ID_1))
 
-    assert len(fired) == 1
-    assert fired[0].agent_id == _AGENT_ID_1
-    assert fired[0].remote_port == 40000
-    assert fired[0].local_port == 8420
+
+# --- forward stream: resolver_snapshot ------------------------------------
 
 
-def test_reverse_tunnel_established_re_emit_fires_callback_unconditionally(
+def test_resolver_snapshot_envelope_updates_accessor(consumer: EnvelopeStreamConsumer) -> None:
+    """``resolver_snapshot`` envelopes feed the consumer's per-agent service mirror."""
+    payload = {
+        "type": "resolver_snapshot",
+        "services_by_agent": {
+            str(_AGENT_ID_1): {"system_interface": "http://127.0.0.1:9100"},
+            str(_AGENT_ID_2): {"webdav": "http://127.0.0.1:9200"},
+        },
+    }
+    _dispatch(consumer, _forward_envelope(payload))
+    assert consumer.get_resolver_snapshot_for_agent(_AGENT_ID_1) == {
+        "system_interface": "http://127.0.0.1:9100",
+    }
+    assert consumer.get_resolver_snapshot_for_agent(_AGENT_ID_2) == {
+        "webdav": "http://127.0.0.1:9200",
+    }
+
+
+def test_resolver_snapshot_returns_empty_dict_for_unknown_agent(consumer: EnvelopeStreamConsumer) -> None:
+    """Without any envelope yet, the accessor returns an empty dict (treated as ``no entry yet``)."""
+    assert consumer.get_resolver_snapshot_for_agent(_AGENT_ID_1) == {}
+
+
+def test_malformed_resolver_snapshot_envelope_is_dropped(consumer: EnvelopeStreamConsumer) -> None:
+    """A malformed ``resolver_snapshot`` payload doesn't crash dispatch and leaves the mirror empty."""
+    _dispatch(consumer, _forward_envelope({"type": "resolver_snapshot", "services_by_agent": "not-a-dict"}))
+    assert consumer.get_resolver_snapshot_for_agent(_AGENT_ID_1) == {}
+
+
+# --- forward stream: listening --------------------------------------------
+
+
+def test_listening_envelope_unblocks_wait_for_listening_with_port(
     consumer: EnvelopeStreamConsumer,
 ) -> None:
-    """Re-emit with a different remote port must call the callback again. The
-    plugin is the source of truth and we must overwrite on every event.
+    """A `listening` forward envelope hands wait_for_listening the bound port."""
+    _dispatch(consumer, _forward_envelope({"type": "listening", "host": "127.0.0.1", "port": 9137}))
+    assert consumer.wait_for_listening(timeout=1.0) == 9137
+
+
+def test_wait_for_listening_times_out_when_no_envelope_arrives(
+    consumer: EnvelopeStreamConsumer,
+) -> None:
+    """Without a `listening` envelope (e.g. the plugin died), wait returns None."""
+    assert consumer.wait_for_listening(timeout=0.05) is None
+
+
+def test_malformed_listening_port_is_dropped_and_waiter_keeps_waiting(
+    consumer: EnvelopeStreamConsumer,
+) -> None:
+    """A `listening` envelope with an unparseable port must not unblock the waiter
+    with a bogus value -- it is dropped and the waiter times out instead.
     """
-    fired: list[ReverseTunnelEstablishedInfo] = []
-    consumer.add_on_reverse_tunnel_established_callback(lambda info: fired.append(info))
-    base_payload = {
-        "type": "reverse_tunnel_established",
-        "agent_id": str(_AGENT_ID_1),
-        "remote_port": 40000,
-        "local_port": 8420,
-        "ssh_host": "1.2.3.4",
-        "ssh_port": 22,
-    }
-    _dispatch(consumer, _forward_envelope(base_payload, agent_id=_AGENT_ID_1))
-    second_payload = dict(base_payload)
-    second_payload["remote_port"] = 40001
-    _dispatch(consumer, _forward_envelope(second_payload, agent_id=_AGENT_ID_1))
-
-    assert [info.remote_port for info in fired] == [40000, 40001]
-
-
-def test_reverse_tunnel_established_with_invalid_payload_is_skipped(
-    consumer: EnvelopeStreamConsumer,
-) -> None:
-    fired: list[ReverseTunnelEstablishedInfo] = []
-    consumer.add_on_reverse_tunnel_established_callback(lambda info: fired.append(info))
-    # Missing remote_port -> KeyError is caught and the callback is not fired.
-    bad_payload = {
-        "type": "reverse_tunnel_established",
-        "agent_id": str(_AGENT_ID_1),
-        "local_port": 8420,
-        "ssh_host": "1.2.3.4",
-        "ssh_port": 22,
-    }
-    _dispatch(consumer, _forward_envelope(bad_payload, agent_id=_AGENT_ID_1))
-    assert fired == []
+    _dispatch(consumer, _forward_envelope({"type": "listening", "host": "127.0.0.1", "port": "nope"}))
+    assert consumer.wait_for_listening(timeout=0.05) is None
 
 
 # --- bounce_observe / terminate -------------------------------------------
@@ -699,56 +640,6 @@ def test_start_before_attach_raises(consumer: EnvelopeStreamConsumer) -> None:
     cg = ConcurrencyGroup(name="forward-cli-test")
     with cg, pytest.raises(RuntimeError, match="start called before attach"):
         consumer.start(cg)
-
-
-# --- LocalAgentDiscoveryHandler ------------------------------------------
-
-
-def test_local_agent_discovery_handler_writes_minds_api_url_for_local_agent(
-    tmp_path: Path,
-) -> None:
-    handler = LocalAgentDiscoveryHandler(
-        minds_api_port=8420,
-        mngr_host_dir=tmp_path / ".mngr",
-    )
-    handler(_AGENT_ID_1, ssh_info=None, provider_name="local")
-    written = (tmp_path / ".mngr" / "agents" / str(_AGENT_ID_1) / "minds_api_url").read_text()
-    assert written == "http://127.0.0.1:8420"
-
-
-def test_local_agent_discovery_handler_skips_minds_api_url_for_remote_agent(
-    tmp_path: Path,
-) -> None:
-    handler = LocalAgentDiscoveryHandler(
-        minds_api_port=8420,
-        mngr_host_dir=tmp_path / ".mngr",
-    )
-    ssh_info = RemoteSSHInfo(user="root", host="1.2.3.4", port=22, key_path=Path("/tmp/k"))
-    handler(_AGENT_ID_1, ssh_info=ssh_info, provider_name="modal")
-    # No minds_api_url was written under the local mngr_host_dir
-    # (remote-agent writes happen via MindsApiUrlWriter via SSH).
-    assert not (tmp_path / ".mngr" / "agents" / str(_AGENT_ID_1) / "minds_api_url").exists()
-
-
-# --- MindsApiUrlWriter ----------------------------------------------------
-
-
-def test_minds_api_url_writer_skips_when_no_ssh_info_for_agent() -> None:
-    """When the resolver has no SSH info for an agent (e.g. local-only),
-    MindsApiUrlWriter must short-circuit before attempting any SSH connection.
-    """
-    resolver = MngrCliBackendResolver()
-    writer = MindsApiUrlWriter(resolver=resolver)
-    # The resolver knows nothing about this agent so get_ssh_info returns None.
-    info = ReverseTunnelEstablishedInfo(
-        agent_id=_AGENT_ID_1,
-        remote_port=40000,
-        local_port=8420,
-        ssh_host="1.2.3.4",
-        ssh_port=22,
-    )
-    # Must not raise (no SSH connect attempted).
-    writer(info)
 
 
 # --- _redact_secrets ------------------------------------------------------

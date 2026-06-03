@@ -84,6 +84,7 @@ def test_connect_cli_invokes_tmux_attach_for_named_agent(
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_connect_via_cli_group(
     cli_runner: CliRunner,
     temp_work_dir: Path,

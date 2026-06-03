@@ -1,8 +1,478 @@
 # Unabridged Changelog - mngr
 
-Full, unedited changelog entries consolidated nightly from individual files in the `changelog/mngr/` directory.
+Full, unedited changelog entries consolidated nightly from individual files in `libs/mngr/changelog/`.
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
+
+## 2026-06-01
+
+# Make `CreateAgentOptions.agent_type` required
+
+- `CreateAgentOptions.agent_type` is now a required field (previously
+  `AgentTypeName | None` defaulting to `None`). Following the removal of
+  the CLI's implicit `claude` default, the residual `agent_type or
+  AgentTypeName("claude")` fallbacks in `api.create.create` and
+  `Host.create_agent_state` were the last places that silently defaulted
+  an unset type to `claude`. Both fallbacks are gone, and the type system
+  now guarantees every agent-creation path supplies a concrete type. The
+  now-dead `if options.agent_type is not None:` guard around agent-type
+  provisioning merging in `Host.provision_agent` was also dropped.
+
+Marked `test_list_command_with_limit` as flaky so offload retries it automatically.
+
+The `on_before_create` and `on_before_host_create` plugin hooks now receive the `MngrContext` as a parameter, giving plugins access to config, the plugin manager, and the concurrency group. Plugins implementing these hooks must add a `mngr_ctx` parameter to their signatures.
+
+Plugins can now contribute standalone help topic pages via the new `register_help_topics` hook. Topics from an installed plugin show up in `mngr help` and are viewable via `mngr help <topic>`, just like mngr's built-in topics. Each topic is a `TopicHelpPage` with explicit metadata (key, description, aliases, see-also) whose body is either `InlineContent(markdown=...)` or `DocFile(path=...)`. Plugin topics that collide with a built-in topic key or alias are skipped so built-in topics always win.
+
+`mngr help <topic>` now renders markdown nicely in an interactive terminal (headings, bold, code, links, and tables) via `rich`, with paragraphs wrapped to the terminal width; the same rendering is applied to command `--help` description and sections. Non-interactive output (pipes, scripts) stays plain. `rich` is imported lazily so it does not affect CLI startup time.
+
+Built-in topic docs are now shipped inside the wheel (`force-include` of the topic doc dirs), fixing a bug where `mngr help <topic>` showed no doc-based topics in a PyPI/wheel install (only the top-level `docs/` tree, which is not packaged, was previously read at runtime).
+
+Tab completion suggests every command and help topic as an argument to `mngr help` (e.g. `mngr help <TAB>` lists `create`, `address`, and any plugin-contributed topics).
+
+Internally, the plugin-facing `TopicHelpPage` model lives in `imbue.mngr.interfaces.help_topic` (so the plugin hookspec can reference it without the plugins layer importing the CLI), while the runtime topic registry lives in `imbue.mngr.cli.help_topics`. mngr's own built-in topics are registered through this same hook (as a built-in plugin) from an explicit registry -- no directory scanning or heading parsing.
+
+In an interactive terminal, `mngr help <topic>` now makes relative and anchor links inside doc-backed topics clickable. Previously a link like `[Idle Detection](idle_detection.md)` or `[a section](#user-input-tracking)` rendered as a dead terminal hyperlink (its relative target means nothing to a terminal or browser).
+
+Each topic's `DocFile` now carries a `source_url` (the doc's canonical GitHub blob URL, pinned to the installed release tag, e.g. `.../blob/v0.2.9/...`, falling back to `main` when the version can't be read). At display time, relative and anchor links are resolved against that URL with `urljoin` (`#anchor` -> `<doc-url>#anchor`, `sibling.md` -> the sibling's URL, `../README.md#x` -> the parent's URL), so the rendered terminal hyperlinks open the right GitHub page/section. Already-absolute links (`https:`, `mailto:`) are left untouched, and plain non-terminal output (pipes, scripts, the doc generator) keeps the original relative links.
+
+Plugins get this for free: a plugin that builds its `DocFile` with a `source_url` (in-repo plugins can use the new `imbue_mngr_doc_url` helper) gets the same clickable-link rewriting; one that omits it simply renders its links unchanged.
+
+# Offline agent field generators
+
+Implemented the plugin hook previously documented as the planned `get_offline_agent_state`, now named `offline_agent_field_generators` to mirror the existing online `agent_field_generators` hook.
+
+- Plugins can now contribute `plugin.<plugin_name>.<field>` data for agents whose host is offline or unreachable. Each generator receives the offline `(DiscoveredAgent, HostDetails)` (rather than the live `(agent, host)` the online hook gets) and computes fields from the cached `data.json` exposed via `DiscoveredAgent.certified_data`. `None` field values are omitted and empty plugins are dropped, exactly like the online path.
+- `mngr list` collects these generators and threads them through `get_host_and_agent_details` to `build_agent_details_from_offline_ref`, so offline plugin fields are usable in `mngr list` columns and CEL filters just like online ones.
+- Discovery snapshots now preserve plugin fields: `discovered_agent_from_agent_details` carries `AgentDetails.plugin` into the reconstructed `certified_data`, so offline generators can still read plugin state for fully-unreachable hosts that fall back to a persisted snapshot.
+- Updated the plugins concept doc to document `offline_agent_field_generators` and remove the `[future]` `get_offline_agent_state` placeholder.
+- Test infrastructure: the `assert_home_is_temp_directory` safety check now also accepts `/private/tmp`, so tests run when `TMPDIR` points into `/tmp` (which macOS realpath-resolves to `/private/tmp`) rather than only the launchd `/var/folders` default.
+
+## 2026-05-30
+
+Tolerate per-host SSH failures during provider agent enumeration.
+
+A single unreachable host (sshd hang, banner reset, auth failure) used to make the default `discover_hosts_and_agents` raise a `HostConnectionError` from the per-host futures loop. That bubbled up to `_construct_and_discover_for_provider` and was recorded as a whole-provider failure, so the resulting `DISCOVERY_FULL` event reported `agents=[]` / `hosts=[]` for the entire provider. Downstream, `mngr_forward`'s resolver blanked its known-agents set and every workspace on that provider became unreachable through the forward plugin -- so one broken Docker container could 503 every other workspace on the same daemon and trip minds' recovery page even for perfectly healthy workspaces.
+
+The default `discover_hosts_and_agents` now catches `HostConnectionError` (and its `HostAuthenticationError` / `HostOfflineError` subclasses) per host and recovers the broken host's agents from the provider's offline view (described below) so the rest of the provider's hosts (and their agents) come through normally. The except block also calls `self.on_connection_error(host_id)` -- matching the contract honored elsewhere in the file -- so providers that cache per-host state (docker's container cache, modal/lima/vps_docker host caches) drop the wedged entry instead of replaying the same stale handle on the next discovery cycle.
+
+Per-host connection errors fall back to the provider's offline view (`to_offline_host(host_id).discover_agents()`). This means a docker container whose sshd has died but whose process is still RUNNING preserves its agents in discovery, mirroring the behavior of a fully-stopped container -- the workspaces stay visible on minds' landing page instead of vanishing on the first SSE poll after sshd dies. The fallback assumes any provider whose hosts can raise `HostConnectionError` implements `to_offline_host`: the local provider never opens a connection (so it never reaches this path), and remote providers persist host/agent state. If `to_offline_host` instead fails -- `NotImplementedError` (no offline view) or `HostNotFoundError` (no persisted record for a host that was just discovered) -- that signals a broken invariant and is allowed to propagate as a per-provider `ProviderDiscoveryError` rather than being masked as an empty agent list. The SSH provider does not yet implement `to_offline_host` (tracked by a FIXME on the class), so an unreachable SSH host currently surfaces as such an error.
+
+## 2026-05-29
+
+- Docker provider: the per-host build image (`mngr-build-<host_id>`) is now untagged when a host is destroyed (and again, defensively, when it is deleted), so built images no longer pile up in `docker images`. Snapshot restore is unaffected -- snapshot images keep their own layers.
+
+Regenerated the CLI reference docs to include the new `mngr imbue_cloud bucket`
+command group (R2 bucket + scoped-key management) added by the mngr_imbue_cloud
+plugin.
+
+`mngr destroy` now actually destroys the host when the last agent on it
+is destroyed -- the documented contract -- regardless of how recently the
+host was created. Previously this fired through the post-destroy GC pass,
+which gates on `min_online_host_age_seconds` (default 10 minutes), so any
+host destroyed within minutes of creation leaked its cloud-side resources
+(e.g. an active imbue_cloud lease, a Vultr VPS) until the 7-day
+destroyed-host grace period eventually triggered `provider.delete_host`.
+
+Two changes in `destroy.py`:
+
+1. **Partition step reconciles discover-vs-on-host disagreement.** When
+   every matched agent is a "ghost" -- returned by the provider's discover
+   but absent from the host's own `get_agents()` -- the destroy CLI now
+   escalates to host-level destruction (`provider.destroy_host`) instead
+   of silently dropping the match. This is what was producing the
+   "No agents found" message when the same agent was destroyed twice on
+   an imbue_cloud-leased host: the first destroy removed `/mngr/agents/<id>/`
+   on the VPS but the connector's lease list still reported the agent.
+
+2. **Post-loop sweep destroys hosts whose last agent was just destroyed.**
+   For each online host that had at least one agent destroyed in this
+   invocation, the destroy CLI now re-checks `host.get_agents()` and, if
+   empty, calls `provider.destroy_host` directly. Bypasses the GC's
+   `min_online_host_age_seconds` filter; the GC pass that runs immediately
+   after is the safety net for transient failures.
+
+Net effect: cloud-side resources are released the moment `mngr destroy`
+returns, and the destroyed-host grace period only retains historical
+state -- aligning all provider types with the same semantic that the
+docker / mngr_vps_docker / imbue_cloud `destroy_host` implementations
+already implement individually.
+
+## New: `--post-host-create-command`
+
+`mngr create` learns a new repeatable flag, `--post-host-create-command`,
+that runs one or more shell commands inside a newly-created host
+synchronously after the host is online but before any agent work_dir is
+touched. Each command runs in order via the host's normal exec path; a
+non-zero exit aborts the create. Stackable from `create_templates.<name>`
+via `post_host_create_command__extend = [...]`.
+
+Motivation: an image may need first-boot setup (e.g.
+forever-claude-template seeds a baked workspace from `/docker_build_code`
+onto its `/mngr/` volume) that must complete before mngr's git mirror
+push or any other work_dir setup. Until now this had to be encoded in the
+container's `CMD`, which raced against mngr's `docker exec` calls and
+required an FCT-specific `use_image_default_cmd` opt-out in
+`mngr_vps_docker` / `providers.docker`. The opt-out and the
+defensive `--workdir /` exec override (from commits `d77714cdf` /
+`55c420c35`) are reverted in the same commit -- the new generic hook
+replaces both.
+
+Install `restic` in the mngr Docker image (`libs/mngr/imbue/mngr/resources/Dockerfile`).
+
+This is the offload test image; the minds app now requires `restic` on the
+machine running it (it initializes each workspace's backup repository
+itself), and its tests exercise a real local restic repository, so restic
+must be present in the test environment.
+
+`build_check_and_install_packages_command` (in `providers/ssh_host_setup.py`) now
+`mkdir -p` the symlink target before creating the `host_dir` symlink. The local
+`docker` provider already creates that subdirectory eagerly so it's a safe no-op
+there; the new docker_vps unified-volume layout relies on the in-script mkdir to
+seed `<volume>/host_dir` before pointing `/mngr` at it.
+
+## 2026-05-28
+
+# `is_allowed_in_pytest` now defaults to False, and the `MNGR_ALLOW_PYTEST` escape hatch is gone
+
+The `is_allowed_in_pytest` config field now defaults to `False` (previously
+`True`). During a pytest run, `load_config` refuses to run when a config file is
+loaded that does not set `is_allowed_in_pytest = true` -- and every config layer
+(user/project/local) is checked individually, so a real config can't ride in
+under a test config that opts in. If no config file is picked up at all, there
+is nothing to protect against and mngr runs normally. This makes the guard
+secure by default: a real config (the developer's `~/.mngr` or the repo's
+`.mngr/settings.toml`) loaded by a poorly-scoped test now trips the guard
+instead of being used to perform real operations, while configs written
+specifically for tests opt in explicitly.
+
+The `MNGR_ALLOW_PYTEST=1` environment variable, which used to bypass the guard
+entirely, has been removed. It had a single user, and the existence of such a
+variable was not worth the risk of it being reached for as a quick bypass
+instead of properly fixing a test with a leaky environment.
+
+# Corrected `is_error_reporting_enabled` config field description
+
+Separately, the `is_error_reporting_enabled` field description was out of date
+(it described prompting to file GitHub issues); it now matches the actual
+behavior -- suggesting a diagnostic agent on an unexpected interactive error.
+
+## Clearer settings-narrowing errors
+
+- The "settings narrowing detected" error now names **both** implicated layers for each offending key: the file doing the (narrowing) assignment and the lower-precedence file whose value would be dropped. Each side shows the resolved file path and the matching `mngr config set --scope <user|project|local>` flag, so it is immediately clear which configs conflict (instead of just an opaque layer label and the dotted key). The `MNGR__*` env-var layer is named as such (it has no `config set` scope).
+- `--setting allow_settings_key_assignment_narrowing=...` is now rejected with a clear error. That flag controls the narrowing guard, which runs while the settings files and env vars are loaded — before `--setting` is applied — so a `--setting` value could not take effect there. The error points you to set it in a `settings.toml` or via `MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true` instead. (Previously the narrowing error misleadingly suggested `--setting` as a remedy, and a `--setting` value for the flag was silently accepted without affecting that guard.)
+
+### Restructure `mngr push` and `mngr pull` into `mngr rsync` and `mngr git push`/`mngr git pull`
+
+The experimental `mngr push` and `mngr pull` commands combined three different
+primitives (rsync, git push, git pull) behind `--sync-mode={files,git}` and
+`--rsync-only` flags. They are replaced by three thin primitives that each wrap
+a single operation:
+
+- `mngr rsync SOURCE DESTINATION` — wraps rsync. Exactly one of `SOURCE` /
+  `DESTINATION` must reference a remote agent or host; the other must be a
+  local path. Local-to-local and remote-to-remote transfers are rejected.
+- `mngr git push TARGET [-- GIT_ARGS...]` — thin wrapper around `git push`
+  from the current working directory's repo to a remote agent or host's repo.
+  Anything after `--` is passed verbatim to the underlying `git push`.
+- `mngr git pull SOURCE [-- GIT_ARGS...]` — thin wrapper around `git pull`
+  from a remote agent or host's repo into the current working directory's
+  repo. Anything after `--` is passed verbatim to the underlying `git pull`.
+
+The git push/pull commands are thin pass-through wrappers: mngr resolves the
+endpoint, builds the SSH URL with mngr's managed credentials, sets
+`receive.denyCurrentBranch=updateInstead` on push targets, and adds a
+`safe.directory` entry — then runs vanilla `git push` / `git pull` with any
+flags the user supplies after `--`. The mngr-side flags
+`--source-branch`/`--target-branch`/`--mirror`/`--uncommitted-changes`/`--dry-run`
+are gone; use the corresponding git flags directly (`feature:main` refspec
+syntax, `--force --tags refs/heads/*:refs/heads/*` for a mirror push,
+`--dry-run`, `--rebase`, etc.).
+
+`mngr push` and `mngr pull` are removed (no compatibility shim).
+
+API-level changes in `imbue.mngr.api.sync`: `pull_files`/`push_files`/`pull_git`/`push_git`
+are replaced by `rsync_from_remote`, `rsync_to_remote`, `git_pull`, and
+`git_push`. There is also a top-level `rsync(source_host, source_path,
+destination_host, destination_path, ...)` for the two-endpoint shape used by
+the CLI. `git_push`/`git_pull` now take an `extra_args: Sequence[str]`
+parameter and have no structured return value (raise `GitSyncError` on
+failure). The `SyncMode` enum, `GitSyncResult`, and `NotAGitRepositoryError`
+are gone; `SyncFilesResult` is renamed to `RsyncResult`.
+
+# Offload pin bump to v0.9.6
+
+Bumped the offload version baked into `libs/mngr/imbue/mngr/resources/Dockerfile`
+from `0.9.5` to `0.9.6` to keep the in-image offload binary in lockstep
+with the CI pin. v0.9.6's headline feature is the new
+`offload run --override-image-id <ID>` CLI flag (Modal provider only),
+which lets a test run skip offload's image-setup pipeline entirely and
+boot from a pre-built Modal image. See
+https://github.com/imbue-ai/offload/releases/tag/v0.9.6 for the full
+release notes.
+
+# Dropped redundant per-project ty/ruff ratchet tests
+
+Removed this project's `test_no_type_errors` and `test_no_ruff_errors` from its
+`test_ratchets.py`. ty resolves the uv workspace root and ruff (run from the repo
+root) both scan across projects, so the per-project copies just re-ran the same
+checks. The single repo-wide equivalents now live in `test_meta_ratchets.py`
+(`test_no_type_errors` and `test_no_ruff_errors`).
+
+No user-facing behavior change.
+
+## 2026-05-27
+
+## Settings narrowing safety net: two false-positive fixes
+
+- A brand-new `[create_templates.<name>]` block whose only ``<opt>__extend = [...]`` entry was introduced in a single layer used to silently lose its `__extend` suffix at config-load time (`resolve_extends` resolved against a `None` base lookup and stored a bare assign). At `mngr create --template <name>` time the option was then treated as a bare assign and tripped the narrowing guard against the create command's runtime params, even though the user had written `__extend`. The suffix is now preserved verbatim inside a template's options when the base has nothing to extend, so `apply_create_template` can still apply it as an extend against the runtime params.
+- `agent_types.<name>.cli_args = "..."` (string form) used to be shell-tokenized into a tuple before the narrowing check ran, so two layers that each supplied a string with different tokens tripped the narrowing guard against each other's individual tokens. Strings represent a coherent single value (scalar replacement intent), not an aggregate, so the narrowing check now exempts tuples that were normalized from string-form values. This applies to every `tuple[str, ...]` field on `AgentTypeConfig` that accepts the string shorthand (`cli_args`, `env`, `env_file`, `extra_provision_command`, `upload_file`, `create_directory`).
+
+- Added `isolate_host_volumes` to the Docker provider config. When set to `True`, each host container only sees its own per-host sub-folder of the shared state volume (via `--mount ... volume-subpath=...`, requires Docker Engine >= 25.0), fixing the cross-host visibility that today's shared mount has. The choice is persisted per host so existing hosts keep the strategy they were created with.
+- Left at its default of unset (treated as today's shared-volume behavior), the provider now emits a one-shot deprecation warning at startup noting that the default will flip to `True` in a future release. Set `isolate_host_volumes = false` explicitly to silence the warning while keeping today's behavior, or `isolate_host_volumes = true` to opt in to isolation now.
+
+# ty 0.0.39 / paramiko 4.0 / coolname 5.0 type fixes
+
+- Converted bracketed `# type: ignore[...]` suppressions to `# ty: ignore[...]`, as required by `ty` 0.0.39.
+- coolname 5.0 widened `RandomGenerator`'s config type; the name-generator config dicts are now annotated with `coolname.CoolnameConfigT` so they type-check (coolname's value type is invariant).
+- The new `types-paramiko` stubs (from the paramiko 4.0 bump) surfaced several paramiko usages in `outer_host`:
+  - `_get_paramiko_transport` / `_create_sftp_client` are now typed as returning/accepting `paramiko.Transport` (was `object`).
+  - The private `_put_file*` helpers are narrowed from `str | IO[str] | IO[bytes]` to `str | IO[bytes]`; only `IO[bytes]` was ever passed, and `SFTPClient.putfo` requires bytes.
+- The e2e `pytest_runtest_makereport` hookwrapper's generator send type is now annotated as `pluggy.Result[pytest.TestReport]`, so `outcome.get_result()` resolves.
+- Intentional reaches into paramiko internals (the `Transport._log` logging monkeypatch and a `Channel._send` access in a test that manufactures a traceback) are annotated with `# ty: ignore[unresolved-attribute]`.
+
+- Tightened this project's `test_ratchets.py` violation counts to their exact current values (`--inline-snapshot=trim`).
+
+No user-facing behavior change.
+
+## 2026-05-26
+
+- Pruned non-notable entries (test-only changes, internal refactors, and doc-only tweaks with no user-facing effect) from this project's CHANGELOG.md, per the new notable-only changelog policy.
+
+# Regenerated CLI docs
+
+The generated `mngr latchkey` command reference
+(`libs/mngr/docs/commands/secondary/latchkey.md`) was regenerated to match the
+command's current help metadata. A new CI check now fails if any generated CLI
+doc drifts from `uv run python scripts/make_cli_docs.py` output.
+
+Replaced the `gemini` entry in `PLUGIN_CATALOG` and `plugin_isolation` test fixtures with `antigravity`. The `AntigravitySignalCheck` detects the new CLI via `agy --version`. Touched-up some prose references in `mngr` resource scripts and docs to drop or refresh mentions of `mngr_gemini` now that the plugin has been renamed.
+
+## Breaking: unified settings overrides
+
+Any mngr config field can now be overridden from a single, unified mechanism:
+
+- **`MNGR__X__Y__Z=value` env vars** (note the double underscores) target the dotted path `x.y.z`. This replaces the narrow `MNGR_COMMANDS_<CMD>_<PARAM>` scheme and frees plugin / CLI command names to contain multiple words. `MNGR_COMMANDS_*` is **removed**.
+- **`--setting x.y.z=value`** and **`mngr config set x.y.z value`** continue to work and now go through the same resolver.
+- **`__extend` operator suffix on a leaf key** (e.g. `MNGR__AGENT_TYPES__MY_CLAUDE__CLI_ARGS__EXTEND='["--model","opus"]'`) opts into additive behavior: append for lists/tuples, shallow key-merge for dicts, union for sets. The bare key is always assignment.
+- **`mngr config extend KEY VALUE`** writes the `__extend` form; **`mngr config set KEY__extend VALUE`** is accepted as an alias.
+- **`mngr config schema`** lists every settable key with type and current effective value; **`mngr config list --all`** includes default-valued fields too.
+
+### Breaking changes you'll notice
+
+- **Layer merging is now assign-by-default for every aggregate** (list, tuple, dict, set). Older configs that relied on implicit concat across user/project/local files (e.g. `cli_args` accumulating) now need an explicit `cli_args__extend = [...]` to keep the additive behavior. The five top-level container dicts on `MngrConfig` (`agent_types`, `providers`, `plugins`, `commands`, `create_templates`) keep their per-key merge — adding `[agent_types.foo]` in one scope still doesn't drop another scope's `[agent_types.bar]`. `disabled_plugins` is a separate carveout: it is populated by `--disable-plugin` CLI flags rather than TOML files, and an empty override preserves the base value (use `[plugins.<name>] enabled = false` to disable a plugin per-scope).
+- **Agent-type parent-type inheritance** likewise stops auto-concatenating `cli_args` / `extra_provision_command` / `upload_file` / `create_directory` / `env` / `env_file`. Use `field__extend` to inherit-and-extend.
+- **Removed env vars:** `MNGR_COMMANDS_<CMD>_<PARAM>`, `MNGR_ENABLE_PARAMIKO_LOGGING`, `MNGR_AGENT_READY_TIMEOUT`. These are promoted to first-class config fields (`logging.enable_paramiko_logging`, `agent_ready_timeout`) and remain settable via `MNGR__*`.
+- **`MNGR_COMPLETION_CACHE_DIR` stays as-is** (single underscore). It's read by the tab-completion lightweight pre-reader path that intentionally skips full config loading, so it joins the "special" env vars (`MNGR_ROOT_NAME` / `MNGR_PREFIX` / `MNGR_HOST_DIR`) rather than becoming a config field. The double-underscore `MNGR__COMPLETION_CACHE_DIR` form is not recognised.
+- **Renamed:** `MNGR_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE` → `MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE`.
+- **Preserved aliases:** `MNGR_ROOT_NAME`, `MNGR_HOST_DIR`, `MNGR_PREFIX`, and `MNGR_HEADLESS` continue to work. Setting both an alias and its canonical `MNGR__*` form to different values raises `ConfigParseError`.
+- **Field name restrictions:** field names can no longer contain `__` (reserved as the env-var segment separator and `__extend` operator). Sibling keys that lowercase-collapse to the same env-var segment now raise at config-load time.
+
+No compatibility shim is provided; the major-version bump is the migration signal.
+
+## Narrowing safety net and CLI-flag extension
+
+- CLI tuple/list flags (e.g. `--env`, `--label`, `--extra-window`) now extend the merged settings value rather than replace it, with the config-supplied entries first and the CLI-supplied values appended. Matches the "settings file → CLI" precedence so users can layer additional values on top of a settings-supplied list.
+- `--setting commands.<name>.<param>__extend=...` and `--setting create_templates.<name>.<param>__extend=...` now correctly extend the merged value stored inside the per-entry `defaults` / `options` mapping (previously fell through to `None` and silently acted as a plain assign for these wrapper models).
+- The `__extend` operator and the narrowing safety net both apply uniformly to `agent_types.<name>.<field>`, `providers.<name>.<field>`, `create_templates.<name>.<field>`, and `plugins.<name>.<field>` -- not just to top-level `MngrConfig` fields. Adding a brand-new entry in a higher layer is always a pure addition (no narrowing); replacing or clearing a non-empty aggregate value within an existing entry follows the same opt-in / `__extend` workaround rules as the top-level fields.
+- Create templates (applied at command time via `--template <name>`) also follow the assign-by-default / `__extend` / narrowing rules. Previously templates concatenated tuple options by default, which silently mixed CLI values into the template's narrowing base and made `--template a --template b` chains hard to reason about when both wrote the same key. Now templates assign-by-default and a template's bare-assign over a non-empty value raises `ConfigParseError` unless `allow_settings_key_assignment_narrowing = true`; opt-in to additive behavior with `[create_templates.<name>] env__extend = [...]`. The pipeline order is now `config_defaults -> templates -> CLI`, so a CLI flag value always appends at the end of the merged list, after any template extension.
+- Added a new top-level `allow_settings_key_assignment_narrowing` setting (default `false`). When `false`, a higher-precedence settings layer that would assign over a non-empty list/tuple/dict/set value from a lower-precedence layer with anything that doesn't preserve every prior entry raises `ConfigParseError` instead of silently dropping entries. The error tells the user how to opt in (set the field to `true`) or keep the additive behavior for the specific key (use the `__extend` suffix). The default is expected to flip to `true` in a future version, and support for `false` may be removed entirely once the migration is complete. Only no-ops (override equals base) and supersets (every base entry survives, e.g. an `__extend` result) pass without flagging — clearing (`env = []`) is treated as the most extreme form of data loss and must be explicitly opted in. Layers that don't write the field at all never trigger the guard.
+
+Fix a class of bugs where tmux commands silently misroute to the wrong agent's session under prefix collision.
+
+When `tmux ... -t name` is invoked and no session named exactly `name` exists, tmux falls back to *session-name prefix matching* and routes the command to any live session whose name starts with `name`. If two agents have names where one is a prefix of the other (e.g. `gemini` and `gemini-to-antigravity`), then when the shorter-named agent is torn down, every subsequent `-t gemini` lookup silently lands on `gemini-to-antigravity` instead of failing. Possible consequences include:
+
+- `kill-window` / `kill-session` tearing down the wrong agent's session
+- `send-keys` / `paste-buffer` delivering input to the wrong agent
+- `capture-pane` reading the wrong agent's screen
+- Lifecycle checks misreporting a stopped agent's state (the symptom that first surfaced this — a stopped agent shown as `WAITING` because the check landed on a live sibling's pane)
+- Background-task polling loops never terminating
+
+Changes:
+- Introduce `TmuxSessionTarget` and `TmuxWindowTarget` Pydantic classes in `imbue.mngr.hosts.tmux` whose `.as_shell_arg()` renders the `-t` argument with a leading `=` (tmux's exact-match prefix), and for window/pane commands the required explicit `:window` component.
+- Route every tmux `-t` call site through the helpers: lifecycle check, send-keys / paste-buffer / capture-pane in `BaseAgent`, post-attach resize script in `connect.py`, `_build_start_agent_shell_command` in `host.py`, rename / kill / has-session paths, the `listing_utils` remote-listing script, and the TUI input pipeline.
+- `build_post_attach_resize_script` now iterates windows so SIGWINCH reaches every pane in every window (previously only the active window's). Side effect of the refactor; not strictly required for the prefix-matching fix.
+- Update `cleanup_tmux_session` (in `utils/testing.py`) to match the new `=<session>:0` exact-match form when pkill-cleaning orphaned activity monitors — the old substring no longer appeared in the monitor's command line after the helper refactor.
+- Add unit tests in `hosts/tmux_test.py` covering the helpers' rendering contract. Live behavioral coverage of the polling-loop-never-terminates failure mode lives in the per-project regression tests under `libs/mngr_claude` and `libs/mngr_gemini`.
+
+## 2026-05-22
+
+## Discovery snapshots now carry per-provider state
+
+- `FullDiscoverySnapshotEvent` (the JSONL event emitted by `mngr observe --discovery-only`) has two new fields: `providers` (providers that loaded successfully) and `error_by_provider_name` (providers whose discovery raised). Old snapshots parse cleanly (the new fields default to empty); new snapshots will trip `DiscoverySchemaChangedError` in older builds of `mngr_forward` / `mngr_latchkey` / `mngr_notifications` until those are rebuilt.
+- `mngr observe --discovery-only` now emits a `FullDiscoverySnapshotEvent` on every poll, even when zero providers succeeded. Per-provider failures land in `error_by_provider_name`; consumers treat the snapshot as authoritative and drop any previously-known agents/hosts whose provider is now errored.
+- `mngr list` no longer skips its side-effect snapshot when some providers failed; the snapshot now includes the per-provider error info. Snapshots are still skipped when a non-provider-attributable error happens at the top level of `list_agents`.
+- Bug fix: the outer `mngr observe` (the multi-host observer) used to spawn its inner `mngr observe --discovery-only` child with an unsupported `--on-error continue` flag, killing the child on every startup. The flag is now gone.
+
+## New `UNKNOWN` agent / host lifecycle state
+
+- `AgentLifecycleState` and `HostState` both grow an `UNKNOWN` value, defined as "the provider that owns this agent/host could not be accessed during the most recent discovery attempt."
+- `AgentObserver` now emits an UNKNOWN entry in its `FullAgentStateEvent` for any previously-observed agent whose provider just failed discovery (sticky: agent stays UNKNOWN until it reappears in a snapshot or its provider is removed from config). Agents whose provider falls out of configured set entirely are dropped from tracking instead.
+- `mngr list` does NOT show UNKNOWN -- it remains stateless and only shows what its own listing returned.
+
+## Retry semantics
+
+- The discovery polling path no longer retries failures at the top level. Providers are responsible for retrying their own transient failures before raising; the snapshot reflects whatever they reported.
+
+## 2026-05-21
+
+Removed the `mngr provision` (aka `mngr prov`) subcommand and its docs. Provisioning still runs automatically during `mngr create`; the `--extra-provision-command`, `--upload-file`, and env-related flags on `mngr create` continue to work as before.
+
+Fix the intro in `UNABRIDGED_CHANGELOG.md` so it references the correct entries directory. The path was `changelog/<project>/` (which never existed); the actual layout is `<project_dir>/changelog/`.
+
+- `mngr create --provider lima` docs now show `--memory=N` / `--disk=N` (plain integers, no `GiB` suffix), matching what `limactl start` expects.
+
+Show the full agent name in the tmux status bar.
+
+User-visible changes:
+
+- mngr's generated tmux config (`~/.mngr/tmux.conf`) now sets
+  `status-left-length` to 20 so a full `mngr-...` session name shows in the
+  status bar. Previously tmux's default of 10 truncated names like
+  `mngr-tmux-display` to `[mngr-tmux`, with the window list mashed onto the end.
+- The widening is written before the user's `~/.tmux.conf` is sourced, so a
+  `status-left-length` set in the user's own config overrides it.
+
+`Host._get_all_descendant_pids` now tracks a `visited` set so a PID-reuse cycle in the process tree (a long-lived pid X dies and is recycled as a descendant of one of its own descendants) can no longer drive the walker past Python's recursion limit. This unsticks `host.stop_agents` on long-lived agents' cleanup paths, which previously crashed with `RecursionError` and skipped the actual stop.
+
+## 2026-05-20
+
+Renamed the mngr-side "workspace server" feature to "system interface", matching the upstream rename of the `minds_workspace_server` package to `system_interface` in `forever-claude-template`. The HTTP endpoint `/api/agents/{id}/restart-workspace-server` became `/api/agents/{id}/restart-system-interface`, and the SSE event type `workspace_server_status` became `system_interface_status`.
+
+## Provider gating: only `mngr create` may bootstrap host-creation state
+
+`mngr list`, `mngr gc`, and other read flows no longer silently bootstrap
+provider-side state just because a provider is enabled. Plumbed through a new
+`is_for_host_creation: bool = False` parameter on
+`ProviderBackendInterface.build_provider_instance` / `api.providers.get_provider_instance`,
+which all backends accept and ignore by default. `mngr create` passes `True`;
+every other path leaves the default. Providers that can't initialize without
+their environment (e.g. Modal) now raise `ProviderUnavailableError`, which
+higher-level loaders skip.
+
+Project now participates in the per-project changelog layout: a `changelog/` subdirectory holds per-PR entry files, and `CHANGELOG.md` / `UNABRIDGED_CHANGELOG.md` at the project root hold the consolidated history. See the full rationale in `dev/changelog/mngr-changelog-per-project.md`.
+
+# Consistent agent address resolution across single-agent subcommands
+
+Refactored how single-agent subcommands turn an `AgentAddress` into the live
+interfaces they operate on. The "find" stage (discovery + matching against
+the address) is now strictly separate from the "ensure live" stage (bringing
+the host online, looking up the live agent, optionally starting it).
+
+Two new helpers in `imbue.mngr.api.find` replace the previous
+`is_start_desired` / `skip_agent_state_check` flags on
+`find_one_agent` / `find_agent_for_command`:
+
+- `resolve_to_started_host_and_agent`: bring the host online and resolve
+  the agent ref to an `AgentInterface` without checking the agent's
+  lifecycle state. Used by `push`, `pull`, `provision`, and `rename`.
+- `resolve_to_started_host_and_running_agent`: as above, but also
+  require / auto-start the agent process. Used by `connect` and `capture`.
+
+Both helpers take a single `allow_auto_start` flag (driven by `--start`).
+
+User-visible changes:
+
+- `push`, `pull`, and `provision` no longer require the agent to be
+  running. Previously they failed when targeting a stopped agent on an
+  online host; now they operate on stopped agents directly.
+- `push`, `pull`, `provision`, and `rename` gain a `--start/--no-start`
+  flag (default `--start`) that controls whether an offline host is
+  started automatically.
+- The `--start` help text on `connect`, `capture`, and `exec` has been
+  reworded to reflect what `--start` actually starts in each command.
+- `mngr connect` no longer falls back to "most recently created agent"
+  when run non-interactively without an explicit agent. It now matches
+  every other single-agent command: pass an agent name, or run it from
+  an interactive terminal to use the selector.
+- Cancelling the interactive agent selector now exits cleanly via
+  `click.Abort` instead of printing nothing and returning silently.
+
+- `mngr list` no longer aborts with "Provider 'modal' is not available"
+  when the Modal per-user environment hasn't been created yet. The
+  Modal backend now raises a new `ProviderEmptyError` (distinct from
+  `ProviderUnavailableError`) when its env doesn't exist, and the
+  listing pipeline silently skips empty providers in every mode
+  (streaming + batch, ABORT + CONTINUE). Semantically: empty means
+  "the backend answered that there's nothing here" and is always safe
+  to drop from a listing; unavailable means "we couldn't ask" and may
+  still warrant an error.
+
+Support a shared Modal env across an offload-acceptance / offload-release
+run (opt-in via `MNGR_TEST_SHARED_MODAL_ENV_NAME`). `imbue.mngr.utils.testing`
+gains a `read_shared_modal_env_name` helper that returns the shared env
+name when the env var is set (and a non-empty dash-suffixed value), or
+`None` otherwise. Used by the modal test fixtures to skip per-sandbox env
+creation/deletion and route all tests into a single pre-created env, so
+fanned-out offload runs stay well under Modal's per-workspace env cap.
+Local pytest behavior (no env var set) is unchanged.
+
+# `HasTranscriptMixin` formalises the raw-capture contract for `mngr transcript`
+
+A new `HasTranscriptMixin` on `AgentInterface` formalises the raw-capture
+contract; `HasCommonTranscriptMixin` extends it with the (gated) common
+converter on top. Future agent types get `mngr transcript` support for free
+by implementing `get_raw_transcript_scripts` + `get_common_transcript_scripts`
+and shipping the matching per-agent scripts.
+
+Fix `mngr config` help text and docs example: the example showed `--user` but the actual option is `--scope user`.
+
+# Rename `HostedLocation` to `HostLocationAddress`
+
+Renamed the address-side `HostedLocation` type to `HostLocationAddress` so its
+name matches its peers (`HostAddress`, `AgentAddress`) and makes its
+relationship to the runtime `HostLocation` type explicit.
+
+Cascading internal renames:
+
+- `parse_hosted_location` -> `parse_host_location_address`
+- `resolve_hosted_location` -> `resolve_host_location_address`
+- `ResolvedHostedLocation` -> `ResolvedHostLocationAddress`
+- `HostedLocationParamType` -> `HostLocationAddressParamType`
+- `HOSTED_LOCATION` (Click param type instance) -> `HOST_LOCATION_ADDRESS`
+- Click param-type display name `hosted_location` -> `host_location_address`
+  (visible in command-line help / docs for `mngr push`, `mngr pull`,
+  `mngr pair`)
+
+No behavior change.
+
+Add `--restart` and `--no-resume` flags to `mngr start`.
+
+- `mngr start my-agent --restart` stops a running agent and starts it fresh. If the agent is already stopped, it is simply started.
+- `mngr start my-agent --no-resume` skips sending the resume message after starting. Can be combined with `--restart`.
+
+### `mngr create` honors the adopt scenario (for imbue_cloud lease flows)
+
+- minds passes `--reuse` for IMBUE_CLOUD agent creates. The bake's services agent is now named `system-services` too, which mngr's pre-flight "agent already exists on this host" check would otherwise reject. `--reuse` is necessary to signal that the lease's pre-baked agent isn't a duplicate-name collision. (`--update` is intentionally NOT passed: the adopt path in `ImbueCloudHost.create_agent_state` already patches labels + command in place; running standard provisioning on top would re-do the file-transfer + provisioning round the bake already paid for.)
+- `mngr` core's duplicate-agent-name check in `api/create.py` now honors `host.pre_baked_agent_id`. With just `--reuse` the check still fired because `--reuse`'s lookup runs BEFORE `resolve_target_host` fires the lease, so the leased host's agent isn't in the operator-local mngr state yet to be reused. The pre-flight check now skips the raise when the existing agent's id matches the host's `pre_baked_agent_id` -- that's the lease-adopt scenario by design and `host.create_agent_state` knows how to hydrate the existing agent in place.
+- `pre_baked_agent_id` is hoisted onto `HostInterface` as a `None`-defaulted frozen field, so the check in `api/create.py` reads `host.pre_baked_agent_id` directly (no `getattr` shim that would trip the `prevent_getattr` ratchet). Providers whose `create_host` returns a host with a baked-in agent (`ImbueCloudHost` is the only one today) populate it; every other provider's hosts default to `None` and the duplicate-name check's prior behavior is preserved.
+
+- `ProviderError` now carries `provider_name` on the base class. Every subclass (`HostNotFoundError`, `HostNameConflictError`, `HostNotRunningError`, `HostNotStoppedError`, `SnapshotNotFoundError`, `TagLimitExceededError`, `ImageNotFoundError`, `LocalHostNotStoppableError`, `LocalHostNotDestroyableError`, `LimaHostCreationError`, etc.) now requires `provider_name` as its first constructor argument. Handlers that catch `ProviderError` can read `e.provider_name` without isinstance-narrowing to a specific subclass.
+
+Removed the unused notion of agent "permissions" from `mngr` itself. The `Permission` primitive, `AgentPermissionsOptions`, `NoPermissionsAgentMixin`, and `get_permissions`/`set_permissions` methods on host and agent interfaces have all been deleted, along with the `--grant`/`--revoke` flags on `mngr limit` and the `--grant` flag on `mngr create`. Agent type configs no longer accept a `permissions` list. Higher-level libraries (latchkey, minds) keep their own (real) permissions concepts.
+
+`mngr rename` now works against offline hosts: when the agent's host is
+not online, the rename (and any `-l KEY=VALUE` labels) are written to
+the provider's persisted agent data without starting the host. The
+`--start/--no-start` flag still exists but now defaults to `--no-start`;
+pass `--start` to force the host online first so tmux and the env file
+are updated alongside data.json.
+
+Add `@pytest.mark.timeout(60)` to two flaky tests in `libs/mngr/imbue/mngr/cli/test_destroy.py`: `test_destroy_via_stdin` and `test_destroy_multiple_agents`. Both spin up two `sleep` agents, wait for tmux sessions, run a parallel destroy, and wait for cleanup -- a workload that lands at or over the global 10s pytest-timeout under modal-offload contention. The first exhausted all 5 `@pytest.mark.flaky` retries on PR #1652; the second has flaked in the same CI runs. The multi-agent shape is the point of both tests (piping multiple names through stdin is the main use case for `destroy -`), so the workload cannot be shrunk. Matches the existing precedent on `test_destroy_transfer_none_keeps_shared_worktree`.
+
+Adds shell-level integration tests for `scripts/install.sh`. The existing install tests build a venv that simulates what install.sh produces, but never invoke the script itself. The new `test_install_script.py` runs `bash scripts/install.sh` against mock `uv` and `mngr` binaries on a synthetic PATH and verifies the control flow: `uv tool upgrade` vs `uv tool install` branches, the PATH-not-set error path, and the continue-on-failure (`|| warn`) behaviour of `mngr dependencies -i` and `mngr extras -i`. No real PyPI install or system dependencies are required, so the tests run in under three seconds with no network access.
+
+`mngr create --type X` now fails fast with `UnknownAgentTypeError` when `X` does not resolve to a registered agent class (either directly via a plugin/built-in registration, or via a `[agent_types.X]` block whose `parent_type` points to a known type), instead of silently resolving to a generic `BaseAgent` + empty config. A bare `[agent_types.X]` block without `parent_type` is also rejected. Use `--type command -- <shell command>` to run an arbitrary shell command. The `--type X -- ...` form is no longer a hidden alias for `--type command -- ...`.
 
 ## 2026-05-15
 

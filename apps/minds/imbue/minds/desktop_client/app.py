@@ -4,13 +4,16 @@ import html
 import json
 import os
 import queue
-import subprocess
+import shlex
 import threading
+import time
 from collections.abc import AsyncGenerator
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated
+from typing import Any
 from typing import Final
 from urllib.parse import urlparse
 
@@ -18,6 +21,7 @@ import httpx
 from fastapi import Depends
 from fastapi import FastAPI
 from fastapi import Request
+from fastapi.responses import FileResponse
 from fastapi.responses import HTMLResponse
 from fastapi.responses import RedirectResponse
 from fastapi.responses import Response
@@ -25,12 +29,15 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from pydantic import Field
+from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.bootstrap import is_imbue_cloud_provider_enabled_for_account
+from imbue.minds.bootstrap import list_disabled_provider_names
+from imbue.minds.bootstrap import set_provider_is_enabled
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
@@ -40,10 +47,16 @@ from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
 from imbue.minds.desktop_client.api_v1 import create_api_v1_router
-from imbue.minds.desktop_client.api_v1 import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backup_export import export_latest_snapshot_zip
+from imbue.minds.desktop_client.backup_password_store import has_saved_backup_password
+from imbue.minds.desktop_client.backup_password_store import read_saved_backup_password
+from imbue.minds.desktop_client.backup_password_store import save_backup_password_if_absent
+from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
+from imbue.minds.desktop_client.backup_provisioning import env_text_defines_restic_password
+from imbue.minds.desktop_client.backup_status import compute_backup_status_for_workspaces
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
@@ -58,15 +71,22 @@ from imbue.minds.desktop_client.destroying import start_destroy
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
+from imbue.minds.desktop_client.onboarding import OnboardingAnswers
+from imbue.minds.desktop_client.onboarding import OnboardingApplier
+from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
+from imbue.minds.desktop_client.recovery_probe import build_host_health_response
+from imbue.minds.desktop_client.recovery_probe import build_probe_argv
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import parse_request_event
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.request_handler import find_handler_for_event
+from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sharing_handler import SharingError
 from imbue.minds.desktop_client.sharing_handler import enable_sharing_via_cloudflare
@@ -82,6 +102,7 @@ from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_creating_page
 from imbue.minds.desktop_client.templates import render_destroying_page
+from imbue.minds.desktop_client.templates import render_dev_styleguide_page
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
@@ -92,12 +113,19 @@ from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates import status_text_for
 from imbue.minds.desktop_client.templates import workspace_accent
+from imbue.minds.desktop_client.tunnel_token_injection import inject_tunnel_token_into_agent
+from imbue.minds.desktop_client.webdav import create_webdav_app
+from imbue.minds.errors import BackupProvisioningError
+from imbue.minds.errors import MngrCommandError
 from imbue.minds.primitives import AIProvider
+from imbue.minds.primitives import BackupEncryptionMethod
+from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.primitives import ServiceName
+from imbue.minds.primitives import UserDataPreference
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.telegram.setup import TelegramSetupStatus
 from imbue.mngr.primitives import AgentId
@@ -125,6 +153,20 @@ def _enqueue_health_change(
     """Push a health-change event into ``health_queue`` and wake the SSE loop."""
     health_queue.put_nowait((str(agent_id), status))
     change_event.set()
+
+
+def _system_interface_status_payload(
+    tracker: "SystemInterfaceHealthTracker | None",
+    agent_id: str,
+    status: AgentHealth,
+) -> dict[str, str]:
+    """Build a ``system_interface_status`` SSE payload, including the failure reason for RESTART_FAILED."""
+    payload: dict[str, str] = {"type": "system_interface_status", "agent_id": agent_id, "status": status.value}
+    if status == AgentHealth.RESTART_FAILED and tracker is not None:
+        error = tracker.get_last_restart_error(AgentId(agent_id))
+        if error is not None:
+            payload["error"] = error
+    return payload
 
 
 # -- Dependency injection helpers --
@@ -364,15 +406,93 @@ def _handle_landing_page(
     branch = request.query_params.get("branch", "")
     session_store: MultiAccountSessionStore | None = request.app.state.session_store
     minds_config: MindsConfig | None = request.app.state.minds_config
+    agent_creator: AgentCreator | None = request.app.state.agent_creator
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
+    is_backup_password_saved = has_saved_backup_password(agent_creator.paths) if agent_creator is not None else False
     html = render_create_form(
         git_url=git_url,
         branch=branch,
         accounts=accounts,
         default_account_id=default_account_id or "",
+        has_saved_backup_password=is_backup_password_saved,
     )
     return HTMLResponse(content=html)
+
+
+def _handle_backup_status_api(
+    request: Request,
+    auth_store: AuthStoreDep,
+    backend_resolver: BackendResolverDep,
+) -> Response:
+    """Return per-project backup status (GET /api/backup-status).
+
+    Queries restic (from the minds machine) for every known workspace using
+    its canonical restic.env, in parallel with a per-workspace timeout. The
+    landing page fetches this once on load to fill each tile.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+    paths: WorkspacePaths | None = request.app.state.api_v1_paths
+    if paths is None:
+        return Response(content="{}", media_type="application/json")
+    root_concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
+    agent_ids = backend_resolver.list_known_workspace_ids()
+    status_by_agent_id = compute_backup_status_for_workspaces(paths, agent_ids, parent_cg=root_concurrency_group)
+    # Workspace creation time lets the landing page show "Created N ago" instead
+    # of a scary "No backups" for a freshly-created, not-yet-backed-up workspace.
+    create_time_by_agent_id: dict[str, datetime] = {}
+    for agent_id in agent_ids:
+        display_info = backend_resolver.get_agent_display_info(agent_id)
+        if display_info is not None and display_info.create_time is not None:
+            create_time_by_agent_id[str(agent_id)] = display_info.create_time
+    payload = {
+        agent_id: {
+            "state": str(status.state),
+            "last_success_at": status.last_success_at.isoformat() if status.last_success_at is not None else None,
+            "created_at": (
+                create_time_by_agent_id[agent_id].isoformat() if agent_id in create_time_by_agent_id else None
+            ),
+        }
+        for agent_id, status in status_by_agent_id.items()
+    }
+    return Response(content=json.dumps(payload), media_type="application/json")
+
+
+def _handle_backup_export_api(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+    backend_resolver: BackendResolverDep,
+) -> Response:
+    """Build + stream a zip of the workspace's latest snapshot (GET /api/backup-export/{agent_id}).
+
+    Produces the zip on the minds machine via ``restic dump --archive zip`` to a
+    /tmp file keyed by host id (so re-exports overwrite), then returns it.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+    paths: WorkspacePaths | None = request.app.state.api_v1_paths
+    if paths is None:
+        return Response(status_code=404, content='{"error": "No backups configured"}', media_type="application/json")
+    try:
+        typed_agent_id = AgentId(agent_id)
+    except ValueError:
+        return Response(status_code=400, content='{"error": "Invalid agent id"}', media_type="application/json")
+    display_info = backend_resolver.get_agent_display_info(typed_agent_id)
+    # The zip file is keyed by host id (per the export contract); fall back to the
+    # agent id only if discovery has no display info for this agent.
+    host_id = display_info.host_id if display_info is not None else agent_id
+    download_label = display_info.agent_name if display_info is not None else agent_id
+    root_concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
+    try:
+        zip_path = export_latest_snapshot_zip(
+            paths=paths, agent_id=typed_agent_id, host_id=host_id, parent_cg=root_concurrency_group
+        )
+    except BackupProvisioningError as e:
+        logger.warning("Backup export failed for {}: {}", agent_id, e)
+        return Response(status_code=500, content=json.dumps({"error": str(e)}), media_type="application/json")
+    return FileResponse(path=str(zip_path), media_type="application/zip", filename=f"{download_label}-backup.zip")
 
 
 # -- Agent creation route handlers --
@@ -558,6 +678,60 @@ def _build_on_created_callback(
     )
 
 
+def _build_backup_request_or_error(
+    *,
+    backup_provider: BackupProvider,
+    encryption_method: BackupEncryptionMethod,
+    typed_master_password: str,
+    is_save_password: bool,
+    api_key_env: str,
+    account_email: str,
+    paths: WorkspacePaths,
+) -> tuple[BackupSetupRequest | None, str | None]:
+    """Resolve form backup inputs into a ``BackupSetupRequest`` or an error message.
+
+    Reads / first-time-saves the shared master password as a side effect.
+    Returns ``(request, None)`` on success or ``(None, message)`` for a
+    validation error the caller should re-render on the form.
+    """
+    if backup_provider is BackupProvider.CONFIGURE_LATER:
+        return BackupSetupRequest(backup_provider=BackupProvider.CONFIGURE_LATER), None
+    if backup_provider is BackupProvider.IMBUE_CLOUD and not account_email:
+        return None, (
+            "imbue_cloud backups require a selected account. Choose an account or pick a different backup provider."
+        )
+    # The user never sets the repository password: minds initializes the repo
+    # and assigns each workspace its own random RESTIC_PASSWORD, so reject it
+    # if a user puts one in the api_key env block.
+    if backup_provider is BackupProvider.API_KEY and env_text_defines_restic_password(api_key_env):
+        return None, (
+            "Don't set RESTIC_PASSWORD in the backup env -- minds assigns each workspace its own random "
+            "repository password. Provide RESTIC_REPOSITORY and any backend credentials only."
+        )
+    # The master password (or empty, for no_password) is used only to
+    # initialize the repo from the minds machine; it never enters the workspace.
+    master_password: SecretStr | None = None
+    if encryption_method is BackupEncryptionMethod.MASTER_PASSWORD:
+        saved_password = read_saved_backup_password(paths)
+        if saved_password is not None:
+            master_password = SecretStr(saved_password)
+        elif typed_master_password:
+            master_password = SecretStr(typed_master_password)
+            if is_save_password:
+                save_backup_password_if_absent(paths, typed_master_password)
+        else:
+            return None, "Enter a backup master password, or set the encryption method to 'no password'."
+    return (
+        BackupSetupRequest(
+            backup_provider=backup_provider,
+            master_password=master_password,
+            api_key_env_text=api_key_env if backup_provider is BackupProvider.API_KEY else "",
+            account_email=account_email,
+        ),
+        None,
+    )
+
+
 async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep) -> Response:
     """Handle form submission to create a new agent."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
@@ -572,16 +746,28 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
     host_name = str(form.get("host_name", "")).strip()
     branch = str(form.get("branch", "")).strip()
     try:
-        launch_mode = LaunchMode(str(form.get("launch_mode", LaunchMode.LOCAL.value)))
+        launch_mode = LaunchMode(str(form.get("launch_mode", LaunchMode.DOCKER.value)))
     except ValueError:
-        launch_mode = LaunchMode.LOCAL
+        launch_mode = LaunchMode.DOCKER
     try:
         ai_provider = AIProvider(str(form.get("ai_provider", AIProvider.SUBSCRIPTION.value)))
     except ValueError:
         ai_provider = AIProvider.SUBSCRIPTION
     account_id = str(form.get("account_id", "")).strip()
     anthropic_api_key = str(form.get("anthropic_api_key", "")).strip()
-    gh_token = str(form.get("gh_token", "")).strip()
+    try:
+        backup_provider = BackupProvider(str(form.get("backup_provider", BackupProvider.CONFIGURE_LATER.value)))
+    except ValueError:
+        backup_provider = BackupProvider.CONFIGURE_LATER
+    try:
+        backup_encryption_method = BackupEncryptionMethod(
+            str(form.get("backup_encryption_method", BackupEncryptionMethod.NO_PASSWORD.value))
+        )
+    except ValueError:
+        backup_encryption_method = BackupEncryptionMethod.NO_PASSWORD
+    backup_master_password = str(form.get("backup_master_password", ""))
+    is_save_backup_password = str(form.get("backup_save_password", "")).strip() != ""
+    backup_api_key_env = str(form.get("backup_api_key_env", ""))
 
     session_store_inst: MultiAccountSessionStore | None = request.app.state.session_store
 
@@ -598,8 +784,11 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
             ai_provider=ai_provider,
             accounts=accounts_list,
             default_account_id=account_id,
-            gh_token=gh_token,
             anthropic_api_key=anthropic_api_key,
+            backup_provider=backup_provider,
+            backup_encryption_method=backup_encryption_method,
+            backup_api_key_env=backup_api_key_env,
+            has_saved_backup_password=has_saved_backup_password(agent_creator.paths),
             error_message=message,
         )
         return HTMLResponse(content=html_body, status_code=status)
@@ -628,13 +817,33 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
     if ai_provider is AIProvider.API_KEY and not anthropic_api_key:
         return _re_render_with_error("An Anthropic API key is required when AI provider is set to api_key.")
 
-    # Resolve the account email when needed (imbue_cloud compute or AI). The
-    # mngr_imbue_cloud plugin owns the SuperTokens session and is responsible
-    # for fetching a fresh access token at the time of each subprocess
-    # invocation, so minds only needs to know which account to ask for.
+    # Resolve the account email when needed (imbue_cloud compute, AI, or
+    # backup). The mngr_imbue_cloud plugin owns the SuperTokens session and
+    # is responsible for fetching a fresh access token at the time of each
+    # subprocess invocation, so minds only needs to know which account to
+    # ask for.
+    is_imbue_cloud_backup = backup_provider is BackupProvider.IMBUE_CLOUD
     account_email = ""
-    if account_id and session_store_inst is not None and (is_imbue_cloud_compute or is_imbue_cloud_ai):
+    if (
+        account_id
+        and session_store_inst is not None
+        and (is_imbue_cloud_compute or is_imbue_cloud_ai or is_imbue_cloud_backup)
+    ):
         account_email = session_store_inst.get_account_email(account_id) or ""
+
+    # Resolve the backup configuration (reads / first-time-saves the shared
+    # master password as a side effect) before kicking off creation.
+    backup_request, backup_error = _build_backup_request_or_error(
+        backup_provider=backup_provider,
+        encryption_method=backup_encryption_method,
+        typed_master_password=backup_master_password,
+        is_save_password=is_save_backup_password,
+        api_key_env=backup_api_key_env,
+        account_email=account_email,
+        paths=agent_creator.paths,
+    )
+    if backup_error is not None:
+        return _re_render_with_error(backup_error)
 
     branch_or_tag = branch
     if is_imbue_cloud_compute and not branch_or_tag:
@@ -657,8 +866,8 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
         account_email=account_email,
         branch_or_tag=branch_or_tag,
         anthropic_api_key=anthropic_api_key,
-        gh_token=gh_token,
         on_created=on_created,
+        backup_request=backup_request,
     )
 
     creating_url = "/creating/{}".format(creation_id)
@@ -677,13 +886,16 @@ def _handle_create_page(
     branch = request.query_params.get("branch", "")
     session_store: MultiAccountSessionStore | None = request.app.state.session_store
     minds_config: MindsConfig | None = request.app.state.minds_config
+    agent_creator: AgentCreator | None = request.app.state.agent_creator
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
+    is_backup_password_saved = has_saved_backup_password(agent_creator.paths) if agent_creator is not None else False
     html = render_create_form(
         git_url=git_url,
         branch=branch,
         accounts=accounts,
         default_account_id=default_account_id or "",
+        has_saved_backup_password=is_backup_password_saved,
     )
     return HTMLResponse(content=html)
 
@@ -712,7 +924,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
     host_name = str(body.get("host_name", "")).strip()
     branch = str(body.get("branch", "")).strip()
     try:
-        launch_mode = LaunchMode(str(body.get("launch_mode", LaunchMode.LOCAL.value)))
+        launch_mode = LaunchMode(str(body.get("launch_mode", LaunchMode.DOCKER.value)))
     except ValueError:
         return Response(
             status_code=400,
@@ -727,8 +939,28 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
             content='{"error": "Invalid ai_provider"}',
             media_type="application/json",
         )
+    try:
+        backup_provider = BackupProvider(str(body.get("backup_provider", BackupProvider.CONFIGURE_LATER.value)))
+    except ValueError:
+        return Response(
+            status_code=400,
+            content='{"error": "Invalid backup_provider"}',
+            media_type="application/json",
+        )
+    try:
+        backup_encryption_method = BackupEncryptionMethod(
+            str(body.get("backup_encryption_method", BackupEncryptionMethod.NO_PASSWORD.value))
+        )
+    except ValueError:
+        return Response(
+            status_code=400,
+            content='{"error": "Invalid backup_encryption_method"}',
+            media_type="application/json",
+        )
+    backup_master_password = str(body.get("backup_master_password", ""))
+    is_save_backup_password = bool(body.get("backup_save_password", False))
+    backup_api_key_env = str(body.get("backup_api_key_env", ""))
     anthropic_api_key = str(body.get("anthropic_api_key", "")).strip()
-    gh_token = str(body.get("gh_token", "")).strip()
     account_id = str(body.get("account_id", "")).strip()
     if not git_url:
         return Response(
@@ -765,14 +997,32 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
             media_type="application/json",
         )
 
-    # Resolve the account email when an imbue_cloud field is selected so the
-    # background creation can mint a LiteLLM key / lease a pool host. The
-    # session store is the source of truth for email <-> user_id mapping.
+    # Resolve the account email when an imbue_cloud field is selected (compute,
+    # AI, or backup) so the background creation can mint a LiteLLM key / lease a
+    # pool host / create a backup bucket. The session store is the source of
+    # truth for email <-> user_id mapping.
+    is_imbue_cloud_backup = backup_provider is BackupProvider.IMBUE_CLOUD
     account_email = ""
-    if account_id and (is_imbue_cloud_compute or is_imbue_cloud_ai):
+    if account_id and (is_imbue_cloud_compute or is_imbue_cloud_ai or is_imbue_cloud_backup):
         session_store_inst: MultiAccountSessionStore | None = request.app.state.session_store
         if session_store_inst is not None:
             account_email = session_store_inst.get_account_email(account_id) or ""
+
+    backup_request, backup_error = _build_backup_request_or_error(
+        backup_provider=backup_provider,
+        encryption_method=backup_encryption_method,
+        typed_master_password=backup_master_password,
+        is_save_password=is_save_backup_password,
+        api_key_env=backup_api_key_env,
+        account_email=account_email,
+        paths=agent_creator.paths,
+    )
+    if backup_error is not None:
+        return Response(
+            status_code=400,
+            content=json.dumps({"error": backup_error}),
+            media_type="application/json",
+        )
 
     creation_id = agent_creator.start_creation(
         git_url,
@@ -782,8 +1032,18 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
         ai_provider=ai_provider,
         account_email=account_email,
         anthropic_api_key=anthropic_api_key,
-        gh_token=gh_token,
+        backup_request=backup_request,
     )
+
+    # Apply any onboarding answers supplied inline by the API caller. Absent
+    # / empty fields map to the no-op path, so existing callers that omit
+    # them are unaffected. The form-driven UI submits answers separately via
+    # POST /api/create-agent/{id}/onboarding once the user finishes the
+    # questions.
+    onboarding_applier: OnboardingApplier | None = request.app.state.onboarding_applier
+    if onboarding_applier is not None:
+        onboarding_applier.start_apply(creation_id, _parse_onboarding_answers(body))
+
     # API contract: the JSON field stays named ``agent_id`` for backwards
     # compatibility with existing API clients, but the value is now a
     # CreationId (minds-internal in-flight handle, distinct prefix from a
@@ -833,12 +1093,75 @@ def _handle_creation_status_api(
     return Response(content=json.dumps(result), media_type="application/json")
 
 
+def _parse_onboarding_answers(data: Mapping[str, object]) -> OnboardingAnswers:
+    """Parse the three optional onboarding fields from a JSON body / form mapping.
+
+    An unrecognized or empty ``user_data_preference`` resolves to ``None``
+    (the question was skipped), matching the no-op semantics of every
+    onboarding answer.
+    """
+    raw_preference = str(data.get("user_data_preference", "")).strip()
+    data_preference: UserDataPreference | None = None
+    if raw_preference:
+        try:
+            data_preference = UserDataPreference(raw_preference)
+        except ValueError:
+            data_preference = None
+    return OnboardingAnswers(
+        data_preference=data_preference,
+        initial_problem=str(data.get("initial_problem", "")),
+        permissions_preference=str(data.get("permissions_preference", "")),
+    )
+
+
+async def _handle_onboarding_submit(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Apply onboarding answers for an in-flight creation (POST /api/create-agent/{agent_id}/onboarding).
+
+    Used by the creating-page question flow: the answers are submitted once
+    the user finishes the questions, then applied on a background thread.
+    Returns immediately; the route param carries a ``CreationId``.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+
+    onboarding_applier: OnboardingApplier | None = request.app.state.onboarding_applier
+    if onboarding_applier is None:
+        return Response(
+            status_code=501, content='{"error": "Onboarding not configured"}', media_type="application/json"
+        )
+
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        return Response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
+
+    creation_id = CreationId(agent_id)
+    if onboarding_applier.agent_creator.get_creation_info(creation_id) is None:
+        return Response(status_code=404, content='{"error": "Unknown agent creation"}', media_type="application/json")
+
+    answers = _parse_onboarding_answers(body)
+    onboarding_applier.start_apply(creation_id, answers)
+    return Response(content=json.dumps({"status": "ok"}), media_type="application/json")
+
+
 def _handle_creating_page(
     agent_id: str,
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """Show the creating progress page (GET /creating/{agent_id})."""
+    """Show the creating/onboarding page (GET /creating/{agent_id}).
+
+    The page renders the onboarding questions first (the workspace is
+    already being created in the background) and falls through to the
+    loading screen if creation hasn't finished by the time the user is
+    done. It no longer redirects when creation is already DONE -- the
+    questions still need to be shown so their answers can take effect; the
+    page itself redirects into the workspace once the user finishes.
+    """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
 
@@ -852,9 +1175,6 @@ def _handle_creating_page(
     info = agent_creator.get_creation_info(creation_id)
     if info is None:
         return Response(status_code=404, content="Unknown agent creation")
-
-    if info.status == AgentCreationStatus.DONE and info.redirect_url is not None:
-        return Response(status_code=307, headers={"Location": info.redirect_url})
 
     html = render_creating_page(creation_id=creation_id, info=info)
     return HTMLResponse(content=html)
@@ -1231,6 +1551,60 @@ def _handle_telegram_status(
     return Response(content=json.dumps(result), media_type="application/json")
 
 
+# -- Providers panel toggle route --
+
+
+async def _handle_provider_toggle(
+    provider_name: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Toggle ``is_enabled`` for a provider in minds' active settings and bounce observe.
+
+    POST ``/api/providers/{provider_name}/toggle`` with body ``{"is_enabled": bool}``.
+    Writes via :func:`set_provider_is_enabled`, then sends ``SIGHUP`` to
+    ``mngr forward`` so it restarts its ``mngr observe`` child to pick up the
+    new setting. The next ``FullDiscoverySnapshotEvent`` will reflect the
+    change; the chrome's optimistic "waiting for refresh" state clears at that
+    point.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.warning("Provider toggle request body was not valid JSON: {}", e)
+        return Response(status_code=400, content='{"error": "Body must be JSON"}', media_type="application/json")
+    # request.json() can return any JSON value (array, string, number, null, ...),
+    # not just objects. Reject non-dict bodies before calling .get() so we return
+    # a structured 400 rather than a 500 from an AttributeError.
+    if not isinstance(body, dict):
+        return Response(
+            status_code=400,
+            content='{"error": "Body must be a JSON object"}',
+            media_type="application/json",
+        )
+    is_enabled = body.get("is_enabled")
+    if not isinstance(is_enabled, bool):
+        return Response(
+            status_code=400,
+            content='{"error": "Body must include is_enabled: bool"}',
+            media_type="application/json",
+        )
+    changed = set_provider_is_enabled(provider_name, is_enabled)
+    # Only bounce observe when the settings file actually changed -- a no-op toggle
+    # (e.g. user clicking Disable twice) should not trigger a SIGHUP and a full
+    # mngr observe restart, since the next discovery snapshot would be identical.
+    if changed:
+        consumer: EnvelopeStreamConsumer | None = request.app.state.envelope_stream_consumer
+        if consumer is not None:
+            consumer.bounce_observe()
+    return Response(
+        content=json.dumps({"provider_name": provider_name, "is_enabled": is_enabled, "changed": changed}),
+        media_type="application/json",
+    )
+
+
 # -- Chrome (persistent shell) route handlers --
 
 
@@ -1264,6 +1638,11 @@ def _handle_chrome_sidebar(request: Request) -> Response:
     """Serve the standalone sidebar page for the Electron sidebar WebContentsView."""
     html = render_sidebar_page(mngr_forward_origin=_get_mngr_forward_origin(request))
     return HTMLResponse(content=html)
+
+
+def _handle_dev_styleguide() -> Response:
+    """Render the design-system styleguide page."""
+    return HTMLResponse(content=render_dev_styleguide_page())
 
 
 async def _handle_chrome_events(
@@ -1313,26 +1692,39 @@ async def _handle_chrome_events(
         try:
             # Send initial workspace list and request count
             session_store: MultiAccountSessionStore | None = request.app.state.session_store
+            paths: WorkspacePaths | None = request.app.state.api_v1_paths
             last_workspace_data = _build_workspace_list(backend_resolver, session_store)
+            last_destroying_ids = _destroying_agent_ids(paths, backend_resolver.list_known_workspace_ids())
             has_accounts = bool(session_store and session_store.list_accounts())
             yield "data: {}\n\n".format(
-                json.dumps({"type": "workspaces", "workspaces": last_workspace_data, "has_accounts": has_accounts})
+                json.dumps(
+                    {
+                        "type": "workspaces",
+                        "workspaces": last_workspace_data,
+                        "destroying_agent_ids": last_destroying_ids,
+                        "has_accounts": has_accounts,
+                    }
+                )
             )
+            # Send the initial providers panel state so the chrome can render
+            # the providers section before the first resolver change fires.
+            last_providers_data = _build_providers_state_payload(backend_resolver)
+            yield "data: {}\n\n".format(json.dumps({"type": "providers_state", **last_providers_data}))
             inbox: RequestInbox | None = request.app.state.request_inbox
-            last_request_count = inbox.get_pending_count() if inbox else 0
-            # ``auto_open`` is bundled with ``request_count`` (rather than its
-            # own SSE event) so the Electron shell sees both atomically when
-            # deciding whether to auto-open the panel on count increases.
+            last_requests_payload = _build_requests_payload(inbox)
+            # ``auto_open`` is bundled with the requests payload (rather than
+            # its own SSE event) so the Electron shell sees both atomically
+            # when deciding whether to auto-open the panel.
             minds_config: MindsConfig | None = request.app.state.minds_config
             auto_open = minds_config.get_auto_open_requests_panel() if minds_config else True
             yield "data: {}\n\n".format(
-                json.dumps({"type": "request_count", "count": last_request_count, "auto_open": auto_open})
+                json.dumps({"type": "requests", **last_requests_payload, "auto_open": auto_open})
             )
 
             if tracker is not None:
                 for aid, status in tracker.snapshot_all().items():
                     yield "data: {}\n\n".format(
-                        json.dumps({"type": "system_interface_status", "agent_id": str(aid), "status": status.value})
+                        json.dumps(_system_interface_status_payload(tracker, str(aid), status))
                     )
 
             # Wait for changes and push updates until client disconnects.
@@ -1384,22 +1776,38 @@ async def _handle_chrome_events(
 
                 while not health_queue.empty():
                     aid_str, status = health_queue.get_nowait()
-                    yield "data: {}\n\n".format(
-                        json.dumps({"type": "system_interface_status", "agent_id": aid_str, "status": status.value})
-                    )
+                    yield "data: {}\n\n".format(json.dumps(_system_interface_status_payload(tracker, aid_str, status)))
 
                 current_data = _build_workspace_list(backend_resolver, session_store)
-                if current_data != last_workspace_data:
+                current_destroying_ids = _destroying_agent_ids(paths, backend_resolver.list_known_workspace_ids())
+                if current_data != last_workspace_data or current_destroying_ids != last_destroying_ids:
                     last_workspace_data = current_data
-                    yield "data: {}\n\n".format(json.dumps({"type": "workspaces", "workspaces": current_data}))
+                    last_destroying_ids = current_destroying_ids
+                    yield "data: {}\n\n".format(
+                        json.dumps(
+                            {
+                                "type": "workspaces",
+                                "workspaces": current_data,
+                                "destroying_agent_ids": current_destroying_ids,
+                            }
+                        )
+                    )
+
+                current_providers_data = _build_providers_state_payload(backend_resolver)
+                if current_providers_data != last_providers_data:
+                    last_providers_data = current_providers_data
+                    yield "data: {}\n\n".format(json.dumps({"type": "providers_state", **current_providers_data}))
 
                 inbox = request.app.state.request_inbox
-                current_request_count = inbox.get_pending_count() if inbox else 0
-                if current_request_count != last_request_count:
-                    last_request_count = current_request_count
+                current_requests_payload = _build_requests_payload(inbox)
+                # Diff the full payload (count + ordered pending ids), not just
+                # the count, so a change to the pending *set* at constant size
+                # still pushes an update and the panel refreshes.
+                if current_requests_payload != last_requests_payload:
+                    last_requests_payload = current_requests_payload
                     auto_open = minds_config.get_auto_open_requests_panel() if minds_config else True
                     yield "data: {}\n\n".format(
-                        json.dumps({"type": "request_count", "count": current_request_count, "auto_open": auto_open})
+                        json.dumps({"type": "requests", **current_requests_payload, "auto_open": auto_open})
                     )
         finally:
             if isinstance(backend_resolver, MngrCliBackendResolver):
@@ -1416,6 +1824,108 @@ async def _handle_chrome_events(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# Provider names that are always hidden from minds' providers panel:
+# - ``local``: always present, always healthy; nothing actionable.
+# - ``imbue_cloud``: the default singleton instance is non-functional. Minds
+#   uses the multi-account variant (``imbue_cloud_<slug>`` per signed-in
+#   account), so the default block is dead weight and surfacing it would
+#   confuse users into thinking they need to enable / disable it.
+# Other consumers (e.g. `mngr list` CLI) keep showing both normally -- the
+# hide applies only to minds' panel.
+_HIDDEN_PROVIDER_NAMES_IN_PANEL: Final[frozenset[str]] = frozenset({"local", "imbue_cloud"})
+
+
+def _build_providers_state_payload(backend_resolver: BackendResolverInterface) -> dict[str, Any]:
+    """Build the providers panel SSE payload from resolver state + minds' settings file.
+
+    Combines three sources:
+    - ``backend_resolver.list_providers()`` -- providers that loaded
+      successfully in the most recent discovery snapshot.
+    - ``backend_resolver.get_provider_errors()`` -- providers whose discovery
+      raised.
+    - ``list_disabled_provider_names()`` -- providers minds' settings file
+      explicitly disables. These are skipped by discovery and so don't appear
+      in the snapshot, but the panel needs them for the Enable button.
+
+    The ``local`` provider is always hidden. Each entry carries name + backend
+    + status; errored entries also carry ``error_type`` and ``error_message``.
+    """
+    if not isinstance(backend_resolver, MngrCliBackendResolver):
+        return {
+            "providers": [],
+            "last_event_at": None,
+            "last_full_snapshot_at": None,
+        }
+    providers = backend_resolver.list_providers()
+    errored = backend_resolver.get_provider_errors()
+    disabled_names = list_disabled_provider_names()
+    last_event_at, last_full_snapshot_at = backend_resolver.get_freshness_timestamps()
+
+    # De-duplicate by name with priority disabled > error > ok. A provider can
+    # appear in multiple source buckets during the window between a Disable click
+    # (writes to minds' settings) and mngr observe's restart (rewrites the snapshot
+    # to drop the now-disabled provider). In that window the same name shows up in
+    # both `disabled_names` and the resolver's errored or healthy set. The user's
+    # explicitly recorded intent (disabled-in-settings) wins; transient error state
+    # wins over stale healthy state.
+    entry_by_name: dict[str, dict[str, Any]] = {}
+    for provider in providers:
+        name = str(provider.provider_name)
+        if name in _HIDDEN_PROVIDER_NAMES_IN_PANEL:
+            continue
+        entry_by_name[name] = {
+            "name": name,
+            "backend": str(provider.config.backend),
+            "status": "ok",
+            "is_enabled": provider.config.is_enabled if provider.config.is_enabled is not None else True,
+        }
+    for provider_name, error in errored.items():
+        name = str(provider_name)
+        if name in _HIDDEN_PROVIDER_NAMES_IN_PANEL:
+            continue
+        entry_by_name[name] = {
+            "name": name,
+            "backend": None,
+            "status": "error",
+            "is_enabled": True,
+            "error_type": error.type_name,
+            "error_message": error.message,
+        }
+    for name in disabled_names:
+        if name in _HIDDEN_PROVIDER_NAMES_IN_PANEL:
+            continue
+        entry_by_name[name] = {
+            "name": name,
+            "backend": None,
+            "status": "disabled",
+            "is_enabled": False,
+        }
+    # Stable alphabetical order by name across all categories.
+    entries = sorted(entry_by_name.values(), key=lambda entry: entry["name"])
+    return {
+        "providers": entries,
+        "last_event_at": last_event_at.isoformat() if last_event_at is not None else None,
+        "last_full_snapshot_at": last_full_snapshot_at.isoformat() if last_full_snapshot_at is not None else None,
+    }
+
+
+def _destroying_agent_ids(paths: WorkspacePaths | None, known_workspace_ids: tuple[AgentId, ...]) -> list[str]:
+    """Return the agent ids currently in any in-flight / failed destroy state.
+
+    Pure read of the on-disk ``destroying/`` dir; never deletes records (the
+    landing-page render path owns DONE-record cleanup). The chrome SSE emits
+    this alongside the workspaces list so Electron can distinguish "the
+    workspace disappeared because we destroyed it" from "discovery transiently
+    lost it" -- the latter must not navigate the user's window away from a
+    workspace that is still around.
+    """
+    if paths is None:
+        return []
+    in_resolver = frozenset(known_workspace_ids)
+    records = list_destroying(paths, in_resolver)
+    return [str(agent_id) for agent_id, record in records.items() if record.status != DestroyingStatus.DONE]
 
 
 def _build_workspace_list(
@@ -1444,79 +1954,119 @@ def _build_workspace_list(
     return workspaces
 
 
+def _build_requests_payload(inbox: RequestInbox | None) -> dict[str, Any]:
+    """Build the content-based requests payload pushed over the chrome SSE.
+
+    The chrome's live request UI (badge, panel refresh, auto-open) must react
+    to any change in the *set* of pending requests, not merely its size. A
+    bare count is a lossy summary: if one request is resolved while another
+    arrives, the count is unchanged even though the inbox contents are not.
+    Keying updates off the count therefore silently drops those transitions.
+
+    To make change detection sound, we surface the actual pending request
+    ids (in a deterministic order) alongside the count. Consumers diff
+    ``request_ids`` to decide whether to refresh the panel and which ids are
+    newly arrived (for auto-open); the count remains for the badge.
+    """
+    pending = inbox.get_pending_requests() if inbox else []
+    request_ids = [str(req.event_id) for req in pending]
+    return {"count": len(request_ids), "request_ids": request_ids}
+
+
 # -- System-interface recovery / restart --
 
 # Minds creates two mngr agents per workspace, both with ``work_dir=/code``
 # in the same container:
 #   - a ``claude``-type agent with the user-chosen name -- runs the user's
-#     Claude conversation in tmux session ``${MNGR_PREFIX}<user-name>``.
+#     Claude conversation.
 #   - a ``main``-type agent always named ``system-services`` -- runs the
-#     bootstrap service manager (which spawns ``svc-*`` windows from
-#     ``services.toml``, including the system interface) in tmux session
-#     ``${MNGR_PREFIX}system-services``.
-# The restart endpoint is invoked with the user agent's id, but the
-# system interface lives under the system-services agent's session, so
-# the kill must explicitly target that session.
+#     bootstrap service manager, which spawns the system interface.
+# The restart endpoints are invoked with the user agent's id; the recovery
+# flow restarts the *system-services* agent (which shares the user agent's
+# host), so it resolves that agent through the backend resolver.
 #
-# ``MNGR_PREFIX`` is propagated into the container's host env (see
-# ``_remote_host_env_flags`` in ``agent_creator.py``) and sourced by
-# ``mngr exec`` via ``build_source_env_prefix``, so it is reliably
-# available in the shell that runs this command.
-#
-# The bootstrap manager prefixes every services.toml-managed tmux window
-# with ``svc-`` and runs the system interface under the
-# ``system_interface`` service entry, so the window we kick is always
-# ``svc-system_interface``.
-_SERVICES_AGENT_NAME: Final[str] = "system-services"
-_RESTART_TMUX_WINDOW: Final[str] = "svc-system_interface"
+# Two recovery tiers:
+#   - System-interface restart (surgical): ``mngr stop`` + ``mngr start`` on
+#     the system-services agent. The user's claude agent is untouched.
+#   - Host restart: ``mngr stop --stop-host`` + ``mngr start`` on the
+#     system-services agent. This bounces the whole container, so every
+#     agent in the workspace is interrupted; only system-services is
+#     started back up (the claude agent is started template-side on the
+#     user's next message).
+
 # How long a single workspace probe through the plugin is allowed to hang.
 # Used by the background system-interface-health probe loop -- we want a short,
 # snappy timeout so a wedged workspace doesn't gate the recovery UI.
 _WORKSPACE_PROBE_TIMEOUT_SECONDS: Final[float] = 2.0
-# Timeout for the ``mngr exec`` dispatch itself (must be > 0 and short --
-# the inner command is non-blocking, so anything beyond a few seconds means
-# the mngr CLI got stuck talking to its provider).
-_RESTART_DISPATCH_TIMEOUT_SECONDS: Final[float] = 10.0
+# Hard timeout for a single ``mngr`` stop/start subprocess during a restart.
+# Generous: a host stop/start bounces a container and can legitimately take
+# tens of seconds, so this is a "definitely wedged" ceiling, not an estimate.
+_RESTART_COMMAND_TIMEOUT_SECONDS: Final[float] = 120.0
+# How long we wait for the system interface to answer again after a restart,
+# split by tier. A surgical (in-place) restart leaves the container running, so
+# the interface should answer again quickly. A host restart cold-boots the
+# container (restore-from-snapshot + the bootstrap service manager spawning the
+# system interface), which legitimately takes longer. Initial agent-creation
+# readiness waiting keeps its own, much longer, timeout.
+_SURGICAL_STARTUP_WAIT_SECONDS: Final[float] = 15.0
+_HOST_RESTART_STARTUP_WAIT_SECONDS: Final[float] = 30.0
+# Poll cadence while waiting for the system interface to come back post-restart.
+_RESTART_PROBE_INTERVAL_SECONDS: Final[float] = 1.0
 
 
-def _build_restart_shell_command() -> str:
-    """Compose the shell command that ``mngr exec`` runs on the agent host.
-
-    Kills the ``svc-system_interface`` window in the system-services
-    tmux session (``${MNGR_PREFIX}system-services``), then ``touch``es
-    ``services.toml`` to re-trigger the bootstrap watch loop which
-    respawns the service. Both run regardless of each other's success
-    so a stale tmux state still produces a touch and vice versa.
-
-    ``mngr exec`` runs commands in the agent's work_dir by default, so
-    ``services.toml`` is referenced as a relative path.
-    """
-    return (
-        f'tmux kill-window -t "${{MNGR_PREFIX}}{_SERVICES_AGENT_NAME}:{_RESTART_TMUX_WINDOW}" '
-        f"2>/dev/null; touch services.toml"
-    )
+def _build_mngr_stop_argv(mngr_binary: str, agent_id: AgentId, is_host_restart: bool) -> list[str]:
+    """Build the argv for ``mngr stop`` on ``agent_id`` -- with ``--stop-host`` for the host tier."""
+    argv = [mngr_binary, "stop", str(agent_id), "--quiet"]
+    if is_host_restart:
+        argv.append("--stop-host")
+    return argv
 
 
-def _build_mngr_exec_argv(
+def _build_mngr_start_argv(mngr_binary: str, agent_id: AgentId) -> list[str]:
+    """Build the argv for ``mngr start`` on ``agent_id`` (also starts the host if it is stopped)."""
+    return [mngr_binary, "start", str(agent_id), "--quiet"]
+
+
+def _build_mngr_host_state_argv(
     mngr_binary: str,
     agent_id: AgentId,
-    shell_command: str,
+    services_agent_id: AgentId | None,
+    provider_name: str | None,
 ) -> list[str]:
-    """Build the argv list for ``mngr exec`` to dispatch ``shell_command`` on ``agent_id``.
+    """Build the argv for the layer-2 probe: list agents to read each host's lifecycle state.
 
-    ``MNGR_HOST_DIR`` selection lives at the call-site (it is injected as
-    an env var on the subprocess), so it is intentionally not a parameter
-    here.
+    The recovery page keys its restart tier off the workspace host's state:
+    a RUNNING host can be recovered with the surgical system-interface
+    restart, while a stopped host needs a full host restart. ``mngr list``
+    is a pure read -- it never starts a stopped container.
+
+    Scopes the listing to just this workspace's chat agent + system-services
+    agent via a CEL ``id == ...`` include, for a smaller payload. When the
+    workspace's provider is known it also passes ``--provider`` so discovery
+    only queries that provider: ``--provider`` is a discovery fan-out control
+    (unlike the post-discovery CEL ``--include``), so an unrelated provider
+    being unreachable does not make this listing exit nonzero and blank out
+    this workspace's own host state. ``--on-error continue`` keeps a per-host
+    failure within the scoped provider from hard-failing the listing.
     """
-    return [
+    if services_agent_id is None:
+        include = f'id == "{agent_id}"'
+    else:
+        include = f'id == "{agent_id}" || id == "{services_agent_id}"'
+    argv = [
         mngr_binary,
-        "exec",
-        str(agent_id),
-        shell_command,
-        "--timeout",
-        str(_RESTART_DISPATCH_TIMEOUT_SECONDS),
+        "list",
+        "--format",
+        "json",
         "--quiet",
+        "--include",
+        include,
+        "--on-error",
+        "continue",
     ]
+    if provider_name is not None:
+        argv += ["--provider", provider_name]
+    return argv
 
 
 def _sanitize_recovery_return_to(raw: str) -> str:
@@ -1556,129 +2106,396 @@ def _sanitize_recovery_return_to(raw: str) -> str:
     return ""
 
 
+def _ssh_command_for_agent(backend_resolver: BackendResolverInterface, agent_id: AgentId) -> str | None:
+    """Build the copy-pasteable SSH command for an agent's host, or None when it has no SSH info.
+
+    Every minds workspace (Docker, Lima, remote) is reached over SSH, so this is
+    populated in practice; it is None only during the brief window before
+    discovery surfaces the host's ``HOST_SSH_INFO`` event. The format matches the
+    command mngr itself emits for the host (``ssh -i <key> -p <port> <user>@<host>``).
+    """
+    ssh_info = backend_resolver.get_ssh_info(agent_id)
+    if ssh_info is None:
+        return None
+    return f"ssh -i {ssh_info.key_path} -p {ssh_info.port} {ssh_info.user}@{ssh_info.host}"
+
+
 def _handle_recovery_page(
     agent_id: str,
     request: Request,
     auth_store: AuthStoreDep,
-    backend_resolver: BackendResolverDep,
 ) -> Response:
     """Render the workspace-recovery page (shown by the 503 redirect or by direct nav)."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return HTMLResponse(content=render_login_page(), status_code=403)
     aid = AgentId(agent_id)
-    ws_name = backend_resolver.get_workspace_name(aid)
-    if not ws_name:
-        info = backend_resolver.get_agent_display_info(aid)
-        ws_name = info.agent_name if info else str(agent_id)
     tracker: SystemInterfaceHealthTracker | None = request.app.state.system_interface_health_tracker
     initial_status = tracker.get_health(aid).value if tracker is not None else AgentHealth.HEALTHY.value
+    initial_error = (tracker.get_last_restart_error(aid) or "") if tracker is not None else ""
     return_to = _sanitize_recovery_return_to(request.query_params.get("return_to", ""))
-    # If the agent has already recovered by the time the chrome navigates
-    # here (a real race: the background probe loop can flip the tracker
-    # back to HEALTHY in the brief window between the STUCK SSE push and
-    # the recovery-page GET landing), redirecting straight back to
-    # ``return_to`` is the right answer. Rendering the recovery page with
-    # ``initial_status="healthy"`` would otherwise wedge the user: the
-    # page's JS only auto-reloads on a streaming ``status=healthy`` SSE
-    # event, and the SSE doesn't push events for HEALTHY agents (the
-    # ``snapshot_all`` filter intentionally excludes them), so the user
-    # would sit on a misleading "not responding" page forever.
-    if initial_status == AgentHealth.HEALTHY.value and return_to:
-        return RedirectResponse(url=return_to, status_code=302)
+    is_explicit_restart = request.query_params.get("intent", "") == "restart"
+    # The recovery page renders from ``render_status`` and then auto-refreshes
+    # itself while a restart is in flight; every refresh re-runs this handler,
+    # so the live tracker state is re-read each tick. A HEALTHY tracker needs
+    # special handling rather than rendering a misleading "not responding" page.
+    render_status = initial_status
+    if initial_status == AgentHealth.HEALTHY.value:
+        if is_explicit_restart:
+            # The user explicitly asked to restart a currently-healthy
+            # workspace (the home-page restart control). Render as STUCK so
+            # the page runs the layer-2 probe and dispatches a restart instead
+            # of sitting idle on a "healthy" page.
+            render_status = AgentHealth.STUCK.value
+        elif return_to:
+            # The workspace recovered before this page loaded -- either a race
+            # (the chrome navigated here on STUCK but the agent recovered
+            # before this GET landed) or the page's own post-restart refresh
+            # observing success. Either way, send the user back to where they
+            # were going.
+            return RedirectResponse(url=return_to, status_code=302)
+        else:
+            # HEALTHY with no return_to to redirect to: render with
+            # render_status still HEALTHY -- the page then offers a manual
+            # restart button.
+            pass
+    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
     html_body = render_recovery_page(
         agent_id=aid,
-        ws_name=ws_name,
         return_to=return_to,
-        initial_status=initial_status,
+        initial_status=render_status,
+        initial_error=initial_error,
+        ssh_command=_ssh_command_for_agent(backend_resolver, aid),
     )
     return HTMLResponse(content=html_body)
 
 
-async def _handle_restart_system_interface_api(
+def _run_mngr(concurrency_group: ConcurrencyGroup, argv: list[str], env: dict[str, str]) -> str:
+    """Run an ``mngr`` subprocess to completion and return its stdout on a clean exit.
+
+    Raises ``MngrCommandError`` for every non-clean outcome, like the rest of
+    minds' mngr calls (``run_mngr_create``, the destroy cleanup) -- one domain
+    error the caller catches once. The non-clean outcomes are:
+
+    * a timeout (with ``is_checked_after=False`` a timeout comes back as a
+      finished process flagged ``is_timed_out`` rather than raising);
+    * a nonzero exit;
+    * a failure to launch at all -- ``OSError`` for fork/exec failures, and
+      ``ConcurrencyGroupError`` for the group's own setup / shutdown / strand
+      failures (``ProcessSetupError``, ``StrandTimedOutError``,
+      ``EnvironmentStoppedError``, ``InvalidConcurrencyGroupStateError``).
+    """
+    try:
+        finished = concurrency_group.run_process_to_completion(
+            argv,
+            timeout=_RESTART_COMMAND_TIMEOUT_SECONDS,
+            is_checked_after=False,
+            env=env,
+        )
+    except (OSError, ConcurrencyGroupError) as exc:
+        # The command never ran (a fork/exec failure, or a concurrency-group
+        # setup/strand/shutdown failure). create/destroy let these propagate to
+        # one outer handler because a launch failure is fatal to the operation;
+        # our callers instead handle failure locally and must keep going (the
+        # host-health probe composes a partial response and cannot 500), so we
+        # wrap it as the single MngrCommandError they already catch rather than
+        # leaving them to also catch this infra-exception tuple.
+        raise MngrCommandError(str(exc)) from exc
+    if finished.is_timed_out:
+        raise MngrCommandError(f"timed out after {int(_RESTART_COMMAND_TIMEOUT_SECONDS)}s")
+    if finished.returncode != 0:
+        raise MngrCommandError(f"exited {finished.returncode}: {finished.stderr.strip()}")
+    return finished.stdout
+
+
+def _await_system_interface_ready(
+    agent_id: AgentId, mngr_forward_port: int, preauth_cookie: str, wait_seconds: float
+) -> bool:
+    """Poll the system interface through the plugin until it answers 200, or ``wait_seconds`` elapses."""
+    deadline = time.monotonic() + wait_seconds
+    with make_workspace_probe_client(
+        preauth_cookie=preauth_cookie,
+        probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
+    ) as probe_client:
+        while time.monotonic() < deadline:
+            status = probe_workspace_through_plugin(
+                mngr_forward_port=mngr_forward_port,
+                preauth_cookie=preauth_cookie,
+                agent_id=agent_id,
+                probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
+                client=probe_client,
+            )
+            if status == 200:
+                return True
+            threading.Event().wait(timeout=_RESTART_PROBE_INTERVAL_SECONDS)
+    return False
+
+
+class _RestartWorkerFailureHandler(MutableModel):
+    """Callable ``on_failure`` hook for the restart worker thread.
+
+    The recovery page only leaves its "Restarting..." state on a HEALTHY or
+    RESTART_FAILED transition, and the tracker is already RESTARTING when the
+    worker starts. If the worker thread crashes unexpectedly, the
+    ``ConcurrencyGroup`` invokes this so the tracker still reaches
+    RESTART_FAILED instead of the page hanging. The crash itself is logged by
+    the ``ObservableThread`` machinery, so this only records the recovery state.
+    """
+
+    tracker: SystemInterfaceHealthTracker = Field(frozen=True, description="Health tracker to transition.")
+    workspace_agent_id: AgentId = Field(frozen=True, description="Workspace agent whose restart worker crashed.")
+
+    def __call__(self, exc: BaseException) -> None:
+        self.tracker.mark_restart_failed(self.workspace_agent_id, f"The restart worker failed unexpectedly: {exc}")
+
+
+def _run_restart_sequence(
+    workspace_agent_id: AgentId,
+    is_host_restart: bool,
+    tracker: SystemInterfaceHealthTracker,
+    backend_resolver: BackendResolverInterface,
+    mngr_binary: str,
+    mngr_host_dir: Path,
+    concurrency_group: ConcurrencyGroup,
+    mngr_forward_port: int,
+    mngr_forward_preauth_cookie: str | None,
+    skip_stop: bool = False,
+) -> None:
+    """Background worker: stop + start the system-services agent, then await recovery.
+
+    Drives the health tracker to HEALTHY on recovery or RESTART_FAILED (with a
+    reason) when a step errors or the system interface does not return within
+    the tier's startup-wait budget (the host tier cold-boots a container, so it
+    waits longer than the in-place surgical tier). A crash of this worker is
+    turned into RESTART_FAILED by ``_RestartWorkerFailureHandler``, wired as the
+    thread's ``on_failure`` callback.
+
+    ``skip_stop`` is set only for the auto-dispatched host tier, which is chosen
+    exclusively when the host-health probe found the container fully stopped --
+    there is nothing to stop, so the (idempotent but not free) ``mngr stop
+    --stop-host`` subprocess is skipped to shave a full mngr invocation off the
+    cold boot's critical path.
+    """
+    tier_label = "host restart" if is_host_restart else "system-interface restart"
+    startup_wait_seconds = _HOST_RESTART_STARTUP_WAIT_SECONDS if is_host_restart else _SURGICAL_STARTUP_WAIT_SECONDS
+    services_agent_id = backend_resolver.get_system_services_agent_id(workspace_agent_id)
+    if services_agent_id is None:
+        tracker.mark_restart_failed(
+            workspace_agent_id, "Could not locate the system-services agent for this workspace."
+        )
+        return
+
+    env = dict(os.environ)
+    env["MNGR_HOST_DIR"] = str(mngr_host_dir)
+
+    if skip_stop:
+        logger.info("Skipping stop step for {} ({}): container already fully stopped", workspace_agent_id, tier_label)
+    else:
+        try:
+            _run_mngr(concurrency_group, _build_mngr_stop_argv(mngr_binary, services_agent_id, is_host_restart), env)
+        except MngrCommandError as exc:
+            logger.warning("Stop step of {} for {} failed: {}", tier_label, workspace_agent_id, exc)
+            tracker.mark_restart_failed(workspace_agent_id, f"Stop step of {tier_label} failed: {exc}")
+            return
+
+    try:
+        _run_mngr(concurrency_group, _build_mngr_start_argv(mngr_binary, services_agent_id), env)
+    except MngrCommandError as exc:
+        logger.warning("Start step of {} for {} failed: {}", tier_label, workspace_agent_id, exc)
+        tracker.mark_restart_failed(workspace_agent_id, f"Start step of {tier_label} failed: {exc}")
+        return
+
+    # Without a plugin route there is no way to probe for recovery, so treat a
+    # clean dispatch as success (mirrors the background probe loop being a no-op).
+    if mngr_forward_port == 0 or not mngr_forward_preauth_cookie:
+        tracker.record_probe_success(workspace_agent_id)
+        return
+
+    if _await_system_interface_ready(
+        workspace_agent_id, mngr_forward_port, mngr_forward_preauth_cookie, startup_wait_seconds
+    ):
+        tracker.record_probe_success(workspace_agent_id)
+    else:
+        tracker.mark_restart_failed(
+            workspace_agent_id,
+            f"The system interface did not respond within {int(startup_wait_seconds)}s of the {tier_label}.",
+        )
+
+
+def _dispatch_restart(
+    request: Request,
+    auth_store: AuthStoreDep,
+    agent_id: str,
+    is_host_restart: bool,
+) -> Response:
+    """Shared body for the two restart endpoints: validate, mark RESTARTING, spawn the worker."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return _json_error("Not authenticated", status_code=403)
+    aid = AgentId(agent_id)
+    tracker: SystemInterfaceHealthTracker | None = request.app.state.system_interface_health_tracker
+    concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
+    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    if tracker is None or concurrency_group is None:
+        return _json_error("Workspace restart is unavailable in this configuration", status_code=503)
+    # A restart is already in flight for this agent -- don't stack a second
+    # worker thread racing the first one's stop/start commands. mark_restarting
+    # decides the RESTARTING transition under its own lock and reports whether
+    # this caller won it, so this check-and-claim is atomic against concurrent
+    # restart requests (recovery page, sidebar, landing page).
+    if not tracker.mark_restarting(aid):
+        return Response(status_code=202, content="{}", media_type="application/json")
+
+    # The auto-dispatched host tier (chosen only when the host-health probe
+    # found the container fully stopped) passes ``host_already_stopped=1`` so
+    # the worker can skip the redundant stop step. Honored only for host
+    # restarts: a manually-requested restart may target a still-running
+    # container, which must be stopped first.
+    skip_stop = is_host_restart and request.query_params.get("host_already_stopped") == "1"
+
+    # is_checked=False + on_failure: a crash of the one-shot worker is handled
+    # by transitioning the tracker to RESTART_FAILED (so the recovery page does
+    # not hang), rather than being surfaced later when the root group is checked.
+    #
+    # The spawn itself can also raise (``ConcurrencyGroupError`` when the group
+    # is shutting down). Since we've already claimed RESTARTING, catch that here
+    # and roll the tracker into RESTART_FAILED too -- otherwise it would be stuck
+    # RESTARTING forever with no worker to advance it.
+    try:
+        concurrency_group.start_new_thread(
+            target=_run_restart_sequence,
+            kwargs={
+                "workspace_agent_id": aid,
+                "is_host_restart": is_host_restart,
+                "tracker": tracker,
+                "backend_resolver": backend_resolver,
+                "mngr_binary": request.app.state.mngr_binary,
+                "mngr_host_dir": request.app.state.mngr_host_dir,
+                "concurrency_group": concurrency_group,
+                "mngr_forward_port": request.app.state.mngr_forward_port or 0,
+                "mngr_forward_preauth_cookie": request.app.state.mngr_forward_preauth_cookie,
+                "skip_stop": skip_stop,
+            },
+            name=f"system-interface-restart-{aid}",
+            daemon=True,
+            is_checked=False,
+            on_failure=_RestartWorkerFailureHandler(tracker=tracker, workspace_agent_id=aid),
+        )
+    except (OSError, RuntimeError, ConcurrencyGroupError) as exc:
+        logger.warning("Failed to spawn restart worker for {}: {}", aid, exc)
+        tracker.mark_restart_failed(aid, f"Could not start the restart worker: {exc}")
+        return _json_error(f"Could not start the restart worker: {exc}", status_code=503)
+    return Response(status_code=202, content="{}", media_type="application/json")
+
+
+def _handle_restart_system_interface_api(
     agent_id: str,
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """Restart the system_interface tmux window on the agent host.
+    """Dispatch a surgical restart of the system-services agent (``mngr stop`` + ``mngr start``)."""
+    return _dispatch_restart(request=request, auth_store=auth_store, agent_id=agent_id, is_host_restart=False)
 
-    Dispatches the ``tmux kill-window`` + ``touch services.toml`` command
-    via ``mngr exec`` (which internally routes through the mngr Host
-    abstraction, so local and remote agents are handled uniformly) and
-    returns 200 as soon as that dispatch succeeds. The workspace tmux
-    window is gone by then, so an immediate fetch of the workspace URL
-    will reliably hit the plugin's 503 "System interface starting..."
-    loader instead of the still-live pre-restart UI. The background
-    system-interface health probe loop flips the tracker back to HEALTHY
-    when the workspace responds 200 again.
 
-    No backend_resolver dependency is taken: ``mngr exec`` routes by
-    agent ID through the mngr Host abstraction, so the per-agent backend
-    URL the resolver carries is not needed here.
+def _handle_restart_host_api(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Dispatch a full host restart (``mngr stop --stop-host`` + ``mngr start`` of system-services)."""
+    return _dispatch_restart(request=request, auth_store=auth_store, agent_id=agent_id, is_host_restart=True)
+
+
+def _handle_host_health_probe_api(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Layer-2 probe: run each recovery-diagnostics probe, classify the dispatch tier.
+
+    Returns a flat ``HostHealthResponse`` -- a list of named probes plus a
+    derived ``dispatch_tier``. The recovery page renders each probe as a
+    row and keys its restart-tier branching off ``dispatch_tier``.
     """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return _json_error("Not authenticated", status_code=403)
     aid = AgentId(agent_id)
-
-    tracker: SystemInterfaceHealthTracker | None = request.app.state.system_interface_health_tracker
-    mngr_binary: str = request.app.state.mngr_binary
-    mngr_host_dir: Path = request.app.state.mngr_host_dir
     concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
     if concurrency_group is None:
-        # Validate preconditions before transitioning the tracker -- otherwise
-        # we would fire RESTARTING then immediately STUCK, producing a brief
-        # "Restarting..." flicker on the recovery page even though no
-        # dispatch was ever attempted.
-        return _json_error("Cannot dispatch restart: no concurrency group available", status_code=503)
-
-    if tracker is not None:
-        tracker.mark_restarting(aid)
-    shell_command = _build_restart_shell_command()
-    argv = _build_mngr_exec_argv(
-        mngr_binary=mngr_binary,
-        agent_id=aid,
-        shell_command=shell_command,
+        return _json_error("Host health probe is unavailable in this configuration", status_code=503)
+    response = _run_host_health_probe(aid, request, concurrency_group)
+    logger.info("Layer-2 host-state probe for {}: dispatch_tier={}", aid, response.dispatch_tier.value)
+    return Response(
+        content=response.model_dump_json(),
+        media_type="application/json",
     )
+
+
+def _run_host_health_probe(
+    agent_id: AgentId,
+    request: Request,
+    concurrency_group: ConcurrencyGroup,
+) -> HostHealthResponse:
+    """Run the batched ``mngr exec`` probe + ``mngr list`` lookup, return the response.
+
+    Composes the response from three independent inputs: ``mngr list`` for
+    host state / services-agent state, the batched in-container
+    ``mngr exec`` probe, and the plugin's resolver-snapshot mirror.
+    """
     env = dict(os.environ)
-    env["MNGR_HOST_DIR"] = str(mngr_host_dir)
-    loop = asyncio.get_running_loop()
-
-    def _dispatch() -> tuple[int | None, str]:
-        finished = concurrency_group.run_process_to_completion(
-            argv,
-            timeout=_RESTART_DISPATCH_TIMEOUT_SECONDS + 5.0,
-            is_checked_after=False,
-            env=env,
-        )
-        return finished.returncode, finished.stderr
-
+    env["MNGR_HOST_DIR"] = str(request.app.state.mngr_host_dir)
+    mngr_binary: str = request.app.state.mngr_binary
+    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    services_agent_id = backend_resolver.get_system_services_agent_id(agent_id)
+    display_info = backend_resolver.get_agent_display_info(agent_id)
+    provider_name = display_info.provider_name if display_info is not None else None
+    list_argv = _build_mngr_host_state_argv(mngr_binary, agent_id, services_agent_id, provider_name)
+    list_command = shlex.join(list_argv)
+    list_error: str | None = None
+    list_stdout = ""
     try:
-        exit_status, stderr_text = await loop.run_in_executor(None, _dispatch)
-    except (OSError, RuntimeError, subprocess.TimeoutExpired, ConcurrencyGroupError) as exc:
-        # OSError covers fork/exec failures, RuntimeError covers the executor
-        # itself, TimeoutExpired fires when ``run_process_to_completion`` hits
-        # its ``timeout=`` argument, and ConcurrencyGroupError covers
-        # StrandTimedOutError / ProcessSetupError raised by the group when
-        # waiting on the strand. All of these are "dispatch failed" semantics
-        # and should produce the same structured 502 + mark_stuck.
-        logger.warning("Restart dispatch for {} failed: {}", aid, exc)
-        if tracker is not None:
-            tracker.mark_stuck(aid)
-        return _json_error(f"Restart command failed: {exc}", status_code=502)
-    if exit_status != 0:
-        logger.warning("Restart command for {} exited {}: {}", aid, exit_status, stderr_text)
-        if tracker is not None:
-            tracker.mark_stuck(aid)
-        return _json_error(f"Restart command exited {exit_status}: {stderr_text}", status_code=502)
-
-    mngr_forward_port: int = request.app.state.mngr_forward_port or 0
-    preauth_cookie: str | None = request.app.state.mngr_forward_preauth_cookie
-    if (mngr_forward_port == 0 or not preauth_cookie) and tracker is not None:
-        # Plugin probing is disabled, so the background probe loop is a
-        # no-op and nothing else will clear the RESTARTING state. Treat
-        # the successful dispatch as success optimistically so the
-        # recovery page auto-returns.
-        tracker.record_success(aid)
-    return Response(status_code=200, content="{}", media_type="application/json")
+        list_stdout = _run_mngr(concurrency_group, list_argv, env)
+    except MngrCommandError as exc:
+        # The listing is scoped to this workspace's own provider (see
+        # _build_mngr_host_state_argv), so a non-clean exit reflects a problem
+        # with *this* provider/host rather than an unrelated sibling, and there
+        # is no trustworthy listing to keep. Record the reason and continue with
+        # an empty listing; it is logged here and threaded into the response so
+        # the recovery page can surface it on the host-state rows in place of a
+        # bare "no row".
+        list_error = str(exc)
+        logger.warning("`mngr list` for host-health probe of {} did not exit cleanly: {}", agent_id, list_error)
+    list_json: str | None = list_stdout or None
+    # The in-container probe stays quiet at warning level: its argv embeds a
+    # long base64 inner script that adds nothing to diagnostics, and the
+    # dispatch_tier INFO line already records the outcome. Trust the stdout only
+    # on a clean exit -- any non-clean outcome (a failed ``mngr exec`` such as
+    # ``--no-start`` against a stopped host, a timeout, or a launch / group
+    # failure) raises and leaves ``in_container_stdout`` None, which parses to a
+    # "no" on the can-we-run-commands probe, and is recorded only at debug.
+    in_container_stdout: str | None = None
+    if services_agent_id is not None:
+        try:
+            in_container_stdout = _run_mngr(concurrency_group, build_probe_argv(mngr_binary, services_agent_id), env)
+        except MngrCommandError as exc:
+            logger.debug("in-container probe for host-health of {} did not exit cleanly: {}", agent_id, exc)
+    consumer: EnvelopeStreamConsumer | None = request.app.state.envelope_stream_consumer
+    plugin_resolver_services: dict[str, str] = (
+        consumer.get_resolver_snapshot_for_agent(agent_id) if consumer is not None else {}
+    )
+    if services_agent_id is not None:
+        exec_command = shlex.join(build_probe_argv(mngr_binary, services_agent_id))
+    else:
+        exec_command = "(mngr exec <system-services-agent>) -- no services agent id known"
+    return build_host_health_response(
+        list_json=list_json,
+        agent_id=agent_id,
+        services_agent_id=services_agent_id,
+        in_container_stdout=in_container_stdout,
+        plugin_resolver_services=plugin_resolver_services,
+        mngr_list_command=list_command,
+        mngr_list_error=list_error,
+        mngr_exec_command=exec_command,
+        mngr_binary=mngr_binary,
+    )
 
 
 # -- Account management routes --
@@ -1945,7 +2762,7 @@ def _resolve_ws_name_and_account(
     agent_id: str,
     request: Request,
     backend_resolver: BackendResolverInterface,
-) -> tuple[str, str, bool, list[object]]:
+) -> tuple[str, str, bool, list[AccountSession]]:
     """Resolve workspace name, account email, has_account flag, and accounts list."""
     parsed_id = AgentId(agent_id)
     ws_name = backend_resolver.get_workspace_name(parsed_id) or ""
@@ -2292,7 +3109,7 @@ def _handle_request_event_callback(agent_id_str: str, raw_line: str) -> None:
     """Process an incoming request event and add it to the app's inbox.
 
     After mutating the inbox, fires the resolver's change notification so
-    the chrome SSE wakes up and pushes the new ``request_count`` immediately
+    the chrome SSE wakes up and pushes the new ``requests`` payload immediately
     (otherwise it would lag up to 30s for the next poll tick, breaking the
     requests panel auto-open and badge UX).
 
@@ -2338,29 +3155,34 @@ def _parse_refresh_service_name(raw_line: str) -> str | None:
 async def _dispatch_refresh_broadcast(app: FastAPI, agent_id: AgentId, service_name: str) -> None:
     """POST to the agent's system interface so it emits a refresh_service WS broadcast.
 
-    Routed through the ``mngr forward`` plugin's per-agent subdomain
-    (``<agent>.localhost:<plugin_port>``) so we reuse the plugin's existing
-    SSH tunnel to the agent rather than maintaining one in minds. Auth on
-    the plugin uses the same ``preauth_cookie`` value the plugin trusts for
-    the Electron-shell pre-set; minds knows that value because it minted it
-    in ``cli/run.py``. Errors are logged but swallowed -- a missed refresh
-    is never worth crashing on.
+    Routed through the ``mngr forward`` plugin's per-agent subdomain so we
+    reuse the plugin's existing SSH tunnel to the agent rather than
+    maintaining one in minds. The request connects to the plugin on loopback
+    and carries the agent's ``agent-<hex>.localhost`` vhost in the ``Host``
+    header (the plugin routes on that header), so it does not depend on
+    ``*.localhost`` name resolution. Auth on the plugin uses the same
+    ``preauth_cookie`` value the plugin trusts for the Electron-shell
+    pre-set; minds knows that value because it minted it in ``cli/run.py``.
+    Errors are logged but swallowed -- a missed refresh is never worth
+    crashing on.
     """
     plugin_port: int = app.state.mngr_forward_port or 8421
     preauth_cookie: str | None = app.state.mngr_forward_preauth_cookie
     if preauth_cookie is None:
         logger.debug("Refresh broadcast skipped for {}/{}: no preauth cookie wired", agent_id, service_name)
         return
-    url = f"http://{agent_id}.localhost:{plugin_port}/api/refresh-service/{service_name}/broadcast"
+    url = f"http://127.0.0.1:{plugin_port}/api/refresh-service/{service_name}/broadcast"
+    host_header = f"{agent_id}.localhost"
     http_client: httpx.AsyncClient = app.state.http_client
     try:
         response = await http_client.post(
             url,
+            headers={"Host": host_header},
             cookies={"mngr_forward_session": preauth_cookie},
         )
         response.raise_for_status()
     except httpx.HTTPError as e:
-        logger.warning("Refresh broadcast POST to {} failed: {}", url, e)
+        logger.warning("Refresh broadcast POST to {} ({}) failed: {}", url, host_header, e)
 
 
 def _log_refresh_dispatch_result(
@@ -2443,6 +3265,7 @@ def create_desktop_client(
     system_interface_health_tracker: SystemInterfaceHealthTracker | None = None,
     mngr_binary: str = "mngr",
     mngr_host_dir: Path | None = None,
+    minds_api_key: str | None = None,
 ) -> FastAPI:
     """Create the bare-origin minds FastAPI application.
 
@@ -2499,6 +3322,21 @@ def create_desktop_client(
     # thread, so awaitability buys us nothing here.
     app.state.shutdown_event = threading.Event()
     app.state.agent_creator = agent_creator
+    # Applies onboarding answers (Q1 local scan, Q2 chat message, Q3 memory
+    # file) on a background thread. Available whenever agent creation is: it
+    # reuses the agent creator's own root concurrency group to track the
+    # detached apply thread, and reads the host name / canonical agent id off
+    # the creator. Without an agent_creator the endpoint returns 501.
+    onboarding_applier: OnboardingApplier | None = None
+    if agent_creator is not None:
+        onboarding_applier = OnboardingApplier(
+            agent_creator=agent_creator,
+            paths=agent_creator.paths,
+            message_sender=MngrMessageSender(mngr_binary=mngr_binary),
+            root_concurrency_group=agent_creator.root_concurrency_group,
+            mngr_binary=mngr_binary,
+        )
+    app.state.onboarding_applier = onboarding_applier
     app.state.imbue_cloud_cli = imbue_cloud_cli
     app.state.telegram_orchestrator = telegram_orchestrator
     app.state.notification_dispatcher = notification_dispatcher
@@ -2524,6 +3362,10 @@ def create_desktop_client(
     # ``app.state.api_v1_paths`` instead of using a defaulting attribute
     # lookup -- the latter is flagged by the project ratchet.
     app.state.api_v1_paths = paths
+    # Central minds API key. Required for ``/api/v1/...`` and the WebDAV
+    # mount; tests that don't exercise those routes can leave it as
+    # ``None`` (the bearer-auth gates fail closed when the key is None).
+    app.state.minds_api_key = minds_api_key
     if http_client is not None:
         app.state.http_client = http_client
 
@@ -2548,6 +3390,13 @@ def create_desktop_client(
     if paths is not None:
         api_v1_router = create_api_v1_router()
         app.include_router(api_v1_router, prefix="/api/v1")
+        # Mount the WebDAV file server under /api/v1/files. Each share
+        # root maps URL-path == on-disk-path (``~`` and ``/tmp``); the
+        # mount itself is gated by the same central-key Bearer check
+        # that protects the rest of /api/v1, via a closure that reads
+        # ``app.state.minds_api_key`` on every request so the gate
+        # stays in sync if a future code path ever rotates the key.
+        app.mount("/api/v1/files", create_webdav_app(lambda: app.state.minds_api_key))
 
     # Static assets: Tailwind Play CDN JS + hand-written tokens.css +
     # per-page JS. The Tailwind JS is fetched once by `just minds-tailwind`
@@ -2562,6 +3411,8 @@ def create_desktop_client(
     app.get("/_chrome")(_handle_chrome_page)
     app.get("/_chrome/sidebar")(_handle_chrome_sidebar)
     app.get("/_chrome/events")(_handle_chrome_events)
+
+    app.get("/_dev/styleguide")(_handle_dev_styleguide)
 
     # Register routes
     app.get("/welcome")(_handle_welcome_page)
@@ -2595,7 +3446,10 @@ def create_desktop_client(
     # Agent creation routes
     app.get("/create")(_handle_create_page)
     app.post("/create")(_handle_create_form_submit)
+    app.get("/api/backup-status")(_handle_backup_status_api)
+    app.get("/api/backup-export/{agent_id}")(_handle_backup_export_api)
     app.post("/api/create-agent")(_handle_create_agent_api)
+    app.post("/api/create-agent/{agent_id}/onboarding")(_handle_onboarding_submit)
     app.get("/api/create-agent/{agent_id}/status")(_handle_creation_status_api)
     app.get("/api/create-agent/{agent_id}/logs")(_handle_creation_logs_sse)
     app.get("/creating/{agent_id}")(_handle_creating_page)
@@ -2611,16 +3465,22 @@ def create_desktop_client(
     app.post("/api/agents/{agent_id}/telegram/setup")(_handle_telegram_setup)
     app.get("/api/agents/{agent_id}/telegram/status")(_handle_telegram_status)
 
+    # Providers panel toggle (Disable / Enable buttons in the landing page panel)
+    app.post("/api/providers/{provider_name}/toggle")(_handle_provider_toggle)
+
     # System-interface recovery routes
     app.get("/agents/{agent_id}/recovery")(_handle_recovery_page)
+    app.get("/api/agents/{agent_id}/host-health")(_handle_host_health_probe_api)
     app.post("/api/agents/{agent_id}/restart-system-interface")(_handle_restart_system_interface_api)
+    app.post("/api/agents/{agent_id}/restart-host")(_handle_restart_host_api)
 
     return app
 
 
-# How often the background probe loop polls agents that are currently STUCK
-# or RESTARTING. Picked to match the old branch's recovery-poll cadence
-# (the plan's default for the open question on probe interval).
+# How often the background probe loop polls each suspect / non-HEALTHY agent.
+# This is also the resolution of the HEALTHY -> STUCK decision: a workspace is
+# marked STUCK once its probe-failure run reaches ``stuck_threshold_seconds``,
+# so STUCK fires at most one interval after the threshold elapses.
 _HEALTH_PROBE_INTERVAL_SECONDS: Final[float] = 2.0
 
 
@@ -2631,17 +3491,24 @@ def start_system_interface_health_probe_loop(
     mngr_forward_preauth_cookie: str | None,
     root_concurrency_group: ConcurrencyGroup | None,
 ) -> None:
-    """Start a background thread that probes STUCK / RESTARTING agents.
+    """Start a background thread that probes suspect / non-HEALTHY agents.
 
-    For each non-HEALTHY agent in the tracker, the thread polls the plugin's
-    per-agent subdomain every ``_HEALTH_PROBE_INTERVAL_SECONDS``. A 200
-    response flips the tracker back to HEALTHY (which fires the on-change
-    callback feeding the SSE stream). The thread silently no-ops when there
-    are no non-HEALTHY agents.
+    For each agent the tracker reports as a probe target (suspect agents
+    enrolled by a failure envelope, plus STUCK / RESTARTING / RESTART_FAILED
+    agents), the thread polls the plugin's per-agent subdomain every
+    ``_HEALTH_PROBE_INTERVAL_SECONDS``. A 200 response flips the tracker back
+    to HEALTHY; any other result is reported as a probe failure, and a run of
+    probe failures lasting ``stuck_threshold_seconds`` transitions a suspect
+    agent to STUCK. Either way the on-change callback feeding the SSE stream
+    fires. The thread silently no-ops when there are no probe targets.
+
+    This loop is the single authority on STUCK: a ``system_interface_backend_failure``
+    envelope only enrolls an agent as suspect, and STUCK is reached solely
+    through probe failures observed here.
 
     Probing is skipped entirely when the plugin port or preauth cookie are
     unset (e.g. minds running without the plugin) -- without a working
-    plugin route there is no way to ask whether the workspace recovered.
+    plugin route there is no way to ask whether the workspace is reachable.
     """
     if mngr_forward_port == 0 or not mngr_forward_preauth_cookie or root_concurrency_group is None:
         return
@@ -2677,7 +3544,7 @@ def _run_system_interface_health_probe_loop(
         probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
     ) as probe_client:
         while not root_concurrency_group.is_shutting_down():
-            for aid in tracker.snapshot_all():
+            for aid in tracker.snapshot_probe_targets():
                 probe_status = probe_workspace_through_plugin(
                     mngr_forward_port=mngr_forward_port,
                     preauth_cookie=mngr_forward_preauth_cookie,
@@ -2686,5 +3553,7 @@ def _run_system_interface_health_probe_loop(
                     client=probe_client,
                 )
                 if probe_status == 200:
-                    tracker.record_success(aid)
+                    tracker.record_probe_success(aid)
+                else:
+                    tracker.record_probe_failure(aid)
             threading.Event().wait(timeout=_HEALTH_PROBE_INTERVAL_SECONDS)

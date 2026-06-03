@@ -42,7 +42,7 @@ PACKAGES: Final[tuple[PackageInfo, ...]] = (
     PackageInfo(dir_name="mngr_claude", pypi_name="imbue-mngr-claude", internal_deps=("imbue-mngr",)),
     PackageInfo(dir_name="mngr_pair", pypi_name="imbue-mngr-pair", internal_deps=("imbue-mngr",)),
     PackageInfo(dir_name="mngr_opencode", pypi_name="imbue-mngr-opencode", internal_deps=("imbue-mngr",)),
-    PackageInfo(dir_name="mngr_gemini", pypi_name="imbue-mngr-gemini", internal_deps=("imbue-mngr",)),
+    PackageInfo(dir_name="mngr_antigravity", pypi_name="imbue-mngr-antigravity", internal_deps=("imbue-mngr",)),
     PackageInfo(dir_name="mngr_kanpan", pypi_name="imbue-mngr-kanpan", internal_deps=("imbue-mngr",)),
     PackageInfo(dir_name="mngr_tutor", pypi_name="imbue-mngr-tutor", internal_deps=("imbue-mngr",)),
     PackageInfo(dir_name="mngr_notifications", pypi_name="imbue-mngr-notifications", internal_deps=("imbue-mngr",)),

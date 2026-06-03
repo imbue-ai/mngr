@@ -1,8 +1,98 @@
 # Unabridged Changelog - mngr_modal
 
-Full, unedited changelog entries consolidated nightly from individual files in the `changelog/mngr_modal/` directory.
+Full, unedited changelog entries consolidated nightly from individual files in `libs/mngr_modal/changelog/`.
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
+
+## 2026-06-01
+
+Fixed flakiness in two `mngr_modal` host-volume acceptance tests by polling `get_volume_for_host` with `wait_for` instead of asserting once, to absorb the brief Modal control-plane lag before a freshly-created volume becomes resolvable by name.
+
+# Offline agent field generators
+
+Updated the provider's `get_host_and_agent_details` override to accept and forward the new `offline_field_generators` parameter to the base implementation, so offline plugin fields (see the mngr changelog entry) are populated when a host falls back to offline data.
+
+## 2026-05-28
+
+# Dropped redundant per-project ty/ruff ratchet tests
+
+Removed this project's `test_no_type_errors` and `test_no_ruff_errors` from its
+`test_ratchets.py`. ty resolves the uv workspace root and ruff (run from the repo
+root) both scan across projects, so the per-project copies just re-ran the same
+checks. The single repo-wide equivalents now live in `test_meta_ratchets.py`
+(`test_no_type_errors` and `test_no_ruff_errors`).
+
+No user-facing behavior change.
+
+## 2026-05-27
+
+# Ratchet count tightening
+
+- Tightened the violation counts recorded in `test_ratchets.py` to their current exact values (via `uv run pytest --inline-snapshot=trim`), locking in previously-unrecorded reductions. No source-code or behavior change.
+
+## 2026-05-26
+
+- Pruned non-notable entries (test-only changes, internal refactors, and doc-only tweaks with no user-facing effect) from this project's CHANGELOG.md, per the new notable-only changelog policy.
+
+Adopted the `PREVENT_BARE_TMUX_TARGETS` ratchet rule (added in `imbue_common`) via
+`rc.check_bare_tmux_targets(_DIR, snapshot(0))` in this project's `test_ratchets.py`.
+This ratchet prevents new occurrences of `tmux <subcmd> -t '<bare-name>'` -- targets
+without a leading `=` exact-match prefix, which can silently route commands to a
+sibling session whose name shares a prefix with the intended one. No production code
+changes in this project; the adopting test starts at a baseline of zero violations.
+
+## 2026-05-21
+
+Fix the intro in `UNABRIDGED_CHANGELOG.md` so it references the correct entries directory. The path was `changelog/<project>/` (which never existed); the actual layout is `<project_dir>/changelog/`.
+
+The acceptance test for `mngr_claude_usage`'s statusline-shim provisioning on a real Modal host (`test_provision_statusline_shim_on_modal_host`) is updated to assert against the new host-stable shim path layout (`<host_dir>/commands/claude_statusline.sh`) and the per-agent sidecar (`<state_dir>/commands/user_statusline_cmd`).
+
+## 2026-05-20
+
+## Modal provider no longer auto-creates an environment from non-create commands
+
+`mngr list`, `mngr gc`, and other read flows no longer silently bootstrap a
+Modal environment (the `Created Modal environment: ...` log line) just because
+the modal provider is enabled. The Modal provider now disables itself (raises
+`ProviderUnavailableError`, which higher-level loaders skip) when its per-user
+Modal environment doesn't exist yet. Only `mngr create` is allowed to bootstrap
+the environment on first use.
+
+Project now participates in the per-project changelog layout: a `changelog/` subdirectory holds per-PR entry files, and `CHANGELOG.md` / `UNABRIDGED_CHANGELOG.md` at the project root hold the consolidated history. See the full rationale in `dev/changelog/mngr-changelog-per-project.md`.
+
+- `mngr_modal`: Modal backend now raises a new `ProviderEmptyError`
+  (distinct from `ProviderUnavailableError`) when its per-user
+  environment doesn't exist yet, so `mngr list` can silently skip the
+  empty provider instead of aborting. (Counterpart to the new
+  `ProviderEmptyError` handling in the listing pipeline.)
+
+Collapse Modal environments across an offload-acceptance / offload-release
+run to a single shared env (opt-in via `MNGR_TEST_SHARED_MODAL_ENV_NAME`).
+Each fanned-out sandbox used to mint its own Modal environment and delete
+it on teardown -- dozens to hundreds per run, driving the
+1500-env-per-workspace cap into transient failures. Inside each sandbox,
+the modal test fixtures (`real_modal_provider`, `persistent_modal_provider`,
+`initial_snapshot_provider`, plus the session-scoped subprocess-env
+fixtures) honor the env var: they thread its name through
+`MngrConfig.prefix` + `ModalProviderConfig.user_id` so every test lands
+in the shared env, and they skip env creation / deletion / leak-tracking
+at the fixture layer (apps and volumes are still created and deleted
+per-test as before). Local pytest behavior (no env var set) is unchanged.
+
+Fix Modal resource leaks in `test_snapshot_and_shutdown.py`. The teardown's `modal app stop` and `modal volume delete` calls were both silently failing (`check=False`, captured output discarded); the fixture also wasn't passing an `environment_name` to `deploy_function`, so the test app + volume landed in the default `main` env outside any cleanup safety net. Pass the session-scoped Modal env to deploy, sandbox lookup, volume operations, and cleanup; run app-stop and volume-delete in parallel with `check=True` so any future failure surfaces immediately.
+
+## Retry on async Modal permission propagation
+
+Modal recently migrated their permission system so the per-user permission entry for a just-created environment is propagated asynchronously (typically ~3-7 seconds after `modal environment create` returns success). During that window, operations on the new environment raise `modal.exception.PermissionDeniedError` instead of `NotFoundError`. This was breaking every Modal acceptance test at fixture construction time.
+
+- `imbue.mngr_modal.backend`: both `_enter_ephemeral_app_context_with_retry` and `_lookup_persistent_app_with_retry` now retry on `ModalProxyPermissionDeniedError` in addition to `ModalProxyNotFoundError`, matching the existing 5-attempt exponential backoff (1s→10s) used for env-not-found.
+- `libs/mngr_modal/imbue/mngr_modal/conftest.py`: the test cleanup helper `_classify_modal_sdk_delete` now retries Modal SDK deletes through the same propagation window so that fast-running test teardowns don't spuriously leak environments/volumes.
+
+No user-visible behavior change beyond fewer transient Modal failures and a small added startup latency (~3-7s on the very first `mngr create` against a brand-new environment, only on first use per profile).
+
+Applied `@fixture_uses_resources` to `deployed_snapshot_function` in `test_snapshot_and_shutdown.py` to fix `test_snapshot_and_shutdown_missing_host_id` and `test_snapshot_and_shutdown_missing_sandbox_id` failing on the modal resource guard.
+
+Bumped pinned `modal` dependency from 1.3.1 to 1.4.3 to stay in sync with the rest of the monorepo.
 
 ## 2026-05-14
 

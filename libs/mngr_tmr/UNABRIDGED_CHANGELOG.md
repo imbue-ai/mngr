@@ -1,8 +1,71 @@
 # Unabridged Changelog - mngr_tmr
 
-Full, unedited changelog entries consolidated nightly from individual files in the `changelog/mngr_tmr/` directory.
+Full, unedited changelog entries consolidated nightly from individual files in `libs/mngr_tmr/changelog/`.
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
+
+## 2026-05-28
+
+`mngr_tmr` is now a thin recipe on top of the new `mngr_mapreduce` framework. The `mngr tmr` CLI surface is unchanged for users; under the hood, all agent launching / polling / extraction code moved out, and TMR is now expressed as a `TestMapReduceRecipe` (in `imbue.mngr_tmr.recipe`) implementing discovery (pytest collect), prompt building, and the `on_mapper_finalized` / `on_reducer_finalized` hooks (which apply each agent's `branch.bundle` to the local repo). Server-side labels were renamed to `mapreduce_role` / `mapreduce_run_name` and the outputs-archive path was simplified to `plugin/mapreduce/outputs.tar.gz` — agents from older TMR runs are not discoverable by this version (run them down with the prior `mngr` build first).
+
+Integrator now runs on the same `--provider` as the testing agents and reuses any snapshot the testing agents built, so on `--provider modal` (or any remote provider) it spins up just as quickly as the test agents do instead of running locally.
+
+To make that work, the integrator now publishes its results the same way testing agents do — packaging `test_output/` + `branch.bundle` into `outputs.tar.gz` under `$MNGR_AGENT_STATE_DIR/plugin/test-map-reduce/` — so the orchestrator can pull and apply the integrated branch via the same volume-based path it already uses for testing-agent outputs.
+
+The integrator path is now identical across providers (including local): the orchestrator rsyncs the local output directory (every testing agent's extracted outputs) into `<work_dir>/.tmr_inputs/` on the integrator host and then sends the integrator prompt; the prompt's inline bash walks each subdirectory, applies the "should pull" predicate to filter qualifying agents, fetches the qualifying bundles into local branches, and cherry-picks. Achieving this required switching local testing agents from `GIT_WORKTREE` to `GIT_MIRROR` transfer mode — branches now live only in each agent's own clone (rather than auto-appearing in the orchestrator's source repo) and surface in the source repo only via the published bundle. Slightly slower than the worktree mode on local, but the unified code path makes the local provider a meaningful proxy for testing the remote one.
+
+Removed CLI flags (the integrator now follows the testing-agent settings): `--integrator-provider`, `--integrator-type`, `--integrator-template`. Pass `--provider` once for both. `--integrator-timeout` is unchanged.
+
+Also dropped `--use-snapshot`: snapshot building is now automatic whenever the provider supports it (modal today, with no warning when the provider doesn't). `--snapshot <ID>` still works for reusing an existing snapshot.
+
+# Dropped redundant per-project ty/ruff ratchet tests
+
+Removed this project's `test_no_type_errors` and `test_no_ruff_errors` from its
+`test_ratchets.py`. ty resolves the uv workspace root and ruff (run from the repo
+root) both scan across projects, so the per-project copies just re-ran the same
+checks. The single repo-wide equivalents now live in `test_meta_ratchets.py`
+(`test_no_type_errors` and `test_no_ruff_errors`).
+
+No user-facing behavior change.
+
+## 2026-05-27
+
+# Ratchet count tightening
+
+- Tightened the violation counts recorded in `test_ratchets.py` to their current exact values (via `uv run pytest --inline-snapshot=trim`), locking in previously-unrecorded reductions. No source-code or behavior change.
+
+## 2026-05-26
+
+- Pruned non-notable entries (test-only changes, internal refactors, and doc-only tweaks with no user-facing effect) from this project's CHANGELOG.md, per the new notable-only changelog policy.
+
+Adopted the `PREVENT_BARE_TMUX_TARGETS` ratchet rule (added in `imbue_common`) via
+`rc.check_bare_tmux_targets(_DIR, snapshot(0))` in this project's `test_ratchets.py`.
+This ratchet prevents new occurrences of `tmux <subcmd> -t '<bare-name>'` -- targets
+without a leading `=` exact-match prefix, which can silently route commands to a
+sibling session whose name shares a prefix with the intended one. No production code
+changes in this project; the adopting test starts at a baseline of zero violations.
+
+## 2026-05-26
+
+## mngr_tmr
+
+- `mngr tmr --provider modal --use-snapshot` now bootstraps the Modal per-user environment on first run instead of aborting with `ProviderEmptyError`. The pre-snapshot provider lookup passes `is_for_host_creation=True`, matching the create path.
+- Several silent-success failure modes now produce a non-zero exit (click's default exit code):
+  - `--reintegrate` when `mngr list` fails or the run name matches no agents.
+  - Any tmr run where every test agent failed to launch (no successful launches).
+
+## 2026-05-21
+
+Fix the intro in `UNABRIDGED_CHANGELOG.md` so it references the correct entries directory. The path was `changelog/<project>/` (which never existed); the actual layout is `<project_dir>/changelog/`.
+
+## 2026-05-20
+
+Project now participates in the per-project changelog layout: a `changelog/` subdirectory holds per-PR entry files, and `CHANGELOG.md` / `UNABRIDGED_CHANGELOG.md` at the project root hold the consolidated history. See the full rationale in `dev/changelog/mngr-changelog-per-project.md`.
+
+- TMR run names are now a single compact timestamp `YYYYMMDDHHMMSS` (e.g. `20260514184215`) used consistently across the output directory (`tmr_<run>/`), the `tmr_run_name` agent label, and the agent / host / branch names of every TMR-spawned entity. Testing agents are `tmr-<run>-<test_name>` (with `-2`, `-3`... appended on sanitization collisions; the random hex id has been removed), branches are `mngr-tmr/<run>/<test_name>`, the snapshotter and integrator are `tmr-<run>-snapshotter` / `tmr-<run>-integrator`, and the host pool is `tmr-<run>-host-<i>`. A new `tmr_role` label (`testing` / `snapshotter` / `integrator`) replaces the previous name-prefix matching for filtering integrator agents during `--reintegrate`.
+- The TMR HTML report is now mirrored to `s3://int8-shared-internal/tmr-reports/<run>.html` (us-west-2) on every regeneration when `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` are set, and the public URL `http://go/shared/tmr-reports/<run>.html` is printed (and emitted as a structured `report_url` event in JSON/JSONL output).
+- Added a `--run-name` flag to `mngr tmr` to override the auto-generated run name.
+- Internal cleanup: the `tmr_role` agent label is now derived directly from `AgentKind` (which gained a `SNAPSHOTTER` variant) and stamped centrally inside `_create_tmr_agent`, so a single `kind: AgentKind` argument controls both in-process classification and the on-server label. The S3 mirror of the HTML report is now invoked from the orchestration / cli layers rather than from inside `report.generate_html_report`, restoring the reporter to its previous "writes a file, returns a Path" contract.
 
 ## 2026-05-14
 
