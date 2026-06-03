@@ -32,14 +32,15 @@ pixel diff threshold).
 """
 
 import argparse
-import dataclasses
 import difflib
 import html
 import http.server
+import re
 import shutil
 import socket
 import socketserver
 import struct
+import subprocess
 import sys
 import threading
 import zlib
@@ -48,9 +49,48 @@ from pathlib import Path
 from typing import Any
 from typing import Final
 
-# All template-rendering functions live in three modules in the desktop_client
-# package -- import them lazily inside scenario builders so this script can
-# be invoked from any CWD without having to keep its module path in sync.
+import jinja2.exceptions
+from loguru import logger
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import sync_playwright
+from pydantic import ConfigDict
+from pydantic import Field
+
+from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.logging import setup_logging
+from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
+from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
+from imbue.minds.desktop_client.latchkey.handlers.templates import render_file_sharing_permission_dialog
+from imbue.minds.desktop_client.latchkey.handlers.templates import render_predefined_permission_dialog
+from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
+from imbue.minds.desktop_client.templates import render_accounts_page
+from imbue.minds.desktop_client.templates import render_auth_error_page
+from imbue.minds.desktop_client.templates import render_chrome_page
+from imbue.minds.desktop_client.templates import render_create_form
+from imbue.minds.desktop_client.templates import render_creating_page
+from imbue.minds.desktop_client.templates import render_destroying_page
+from imbue.minds.desktop_client.templates import render_dev_styleguide_page
+from imbue.minds.desktop_client.templates import render_landing_page
+from imbue.minds.desktop_client.templates import render_login_page
+from imbue.minds.desktop_client.templates import render_login_redirect_page
+from imbue.minds.desktop_client.templates import render_request_unavailable_page
+from imbue.minds.desktop_client.templates import render_sharing_editor
+from imbue.minds.desktop_client.templates import render_sidebar_page
+from imbue.minds.desktop_client.templates import render_welcome_page
+from imbue.minds.desktop_client.templates import render_workspace_settings
+from imbue.minds.desktop_client.templates_auth import render_auth_page
+from imbue.minds.desktop_client.templates_auth import render_check_email_page
+from imbue.minds.desktop_client.templates_auth import render_forgot_password_page
+from imbue.minds.desktop_client.templates_auth import render_oauth_close_page
+from imbue.minds.desktop_client.templates_auth import render_settings_page
+from imbue.minds.primitives import AIProvider
+from imbue.minds.primitives import BackupEncryptionMethod
+from imbue.minds.primitives import BackupProvider
+from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import LaunchMode
+from imbue.minds.primitives import OneTimeCode
+from imbue.mngr.primitives import AgentId
 
 
 def _repo_root() -> Path:
@@ -60,8 +100,6 @@ def _repo_root() -> Path:
     path so the script keeps working when copied outside the tree (useful
     for capturing both sides of a branch swap from one stable location).
     """
-    import subprocess
-
     try:
         out = subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip()
         return Path(out)
@@ -78,12 +116,35 @@ OUTPUT_ROOT: Final[Path] = REPO_ROOT / "apps" / "minds" / ".visual-diff"
 VIEWPORT_W: Final[int] = 1440
 VIEWPORT_H: Final[int] = 900
 
+# Exceptions that a template builder can plausibly raise during scenario
+# rendering. The harness catches these so a single broken page doesn't
+# abort the whole capture run; anything outside this set (e.g.
+# KeyboardInterrupt, SystemExit, or a real programming defect like an
+# AssertionError that wasn't anticipated) should still crash.
+_BUILDER_EXCEPTIONS: Final[tuple[type[BaseException], ...]] = (
+    TypeError,
+    AttributeError,
+    KeyError,
+    ValueError,
+    LookupError,
+    RuntimeError,
+    OSError,
+    ImportError,
+    jinja2.exceptions.TemplateError,
+)
+
+# Exceptions that Playwright can raise during navigation/screenshotting.
+_PLAYWRIGHT_EXCEPTIONS: Final[tuple[type[BaseException], ...]] = (
+    PlaywrightError,
+    PlaywrightTimeoutError,
+    OSError,
+)
+
 
 # -- Scenario catalog -----------------------------------------------------
 
 
-@dataclasses.dataclass(frozen=True)
-class Scenario:
+class Scenario(FrozenModel):
     """One renderable state to capture.
 
     ``builder`` returns the HTML string. We pass it as a thunk (rather than
@@ -96,63 +157,34 @@ class Scenario:
     belongs in dedicated tests.
     """
 
+    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
+
     name: str
     builder: Callable[[], str]
-    interactions: tuple[Callable[[Any], None], ...] = ()
+    interactions: tuple[Callable[[Any], None], ...] = Field(default=())
 
 
-def _stub_account(user_id: str, email: str, n_workspaces: int = 0) -> Any:
+class _Account(FrozenModel):
     """Minimal account stub matching the attrs the templates read.
 
     The real Account model lives in the imbue_cloud client and pulling it
     in here would couple this tool to that whole subsystem.
     """
 
-    @dataclasses.dataclass(frozen=True)
-    class _Account:
-        user_id: str
-        email: str
-        workspace_ids: tuple[str, ...]
+    user_id: str
+    email: str
+    workspace_ids: tuple[str, ...]
 
-    return _Account(user_id=user_id, email=email, workspace_ids=tuple(f"agent-{i:032d}" for i in range(n_workspaces)))
+
+def _stub_account(user_id: str, email: str, n_workspaces: int = 0) -> _Account:
+    return _Account(
+        user_id=user_id,
+        email=email,
+        workspace_ids=tuple(f"agent-{i:032d}" for i in range(n_workspaces)),
+    )
 
 
 def _build_scenarios() -> list[Scenario]:
-    # Imports inside the function so this script can at least print its
-    # --help without the full minds backend on the path.
-    from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
-    from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
-    from imbue.minds.desktop_client.latchkey.handlers.templates import render_file_sharing_permission_dialog
-    from imbue.minds.desktop_client.latchkey.handlers.templates import render_predefined_permission_dialog
-    from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
-    from imbue.minds.desktop_client.templates import render_accounts_page
-    from imbue.minds.desktop_client.templates import render_auth_error_page
-    from imbue.minds.desktop_client.templates import render_chrome_page
-    from imbue.minds.desktop_client.templates import render_create_form
-    from imbue.minds.desktop_client.templates import render_creating_page
-    from imbue.minds.desktop_client.templates import render_destroying_page
-    from imbue.minds.desktop_client.templates import render_dev_styleguide_page
-    from imbue.minds.desktop_client.templates import render_landing_page
-    from imbue.minds.desktop_client.templates import render_login_page
-    from imbue.minds.desktop_client.templates import render_login_redirect_page
-    from imbue.minds.desktop_client.templates import render_request_unavailable_page
-    from imbue.minds.desktop_client.templates import render_sharing_editor
-    from imbue.minds.desktop_client.templates import render_sidebar_page
-    from imbue.minds.desktop_client.templates import render_welcome_page
-    from imbue.minds.desktop_client.templates import render_workspace_settings
-    from imbue.minds.desktop_client.templates_auth import render_auth_page
-    from imbue.minds.desktop_client.templates_auth import render_check_email_page
-    from imbue.minds.desktop_client.templates_auth import render_forgot_password_page
-    from imbue.minds.desktop_client.templates_auth import render_oauth_close_page
-    from imbue.minds.desktop_client.templates_auth import render_settings_page
-    from imbue.minds.primitives import AIProvider
-    from imbue.minds.primitives import BackupEncryptionMethod
-    from imbue.minds.primitives import BackupProvider
-    from imbue.minds.primitives import CreationId
-    from imbue.minds.primitives import LaunchMode
-    from imbue.minds.primitives import OneTimeCode
-    from imbue.mngr.primitives import AgentId
-
     agent_a = AgentId("agent-00000000000000000000000000000001")
     agent_b = AgentId("agent-00000000000000000000000000000002")
     agent_c = AgentId("agent-00000000000000000000000000000003")
@@ -179,22 +211,22 @@ def _build_scenarios() -> list[Scenario]:
 
     return [
         # -- Landing page ------------------------------------------------
-        Scenario("landing_empty", lambda: render_landing_page(accessible_agent_ids=())),
+        Scenario(name="landing_empty", builder=lambda: render_landing_page(accessible_agent_ids=())),
         Scenario(
-            "landing_discovering",
-            lambda: render_landing_page(accessible_agent_ids=(), is_discovering=True),
+            name="landing_discovering",
+            builder=lambda: render_landing_page(accessible_agent_ids=(), is_discovering=True),
         ),
         Scenario(
-            "landing_with_workspaces",
-            lambda: render_landing_page(
+            name="landing_with_workspaces",
+            builder=lambda: render_landing_page(
                 accessible_agent_ids=(agent_a, agent_b),
                 mngr_forward_origin="http://localhost:8421",
                 agent_names={str(agent_a): "alpha", str(agent_b): "beta"},
             ),
         ),
         Scenario(
-            "landing_with_destroying_workspace",
-            lambda: render_landing_page(
+            name="landing_with_destroying_workspace",
+            builder=lambda: render_landing_page(
                 accessible_agent_ids=(agent_a, agent_b, agent_c),
                 mngr_forward_origin="http://localhost:8421",
                 agent_names={str(agent_a): "alpha", str(agent_b): "beta-destroying", str(agent_c): "gamma-failed"},
@@ -202,24 +234,24 @@ def _build_scenarios() -> list[Scenario]:
             ),
         ),
         # -- Welcome page ------------------------------------------------
-        Scenario("welcome", render_welcome_page),
+        Scenario(name="welcome", builder=render_welcome_page),
         # -- Create form -------------------------------------------------
-        Scenario("create_no_account", lambda: render_create_form()),
+        Scenario(name="create_no_account", builder=lambda: render_create_form()),
         Scenario(
-            "create_with_account",
-            lambda: render_create_form(accounts=(account_a,), default_account_id="user-aaaaaa"),
+            name="create_with_account",
+            builder=lambda: render_create_form(accounts=(account_a,), default_account_id="user-aaaaaa"),
         ),
         Scenario(
-            "create_with_error",
-            lambda: render_create_form(error_message="imbue_cloud requires an account."),
+            name="create_with_error",
+            builder=lambda: render_create_form(error_message="imbue_cloud requires an account."),
         ),
         Scenario(
-            "create_lima_subscription",
-            lambda: render_create_form(launch_mode=LaunchMode.LIMA, ai_provider=AIProvider.SUBSCRIPTION),
+            name="create_lima_subscription",
+            builder=lambda: render_create_form(launch_mode=LaunchMode.LIMA, ai_provider=AIProvider.SUBSCRIPTION),
         ),
         Scenario(
-            "create_with_master_password",
-            lambda: render_create_form(
+            name="create_with_master_password",
+            builder=lambda: render_create_form(
                 backup_provider=BackupProvider.IMBUE_CLOUD,
                 backup_encryption_method=BackupEncryptionMethod.MASTER_PASSWORD,
                 has_saved_backup_password=False,
@@ -229,47 +261,47 @@ def _build_scenarios() -> list[Scenario]:
         ),
         # -- Creating page (question flow + loading) ---------------------
         Scenario(
-            "creating",
-            lambda: render_creating_page(
+            name="creating",
+            builder=lambda: render_creating_page(
                 creation_id=CreationId("creation-00000000000000000000000000000001"),
                 info=creation_info_running,
             ),
         ),
         # -- Destroying detail page --------------------------------------
         Scenario(
-            "destroying_running",
-            lambda: render_destroying_page(
+            name="destroying_running",
+            builder=lambda: render_destroying_page(
                 agent_id=agent_a, agent_name="alpha", pid=12345, status="running"
             ),
         ),
         Scenario(
-            "destroying_failed",
-            lambda: render_destroying_page(
+            name="destroying_failed",
+            builder=lambda: render_destroying_page(
                 agent_id=agent_a, agent_name="alpha", pid=12345, status="failed"
             ),
         ),
         Scenario(
-            "destroying_done",
-            lambda: render_destroying_page(
+            name="destroying_done",
+            builder=lambda: render_destroying_page(
                 agent_id=agent_a, agent_name="alpha", pid=12345, status="done"
             ),
         ),
         # -- Accounts page -----------------------------------------------
         Scenario(
-            "accounts_empty",
-            lambda: render_accounts_page(accounts=()),
+            name="accounts_empty",
+            builder=lambda: render_accounts_page(accounts=()),
         ),
         Scenario(
-            "accounts_with_default",
-            lambda: render_accounts_page(
+            name="accounts_with_default",
+            builder=lambda: render_accounts_page(
                 accounts=(account_a, account_b),
                 default_account_id="user-aaaaaa",
                 enabled_by_user_id={"user-aaaaaa": True, "user-bbbbbb": True},
             ),
         ),
         Scenario(
-            "accounts_with_signed_out",
-            lambda: render_accounts_page(
+            name="accounts_with_signed_out",
+            builder=lambda: render_accounts_page(
                 accounts=(account_a, account_b),
                 default_account_id="user-aaaaaa",
                 enabled_by_user_id={"user-aaaaaa": True, "user-bbbbbb": False},
@@ -277,8 +309,8 @@ def _build_scenarios() -> list[Scenario]:
         ),
         # -- Workspace settings ------------------------------------------
         Scenario(
-            "workspace_settings_no_account",
-            lambda: render_workspace_settings(
+            name="workspace_settings_no_account",
+            builder=lambda: render_workspace_settings(
                 agent_id=str(agent_a),
                 ws_name="alpha",
                 current_account=None,
@@ -288,8 +320,8 @@ def _build_scenarios() -> list[Scenario]:
             ),
         ),
         Scenario(
-            "workspace_settings_with_account",
-            lambda: render_workspace_settings(
+            name="workspace_settings_with_account",
+            builder=lambda: render_workspace_settings(
                 agent_id=str(agent_a),
                 ws_name="alpha",
                 current_account=account_a,
@@ -299,8 +331,8 @@ def _build_scenarios() -> list[Scenario]:
             ),
         ),
         Scenario(
-            "workspace_settings_no_servers",
-            lambda: render_workspace_settings(
+            name="workspace_settings_no_servers",
+            builder=lambda: render_workspace_settings(
                 agent_id=str(agent_a),
                 ws_name="alpha",
                 current_account=account_a,
@@ -311,8 +343,8 @@ def _build_scenarios() -> list[Scenario]:
         ),
         # -- Sharing editor ----------------------------------------------
         Scenario(
-            "sharing_no_account",
-            lambda: render_sharing_editor(
+            name="sharing_no_account",
+            builder=lambda: render_sharing_editor(
                 agent_id=str(agent_a),
                 service_name="frontend",
                 title="Share frontend in alpha",
@@ -322,8 +354,8 @@ def _build_scenarios() -> list[Scenario]:
             ),
         ),
         Scenario(
-            "sharing_with_account",
-            lambda: render_sharing_editor(
+            name="sharing_with_account",
+            builder=lambda: render_sharing_editor(
                 agent_id=str(agent_a),
                 service_name="frontend",
                 title="Share frontend in alpha",
@@ -336,28 +368,31 @@ def _build_scenarios() -> list[Scenario]:
             ),
         ),
         # -- Chrome (titlebar) -------------------------------------------
-        Scenario("chrome_mac_unauth", lambda: render_chrome_page(is_mac=True, is_authenticated=False)),
-        Scenario("chrome_mac_auth", lambda: render_chrome_page(is_mac=True, is_authenticated=True)),
-        Scenario("chrome_non_mac_auth", lambda: render_chrome_page(is_mac=False, is_authenticated=True)),
+        Scenario(name="chrome_mac_unauth", builder=lambda: render_chrome_page(is_mac=True, is_authenticated=False)),
+        Scenario(name="chrome_mac_auth", builder=lambda: render_chrome_page(is_mac=True, is_authenticated=True)),
+        Scenario(name="chrome_non_mac_auth", builder=lambda: render_chrome_page(is_mac=False, is_authenticated=True)),
         # -- Sidebar -----------------------------------------------------
-        Scenario("sidebar", lambda: render_sidebar_page(mngr_forward_origin="http://localhost:8421")),
+        Scenario(name="sidebar", builder=lambda: render_sidebar_page(mngr_forward_origin="http://localhost:8421")),
         # -- Login / login_redirect / auth_error / request_unavailable ---
-        Scenario("login", render_login_page),
+        Scenario(name="login", builder=render_login_page),
         Scenario(
-            "login_redirect",
-            lambda: render_login_redirect_page(one_time_code=OneTimeCode("abc123-secret-82341")),
+            name="login_redirect",
+            builder=lambda: render_login_redirect_page(one_time_code=OneTimeCode("abc123-secret-82341")),
         ),
-        Scenario("auth_error", lambda: render_auth_error_page(message="This code has already been used.")),
         Scenario(
-            "request_unavailable",
-            lambda: render_request_unavailable_page(message="This request was already granted."),
+            name="auth_error",
+            builder=lambda: render_auth_error_page(message="This code has already been used."),
+        ),
+        Scenario(
+            name="request_unavailable",
+            builder=lambda: render_request_unavailable_page(message="This request was already granted."),
         ),
         # -- Dev styleguide ----------------------------------------------
-        Scenario("dev_styleguide", render_dev_styleguide_page),
+        Scenario(name="dev_styleguide", builder=render_dev_styleguide_page),
         # -- Latchkey permission dialogs ---------------------------------
         Scenario(
-            "latchkey_predefined_some_checked",
-            lambda: render_predefined_permission_dialog(
+            name="latchkey_predefined_some_checked",
+            builder=lambda: render_predefined_permission_dialog(
                 agent_id=str(agent_a),
                 request_id="req-00000000000000000000000000000001",
                 ws_name="alpha",
@@ -369,8 +404,8 @@ def _build_scenarios() -> list[Scenario]:
             ),
         ),
         Scenario(
-            "latchkey_predefined_none_checked",
-            lambda: render_predefined_permission_dialog(
+            name="latchkey_predefined_none_checked",
+            builder=lambda: render_predefined_permission_dialog(
                 agent_id=str(agent_a),
                 request_id="req-00000000000000000000000000000001",
                 ws_name="alpha",
@@ -382,8 +417,8 @@ def _build_scenarios() -> list[Scenario]:
             ),
         ),
         Scenario(
-            "latchkey_file_sharing_read",
-            lambda: render_file_sharing_permission_dialog(
+            name="latchkey_file_sharing_read",
+            builder=lambda: render_file_sharing_permission_dialog(
                 agent_id=str(agent_a),
                 request_id="req-00000000000000000000000000000001",
                 ws_name="alpha",
@@ -395,8 +430,8 @@ def _build_scenarios() -> list[Scenario]:
             ),
         ),
         Scenario(
-            "latchkey_file_sharing_write",
-            lambda: render_file_sharing_permission_dialog(
+            name="latchkey_file_sharing_write",
+            builder=lambda: render_file_sharing_permission_dialog(
                 agent_id=str(agent_a),
                 request_id="req-00000000000000000000000000000001",
                 ws_name="alpha",
@@ -408,22 +443,25 @@ def _build_scenarios() -> list[Scenario]:
             ),
         ),
         # -- Auth pages (SuperTokens) ------------------------------------
-        Scenario("auth_signup_default", lambda: render_auth_page(default_to_signup=True)),
-        Scenario("auth_signin_default", lambda: render_auth_page(default_to_signup=False)),
+        Scenario(name="auth_signup_default", builder=lambda: render_auth_page(default_to_signup=True)),
+        Scenario(name="auth_signin_default", builder=lambda: render_auth_page(default_to_signup=False)),
         Scenario(
-            "auth_signup_with_message",
-            lambda: render_auth_page(default_to_signup=True, message="Please sign up to continue."),
+            name="auth_signup_with_message",
+            builder=lambda: render_auth_page(default_to_signup=True, message="Please sign up to continue."),
         ),
-        Scenario("auth_check_email", lambda: render_check_email_page(email="alice@example.com")),
-        Scenario("auth_forgot_password", render_forgot_password_page),
+        Scenario(name="auth_check_email", builder=lambda: render_check_email_page(email="alice@example.com")),
+        Scenario(name="auth_forgot_password", builder=render_forgot_password_page),
         Scenario(
-            "auth_oauth_close_with_name",
-            lambda: render_oauth_close_page(email="alice@example.com", display_name="Alice"),
+            name="auth_oauth_close_with_name",
+            builder=lambda: render_oauth_close_page(email="alice@example.com", display_name="Alice"),
         ),
-        Scenario("auth_oauth_close_without_name", lambda: render_oauth_close_page(email="alice@example.com")),
         Scenario(
-            "auth_settings_email",
-            lambda: render_settings_page(
+            name="auth_oauth_close_without_name",
+            builder=lambda: render_oauth_close_page(email="alice@example.com"),
+        ),
+        Scenario(
+            name="auth_settings_email",
+            builder=lambda: render_settings_page(
                 email="alice@example.com",
                 display_name="Alice",
                 user_id="user-aaaaaa",
@@ -432,8 +470,8 @@ def _build_scenarios() -> list[Scenario]:
             ),
         ),
         Scenario(
-            "auth_settings_oauth",
-            lambda: render_settings_page(
+            name="auth_settings_oauth",
+            builder=lambda: render_settings_page(
                 email="alice@example.com",
                 display_name=None,
                 user_id="user-aaaaaa",
@@ -447,6 +485,18 @@ def _build_scenarios() -> list[Scenario]:
 # -- Capture subcommand --------------------------------------------------
 
 
+class _QuietStaticHandler(http.server.SimpleHTTPRequestHandler):
+    """SimpleHTTPRequestHandler that silences the per-request access log.
+
+    The serving directory is bound by the lambda factory passed to
+    TCPServer in ``_serve_directory`` -- this subclass only overrides
+    logging.
+    """
+
+    def log_message(self, fmt: str, *args: Any) -> None:  # ty: ignore[invalid-method-override]
+        pass
+
+
 def _serve_directory(root: Path) -> tuple[socketserver.TCPServer, threading.Thread, int]:
     """Spin up a daemon HTTP server rooted at ``root`` on a random free port.
 
@@ -454,22 +504,57 @@ def _serve_directory(root: Path) -> tuple[socketserver.TCPServer, threading.Thre
     pages reference ``/_static/...`` as root-absolute paths; file:// breaks
     those references silently. The server runs until process exit.
     """
-
-    class _Handler(http.server.SimpleHTTPRequestHandler):
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            super().__init__(*args, directory=str(root), **kwargs)
-
-        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-            pass  # silence the per-request access log
-
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
 
-    httpd = socketserver.TCPServer(("127.0.0.1", port), _Handler)
+    httpd = socketserver.TCPServer(
+        ("127.0.0.1", port),
+        lambda *args, **kwargs: _QuietStaticHandler(*args, directory=str(root), **kwargs),
+    )
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     return httpd, thread, port
+
+
+def _render_all_html(scenarios: list[Scenario], html_dir: Path) -> None:
+    """Render every scenario's HTML to disk; log + record failures inline."""
+    for sc in scenarios:
+        try:
+            rendered = sc.builder()
+        except _BUILDER_EXCEPTIONS as exc:
+            logger.opt(exception=exc).warning("[render fail] {}: {}", sc.name, type(exc).__name__)
+            (html_dir / f"{sc.name}.html").write_text(
+                f"<!-- RENDER FAILED: {html.escape(str(exc))} -->"
+            )
+            continue
+        (html_dir / f"{sc.name}.html").write_text(rendered)
+
+
+def _screenshot_all(scenarios: list[Scenario], png_dir: Path, port: int) -> None:
+    """Screenshot every scenario via Playwright."""
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        try:
+            context = browser.new_context(viewport={"width": VIEWPORT_W, "height": VIEWPORT_H})
+            page = context.new_page()
+            for sc in scenarios:
+                target = f"http://127.0.0.1:{port}/html/{sc.name}.html"
+                try:
+                    page.goto(target, wait_until="networkidle", timeout=15000)
+                    # Tailwind Play CDN generates the utility styles at
+                    # runtime; give it a beat to settle before snapshotting.
+                    page.wait_for_timeout(400)
+                    for action in sc.interactions:
+                        action(page)
+                    page.screenshot(path=str(png_dir / f"{sc.name}.png"), full_page=True)
+                    logger.info("[shot] {}", sc.name)
+                except _PLAYWRIGHT_EXCEPTIONS as exc:
+                    logger.opt(exception=exc).warning(
+                        "[shot fail] {}: {}", sc.name, type(exc).__name__
+                    )
+        finally:
+            browser.close()
 
 
 def _do_capture(label: str) -> Path:
@@ -486,54 +571,21 @@ def _do_capture(label: str) -> Path:
     (output_dir / "_static").symlink_to(STATIC_DIR)
 
     scenarios = _build_scenarios()
-    print(f"[capture] rendering {len(scenarios)} scenarios -> {output_dir}")
+    logger.info("[capture] rendering {} scenarios -> {}", len(scenarios), output_dir)
 
     # 1. Render HTML for every scenario first. Failures here will catch
     # any obviously-broken template before we spin up Playwright.
-    for sc in scenarios:
-        try:
-            rendered = sc.builder()
-        except Exception as exc:
-            print(f"  [render fail] {sc.name}: {type(exc).__name__}: {exc}")
-            (html_dir / f"{sc.name}.html").write_text(f"<!-- RENDER FAILED: {html.escape(str(exc))} -->")
-            continue
-        (html_dir / f"{sc.name}.html").write_text(rendered)
+    _render_all_html(scenarios, html_dir)
 
     # 2. Boot HTTP server + Playwright; screenshot each.
     httpd, _thread, port = _serve_directory(output_dir)
     try:
-        try:
-            from playwright.sync_api import sync_playwright
-        except ImportError:
-            print("[capture] playwright not installed; skipping screenshot pass.")
-            print("          run `uv pip install playwright && playwright install chromium`")
-            return output_dir
-
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch()
-            try:
-                context = browser.new_context(viewport={"width": VIEWPORT_W, "height": VIEWPORT_H})
-                page = context.new_page()
-                for sc in scenarios:
-                    target = f"http://127.0.0.1:{port}/html/{sc.name}.html"
-                    try:
-                        page.goto(target, wait_until="networkidle", timeout=15000)
-                        # Tailwind Play CDN generates the utility styles at
-                        # runtime; give it a beat to settle before snapshotting.
-                        page.wait_for_timeout(400)
-                        for action in sc.interactions:
-                            action(page)
-                        page.screenshot(path=str(png_dir / f"{sc.name}.png"), full_page=True)
-                        print(f"  [shot] {sc.name}")
-                    except Exception as exc:
-                        print(f"  [shot fail] {sc.name}: {type(exc).__name__}: {exc}")
-            finally:
-                browser.close()
+        _screenshot_all(scenarios, png_dir, port)
     finally:
         httpd.shutdown()
         httpd.server_close()
 
-    print(f"[capture] done: {output_dir}")
+    logger.info("[capture] done: {}", output_dir)
     return output_dir
 
 
@@ -547,7 +599,8 @@ def _read_png_dimensions(path: Path) -> tuple[int, int] | None:
             sig = fh.read(8)
             if sig != b"\x89PNG\r\n\x1a\n":
                 return None
-            fh.read(4)  # IHDR length
+            # Skip the IHDR length field.
+            fh.read(4)
             if fh.read(4) != b"IHDR":
                 return None
             w, h = struct.unpack(">II", fh.read(8))
@@ -564,6 +617,11 @@ def _hash_bytes(path: Path) -> int:
         return 0
 
 
+def _collapse_whitespace(s: str) -> str:
+    """Collapse all whitespace runs to a single space and strip."""
+    return re.sub(r"\s+", " ", s.strip())
+
+
 def _structural_html_diff(left_html: str, right_html: str) -> str | None:
     """Return None if the two HTML strings are equivalent enough; else a
     short summary of how they differ.
@@ -572,14 +630,8 @@ def _structural_html_diff(left_html: str, right_html: str) -> str | None:
     This catches missing/added elements, attribute drift, and changed text
     content without flagging Jinja-vs-JinjaX whitespace cosmetics.
     """
-    import re
-
-    def norm(s: str) -> str:
-        s = re.sub(r"\s+", " ", s.strip())
-        return s
-
-    nl = norm(left_html)
-    nr = norm(right_html)
+    nl = _collapse_whitespace(left_html)
+    nr = _collapse_whitespace(right_html)
     if nl == nr:
         return None
     # Produce a short unified diff for the report. Split on > to keep
@@ -587,10 +639,32 @@ def _structural_html_diff(left_html: str, right_html: str) -> str | None:
     left_lines = nl.replace(">", ">\n").splitlines()
     right_lines = nr.replace(">", ">\n").splitlines()
     diff = difflib.unified_diff(left_lines, right_lines, lineterm="", n=2)
-    summary = "\n".join(list(diff)[:80])  # bound the report size
+    # Bound the report size at 80 diff lines.
+    summary = "\n".join(list(diff)[:80])
     if not summary:
         summary = "(differs only in whitespace position; both normalize equal)"
     return summary
+
+
+def _classify_verdict(png_present: bool, png_identical: bool, html_diff: str | None) -> str:
+    """Decide the per-scenario verdict.
+
+    PNG hash beats HTML diff because the Jinja-to-JinjaX migration
+    legitimately reshuffles whitespace and prefers literal Unicode over
+    HTML entities (``--`` vs ``&mdash;``), both of which render identically.
+    """
+    if png_identical:
+        # PNGs are byte-identical, so the rendered pixels match;
+        # ignore any HTML cosmetic differences.
+        return "ok"
+    if png_present:
+        # PNGs differ pixel-for-pixel -- a real visual regression.
+        return "differs"
+    if html_diff is None:
+        # No PNGs (browser pass skipped) but the HTML normalizes equal.
+        return "cosmetic"
+    # No PNGs and the normalized HTML disagrees.
+    return "differs"
 
 
 def _do_compare(label_a: str, label_b: str) -> Path:
@@ -607,10 +681,6 @@ def _do_compare(label_a: str, label_b: str) -> Path:
       normalizes differently.
     - ``missing_in_a`` / ``missing_in_b``: scenario only present in one
       capture.
-
-    PNG hash beats HTML diff because the Jinja-to-JinjaX migration
-    legitimately reshuffles whitespace and prefers literal Unicode over
-    HTML entities (``--`` vs ``&mdash;``), both of which render identically.
     """
     dir_a = OUTPUT_ROOT / label_a
     dir_b = OUTPUT_ROOT / label_b
@@ -646,15 +716,7 @@ def _do_compare(label_a: str, label_b: str) -> Path:
             dim_b = _read_png_dimensions(png_b)
             png_status = "differ" if dim_a == dim_b else f"differ ({dim_a} vs {dim_b})"
 
-        if png_identical:
-            verdict = "ok"  # visually identical; HTML cosmetics ignored
-        elif png_present:
-            verdict = "differs"  # pixel-level regression
-        elif html_diff is None:
-            verdict = "cosmetic"  # no png to check, but HTML normalizes equal
-        else:
-            verdict = "differs"  # HTML normalization disagrees
-
+        verdict = _classify_verdict(png_present, png_identical, html_diff)
         rows.append(
             {
                 "name": name,
@@ -677,13 +739,14 @@ def _do_compare(label_a: str, label_b: str) -> Path:
     n_cosmetic = sum(1 for r in rows if r["verdict"] == "cosmetic")
     n_differs = sum(1 for r in rows if r["verdict"] == "differs")
     n_missing = sum(1 for r in rows if r["verdict"].startswith("missing"))
-    print(
-        f"[compare] {n_ok} pixel-identical / "
-        f"{n_cosmetic} html-cosmetic / "
-        f"{n_differs} differ / "
-        f"{n_missing} missing"
+    logger.info(
+        "[compare] {} pixel-identical / {} html-cosmetic / {} differ / {} missing",
+        n_ok,
+        n_cosmetic,
+        n_differs,
+        n_missing,
     )
-    print(f"[compare] report: {report_path}")
+    logger.info("[compare] report: {}", report_path)
     return report_path
 
 
@@ -728,12 +791,14 @@ def _render_report(label_a: str, label_b: str, rows: list[dict[str, Any]]) -> st
     ]
     for row in rows:
         verdict = row["verdict"]
-        cls = (
-            "verdict-ok" if verdict == "ok"
-            else "verdict-cosmetic" if verdict == "cosmetic"
-            else "verdict-missing" if verdict.startswith("missing")
-            else "verdict-differs"
-        )
+        if verdict == "ok":
+            cls = "verdict-ok"
+        elif verdict == "cosmetic":
+            cls = "verdict-cosmetic"
+        elif verdict.startswith("missing"):
+            cls = "verdict-missing"
+        else:
+            cls = "verdict-differs"
         parts.append(f"<tr><td><code>{html.escape(row['name'])}</code></td>")
         parts.append(f"<td class='{cls}'>{html.escape(verdict)}</td>")
         if verdict.startswith("missing"):
@@ -752,6 +817,7 @@ def _render_report(label_a: str, label_b: str, rows: list[dict[str, Any]]) -> st
 
 
 def main(argv: list[str] | None = None) -> int:
+    setup_logging(level="INFO")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -778,7 +844,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "list-scenarios":
         for sc in _build_scenarios():
-            print(sc.name)
+            logger.info("{}", sc.name)
         return 0
     return 1
 
