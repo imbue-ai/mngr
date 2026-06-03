@@ -5,6 +5,7 @@ import pytest
 
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.desktop_client import templates as _templates_module
+from imbue.minds.desktop_client.templates import CATALOG
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
@@ -480,6 +481,85 @@ def test_dev_styleguide_token_swatches_enumerate_root_declarations() -> None:
     assert declared == surfaced, (
         f"tokens.css :root declares {sorted(declared)} but the styleguide "
         f"surfaces {sorted(surfaced)}. Add or remove a "
-        f'`data-token="--<name>"` swatch in templates/dev_styleguide.html '
+        f'`data-token="--<name>"` swatch in templates/pages/DevStyleguide.jinja '
         f"to match."
     )
+
+
+# -- JinjaX component-level tests ----------------------------------------
+#
+# These exercise each individual component in isolation through the shared
+# CATALOG so we catch regressions in any one component without rendering a
+# whole page.
+
+
+def test_button_link_renders_anchor_with_href() -> None:
+    html = CATALOG.render("ButtonLink", href="/create", _content="Create")
+    assert '<a href="/create"' in html
+    assert ">Create</a>" in html
+
+
+def test_button_renders_each_variant_class_set() -> None:
+    # The five variants should each contribute their own background class.
+    variants_to_class = {
+        "primary": "bg-zinc-900",
+        "secondary": "bg-zinc-100",
+        "danger": "bg-red-50",
+        "success": "bg-emerald-800",
+        "ghost": "bg-transparent",
+    }
+    for variant, css_class in variants_to_class.items():
+        html = CATALOG.render("Button", variant=variant, _content="X")
+        assert css_class in html, f"variant={variant} missing {css_class}"
+
+
+def test_button_submit_has_form_attribute_when_passed() -> None:
+    html = CATALOG.render("ButtonSubmit", form="my-form", _content="Save")
+    assert 'type="submit"' in html
+    assert 'form="my-form"' in html
+
+
+def test_notice_renders_each_variant() -> None:
+    variants_to_class = {
+        "info": "bg-blue-50",
+        "warn": "bg-amber-50",
+        "success": "bg-emerald-50",
+        "error": "bg-red-50",
+    }
+    for variant, css_class in variants_to_class.items():
+        html = CATALOG.render("Notice", variant=variant, _content="msg")
+        assert css_class in html
+        assert "msg" in html
+
+
+def test_card_renders_default_slot() -> None:
+    html = CATALOG.render("Card", _content="<p>body</p>")
+    assert "<p>body</p>" in html
+    assert "border-zinc-200" in html
+
+
+def test_spinner_renders_for_each_size() -> None:
+    for size, css_class in (("sm", "w-3.5"), ("md", "w-[18px]"), ("lg", "w-8")):
+        html = CATALOG.render("Spinner", size=size)
+        assert 'class="spinner' in html
+        assert css_class in html
+
+
+def test_oauth_icon_google_includes_google_svg_path() -> None:
+    html = CATALOG.render("auth.OauthIcon", provider="google")
+    # One of the four <path d="..."> values unique to the Google glyph
+    # (the blue triangle); shows the right SVG was selected.
+    assert "M22.56 12.25" in html
+
+
+def test_oauth_icon_github_includes_github_svg_path() -> None:
+    html = CATALOG.render("auth.OauthIcon", provider="github")
+    # The opening of GitHub's mark path.
+    assert "M12 0C5.37 0 0 5.37" in html
+
+
+def test_oauth_icon_unknown_provider_renders_nothing_visible() -> None:
+    # Defensive: the icon component has no fallback path, so an unexpected
+    # provider just produces empty output (no exception).
+    html = CATALOG.render("auth.OauthIcon", provider="not-a-provider").strip()
+    assert html == ""

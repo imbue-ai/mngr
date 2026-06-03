@@ -1,0 +1,8 @@
+{#def size="md", extra="" #}
+{#
+  Small / medium / large CSS-only spinner (.spinner class lives in tokens.css).
+  Usage:
+    <Spinner size="sm" />
+#}
+{% set _dim = {"sm": "w-3.5 h-3.5 border", "md": "w-[18px] h-[18px] border-2", "lg": "w-8 h-8 border-[3px]"} %}
+<span class="spinner inline-block align-middle {{ _dim[size] }} {{ extra }}" aria-hidden="true"></span>

@@ -7,6 +7,7 @@
 - The migration is atomic — one PR flips every consumer at once. There is no transition period with both engines wired up in parallel.
 - JinjaX is a thin layer on Jinja2: the `Catalog` owns a Jinja `Environment` (`catalog.jinja_env`) we can configure exactly like the current `JINJA_ENV`. Autoescape, `tojson`, custom filters, and `FileSystemLoader` all keep working.
 - Scope is limited to `apps/minds/imbue/minds/desktop_client/templates/`. `libs/mngr_forward`'s templates have no macros and stay on plain Jinja2.
+- **Pages are components too.** During Phase 1 implementation we discovered that JinjaX's `<Component>` tag resolution only works when you call `catalog.render("Name")` — rendering a snake_case `.html` template through `catalog.jinja_env.get_template(...)` directly bypasses JinjaX's runtime setup (loader-priming, `__prefix` context var). To stay idiomatic, page templates become PascalCase `.jinja` components too, but live in a dedicated `templates/pages/` subdirectory so the file tree still visually distinguishes them from primitive components at `templates/`. Auth pages stay under `templates/auth/` alongside auth components.
 
 ## Expected behavior
 
@@ -127,13 +128,9 @@ Beyond converting existing examples to the new components, add swatches for comp
 
 ### Wheel packaging
 
-- `apps/minds/pyproject.toml` currently relies on hatchling's default behavior to ship `.html` files inside the `imbue` package directory (`[tool.hatch.build.targets.wheel] packages = ["imbue"]`). `.jinja` files inside the same directory follow the same default-inclusion rule, but this is implicit. Explicitly add:
-  ```toml
-  [tool.hatch.build.targets.wheel.force-include]
-  "imbue/minds/desktop_client/templates" = "imbue/minds/desktop_client/templates"
-  ```
-  This makes wheel inclusion of every `.jinja` (and existing `.html`) under that directory explicit and survives future hatchling default changes.
-- Smoke-verify the built wheel includes `.jinja` files: `uv build apps/minds && unzip -l apps/minds/dist/minds-*.whl | grep '\.jinja'` after the migration is complete.
+- `apps/minds/pyproject.toml` ships `.html` files inside the `imbue` package via hatchling's default behavior (`[tool.hatch.build.targets.wheel] packages = ["imbue"]`). `.jinja` files inside the same directory follow the same default-inclusion rule.
+- Verified during implementation: adding a redundant `force-include` for `imbue/minds/desktop_client/templates` causes hatchling to write every template *twice* into the wheel (zipfile-duplicate warnings). So we deliberately do **not** add a force-include block.
+- Smoke-verify the built wheel includes `.jinja` files: `uv build apps/minds && unzip -l dist/minds-*.whl | grep '\.jinja'` after the migration is complete.
 
 ### Tests
 
