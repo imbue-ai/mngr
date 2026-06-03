@@ -571,60 +571,56 @@ async def amain() -> int:
         await snap_page(win, "02-home-after-auth")
 
         if not SKIP_FIRST_MESSAGE:
-            # 4. Create agent via API (not the form): the prod-tier form
-            # defaults to compute=DOCKER without an Imbue Cloud account,
-            # which a vanilla mac runner can't provision. POSTing /api
-            # /create-agent directly with launch_mode=LIMA mirrors the
-            # old bash flow (first-message-verify.sh) and is deterministic.
-            # fetch() runs inside the auth'd page so the session cookie is
-            # attached automatically.
+            # 4. Create agent via UI click. Mirrors what a user does:
+            #     - expand the "Configure..." panel (otherwise
+            #       launch_mode/ai_provider/api_key inputs are
+            #       display:none and Playwright can't fill them)
+            #     - set launch_mode=LIMA and ai_provider=API_KEY (the
+            #       form's default ai_provider is SUBSCRIPTION on
+            #       no-account, which needs a host keychain OAuth that
+            #       CI runners don't have)
+            #     - paste the ANTHROPIC_API_KEY secret into
+            #       anthropic_api_key (the api-key-row is .hidden until
+            #       the provider select fires its change event)
+            #     - fill host_name, submit the form, follow the server
+            #       redirect to /creating/<id> which renders the
+            #       "Setting up your workspace" progress UI
+            # The script previously POSTed /api/create-agent directly,
+            # which left the form on screen unchanged -- 03 and 04b
+            # screenshots ended up visually identical to 02. Driving
+            # the click sequence makes those screenshots match their
+            # phase claims AND exercises the same code path a real
+            # user hits (more representative of UI regressions).
             anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
             if not anthropic_key:
                 raise RuntimeError("ANTHROPIC_API_KEY not set; can't create LIMA agent")
-            create_body = {
-                "agent_name": HOST_NAME,
-                "host_name": HOST_NAME,
-                "git_url": GIT_URL,
-                "branch": GIT_BRANCH,
-                "launch_mode": "LIMA",
-                "ai_provider": "API_KEY",
-                "anthropic_api_key": anthropic_key,
-                "include_env_file": False,
-            }
-            resp = await win.evaluate(
-                """async (body) => {
-                    const r = await fetch('/api/create-agent', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify(body),
-                    });
-                    return {status: r.status, body: await r.text()};
-                }""",
-                create_body,
-            )
-            if resp["status"] != 200:
-                raise RuntimeError(f"create-agent HTTP {resp['status']}: {resp['body']}")
-            creation_id = json.loads(resp["body"]).get("agent_id", "")
-            if not creation_id:
-                raise RuntimeError(f"no agent_id in create-agent response: {resp['body']}")
-            logger.info("creation_id={}", creation_id)
-            # Drive `win` to the /creating/<id> progress page so the
-            # 03 + 04b screenshots actually show the "Setting up your
-            # workspace" UI instead of the unchanged Create-form. The
-            # API path the script uses (POST /api/create-agent) does
-            # not transition the form; the form-submit UI flow would
-            # navigate here automatically, so we mirror that. Using
-            # ``win.goto`` reuses the existing window; an earlier
-            # attempt used ctx.new_page() which left a stray
-            # BrowserWindow that ended up in front of every later
-            # screencapture (see git blame on 04b's comment).
+            # /create is the form's action target; landing page is `/`.
+            await win.goto(origin + "/create")
+            await win.wait_for_selector("#create-form", timeout=10_000)
+            await win.click("#configure-toggle")
+            await win.wait_for_selector("#configure-panel:not(.hidden)", timeout=5_000)
+            await win.select_option("#launch_mode", value="LIMA")
+            await win.select_option("#ai_provider", value="API_KEY")
+            await win.wait_for_selector("#api-key-row:not(.hidden)", timeout=5_000)
+            await win.fill("#anthropic_api_key", anthropic_key)
+            await win.fill("#host_name", HOST_NAME)
+            # Submit triggers a POST /create -> server redirects to
+            # /creating/<id>. wait_for_url scopes to that path so we
+            # also extract the creation_id from the URL afterwards.
+            async with win.expect_navigation(url=re.compile(r"/creating/[a-z0-9-]+")):
+                await win.click("#create-submit")
+            # Pull creation_id out of the post-submit URL.
             with contextlib.suppress(Exception):
-                await win.goto(origin + f"/creating/{creation_id}")
                 await win.wait_for_function(
                     "document.body.innerText.includes('Setting up your workspace')",
                     timeout=15_000,
                 )
             await snap_page(win, "03-create-agent-submitted")
+            m = re.search(r"/creating/([a-z0-9-]+)", win.url)
+            if not m:
+                raise RuntimeError(f"expected /creating/<id> after submit, got url={win.url}")
+            creation_id = m.group(1)
+            logger.info("creation_id={}", creation_id)
 
             # 5. Poll /api/create-agent/<id>/status until DONE. The chat
             # panel does NOT auto-open when creation completes -- the
