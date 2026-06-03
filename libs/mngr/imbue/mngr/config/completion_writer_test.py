@@ -196,6 +196,27 @@ def test_write_cli_completions_cache_includes_positional_completions_for_plugin(
 
     assert data["positional_completions"]["plugin.enable"] == [["plugin_names"]]
     assert data["positional_completions"]["plugin.disable"] == [["plugin_names"]]
+    assert data["positional_completions"]["plugin.add"] == [["catalog_packages"]]
+
+
+def test_write_cli_completions_cache_includes_catalog_package_names(
+    completion_cache_dir: Path,
+) -> None:
+    """Cache should include installable catalog package names for `plugin add` completion."""
+    group = click.Group(name="test", commands={"list": click.Command("list")})
+
+    write_cli_completions_cache(cli_group=group)
+    data = _read_cache(completion_cache_dir)
+
+    catalog_packages = data["catalog_package_names"]
+    assert catalog_packages == sorted(set(catalog_packages))
+    # Every catalog package is an installable PyPI distribution with the shared prefix.
+    assert catalog_packages
+    assert all(name.startswith("imbue-mngr-") for name in catalog_packages)
+    # The entry-point name (e.g. "claude") is not what `plugin add` takes; the
+    # PyPI package name is, so completion must offer the latter.
+    assert "imbue-mngr-claude" in catalog_packages
+    assert "claude" not in catalog_packages
 
 
 def test_write_cli_completions_cache_includes_positional_completions_for_config(

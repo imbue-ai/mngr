@@ -1,0 +1,1 @@
+Added shell tab-completion for the positional argument of `mngr plugin add`. Pressing TAB now suggests installable plugin package names (e.g. `imbue-mngr-claude`, `imbue-mngr-modal`) drawn from the plugin catalog -- the same set the `mngr extras` install wizard offers. Completion repeats for each package when adding several at once.
