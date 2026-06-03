@@ -51,9 +51,8 @@ class CompletionCacheData(NamedTuple):
     host_name_options: list[str] = []
     plugin_name_options: list[str] = []
     plugin_names: list[str] = []
-    # PyPI package names from the plugin catalog, used to complete the positional
-    # argument of `mngr plugin add` (which takes installable package specifiers,
-    # not the entry-point names of already-installed plugins in `plugin_names`).
+    # Installable plugin package names (PyPI) for completing `mngr plugin add`,
+    # distinct from `plugin_names` (entry-point names of installed plugins).
     catalog_package_names: list[str] = []
     config_keys: list[str] = []
     positional_nargs_by_command: dict[str, int | None] = {}
