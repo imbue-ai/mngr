@@ -314,7 +314,8 @@ def _resolve_sources(
     """Resolve completion source identifiers to actual candidate values.
 
     Source identifiers: "agent_names", "host_names", "plugin_names",
-    "catalog_packages", "help_targets", "config_keys", "config_value_for_key".
+    "catalog_packages", "installed_packages", "help_targets", "config_keys",
+    "config_value_for_key".
     """
     candidates: list[str] = []
     needs_agents = "agent_names" in sources
@@ -329,6 +330,8 @@ def _resolve_sources(
         candidates.extend(cache.plugin_names)
     if "catalog_packages" in sources:
         candidates.extend(cache.catalog_package_names)
+    if "installed_packages" in sources:
+        candidates.extend(cache.installed_plugin_package_names)
     if "help_targets" in sources:
         candidates.extend(cache.help_targets)
     if "config_keys" in sources:

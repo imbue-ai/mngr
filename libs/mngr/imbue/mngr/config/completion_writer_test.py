@@ -197,6 +197,7 @@ def test_write_cli_completions_cache_includes_positional_completions_for_plugin(
     assert data["positional_completions"]["plugin.enable"] == [["plugin_names"]]
     assert data["positional_completions"]["plugin.disable"] == [["plugin_names"]]
     assert data["positional_completions"]["plugin.add"] == [["catalog_packages"]]
+    assert data["positional_completions"]["plugin.remove"] == [["installed_packages"]]
 
 
 def test_write_cli_completions_cache_includes_catalog_package_names(
@@ -217,6 +218,34 @@ def test_write_cli_completions_cache_includes_catalog_package_names(
     # PyPI package name is, so completion must offer the latter.
     assert "imbue-mngr-claude" in catalog_packages
     assert "claude" not in catalog_packages
+
+
+def test_write_cli_completions_cache_includes_installed_plugin_packages(
+    completion_cache_dir: Path,
+) -> None:
+    """Cache should record the installed plugin packages passed by the caller for `plugin remove`."""
+    group = click.Group(name="test", commands={"list": click.Command("list")})
+
+    write_cli_completions_cache(
+        cli_group=group,
+        installed_plugin_packages=["imbue-mngr-modal", "imbue-mngr-claude", "imbue-mngr-modal"],
+    )
+    data = _read_cache(completion_cache_dir)
+
+    # Deduplicated and sorted.
+    assert data["installed_plugin_package_names"] == ["imbue-mngr-claude", "imbue-mngr-modal"]
+
+
+def test_write_cli_completions_cache_installed_plugin_packages_defaults_empty(
+    completion_cache_dir: Path,
+) -> None:
+    """When the caller passes no installed packages, the field is empty (not an error)."""
+    group = click.Group(name="test", commands={"list": click.Command("list")})
+
+    write_cli_completions_cache(cli_group=group)
+    data = _read_cache(completion_cache_dir)
+
+    assert data["installed_plugin_package_names"] == []
 
 
 def test_write_cli_completions_cache_includes_positional_completions_for_config(

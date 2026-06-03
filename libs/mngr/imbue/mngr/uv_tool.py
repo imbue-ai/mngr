@@ -106,6 +106,28 @@ def read_receipt(receipt_path: Path) -> ToolReceipt:
     return ToolReceipt(base=base, extras=extras)
 
 
+def get_installed_plugin_package_names(receipt_path: Path | None = None) -> list[str]:
+    """Return installed plugin package names from the uv-tool receipt, best-effort.
+
+    These are exactly the package names ``mngr plugin remove`` accepts (the
+    receipt extras). Returns an empty list when mngr was not installed via
+    ``uv tool`` or the receipt cannot be read -- callers (e.g. the tab
+    completion cache writer) must never fail on a missing/garbled receipt.
+
+    ``receipt_path`` defaults to the live uv-tool receipt; callers may pass an
+    explicit path (mainly for testing).
+    """
+    if receipt_path is None:
+        receipt_path = get_receipt_path()
+    if receipt_path is None:
+        return []
+    try:
+        receipt = read_receipt(receipt_path)
+    except (OSError, tomllib.TOMLDecodeError):
+        return []
+    return sorted({requirement.name for requirement in receipt.extras})
+
+
 @pure
 def build_base_specifier(base: ToolRequirement) -> str:
     """Build the positional specifier for ``uv tool install <specifier>``.

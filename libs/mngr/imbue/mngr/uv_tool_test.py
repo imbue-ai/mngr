@@ -15,6 +15,7 @@ from imbue.mngr.uv_tool import build_uv_tool_install_add_path
 from imbue.mngr.uv_tool import build_uv_tool_install_add_requirements
 from imbue.mngr.uv_tool import build_uv_tool_install_remove
 from imbue.mngr.uv_tool import build_uv_tool_install_remove_multiple
+from imbue.mngr.uv_tool import get_installed_plugin_package_names
 from imbue.mngr.uv_tool import get_receipt_path
 from imbue.mngr.uv_tool import read_receipt
 from imbue.mngr.uv_tool import require_uv_tool_receipt
@@ -481,3 +482,36 @@ def test_build_uv_tool_install_remove_multiple_all_deps() -> None:
     )
     cmd = build_uv_tool_install_remove_multiple(receipt, {"dep-a", "dep-b"})
     assert cmd == ("uv", "tool", "install", "imbue-mngr", "--reinstall")
+
+
+# =============================================================================
+# Tests for get_installed_plugin_package_names
+# =============================================================================
+
+
+def test_get_installed_plugin_package_names_returns_empty_in_dev_mode() -> None:
+    """Best-effort: returns empty when mngr was not installed via uv tool (no receipt)."""
+    assert get_installed_plugin_package_names() == []
+
+
+def test_get_installed_plugin_package_names_sorted_and_deduped(tmp_path: Path) -> None:
+    """Returns the receipt extras' package names, sorted and deduplicated."""
+    receipt_path = tmp_path / "uv-receipt.toml"
+    receipt_path.write_text(
+        "[tool]\nrequirements = [\n"
+        '  { name = "imbue-mngr" },\n'
+        '  { name = "imbue-mngr-modal" },\n'
+        '  { name = "imbue-mngr-claude" },\n'
+        '  { name = "imbue-mngr-modal" },\n'
+        "]\n"
+    )
+
+    assert get_installed_plugin_package_names(receipt_path) == ["imbue-mngr-claude", "imbue-mngr-modal"]
+
+
+def test_get_installed_plugin_package_names_handles_malformed_receipt(tmp_path: Path) -> None:
+    """Best-effort: a garbled receipt yields an empty list rather than raising."""
+    receipt_path = tmp_path / "uv-receipt.toml"
+    receipt_path.write_text("this is not valid toml = = =\n")
+
+    assert get_installed_plugin_package_names(receipt_path) == []

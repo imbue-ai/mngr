@@ -452,6 +452,68 @@ def test_get_completions_plugin_add_is_variadic(
     assert result == ["imbue-mngr-claude", "imbue-mngr-modal"]
 
 
+def test_get_completions_plugin_remove_installed_packages(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """Completing installed plugin packages for `mngr plugin remove <TAB>`."""
+    data = CompletionCacheData(
+        commands=["plugin"],
+        subcommand_by_command={"plugin": ["add", "remove", "enable"]},
+        positional_completions={"plugin.remove": [["installed_packages"]]},
+        installed_plugin_package_names=["imbue-mngr-claude", "imbue-mngr-modal"],
+    )
+    _write_command_cache(completion_cache_dir, data)
+    set_comp_env("mngr plugin remove ", "3")
+
+    result = _get_completions()
+
+    assert result == ["imbue-mngr-claude", "imbue-mngr-modal"]
+
+
+def test_get_completions_plugin_remove_installed_packages_with_prefix(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """`plugin remove` completion respects a prefix filter."""
+    data = CompletionCacheData(
+        commands=["plugin"],
+        subcommand_by_command={"plugin": ["add", "remove", "enable"]},
+        positional_completions={"plugin.remove": [["installed_packages"]]},
+        installed_plugin_package_names=["imbue-mngr-claude", "imbue-mngr-modal"],
+    )
+    _write_command_cache(completion_cache_dir, data)
+    set_comp_env("mngr plugin remove imbue-mngr-c", "3")
+
+    result = _get_completions()
+
+    assert result == ["imbue-mngr-claude"]
+
+
+def test_get_completions_plugin_remove_distinct_from_add(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """`remove` completes installed packages while `add` completes the full catalog."""
+    data = CompletionCacheData(
+        commands=["plugin"],
+        subcommand_by_command={"plugin": ["add", "remove"]},
+        positional_completions={
+            "plugin.add": [["catalog_packages"]],
+            "plugin.remove": [["installed_packages"]],
+        },
+        catalog_package_names=["imbue-mngr-claude", "imbue-mngr-modal", "imbue-mngr-vultr"],
+        installed_plugin_package_names=["imbue-mngr-claude"],
+    )
+    _write_command_cache(completion_cache_dir, data)
+
+    set_comp_env("mngr plugin add ", "3")
+    assert _get_completions() == ["imbue-mngr-claude", "imbue-mngr-modal", "imbue-mngr-vultr"]
+
+    set_comp_env("mngr plugin remove ", "3")
+    assert _get_completions() == ["imbue-mngr-claude"]
+
+
 def test_get_completions_subcommand_agent_names_with_prefix(
     completion_cache_dir: Path,
     set_comp_env: Callable[[str, str], None],

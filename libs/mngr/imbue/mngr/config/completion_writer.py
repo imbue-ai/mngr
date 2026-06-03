@@ -25,7 +25,7 @@ from imbue.mngr.utils.pydantic_utils import unwrap_optional
 # Each inner list contains source names for that position (empty = freeform).
 # For variadic commands (nargs=None), the last entry repeats.
 # Source identifiers: "agent_names", "host_names", "plugin_names",
-# "catalog_packages", "config_keys", "help_targets"
+# "catalog_packages", "installed_packages", "config_keys", "help_targets"
 _POSITIONAL_COMPLETION_SPEC: Final[dict[str, list[list[str]]]] = {
     "archive": [["agent_names"]],
     "capture": [["agent_names"]],
@@ -53,6 +53,7 @@ _POSITIONAL_COMPLETION_SUBCOMMAND_SPEC: Final[dict[str, list[list[str]]]] = {
     "snapshot.destroy": [["agent_names"]],
     "snapshot.list": [["agent_names"]],
     "plugin.add": [["catalog_packages"]],
+    "plugin.remove": [["installed_packages"]],
     "plugin.enable": [["plugin_names"]],
     "plugin.disable": [["plugin_names"]],
     "config.get": [["config_keys"]],
@@ -326,6 +327,7 @@ def write_cli_completions_cache(
     mngr_ctx: MngrContext | None = None,
     registered_agent_types: list[str] | None = None,
     topic_names: list[str] | None = None,
+    installed_plugin_packages: list[str] | None = None,
 ) -> None:
     """Write all CLI commands, options, and choices to the completions cache (best-effort).
 
@@ -345,6 +347,12 @@ def write_cli_completions_cache(
     command names they form the completion candidates for the ``mngr help``
     positional argument. The caller passes these because help topics live in the
     cli layer, which this (config-layer) writer must not import.
+
+    installed_plugin_packages are the package names currently installed as
+    plugins (uv-tool receipt extras); they are the completion candidates for the
+    ``mngr plugin remove`` positional argument. The caller passes these for the
+    same layering reason as topic_names: the uv-tool receipt helper transitively
+    imports the cli layer, which this writer must not depend on.
 
     Catches OSError from cache writes so filesystem failures do not break
     CLI commands. Other exceptions are allowed to propagate.
@@ -452,6 +460,7 @@ def write_cli_completions_cache(
             plugin_name_options=sorted(set(plugin_name_opts)),
             plugin_names=dynamic.plugin_names if dynamic is not None else [],
             catalog_package_names=catalog_package_names,
+            installed_plugin_package_names=sorted(set(installed_plugin_packages or [])),
             config_keys=dynamic.config_keys if dynamic is not None else [],
             positional_nargs_by_command=positional_nargs_by_command,
             positional_completions=positional_completions,
