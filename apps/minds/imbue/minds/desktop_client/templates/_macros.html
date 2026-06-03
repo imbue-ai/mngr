@@ -27,7 +27,13 @@
     so it always reads against the active surface; fg comes from
     --text-on-accent so the label stays legible on either polarity.
   - secondary: a quiet elevated surface tile with a default border.
-  - danger / success: state-color trio (bg + fg + border).
+  - danger: state-color trio (bg + fg + border) -- a pale tinted tile
+    that reads as a destructive-but-not-loud action.
+  - success: solid filled button using --state-success-fg as the fill,
+    --text-on-accent as the label color. This preserves the
+    pre-design-system bg-emerald-800 look (a confident "go" button)
+    rather than mirroring danger's pale-tile shape; the trio split
+    didn't carry forward here.
   - ghost: transparent until hovered; reads as a tertiary action.
 #}
 {% set _BTN_VARIANTS = {
