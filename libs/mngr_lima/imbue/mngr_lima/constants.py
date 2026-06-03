@@ -32,6 +32,10 @@ CLOUD_INIT_TIMEOUT_SECONDS: Final[float] = 300.0
 # is a logical cap visible to the guest, not upfront host disk usage.
 DEFAULT_HOST_DATA_DISK_SIZE: Final[str] = "100GiB"
 
+# Default guest-internal port the agent container publishes its sshd on when
+# is_host_in_docker=True. Mirrors the vps_docker provider's container_ssh_port.
+DEFAULT_CONTAINER_SSH_PORT: Final[int] = 2222
+
 
 def lima_host_data_disk_mount_path(disk_name: str) -> str:
     """Return the in-VM path Lima auto-mounts an additional disk at.

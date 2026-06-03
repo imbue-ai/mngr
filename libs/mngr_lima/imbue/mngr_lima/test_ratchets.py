@@ -115,8 +115,9 @@ def test_prevent_namedtuple() -> None:
 
 
 def test_prevent_yaml_usage() -> None:
-    # lima native config only accepts yaml
-    rc.check_yaml_usage(_DIR, snapshot(96))
+    # lima native config only accepts yaml; is_host_in_docker mode adds a second
+    # code path that must also generate + write a Lima YAML config in the VM.
+    rc.check_yaml_usage(_DIR, snapshot(101))
 
 
 def test_prevent_functools_partial() -> None:
