@@ -13,16 +13,7 @@
   {{ content }}
 
   <div class="flex gap-2 mt-5 justify-end">
-    <button type="button"
-            onclick="submitPermissionDeny()"
-            class="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-md font-medium text-sm leading-tight transition-colors cursor-pointer no-underline whitespace-nowrap bg-red-50 text-red-600 border border-red-200 hover:bg-red-100">
-      Deny
-    </button>
-    <button type="submit"
-            id="permissions-approve-btn"
-            disabled
-            class="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-md font-medium text-sm leading-tight transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer no-underline whitespace-nowrap bg-emerald-800 text-emerald-50 border border-transparent hover:bg-emerald-900">
-      Approve
-    </button>
+    <Button variant="danger" onclick="submitPermissionDeny()">Deny</Button>
+    <ButtonSubmit id="permissions-approve-btn" variant="success" disabled>Approve</ButtonSubmit>
   </div>
 </form>
