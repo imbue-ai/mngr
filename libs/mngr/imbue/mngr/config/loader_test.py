@@ -882,6 +882,7 @@ def test_load_config_threads_every_field_from_toml(
 
     assert config.prefix == "regression-"
     assert config.pager == "less"
+    assert config.events_base_dir_override == Path("/tmp/regression-events")
     assert config.connect_command == "my-connect"
     assert config.is_remote_agent_installation_allowed is False
     assert config.headless is True
@@ -902,6 +903,7 @@ def test_load_config_threads_every_field_from_toml(
 _SAMPLE_CONFIG_VALUES: dict[str, Any] = {
     "prefix": "regression-",
     "default_host_dir": "/tmp/regression",
+    "events_base_dir_override": "/tmp/regression-events",
     "unset_vars": ["TEST_VAR"],
     "pager": "less",
     "enabled_backends": ["local"],
@@ -929,6 +931,7 @@ _SAMPLE_CONFIG_VALUES: dict[str, Any] = {
 _SAMPLE_TOML = """\
 prefix = "regression-"
 default_host_dir = "/tmp/regression"
+events_base_dir_override = "/tmp/regression-events"
 unset_vars = ["TEST_VAR"]
 pager = "less"
 enabled_backends = ["local"]

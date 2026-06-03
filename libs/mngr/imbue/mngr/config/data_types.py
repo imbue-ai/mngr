@@ -647,6 +647,14 @@ class MngrConfig(FrozenModel):
         default=Path("~/.mngr"),
         description="Default base directory for mngr data on hosts (can be overridden per provider instance)",
     )
+    events_base_dir_override: Path | None = Field(
+        default=None,
+        description="If set, discovery/observe event files are written and read under this base dir "
+        "instead of `default_host_dir`. Used to isolate a `mngr observe --discovery-only` process "
+        "(e.g. the one latchkey runs to drive forwarding) from the shared discovery event log, so its "
+        "snapshots are never tailed by another forward's observer. Only changes where event files "
+        "live -- provider/account/auth resolution still uses `default_host_dir`.",
+    )
     unset_vars: list[str] = Field(
         # these are necessary to prevent tmux from accidentally sticking test data in history files
         default_factory=lambda: list(("HISTFILE", "PROFILE", "VIRTUAL_ENV")),
@@ -793,6 +801,7 @@ class MngrConfig(FrozenModel):
         return self.__class__(
             prefix=_assign_scalar(self.prefix, override.prefix),
             default_host_dir=_assign_scalar(self.default_host_dir, override.default_host_dir),
+            events_base_dir_override=_assign_scalar(self.events_base_dir_override, override.events_base_dir_override),
             pager=_assign_scalar(self.pager, override.pager),
             unset_vars=override.unset_vars if override.unset_vars is not None else self.unset_vars,
             work_dir_extra_paths=override.work_dir_extra_paths
