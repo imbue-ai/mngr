@@ -121,7 +121,7 @@ def render_landing_page(
 # ``_dev_only_workspace_default`` for the gating rationale.
 _FALLBACK_GIT_URL: Final[str] = "https://github.com/imbue-ai/forever-claude-template.git"
 _FALLBACK_HOST_NAME: Final[str] = "assistant"
-_FALLBACK_BRANCH: Final[str] = ""
+_FALLBACK_BRANCH: Final[str] = "pilot"
 
 # Root names that map to operator-managed shared tiers (production /
 # staging). For these tiers the MINDS_WORKSPACE_* env-var defaults are
