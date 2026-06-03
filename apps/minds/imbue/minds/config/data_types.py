@@ -212,6 +212,56 @@ class MinContainersConfig(FrozenModel):
     )
 
 
+class ScaledownWindowConfig(FrozenModel):
+    """Idle-before-scaledown windows (seconds) for each Modal app the tier ships.
+
+    Read by ``minds env deploy`` and threaded into each ``modal deploy``
+    invocation as the matching ``MINDS_<APP>_SCALEDOWN_WINDOW`` env var,
+    which the Modal app reads at module load and passes to its function's
+    ``scaledown_window``. This keeps a container alive for the configured
+    idle window after its last request before Modal scales it down.
+
+    Defaults are ``0`` -- meaning "don't pin it; use Modal's own default
+    scaledown window" (Modal requires the value > 0, so the apps normalize
+    ``0`` to ``None``). Dev tiers raise this to ~10 minutes so their
+    no-warm-pool apps (``min_containers = 0``) stay hot across a dev session
+    instead of cold-booting on every request. Staging / production leave it
+    at ``0`` and rely on ``min_containers`` instead, and the ci/test tier
+    leaves it at ``0`` so test containers tear down promptly.
+    """
+
+    connector: NonNegativeInt = Field(
+        default=NonNegativeInt(0),
+        description="Idle seconds before ``rsc-<tier>`` scales a container down (0 = Modal default).",
+    )
+    litellm_proxy: NonNegativeInt = Field(
+        default=NonNegativeInt(0),
+        description="Idle seconds before ``llm-<tier>`` scales a container down (0 = Modal default).",
+    )
+
+
+class PaidDefaultsConfig(FrozenModel):
+    """Default paid-access entries seeded into the connector's paid tables on deploy.
+
+    After the pool-hosts schema migrations run, ``minds env deploy`` seeds
+    these into ``paid_domains`` / ``paid_emails`` (as ``is_paid = true``)
+    using ``INSERT ... ON CONFLICT DO NOTHING`` -- i.e. **seed-if-absent**:
+    it sets the tier's initial default but never re-activates an entry an
+    operator later soft-removed, so a redeploy doesn't fight manual changes.
+    Values are lowercased to match the connector's normalized lookups.
+    Empty lists (the default) seed nothing.
+    """
+
+    domains: tuple[NonEmptyStr, ...] = Field(
+        default=(),
+        description="Domains seeded into paid_domains (e.g. ``imbue.com``); exact-domain match grants paid access.",
+    )
+    emails: tuple[NonEmptyStr, ...] = Field(
+        default=(),
+        description="Full email addresses seeded into paid_emails.",
+    )
+
+
 class DeployEnvConfig(FrozenModel):
     """Per-tier deploy-time config read by deploy scripts and `minds env create`.
 
@@ -253,6 +303,22 @@ class DeployEnvConfig(FrozenModel):
             "Each entry is threaded into the matching ``modal deploy`` as an env var "
             "(``MINDS_CONNECTOR_MIN_CONTAINERS`` / ``MINDS_LITELLM_PROXY_MIN_CONTAINERS``) "
             "so the deployed function pin honors the tier's config."
+        ),
+    )
+    scaledown_window: ScaledownWindowConfig = Field(
+        default_factory=ScaledownWindowConfig,
+        description=(
+            "Per-service idle-before-scaledown windows (seconds) for the Modal apps this "
+            "tier ships. Threaded into the matching ``modal deploy`` as an env var "
+            "(``MINDS_CONNECTOR_SCALEDOWN_WINDOW`` / ``MINDS_LITELLM_PROXY_SCALEDOWN_WINDOW``); "
+            "0 means use Modal's own default."
+        ),
+    )
+    paid: PaidDefaultsConfig = Field(
+        default_factory=PaidDefaultsConfig,
+        description=(
+            "Default paid-access entries seeded (seed-if-absent) into the connector's "
+            "paid_domains / paid_emails tables after migrations on each deploy."
         ),
     )
 

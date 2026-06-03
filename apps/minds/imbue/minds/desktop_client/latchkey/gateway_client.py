@@ -192,24 +192,44 @@ class StreamedPermissionRequest(FrozenModel):
     )
 
 
-class AvailableServiceEntry(FrozenModel):
-    """Single entry returned by ``GET /permissions/available``.
+class AvailablePermission(FrozenModel):
+    """A single grantable permission schema and its plain-English summary."""
 
-    Mirrors the wire shape that the gateway extension's bundled
-    ``services.json`` advertises: one detent scope schema, a
+    name: str = Field(min_length=1, description="Detent permission schema name (e.g. ``slack-read-all``).")
+    description: str = Field(
+        default="",
+        description="Plain-English summary of the permission (detent's ``$comment``).",
+    )
+
+
+class AvailableServiceEntry(FrozenModel):
+    """Single scope entry within a service's ``GET /permissions/available`` value.
+
+    Each service in the catalog maps to a *list* of these entries (a
+    service may expose more than one detent scope). Mirrors the wire
+    shape that the gateway extension's bundled ``services.json``
+    advertises for one scope entry: one detent scope schema, a
     human-readable display name, and the list of detent permission
     schemas under that scope that the user may grant. The ``any``
     catch-all is intentionally absent here -- the gateway never lists
     it because every scope implicitly admits it; the dialog layer
     (:mod:`services_catalog`) injects it client-side as an opt-in
     choice.
+
+    ``description`` carries detent's ``$comment`` summary for the scope,
+    and each :class:`AvailablePermission` carries its own. Both are
+    optional so older catalogs without them still validate.
     """
 
     scope: str = Field(min_length=1, description="Detent scope schema name (e.g. ``slack-api``).")
     display_name: str = Field(min_length=1, description="Human-readable label shown in the dialog header.")
-    permissions: tuple[str, ...] = Field(
+    description: str = Field(
+        default="",
+        description="Plain-English summary of the scope (detent's ``$comment``).",
+    )
+    permissions: tuple[AvailablePermission, ...] = Field(
         default=(),
-        description="Detent permission schemas the user can grant for this scope.",
+        description="Permissions the user can grant for this scope, each with its plain-English summary.",
     )
 
 
@@ -490,15 +510,17 @@ class LatchkeyGatewayClient(MutableModel):
                 f"POST {url} returned {response.status_code}: {response.text.strip()}",
             )
 
-    def get_available_services(self) -> dict[str, AvailableServiceEntry]:
+    def get_available_services(self) -> dict[str, tuple[AvailableServiceEntry, ...]]:
         """Fetch the ``/permissions/available`` catalog from the gateway.
 
         Returns a mapping keyed by raw service name (e.g. ``slack``)
-        with one validated :class:`AvailableServiceEntry` per value.
-        HTTP failures, non-JSON bodies, non-object top-level values,
-        and entries that fail :class:`AvailableServiceEntry` validation
-        all raise :class:`LatchkeyGatewayClientError` so callers have a
-        single error type to catch.
+        with a tuple of validated :class:`AvailableServiceEntry` per
+        value (a service may expose more than one detent scope). HTTP
+        failures, non-JSON bodies, non-object top-level values, values
+        that are not arrays, and entries that fail
+        :class:`AvailableServiceEntry` validation all raise
+        :class:`LatchkeyGatewayClientError` so callers have a single
+        error type to catch.
 
         The entry-level validation lives here (rather than in the
         catalog module that consumes the result) because the wire shape
@@ -524,14 +546,21 @@ class LatchkeyGatewayClient(MutableModel):
             raise LatchkeyGatewayClientError(f"GET {url} returned non-JSON body: {e}") from e
         if not isinstance(payload, dict):
             raise LatchkeyGatewayClientError(f"GET {url} returned non-object JSON: {payload!r}")
-        validated: dict[str, AvailableServiceEntry] = {}
-        for service_name, raw_entry in payload.items():
-            try:
-                validated[service_name] = AvailableServiceEntry.model_validate(raw_entry)
-            except ValidationError as e:
+        validated: dict[str, tuple[AvailableServiceEntry, ...]] = {}
+        for service_name, raw_entries in payload.items():
+            if not isinstance(raw_entries, list):
                 raise LatchkeyGatewayClientError(
-                    f"GET {url} entry for service {service_name!r} has an invalid shape: {e}",
-                ) from e
+                    f"GET {url} value for service {service_name!r} is not a JSON array: {raw_entries!r}",
+                )
+            entries: list[AvailableServiceEntry] = []
+            for index, raw_entry in enumerate(raw_entries):
+                try:
+                    entries.append(AvailableServiceEntry.model_validate(raw_entry))
+                except ValidationError as e:
+                    raise LatchkeyGatewayClientError(
+                        f"GET {url} entry {index} for service {service_name!r} has an invalid shape: {e}",
+                    ) from e
+            validated[service_name] = tuple(entries)
         return validated
 
     def get_granted_permissions_for_scopes(

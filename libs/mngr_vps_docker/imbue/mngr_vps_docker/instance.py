@@ -1301,7 +1301,7 @@ class VpsDockerProvider(BaseProviderInstance):
                 if existing is not None:
                     updated = existing.model_copy(update={"certified_host_data": certified_data})
                     host_store.write_host_record(updated)
-        except (HostConnectionError, MngrError) as e:
+        except MngrError as e:
             logger.warning("Failed to sync certified data to VPS host volume: {}", e)
 
     # =========================================================================
@@ -1408,11 +1408,8 @@ class VpsDockerProvider(BaseProviderInstance):
         host_id = HostId.generate()
         logger.info("Creating VPS Docker host {} ({}) ...", name, host_id)
 
-        base_image = str(image) if image else self.config.default_image
-        effective_start_args = tuple(self.config.default_start_args) + tuple(start_args or ())
         parsed = self._parse_build_args(build_args)
         region, plan = parsed.region, parsed.plan
-        docker_build_args = parsed.docker_build_args
 
         _vps_key_path, vps_public_key = self._get_vps_ssh_keypair()
         vps_host_key_path, vps_host_public_key = self._get_vps_host_keypair()
@@ -1435,42 +1432,23 @@ class VpsDockerProvider(BaseProviderInstance):
             )
 
             with self._make_outer_for_vps_ip(vps_ip) as outer:
-                # The unified host volume is provisioned at the top of
-                # ``_setup_container_on_vps`` -- that runs before the
-                # (potentially slow and failure-prone) image pull/build so the
-                # volume still exists by the time ``_finalize_host_creation``
-                # writes ``host_state.json``.
-                container_name, container_id, volume_name = self._setup_container_on_vps(
+                host = self.create_host_on_existing_vps(
                     outer=outer,
                     host_id=host_id,
                     name=name,
                     vps_ip=vps_ip,
-                    base_image=base_image,
-                    effective_start_args=effective_start_args,
-                    docker_build_args=docker_build_args,
-                    git_depth=parsed.git_depth,
-                    tags=tags,
-                    known_hosts=known_hosts,
-                    authorized_keys=authorized_keys,
-                )
-
-                host = self._finalize_host_creation(
-                    host_id=host_id,
-                    name=name,
-                    vps_ip=vps_ip,
-                    outer=outer,
-                    container_name=container_name,
-                    container_id=container_id,
-                    volume_name=volume_name,
-                    base_image=base_image,
-                    effective_start_args=effective_start_args,
-                    tags=tags,
-                    lifecycle=lifecycle,
-                    region=region,
-                    plan=plan,
                     vps_instance_id=vps_instance_id,
                     vps_ssh_key_id=vps_ssh_key_id,
                     vps_host_public_key=vps_host_public_key,
+                    region=region,
+                    plan=plan,
+                    image=image,
+                    tags=tags,
+                    build_args=build_args,
+                    start_args=start_args,
+                    lifecycle=lifecycle,
+                    known_hosts=known_hosts,
+                    authorized_keys=authorized_keys,
                 )
 
             logger.info("VPS Docker host {} created successfully (VPS: {}, IP: {})", name, vps_instance_id, vps_ip)
@@ -1497,6 +1475,116 @@ class VpsDockerProvider(BaseProviderInstance):
                 except Exception as cleanup_err:
                     logger.warning("Failed to clean up SSH key: {}", cleanup_err)
             raise
+
+    def create_host_on_existing_vps(
+        self,
+        *,
+        outer: OuterHostInterface,
+        host_id: HostId,
+        name: HostName,
+        vps_ip: str,
+        vps_instance_id: VpsInstanceId,
+        vps_ssh_key_id: str,
+        vps_host_public_key: str,
+        region: str,
+        plan: str,
+        image: ImageReference | None,
+        tags: Mapping[str, str] | None,
+        build_args: Sequence[str] | None,
+        start_args: Sequence[str] | None,
+        lifecycle: HostLifecycleOptions | None,
+        known_hosts: Sequence[str] | None,
+        authorized_keys: Sequence[str] | None,
+    ) -> Host:
+        """Build the container and finalize host state on an already-reachable VPS.
+
+        This is the single canonical "set up the host after the VPS exists"
+        code path. ``create_host`` calls it once it has ordered (or recycled)
+        a VPS and opened an outer; other providers that operate on a VPS they
+        did not order themselves (e.g. ``mngr_imbue_cloud``'s slow path, which
+        rebuilds the container on a leased pool VPS) call it directly with
+        their own ``outer``. It makes no VPS-client (ordering) calls.
+
+        The unified host volume is provisioned at the top of
+        ``_setup_container_on_vps`` -- that runs before the (potentially slow
+        and failure-prone) image pull/build so the volume still exists by the
+        time ``_finalize_host_creation`` writes ``host_state.json``.
+        """
+        base_image = str(image) if image else self.config.default_image
+        effective_start_args = tuple(self.config.default_start_args) + tuple(start_args or ())
+        parsed = self._parse_build_args(build_args)
+
+        container_name, container_id, volume_name = self._setup_container_on_vps(
+            outer=outer,
+            host_id=host_id,
+            name=name,
+            vps_ip=vps_ip,
+            base_image=base_image,
+            effective_start_args=effective_start_args,
+            docker_build_args=parsed.docker_build_args,
+            git_depth=parsed.git_depth,
+            tags=tags,
+            known_hosts=known_hosts,
+            authorized_keys=authorized_keys,
+        )
+
+        return self._finalize_host_creation(
+            host_id=host_id,
+            name=name,
+            vps_ip=vps_ip,
+            outer=outer,
+            container_name=container_name,
+            container_id=container_id,
+            volume_name=volume_name,
+            base_image=base_image,
+            effective_start_args=effective_start_args,
+            tags=tags,
+            lifecycle=lifecycle,
+            region=region,
+            plan=plan,
+            vps_instance_id=vps_instance_id,
+            vps_ssh_key_id=vps_ssh_key_id,
+            vps_host_public_key=vps_host_public_key,
+        )
+
+    def teardown_container_on_existing_vps(self, outer: OuterHostInterface, host_id: HostId) -> None:
+        """Remove the container + per-host volumes/subvolume for ``host_id`` on a reachable VPS.
+
+        The VPS itself is left running (no VPS-client calls). Used to clear a
+        pre-existing container before rebuilding on the same VPS -- e.g. the
+        imbue_cloud slow path reclaiming a leased pool host whose baked
+        container must be torn down before ``create_host_on_existing_vps``
+        rebuilds it under the same ``host_id``. Each step is best-effort and
+        logged; a missing resource is a no-op.
+        """
+        # Remove every workspace container identified by its host-id label.
+        list_result = outer.execute_idempotent_command(
+            f"docker ps -aq --filter label={LABEL_HOST_ID}={shlex.quote(str(host_id))}"
+        )
+        if list_result.success:
+            for container_id in list_result.stdout.split():
+                try:
+                    _remove_container(outer, container_id, force=True)
+                except (HostConnectionError, MngrError) as e:
+                    logger.warning("Failed to remove container {} for host {}: {}", container_id, host_id, e)
+        else:
+            logger.warning("Failed to list containers for host {}: {}", host_id, list_result.stderr.strip())
+
+        # Delete the per-host btrfs subvolume (the bind source for the unified
+        # volume) so the rebuild can recreate it cleanly.
+        subvolume_path = self.config.btrfs_mount_path / host_id.get_uuid().hex
+        try:
+            _delete_btrfs_subvolume_on_outer(outer, subvolume_path)
+        except (HostConnectionError, MngrError) as e:
+            logger.warning("Failed to delete btrfs subvolume {}: {}", subvolume_path, e)
+
+        # Remove the named docker volumes so a recreate with the same names
+        # doesn't collide.
+        for volume_name in (_host_volume_name_for(host_id), _snapshot_trigger_volume_name_for(host_id)):
+            try:
+                _remove_volume(outer, volume_name)
+            except (HostConnectionError, MngrError) as e:
+                logger.warning("Failed to remove volume {} for host {}: {}", volume_name, host_id, e)
 
     def _provision_vps(
         self,
@@ -2033,7 +2121,7 @@ class VpsDockerProvider(BaseProviderInstance):
                 # will fail otherwise because the container still holds it open.
                 try:
                     _remove_container(outer, vps_config.container_name, force=True)
-                except (HostConnectionError, MngrError) as e:
+                except MngrError as e:
                     logger.warning("Failed to remove container: {}", e)
 
                 # Delete the per-host btrfs subvolume before the named volume.
@@ -2044,7 +2132,7 @@ class VpsDockerProvider(BaseProviderInstance):
                 subvolume_path = self.config.btrfs_mount_path / host_id.get_uuid().hex
                 try:
                     _delete_btrfs_subvolume_on_outer(outer, subvolume_path)
-                except (HostConnectionError, MngrError) as e:
+                except MngrError as e:
                     logger.warning("Failed to delete btrfs subvolume {}: {}", subvolume_path, e)
 
                 # Remove the unified host volume. With bind options the volume
@@ -2053,7 +2141,7 @@ class VpsDockerProvider(BaseProviderInstance):
                 # volume name doesn't collide.
                 try:
                     _remove_volume(outer, vps_config.volume_name)
-                except (HostConnectionError, MngrError) as e:
+                except MngrError as e:
                     logger.warning("Failed to remove host volume: {}", e)
 
                 # Remove the per-host snapshot-trigger volume (the named entry;
@@ -2061,7 +2149,7 @@ class VpsDockerProvider(BaseProviderInstance):
                 # all containers on this outer and is left alone).
                 try:
                     _remove_volume(outer, _snapshot_trigger_volume_name_for(host_id))
-                except (HostConnectionError, MngrError) as e:
+                except MngrError as e:
                     logger.warning("Failed to remove snapshot trigger volume: {}", e)
 
         # Destroy the VPS instance
@@ -2230,7 +2318,7 @@ class VpsDockerProvider(BaseProviderInstance):
                             self._container_running_cache[container_name] = _docker_inspect_running(
                                 outer, container_name
                             )
-                    except (HostConnectionError, MngrError) as exc:
+                    except MngrError as exc:
                         logger.warning(
                             "Failed to inspect container status for host {} on VPS {}: {}",
                             host_id,
@@ -2350,7 +2438,7 @@ class VpsDockerProvider(BaseProviderInstance):
                     return [], {}
                 agent_data = host_store.list_persisted_agent_data()
                 return [record], {host_id: agent_data}
-        except (HostConnectionError, MngrError) as e:
+        except MngrError as e:
             cached_records = [r for r in self._host_record_cache.values() if r.vps_ip == vps_ip]
             if cached_records:
                 logger.warning(
@@ -2441,6 +2529,8 @@ class VpsDockerProvider(BaseProviderInstance):
         agent_refs: Sequence[DiscoveredAgent],
         field_generators: Mapping[str, Mapping[str, Callable[[AgentInterface, OnlineHostInterface], Any]]]
         | None = None,
+        offline_field_generators: Mapping[str, Mapping[str, Callable[[DiscoveredAgent, HostDetails], Any]]]
+        | None = None,
         on_error: Callable[[DiscoveredAgent | DiscoveredHost, BaseException], None] | None = None,
     ) -> tuple[HostDetails, list[AgentDetails]]:
         """Build HostDetails and AgentDetails via a single SSH command."""
@@ -2451,13 +2541,25 @@ class VpsDockerProvider(BaseProviderInstance):
 
         # For offline hosts or hosts without a record, fall back to default
         if host_record is None or host_record.vps_ip is None or host_record.config is None:
-            return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+            return super().get_host_and_agent_details(
+                host_ref,
+                agent_refs,
+                field_generators=field_generators,
+                offline_field_generators=offline_field_generators,
+                on_error=on_error,
+            )
 
         try:
             host = self.get_host(host_ref.host_id)
 
             if not isinstance(host, Host):
-                return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+                return super().get_host_and_agent_details(
+                    host_ref,
+                    agent_refs,
+                    field_generators=field_generators,
+                    offline_field_generators=offline_field_generators,
+                    on_error=on_error,
+                )
 
             # Collect all data in one SSH command
             script = build_listing_collection_script(str(self.host_dir), self.mngr_ctx.config.prefix)
@@ -2480,7 +2582,13 @@ class VpsDockerProvider(BaseProviderInstance):
                 host_ref.host_id,
                 e,
             )
-            return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+            return super().get_host_and_agent_details(
+                host_ref,
+                agent_refs,
+                field_generators=field_generators,
+                offline_field_generators=offline_field_generators,
+                on_error=on_error,
+            )
         except MngrError as e:
             if on_error:
                 on_error(host_ref, e)

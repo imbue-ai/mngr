@@ -30,13 +30,13 @@ from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.api.providers import list_provider_names_to_load
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
-from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderDiscoveryError
 from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import ProviderInstanceNotFoundError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import AgentId
@@ -178,6 +178,9 @@ class _ListAgentsParams(FrozenModel):
     field_generators: dict[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] = Field(
         default_factory=dict,
     )
+    offline_field_generators: dict[str, dict[str, Callable[[DiscoveredAgent, HostDetails], Any]]] = Field(
+        default_factory=dict,
+    )
 
 
 @log_call
@@ -222,6 +225,12 @@ def list_agents(
                 plugin_name, generators = hook_result
                 field_generators[plugin_name] = generators
 
+        offline_field_generators: dict[str, dict[str, Callable[[DiscoveredAgent, HostDetails], Any]]] = {}
+        for offline_hook_result in mngr_ctx.pm.hook.offline_agent_field_generators():
+            if offline_hook_result is not None:
+                offline_plugin_name, offline_generators = offline_hook_result
+                offline_field_generators[offline_plugin_name] = offline_generators
+
         params = _ListAgentsParams(
             compiled_include_filters=compiled_include_filters,
             compiled_exclude_filters=compiled_exclude_filters,
@@ -229,6 +238,7 @@ def list_agents(
             on_agent=on_agent,
             on_error=on_error,
             field_generators=field_generators,
+            offline_field_generators=offline_field_generators,
         )
 
         if is_streaming:
@@ -674,8 +684,9 @@ def _collect_and_emit_details_for_host(
     _host_details, agent_details_list = provider.get_host_and_agent_details(
         host_ref,
         agent_refs,
-        params.field_generators,
-        lambda source, exc: _handle_listing_error(source, exc, params, result, results_lock),
+        field_generators=params.field_generators,
+        offline_field_generators=params.offline_field_generators,
+        on_error=lambda source, exc: _handle_listing_error(source, exc, params, result, results_lock),
     )
     for agent_details in agent_details_list:
         # Apply CEL filters if provided
@@ -713,7 +724,7 @@ def _process_host_with_error_handling(
 
     except Exception as e:
         if params.error_behavior == ErrorBehavior.ABORT:
-            if isinstance(e, (MngrError, BaseMngrError)):
+            if isinstance(e, MngrError):
                 raise
             raise MngrError(str(e)) from e
         logger.opt(exception=e).error("Error processing host {}", host_ref.host_id)

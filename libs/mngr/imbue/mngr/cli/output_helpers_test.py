@@ -6,9 +6,8 @@ import pytest
 
 from imbue.mngr.api.rsync import RsyncResult
 from imbue.mngr.cli.output_helpers import AbortError
-from imbue.mngr.cli.output_helpers import _write_json_line
+from imbue.mngr.cli.output_helpers import emit_error_event
 from imbue.mngr.cli.output_helpers import emit_event
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import emit_info
 from imbue.mngr.cli.output_helpers import format_size
@@ -18,6 +17,7 @@ from imbue.mngr.cli.output_helpers import output_git_push_success
 from imbue.mngr.cli.output_helpers import output_rsync_result
 from imbue.mngr.cli.output_helpers import render_format_template
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
@@ -153,20 +153,6 @@ def test_on_error_stores_original_exception() -> None:
     with pytest.raises(AbortError) as exc_info:
         on_error("test error", ErrorBehavior.ABORT, OutputFormat.HUMAN, exc=original)
     assert exc_info.value.original_exception is original
-
-
-# =============================================================================
-# Tests for emit_final_json
-# =============================================================================
-
-
-def test_emit_final_json_outputs_json(capsys: pytest.CaptureFixture[str]) -> None:
-    """emit_final_json should output JSON data."""
-    emit_final_json({"status": "success", "count": 5})
-    captured = capsys.readouterr()
-    output = json.loads(captured.out.strip())
-    assert output["status"] == "success"
-    assert output["count"] == 5
 
 
 # =============================================================================
@@ -432,13 +418,13 @@ def test_write_human_line_with_args(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 # =============================================================================
-# Tests for _write_json_line
+# Tests for write_json_line
 # =============================================================================
 
 
 def test_write_json_line_outputs_json(capsys: pytest.CaptureFixture[str]) -> None:
-    """_write_json_line should output valid JSON followed by newline."""
-    _write_json_line({"key": "value", "number": 42})
+    """write_json_line should output valid JSON followed by newline."""
+    write_json_line({"key": "value", "number": 42})
     captured = capsys.readouterr()
     output = json.loads(captured.out.strip())
     assert output["key"] == "value"
@@ -446,8 +432,8 @@ def test_write_json_line_outputs_json(capsys: pytest.CaptureFixture[str]) -> Non
 
 
 def test_write_json_line_terminates_with_newline(capsys: pytest.CaptureFixture[str]) -> None:
-    """_write_json_line should terminate output with newline."""
-    _write_json_line({"a": 1})
+    """write_json_line should terminate output with newline."""
+    write_json_line({"a": 1})
     captured = capsys.readouterr()
     assert captured.out.endswith("\n")
 
@@ -484,3 +470,35 @@ def test_on_error_jsonl_format_abort(capsys: pytest.CaptureFixture[str]) -> None
     output = json.loads(captured.out.strip())
     assert output["event"] == "error"
     assert output["message"] == "jsonl error"
+
+
+def test_on_error_jsonl_includes_error_class_when_exc_given(capsys: pytest.CaptureFixture[str]) -> None:
+    """on_error attaches the exception's class name to the JSONL error event."""
+    on_error("boom", ErrorBehavior.CONTINUE, OutputFormat.JSONL, exc=MngrError("boom"))
+    output = json.loads(capsys.readouterr().out.strip())
+    assert output["event"] == "error"
+    assert output["error_class"] == "MngrError"
+
+
+# =============================================================================
+# Tests for emit_error_event
+# =============================================================================
+
+
+def test_emit_error_event_jsonl_emits_event_with_error_class(capsys: pytest.CaptureFixture[str]) -> None:
+    """In JSONL mode, emit a structured error record carrying the exception class name."""
+    emit_error_event(MngrError("no exact match"), OutputFormat.JSONL)
+    output = json.loads(capsys.readouterr().out.strip())
+    assert output == {"event": "error", "error_class": "MngrError", "message": "no exact match"}
+
+
+def test_emit_error_event_human_format_is_noop(capsys: pytest.CaptureFixture[str]) -> None:
+    """HUMAN mode must not emit a JSONL error record."""
+    emit_error_event(MngrError("boom"), OutputFormat.HUMAN)
+    assert capsys.readouterr().out == ""
+
+
+def test_emit_error_event_none_format_is_noop(capsys: pytest.CaptureFixture[str]) -> None:
+    """A missing (None) output format -- e.g. failure before option parsing -- is a no-op."""
+    emit_error_event(MngrError("boom"), None)
+    assert capsys.readouterr().out == ""

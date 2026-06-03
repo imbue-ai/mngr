@@ -19,7 +19,10 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.logging import make_jsonl_file_sink
 from imbue.imbue_common.logging import setup_logging
 from imbue.imbue_common.logging import trace_span
-from imbue.mngr.errors import BaseMngrError
+
+
+class _SampleLoggingError(Exception):
+    """Sample exception used to exercise logging behavior on failure paths."""
 
 
 class LogCapture:
@@ -165,8 +168,8 @@ def test_log_span_logs_timing_even_on_exception() -> None:
     try:
         try:
             with log_span("risky operation"):
-                raise BaseMngrError("test error")
-        except BaseMngrError:
+                raise _SampleLoggingError("test error")
+        except _SampleLoggingError:
             pass
 
         assert len(captured_messages) == 2
@@ -404,8 +407,8 @@ def test_trace_span_logs_on_exception() -> None:
     with capture_logs() as cap:
         try:
             with trace_span("risky"):
-                raise BaseMngrError("boom")
-        except BaseMngrError:
+                raise _SampleLoggingError("boom")
+        except _SampleLoggingError:
             pass
 
         assert len(cap.messages) == 2

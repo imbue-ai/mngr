@@ -49,7 +49,6 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import AgentStartError
-from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostDataSchemaError
 from imbue.mngr.errors import InvalidActivityTypeError
@@ -622,7 +621,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     )
                     try:
                         self.execute_idempotent_command(f"rm -f '{lock_file_path}'")
-                    except (BaseMngrError, OSError) as lock_removal_error:
+                    except (MngrError, OSError) as lock_removal_error:
                         logger.warning(
                             "Failed to remove host lock file during error cleanup: {}",
                             lock_removal_error,
@@ -1905,7 +1904,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         """
         agent_id = options.agent_id if options.agent_id is not None else AgentId.generate()
         agent_name = options.name or AgentName(f"agent-{str(agent_id)}")
-        agent_type = options.agent_type or AgentTypeName("claude")
+        agent_type = options.agent_type
         with info_span(
             "Creating agent state...",
             agent_id=str(agent_id),
@@ -2126,9 +2125,8 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         # Merge agent type provisioning fields into options before any other logic.
         # Use resolve_agent_type to get the parent-merged config so that
         # provisioning fields defined on a parent type are inherited by children.
-        if options.agent_type is not None:
-            resolved = resolve_agent_type(options.agent_type, mngr_ctx.config)
-            options = _merge_agent_type_provisioning(resolved.agent_config, options)
+        resolved = resolve_agent_type(options.agent_type, mngr_ctx.config)
+        options = _merge_agent_type_provisioning(resolved.agent_config, options)
 
         with self.mngr_ctx.concurrency_group.make_concurrency_group("provision_agent") as concurrency_group:
             # Call pre-provisioning validation on agent

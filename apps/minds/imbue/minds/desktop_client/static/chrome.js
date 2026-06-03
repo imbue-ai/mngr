@@ -201,6 +201,29 @@
     if (isElectron) window.minds.toggleRequestsPanel();
   };
 
+  // -- Open a permission request from workspace content (browser mode) -------
+  //
+  // The workspace (the cross-origin content iframe) can ask the shell to show
+  // a permission request by posting `{type:'minds:open-request-modal',
+  // requestId}` to `window.parent`. In Electron this is handled by the content
+  // view's relay preload + main process (which opens a modal overlay); in
+  // browser mode there is no overlay, so we navigate the content iframe to the
+  // request page instead. Only honour messages from the content iframe itself,
+  // and only well-formed server-issued ids (`evt-<uuid hex>`), so arbitrary
+  // pages cannot drive navigation.
+  if (!isElectron) {
+    window.addEventListener('message', function (e) {
+      var frame = document.getElementById('content-frame');
+      if (!frame || e.source !== frame.contentWindow) return;
+      var data = e.data;
+      if (!data || typeof data !== 'object') return;
+      if (data.type !== 'minds:open-request-modal') return;
+      var requestId = data.requestId;
+      if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
+      navigateContent('/requests/' + requestId);
+    });
+  }
+
   // -- SSE-driven sidebar (browser mode only) -------------------------------
   function renderWorkspaces(workspaces) {
     var container = document.getElementById('sidebar-workspaces');
@@ -255,7 +278,7 @@
     try {
       if (data.type === 'workspaces') renderWorkspaces(data.workspaces);
       if (data.type === 'auth_status') updateAuthUI(data);
-      if (data.type === 'request_count') updateRequestsBadge(data.count);
+      if (data.type === 'requests') updateRequestsBadge(data.count);
       if (data.type === 'system_interface_status') handleSystemInterfaceStatus(data.agent_id, data.status);
     } catch (e) {}
   }

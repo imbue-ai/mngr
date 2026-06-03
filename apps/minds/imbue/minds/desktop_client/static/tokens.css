@@ -1,23 +1,20 @@
 /*
  * Design tokens + a handful of custom CSS that Tailwind doesn't cover
- * (chrome colors, per-workspace accent stripe, spinner keyframes).
+ * (per-workspace accent stripe, spinner keyframes, titlebar drop shadow).
  *
  * This file is committed and loaded alongside the Tailwind Play CDN JS
  * (which generates utility classes at runtime -- see static/tailwind.js).
+ *
+ * Chrome colors / focus rings / link color are not tokens here -- chrome
+ * uses raw Tailwind classes (bg-zinc-900, text-zinc-200, border-white/10,
+ * focus:ring-blue-600/15, ...) directly. The only token consumed by
+ * non-styleguide code is --shadow-seam (titlebar drop shadow, chrome.html)
+ * and the implicit --workspace-accent (set per-workspace via inline
+ * style, consumed by the .page-workspace / .accent-spine / .sidebar-item
+ * / .accent-swatch rules below).
  */
 
 :root {
-  --bg-chrome: #18181b;
-  --bg-chrome-elev: #27272a;
-  --bg-chrome-hover: rgba(255, 255, 255, 0.06);
-  --bg-chrome-active: rgba(255, 255, 255, 0.10);
-  --border-chrome: rgba(255, 255, 255, 0.08);
-  --text-chrome: #e4e4e7;
-  --text-chrome-muted: #a1a1aa;
-
-  --link: #2563eb;
-  --focus-ring: 0 0 0 3px rgba(37, 99, 235, 0.18);
-
   --shadow-seam: 0 4px 10px -6px rgba(0, 0, 0, 0.35);
 }
 
@@ -74,6 +71,62 @@ html {
 
 .accent-swatch {
   background: var(--workspace-accent, oklch(65% 0.15 230));
+}
+
+/*
+ * Onboarding option cards (creating-page question flow). Selection state
+ * and the editable-textarea reveal are driven by the `.opt-selected` class
+ * (toggled by static/creating.js); kept here rather than as Tailwind
+ * utilities because they depend on parent-state selectors.
+ */
+.opt {
+  display: flex;
+  gap: 12px;
+  padding: 13px 14px;
+  border: 1px solid rgba(9, 9, 11, 0.1);
+  border-radius: 11px;
+  cursor: pointer;
+  background: #f5f5f7;
+  transition: border-color 150ms, background 150ms;
+}
+.opt:hover {
+  border-color: rgba(9, 9, 11, 0.2);
+}
+.opt-selected {
+  border-color: #2563eb;
+  background: rgba(37, 99, 235, 0.06);
+}
+.opt-radio {
+  flex: 0 0 auto;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(9, 9, 11, 0.25);
+  margin-top: 2px;
+  position: relative;
+}
+.opt-selected .opt-radio {
+  border-color: #2563eb;
+}
+.opt-selected .opt-radio::after {
+  content: '';
+  position: absolute;
+  inset: 3.5px;
+  border-radius: 50%;
+  background: #2563eb;
+}
+.opt-body {
+  flex: 1;
+  min-width: 0;
+}
+.opt-edit {
+  display: none;
+}
+.opt-editable.opt-selected .opt-desc {
+  display: none;
+}
+.opt-editable.opt-selected .opt-edit {
+  display: block;
 }
 
 .spinner {
