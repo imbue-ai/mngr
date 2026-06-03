@@ -75,14 +75,37 @@
     </section>
 
     {# ---- Loading screen: full-width, not constrained to the question card ---- #}
+    {# Holds two mutually exclusive sub-views (progress vs. failure) plus a #}
+    {# shared logs/details footer, so the streamed logs stay in one place #}
+    {# regardless of which sub-view is showing. #}
     <section class="screen hidden w-full" data-screen="loading">
-      <div class="text-center pt-2 pb-1">
-        <div class="text-lg font-semibold mb-1.5">Setting up your workspace</div>
-        <p id="tip" class="text-[13px] text-zinc-500 min-h-[34px] leading-snug transition-opacity"></p>
+      {# Progress sub-view: shown while creation is in flight. #}
+      <div id="progress-view">
+        <div class="text-center pt-2 pb-1">
+          <div class="text-lg font-semibold mb-1.5">Setting up your workspace</div>
+          <p id="tip" class="text-[13px] text-zinc-500 min-h-[34px] leading-snug transition-opacity"></p>
+        </div>
+        <div class="h-1.5 bg-zinc-100 rounded-full overflow-hidden">
+          <div id="bar-fill" class="h-full w-0 rounded-full bg-blue-600 transition-[width] duration-300 ease-out"></div>
+        </div>
       </div>
-      <div class="h-1.5 bg-zinc-100 rounded-full overflow-hidden">
-        <div id="bar-fill" class="h-full w-0 rounded-full bg-blue-600 transition-[width] duration-300 ease-out"></div>
+
+      {# Failure sub-view: revealed by creating.js the moment creation fails. #}
+      <div id="failure-view" class="hidden">
+        <div class="text-center pt-2 pb-1">
+          <div class="text-lg font-semibold mb-1.5 text-red-600">We couldn't set up your workspace</div>
+          <p class="text-[13px] text-zinc-500 leading-snug">Setup stopped before your workspace was ready.</p>
+        </div>
+        <div class="px-3 py-2.5 rounded-md text-sm my-2 bg-red-50 text-red-600 border border-red-200">
+          <span id="error-message" class="font-mono text-[12.5px] break-words whitespace-pre-wrap"></span>
+        </div>
+        <div class="flex items-center justify-center gap-2 mt-4">
+          {{ ui.btn_link('Back to setup', '/create', variant='primary') }}
+          {{ ui.btn_link('Home', '/', variant='ghost') }}
+        </div>
       </div>
+
+      {# Shared footer: live stage caption + collapsible logs. #}
       <div class="flex items-center justify-between mt-2.5 text-[11.5px] text-zinc-400">
         <span id="stage">{{ status_text }}</span>
         <button type="button" id="details-toggle"
