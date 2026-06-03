@@ -99,7 +99,7 @@ class ReverseTunnelInfo(FrozenModel):
             "caller of ``setup_reverse_tunnel`` (currently the Latchkey discovery handler) and "
             "read by ``remove_reverse_tunnels_for_agent`` so all tunnels belonging to a "
             "destroyed agent can be torn down together. ``None`` when the caller does not "
-            "associate the tunnel with a specific agent (e.g. minds' bare ``--reverse <r>:<l>`` "
+            "associate the tunnel with a specific agent (e.g. bare ``--reverse <r>:<l>`` "
             "specs from the plugin CLI)."
         ),
     )
@@ -177,8 +177,8 @@ class SSHTunnelManager(MutableModel):
     _shutdown_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     # Reverse tunnels are keyed by ``(conn_key, local_port)`` so that a single
     # SSH host can host multiple concurrent tunnels for different purposes --
-    # e.g. one for the minds API (``local_port == server_port``) and one per
-    # agent for the Latchkey gateway (``local_port == per_agent_gateway_port``).
+    # e.g. one for a host application's API (``local_port == server_port``) and
+    # one per agent for the Latchkey gateway (``local_port == per_agent_gateway_port``).
     _reverse_tunnels: dict[tuple[str, int], ReverseTunnelInfo] = PrivateAttr(default_factory=dict)
     _reverse_tunnel_setup_locks: dict[str, threading.Lock] = PrivateAttr(default_factory=dict)
     _health_check_thread: threading.Thread | None = PrivateAttr(default=None)

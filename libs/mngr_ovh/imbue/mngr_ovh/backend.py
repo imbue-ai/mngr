@@ -138,12 +138,15 @@ class OvhProvider(VpsDockerProvider):
             # real credentials still surfaces through the except branch below.
             self._vps_iam_cache = []
             return []
-        try:
-            resources = list_vps_resources_for_provider(self.ovh_client, provider_name=str(self.name))
-        except MngrError as e:
-            logger.warning("OVH IAM tag listing failed; treating as empty: {}", e)
-            self._vps_iam_cache = []
-            return []
+        # Deliberately do NOT catch IAM-listing errors here. Swallowing to an
+        # empty list would make a transient OVH outage / expired credentials
+        # look like "this provider has zero hosts" -- which the discovery layer
+        # cannot distinguish from a real empty result, and which defeats mngr's
+        # "mark hosts UNKNOWN when a provider's discovery fails" safeguard. We
+        # let it propagate so `mngr list --on-error continue` records the
+        # failure instead of silently dropping live hosts. (The genuinely-
+        # unconfigured case is the is_unconfigured early-return above.)
+        resources = list_vps_resources_for_provider(self.ovh_client, provider_name=str(self.name))
         hostnames = [r.name for r in resources if r.name]
         self._vps_iam_cache = hostnames
         return list(hostnames)
