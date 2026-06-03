@@ -7,7 +7,8 @@
 
   The legacy `tokens.css` content (workspace-accent variables, spinner
   keyframes, .opt onboarding cards) is now part of `globals.css`, which
-  Vite emits inside `app.css`.
+  Vite emits as `assets/globals.css` (Vite names CSS bundles after the
+  imported `.css` source, not the JS entry).
 
   Blocks:
     title           -- <title> contents. Defaults to "Minds".
@@ -25,7 +26,7 @@
 <head>
   <meta charset="UTF-8">
   <title>{% block title %}Minds{% endblock %}</title>
-  <link rel="stylesheet" href="/_static/_dist/assets/app.css">
+  <link rel="stylesheet" href="/_static/_dist/assets/globals.css">
   {% block head %}{% endblock %}
 </head>
 <body class="{% block body_class %}bg-zinc-50 text-zinc-900 font-sans antialiased{% endblock %}"
