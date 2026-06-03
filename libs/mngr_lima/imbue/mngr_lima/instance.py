@@ -781,8 +781,12 @@ sudo poweroff
     def _start_docker_host(self, host_record: HostRecord) -> Host:
         """Start a stopped docker-mode host: boot the VM, then relaunch the container."""
         config = host_record.config
-        assert config is not None and config.container_name is not None and config.container_host_port is not None
         host_id = HostId(host_record.certified_host_data.host_id)
+        if config is None or config.container_name is None or config.container_host_port is None:
+            raise MngrError(
+                f"Host {host_id} is missing docker-mode configuration "
+                "(container_name/container_host_port) and cannot be started."
+            )
         container_host_port = config.container_host_port
 
         try:
@@ -1306,7 +1310,8 @@ sudo poweroff
 
         # Instance is running -- create online host.
         if host_record.config.is_host_in_docker:
-            assert host_record.config.container_host_port is not None
+            if host_record.config.container_host_port is None:
+                raise MngrError(f"Host {host_id} is in docker mode but its record is missing container_host_port.")
             host_obj = self._create_container_host_object(
                 host_id,
                 HostName(host_record.certified_host_data.host_name),
