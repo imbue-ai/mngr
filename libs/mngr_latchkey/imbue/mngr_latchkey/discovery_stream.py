@@ -89,6 +89,14 @@ class DiscoveryStreamConsumer(MutableModel):
         frozen=True,
         description="Path to the mngr binary used to spawn the observe subprocess.",
     )
+    events_dir: Path | None = Field(
+        default=None,
+        frozen=True,
+        description="If set, passed to `mngr observe` as --events-dir so this discovery observer's "
+        "event log lives in a private per-process directory instead of the shared default. Keeps "
+        "latchkey's discovery snapshots out of any other observer's tail (see "
+        "MngrConfig.events_base_dir_override). Latchkey always sets this.",
+    )
 
     _on_agent_discovered_callbacks: list[OnAgentDiscoveredCallback] = PrivateAttr(default_factory=list)
     _on_agent_destroyed_callbacks: list[OnAgentDestroyedCallback] = PrivateAttr(default_factory=list)
@@ -115,8 +123,11 @@ class DiscoveryStreamConsumer(MutableModel):
         """Spawn the ``mngr observe`` subprocess and begin dispatching events."""
         if self._process is not None:
             raise RuntimeError("DiscoveryStreamConsumer.start already called")
+        command = [self.mngr_binary, "observe", "--discovery-only", "--quiet"]
+        if self.events_dir is not None:
+            command += ["--events-dir", str(self.events_dir)]
         self._process = self.concurrency_group.run_process_in_background(
-            command=[self.mngr_binary, "observe", "--discovery-only", "--quiet"],
+            command=command,
             on_output=self._on_observe_output,
             cwd=Path.home(),
         )

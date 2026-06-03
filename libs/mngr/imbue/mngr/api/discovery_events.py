@@ -195,9 +195,17 @@ _DISCOVERY_EVENT_ADAPTER: Final[TypeAdapter[DiscoveryEvent]] = TypeAdapter(Disco
 
 @pure
 def get_discovery_events_dir(config: MngrConfig) -> Path:
-    """Return the directory for discovery event files."""
-    host_dir = Path(config.default_host_dir).expanduser()
-    return host_dir / "events" / "mngr" / "discovery"
+    """Return the directory for discovery event files.
+
+    When ``config.events_base_dir_override`` is set, discovery events live under it
+    instead of ``default_host_dir``. This lets a ``mngr observe --discovery-only``
+    process write/read a private event log that no other observer tails (see
+    ``MngrConfig.events_base_dir_override``). Both the snapshot writers (under
+    ``list_agents``) and the reader/tail in ``run_discovery_stream`` derive their
+    path from this function, so a single override relocates the whole stream.
+    """
+    base = config.events_base_dir_override or config.default_host_dir
+    return Path(base).expanduser() / "events" / "mngr" / "discovery"
 
 
 @pure
