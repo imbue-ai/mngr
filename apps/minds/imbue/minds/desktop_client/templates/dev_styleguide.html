@@ -19,28 +19,34 @@
 {% block content %}
 {#
   Canonical workspace palette: name, var() expression, and an ``is_dark`` flag
-  that mirrors the OKLCH ``L >= 0.6`` threshold theme.js uses to pick the
-  data-theme. Shared by the surface picker (uses all three fields) and the
-  workspace-palette swatch grid (uses ``name`` only), so a palette change is
-  a single-edit operation rather than a two-place lockstep.
+  that drives the swatch label color (white text on dark swatches, near-black
+  text on light ones -- otherwise the lighter palette entries would render
+  their own labels illegibly on top of themselves).
+
+  The 11 names + hex values are imported verbatim from Figma's "Workspace
+  colors" variable collection -- emotive concept names (indifference =
+  pure black, confusion = dark teal, ... clarity = pale cream). Shared by
+  the surface picker (uses all three fields) and the workspace-palette
+  swatch grid (uses ``name`` only), so a palette change is a single-edit
+  operation rather than a two-place lockstep.
 #}
 {% set _PALETTE = [
-      ('forest-deep', 'var(--palette-forest-deep)', true),
-      ('forest',      'var(--palette-forest)',      true),
-      ('claret',      'var(--palette-claret)',      true),
-      ('olive',       'var(--palette-olive)',       true),
-      ('charcoal',    'var(--palette-charcoal)',    true),
-      ('sky',         'var(--palette-sky)',         false),
-      ('blush',       'var(--palette-blush)',       false),
-      ('lime',        'var(--palette-lime)',        false),
-      ('lavender',    'var(--palette-lavender)',    false),
-      ('sage',        'var(--palette-sage)',        false),
-      ('cream',       'var(--palette-cream)',       false),
-      ('taupe',       'var(--palette-taupe)',       false),
+      ('indifference', 'var(--ws-indifference)', true),
+      ('confusion',    'var(--ws-confusion)',    true),
+      ('courage',      'var(--ws-courage)',      true),
+      ('envy',         'var(--ws-envy)',         true),
+      ('peace',        'var(--ws-peace)',        false),
+      ('belonging',    'var(--ws-belonging)',    false),
+      ('energy',       'var(--ws-energy)',       false),
+      ('strength',     'var(--ws-strength)',     false),
+      ('comfort',      'var(--ws-comfort)',      false),
+      ('inspiration',  'var(--ws-inspiration)',  false),
+      ('clarity',      'var(--ws-clarity)',      false),
 ] %}
 {# Shared class list for the surface-picker swatch buttons. Kept here so
-   the pure-black / pure-white hardcoded buttons and the palette-loop
-   buttons cannot drift from each other. #}
+   the pure-white hardcoded button and the palette-loop buttons cannot
+   drift from each other. (Pure black isn't a separate button anymore --
+   ``--ws-indifference`` IS pure black and lives in the palette loop.) #}
 {% set _SWATCH_CLS = 'flex flex-col items-start gap-1 px-3 py-2 rounded-md border border-line transition hover:border-line-strong' %}
 <div class="max-w-5xl mx-auto px-8 py-10 space-y-12">
 
@@ -58,37 +64,24 @@
   <section data-surface-picker>
     <h2 class="text-h2 text-ink mb-1">Surface</h2>
     <p class="text-caption text-ink-secondary mb-4">
-      Pick a workspace color (or the pure-black non-workspace baseline). The
-      whole page re-tints and components flip between light- and dark-theme
-      palettes automatically based on the surface's luminance.
+      Pick a workspace color (``indifference`` is the pure-black non-workspace
+      baseline). The whole page re-tints and components flip between light-
+      and dark-theme palettes automatically based on the surface's luminance.
     </p>
     <div class="bg-surface-elevated border border-line rounded-xl p-4 shadow-card">
       <div class="flex flex-wrap items-stretch gap-2">
-        <button type="button" data-surface="#000000"
-                class="{{ _SWATCH_CLS }}"
-                style="background: #000000; color: #ffffff;">
-          <span class="text-caption font-medium">pure black</span>
-          <span class="font-mono text-[11px] opacity-70">#000000</span>
-        </button>
         <button type="button" data-surface="#ffffff"
                 class="{{ _SWATCH_CLS }}"
                 style="background: #ffffff; color: #18181b;">
           <span class="text-caption font-medium">pure white</span>
           <span class="font-mono text-[11px] opacity-70">#ffffff</span>
         </button>
-        {#
-          Each palette entry's ``is_dark`` flag (defined in ``_PALETTE``
-          above) drives the swatch label color -- white text on the dark
-          swatches, near-black text on the light ones (otherwise sky /
-          blush / lime / lavender / sage / cream / taupe labels would be
-          illegible against their own backgrounds).
-        #}
         {% for name, css, is_dark in _PALETTE %}
         <button type="button" data-surface="{{ css }}"
                 class="{{ _SWATCH_CLS }}"
                 style="background: {{ css }}; color: {% if is_dark %}rgba(255,255,255,0.95){% else %}#18181b{% endif %};">
           <span class="text-caption font-medium">{{ name }}</span>
-          <span class="font-mono text-[11px] opacity-70">--palette-{{ name }}</span>
+          <span class="font-mono text-[11px] opacity-70">--ws-{{ name }}</span>
         </button>
         {% endfor %}
         <div class="flex items-center gap-3 ml-2">
@@ -104,17 +97,18 @@
   <section>
     <h2 class="text-h2 text-ink mb-1">Workspace palette</h2>
     <p class="text-caption text-ink-secondary mb-4">
-      Picker source for new workspaces (future PR). Each swatch is a CSS
-      variable on <code class="font-mono">:root</code>.
+      The 11 Figma "Workspace colors" variables. Picker source for new
+      workspaces (future PR). Each swatch is a CSS variable on
+      <code class="font-mono">:root</code>.
     </p>
     <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
       {% for name, css, is_dark in _PALETTE %}
-      <div data-token="--palette-{{ name }}"
+      <div data-token="--ws-{{ name }}"
            class="flex items-center gap-3 bg-surface-elevated border border-line rounded-lg p-3 shadow-card">
         <div class="w-10 h-10 rounded-md border border-line shrink-0"
              style="background: {{ css }};"></div>
         <div class="min-w-0 flex-1">
-          <div class="font-mono text-caption text-ink truncate">--palette-{{ name }}</div>
+          <div class="font-mono text-caption text-ink truncate">--ws-{{ name }}</div>
         </div>
       </div>
       {% endfor %}

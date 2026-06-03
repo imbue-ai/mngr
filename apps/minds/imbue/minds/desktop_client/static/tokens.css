@@ -37,21 +37,23 @@
 
 :root {
   /* --- Workspace palette (primitives) ---------------------------------
-     Picker source for new workspaces. Existing workspaces continue to
-     use the hash-derived oklch(L% 0.15 H) accent until they're migrated
-     onto this palette in a future PR. */
-  --palette-forest-deep:  oklch(28% 0.04 165);
-  --palette-forest:       oklch(38% 0.07 150);
-  --palette-claret:       oklch(38% 0.08 25);
-  --palette-olive:        oklch(48% 0.09 110);
-  --palette-charcoal:     oklch(35% 0.02 270);
-  --palette-sky:          oklch(78% 0.06 235);
-  --palette-blush:        oklch(82% 0.05 25);
-  --palette-lime:         oklch(86% 0.16 115);
-  --palette-lavender:     oklch(82% 0.05 290);
-  --palette-sage:         oklch(86% 0.04 145);
-  --palette-cream:        oklch(92% 0.05 80);
-  --palette-taupe:        oklch(70% 0.03 65);
+     11 named workspace colors imported verbatim from the Figma Minds
+     "Workspace colors" variable collection. Picker source for new
+     workspaces; existing workspaces continue to use the hash-derived
+     oklch(70% 0.15 H) accent until they're migrated onto this palette
+     in a future PR. ``--ws-indifference`` is the pure-black baseline
+     used by non-workspace pages. */
+  --ws-indifference: #000000;
+  --ws-confusion:    #0b292b;
+  --ws-courage:      #492222;
+  --ws-envy:         #3c3d06;
+  --ws-peace:        #9fbbd3;
+  --ws-belonging:    #e8a7a8;
+  --ws-energy:       #cecd0c;
+  --ws-strength:     #cfc7b3;
+  --ws-comfort:      #f5d6a0;
+  --ws-inspiration:  #e9ecd9;
+  --ws-clarity:      #fcefd4;
 
   /* --- Brand / state primitives -------------------------------------- */
   --palette-brand-red:      rgb(220 38 38);

@@ -473,13 +473,18 @@ def test_render_dev_styleguide_page_surfaces_tokens_and_macro_widgets() -> None:
 
 def test_render_dev_styleguide_page_has_surface_picker() -> None:
     """The surface picker is the entry point for inspecting the design
-    system on any workspace surface -- it must include the pure-black
-    baseline, at least one Figma palette swatch, and the legacy hue
-    slider used to dial in arbitrary OKLCH workspace accents."""
+    system on any workspace surface. It must include:
+
+    - The pure-black baseline -- which is ``--ws-indifference`` in the
+      Figma palette (no separate hardcoded ``#000000`` swatch).
+    - At least one named Figma palette swatch.
+    - The legacy hue slider used to dial in arbitrary OKLCH workspace
+      accents (the non-Figma fallback path).
+    """
     html = render_dev_styleguide_page()
     assert "data-surface-picker" in html
-    assert 'data-surface="#000000"' in html
-    assert 'data-surface="var(--palette-forest)"' in html
+    assert 'data-surface="var(--ws-indifference)"' in html
+    assert 'data-surface="var(--ws-confusion)"' in html
     assert 'id="styleguide-accent-hue"' in html
 
 

@@ -57,23 +57,28 @@ window.tailwind.config = {
           hover:   'var(--accent-hover)',
           soft:    'var(--accent-soft)',
         },
-        // Workspace palette primitives -- used by the styleguide picker and
+        // Workspace palette primitives -- the 11 named Figma "Workspace
+        // colors" plus the brand seeds. Used by the styleguide picker and
         // (future PR) by the new-workspace color picker. Production pages
-        // should reach for these only when they need a literal palette
-        // swatch; everything else should use the semantic tokens above.
+        // should reach for these only when they need a literal swatch;
+        // everything else should use the semantic tokens above.
+        ws: {
+          indifference: 'var(--ws-indifference)',
+          confusion:    'var(--ws-confusion)',
+          courage:      'var(--ws-courage)',
+          envy:         'var(--ws-envy)',
+          peace:        'var(--ws-peace)',
+          belonging:    'var(--ws-belonging)',
+          energy:       'var(--ws-energy)',
+          strength:     'var(--ws-strength)',
+          comfort:      'var(--ws-comfort)',
+          inspiration:  'var(--ws-inspiration)',
+          clarity:      'var(--ws-clarity)',
+        },
         palette: {
-          'forest-deep': 'var(--palette-forest-deep)',
-          forest:        'var(--palette-forest)',
-          claret:        'var(--palette-claret)',
-          olive:         'var(--palette-olive)',
-          charcoal:      'var(--palette-charcoal)',
-          sky:           'var(--palette-sky)',
-          blush:         'var(--palette-blush)',
-          lime:          'var(--palette-lime)',
-          lavender:      'var(--palette-lavender)',
-          sage:          'var(--palette-sage)',
-          cream:         'var(--palette-cream)',
-          taupe:         'var(--palette-taupe)',
+          'brand-red':      'var(--palette-brand-red)',
+          'brand-red-soft': 'var(--palette-brand-red-soft)',
+          'accent-blue':    'var(--palette-accent-blue)',
         },
       },
       fontSize: {
