@@ -15,33 +15,21 @@ Read the entire "# Testing" section of style_guide.md closely (in particular "Hi
 
 Once you've gathered that context, please do the below.
 
-Your task is to identify tests within the scan scope that are low-quality, fragile, or misleading -- tests that pass without actually establishing that the code is correct, that will break for reasons unrelated to real bugs, or that are placed/structured wrongly. A bad test is worse than no test: it spends CI time, it lulls readers into thinking a behavior is covered when it is not, and it has to be maintained. **The central question for every test is: would this test fail if the code under test had a real bug? If you cannot point to a specific bug the test would catch, it is a candidate.**
+Your task is to identify tests within the scan scope that are low-quality, fragile, or misleading -- tests that pass without establishing that the code is correct, that break for reasons unrelated to real bugs, or that are placed or structured wrongly. A bad test is worse than no test: it costs CI time and maintenance, and it lulls readers into thinking a behavior is covered when it is not.
 
-Focus on the semantic quality of the tests -- the things a linter or ratchet cannot see. Some anti-patterns (`unittest.mock` imports, `monkeypatch.setattr`, `time.sleep`, inline imports) are already enforced by the per-project `test_ratchets.py`; go look at the existing ratchet tests and do NOT re-report a raw occurrence that a ratchet already counts. You should still report the *semantic* problem when one of those patterns is being used to fake out behavior in a way that makes the test meaningless, but say what is wrong with the test, not merely "this uses a mock".
+The style guide's "# Testing" section already catalogs what makes a test good -- do not restate it; your job is to apply it. Focus on semantic quality, the things a linter or ratchet cannot see. (`unittest.mock`, `monkeypatch.setattr`, `time.sleep`, and inline imports are already counted by the per-project `test_ratchets.py`; check those ratchets and do not re-report a raw occurrence. Do report the semantic damage when such a pattern makes a test meaningless -- e.g. a mock that fakes out the very thing under test -- but say what is wrong with the test, not merely that it "uses a mock".)
 
-## What to look for
+## How to judge each test
 
-The style guide defines the bar; this is a checklist of the concrete shapes that violate it, to scan for. Examine every test in the scan scope, looking for:
+Judge every test along two axes.
 
-- **Tautological or unfalsifiable assertions** -- asserting a constructor field equals the value just passed in, a constant against itself, or any value the test constructed rather than the *effect* of the operation under test.
-- **"No exception raised" as the only check** -- the body calls the code but never asserts on the output or effect.
-- **Tests of implementation rather than behavior** -- assertions on internal call order, private attributes, or how a result was computed, such that a behavior-preserving refactor would break them.
-- **Error tests that don't pin the error** -- `pytest.raises(Exception)` (or a bare `except`) that never checks the specific error type or message.
-- **Weak coverage-chasing assertions** -- `assert result is not None`, `assert len(x) > 0`, and similar, where the real contract is far more specific.
-- **Missing cases** -- branchy or collection-handling code tested only on the happy path, with no empty / single / boundary / per-branch coverage.
-- **Mock misuse and faking** -- hand-rolled fakes that don't inherit the interface they stand in for, mocks defined inline instead of in a shared `mock_*_test.py`, `types.SimpleNamespace` where a real object belongs, or mocking the very thing under test so the assertion only checks the mock.
-- **Flakiness and isolation hazards** -- sleep/wall-clock synchronization instead of polling, non-unique IDs/constants, shared mutable state or order-dependence, touching the real `HOME` or other shared on-disk state, live network from unit/integration tests.
-- **Wrong type, location, or marking** -- unit tests (`*_test.py`) that are slow or reach external resources; integration/acceptance/release tests in the wrong filename pattern or missing their `@pytest.mark.*`; or tests that use external resources (network, credentials, expensive infra) left unmarked as plain unit/integration tests rather than `@pytest.mark.acceptance`/`release`.
-- **Organization and naming** -- classes used to group test functions, undescriptive test names, or `parametrize` mismatched to whether the cases truly share logic (split apart, or merge near-duplicate functions).
-- **Snapshot misuse** -- hand-written "expected" values that duplicate the implementation's logic (so test and code drift together silently), oversized inline snapshots that should be hashed/file-based, or snapshots too opaque to review.
+**Does it actually verify behavior?** This is the heart of it. For each test or assertion, ask:
 
-## How to evaluate each candidate
+1. **Would it catch a real bug?** Name the concrete bug -- a specific wrong value, a swapped branch, a dropped side effect -- the test should guard against, and check that its assertions would actually fail on it. If you cannot, or they would still pass, it is a candidate. Exercising the code is not the same as verifying it. (Tautological assertions, "it didn't raise" with no check on the result, and loose coverage-chasing assertions all fail here.)
+2. **Behavior or implementation?** Would a behavior-preserving refactor break it? Then it is coupled to implementation details (internal call order, private attributes, how a result was computed) and is a candidate; good tests assert on observable effects.
+3. **Could it fail for the wrong reasons?** Sleep-based synchronization, non-unique IDs, shared state, order-dependence, real network access, or anything not self-isolating makes it flaky -- flag it.
 
-For each test (or assertion) you find, ask these three questions:
-
-1. **Would it catch a real bug?** Construct the concrete bug -- a specific wrong value, a swapped branch, a dropped side effect -- that this test is supposed to guard against, and check whether the assertions would actually fail on it. If you cannot name such a bug, or the assertions would still pass with the bug present, it is a candidate. "It exercises the code" is not the same as "it verifies the code".
-2. **Does it test behavior or implementation?** Would a legitimate, behavior-preserving refactor of the production code break this test? If yes, it is coupled to implementation details and is a candidate. The good version asserts on the observable effect (return value, persisted state, emitted output), not on how the result was produced.
-3. **Will it fail for the wrong reasons?** Could this test fail (or pass) due to timing, ordering, shared state, environment, or non-unique identifiers rather than the correctness of the code? Flag anything that is non-deterministic, not self-isolating, or dependent on another test having run first.
+**Is it well-formed per the style guide?** Flag structural divergences the guide defines: wrong test type, location, or marker for the dependencies it actually uses; classes used to group test functions; undescriptive names; misuse of `parametrize`; missing edge / branch / empty-collection cases; and snapshot misuse (hand-written expected values that just duplicate the code, or oversized inline snapshots that should be hashed).
 
 ## Reporting
 
@@ -54,8 +42,6 @@ If you find a test that is flaky (passes and fails non-deterministically), call 
 Do NOT report issues that are already covered by an existing FIXME.
 
 Do NOT report issues that are highlighted as non-issues in non_issues.md.
-
-Do NOT re-report a raw pattern occurrence that an existing ratchet already counts (report the semantic test-quality problem instead, if there is one).
 
 After reviewing all the tests in the scan scope, think carefully about the most important and most misleading ones (a test that silently passes on a real bug is worse than one that is merely redundant).
 
