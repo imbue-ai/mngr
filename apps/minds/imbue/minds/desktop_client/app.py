@@ -2799,9 +2799,7 @@ def _handle_request_page(
     req_event = inbox.get_request_by_id(request_id)
     if req_event is None:
         return HTMLResponse(
-            content=render_request_unavailable_page(
-                message="It may have expired, or it was opened from an old link."
-            ),
+            content=render_request_unavailable_page(message="It may have expired, or it was opened from an old link."),
             status_code=404,
         )
     # A granted/denied request lingers in the append-only log, so re-rendering
@@ -2809,9 +2807,7 @@ def _handle_request_page(
     # "no longer available" page instead.
     if inbox.is_request_resolved(request_id):
         return HTMLResponse(
-            content=render_request_unavailable_page(
-                message="It has already been processed."
-            ),
+            content=render_request_unavailable_page(message="It has already been processed."),
             status_code=200,
         )
 
