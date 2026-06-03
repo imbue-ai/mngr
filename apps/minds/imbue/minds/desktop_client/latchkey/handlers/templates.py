@@ -82,7 +82,8 @@ def render_file_sharing_permission_dialog(
     """Render the file-sharing permission approval dialog.
 
     Mirrors the predefined dialog's chrome, header, rationale card, and
-    submission JS (via the shared ``templates/permissions.html`` base);
+    submission JS (via the shared ``PermissionsDialog`` /
+    ``PermissionsHeader`` / ``PermissionsForm`` JinjaX components);
     swaps the per-permission checkbox list for a short explanation of
     what the agent will be allowed to do with the path.
 
