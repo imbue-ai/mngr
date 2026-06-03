@@ -70,6 +70,7 @@ from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.system_interface_health import should_enroll_suspect_for_backend_failure
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
@@ -176,7 +177,9 @@ def run(
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
     is_electron = os.getenv("MINDS_ELECTRON") == "1"
     notification_dispatcher = NotificationDispatcher(is_electron=is_electron)
-    backend_resolver = MngrCliBackendResolver()
+    backend_resolver = MngrCliBackendResolver(
+        last_good_agents_path=paths.data_dir / "last_good_agent_topology.json",
+    )
     latchkey = _build_latchkey(data_directory=data_directory)
     latchkey.initialize()
 
@@ -268,12 +271,17 @@ def run(
     # the plugin (registered as a callback below) and on the readiness-probe
     # success that ``_wait_for_workspace_ready`` reports through AgentCreator.
     # Constructed here (instead of inside create_desktop_client) so it can
-    # be threaded into both AgentCreator (for record_success) and consumer's
-    # failure callback (registered before consumer.start() below; otherwise
-    # early failures would dispatch against an empty list).
+    # be threaded into both AgentCreator (for record_probe_success) and the
+    # consumer's failure callback (registered before consumer.start() below;
+    # otherwise early failures would dispatch against an empty list).
     system_interface_health_tracker = SystemInterfaceHealthTracker()
+    # The plugin reports every non-2xx response; minds decides which ones count.
+    # Only connection-level failures and infrastructure 5xx enroll a suspect --
+    # application errors are left for the background probe to adjudicate.
     consumer.add_on_system_interface_backend_failure_callback(
-        lambda agent_id, _reason, _status: system_interface_health_tracker.record_failure(agent_id)
+        lambda agent_id, _reason, status_code: system_interface_health_tracker.record_failure(agent_id)
+        if should_enroll_suspect_for_backend_failure(status_code)
+        else None
     )
 
     # All callbacks registered -- now safe to start the envelope reader

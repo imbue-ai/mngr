@@ -51,8 +51,8 @@ from imbue.mngr.cli.headless_runner import stream_or_accumulate_response
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import emit_event
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
@@ -70,8 +70,10 @@ from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import AgentLifecycleOptions
 from imbue.mngr.interfaces.host import AgentProvisioningOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import HOST_PROVISIONING_FIELD_MAP
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
 from imbue.mngr.interfaces.host import HostLocation
+from imbue.mngr.interfaces.host import HostProvisioningOptions
 from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr.interfaces.host import NewHostBuildOptions
 from imbue.mngr.interfaces.host import NewHostOptions
@@ -505,6 +507,13 @@ class _CreateCommand(click.Command):
     help="Build argument as key=value or --key=value (e.g., -b gpu=h100 -b cpu=2) [repeatable]",
 )
 @optgroup.option("-s", "--start-arg", multiple=True, help="Argument for start [repeatable]")
+@optgroup.option(
+    "--post-host-create-command",
+    "post_host_create_command",
+    multiple=True,
+    help="Shell command to run inside the new host after it is created, before any agent "
+    "work_dir setup. Runs synchronously; non-zero exit aborts the create. [repeatable]",
+)
 @optgroup.group("Host Lifecycle")
 @optgroup.option(
     "--idle-timeout",
@@ -1635,6 +1644,16 @@ def _parse_target_host(
             start_args=tuple(combined_start_args),
         )
 
+        # Parse host provisioning options using the shared field map (parallels
+        # AgentProvisioningOptions; lets template-stacking + CLI use one
+        # definition).
+        host_prov_kwargs: dict[str, tuple[Any, ...]] = {}
+        for config_field, target_field, parser in HOST_PROVISIONING_FIELD_MAP:
+            raw_values: tuple[str, ...] = getattr(opts, config_field, ())
+            if raw_values:
+                host_prov_kwargs[target_field] = tuple(parser(s) for s in raw_values)
+        host_provisioning = HostProvisioningOptions(**host_prov_kwargs)
+
         parsed_host_name_style = HostNameStyle(opts.host_name_style.upper())
         return NewHostOptions(
             provider=address.provider_name,
@@ -1647,6 +1666,7 @@ def _parse_target_host(
                 env_files=host_env_files,
             ),
             lifecycle=lifecycle,
+            provisioning=host_provisioning,
         )
 
     # Targeting an existing host. ``host_name is None`` here would imply only
@@ -1783,7 +1803,7 @@ def _output_result(result: CreateAgentResult, opts: OutputOptions) -> None:
     result_data = {"agent_id": str(result.agent.id), "host_id": str(result.host.id)}
     match opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json(result_data)
+            write_json_line(result_data)
         case OutputFormat.JSONL:
             emit_event("created", result_data, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
@@ -1799,7 +1819,7 @@ _CREATE_HELP_METADATA = CommandHelpMetadata(
     synopsis="""mngr [create|c] [<ADDRESS>] [<AGENT_TYPE>] [-t <TEMPLATE>] [--new-host] [-w WINDOW_NAME=COMMAND]
     [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--transfer <MODE>]
     [--[no-]rsync] [--rsync-args <ARGS>] [--branch [BASE][:NEW]] [--[no-]ensure-clean]
-    [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>]
+    [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>] [--post-host-create-command <COMMAND>]
     [--env <KEY=VALUE>] [--env-file <FILE>] [--pass-env <KEY>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
     [--idle-timeout <SECONDS>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot] [--reuse|--no-reuse]
     [--message <TEXT>] [--message-file <FILE>] [--edit-message]

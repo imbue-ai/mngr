@@ -4,6 +4,133 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-01
+
+# Make `CreateAgentOptions.agent_type` required
+
+- `CreateAgentOptions.agent_type` is now a required field (previously
+  `AgentTypeName | None` defaulting to `None`). Following the removal of
+  the CLI's implicit `claude` default, the residual `agent_type or
+  AgentTypeName("claude")` fallbacks in `api.create.create` and
+  `Host.create_agent_state` were the last places that silently defaulted
+  an unset type to `claude`. Both fallbacks are gone, and the type system
+  now guarantees every agent-creation path supplies a concrete type. The
+  now-dead `if options.agent_type is not None:` guard around agent-type
+  provisioning merging in `Host.provision_agent` was also dropped.
+
+Marked `test_list_command_with_limit` as flaky so offload retries it automatically.
+
+The `on_before_create` and `on_before_host_create` plugin hooks now receive the `MngrContext` as a parameter, giving plugins access to config, the plugin manager, and the concurrency group. Plugins implementing these hooks must add a `mngr_ctx` parameter to their signatures.
+
+Plugins can now contribute standalone help topic pages via the new `register_help_topics` hook. Topics from an installed plugin show up in `mngr help` and are viewable via `mngr help <topic>`, just like mngr's built-in topics. Each topic is a `TopicHelpPage` with explicit metadata (key, description, aliases, see-also) whose body is either `InlineContent(markdown=...)` or `DocFile(path=...)`. Plugin topics that collide with a built-in topic key or alias are skipped so built-in topics always win.
+
+`mngr help <topic>` now renders markdown nicely in an interactive terminal (headings, bold, code, links, and tables) via `rich`, with paragraphs wrapped to the terminal width; the same rendering is applied to command `--help` description and sections. Non-interactive output (pipes, scripts) stays plain. `rich` is imported lazily so it does not affect CLI startup time.
+
+Built-in topic docs are now shipped inside the wheel (`force-include` of the topic doc dirs), fixing a bug where `mngr help <topic>` showed no doc-based topics in a PyPI/wheel install (only the top-level `docs/` tree, which is not packaged, was previously read at runtime).
+
+Tab completion suggests every command and help topic as an argument to `mngr help` (e.g. `mngr help <TAB>` lists `create`, `address`, and any plugin-contributed topics).
+
+Internally, the plugin-facing `TopicHelpPage` model lives in `imbue.mngr.interfaces.help_topic` (so the plugin hookspec can reference it without the plugins layer importing the CLI), while the runtime topic registry lives in `imbue.mngr.cli.help_topics`. mngr's own built-in topics are registered through this same hook (as a built-in plugin) from an explicit registry -- no directory scanning or heading parsing.
+
+In an interactive terminal, `mngr help <topic>` now makes relative and anchor links inside doc-backed topics clickable. Previously a link like `[Idle Detection](idle_detection.md)` or `[a section](#user-input-tracking)` rendered as a dead terminal hyperlink (its relative target means nothing to a terminal or browser).
+
+Each topic's `DocFile` now carries a `source_url` (the doc's canonical GitHub blob URL, pinned to the installed release tag, e.g. `.../blob/v0.2.9/...`, falling back to `main` when the version can't be read). At display time, relative and anchor links are resolved against that URL with `urljoin` (`#anchor` -> `<doc-url>#anchor`, `sibling.md` -> the sibling's URL, `../README.md#x` -> the parent's URL), so the rendered terminal hyperlinks open the right GitHub page/section. Already-absolute links (`https:`, `mailto:`) are left untouched, and plain non-terminal output (pipes, scripts, the doc generator) keeps the original relative links.
+
+Plugins get this for free: a plugin that builds its `DocFile` with a `source_url` (in-repo plugins can use the new `imbue_mngr_doc_url` helper) gets the same clickable-link rewriting; one that omits it simply renders its links unchanged.
+
+# Offline agent field generators
+
+Implemented the plugin hook previously documented as the planned `get_offline_agent_state`, now named `offline_agent_field_generators` to mirror the existing online `agent_field_generators` hook.
+
+- Plugins can now contribute `plugin.<plugin_name>.<field>` data for agents whose host is offline or unreachable. Each generator receives the offline `(DiscoveredAgent, HostDetails)` (rather than the live `(agent, host)` the online hook gets) and computes fields from the cached `data.json` exposed via `DiscoveredAgent.certified_data`. `None` field values are omitted and empty plugins are dropped, exactly like the online path.
+- `mngr list` collects these generators and threads them through `get_host_and_agent_details` to `build_agent_details_from_offline_ref`, so offline plugin fields are usable in `mngr list` columns and CEL filters just like online ones.
+- Discovery snapshots now preserve plugin fields: `discovered_agent_from_agent_details` carries `AgentDetails.plugin` into the reconstructed `certified_data`, so offline generators can still read plugin state for fully-unreachable hosts that fall back to a persisted snapshot.
+- Updated the plugins concept doc to document `offline_agent_field_generators` and remove the `[future]` `get_offline_agent_state` placeholder.
+- Test infrastructure: the `assert_home_is_temp_directory` safety check now also accepts `/private/tmp`, so tests run when `TMPDIR` points into `/tmp` (which macOS realpath-resolves to `/private/tmp`) rather than only the launchd `/var/folders` default.
+
+## 2026-05-30
+
+Tolerate per-host SSH failures during provider agent enumeration.
+
+A single unreachable host (sshd hang, banner reset, auth failure) used to make the default `discover_hosts_and_agents` raise a `HostConnectionError` from the per-host futures loop. That bubbled up to `_construct_and_discover_for_provider` and was recorded as a whole-provider failure, so the resulting `DISCOVERY_FULL` event reported `agents=[]` / `hosts=[]` for the entire provider. Downstream, `mngr_forward`'s resolver blanked its known-agents set and every workspace on that provider became unreachable through the forward plugin -- so one broken Docker container could 503 every other workspace on the same daemon and trip minds' recovery page even for perfectly healthy workspaces.
+
+The default `discover_hosts_and_agents` now catches `HostConnectionError` (and its `HostAuthenticationError` / `HostOfflineError` subclasses) per host and recovers the broken host's agents from the provider's offline view (described below) so the rest of the provider's hosts (and their agents) come through normally. The except block also calls `self.on_connection_error(host_id)` -- matching the contract honored elsewhere in the file -- so providers that cache per-host state (docker's container cache, modal/lima/vps_docker host caches) drop the wedged entry instead of replaying the same stale handle on the next discovery cycle.
+
+Per-host connection errors fall back to the provider's offline view (`to_offline_host(host_id).discover_agents()`). This means a docker container whose sshd has died but whose process is still RUNNING preserves its agents in discovery, mirroring the behavior of a fully-stopped container -- the workspaces stay visible on minds' landing page instead of vanishing on the first SSE poll after sshd dies. The fallback assumes any provider whose hosts can raise `HostConnectionError` implements `to_offline_host`: the local provider never opens a connection (so it never reaches this path), and remote providers persist host/agent state. If `to_offline_host` instead fails -- `NotImplementedError` (no offline view) or `HostNotFoundError` (no persisted record for a host that was just discovered) -- that signals a broken invariant and is allowed to propagate as a per-provider `ProviderDiscoveryError` rather than being masked as an empty agent list. The SSH provider does not yet implement `to_offline_host` (tracked by a FIXME on the class), so an unreachable SSH host currently surfaces as such an error.
+
+## 2026-05-29
+
+- Docker provider: the per-host build image (`mngr-build-<host_id>`) is now untagged when a host is destroyed (and again, defensively, when it is deleted), so built images no longer pile up in `docker images`. Snapshot restore is unaffected -- snapshot images keep their own layers.
+
+Regenerated the CLI reference docs to include the new `mngr imbue_cloud bucket`
+command group (R2 bucket + scoped-key management) added by the mngr_imbue_cloud
+plugin.
+
+`mngr destroy` now actually destroys the host when the last agent on it
+is destroyed -- the documented contract -- regardless of how recently the
+host was created. Previously this fired through the post-destroy GC pass,
+which gates on `min_online_host_age_seconds` (default 10 minutes), so any
+host destroyed within minutes of creation leaked its cloud-side resources
+(e.g. an active imbue_cloud lease, a Vultr VPS) until the 7-day
+destroyed-host grace period eventually triggered `provider.delete_host`.
+
+Two changes in `destroy.py`:
+
+1. **Partition step reconciles discover-vs-on-host disagreement.** When
+   every matched agent is a "ghost" -- returned by the provider's discover
+   but absent from the host's own `get_agents()` -- the destroy CLI now
+   escalates to host-level destruction (`provider.destroy_host`) instead
+   of silently dropping the match. This is what was producing the
+   "No agents found" message when the same agent was destroyed twice on
+   an imbue_cloud-leased host: the first destroy removed `/mngr/agents/<id>/`
+   on the VPS but the connector's lease list still reported the agent.
+
+2. **Post-loop sweep destroys hosts whose last agent was just destroyed.**
+   For each online host that had at least one agent destroyed in this
+   invocation, the destroy CLI now re-checks `host.get_agents()` and, if
+   empty, calls `provider.destroy_host` directly. Bypasses the GC's
+   `min_online_host_age_seconds` filter; the GC pass that runs immediately
+   after is the safety net for transient failures.
+
+Net effect: cloud-side resources are released the moment `mngr destroy`
+returns, and the destroyed-host grace period only retains historical
+state -- aligning all provider types with the same semantic that the
+docker / mngr_vps_docker / imbue_cloud `destroy_host` implementations
+already implement individually.
+
+## New: `--post-host-create-command`
+
+`mngr create` learns a new repeatable flag, `--post-host-create-command`,
+that runs one or more shell commands inside a newly-created host
+synchronously after the host is online but before any agent work_dir is
+touched. Each command runs in order via the host's normal exec path; a
+non-zero exit aborts the create. Stackable from `create_templates.<name>`
+via `post_host_create_command__extend = [...]`.
+
+Motivation: an image may need first-boot setup (e.g.
+forever-claude-template seeds a baked workspace from `/docker_build_code`
+onto its `/mngr/` volume) that must complete before mngr's git mirror
+push or any other work_dir setup. Until now this had to be encoded in the
+container's `CMD`, which raced against mngr's `docker exec` calls and
+required an FCT-specific `use_image_default_cmd` opt-out in
+`mngr_vps_docker` / `providers.docker`. The opt-out and the
+defensive `--workdir /` exec override (from commits `d77714cdf` /
+`55c420c35`) are reverted in the same commit -- the new generic hook
+replaces both.
+
+Install `restic` in the mngr Docker image (`libs/mngr/imbue/mngr/resources/Dockerfile`).
+
+This is the offload test image; the minds app now requires `restic` on the
+machine running it (it initializes each workspace's backup repository
+itself), and its tests exercise a real local restic repository, so restic
+must be present in the test environment.
+
+`build_check_and_install_packages_command` (in `providers/ssh_host_setup.py`) now
+`mkdir -p` the symlink target before creating the `host_dir` symlink. The local
+`docker` provider already creates that subdirectory eagerly so it's a safe no-op
+there; the new docker_vps unified-volume layout relies on the in-script mkdir to
+seed `<volume>/host_dir` before pointing `/mngr` at it.
+
 ## 2026-05-28
 
 # `is_allowed_in_pytest` now defaults to False, and the `MNGR_ALLOW_PYTEST` escape hatch is gone

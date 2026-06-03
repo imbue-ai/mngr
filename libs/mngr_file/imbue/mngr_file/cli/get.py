@@ -12,7 +12,7 @@ from imbue.mngr.cli.address_params import AGENT_OR_HOST_ADDRESS
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.output_helpers import emit_event
-from imbue.mngr.cli.output_helpers import emit_final_json
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.primitives import AgentOrHostAddress
@@ -45,7 +45,7 @@ def _emit_get_result(
     }
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json({"event": "file_read", **data})
+            write_json_line({"event": "file_read", **data})
         case OutputFormat.JSONL:
             emit_event("file_read", data, OutputFormat.JSONL)
         case OutputFormat.HUMAN:

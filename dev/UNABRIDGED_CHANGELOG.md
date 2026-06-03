@@ -4,6 +4,72 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-01
+
+`markdown-it-py` is now an explicit (rather than only transitive) dependency in the lockfile: mngr uses rich's own CommonMark parser directly to rewrite links when rendering help topics for the terminal.
+
+## 2026-05-29
+
+# Spec file-tree updates for the apps/minds todesktop config rename
+
+- `specs/electron-desktop-app/concise.md` and `specs/electron-desktop-app/spec.md`:
+  the file-tree listings for `apps/minds/` now show `todesktop.js` instead of
+  `todesktop.json`. The rename happens in the apps/minds slice of this PR (see
+  `apps/minds/changelog/mngr-activate-todesktop-binary-hook.md`); these spec
+  updates keep the documented layout in sync with the actual one.
+
+- Added a design spec under `specs/docker-cleanup-state-and-images/` documenting the Docker build-image and state-container cleanup work.
+
+Added the implementation spec for Imbue Cloud R2 bucket support
+(`specs/imbue-cloud-r2-buckets/spec.md`).
+
+Updated the `.minds/template/cloudflare.sh` secret template to document that
+`CLOUDFLARE_API_TOKEN` must now be an account-owned (`cfat_`) token carrying
+`Workers R2 Storage: Edit` + `Account API Tokens: Edit` (on top of the existing
+tunnel/DNS/Access/KV permissions), and that R2 must be enabled on the Cloudflare
+account.
+
+- Drop the now-removed `--use-snapshot` flag from the TMR GHA workflow (`.github/workflows/tmr.yml`) so the scheduled/manual TMR runs don't fail at invocation. Snapshot building on `--provider modal` is automatic now, so behavior is unchanged. Also refresh a stale comment in `.github/workflows/tmr-reintegrate.yml` that mentioned the same removed flag.
+
+# Self-hosted Mac runner + launch-to-first-message workflow
+
+- Added `.github/workflows/minds-launch-to-msg.yml`, a `workflow_dispatch` job that (given a minds commit SHA and forever-claude-template ref) either reuses an existing ToDesktop build matching the commit or runs `pnpm dist` to build a fresh draft, then on the self-hosted `minds-runner` macOS host downloads the resulting `.app`, launches it, waits for the backend to come up, and optionally round-trips a real first-message chat against a LIMA agent before cleaning up. Collects diagnostic artifacts on failure.
+- Added `.github/workflows/minds-runner-reset.yml`, a `workflow_dispatch` job to manually reset the self-hosted runner to a clean state (and optionally install a fresh `.app` from a ToDesktop `.zip` URL).
+- Companion infrastructure (the runner Mac itself: Tailscale-tagged, LaunchAgent-installed GitHub Actions runner) lives outside this repo. The runner is registered at the `imbue-ai` org level and is targeted by `runs-on: [self-hosted, macOS, minds-runner]`.
+
+Added `specs/minds-backup-provider/concise.md`, the spec for wiring the
+imbue_cloud bucket capability into the minds workspace-creation flow (backup
+provider toggle, async post-creation restic config injection, and the
+forever-claude-template `host_backup` contract changes).
+
+Added spec `specs/host-backup/concise.md` for a new continuous-backup
+service that runs inside every mind workspace. The service uses restic
+against a Cloudflare R2 bucket by default and takes consistent btrfs
+subvolume snapshots on lima / vps-docker (no-op on plain docker). The
+in-container `host_backup` library + bootstrap config wiring lives in
+forever-claude-template (separate PR). This monorepo's changes provision
+the outer-side `snapshot_helper.sh` systemd unit on vps-docker hosts;
+see `libs/mngr_vps_docker/changelog/mngr-mind-backup.md` and
+`libs/mngr_ovh/changelog/mngr-mind-backup.md` for the per-project
+details.
+
+- Added a spec (``specs/symlink-code-onto-mngr-volume/concise.md``) describing the relocation of the forever-claude-template workspace from ``/code/`` onto the ``/mngr/`` persistent volume (as ``/mngr/code/``), with safety-net ``/code -> /mngr/code`` and ``/worktree -> /mngr/worktree`` symlinks. The spec covers the Dockerfile bake-and-relocate dance (workspace baked at ``/mngr/code/`` then renamed to ``/docker_build_code`` so the volume mount path is empty in the image), the first-boot atomic-seed CMD logic, the per-template scope (``docker``/``vultr``/``ovh`` run the full dance; ``lima`` aligns the path but skips the dance; ``imbue_cloud`` inherits from the ``ovh`` bake), and the no-auto-migration story for existing live hosts. The actual implementation lives in the forever-claude-template repo on the ``mngr/symlink-code`` branch.
+
+Added the design doc for putting the per-host VPS docker unified volume onto
+a loop-mounted btrfs subvolume (`specs/vps-docker-btrfs/concise.md`). See the
+per-project entries under `libs/mngr_vps_docker/`, `libs/mngr_vultr/`, and
+`libs/mngr_ovh/` for the implementation details.
+
+Added a new design spec under `specs/vps-docker-unified-volume/concise.md`
+that documents the docker_vps provider's move from a two-volume layout
+(per-user state container + per-host data volume) to a single unified
+per-host Docker volume on the VPS. The spec captures the rationale,
+expected on-volume layout (`host_state.json`, `agents/<agent_id>.json`,
+`host_dir/`), discovery behavior (find the volume via the agent
+container's `com.imbue.mngr.host-id` label), and the breaking-change
+caveat that pre-existing docker_vps hosts cannot be discovered after
+upgrade.
+
 ## 2026-05-28
 
 Bump the `test-docker-electron` CI job's Node.js to 24.15.0 and pnpm to 10.33.4 to match the new exact-version pins in `apps/minds/package.json`. Also refresh the example `pyproject.toml` block in `specs/electron-desktop-app/spec.md` so it matches the real packaged file (`requires-python = "==3.12.13"` and the actual three-dependency list) instead of the older `>=3.12` / single-`imbue-minds` snapshot, and correct the standalone-pyproject path reference in that spec from `electron/pyproject.toml` to `electron/pyproject/pyproject.toml`.

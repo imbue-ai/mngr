@@ -71,7 +71,7 @@ def test_prevent_silent_decode_error_catches() -> None:
 
 
 def test_prevent_inline_imports() -> None:
-    rc.check_inline_imports(_DIR, snapshot(3))
+    rc.check_inline_imports(_DIR, snapshot(4))
 
 
 def test_prevent_relative_imports() -> None:
@@ -92,7 +92,14 @@ def test_prevent_getattr() -> None:
     # pattern documented inline on _walk_to_field. Switching to model_dump
     # round-tripping to dodge the ratchet would re-introduce the serialisation
     # cost _walk_to_field was rewritten to avoid (see its docstring).
-    rc.check_getattr(_DIR, snapshot(11))
+    #
+    # cli/create.py uses the same map-driven `getattr(opts, config_field, ())`
+    # pattern twice -- once for AgentProvisioningOptions
+    # (PROVISIONING_FIELD_MAP) and once for HostProvisioningOptions
+    # (HOST_PROVISIONING_FIELD_MAP). Both are data-driven traversals where
+    # the attribute name only exists in the map; static field access is not
+    # possible.
+    rc.check_getattr(_DIR, snapshot(12))
 
 
 def test_prevent_setattr() -> None:

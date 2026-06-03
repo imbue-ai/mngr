@@ -408,6 +408,38 @@ def test_reverse_tunnel_established_is_silently_ignored(
     _dispatch(consumer, _forward_envelope(payload, agent_id=_AGENT_ID_1))
 
 
+# --- forward stream: resolver_snapshot ------------------------------------
+
+
+def test_resolver_snapshot_envelope_updates_accessor(consumer: EnvelopeStreamConsumer) -> None:
+    """``resolver_snapshot`` envelopes feed the consumer's per-agent service mirror."""
+    payload = {
+        "type": "resolver_snapshot",
+        "services_by_agent": {
+            str(_AGENT_ID_1): {"system_interface": "http://127.0.0.1:9100"},
+            str(_AGENT_ID_2): {"webdav": "http://127.0.0.1:9200"},
+        },
+    }
+    _dispatch(consumer, _forward_envelope(payload))
+    assert consumer.get_resolver_snapshot_for_agent(_AGENT_ID_1) == {
+        "system_interface": "http://127.0.0.1:9100",
+    }
+    assert consumer.get_resolver_snapshot_for_agent(_AGENT_ID_2) == {
+        "webdav": "http://127.0.0.1:9200",
+    }
+
+
+def test_resolver_snapshot_returns_empty_dict_for_unknown_agent(consumer: EnvelopeStreamConsumer) -> None:
+    """Without any envelope yet, the accessor returns an empty dict (treated as ``no entry yet``)."""
+    assert consumer.get_resolver_snapshot_for_agent(_AGENT_ID_1) == {}
+
+
+def test_malformed_resolver_snapshot_envelope_is_dropped(consumer: EnvelopeStreamConsumer) -> None:
+    """A malformed ``resolver_snapshot`` payload doesn't crash dispatch and leaves the mirror empty."""
+    _dispatch(consumer, _forward_envelope({"type": "resolver_snapshot", "services_by_agent": "not-a-dict"}))
+    assert consumer.get_resolver_snapshot_for_agent(_AGENT_ID_1) == {}
+
+
 # --- forward stream: listening --------------------------------------------
 
 

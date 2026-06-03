@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-01
+
+Fixed flakiness in two `mngr_modal` host-volume acceptance tests by polling `get_volume_for_host` with `wait_for` instead of asserting once, to absorb the brief Modal control-plane lag before a freshly-created volume becomes resolvable by name.
+
+# Offline agent field generators
+
+Updated the provider's `get_host_and_agent_details` override to accept and forward the new `offline_field_generators` parameter to the base implementation, so offline plugin fields (see the mngr changelog entry) are populated when a host falls back to offline data.
+
 ## 2026-05-28
 
 # Dropped redundant per-project ty/ruff ratchet tests

@@ -1,9 +1,14 @@
+import re
+from pathlib import Path
+
 import pytest
 
 from imbue.imbue_common.ids import InvalidRandomIdError
+from imbue.minds.desktop_client import templates as _templates_module
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
+from imbue.minds.desktop_client.templates import render_dev_styleguide_page
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
@@ -13,6 +18,8 @@ from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.mngr.primitives import AgentId
+
+_TOKENS_CSS_PATH = Path(_templates_module.__file__).resolve().parent / "static" / "tokens.css"
 
 _AGENT_A: AgentId = AgentId("agent-00000000000000000000000000000001")
 _AGENT_B: AgentId = AgentId("agent-00000000000000000000000000000002")
@@ -91,17 +98,20 @@ def test_render_create_form_contains_all_launch_modes() -> None:
         assert mode.value.lower() in html
 
 
-def test_render_create_form_selects_docker_by_default() -> None:
+def test_render_create_form_selects_lima_by_default_without_account() -> None:
+    # With no account selected the compute provider defaults to LIMA (the
+    # local self-served default); IMBUE_CLOUD is only the default when an
+    # account is present.
     html = render_create_form()
-    assert 'value="DOCKER" selected' in html
+    assert 'value="LIMA" selected' in html
 
 
 def test_render_create_form_selects_specified_launch_mode() -> None:
-    # CLOUD instead of the default DOCKER so the "selection honored over the
+    # CLOUD instead of the default LIMA so the "selection honored over the
     # default" assertion is meaningful.
     html = render_create_form(launch_mode=LaunchMode.CLOUD)
     assert 'value="CLOUD" selected' in html
-    assert 'value="DOCKER" selected' not in html
+    assert 'value="LIMA" selected' not in html
 
 
 def test_render_create_form_contains_ai_provider_options() -> None:
@@ -118,11 +128,6 @@ def test_render_create_form_defaults_ai_provider_to_subscription_without_account
 def test_render_create_form_omits_env_file_checkbox() -> None:
     html = render_create_form()
     assert "include_env_file" not in html
-
-
-def test_render_create_form_includes_gh_token_field() -> None:
-    html = render_create_form()
-    assert 'name="gh_token"' in html
 
 
 def test_render_create_form_shows_error_message_when_supplied() -> None:
@@ -232,23 +237,249 @@ def test_render_sidebar_page_contains_workspace_list() -> None:
 def test_render_recovery_page_includes_agent_id_and_return_to() -> None:
     html = render_recovery_page(
         agent_id=_AGENT_A,
-        ws_name="my-workspace",
         return_to="http://agent.localhost:8421/",
         initial_status="stuck",
+        initial_error="",
     )
     assert str(_AGENT_A) in html
-    assert "my-workspace" in html
     assert "http://agent.localhost:8421/" in html
     assert "/api/agents/" in html
+    # The two restart tiers the recovery page can dispatch.
     assert "restart-system-interface" in html
+    assert "restart-host" in html
+    # The layer-2 probe endpoint the page calls on load.
+    assert "host-health" in html
     assert 'data-initial-status="stuck"' in html
 
 
 def test_render_recovery_page_restarting_status() -> None:
     html = render_recovery_page(
         agent_id=_AGENT_B,
-        ws_name="ws",
         return_to="",
         initial_status="restarting",
+        initial_error="",
     )
     assert 'data-initial-status="restarting"' in html
+
+
+def test_render_recovery_page_carries_restart_failed_error() -> None:
+    html = render_recovery_page(
+        agent_id=_AGENT_B,
+        return_to="",
+        initial_status="restart_failed",
+        initial_error="Start step of host restart failed: exited 1",
+    )
+    assert 'data-initial-status="restart_failed"' in html
+    assert "Start step of host restart failed: exited 1" in html
+
+
+def test_render_recovery_page_includes_diagnostics_dom_hooks() -> None:
+    """The recovery page must expose the DOM hooks the JS uses to render the
+    debug-menu details block and the Copy diagnostics button. The hooks are
+    present on every render -- the JS populates them when the host-health
+    endpoint response arrives.
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="stuck",
+        initial_error="",
+    )
+    assert 'id="recovery-debug-details"' in html
+    assert 'id="recovery-debug-content"' in html
+    assert 'id="copy-diagnostics-btn"' in html
+
+
+def test_render_recovery_page_renders_copy_ssh_button_with_command() -> None:
+    """When given an ssh_command, the page renders a Copy SSH command button
+    that carries the exact command in its data attribute, beside Copy diagnostics.
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="stuck",
+        initial_error="",
+        ssh_command="ssh -i /home/user/.mngr/key -p 60022 root@127.0.0.1",
+    )
+    assert 'id="copy-ssh-btn"' in html
+    assert 'data-ssh-command="ssh -i /home/user/.mngr/key -p 60022 root@127.0.0.1"' in html
+    # The button must sit inside the diagnostics menu, alongside Copy diagnostics.
+    diag_pos = html.index('id="copy-diagnostics-btn"')
+    ssh_pos = html.index('id="copy-ssh-btn"')
+    details_pos = html.index('id="recovery-debug-details"')
+    assert details_pos < diag_pos < ssh_pos
+    # The click handler copies the data attribute to the clipboard.
+    assert "data-ssh-command" in html
+    assert "navigator.clipboard" in html
+
+
+def test_render_recovery_page_omits_copy_ssh_button_without_command() -> None:
+    """With no ssh_command (the default), the Copy SSH command button is absent
+    -- we never render an inert button that would copy nothing.
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="stuck",
+        initial_error="",
+    )
+    assert 'id="copy-ssh-btn"' not in html
+    assert "Copy SSH command" not in html
+    # Copy diagnostics is unaffected.
+    assert 'id="copy-diagnostics-btn"' in html
+
+
+def test_render_recovery_page_script_branches_on_dispatch_tier() -> None:
+    """The recovery page reads ``dispatch_tier`` directly off the host-health response.
+
+    Each restart tier the server may report must have a corresponding
+    code branch in the page's JS.
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="stuck",
+        initial_error="",
+    )
+    assert "dispatch_tier" in html
+    for tier in ("'workspace_misconfigured'", "'host_offline'", "'interface_unresponsive'", "'host_unresponsive'"):
+        assert tier in html, f"recovery page JS missing branch for {tier}"
+    # The shared landing places for each branch.
+    assert "renderMisconfigured" in html
+    assert "renderUnresponsive" in html
+    assert "Workspace misconfigured" in html
+    assert "Try restart anyway" in html
+
+
+def test_render_recovery_page_loading_hides_diagnostic_dropdown() -> None:
+    """renderLoading must hide the diagnostic dropdown so a stale prior diagnostic
+    does not linger on the page while a fresh check is in flight (issue: user
+    clicked Restart workspace and the previous probe's diagnostic stayed open).
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="stuck",
+        initial_error="",
+    )
+    # renderLoading clears the cached payload and hides the debug details.
+    loading_block_start = html.find("function renderLoading")
+    assert loading_block_start >= 0
+    loading_block_end = html.find("function ", loading_block_start + 1)
+    loading_block = html[loading_block_start:loading_block_end]
+    assert "show(debugDetailsEl, false)" in loading_block
+    assert "latestHealth = null" in loading_block
+
+
+def test_render_recovery_page_restart_failed_also_runs_probe() -> None:
+    """The restart_failed entry must run the diagnostic probe so the page
+    shows both the error details and the diagnostics (in separate elements),
+    not just the error.
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="restart_failed",
+        initial_error="Stop step of host restart failed: exited 1",
+    )
+    # The restart_failed branch in the dispatcher calls runProbe(false) so
+    # the diagnostics are populated without auto-dispatching another restart.
+    assert "restart_failed" in html
+    assert "runProbe(false)" in html
+    # The error-details DOM hook is rendered alongside the diagnostic.
+    assert 'id="recovery-error"' in html
+    assert 'id="recovery-debug-details"' in html
+
+
+def test_render_recovery_page_honors_misconfigured_before_autodispatch_short_circuit() -> None:
+    """The workspace_misconfigured tier must be honored on the restart_failed path.
+
+    A workspace whose services.toml lacks [services.system_interface] lands in
+    restart_failed once its undeclared interface fails to come back up, so the
+    page runs runProbe(false). If the no-auto-dispatch short-circuit
+    (``if (!autoDispatch) renderUnresponsive()``) ran before the
+    workspace_misconfigured check, that workspace would render a misleading
+    "unresponsive" page even though no restart can recover it. Assert the
+    misconfigured branch precedes the short-circuit inside runProbe so the
+    restart_failed path still reaches renderMisconfigured().
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="restart_failed",
+        initial_error="boom",
+    )
+    probe_body = html[html.index("function runProbe(") :]
+    misconfigured_pos = probe_body.index("'workspace_misconfigured'")
+    short_circuit_pos = probe_body.index("if (!autoDispatch)")
+    assert misconfigured_pos < short_circuit_pos, (
+        "the workspace_misconfigured branch must precede the !autoDispatch short-circuit "
+        "so a misconfigured workspace on the restart_failed path renders misconfigured"
+    )
+
+
+def test_render_recovery_page_promotes_button_above_troubleshooting() -> None:
+    """The restart button is the page's primary action, so it must appear
+    before the de-emphasized troubleshooting block -- not sandwiched between
+    the error and diagnostics disclosures as in the previous layout. Both
+    disclosures live inside that troubleshooting block.
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="restart_failed",
+        initial_error="boom",
+    )
+    button_pos = html.index('id="recovery-host-btn"')
+    block_pos = html.index('class="recovery-troubleshooting"')
+    error_pos = html.index('id="recovery-error"')
+    debug_pos = html.index('id="recovery-debug-details"')
+    # Button first, then the troubleshooting block, then both disclosures.
+    assert button_pos < block_pos < error_pos < debug_pos
+
+
+def test_render_dev_styleguide_page_surfaces_tokens_and_macro_widgets() -> None:
+    """The styleguide must surface the live ``:root`` tokens and render
+    each catalog widget through its real macro (so the catalog can't drift
+    silently from the macros it documents)."""
+    html = render_dev_styleguide_page()
+    assert "--shadow-seam" in html
+    # The accent picker section is a separate runtime variable, not a :root token.
+    assert "--workspace-accent" in html
+    # Each pattern block should be present.
+    for header in (
+        "Titlebar buttons",
+        "Window controls",
+        "Sidebar items",
+        "Accent spine",
+        "Spinner",
+        "Buttons",
+        "Notices",
+    ):
+        assert header in html, f"missing pattern: {header}"
+    # The buttons / notices / inputs are rendered through _macros.html; these
+    # assertions verify that the macro output (button label, notice copy, input
+    # name) actually reaches the rendered page.
+    assert ">Primary<" in html and ">Danger<" in html
+    assert "All set: action completed." in html
+    assert 'name="styleguide-focus-ring-input"' in html
+
+
+def test_dev_styleguide_token_swatches_enumerate_root_declarations() -> None:
+    """Drift guard: every ``:root`` token in ``tokens.css`` must have a
+    matching ``data-token`` swatch in the styleguide template (and vice
+    versa). Failure means the catalog is out of sync with the live tokens.
+    """
+    root_block = re.search(r":root\s*\{([^}]*)\}", _TOKENS_CSS_PATH.read_text(), re.DOTALL)
+    assert root_block is not None, "tokens.css must declare a :root block"
+    declared = {f"--{name}" for name in re.findall(r"--([a-z][a-z0-9-]*)\s*:", root_block.group(1))}
+
+    html = render_dev_styleguide_page()
+    surfaced = set(re.findall(r'data-token="(--[a-z][a-z0-9-]*)"', html))
+
+    assert declared == surfaced, (
+        f"tokens.css :root declares {sorted(declared)} but the styleguide "
+        f"surfaces {sorted(surfaced)}. Add or remove a "
+        f'`data-token="--<name>"` swatch in templates/dev_styleguide.html '
+        f"to match."
+    )

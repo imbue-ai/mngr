@@ -1146,7 +1146,7 @@ class PluginModifyingAgentOptions:
     """Test plugin that modifies agent_options."""
 
     @hookimpl
-    def on_before_create(self, args: OnBeforeCreateArgs) -> OnBeforeCreateArgs | None:
+    def on_before_create(self, args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
         # Modify the agent name by adding a prefix
         new_options = args.agent_options.model_copy_update(
             to_update(args.agent_options.field_ref().name, AgentName(f"modified-{args.agent_options.name}")),
@@ -1160,7 +1160,7 @@ class PluginModifyingCreateWorkDir:
     """Test plugin that modifies create_work_dir."""
 
     @hookimpl
-    def on_before_create(self, args: OnBeforeCreateArgs) -> OnBeforeCreateArgs | None:
+    def on_before_create(self, args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
         # Force create_work_dir to False
         return args.model_copy_update(
             to_update(args.field_ref().create_work_dir, False),
@@ -1171,7 +1171,7 @@ class PluginReturningNone:
     """Test plugin that returns None (passes through unchanged)."""
 
     @hookimpl
-    def on_before_create(self, args: OnBeforeCreateArgs) -> OnBeforeCreateArgs | None:
+    def on_before_create(self, args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
         return None
 
 
@@ -1179,7 +1179,7 @@ class PluginChainA:
     """First plugin in a chain test - adds 'A' to agent name."""
 
     @hookimpl
-    def on_before_create(self, args: OnBeforeCreateArgs) -> OnBeforeCreateArgs | None:
+    def on_before_create(self, args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
         new_name = AgentName(f"{args.agent_options.name}-A")
         new_options = args.agent_options.model_copy_update(
             to_update(args.agent_options.field_ref().name, new_name),
@@ -1193,7 +1193,7 @@ class PluginChainB:
     """Second plugin in a chain test - adds 'B' to agent name."""
 
     @hookimpl
-    def on_before_create(self, args: OnBeforeCreateArgs) -> OnBeforeCreateArgs | None:
+    def on_before_create(self, args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
         new_name = AgentName(f"{args.agent_options.name}-B")
         new_options = args.agent_options.model_copy_update(
             to_update(args.agent_options.field_ref().name, new_name),

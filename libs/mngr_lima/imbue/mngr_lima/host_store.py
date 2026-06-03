@@ -26,6 +26,25 @@ class LimaHostConfig(FrozenModel):
     instance_name: str = Field(description="Lima instance name (e.g. mngr-my-host)")
     start_args: tuple[str, ...] = Field(default=(), description="limactl start arguments for replay")
     image_url: str | None = Field(default=None, description="Image URL used to create the VM")
+    # Locks in the host_dir layout chosen at create_host time so subsequent
+    # start_host/stop_host/get_host always replay the same setup regardless
+    # of later provider config edits. Default True ensures pre-change on-disk
+    # records (which lack this field) deserialize into today's bind-mount mode.
+    is_host_data_volume_exposed: bool = Field(
+        default=True,
+        description=(
+            "Whether host_dir is backed by a 9p bind mount to the host machine "
+            "(True, today's default) or by an in-VM btrfs additionalDisk (False)."
+        ),
+    )
+    host_data_disk_name: str | None = Field(
+        default=None,
+        description=(
+            "Name of the Lima-managed additional disk used to back host_dir "
+            "when is_host_data_volume_exposed=False. None when the host uses "
+            "the bind-mount layout."
+        ),
+    )
 
 
 class HostRecord(FrozenModel):

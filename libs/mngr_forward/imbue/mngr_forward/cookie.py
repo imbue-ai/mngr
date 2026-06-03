@@ -1,14 +1,14 @@
 """Session-cookie + per-subdomain auth-token helpers.
 
 Adapted from ``minds.desktop_client.cookie_manager``. Cookie name is pinned
-to ``mngr_forward_session`` so it does not collide with minds' own
-``minds_session`` cookie when both bind on different ports of the same host.
+to ``mngr_forward_session`` so it does not collide with a host application's
+own session cookie when both bind on different ports of the same host.
 
 The ``verify_session_cookie`` helper accepts an optional opaque
 ``preauth_cookie_value``: if the inbound cookie matches that value exactly,
 it is accepted without verifying a signature. This lets the Electron shell
 pre-set a cookie on the bare origin before the first navigation so the
-initial OTP flow can be skipped when ``minds run`` spawns the plugin.
+initial OTP flow can be skipped when the host application spawns the plugin.
 """
 
 from typing import Final

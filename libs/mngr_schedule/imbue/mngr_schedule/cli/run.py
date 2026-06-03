@@ -9,8 +9,8 @@ from loguru import logger
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import OutputFormat
@@ -85,9 +85,9 @@ def _emit_output(output: str, output_format: OutputFormat) -> None:
     """
     match output_format:
         case OutputFormat.JSON:
-            emit_final_json({"output": output})
+            write_json_line({"output": output})
         case OutputFormat.JSONL:
-            emit_final_json({"event": "output", "output": output})
+            write_json_line({"event": "output", "output": output})
         case OutputFormat.HUMAN:
             if output:
                 write_human_line("{}", output.rstrip("\n"))

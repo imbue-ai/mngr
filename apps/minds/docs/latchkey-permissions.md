@@ -28,23 +28,47 @@ and how the agent receives the answer.
    request events file via `mngr events --follow`, adds a card to the
    right-side requests inbox panel, and surfaces a notification.
 5. **User opens the dialog.** Clicking the card opens
-   `/requests/<event_id>`, which renders a single-scope permission dialog:
-   * The list of [Detent](https://github.com/imbue-ai/detent) permission
-     schemas the user can grant for that scope, fetched from the latchkey
-     gateway's `GET /permissions/available` endpoint and cached in
-     process for the lifetime of the desktop client.
+   `/requests/<event_id>` in a **modal overlay** over the current window
+   (a transparent full-content-area `WebContentsView` stacked above the
+   workspace, with a dim backdrop). The user's workspace view is never
+   navigated away, so dismissing the dialog -- via Approve/Deny, the close
+   button, a backdrop click, or Escape -- returns them to their work with
+   no context lost. (Opened directly in a browser, with no modal host, the
+   page degrades to a dimmed, centered card and dismissal navigates home.)
+   The page renders a single-scope permission dialog:
+   * The dialog header names the service plainly (no monospace pill) and
+     attributes the agent's rationale prominently as
+     "`<workspace>` says:" -- this is the main place the requesting
+     agent's name is surfaced. There is no separate "Workspace:" line.
+   * By default the dialog shows a **simple, informative view**: a
+     single summary sentence ("Approving will grant `<workspace>` and its
+     sibling agents the following permissions:") above a read-only list
+     of the permissions that will be granted on Approve (no checkboxes),
+     plus only the Approve / Deny buttons. This keeps the common case
+     approachable for non-technical users.
+   * A small **"Adjust"** link, rendered inside the permission list, reveals
+     the full **editor view**, which exposes a checkbox per [Detent](https://github.com/imbue-ai/detent)
+     permission schema available for that scope. The available schemas
+     are fetched from the latchkey gateway's `GET /permissions/available`
+     endpoint and cached in process for the lifetime of the desktop
+     client. The checkbox inputs always exist in the page (the editor is
+     merely hidden by default), so the simple view's Approve still
+     submits the pre-checked set.
    * The detent ``any`` schema (matches every request inside the scope) is
-     prepended as the first checkbox so the user can opt into unrestricted
-     access if they want. It is **not** pre-checked.
-   * The dialog pre-checks the union of (a) permissions already granted
-     for that scope on the agent's host and (b) the permissions the agent
-     declared in the request event. Approving without changes grants
-     exactly that union; ticking more broadens it, unticking narrows or
-     revokes. The dialog therefore doubles as a revocation UI.
+     prepended as the first checkbox in the editor so the user can opt
+     into unrestricted access if they want. It is **not** pre-checked,
+     and so never appears in the simple view's read-only list.
+   * The dialog pre-checks (and the simple view lists) the union of (a)
+     permissions already granted for that scope on the agent's host and
+     (b) the permissions the agent declared in the request event.
+     Approving without changes grants exactly that union; opening the
+     editor and ticking more broadens it, unticking narrows or revokes.
+     The editor therefore doubles as a revocation UI.
    * The Approve button stays disabled while zero boxes are checked,
      so if the agent submitted an empty ``permissions`` tuple and the
-     user has no prior grants for the scope, the user must actively
-     pick something before approving.
+     user has no prior grants for the scope, the simple view shows a
+     prompt to use "Adjust" and the user must actively pick something
+     there before approving.
 6. **User approves.** The desktop client:
    1. Runs `latchkey services info <service>` to read `credentialStatus`,
       `authOptions`, and `setCredentialsExample`.
@@ -155,7 +179,9 @@ permission schemas the dialog offers) lives alongside the latchkey
 gateway extension at
 [`libs/mngr_latchkey/imbue/mngr_latchkey/extensions/services.json`](../../../libs/mngr_latchkey/imbue/mngr_latchkey/extensions/services.json)
 and is fetched at desktop-client runtime via the gateway's
-`GET /permissions/available` endpoint. Each entry has the shape:
+`GET /permissions/available` endpoint. Each service maps to a *list* of
+scope entries (a single service may expose more than one detent scope).
+Each entry has the shape:
 
 * `scope` -- the detent scope schema the service owns; used as the rule
   key in `latchkey_permissions.json` and as the value the agent puts

@@ -10,6 +10,8 @@ from pydantic import SecretStr
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import LeaseDbId
+from imbue.mngr_imbue_cloud.primitives import R2AccessKeyId
+from imbue.mngr_imbue_cloud.primitives import R2BucketAccess
 from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
 
 
@@ -181,3 +183,37 @@ class AuthPolicy(FrozenModel):
     emails: tuple[str, ...] = ()
     email_domains: tuple[str, ...] = ()
     require_idp: tuple[str, ...] = ()
+
+
+class R2BucketInfo(FrozenModel):
+    """Metadata about an R2 bucket owned by the account."""
+
+    bucket_name: str = Field(description="Full R2 bucket name (<user_id_prefix>--<slug>)")
+    s3_endpoint: AnyUrl = Field(description="S3-compatible endpoint for this account")
+
+
+class R2KeyMaterial(FrozenModel):
+    """A bucket-scoped S3 credential, returned once at key creation."""
+
+    access_key_id: R2AccessKeyId = Field(description="S3 Access Key ID (= the Cloudflare token id)")
+    secret_access_key: SecretStr = Field(description="S3 Secret Access Key (shown once, never persisted by us)")
+    s3_endpoint: AnyUrl = Field(description="S3-compatible endpoint for this account")
+    bucket_name: str = Field(description="Full R2 bucket name this key is scoped to")
+    access: R2BucketAccess = Field(description="Access scope: 'read' or 'readwrite'")
+
+
+class R2KeyInfo(FrozenModel):
+    """Metadata about a bucket key (never includes the secret)."""
+
+    access_key_id: R2AccessKeyId = Field(description="S3 Access Key ID (= the Cloudflare token id)")
+    bucket_name: str = Field(description="Full R2 bucket name this key is scoped to")
+    access: R2BucketAccess = Field(description="Access scope: 'read' or 'readwrite'")
+    alias: str | None = Field(default=None, description="Human-readable alias")
+    created_at: str = Field(description="ISO 8601 timestamp when the key was created")
+
+
+class R2BucketCreateResult(FrozenModel):
+    """Result of creating a bucket: the bucket plus its minted default key."""
+
+    bucket: R2BucketInfo = Field(description="The created bucket")
+    key: R2KeyMaterial = Field(description="The default key minted alongside the bucket")
