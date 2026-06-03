@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from typing import Final
 
+from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -152,7 +153,11 @@ def get_installed_plugin_package_names(
         is_plugin_package = has_mngr_entry_points
     try:
         receipt = read_receipt(receipt_path)
-    except (OSError, tomllib.TOMLDecodeError):
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        # The receipt is machine-written by uv; a parse/read failure means it is
+        # corrupt or unreadable. Degrade gracefully (no completions) but surface
+        # the corruption rather than swallowing it silently.
+        logger.warning("Could not read uv-tool receipt at {} for plugin completion: {}", receipt_path, e)
         return []
     return sorted({requirement.name for requirement in receipt.extras if is_plugin_package(requirement.name)})
 
