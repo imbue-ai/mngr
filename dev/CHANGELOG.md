@@ -23,6 +23,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: New design / implementation specs under `specs/`: `docker-cleanup-state-and-images/`, `imbue-cloud-r2-buckets/spec.md`, `minds-backup-provider/concise.md`, `host-backup/concise.md`, `symlink-code-onto-mngr-volume/concise.md`, `vps-docker-btrfs/concise.md`, and `vps-docker-unified-volume/concise.md`.
 - Added: Updated `.minds/template/cloudflare.sh` secret template documenting that `CLOUDFLARE_API_TOKEN` must now be an account-owned (`cfat_`) token with `Workers R2 Storage: Edit` + `Account API Tokens: Edit` (on top of the existing tunnel/DNS/Access/KV permissions), and that R2 must be enabled on the Cloudflare account.
 - Added: `markdown-it-py` is now an explicit (rather than only transitive) dependency in the lockfile; mngr uses rich's CommonMark parser directly to rewrite links when rendering help topics for the terminal.
+- Added: New design docs under `blueprint/`: `tiered-restart-v2/plan-tiered-restart-v2.md` describing the two-tier minds workspace recovery flow and the `mngr stop --stop-host` flag that backs the host-restart tier, plus an implementation plan for the error-hierarchy collapse.
 
 ### Changed
 
@@ -48,6 +49,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Added `libs/mngr_mapreduce` to the workspace; the root `pyproject.toml` now collects coverage for `imbue.mngr_mapreduce`.
 - Changed: Dropped the now-removed `--use-snapshot` flag from `.github/workflows/tmr.yml` so scheduled / manual TMR runs don't fail at invocation (snapshot building on `--provider modal` is automatic now), and refreshed the stale `--use-snapshot` comment in `.github/workflows/tmr-reintegrate.yml`.
 - Changed: Spec file-tree listings under `specs/electron-desktop-app/` (`concise.md` + `spec.md`) now show `todesktop.js` instead of `todesktop.json`, tracking the apps/minds rename.
+- Changed: Tightened the `test_every_project_has_changelog_layout` meta-ratchet to also require a `.gitkeep` inside each project's `changelog/` directory. Previously only the directory's existence was checked, so a newly added project with no `.gitkeep` would pass until a later consolidation run drained its entries and the empty directory silently vanished from git; requiring the `.gitkeep` upfront catches the omission when the project is first added.
 
 ### Removed
 

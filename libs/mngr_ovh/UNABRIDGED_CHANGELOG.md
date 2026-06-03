@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-02
+
+Collapsed redundant `except` clauses: clauses listing `VpsApiError` / `VpsProvisioningError`
+alongside `MngrError` now catch just `MngrError` (those VPS errors are already `MngrError`
+subclasses via `VpsDockerError`). No behavior change.
+
+- pyproject.toml: align `imbue-mngr*==` pin stragglers with the satellites bumped in main's `e22e7010e` release commit. Several `imbue-mngr-*` libs still pinned to older versions even though `libs/mngr` had moved to 0.2.10; building the apps/minds ToDesktop bundle from main today would fail at `uv lock` in `apps/minds/scripts/build.js` because the workspace constraint graph is unsatisfiable. Day-to-day dev hides this because `[tool.uv.sources]` redirects every `imbue-mngr-*` to its workspace path, bypassing the `==` pin.
+
 ## 2026-05-29
 
 User-visible: minds workspaces running on OVH (docker-on-VPS) hosts can now

@@ -6,6 +6,21 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: New `mngr stop --stop-host` flag stops an agent's whole host (every agent on it) instead of just the named agent. For container-backed providers it stops the container while the underlying machine keeps running; rejected on providers that don't support it; cannot be combined with `--archive`. Idempotent (an already-stopped host reports success). Targets multiple hosts concurrently rather than serially. Resolves the host without SSH (via the discovery event stream and the provider's SSH-free `get_host`) so `mngr stop --stop-host` works even when sshd is unreachable.
+
+### Changed
+
+- Changed: **Breaking** — `AgentError`, `HostError`, and all their subclasses (e.g. `NoCommandDefinedError`, `AgentNotFoundOnHostError`, `SendMessageError`, `AgentStartError`, `HostConnectionError`, `HostOfflineError`, `HostAuthenticationError`, `CommandTimeoutError`, `HostDataSchemaError`) now inherit from `MngrError` instead of `BaseMngrError`. `BaseMngrError` has been removed entirely; `MngrError` now inherits directly from `click.ClickException`. The remaining `BaseMngrError`-only error types (`PluginSpecifierError`, `DiscoverySchemaChangedError`, `MalformedJsonlLineError`, `TolerantPathError`, `IssueSearchError`) were moved the same way. Every mngr error is now a `ClickException`, so any escaped error at the CLI renders as a clean `Error: ...` message instead of a Python traceback. Redundant `MngrError` mix-ins on `AgentNotFoundError` / `DuplicateAgentNameError` were removed, and `except` clauses listing an error type already covered by another in the same clause were collapsed.
+- Changed: Renamed `emit_final_json` to `write_json_line` in `imbue.mngr.cli.output_helpers` (sibling to the existing `write_human_line`). The old name was misleading — despite "final JSON" implying the single terminating object emitted in `--format=json` mode, it was also called from streaming JSONL callbacks (e.g. `mngr list`).
+- Changed: Installed Node.js in the shared mngr Docker image (`resources/Dockerfile`), pinned to `apps/minds/package.json`'s `engines.node` (24.15.0). Node is a runtime dependency of the mngr_latchkey gateway's `.mjs` extensions and minds Python tests that evaluate `apps/minds/todesktop.js` via `node`.
+
+### Fixed
+
+- Fixed: `mngr list --format json` no longer crashes on `ProviderErrorInfo` when no agents were returned. With `--on-error continue` and a per-provider failure, the empty-agents path was passing raw `ErrorInfo` pydantic models to `json.dumps`, raising `TypeError: Object of type ProviderErrorInfo is not JSON serializable`. The empty-agents path now goes through the same `_emit_json_output` serializer as the non-empty path, producing a clean `{"agents": [], "errors": [...]}` payload.
+- Fixed: Indefinite hang in git-push / rsync over SSH on macOS hosts where `SSH_AUTH_SOCK` routes to 1Password's biometric SSH agent. The shared `build_ssh_transport_command` now pins authentication to the explicit `-i` key via `-o IdentitiesOnly=yes -o IdentityAgent=none`. Without these flags, OpenSSH consults `SSH_AUTH_SOCK` first; in BatchMode (no TTY) the biometric prompt can never fire and ssh blocks forever on the agent reply.
+
 ## [v0.2.10] - 2026-06-01
 
 ### Added

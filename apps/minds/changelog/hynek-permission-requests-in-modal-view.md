@@ -1,3 +1,0 @@
-Permission request dialogs now open in a modal overlay instead of replacing the main content window.
-
-When a user clicks a permission request card in the side panel, the request page (`/requests/<event_id>`) now opens in a transparent full-content-area overlay (`modalView`) stacked above the workspace, with a dim backdrop. The workspace view is never navigated away, so the user keeps the context of their work; dismissing the dialog (via Approve/Deny, the close button, a backdrop click, or Escape) returns them to exactly where they were. Opened directly in a browser with no modal host, the page degrades to a dimmed, centered card and dismissal navigates home.

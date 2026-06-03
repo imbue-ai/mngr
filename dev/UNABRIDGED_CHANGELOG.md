@@ -4,6 +4,20 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-02
+
+Added the design doc for the tiered system-interface restart
+(`blueprint/tiered-restart-v2/plan-tiered-restart-v2.md`), describing the
+two-tier minds workspace recovery flow and the `mngr stop --stop-host`
+flag that backs the host-restart tier.
+
+Added the implementation plan for the error-hierarchy collapse under `blueprint/`. No runtime
+or tooling change.
+
+## 2026-06-01
+
+Tightened the `test_every_project_has_changelog_layout` meta-ratchet to also require a `.gitkeep` inside each project's `changelog/` directory. Previously only the directory's existence was checked, so a newly added project with no `.gitkeep` would pass until a later consolidation run drained its entries and the empty directory silently vanished from git. Requiring the `.gitkeep` upfront catches the omission when the project is first added.
+
 ## 2026-06-01
 
 `markdown-it-py` is now an explicit (rather than only transitive) dependency in the lockfile: mngr uses rich's own CommonMark parser directly to rewrite links when rendering help topics for the terminal.

@@ -4,6 +4,93 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-02
+
+Internal refactor with no user-visible behavior change. Removed the `emit_final_json` helper from `imbue.mngr.cli.output_helpers`, which was a one-line pass-through to the private `_write_json_line`. The underlying primitive is now public as `write_json_line` (sibling to the existing `write_human_line`), and all call sites use it directly.
+
+The old name was misleading: despite "final JSON" implying the single terminating object emitted in `--format=json` mode, it was also called from the streaming JSONL callbacks (e.g. `mngr list`). `write_json_line` honestly describes what it does -- write one JSON object as a line -- for both the JSON and JSONL paths.
+
+New `mngr stop --stop-host` flag: stops an agent's whole host (every
+agent on it) instead of just the named agent.
+
+- For container-backed providers `--stop-host` stops the container while
+  the underlying machine keeps running; it is rejected up front on
+  providers that do not support stopping hosts, and cannot be combined
+  with `--archive`.
+- `--stop-host` is idempotent: if the host is already offline it reports
+  success instead of raising an error, so restarting an already-stopped
+  workspace works.
+- `--stop-host` now resolves the target host without SSH. Previously it
+  failed with an `SSH error (Error reading SSH protocol banner...)` when
+  the host's container was still running but its sshd was unreachable
+  (sshd crashed, or PID exhaustion blocked new SSH sessions) -- one of
+  the cases `--stop-host` is meant to handle. The host_id is now resolved
+  from the discovery event stream and then fetched through the provider's
+  own SSH-free `get_host` (which validates that the host still exists and
+  supplies its name), so `mngr stop <agent> --stop-host` followed by
+  `mngr start <agent>` reliably bounces an unresponsive workspace. A
+  single SSH-free lookup against the one relevant provider both validates
+  and names the host, so resolution does not scan every provider's hosts
+  up front, and does not replay host discovered/destroyed events.
+- This supports the minds tiered workspace-restart recovery flow, which
+  uses a full host restart as its heavier recovery tier.
+- When `--stop-host` targets multiple hosts, they are now stopped
+  concurrently (via a concurrency-group executor) instead of one at a
+  time, so the command no longer serializes on the slowest host. Output
+  order is unchanged. If one host fails to stop, the others are still
+  stopped before the error is raised (the previous sequential version
+  aborted on the first failure, leaving later hosts running).
+
+Fix `mngr list --format json` crashing on `ProviderErrorInfo` when no
+agents were returned. With `--on-error continue` and a per-provider
+failure, the empty-agents path passed raw `ErrorInfo` pydantic models to
+`json.dumps`, which crashed with `TypeError: Object of type
+ProviderErrorInfo is not JSON serializable`. The empty-agents path now
+goes through the same `_emit_json_output` serializer as the non-empty
+path, so `mngr list --on-error continue --format json` produces a clean
+`{"agents": [], "errors": [...]}` payload instead of a traceback.
+
+- Fix indefinite hang in git-push / rsync over SSH on macOS hosts where `SSH_AUTH_SOCK` routes to 1Password's biometric SSH agent. The shared `build_ssh_transport_command` (used by git push and rsync) now pins authentication to the explicit `-i` key via `-o IdentitiesOnly=yes -o IdentityAgent=none`. Without these flags, OpenSSH consults `SSH_AUTH_SOCK` first; in BatchMode (no TTY) the biometric prompt can never fire and ssh blocks forever on the agent reply.
+
+`AgentError` (and all of its subclasses, e.g. `NoCommandDefinedError`, `AgentNotFoundOnHostError`,
+`SendMessageError`, `AgentStartError`) now inherit from `MngrError` instead of `BaseMngrError`.
+The remaining `BaseMngrError`-only error types -- `PluginSpecifierError`,
+`DiscoverySchemaChangedError`, `MalformedJsonlLineError`, `TolerantPathError`, and
+`IssueSearchError` -- were moved the same way. This completes the consolidation of the error
+hierarchy under a single user-facing parent class: every mngr error is now a `ClickException`,
+so when one reaches the CLI it renders as a clean `Error: ...` message (plus any help text)
+instead of a Python traceback, and `except MngrError` handlers treat them as the user-facing
+errors they are.
+
+The now-redundant `MngrError` mix-in on `AgentNotFoundError` and `DuplicateAgentNameError`
+(which already reached `MngrError` via `AgentError`) was removed; both still behave identically.
+
+The `BaseMngrError` base class has been removed entirely. `MngrError` now inherits directly
+from `click.ClickException`, and every mngr error inherits from `MngrError`. There is no longer
+a separate non-user-facing error tier: all mngr errors render as a clean `Error: ...` message
+at the CLI (plus any help text) rather than a traceback. This is a no-op for users -- prior
+commits had already moved every error class under `MngrError`; removing `BaseMngrError` simply
+finalizes that consolidation.
+
+`except` clauses that listed an error type already covered by another type in the same clause
+were collapsed (e.g. `except (MngrError, UserInputError)` -> `except MngrError`,
+`isinstance(e, (MngrError, BaseMngrError))` -> `isinstance(e, MngrError)`). Clauses pairing
+`MngrError` with unrelated types (`OSError`, `docker.errors.*`, etc.) are unchanged.
+
+`HostError` (and all of its subclasses, e.g. `HostConnectionError`, `HostOfflineError`,
+`HostAuthenticationError`, `CommandTimeoutError`, `HostDataSchemaError`) now inherit from
+`MngrError` instead of `BaseMngrError`, consolidating the error hierarchy under a single
+user-facing parent class. Host errors are now `ClickException` instances, so when one reaches
+the CLI it renders as a clean `Error: ...` message (plus any help text) instead of a Python
+traceback, and `except MngrError` handlers treat them as the user-facing errors they are.
+
+The base `get_host_and_agent_details` now re-raises `HostConnectionError` from its per-agent
+guard so that, even though `HostConnectionError` is now a `MngrError`, a connection failure
+still reaches the host-level handler that clears the connection cache and falls back to the
+offline view instead of being swallowed per-agent.
+
+Install Node.js in the shared mngr image (`resources/Dockerfile`), pinned to `apps/minds/package.json`'s `engines.node` (24.15.0). Node is a runtime dependency of the mngr_latchkey gateway's `.mjs` extensions, and is also used by minds Python tests that evaluate `apps/minds/todesktop.js` via `node`. With Node in the image, those tests run on offload instead of being silently skipped.
+
 ## 2026-06-01
 
 # Make `CreateAgentOptions.agent_type` required

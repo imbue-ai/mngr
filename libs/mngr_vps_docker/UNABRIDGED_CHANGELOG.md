@@ -4,6 +4,13 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-02
+
+Simplified exception handlers now that `HostError`/`HostConnectionError` are `MngrError`
+subclasses: the redundant `except (HostConnectionError, MngrError)` guards in the VPS Docker
+instance are now just `except MngrError`. No behavior change -- host connection errors are
+still caught and handled the same way.
+
 ## 2026-06-01
 
 # Offline agent field generators

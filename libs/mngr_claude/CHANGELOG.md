@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: Aligned `imbue-mngr*==` pin stragglers in `pyproject.toml` with the satellites bumped in main's `e22e7010e` release commit. Without this, building the apps/minds ToDesktop bundle from main would fail at `uv lock` because the workspace constraint graph is unsatisfiable; day-to-day dev hides the issue because `[tool.uv.sources]` redirects every `imbue-mngr-*` to its workspace path, bypassing the `==` pin.
+
 ## [v0.2.10] - 2026-06-01
 
 ### Changed

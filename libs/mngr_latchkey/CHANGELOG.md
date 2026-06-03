@@ -16,6 +16,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `mngr latchkey register-agent --host-id ID --agent-id ID` CLI wrapping that helper for operators (documented in the README).
 - Added: `imbue.mngr_latchkey.store.load_permissions(path)` public reader, symmetric with `save_permissions`.
 - Added: Bumped bundled Latchkey to 2.14.0 to support GitHub git operations via the Latchkey gateway.
+- Added: New `libs/mngr_latchkey/scripts/generate_services_json.py` developer tool that regenerates the bundled `services.json` permission catalog from a detent checkout's built-in request schemas (mirrors detent's own doc generator, including the AWS special case) and carries over per-schema `$comment` summaries.
+- Added: `permission_requests` gateway extension now validates the `scope` and `permissions` of incoming `predefined` POST `/permission-requests` bodies against the bundled `services.json` catalog. A request whose `scope` is not a known Detent scope, or whose `permissions` list contains entries not listed under that scope, is rejected with HTTP 400 at creation time rather than persisted as a pending request that approval would splice into `permissions.json`. File-sharing requests are unaffected.
 
 ### Changed
 
@@ -32,6 +34,9 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: The agent baseline permissions file now enforces per-agent Minds API isolation via two cooperating rules — a deny rule for any `/minds-api-proxy/api/v1/agents/<id>/...` whose `<id>` is absent from an allowed-agent `anyOf` list, then a generic allow rule for listed agents — so an agent on one host cannot reach the Minds API on behalf of an agent on another.
 - Changed: `mngr_latchkey/ssh_tunnel.py` is removed; `SSHTunnelManager`, `RemoteSSHInfo`, and `SSHTunnelError` are now imported from `imbue.mngr_forward.ssh_tunnel`, the single monorepo SSH-tunneling implementation (which absorbed latchkey's exponential-backoff repair loop, `agent_id` tagging, and `remove_reverse_tunnels_for_agent`).
 - Changed: `services.json` catalog (and the `permissions` gateway extension that reads it) now maps each raw service name to a *list* of scope entries instead of a single entry, so one service can expose more than one detent scope. `GET /permissions/available` and `GET /permissions/available/<service_name>` now return arrays of `{scope, display_name, permissions}` objects per service.
+- Changed: Regenerated `services.json` against current detent — each scope entry now carries a `description` (detent's `$comment` for the scope), and `permissions` changed from a list of strings to a list of `{"name", "description"}` objects so each permission's summary is colocated with its name. The refresh also picks up detent's newer definitions: Slack gains `slack-auth-read`/`slack-auth-write`, and GitLab now exposes a separate `gitlab-git` scope alongside `gitlab-api`.
+- Changed: `permissions` gateway extension and the `GET /permissions/available` / `GET /permissions/available/<service_name>` endpoints now document and validate the new scope-level `description` and `{name, description}` permission objects (with end-to-end tests driving the extension over HTTP).
+- Changed: Aligned `imbue-mngr*==` pin stragglers in `pyproject.toml` with the satellites bumped in main's `e22e7010e` release commit.
 
 ### Fixed
 

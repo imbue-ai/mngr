@@ -23,6 +23,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `OuterHost.get_name` / `OuterHostInterface.get_name` now return `str` instead of `HostName` (the outer host's name is an SSH hostname / IP address that routinely contains dots).
 - Changed: **Breaking** — OVH hosts created by `mngr create --provider ovh` now back their per-host unified docker volume with a btrfs subvolume on a loop-mounted btrfs filesystem on the VPS (`/mngr-btrfs/<host_id_hex>` on `/var/lib/mngr-btrfs.img`), enabling consistent `btrfs subvolume snapshot -r` of agent data. See `mngr_vps_docker`'s changelog for the full mechanism. Existing OVH hosts created on the prior layout cannot be discovered or managed after upgrade — destroy and recreate them.
 - Changed: Added `inotify-tools` and `jq` to `_REQUIRED_OUTER_PACKAGES` so the new `snapshot_helper.service` (provisioned by `mngr_vps_docker`) has the tools it needs on OVH-leased outers.
+- Changed: Aligned `imbue-mngr*==` pin stragglers in `pyproject.toml` with the satellites bumped in main's `e22e7010e` release commit.
 
 ### Fixed
 

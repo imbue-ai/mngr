@@ -2,6 +2,21 @@
 
 This file contains the full, verbatim per-PR entries for the `mngr_mapreduce` library. For the curated summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-02
+
+Simplified exception handlers now that `AgentError` is a `MngrError` subclass: the redundant
+`AgentError` entry in the `except (MngrError, AgentError, ...)` guards in launching and the CLI
+has been removed. No behavior change -- agent errors are still caught and handled the same way.
+
+Simplified exception handlers now that `HostError` is a `MngrError` subclass: the redundant
+`HostError` entry in the `except (MngrError, HostError, ...)` guards in launching and the CLI
+has been removed. `AgentError` (still a `BaseMngrError`, not a `MngrError`) is retained. No
+behavior change.
+
+## 2026-06-01
+
+Restored the `changelog/` directory by adding a `.gitkeep` placeholder. The directory had vanished from git after a consolidation run deleted its last entry file (git does not track empty directories), which broke the `test_every_project_has_changelog_layout` meta-ratchet. The `.gitkeep` keeps the directory tracked even when it holds no pending entries, matching every other project. No production code change.
+
 ## 2026-05-29
 
 Move post-finalize ``stop_agent_on_host`` calls off the polling loop's main thread.
