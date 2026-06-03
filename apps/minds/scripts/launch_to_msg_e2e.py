@@ -91,12 +91,16 @@ SLACK_PROMPT = (
 
 SKIP_FIRST_MESSAGE = os.environ.get("SKIP_FIRST_MESSAGE", "0") == "1"
 SKIP_SLACK_FLOW = os.environ.get("SKIP_SLACK_FLOW", "0") == "1"
-# Treat slack-flow timeout (canned body never arrives) as a soft pass
-# instead of a hard fail. We always take the 07-07d UI screenshots that
-# show the latchkey approval flow; defaulting to soft means the user
-# can still see the visual evidence without CI going red on the deep
-# latchkey-gateway "credentials INVALID" issue.
-SLACK_BEST_EFFORT = os.environ.get("SLACK_BEST_EFFORT", "1") == "1"
+# Slack-flow timeout (canned body never arrives) is a hard fail by
+# default. CI run 26872452227 was reported as success because the old
+# default (SLACK_BEST_EFFORT=1) swallowed an actual "Authorization
+# failed: No browser configured" error -- the broken state was clearly
+# visible in 07d-stage2-post-approve.win.png but the script chose to
+# warn-and-pass instead of raise. The CI workflow now pre-installs the
+# latchkey browser, so this code path should not fire in CI; if it
+# does, that itself is the signal worth surfacing. Opt-in soft-pass
+# remains available via SLACK_BEST_EFFORT=1 for interactive debugging.
+SLACK_BEST_EFFORT = os.environ.get("SLACK_BEST_EFFORT", "0") == "1"
 
 # --- snap helpers ---
 
@@ -604,6 +608,16 @@ async def amain() -> int:
             if not creation_id:
                 raise RuntimeError(f"no agent_id in create-agent response: {resp['body']}")
             logger.info("creation_id={}", creation_id)
+            # Wait for the form to actually transition to the progress UI
+            # before snapping. Without this `03-create-agent-submitted`
+            # is just `02-home-after-auth` again -- the screenshot lies
+            # about which phase we're in. The progress UI ships
+            # "Setting up your workspace" as a heading.
+            with contextlib.suppress(Exception):
+                await win.wait_for_function(
+                    "document.body.innerText.includes('Setting up your workspace')",
+                    timeout=15_000,
+                )
             await snap_page(win, "03-create-agent-submitted")
 
             # 5. Poll /api/create-agent/<id>/status until DONE. The chat
@@ -714,6 +728,15 @@ async def amain() -> int:
             inp = await win.wait_for_selector('textarea, [contenteditable="true"]', timeout=60_000)
             await inp.fill(FIRST_PROMPT)
             await inp.press("Enter")
+            # Wait for the user's prompt to render before snapping so
+            # `05-first-message-sent` actually shows the prompt bubble.
+            # Without this the screenshot misses the bubble (as in run
+            # 26872452227 where 05 was visually identical to 04).
+            with contextlib.suppress(Exception):
+                await win.wait_for_function(
+                    f"document.body.innerText.includes({FIRST_PROMPT!r})",
+                    timeout=10_000,
+                )
             await snap_page(win, "05-first-message-sent")
             # Wait for the AGENT's reply, not the user prompt echo. The
             # prompt itself contains "pong" so a naive `includes('pong')`
@@ -949,6 +972,18 @@ async def _advance_approval(ctx: BrowserContext, win: Page, stage: int, state: d
                     await asyncio.sleep(2)
                     with contextlib.suppress(Exception):
                         await snap_page(w, "07d-stage2-post-approve")
+                    # Surface latchkey-side authorisation failures
+                    # immediately rather than waiting DRIVE_SLACK_TIMEOUT
+                    # seconds (then masking with SLACK_BEST_EFFORT). The
+                    # post-approve page renders the error banner verbatim;
+                    # parse the visible text and raise so CI fails on the
+                    # actual signal, not a timeout that happens to coincide.
+                    with contextlib.suppress(Exception):
+                        body_text = await w.evaluate("document.body.innerText")
+                        if "Authorization failed" in body_text or "No browser configured" in body_text:
+                            raise RuntimeError(
+                                "07d shows authorization failure: " + body_text.replace("\n", " | ")[:400]
+                            )
                     # Kicks are sent from the main poll loop after a
                     # KICK_DELAY settle period; see slack-flow loop.
                     return
