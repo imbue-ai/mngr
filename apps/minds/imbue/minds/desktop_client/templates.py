@@ -663,18 +663,14 @@ def render_dev_styleguide_page() -> str:
     return JINJA_ENV.get_template("dev_styleguide.html").render()
 
 
-def _serialize_account_for_solid(account: AccountSession) -> dict[str, Any]:
-    """Flatten an ``AccountSession`` to the JSON-serializable shape the Solid accounts page expects.
+def _serialize_account_with_workspaces(account: AccountSession) -> dict[str, Any]:
+    """Like ``_serialize_account`` but also includes the account's ``workspace_ids``.
 
-    Mirrors the fields the original Jinja template read off each account
-    (``email``, ``user_id``, ``workspace_ids``) plus nothing else. Used by
-    ``render_accounts_page`` (and exposed for tests).
+    Used by ``render_accounts_page``, where the per-account row shows
+    the workspace count; the create form only reads ``user_id`` /
+    ``email`` and uses the narrower helper.
     """
-    return {
-        "user_id": str(account.user_id),
-        "email": account.email,
-        "workspace_ids": list(account.workspace_ids),
-    }
+    return {**_serialize_account(account), "workspace_ids": list(account.workspace_ids)}
 
 
 def render_accounts_page(
@@ -692,7 +688,7 @@ def render_accounts_page(
     providers panel.
     """
     props: dict[str, Any] = {
-        "accounts": [_serialize_account_for_solid(a) for a in accounts],
+        "accounts": [_serialize_account_with_workspaces(a) for a in accounts],
         "default_account_id": default_account_id or "",
         "enabled_by_user_id": dict(enabled_by_user_id or {}),
     }
