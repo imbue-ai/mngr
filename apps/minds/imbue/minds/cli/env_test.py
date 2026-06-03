@@ -179,6 +179,20 @@ def test_activate_refuses_when_another_envs_recover_target_exists(
     assert "dev-other" in result.output
 
 
+def test_activate_succeeds_when_run_outside_the_monorepo(_isolated_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Activation works from outside the monorepo: the recover-target guard is
+    skipped (no monorepo root means no recover-target file can exist there)
+    rather than erroring on NotInMonorepoError.
+    """
+    # Deliberately do NOT create an `apps/` marker, so find_monorepo_root
+    # raises NotInMonorepoError from this cwd and the guard tolerates it.
+    monkeypatch.chdir(_isolated_env)
+    runner = CliRunner()
+    result = runner.invoke(env, ["activate", "--create", "dev-foo"])
+    assert result.exit_code == 0, result.output
+    assert "export MINDS_ROOT_NAME=minds-dev-foo" in result.output
+
+
 def test_activate_allowed_for_affected_env_even_when_another_target_exists(
     _isolated_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -105,6 +105,7 @@ from imbue.minds.envs.provisioning import Providers
 from imbue.minds.envs.provisioning import deploy_env
 from imbue.minds.envs.provisioning import destroy_env
 from imbue.minds.envs.provisioning import list_dev_envs
+from imbue.minds.envs.recover import NotInMonorepoError
 from imbue.minds.envs.recover import RecoverFailedError
 from imbue.minds.envs.recover import RecoverTargetMissingError
 from imbue.minds.envs.recover import find_all_recover_target_files
@@ -567,7 +568,10 @@ def _refuse_if_any_recover_target_exists() -> None:
     """
     try:
         repo_root = find_monorepo_root()
-    except MindError:
+    except NotInMonorepoError:
+        # No monorepo root reachable means no recover-target file can be
+        # there; tolerate it. Any other MindError propagates.
+        logger.debug("Not inside the monorepo; skipping recover-target check")
         return
     files = find_all_recover_target_files(repo_root=repo_root)
     if not files:
@@ -592,7 +596,10 @@ def _refuse_if_this_env_recover_target_exists(env_name: str) -> None:
     """
     try:
         repo_root = find_monorepo_root()
-    except MindError:
+    except NotInMonorepoError:
+        # No monorepo root reachable means no recover-target file can be
+        # there; tolerate it. Any other MindError propagates.
+        logger.debug("Not inside the monorepo; skipping recover-target check")
         return
     if recover_target_exists(repo_root=repo_root, env_name=env_name):
         raise click.ClickException(
@@ -618,7 +625,11 @@ def _refuse_if_recover_target_blocks_activation(env_name: str) -> None:
     """
     try:
         repo_root = find_monorepo_root()
-    except MindError:
+    except NotInMonorepoError:
+        # No monorepo root reachable from cwd means there can't be a
+        # recover-target file there either, so there's nothing to guard
+        # against. Any other MindError is a real failure and propagates.
+        logger.debug("Not inside the monorepo; skipping recover-target activation guard")
         return
     files = find_all_recover_target_files(repo_root=repo_root)
     if not files:
@@ -1242,7 +1253,7 @@ def env_deploy(
             # follow-up command on every failure is a footgun.
             try:
                 repo_root_for_recover = find_monorepo_root()
-            except MindError:
+            except NotInMonorepoError:
                 repo_root_for_recover = None
             if repo_root_for_recover is not None and recover_target_exists(
                 repo_root=repo_root_for_recover, env_name=env_name
