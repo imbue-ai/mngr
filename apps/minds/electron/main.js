@@ -6,7 +6,35 @@ const paths = require('./paths');
 const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 
-todesktop.init();
+// Use ToDesktop's default auto-update behavior: it checks on launch +
+// on an interval, downloads in the background, and shows its own
+// "Restart to update" prompt when a download completes. We previously
+// suppressed that prompt to build a custom titlebar pill, but the pill
+// renderer was never wired up -- leaving users with detection but no
+// way to install. Defaults are simpler and actually work.
+//
+// Only init when packaged: in dev (`pnpm start`), `electron.autoUpdater`
+// is undefined on macOS (Squirrel is not linked in the unsigned dev
+// binary), and todesktop's constructor throws trying to subscribe to
+// it. Skipping init keeps dev launches working; the auto-updater is
+// never useful in dev anyway.
+if (app.isPackaged) {
+  // @todesktop/runtime defaults `showInstallAndRestartPrompt: "never"`,
+  // which leaves a downloaded update silently staged on disk with no UI
+  // surfacing -- users see the initial "Update found. Downloading in
+  // the background. You will be prompted to restart when it is ready."
+  // dialog, the download completes, and they are never prompted again.
+  // Set to "always" so the runtime shows a native "Install on next
+  // launch / Install now and restart" dialog as soon as the staged
+  // bundle is ready.
+  todesktop.init({
+    updateReadyAction: {
+      showInstallAndRestartPrompt: 'always',
+    },
+  });
+} else {
+  console.log('[update] Skipping ToDesktop init (dev build -- not packaged)');
+}
 
 // Redirect Electron's userData directory to ~/.<MINDS_ROOT_NAME>/ so that dev
 // and production installs are fully isolated (cookies, sessions, caches, etc.).
@@ -288,6 +316,7 @@ function createBundleWebContentsViews(win) {
   });
   const contentView = new WebContentsView({
     webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
       partition: CONTENT_PARTITION,
       contextIsolation: true,
       nodeIntegration: false,
@@ -295,6 +324,17 @@ function createBundleWebContentsViews(win) {
   });
   win.contentView.addChildView(chromeView);
   win.contentView.addChildView(contentView);
+
+  // Auto-open DevTools when MINDS_OPEN_DEVTOOLS=1 is set. The built-in
+  // cmd+opt+I shortcut hits an Electron menu handler that assumes a
+  // BrowserWindow (we use BaseWindow + WebContentsViews) and crashes;
+  // this env var is the escape hatch for dev-time inspection.
+  if (process.env.MINDS_OPEN_DEVTOOLS === '1') {
+    contentView.webContents.once('did-finish-load', () => {
+      contentView.webContents.openDevTools({ mode: 'detach' });
+    });
+  }
+
   return { chromeView, contentView };
 }
 
@@ -1446,6 +1486,53 @@ async function onReady() {
   await runStartupSequence(initialBundle);
 }
 
+// User-initiated update check from File > Check for Updates.
+//
+// Follows ToDesktop's documented API: `autoUpdater.checkForUpdates()`
+// returns a Promise resolving to `{ updateInfo }` -- `updateInfo` is the
+// release metadata when a newer version exists (ToDesktop then downloads
+// it in the background and shows its own "Restart to update" prompt via
+// the default updateReadyAction), or null/absent when already current.
+// We branch on that return value for the menu-click feedback rather
+// than listening for events -- events are ToDesktop's "granular control"
+// path and may not fire on every resolve, which is exactly what made an
+// earlier version of this function silent.
+async function triggerUpdateCheck() {
+  const autoUpdater = todesktop.autoUpdater;
+  if (!autoUpdater || typeof autoUpdater.checkForUpdates !== 'function') {
+    dialog.showMessageBox({
+      type: 'info',
+      message: 'Update check unavailable.',
+      detail: 'This build is running in draft mode; the auto-updater is disabled until the build is released to the latest channel.',
+    });
+    return;
+  }
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    const updateInfo = result && result.updateInfo;
+    if (updateInfo) {
+      const v = updateInfo.version || updateInfo.releaseName;
+      dialog.showMessageBox({
+        type: 'info',
+        message: v ? `Update ${v} found.` : 'Update found.',
+        detail: 'Downloading in the background. You will be prompted to restart when it is ready.',
+      });
+    } else {
+      dialog.showMessageBox({
+        type: 'info',
+        message: "You're up to date.",
+        detail: 'No newer version is available.',
+      });
+    }
+  } catch (err) {
+    dialog.showMessageBox({
+      type: 'error',
+      message: 'Update check failed.',
+      detail: String(err && err.message ? err.message : err),
+    });
+  }
+}
+
 function installApplicationMenu() {
   if (!isMac || process.env.MINDS_HIDE_MENU === '1') {
     // On Windows/Linux the frame is custom-drawn; on macOS with MINDS_HIDE_MENU
@@ -1461,6 +1548,8 @@ function installApplicationMenu() {
       label: app.name || 'Minds',
       submenu: [
         { role: 'about' },
+        { type: 'separator' },
+        { label: 'Check for Updates...', click: triggerUpdateCheck },
         { type: 'separator' },
         { role: 'services' },
         { type: 'separator' },
@@ -1491,6 +1580,33 @@ function installApplicationMenu() {
       ],
     },
     { role: 'editMenu' },
+    {
+      label: 'View',
+      submenu: [
+        {
+          label: 'Toggle Developer Tools',
+          // Default Electron binding (`role: 'toggleDevTools'`) targets the
+          // focused BrowserWindow's contents; we use BaseWindow with multiple
+          // WebContentsViews, so call toggleDevTools explicitly on the
+          // focused bundle's content view.
+          accelerator: 'Alt+Cmd+I',
+          click: () => {
+            const bundle = getMostRecentWindow();
+            if (!bundle || bundle.window.isDestroyed()) return;
+            const cv = bundle.contentView;
+            if (cv && !cv.webContents.isDestroyed()) {
+              cv.webContents.toggleDevTools();
+            }
+          },
+        },
+        { type: 'separator' },
+        { role: 'resetZoom' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+      ],
+    },
     { role: 'windowMenu' },
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
@@ -1520,6 +1636,7 @@ async function runStartupSequence(bundle) {
       }
     });
   } catch (err) {
+    console.error('[startup] env-setup failed:', err.message);
     showErrorInAllWindows(
       'Setup failed -- you may not be connected to the internet',
       err.message,
