@@ -49,10 +49,14 @@ describe('CreateRoute', () => {
   });
 
   it('submits the form as JSON and follows the redirect on success', async () => {
+    // Production envelope shape: the Python handler wraps the redirect
+    // url inside `{ ok, errors, data }` so the api wrapper can speak
+    // the same shape on success and failure.
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      text: async () => JSON.stringify({ redirect_url: '/creating/abc123' }),
+      text: async () =>
+        JSON.stringify({ ok: true, errors: {}, data: { redirect_url: '/creating/abc123' } }),
     });
     globalThis.fetch = fetchMock;
 
@@ -72,10 +76,13 @@ describe('CreateRoute', () => {
   });
 
   it('renders the server error message and does not redirect on a validation failure', async () => {
+    // Production envelope shape on failure: `_handle_create_form_submit`
+    // returns `{ ok: false, errors: { _: msg }, data: null }`.
     const fetchMock = vi.fn().mockResolvedValue({
       ok: false,
       status: 400,
-      text: async () => JSON.stringify({ errors: { _: 'Repository URL is required.' } }),
+      text: async () =>
+        JSON.stringify({ ok: false, errors: { _: 'Repository URL is required.' }, data: null }),
     });
     globalThis.fetch = fetchMock;
 

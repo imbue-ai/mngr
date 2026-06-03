@@ -28,6 +28,14 @@ async function postJson(path, body) {
     }
     return { ok: false, errors: { _: parsed?.error || `HTTP ${response.status}` } };
   }
+  // If the response speaks the `{ ok, errors, data }` envelope (the
+  // convention every migrated form-post handler uses), unwrap it so
+  // callers get the same shape on success and failure. Endpoints that
+  // haven't been migrated yet just return their raw JSON and we pass
+  // it through as `data`.
+  if (parsed && typeof parsed === 'object' && 'ok' in parsed && 'errors' in parsed) {
+    return { ok: !!parsed.ok, errors: parsed.errors || {}, data: parsed.data };
+  }
   return { ok: true, errors: {}, data: parsed };
 }
 
