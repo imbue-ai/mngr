@@ -6,6 +6,7 @@ from typing import cast
 
 import pytest
 
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import DISCOVERY_EVENT_SOURCE
@@ -75,6 +76,16 @@ from imbue.mngr.utils.testing import make_test_discovered_host
 def test_get_discovery_events_dir_returns_correct_path(temp_config: MngrConfig) -> None:
     events_dir = get_discovery_events_dir(temp_config)
     assert events_dir == temp_config.default_host_dir / "events" / "mngr" / "discovery"
+
+
+def test_get_discovery_events_dir_honors_events_base_dir_override(temp_config: MngrConfig) -> None:
+    # When the override is set, discovery events relocate under it (not default_host_dir),
+    # so a --discovery-only observer can write/read a private log that no other observer tails.
+    override = Path("/tmp/private-discovery-base")
+    overridden = temp_config.model_copy_update(to_update(temp_config.field_ref().events_base_dir_override, override))
+    assert get_discovery_events_dir(overridden) == override / "events" / "mngr" / "discovery"
+    # default_host_dir is unaffected -- provider/auth resolution still uses it.
+    assert overridden.default_host_dir == temp_config.default_host_dir
 
 
 def test_get_discovery_events_path_returns_jsonl_file(temp_config: MngrConfig) -> None:

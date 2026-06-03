@@ -22,6 +22,7 @@ surfaced as a non-zero exit (no ``--allow-degraded`` mode).
 """
 
 import os
+import shutil
 import signal
 import threading
 from datetime import datetime
@@ -542,9 +543,20 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
     )
     destruction_handler = LatchkeyDestructionHandler(tunnel_manager=tunnel_manager)
 
+    # Isolate latchkey's discovery observer onto a private, per-env event log so its
+    # snapshots are never written into (and tailed from) the shared default discovery
+    # log that minds' `mngr observe` reads. Without this, two observers share one log
+    # and an imbue_cloud-less snapshot from one flickers healthy hosts out of the
+    # other's view. The path is stable per-env (under this latchkey's plugin data dir,
+    # reused across forward restarts); since we're guaranteed the sole forward here
+    # (checked above), clearing a prior run's stale snapshots is safe and avoids
+    # re-emitting them on restart.
+    discovery_events_dir = Path(latchkey.plugin_data_dir) / "discovery-observe"
+    shutil.rmtree(discovery_events_dir, ignore_errors=True)
     consumer = DiscoveryStreamConsumer(
         concurrency_group=mngr_ctx.concurrency_group,
         mngr_binary=opts.mngr_binary,
+        events_dir=discovery_events_dir,
     )
     consumer.add_on_agent_discovered_callback(discovery_handler)
     consumer.add_on_agent_destroyed_callback(destruction_handler)

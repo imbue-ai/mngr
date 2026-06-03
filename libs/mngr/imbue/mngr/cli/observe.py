@@ -4,6 +4,7 @@ from typing import Any
 import click
 from loguru import logger
 
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.api.discovery_events import run_discovery_stream
 from imbue.mngr.api.observe import AgentObserver
 from imbue.mngr.api.observe import acquire_observe_lock
@@ -30,7 +31,9 @@ class ObserveCliOptions(CommonCliOptions):
     "--events-dir",
     type=click.Path(path_type=Path),
     default=None,
-    help="Base directory for event output files and lock. Defaults to MNGR_HOST_DIR (~/.mngr).",
+    help="Base directory for this process's event output files and lock (including the "
+    "--discovery-only event log). Defaults to MNGR_HOST_DIR (~/.mngr). Pass a private dir to "
+    "isolate a discovery-only observer from the shared discovery log.",
 )
 @click.option(
     "--discovery-only",
@@ -64,6 +67,24 @@ def observe(ctx: click.Context, **kwargs: Any) -> None:
     events_base_dir = opts.events_dir
     if events_base_dir is None:
         events_base_dir = get_default_events_base_dir(mngr_ctx.config)
+
+    # An explicit --events-dir must also relocate this process's *discovery* event
+    # log, not just the agent-state events the full observer writes. The snapshot
+    # writers (under `list_agents`) and the reader/tail in `run_discovery_stream`
+    # all derive the discovery path from `mngr_ctx.config`, so we thread the
+    # override through the config. Without this, every `mngr observe --discovery-only`
+    # reads/writes the single shared default discovery log and its snapshots get
+    # tailed by every other observer on the same host dir (which is how an
+    # imbue_cloud-less observer can flicker a healthy host out of another's view).
+    if opts.events_dir is not None:
+        mngr_ctx = mngr_ctx.model_copy_update(
+            to_update(
+                mngr_ctx.field_ref().config,
+                mngr_ctx.config.model_copy_update(
+                    to_update(mngr_ctx.config.field_ref().events_base_dir_override, opts.events_dir)
+                ),
+            ),
+        )
 
     if opts.discovery_only:
         run_discovery_stream(mngr_ctx=mngr_ctx)
