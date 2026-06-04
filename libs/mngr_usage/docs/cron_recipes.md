@@ -211,8 +211,8 @@ mv "$task_file" "$claimed" || exit 0
 name="$(basename "$claimed" .md | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')"
 [[ -n "$name" ]] || name="task-$(date +%s)"
 
-# Create (auto-starts) in the project repo we cd'd into, tag it into the live
-# pool, and hand it the task file as its first message. --no-connect keeps it
+# Create the agent in the project repo we cd'd into, tag it into the live pool,
+# and hand it the task file as its first message. --no-connect keeps it
 # non-interactive (cron has no TTY to attach a tmux session to).
 mngr create "$name" claude --label queue=live \
   --message-file "$claimed" --no-connect
@@ -223,20 +223,10 @@ Finished agents are stopped and moved to `queue=in-review`; to see them, run
 
 ## Scheduling
 
-`cron` runs with a bare environment, so each script has to establish its own
-context. Two things bite in practice:
-
-- **`PATH`** is minimal, so set one that finds `mngr`, `jq`, `git`, `tmux`, and
-  `claude`. `mngr` (and the Claude CLI) install under `~/.local/bin`; `jq`,
-  `git`, and `tmux` come from your system package manager.
-- **The working directory** is your home dir, which usually isn't a git repo --
-  that's why the recipes above `cd "$PROJECT_DIR"` before spawning an agent.
-  `mngr` resolves project-scoped settings (`.mngr/` config, `create_templates`,
-  labels) from the cwd's git worktree root, so running inside the project is
-  what makes those settings apply. (`--from` only sets the agent's source repo,
-  not which config loads.)
-
-On Linux (deps installed via `apt`, so they land in `/usr/bin`):
+`cron` runs with a bare `PATH`, so set one that finds `mngr`, `jq`, `git`,
+`tmux`, and `claude`. `mngr`, `claude`, and `uv` install under `~/.local/bin`;
+`jq`, `git`, and `tmux` come from your system package manager (`/usr/bin` via
+`apt` on Linux, `/opt/homebrew/bin` via Homebrew on Apple Silicon macOS).
 
 ```cron
 PATH=/usr/bin:/bin:/home/you/.local/bin
@@ -244,33 +234,15 @@ PATH=/usr/bin:/bin:/home/you/.local/bin
 */5 * * * * /path/to/your/script.sh
 ```
 
-On macOS (Homebrew on Apple Silicon puts deps in `/opt/homebrew/bin`; Intel Macs
-use `/usr/local/bin`, kept below for either):
-
-```cron
-PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/you/.local/bin
-
-*/5 * * * * /path/to/your/script.sh
-```
-
-On macOS, though, prefer a **LaunchAgent** over `cron` for anything that drives
-a `claude` agent -- see the next section for why.
-
 ### macOS: run via a LaunchAgent (Keychain-aware)
 
-`cron` jobs on macOS run outside your GUI (Aqua) login session, so they can't
-reach the login Keychain -- and that's where Claude Code keeps its credentials
-(Keychain service `Claude Code-credentials`), not in a file. A cron-launched
-agent therefore comes up unauthenticated: its banner reads
-`API Usage Billing - Not logged in - Run /login`, and it does nothing.
+On macOS, `cron` runs outside your GUI (Aqua) login session, so it can't reach
+the login Keychain where Claude Code stores its credentials -- cron-launched
+agents come up "Not logged in" and do nothing. A user **LaunchAgent** runs
+inside that session, so its agents authenticate with your normal Claude login.
 
-A user **LaunchAgent** loaded into your Aqua session *does* have Keychain
-access, so agents authenticate with your normal Claude login (the banner reads
-e.g. `Claude Max` instead of `Not logged in`) -- no API key on disk. It's the
-macOS-native answer to "my scheduled mngr agents come up not-logged-in".
-
-Drop a plist in `~/Library/LaunchAgents/`. It runs your `.sh` directly (give the
-script a shebang and `chmod +x` it); no wrapper needed:
+Put a plist in `~/Library/LaunchAgents/`; it runs your `.sh` directly (the
+script needs a shebang and `chmod +x`):
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -288,18 +260,10 @@ script a shebang and `chmod +x` it); no wrapper needed:
 </plist>
 ```
 
-- `StartInterval` (seconds) is the periodic-run knob -- `300` is the equivalent
-  of cron's `*/5`.
-- `EnvironmentVariables` -> `PATH` carries the same caveat as cron: a bare
-  launchd `PATH` won't find your tools, so include the Homebrew prefix
-  (`/opt/homebrew/bin`, for `tmux` and `node`) and `~/.local/bin` (`mngr`,
-  `claude`, `uv`).
+- `StartInterval` (seconds) sets the run cadence -- `300` is cron's `*/5`.
+- `EnvironmentVariables` -> `PATH` needs the same entries as cron above: the
+  Homebrew prefix (`/opt/homebrew/bin`) and `~/.local/bin`.
 - `StandardOutPath` / `StandardErrorPath` capture output to a log file.
-  LaunchAgents don't mail their output, so this also avoids cron's "You have new
-  mail" noise.
-- The cwd caveat still applies: the job runs outside your repo, so the script
-  must `cd` into it (or set `MNGR_PROJECT_CONFIG_DIR`) for mngr to pick up the
-  project's `.mngr/settings.toml`.
 
 Load it into your session (and start it running):
 

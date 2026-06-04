@@ -8,9 +8,9 @@ Refined the cron automation recipes doc (`docs/cron_recipes.md`):
   the project's settings (`create_templates`, labels, etc.). Dropped the now
   redundant `--from ":$PROJECT_DIR"` from `dispatch-task.sh` (cd makes the
   create source default to the project's git root).
-- Reworked the Scheduling section: explained the bare-cwd caveat alongside the
-  bare-`PATH` one, and added a separate macOS `PATH` example that includes
-  `/opt/homebrew/bin` (Apple Silicon Homebrew) in addition to the Linux example.
+- Reworked the Scheduling section: the `PATH` note now covers both the Linux
+  (`/usr/bin` via apt) and macOS (`/opt/homebrew/bin` via Homebrew) dependency
+  locations around a single cron example.
 - Added a macOS LaunchAgent section as the recommended alternative to `cron` on
   macOS. cron jobs run outside the GUI (Aqua) login session and so can't reach
   the login Keychain, where Claude Code stores its credentials -- cron-launched
