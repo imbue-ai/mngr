@@ -93,6 +93,7 @@ from imbue.minds.desktop_client.sharing_handler import is_probeable_share_url
 from imbue.minds.desktop_client.sharing_handler import is_share_ready_from_edge_response
 from imbue.minds.desktop_client.sharing_handler import parse_emails_form_value
 from imbue.minds.desktop_client.sharing_handler import resolve_account_email_for_workspace
+from imbue.minds.desktop_client.supertokens_routes import _bounce_latchkey_forward_supervisor
 from imbue.minds.desktop_client.supertokens_routes import create_supertokens_router
 from imbue.minds.desktop_client.supertokens_routes import signout_user_via_plugin
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
@@ -1550,24 +1551,6 @@ def _handle_telegram_status(
 # -- Providers panel toggle route --
 
 
-def _bounce_latchkey_forward(request: Request) -> None:
-    """Bounce the detached ``mngr latchkey forward`` supervisor's observe child.
-
-    Mirrors :func:`EnvelopeStreamConsumer.bounce_observe` for latchkey: called
-    on the same provider-set changes minds uses to bounce its own observe so
-    latchkey reloads the current provider set without dropping its shared
-    gateway or reverse tunnels. No-op when no supervisor handle is on app.state
-    (e.g. tests). ``bounce()`` starts the supervisor if none is running.
-    """
-    supervisor: LatchkeyForwardSupervisor | None = request.app.state.latchkey_forward_supervisor
-    if supervisor is None:
-        return
-    try:
-        supervisor.bounce()
-    except (OSError, RuntimeError) as e:
-        logger.warning("Failed to bounce mngr latchkey forward: {}", e)
-
-
 async def _handle_provider_toggle(
     provider_name: str,
     request: Request,
@@ -1615,7 +1598,7 @@ async def _handle_provider_toggle(
             consumer.bounce_observe()
         # Keep latchkey's discovery in lockstep with minds' own observe so its
         # gateway permission / reverse-tunnel setup reflects the new provider set.
-        _bounce_latchkey_forward(request)
+        _bounce_latchkey_forward_supervisor(request.app.state.latchkey_forward_supervisor)
     return Response(
         content=json.dumps({"provider_name": provider_name, "is_enabled": is_enabled, "changed": changed}),
         media_type="application/json",
