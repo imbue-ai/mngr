@@ -1341,7 +1341,6 @@ def _build_fully_populated_mngr_config(mngr_test_prefix: str) -> MngrConfig:
     return MngrConfig(
         prefix=f"{mngr_test_prefix}override-",
         default_host_dir=Path("/tmp/non-default-host-dir"),
-        events_base_dir_override=Path("/tmp/non-default-events-base-dir"),
         unset_vars=["NON_DEFAULT_VAR"],
         work_dir_extra_paths={".something": WorkDirExtraPathMode.COPY},
         pager="bat",

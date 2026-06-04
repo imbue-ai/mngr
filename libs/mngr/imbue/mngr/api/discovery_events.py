@@ -204,15 +204,12 @@ _DISCOVERY_EVENT_ADAPTER: Final[TypeAdapter[DiscoveryEvent]] = TypeAdapter(Disco
 def get_discovery_events_dir(config: MngrConfig) -> Path:
     """Return the directory for discovery event files.
 
-    When ``config.events_base_dir_override`` is set, discovery events live under it
-    instead of ``default_host_dir``. This lets a ``mngr observe --discovery-only``
-    process write/read a private event log that no other observer tails (see
-    ``MngrConfig.events_base_dir_override``). Both the snapshot writers (under
-    ``list_agents``) and the reader/tail in ``run_discovery_stream`` derive their
-    path from this function, so a single override relocates the whole stream.
+    Both the snapshot writers (under ``list_agents``) and the reader/tail in
+    ``run_discovery_stream`` / ``tail_discovery_events_file`` derive their path from
+    this function, so every mngr process on the same host dir reads and writes a
+    single shared discovery log.
     """
-    base = config.events_base_dir_override or config.default_host_dir
-    return Path(base).expanduser() / "events" / "mngr" / "discovery"
+    return config.default_host_dir.expanduser() / "events" / "mngr" / "discovery"
 
 
 @pure
@@ -1041,6 +1038,71 @@ def _emit_lines_from_offset(
     return offset + bytes_consumed
 
 
+def _emit_latest_cached_snapshot(
+    events_path: Path,
+    warner: MalformedJsonLineWarner,
+    emitted_event_ids: set[str],
+    emit_lock: Lock,
+    on_line: Callable[[str], None] | None,
+    # (byte offset consumed so a subsequent tail resumes there, whether a cached snapshot was emitted)
+) -> tuple[int, bool]:
+    """Emit lines from the latest full snapshot on disk, if any.
+
+    Returns the byte offset up to which the file was consumed (the starting offset
+    for a subsequent tail) and whether a cached snapshot was actually emitted. When
+    the file is absent the offset is 0; when it exists but holds no full snapshot the
+    offset is the current file size (so the tail only sees newly-appended lines).
+    """
+    if not events_path.exists():
+        return 0, False
+    snapshot_offset = find_latest_full_snapshot_offset(events_path)
+    if snapshot_offset <= 0:
+        return events_path.stat().st_size, False
+    consumed_offset = _emit_lines_from_offset(
+        events_path, snapshot_offset, warner, emitted_event_ids, emit_lock, on_line
+    )
+    return consumed_offset, True
+
+
+def tail_discovery_events_file(
+    events_path: Path,
+    stop_event: threading.Event,
+    on_line: Callable[[str], None],
+) -> None:
+    """Emit the latest cached discovery snapshot, then tail the file for appended events.
+
+    A pure *consumer* of an existing discovery event log: unlike ``run_discovery_stream``
+    it never polls providers or writes snapshots. Intended for a process that observes
+    the discovery stream produced by *another* ``mngr observe --discovery-only`` (e.g.
+    ``mngr forward --observe-via-file``). Blocks until ``stop_event`` is set, so callers
+    run it on a dedicated thread.
+
+    Tolerates the file being absent when called (the tail loop waits for it to appear)
+    and being truncated/rotated while tailing (it resets and re-reads), reusing the same
+    tail loop ``run_discovery_stream`` relies on. The latest cached snapshot is emitted
+    up front so a consumer attaching mid-stream is populated immediately.
+    """
+    emitted_event_ids: set[str] = set()
+    emit_lock = Lock()
+    warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
+    # Emit from the latest full snapshot on disk so a consumer attaching mid-stream
+    # is populated immediately. ``find_latest_full_snapshot_offset`` returns 0 when
+    # the file is absent or holds no snapshot yet *and* when the snapshot is the very
+    # first line; reading from that offset covers all three (the dedup set keeps a
+    # later real snapshot from double-emitting), so unlike ``run_discovery_stream``'s
+    # writer-side fast path we never skip an offset-0 snapshot.
+    if events_path.exists():
+        snapshot_offset = find_latest_full_snapshot_offset(events_path)
+        initial_offset = _emit_lines_from_offset(
+            events_path, snapshot_offset, warner, emitted_event_ids, emit_lock, on_line
+        )
+    else:
+        initial_offset = 0
+    _discovery_stream_tail_events_file(
+        events_path, initial_offset, stop_event, emitted_event_ids, emit_lock, warner, on_line
+    )
+
+
 def _write_unfiltered_full_snapshot(mngr_ctx: MngrContext) -> None:
     """Run an unfiltered list to trigger a full discovery snapshot event.
 
@@ -1122,18 +1184,12 @@ def run_discovery_stream(
     # warning when the next phase or the tail reads valid data after it.
     warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
 
-    # Phase 1: emit from the latest cached snapshot on disk (fast path)
-    has_cached_snapshot = False
-    # Default to file size; overridden below to the byte position phase 1
-    # actually consumed so the tail thread re-reads any trailing partial line.
-    initial_offset = events_path.stat().st_size if events_path.exists() else 0
-    if events_path.exists():
-        snapshot_offset = find_latest_full_snapshot_offset(events_path)
-        if snapshot_offset > 0:
-            has_cached_snapshot = True
-            initial_offset = _emit_lines_from_offset(
-                events_path, snapshot_offset, warner, emitted_event_ids, emit_lock, on_line
-            )
+    # Phase 1: emit from the latest cached snapshot on disk (fast path). The
+    # returned offset is the byte position actually consumed so the tail thread
+    # re-reads any trailing partial line.
+    initial_offset, has_cached_snapshot = _emit_latest_cached_snapshot(
+        events_path, warner, emitted_event_ids, emit_lock, on_line
+    )
 
     # Phase 2: start tailing the events file for new events
     stop_event = threading.Event()

@@ -9,8 +9,6 @@ and lifecycle gating.
 """
 
 import json
-import os
-import signal
 import subprocess
 import threading
 from pathlib import Path
@@ -521,62 +519,7 @@ def test_malformed_listening_port_is_dropped_and_waiter_keeps_waiting(
     assert consumer.wait_for_listening(timeout=0.05) is None
 
 
-# --- bounce_observe / terminate -------------------------------------------
-
-
-def test_bounce_observe_sends_sighup_to_attached_pid(consumer: EnvelopeStreamConsumer) -> None:
-    """Install a real SIGHUP handler in this test process and confirm the
-    consumer's bounce_observe path sends SIGHUP to the configured PID.
-
-    Uses the test's own PID so the signal really lands in the same process
-    (xdist runs each worker in its own process, so this is isolated from
-    parallel tests).
-    """
-    received = threading.Event()
-
-    def _handler(_signo: int, _frame: object) -> None:
-        received.set()
-
-    previous = signal.signal(signal.SIGHUP, _handler)
-    try:
-        fake = _FakeProcess(pid=os.getpid())
-        # Plugin is still running (poll() returns None).
-        fake.returncode = None
-        _attach_fake(consumer, fake)
-        consumer.bounce_observe()
-        assert received.wait(timeout=2.0), "SIGHUP was not received"
-    finally:
-        signal.signal(signal.SIGHUP, previous)
-
-
-def test_bounce_observe_is_no_op_when_process_already_exited(
-    consumer: EnvelopeStreamConsumer,
-) -> None:
-    """If the plugin's poll() returns a non-None code, bounce_observe must not
-    deliver a signal -- the PID could now belong to a recycled, unrelated
-    process. Use a real SIGHUP handler that should never fire.
-    """
-    received = threading.Event()
-
-    def _handler(_signo: int, _frame: object) -> None:
-        received.set()
-
-    previous = signal.signal(signal.SIGHUP, _handler)
-    try:
-        fake = _FakeProcess(pid=os.getpid())
-        # Process has already exited.
-        fake.returncode = 0
-        _attach_fake(consumer, fake)
-        consumer.bounce_observe()
-        # Brief wait to confirm no signal lands.
-        assert not received.wait(timeout=0.2)
-    finally:
-        signal.signal(signal.SIGHUP, previous)
-
-
-def test_bounce_observe_is_no_op_when_no_process_attached(consumer: EnvelopeStreamConsumer) -> None:
-    # Must not raise even with no attached process.
-    consumer.bounce_observe()
+# --- terminate ------------------------------------------------------------
 
 
 def test_terminate_calls_terminate_then_returns(consumer: EnvelopeStreamConsumer) -> None:

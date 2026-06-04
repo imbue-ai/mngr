@@ -6,12 +6,12 @@ Covers:
 - ``_build_providers_state_payload``: combines resolver-tracked providers,
   errored providers, and disabled-on-disk providers into the SSE payload.
 
-The toggle endpoint also sends ``SIGHUP`` to the ``mngr forward`` plugin via
-``EnvelopeStreamConsumer.bounce_observe``. Tests deliberately do not wire a
-consumer (``create_desktop_client`` defaults the slot to ``None``); the
-handler's ``if consumer is not None`` guard makes the bounce a no-op in that
-case. The bounce side-effect itself is exercised by the forward_cli unit
-tests; this file focuses on the new routing/validation/serialization logic.
+The toggle endpoint also bounces the detached ``mngr latchkey forward``
+supervisor (the single discovery observer) via
+``bounce_latchkey_forward_supervisor``. Tests deliberately do not wire a
+supervisor (``create_desktop_client`` defaults the slot to ``None``); the
+helper's ``if supervisor is None`` guard makes the bounce a no-op in that
+case. This file focuses on the new routing/validation/serialization logic.
 """
 
 import tomllib
