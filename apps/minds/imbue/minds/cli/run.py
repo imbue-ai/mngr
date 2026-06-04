@@ -207,13 +207,27 @@ def run(
     # across desktop-client restarts.
     gateway_client = LatchkeyGatewayClient.from_latchkey(latchkey)
 
+    # Build the supervisor once and keep the handle: the startup restart runs on
+    # the background thread below, and the same instance is stashed on app.state
+    # so the provider-change request handlers can ``bounce()`` it mid-session
+    # (mirroring the SIGHUP minds already sends its own ``mngr forward`` observe).
+    latchkey_forward_supervisor = LatchkeyForwardSupervisor(
+        mngr_binary=MNGR_BINARY,
+        latchkey_binary=latchkey.latchkey_binary,
+        latchkey_directory=latchkey.latchkey_directory,
+        extra_env={
+            MINDS_API_PROXY_URL_ENV_VAR: f"http://127.0.0.1:{port}",
+            MINDS_API_PROXY_KEY_ENV_VAR: minds_api_key,
+        },
+    )
+
     # Background thread: supervisor restart must complete before the
     # gateway-client pre-warm reads the on-disk forward record, or it
     # caches the previous supervisor's stale port for the rest of the
     # process lifetime.
     root_concurrency_group.start_new_thread(
         _restart_supervisor_then_prewarm_gateway_client,
-        args=(latchkey, gateway_client, port, minds_api_key),
+        args=(latchkey_forward_supervisor, gateway_client),
         name="mngr-latchkey-supervisor-and-gateway-init",
     )
 
@@ -372,6 +386,7 @@ def run(
         mngr_binary=MNGR_BINARY,
         mngr_host_dir=mngr_host_dir,
         minds_api_key=minds_api_key,
+        latchkey_forward_supervisor=latchkey_forward_supervisor,
     )
 
     # Background probe loop: flips STUCK/RESTARTING agents back to HEALTHY
@@ -580,10 +595,8 @@ def _sleep_then_open(url: str, delay: float = 1.0) -> None:
 
 
 def _restart_supervisor_then_prewarm_gateway_client(
-    latchkey: Latchkey,
+    supervisor: LatchkeyForwardSupervisor,
     gateway_client: LatchkeyGatewayClient,
-    minds_api_port: int,
-    minds_api_key: str,
 ) -> None:
     """Restart the latchkey supervisor, then pre-warm the gateway client.
 
@@ -591,8 +604,8 @@ def _restart_supervisor_then_prewarm_gateway_client(
     the bound port from the supervisor's on-disk record, so it must
     run after the supervisor restart has stamped the fresh port.
 
-    ``minds_api_port`` is the port the minds bare-origin server is
-    bound to in *this* process; it's threaded through to the
+    The supervisor was constructed in ``run`` with the bare-origin port
+    baked into its ``extra_env``; it's threaded through to the
     supervisor as ``LATCHKEY_EXTENSION_MINDS_API_URL`` so the gateway's
     bundled ``minds-api-proxy`` extension knows where to forward agent
     traffic. Restarting the supervisor on every minds start is what
@@ -602,7 +615,7 @@ def _restart_supervisor_then_prewarm_gateway_client(
     can inject ``Authorization: Bearer <key>`` on every forwarded
     request.
     """
-    _ensure_mngr_latchkey_forward_supervisor(latchkey, minds_api_port, minds_api_key)
+    _restart_mngr_latchkey_forward_supervisor(supervisor)
     try:
         gateway_client.ensure_initialized()
     except LatchkeyGatewayClientError as e:
@@ -612,23 +625,8 @@ def _restart_supervisor_then_prewarm_gateway_client(
         )
 
 
-def _ensure_mngr_latchkey_forward_supervisor(latchkey: Latchkey, minds_api_port: int, minds_api_key: str) -> None:
+def _restart_mngr_latchkey_forward_supervisor(supervisor: LatchkeyForwardSupervisor) -> None:
     """Restart the detached ``mngr latchkey forward`` supervisor on minds startup.
-
-    Reuses ``latchkey``'s already-resolved binary + directory paths so
-    the supervisor sees exactly the same latchkey state minds itself
-    works against. Bare-name ``mngr`` is used; bundled minds builds
-    rely on the Electron shell having put ``mngr`` on the child's
-    PATH alongside the bundled ``latchkey`` (the
-    :class:`MngrMessageSender` and ``mngr forward`` subprocess paths
-    already make the same assumption).
-
-    ``minds_api_port`` is published to the spawned supervisor as the
-    ``LATCHKEY_EXTENSION_MINDS_API_URL`` env var so the gateway's
-    bundled ``minds-api-proxy`` extension knows the bare-origin URL
-    to forward agent traffic to. The supervisor inherits this env var
-    into the ``latchkey gateway`` subprocess it owns and from there
-    into the extension's ``process.env``.
 
     Uses :meth:`LatchkeyForwardSupervisor.restart` rather than
     ``ensure_running`` so that minds upgrades always run with a
@@ -640,21 +638,13 @@ def _ensure_mngr_latchkey_forward_supervisor(latchkey: Latchkey, minds_api_port:
     consumer today. Restarting on every minds start is also what
     keeps ``LATCHKEY_EXTENSION_MINDS_API_URL`` in sync with the
     current bare-origin port -- minds re-binds its server on every
-    start, and the supervisor restart re-publishes the env var.
+    start, and the supervisor restart re-publishes the env var (baked
+    into the supervisor's ``extra_env`` at construction time in ``run``).
 
     Failures are logged as warnings rather than raised: a broken
     supervisor degrades latchkey to "unreachable from inside agents"
     but should not prevent minds itself from starting.
     """
-    supervisor = LatchkeyForwardSupervisor(
-        mngr_binary=MNGR_BINARY,
-        latchkey_binary=latchkey.latchkey_binary,
-        latchkey_directory=latchkey.latchkey_directory,
-        extra_env={
-            MINDS_API_PROXY_URL_ENV_VAR: f"http://127.0.0.1:{minds_api_port}",
-            MINDS_API_PROXY_KEY_ENV_VAR: minds_api_key,
-        },
-    )
     try:
         info = supervisor.restart()
     except LatchkeyError as e:

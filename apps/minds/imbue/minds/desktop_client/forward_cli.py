@@ -58,6 +58,7 @@ from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
+from imbue.mngr.api.discovery_events import partition_removed_agents_by_provider_error
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
@@ -380,39 +381,66 @@ class EnvelopeStreamConsumer(MutableModel):
             logger.trace("Ignoring unknown discovery event: {}", type(event).__name__)
 
     def _handle_full_snapshot(self, event: FullDiscoverySnapshotEvent) -> None:
-        agent_ids: list[AgentId] = []
-        agent_host_map: dict[str, str] = {}
-        kept: dict[str, DiscoveredAgent] = {}
+        # Agents present in this snapshot.
+        fresh_agents: dict[str, DiscoveredAgent] = {}
+        fresh_host_map: dict[str, str] = {}
         for agent in event.agents:
-            agent_ids.append(agent.agent_id)
-            agent_host_map[str(agent.agent_id)] = str(agent.host_id)
-            kept[str(agent.agent_id)] = agent
+            fresh_agents[str(agent.agent_id)] = agent
+            fresh_host_map[str(agent.agent_id)] = str(agent.host_id)
         with self._lock:
-            previously_known = set(self._discovered_agents.keys())
-            self._discovered_agents = kept
-            self._agent_host_map = agent_host_map
+            prior_agents = dict(self._discovered_agents)
+            prior_host_map = dict(self._agent_host_map)
+            removed = prior_agents.keys() - fresh_agents.keys()
+            # An agent absent because its provider errored is retained (kept in
+            # the resolver and surfaced as stale via error_by_provider_name)
+            # rather than dropped; only genuinely-removed agents fire destroyed.
+            partition = partition_removed_agents_by_provider_error(
+                removed_agent_ids=removed,
+                provider_name_by_prior_agent_id={
+                    aid_str: str(agent.provider_name) for aid_str, agent in prior_agents.items()
+                },
+                error_by_provider_name=event.error_by_provider_name,
+            )
+            merged_agents = dict(fresh_agents)
+            merged_host_map = dict(fresh_host_map)
+            for aid_str in partition.retained:
+                merged_agents[aid_str] = prior_agents[aid_str]
+                merged_host_map[aid_str] = prior_host_map[aid_str]
+            self._discovered_agents = merged_agents
+            self._agent_host_map = merged_host_map
             ssh_info_by_agent = {
-                aid: self._ssh_by_host_id[hid] for aid, hid in agent_host_map.items() if hid in self._ssh_by_host_id
+                aid: self._ssh_by_host_id[hid] for aid, hid in merged_host_map.items() if hid in self._ssh_by_host_id
             }
-            removed = previously_known - set(kept.keys())
+        # Push the merged set (fresh + retained) so retained agents stay listed
+        # in the workspace UI; their provider_name lets the workspace list mark
+        # them stale by cross-referencing the errored providers below.
         self.resolver.update_agents(
             ParsedAgentsResult(
-                agent_ids=tuple(agent_ids),
-                discovered_agents=event.agents,
+                agent_ids=tuple(agent.agent_id for agent in merged_agents.values()),
+                discovered_agents=tuple(merged_agents.values()),
                 ssh_info_by_agent_id=ssh_info_by_agent,
             )
         )
         # Push provider state + freshness timestamp through the resolver so the
-        # providers panel can render OK / Error badges and "time since last full
-        # discovery event" without parsing the discovery stream itself.
+        # providers panel can render OK / Error badges, the workspace list can
+        # mark retained agents stale, and the "time since last full discovery
+        # event" counter updates -- without parsing the discovery stream itself.
         self.resolver.update_providers(
             providers=event.providers,
             error_by_provider_name=event.error_by_provider_name,
             last_full_snapshot_at=datetime.now(timezone.utc),
         )
-        for aid_str in removed:
+        if partition.retained:
+            logger.debug(
+                "Retained {} agent(s) through a provider discovery error; surfacing as stale: {}",
+                len(partition.retained),
+                sorted(partition.retained),
+            )
+        for aid_str in partition.dropped:
             self._fire_destroyed(AgentId(aid_str))
-        for agent in event.agents:
+        # Only (re)fire discovery for agents actually present in this snapshot;
+        # retained agents were already announced and stay set up.
+        for agent in fresh_agents.values():
             ssh_info = ssh_info_by_agent.get(str(agent.agent_id))
             self._fire_discovered(agent.agent_id, ssh_info, str(agent.provider_name))
 

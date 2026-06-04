@@ -25,6 +25,7 @@ from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.event_envelope import IsoTimestamp
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
+from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.primitives import AgentId
@@ -86,6 +87,29 @@ def _full_snapshot_line(agents: tuple[DiscoveredAgent, ...], counter: list[int])
     return _serialize(event)
 
 
+def _full_snapshot_line_with_errors(
+    agents: tuple[DiscoveredAgent, ...],
+    errored_provider_names: tuple[str, ...],
+    counter: list[int],
+) -> str:
+    event = FullDiscoverySnapshotEvent(
+        timestamp=_TIMESTAMP,
+        event_id=_next_event_id(counter),
+        source=_EVENT_SOURCE,
+        agents=agents,
+        hosts=(),
+        error_by_provider_name={
+            ProviderInstanceName(name): DiscoveryError(
+                type_name="RuntimeError",
+                message="discovery failed",
+                provider_name=ProviderInstanceName(name),
+            )
+            for name in errored_provider_names
+        },
+    )
+    return _serialize(event)
+
+
 def _agent_discovered_line(agent: DiscoveredAgent, counter: list[int]) -> str:
     event = AgentDiscoveryEvent(
         timestamp=_TIMESTAMP,
@@ -124,6 +148,11 @@ def _host_ssh_info_line(host_id: HostId, counter: list[int]) -> str:
     return _serialize(event)
 
 
+def _feed_observe(manager: ForwardStreamManager, line: str) -> None:
+    """Feed one observe-stream line through the manager's private dispatcher (test hook)."""
+    manager._on_observe_output(line + "\n", is_stdout=True)  # noqa: SLF001
+
+
 def test_full_snapshot_updates_resolver_and_fires_callback(
     setup: tuple[ForwardStreamManager, ForwardResolver, io.StringIO, list[int]],
 ) -> None:
@@ -131,7 +160,7 @@ def test_full_snapshot_updates_resolver_and_fires_callback(
     discovered: list[tuple[AgentId, RemoteSSHInfo | None, str]] = []
     manager.add_on_agent_discovered_callback(lambda aid, ssh, prov: discovered.append((aid, ssh, prov)))
     line = _full_snapshot_line((_agent(TEST_AGENT_ID_1), _agent(TEST_AGENT_ID_2)), counter)
-    manager._on_observe_output(line + "\n", is_stdout=True)  # noqa: SLF001
+    _feed_observe(manager, line)
     # Resolver received both agents.
     assert set(resolver.list_known_agent_ids()) == {TEST_AGENT_ID_1, TEST_AGENT_ID_2}
     # Callback fired once per agent.
@@ -158,15 +187,38 @@ def test_agent_discovery_excluded_by_filter_skips_resolver(
 
     # Agent with no labels.workspace -> excluded.
     line = _agent_discovered_line(_agent(TEST_AGENT_ID_1, labels={}), counter)
-    manager._on_observe_output(line + "\n", is_stdout=True)  # noqa: SLF001
+    _feed_observe(manager, line)
     assert TEST_AGENT_ID_1 not in resolver.list_known_agent_ids()
     assert fired == []
 
     # Agent with labels.workspace=true -> included.
     line2 = _agent_discovered_line(_agent(TEST_AGENT_ID_2, labels={"workspace": "true"}), counter)
-    manager._on_observe_output(line2 + "\n", is_stdout=True)  # noqa: SLF001
+    _feed_observe(manager, line2)
     assert TEST_AGENT_ID_2 in resolver.list_known_agent_ids()
     assert fired == [TEST_AGENT_ID_2]
+
+
+def test_full_snapshot_retains_agent_whose_provider_errored_then_drops_on_clean(
+    setup: tuple[ForwardStreamManager, ForwardResolver, io.StringIO, list[int]],
+) -> None:
+    """A snapshot omitting an agent whose provider errored keeps it; a clean snapshot drops it."""
+    manager, resolver, _buf, counter = setup
+    destroyed: list[AgentId] = []
+    manager.add_on_agent_destroyed_callback(lambda aid: destroyed.append(aid))
+
+    # Both agents present (provider 'modal' succeeded).
+    _feed_observe(manager, _full_snapshot_line((_agent(TEST_AGENT_ID_1), _agent(TEST_AGENT_ID_2)), counter))
+    assert set(resolver.list_known_agent_ids()) == {TEST_AGENT_ID_1, TEST_AGENT_ID_2}
+
+    # Snapshot omits agent 2 but its provider 'modal' errored -> retained, no destruction.
+    _feed_observe(manager, _full_snapshot_line_with_errors((_agent(TEST_AGENT_ID_1),), ("modal",), counter))
+    assert set(resolver.list_known_agent_ids()) == {TEST_AGENT_ID_1, TEST_AGENT_ID_2}
+    assert destroyed == []
+
+    # Clean snapshot (no provider error) still omits agent 2 -> dropped now.
+    _feed_observe(manager, _full_snapshot_line((_agent(TEST_AGENT_ID_1),), counter))
+    assert set(resolver.list_known_agent_ids()) == {TEST_AGENT_ID_1}
+    assert destroyed == [TEST_AGENT_ID_2]
 
 
 def test_agent_destroyed_clears_resolver_and_fires_callback(

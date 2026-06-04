@@ -31,6 +31,7 @@ from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
+from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
@@ -219,6 +220,58 @@ def test_subsequent_snapshot_fires_destroyed_for_dropped_agents(
     )
     _dispatch(consumer, _observe_envelope(second))
 
+    assert destroyed == [_AGENT_ID_2]
+    assert set(consumer.resolver.list_known_agent_ids()) == {_AGENT_ID_1}
+
+
+def test_snapshot_retains_agent_whose_provider_errored_then_drops_on_clean(
+    consumer: EnvelopeStreamConsumer,
+) -> None:
+    """An agent omitted because its provider errored is retained (and surfaced stale); a clean snapshot drops it."""
+    counter = [0]
+    destroyed: list[AgentId] = []
+    consumer.add_on_agent_destroyed_callback(lambda aid: destroyed.append(aid))
+
+    first = FullDiscoverySnapshotEvent(
+        timestamp=_TIMESTAMP,
+        event_id=_next_event_id(counter),
+        source=_EVENT_SOURCE,
+        agents=(_make_agent(_AGENT_ID_1), _make_agent(_AGENT_ID_2)),
+        hosts=(),
+    )
+    _dispatch(consumer, _observe_envelope(first))
+
+    # Snapshot omits agent 2 but its provider 'local' errored: agent 2 is
+    # retained in the resolver (no destroyed callback) and the error is
+    # surfaced so the workspace list can render it stale.
+    errored = FullDiscoverySnapshotEvent(
+        timestamp=_TIMESTAMP,
+        event_id=_next_event_id(counter),
+        source=_EVENT_SOURCE,
+        agents=(_make_agent(_AGENT_ID_1),),
+        hosts=(),
+        error_by_provider_name={
+            ProviderInstanceName("local"): DiscoveryError(
+                type_name="RuntimeError",
+                message="discovery failed",
+                provider_name=ProviderInstanceName("local"),
+            )
+        },
+    )
+    _dispatch(consumer, _observe_envelope(errored))
+    assert destroyed == []
+    assert set(consumer.resolver.list_known_agent_ids()) == {_AGENT_ID_1, _AGENT_ID_2}
+    assert ProviderInstanceName("local") in consumer.resolver.get_provider_errors()
+
+    # Clean snapshot (no provider error) still omits agent 2 -> dropped now.
+    clean = FullDiscoverySnapshotEvent(
+        timestamp=_TIMESTAMP,
+        event_id=_next_event_id(counter),
+        source=_EVENT_SOURCE,
+        agents=(_make_agent(_AGENT_ID_1),),
+        hosts=(),
+    )
+    _dispatch(consumer, _observe_envelope(clean))
     assert destroyed == [_AGENT_ID_2]
     assert set(consumer.resolver.list_known_agent_ids()) == {_AGENT_ID_1}
 
