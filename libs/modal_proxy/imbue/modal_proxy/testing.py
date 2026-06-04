@@ -43,7 +43,7 @@ from imbue.modal_proxy.log_utils import ModalLoguruWriter
 # ---------------------------------------------------------------------------
 
 
-class TestingExecOutput(ExecOutput):
+class FakeExecOutput(ExecOutput):
     """Exec output backed by a completed process result."""
 
     output_text: str = Field(default="", description="The captured stdout text")
@@ -52,7 +52,7 @@ class TestingExecOutput(ExecOutput):
         return self.output_text
 
 
-class TestingExecProcess(ExecProcess):
+class FakeExecProcess(ExecProcess):
     """Exec process backed by a ConcurrencyGroup-managed process."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -62,8 +62,8 @@ class TestingExecProcess(ExecProcess):
 
     def get_stdout(self) -> ExecOutput:
         if self._running_process is not None:
-            return TestingExecOutput(output_text=self._running_process.read_stdout())
-        return TestingExecOutput(output_text=self._completed_text)
+            return FakeExecOutput(output_text=self._running_process.read_stdout())
+        return FakeExecOutput(output_text=self._completed_text)
 
     def wait(self) -> int:
         if self._running_process is not None:
@@ -71,13 +71,13 @@ class TestingExecProcess(ExecProcess):
         return 0
 
 
-class TestingSecret(SecretInterface):
+class FakeSecret(SecretInterface):
     """In-memory secret holding key-value pairs."""
 
     values: dict[str, str | None] = Field(default_factory=dict, description="Secret key-value pairs")
 
 
-class TestingFunction(FunctionInterface):
+class FakeFunction(FunctionInterface):
     """Testing function with a configurable web URL."""
 
     url: str | None = Field(default=None, description="The web URL for this function")
@@ -86,7 +86,7 @@ class TestingFunction(FunctionInterface):
         return self.url
 
 
-class TestingImage(ImageInterface):
+class FakeImage(ImageInterface):
     """Lightweight no-op image for testing."""
 
     image_id: str = Field(description="Unique identifier for this image")
@@ -96,7 +96,7 @@ class TestingImage(ImageInterface):
 
     def apt_install(self, *packages: str) -> "ImageInterface":
         # No-op -- packages are already installed in the test environment
-        return TestingImage(image_id=self.image_id)
+        return FakeImage(image_id=self.image_id)
 
     def dockerfile_commands(
         self,
@@ -106,14 +106,14 @@ class TestingImage(ImageInterface):
         secrets: Sequence[SecretInterface] = (),
     ) -> "ImageInterface":
         # No-op -- return a new image with a fresh ID to simulate layer caching
-        return TestingImage(image_id=f"img-{uuid.uuid4().hex}")
+        return FakeImage(image_id=f"img-{uuid.uuid4().hex}")
 
     def build(self, app: AppInterface) -> None:
         # No-op -- images are not real in the test environment
         pass
 
 
-class TestingVolume(VolumeInterface):
+class FakeVolume(VolumeInterface):
     """Volume backed by a real directory on disk."""
 
     root_dir: Path = Field(description="Local directory backing this volume")
@@ -187,7 +187,7 @@ class TestingVolume(VolumeInterface):
         pass
 
 
-class TestingSandbox(SandboxInterface):
+class FakeSandbox(SandboxInterface):
     """Sandbox that runs commands locally via ConcurrencyGroup.
 
     Background processes are tracked by the ConcurrencyGroup and cleaned
@@ -232,7 +232,7 @@ class TestingSandbox(SandboxInterface):
                 list(args),
                 is_checked_by_group=False,
             )
-            exec_proc = TestingExecProcess()
+            exec_proc = FakeExecProcess()
             exec_proc._running_process = running
             return exec_proc
         else:
@@ -241,7 +241,7 @@ class TestingSandbox(SandboxInterface):
                 timeout=60,
                 is_checked_after=False,
             )
-            exec_proc = TestingExecProcess()
+            exec_proc = FakeExecProcess()
             exec_proc._completed_text = finished.stdout
             return exec_proc
 
@@ -263,7 +263,7 @@ class TestingSandbox(SandboxInterface):
             raise ModalProxyError("Sandbox has been terminated")
         self._snapshot_count += 1
         image_id = f"snap-{self.sandbox_id}-{self._snapshot_count}"
-        return TestingImage(image_id=image_id)
+        return FakeImage(image_id=image_id)
 
     def terminate(self) -> None:
         if self._is_terminated:
@@ -275,7 +275,7 @@ class TestingSandbox(SandboxInterface):
                 process.terminate(force_kill_seconds=2.0)
 
 
-class TestingApp(AppInterface):
+class FakeApp(AppInterface):
     """Lightweight testing app with a generated ID."""
 
     app_id: str = Field(description="Unique app identifier")
@@ -296,7 +296,7 @@ class TestingApp(AppInterface):
 # ---------------------------------------------------------------------------
 
 
-class TestingModalInterface(ModalInterface):
+class FakeModalInterface(ModalInterface):
     """Testing implementation of ModalInterface that fakes Modal locally.
 
     All state is held in memory and on the local filesystem (for volumes).
@@ -313,10 +313,10 @@ class TestingModalInterface(ModalInterface):
     root_dir: Path = Field(description="Root directory for volume storage")
     concurrency_group: ConcurrencyGroup = Field(description="Root ConcurrencyGroup for process management")
     _environments: set[str] = PrivateAttr(default_factory=set)
-    _apps: dict[str, TestingApp] = PrivateAttr(default_factory=dict)
-    _volumes: dict[str, TestingVolume] = PrivateAttr(default_factory=dict)
-    _sandboxes: list[TestingSandbox] = PrivateAttr(default_factory=list)
-    _functions: dict[str, TestingFunction] = PrivateAttr(default_factory=dict)
+    _apps: dict[str, FakeApp] = PrivateAttr(default_factory=dict)
+    _volumes: dict[str, FakeVolume] = PrivateAttr(default_factory=dict)
+    _sandboxes: list[FakeSandbox] = PrivateAttr(default_factory=list)
+    _functions: dict[str, FakeFunction] = PrivateAttr(default_factory=dict)
     _deployments: list[tuple[Path, str]] = PrivateAttr(default_factory=list)
 
     # =====================================================================
@@ -332,7 +332,7 @@ class TestingModalInterface(ModalInterface):
 
     def app_create(self, name: str) -> AppInterface:
         app_id = f"ap-{uuid.uuid4().hex}"
-        app = TestingApp(app_id=app_id, app_name=name)
+        app = FakeApp(app_id=app_id, app_name=name)
         self._apps[name] = app
         return app
 
@@ -354,7 +354,7 @@ class TestingModalInterface(ModalInterface):
             return self._apps[key]
         if create_if_missing:
             app_id = f"ap-{uuid.uuid4().hex}"
-            app = TestingApp(app_id=app_id, app_name=name)
+            app = FakeApp(app_id=app_id, app_name=name)
             self._apps[key] = app
             return app
         raise ModalProxyNotFoundError(f"App not found: {name}")
@@ -364,13 +364,13 @@ class TestingModalInterface(ModalInterface):
     # =====================================================================
 
     def image_debian_slim(self) -> ImageInterface:
-        return TestingImage(image_id=f"img-debian-{uuid.uuid4().hex}")
+        return FakeImage(image_id=f"img-debian-{uuid.uuid4().hex}")
 
     def image_from_registry(self, name: str) -> ImageInterface:
-        return TestingImage(image_id=f"img-reg-{name.replace(':', '-').replace('/', '-')}-{uuid.uuid4().hex}")
+        return FakeImage(image_id=f"img-reg-{name.replace(':', '-').replace('/', '-')}-{uuid.uuid4().hex}")
 
     def image_from_id(self, image_id: str) -> ImageInterface:
-        return TestingImage(image_id=image_id)
+        return FakeImage(image_id=image_id)
 
     # =====================================================================
     # Sandbox
@@ -391,7 +391,7 @@ class TestingModalInterface(ModalInterface):
         volumes: Mapping[str, VolumeInterface] | None = None,
     ) -> SandboxInterface:
         sandbox_id = f"sb-{uuid.uuid4().hex}"
-        sandbox = TestingSandbox(sandbox_id=sandbox_id)
+        sandbox = FakeSandbox(sandbox_id=sandbox_id)
         # Create a child ConcurrencyGroup for this sandbox's processes
         child_cg = self.concurrency_group.make_concurrency_group(
             name=f"sandbox-{sandbox_id}",
@@ -431,7 +431,7 @@ class TestingModalInterface(ModalInterface):
             raise ModalProxyNotFoundError(f"Volume not found: {name}")
         vol_dir = self.root_dir / "volumes" / environment_name / name
         vol_dir.mkdir(parents=True, exist_ok=True)
-        volume = TestingVolume(root_dir=vol_dir, volume_name=name)
+        volume = FakeVolume(root_dir=vol_dir, volume_name=name)
         self._volumes[key] = volume
         return volume
 
@@ -452,7 +452,7 @@ class TestingModalInterface(ModalInterface):
     # =====================================================================
 
     def secret_from_dict(self, values: Mapping[str, str | None]) -> SecretInterface:
-        return TestingSecret(values=dict(values))
+        return FakeSecret(values=dict(values))
 
     # =====================================================================
     # Function
@@ -492,7 +492,7 @@ class TestingModalInterface(ModalInterface):
                 if stripped.startswith("def ") and "(" in stripped:
                     func_name = stripped[4 : stripped.index("(")]
                     key = f"{app_name}/{func_name}"
-                    self._functions[key] = TestingFunction(url=f"https://testing.modal.run/{app_name}/{func_name}")
+                    self._functions[key] = FakeFunction(url=f"https://testing.modal.run/{app_name}/{func_name}")
         except (OSError, ValueError) as e:
             logger.trace("Failed to scan script for function names: {}", e)
 

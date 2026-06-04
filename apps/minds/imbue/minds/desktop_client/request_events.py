@@ -264,11 +264,26 @@ class RequestInbox(FrozenModel):
         return pending
 
     def get_request_by_id(self, event_id: str) -> RequestEvent | None:
-        """Find a request event by its event_id."""
+        """Find a request event by its event_id.
+
+        Note: this returns the request regardless of whether it has been
+        responded to. Callers that must not act on an already-resolved
+        request (e.g. re-rendering the grant/deny page) should additionally
+        check :meth:`is_request_resolved`.
+        """
         for req in self.requests:
             if str(req.event_id) == event_id:
                 return req
         return None
+
+    def is_request_resolved(self, event_id: str) -> bool:
+        """Return whether a response has already been recorded for this request.
+
+        A granted or denied request lingers in ``requests`` (the log is
+        append-only), so its presence alone does not mean it is still
+        actionable -- a matching response in ``responses`` means it is done.
+        """
+        return any(str(r.request_event_id) == event_id for r in self.responses)
 
     def get_pending_count(self) -> int:
         """Return the number of pending requests."""

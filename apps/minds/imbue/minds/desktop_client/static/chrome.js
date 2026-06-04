@@ -201,6 +201,29 @@
     if (isElectron) window.minds.toggleRequestsPanel();
   };
 
+  // -- Open a permission request from workspace content (browser mode) -------
+  //
+  // The workspace (the cross-origin content iframe) can ask the shell to show
+  // a permission request by posting `{type:'minds:open-request-modal',
+  // requestId}` to `window.parent`. In Electron this is handled by the content
+  // view's relay preload + main process (which opens a modal overlay); in
+  // browser mode there is no overlay, so we navigate the content iframe to the
+  // request page instead. Only honour messages from the content iframe itself,
+  // and only well-formed server-issued ids (`evt-<uuid hex>`), so arbitrary
+  // pages cannot drive navigation.
+  if (!isElectron) {
+    window.addEventListener('message', function (e) {
+      var frame = document.getElementById('content-frame');
+      if (!frame || e.source !== frame.contentWindow) return;
+      var data = e.data;
+      if (!data || typeof data !== 'object') return;
+      if (data.type !== 'minds:open-request-modal') return;
+      var requestId = data.requestId;
+      if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
+      navigateContent('/requests/' + requestId);
+    });
+  }
+
   // -- SSE-driven sidebar (browser mode only) -------------------------------
   function renderWorkspaces(workspaces) {
     var container = document.getElementById('sidebar-workspaces');
@@ -233,6 +256,15 @@
         row.className = 'sidebar-item cursor-pointer text-sm font-medium text-zinc-200 rounded-md mx-1.5 my-0.5 py-2.5 pl-4 pr-3 transition-colors hover:bg-white/5';
         row.textContent = w.name || w.id;
         row.setAttribute('data-agent-id', w.id);
+        // Retained-but-unverified workspace (its provider's last discovery poll
+        // errored): append an amber dot. The row stays fully clickable.
+        if (w.is_stale) {
+          row.classList.add('is-stale');
+          var staleDot = document.createElement('span');
+          staleDot.className = 'sidebar-stale-dot inline-block w-1.5 h-1.5 ml-1.5 rounded-full bg-amber-400/80 align-middle';
+          staleDot.title = "This workspace's provider had a discovery error; its status is unverified (still usable).";
+          row.appendChild(staleDot);
+        }
         if (typeof w.accent === 'string') {
           row.style.setProperty('--workspace-accent', w.accent);
         } else {

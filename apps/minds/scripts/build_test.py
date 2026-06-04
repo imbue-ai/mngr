@@ -7,16 +7,9 @@ import subprocess
 from pathlib import Path
 from typing import Final
 
-import pytest
-
 APP_ROOT = Path(__file__).resolve().parents[1]
 
 _NODE_BINARY: Final[str | None] = shutil.which("node")
-
-pytestmark = pytest.mark.skipif(
-    _NODE_BINARY is None,
-    reason="evaluating apps/minds/todesktop.js requires a node binary on PATH",
-)
 
 
 def _load_todesktop_config() -> dict:

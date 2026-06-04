@@ -76,6 +76,15 @@
         label.className = 'flex-1 whitespace-nowrap overflow-hidden text-ellipsis';
         label.textContent = w.name || w.id;
         row.appendChild(label);
+        // Retained-but-unverified workspace (its provider's last discovery poll
+        // errored): show an amber dot. The row stays fully clickable.
+        if (w.is_stale) {
+          row.classList.add('is-stale');
+          var staleDot = document.createElement('span');
+          staleDot.className = 'sidebar-stale-dot inline-block w-1.5 h-1.5 rounded-full bg-amber-400/80 shrink-0';
+          staleDot.title = "This workspace's provider had a discovery error; its status is unverified (still usable).";
+          row.appendChild(staleDot);
+        }
         var btn = buildOpenNewBtn(w.id);
         // Show the "open in new window" icon on hover (or focus-within).
         // Tailwind's `group` class on the row + `group-hover:inline-flex`

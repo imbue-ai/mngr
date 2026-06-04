@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed: Discovery no longer masks failures as "zero hosts" — `_list_provider_vps_hostnames` previously caught any IAM-listing error and returned an empty list, so a transient OVH outage / expired credentials looked identical to a real empty result and defeated mngr's "mark hosts UNKNOWN when a provider's discovery fails" safeguard. It now lets the error propagate so `mngr list --on-error continue` records the failure instead of silently dropping live hosts.
+
 ### Added
 
 - Added: New `mngr_ovh` provider plugin that runs mngr agents in Docker containers on OVH classic VPS instances (e.g. `vps-2025-model1` / "VPS-1" at ~$7.99/mo). Uses `python-ovh`, supports OAuth2 / AK-AS-CK / `~/.ovh.conf` credentials, provisions via `/order/cart` + `POST /vps/{s}/rebuild`, discovers via OVH IAM v2 tags, and TOFU-pins the host key on first SSH.

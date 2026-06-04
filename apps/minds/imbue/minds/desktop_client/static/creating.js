@@ -138,8 +138,16 @@
     'Did you know: you can revisit permissions and compute settings later.'
   ];
   var loadingStarted = false;
+  var tipsInterval = null;
 
   function showLoading() {
+    // If creation already failed, never show the in-progress UI -- jump
+    // straight to the failure view (e.g. the user finished the questions
+    // after the failure had already been detected).
+    if (creationFailed) {
+      showFailure();
+      return;
+    }
     showScreen('loading');
     if (loadingStarted) return;
     loadingStarted = true;
@@ -152,7 +160,7 @@
     if (!tipEl) return;
     var idx = 0;
     tipEl.innerHTML = TIPS[0];
-    setInterval(function () {
+    tipsInterval = setInterval(function () {
       idx = (idx + 1) % TIPS.length;
       tipEl.style.opacity = '0';
       setTimeout(function () {
@@ -160,6 +168,30 @@
         tipEl.style.opacity = '1';
       }, 250);
     }, 3000);
+  }
+
+  // ---- Failure view ----
+  // Surface a creation failure prominently, from whatever screen the user
+  // is currently on. Stops the rotating tips and progress bar, swaps the
+  // loading screen's progress sub-view for the failure sub-view, and fills
+  // in the error message. Idempotent: safe to call from both the status
+  // poll and the SSE 'done' handler.
+  var failureShown = false;
+  function showFailure() {
+    if (failureShown) return;
+    failureShown = true;
+    if (tipsInterval) { clearInterval(tipsInterval); tipsInterval = null; }
+    showScreen('loading');
+    var progressView = document.getElementById('progress-view');
+    var failureView = document.getElementById('failure-view');
+    if (progressView) progressView.classList.add('hidden');
+    if (failureView) failureView.classList.remove('hidden');
+    var msgEl = document.getElementById('error-message');
+    if (msgEl) msgEl.textContent = creationError || 'unknown error';
+    // The prominent error box now carries the message, so clear the faint
+    // footer caption to avoid showing it twice.
+    var stage = document.getElementById('stage');
+    if (stage) stage.textContent = '';
   }
 
   // Time-based bar: ease to 80% over the expected duration, then crawl the
@@ -173,9 +205,9 @@
 
   function tickProgress() {
     var fill = document.getElementById('bar-fill');
-    var stage = document.getElementById('stage');
     if (creationFailed) {
-      if (stage) stage.textContent = 'Failed: ' + (creationError || 'unknown error');
+      // showFailure() (called from the poll/SSE handlers) owns the failure
+      // UI; just stop advancing the bar.
       return;
     }
     if (creationDone && redirectUrl) {
@@ -213,8 +245,7 @@
     } else if (data.status === 'FAILED') {
       creationFailed = true;
       creationError = data.error || 'unknown error';
-      var stage = document.getElementById('stage');
-      if (stage) stage.textContent = 'Failed: ' + creationError;
+      showFailure();
       if (statusPoll) { clearInterval(statusPoll); statusPoll = null; }
     }
   }
@@ -256,8 +287,7 @@
       } else if (data.status === 'FAILED') {
         creationFailed = true;
         creationError = data.error || 'unknown error';
-        var stage = document.getElementById('stage');
-        if (stage) stage.textContent = 'Failed: ' + creationError;
+        showFailure();
       }
     } else if (data._type === 'status' && data.status_text) {
       var stageEl = document.getElementById('stage');
