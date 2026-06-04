@@ -13,6 +13,7 @@ from imbue.mngr_latchkey.remote_gateway import INNER_PORT
 from imbue.mngr_latchkey.remote_gateway import LATCHKEY_VERSION
 from imbue.mngr_latchkey.remote_gateway import OUTER_PORT
 from imbue.mngr_latchkey.remote_gateway import RemoteGatewayError
+from imbue.mngr_latchkey.remote_gateway import ensure_container_tunnel_keypair
 from imbue.mngr_latchkey.remote_gateway import ensure_latchkey_gateway_reachable_from_container
 from imbue.mngr_latchkey.remote_gateway import ensure_latchkey_gateway_running
 from imbue.mngr_latchkey.remote_gateway import ensure_latchkey_installed
@@ -293,3 +294,35 @@ def test_ensure_latchkey_gateway_reachable_raises_on_failure() -> None:
             container_ssh_port=2222,
             container_ssh_key_path=Path("/etc/mngr/container_key"),
         )
+
+
+def test_ensure_container_tunnel_keypair_generates_key_and_authorizes_in_container() -> None:
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+    key_path = ensure_container_tunnel_keypair(outer, container_name="mngr-ws", container_ssh_user="root")
+    # Private key lands under the resolved remote latchkey dir.
+    assert key_path == Path("/root/.latchkey/container_tunnel_key")
+    script = _stub(outer).recorded[-1].command
+    # Generates the keypair (only when absent) and authorizes it via docker exec.
+    assert "ssh-keygen -t ed25519 -N '' -q -f /root/.latchkey/container_tunnel_key" in script
+    assert "if [ ! -f /root/.latchkey/container_tunnel_key ]; then" in script
+    assert "docker exec -u root" in script
+    assert "mngr-ws" in script
+    # Public key is passed via env, not spliced into the inner command.
+    assert 'TUNNEL_PUBKEY="$(cat /root/.latchkey/container_tunnel_key.pub)"' in script
+    assert "-e TUNNEL_PUBKEY=" in script
+    # Idempotent authorized_keys append.
+    assert "grep -qxF" in script
+    assert "authorized_keys" in script
+
+
+def test_ensure_container_tunnel_keypair_returns_path_under_resolved_home() -> None:
+    outer = cast(OuterHostInterface, _StubOuter(home="/home/agent"))
+    key_path = ensure_container_tunnel_keypair(outer, container_name="mngr-ws", container_ssh_user="agent")
+    assert key_path == Path("/home/agent/.latchkey/container_tunnel_key")
+    assert "docker exec -u agent" in _stub(outer).recorded[-1].command
+
+
+def test_ensure_container_tunnel_keypair_raises_on_failure() -> None:
+    outer = _outer(CommandResult(stdout="", stderr="Error: No such container: mngr-ws", success=False))
+    with pytest.raises(RemoteGatewayError, match="No such container"):
+        ensure_container_tunnel_keypair(outer, container_name="mngr-ws", container_ssh_user="root")

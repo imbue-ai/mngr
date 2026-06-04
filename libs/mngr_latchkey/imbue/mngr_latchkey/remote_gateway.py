@@ -80,6 +80,11 @@ _REMOTE_FILE_MODE: Final[str] = "0600"
 # under the remote ``$HOME/.latchkey`` directory.
 _REMOTE_GATEWAY_LOG_FILENAME: Final[str] = "gateway.log"
 
+# Filename of the ad-hoc private key generated on the VPS for the
+# outer-host -> container SSH used by the reverse tunnel. Lives under the
+# remote ``$HOME/.latchkey`` directory; the matching ``.pub`` sits beside it.
+_CONTAINER_TUNNEL_KEY_FILENAME: Final[str] = "container_tunnel_key"
+
 
 class RemoteGatewayError(LatchkeyError, RuntimeError):
     """Raised when provisioning the latchkey CLI on a remote VPS fails."""
@@ -352,3 +357,83 @@ def ensure_latchkey_gateway_reachable_from_container(
                 host_name, result.stderr.strip() or result.stdout.strip()
             )
         )
+
+
+def _build_container_tunnel_keypair_script(
+    key_path: Path,
+    container_name: str,
+    container_ssh_user: str,
+) -> str:
+    """Build a script that mints an ad-hoc VPS->container keypair and authorizes it in the container.
+
+    Generates an ed25519 keypair on the VPS at ``key_path`` (once; reused on
+    later calls) and appends its public key to the container ssh user's
+    ``authorized_keys`` via ``docker exec`` -- the VPS owns the docker daemon,
+    so no pre-existing SSH access to the container is needed to install it. The
+    public key is handed to the container through the ``TUNNEL_PUBKEY`` env var
+    so it never has to be spliced into the inner shell command. Idempotent: the
+    key is only generated when absent and the authorized_keys append is guarded
+    by a fixed-string match.
+    """
+    key = shlex.quote(str(key_path))
+    pub = shlex.quote(f"{key_path}.pub")
+    # Runs inside the container as the ssh user; reads the public key from the
+    # docker-injected TUNNEL_PUBKEY env var and appends it to authorized_keys.
+    authorize = (
+        'mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh" && '
+        'touch "$HOME/.ssh/authorized_keys" && chmod 600 "$HOME/.ssh/authorized_keys" && '
+        '{ grep -qxF "$TUNNEL_PUBKEY" "$HOME/.ssh/authorized_keys" || '
+        'echo "$TUNNEL_PUBKEY" >> "$HOME/.ssh/authorized_keys"; }'
+    )
+    return "\n".join(
+        (
+            "set -e",
+            f"mkdir -p {shlex.quote(str(key_path.parent))}",
+            # Generate the keypair once; reuse it on subsequent calls.
+            f"if [ ! -f {key} ]; then",
+            f"  ssh-keygen -t ed25519 -N '' -q -f {key}",
+            "fi",
+            f'TUNNEL_PUBKEY="$(cat {pub})"',
+            f'docker exec -u {shlex.quote(container_ssh_user)} -e TUNNEL_PUBKEY="$TUNNEL_PUBKEY" '
+            f"{shlex.quote(container_name)} sh -c {shlex.quote(authorize)}",
+        )
+    )
+
+
+def ensure_container_tunnel_keypair(
+    host: OuterHostInterface,
+    container_name: str,
+    container_ssh_user: str,
+) -> Path:
+    """Create an ad-hoc outer-host -> container SSH keypair and authorize it in the container.
+
+    Generates an ed25519 keypair on the VPS (under ``$HOME/.latchkey/``) and
+    installs its public key into the container ssh user's ``authorized_keys``
+    via ``docker exec``. Returns the path to the private key on the VPS,
+    suitable for passing as ``container_ssh_key_path`` to
+    :func:`ensure_latchkey_gateway_reachable_from_container`.
+
+    Idempotent: the keypair is generated only when absent and re-authorizing is
+    a no-op. Raises :class:`RemoteGatewayError` if key generation or
+    authorization fails.
+    """
+    key_path = _resolve_remote_latchkey_directory(host) / _CONTAINER_TUNNEL_KEY_FILENAME
+    script = _build_container_tunnel_keypair_script(
+        key_path=key_path,
+        container_name=container_name,
+        container_ssh_user=container_ssh_user,
+    )
+    host_name = host.get_name()
+    with log_span(
+        "Provisioning ad-hoc tunnel keypair for container {} on VPS {}",
+        container_name,
+        host_name,
+    ):
+        result = host.execute_idempotent_command(script, timeout_seconds=_REMOTE_COMMAND_TIMEOUT_SECONDS)
+    if not result.success:
+        raise RemoteGatewayError(
+            "Failed to provision tunnel keypair for container {} on VPS {}: {}".format(
+                container_name, host_name, result.stderr.strip() or result.stdout.strip()
+            )
+        )
+    return key_path
