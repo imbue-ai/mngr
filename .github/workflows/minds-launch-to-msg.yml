@@ -4,12 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       commit_sha:
-        description: 'REQUIRED. Commit SHA (or branch / tag) to build a fresh ToDesktop draft from. Required so the verify job can never silently re-test the released bundle instead of the code at this SHA; see PR #1317 history -- skipping this silently shipped three "green" runs against a stale released bundle.'
+        description: 'REQUIRED. Commit SHA (or branch / tag) to verify. The build job looks for an existing ToDesktop build for this SHA and reuses it; otherwise it packages a fresh one. Verify always runs against a bundle built from THIS SHA -- no implicit fallback to released or arbitrary URLs.'
         required: true
-      app_zip_url:
-        description: 'Optional escape hatch: ToDesktop .zip URL to verify directly. When set, skips the build job and verifies this URL against the test infra in commit_sha. Takes precedence over the built artifact. Useful for re-validating a known-good bundle against test-script changes.'
-        required: false
-        default: ''
       skip_first_message:
         description: 'Skip the first-message round-trip step (smoke-only: install + launch + backend-ready).'
         type: boolean
@@ -21,9 +17,8 @@ on:
         required: false
         default: false
       template_ref:
-        description: 'forever-claude-template ref (branch / tag / SHA) the agent is created from. Empty -> script default (pilot_2, known-compatible with the bundled mngr). Set to "main" to verify the user-default path.'
-        required: false
-        default: ''
+        description: "REQUIRED. forever-claude-template ref (branch / tag / SHA) the agent is created from. Required because agent runtime behavior is a function of (minds binary, FCT template); a moving default would make runs irreproducible the same way an unset commit_sha did. Pass `pilot_2` for the production path, `main` for the user-default path, or a specific SHA for replay."
+        required: true
       template_url:
         description: 'Override the FCT git URL (forks). Empty -> https://github.com/imbue-ai/forever-claude-template.'
         required: false
@@ -40,13 +35,14 @@ concurrency:
 
 jobs:
   build:
-    # commit_sha is required at the dispatch level, so build always has a
-    # SHA to package from. The only way to skip it is to pass app_zip_url
-    # explicitly: "I want to verify THIS bundle, not build a new one." The
-    # silent "verify the latest released" path that lived here was the
-    # root cause of three "green" runs that actually validated nothing on
-    # this branch; that fallback no longer exists.
-    if: ${{ inputs.app_zip_url == '' }}
+    # commit_sha is required at the dispatch level, so build always runs.
+    # The job's `check for existing ToDesktop build` step short-circuits
+    # `pnpm dist` (the 15-min ToDesktop sign + notarize) when a clean
+    # ready build for this SHA already exists; otherwise it packages
+    # fresh. Verify always consumes the artifact this job produced. The
+    # historic "skip build entirely and verify the released bundle" path
+    # is gone -- it shipped three "green" runs against a stale 0.2.34
+    # bundle that didn't have any of this branch's commits in it.
     # MUST be macOS: scripts/download-binaries.js uses `xcrun --find git`
     # for the darwin git bundle, and bundling uv/lima needs the target's
     # native binary. Linux runners produce ELF binaries that the shipped
@@ -245,11 +241,11 @@ jobs:
 
   verify:
     needs: [build]
-    # Run when build succeeded (commit_sha drove a fresh package) or when
-    # build was skipped (app_zip_url given explicitly). On build failure
-    # verify is skipped; the build job's own `upload build log` step uses
-    # always() so the dist log artifact is preserved either way.
-    if: ${{ always() && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
+    # Build always runs (commit_sha is required); verify gates on it
+    # succeeding. On build failure verify is skipped; the build job's own
+    # `upload build log` step uses always() so the dist log artifact is
+    # preserved either way.
+    if: ${{ needs.build.result == 'success' }}
     runs-on: [self-hosted, macOS, minds-runner]
     timeout-minutes: 40
     env:
@@ -279,19 +275,20 @@ jobs:
       - name: resolve build URL
         id: url
         run: |
-          # Two cases, both explicit. The third historic case (no inputs ->
-          # latest released bundle) is gone: it silently tested infra, not
-          # code, and shipped three "green" runs against a stale release.
-          if [[ -n "${{ inputs.app_zip_url }}" ]]; then
-            URL='${{ inputs.app_zip_url }}'
-            SRC='direct input (app_zip_url)'
-          elif [[ -n '${{ needs.build.outputs.app_zip_url }}' ]]; then
-            URL='${{ needs.build.outputs.app_zip_url }}'
-            SRC='fresh build (commit ${{ inputs.commit_sha }}, build_id ${{ needs.build.outputs.build_id }})'
-          else
-            echo "::error::No bundle URL resolved. build job did not produce one and app_zip_url was empty."
-            echo "::error::This should be impossible -- commit_sha is required, so build runs unless app_zip_url is set."
+          # Build always runs (commit_sha is required), so its output is
+          # the only source. The historic "no inputs -> latest released"
+          # fallback is gone: it silently tested infra, not code, and
+          # shipped three "green" runs against a stale released bundle.
+          URL='${{ needs.build.outputs.app_zip_url }}'
+          REUSED='${{ needs.build.outputs.reused }}'
+          if [[ -z "$URL" ]]; then
+            echo "::error::build job did not produce a bundle URL. Inspect minds-dist-log-${{ github.run_id }}."
             exit 1
+          fi
+          if [[ "$REUSED" == "true" ]]; then
+            SRC='reused build (commit ${{ inputs.commit_sha }}, build_id ${{ needs.build.outputs.build_id }})'
+          else
+            SRC='fresh build (commit ${{ inputs.commit_sha }}, build_id ${{ needs.build.outputs.build_id }})'
           fi
           echo "url=$URL" >> "$GITHUB_OUTPUT"
           echo "Verifying: $URL"
@@ -359,9 +356,46 @@ jobs:
           MINDS_ELECTRON_EXEC_PATH=/Applications/Minds.app/Contents/MacOS/Minds \
             /Applications/Minds.app/Contents/Resources/latchkey/bin/latchkey ensure-browser
 
+      - name: resolve FCT template ref to a full SHA
+        # template_ref is required at the dispatch level (branch / tag /
+        # SHA accepted). Resolve to a full SHA so the run record names
+        # the exact FCT commit the agent was created from; otherwise a
+        # branch ref like `pilot_2` would silently drift between runs
+        # the same way the empty commit_sha trap did.
+        id: fct_sha
+        env:
+          FCT_REPO_URL: ${{ inputs.template_url || 'https://github.com/imbue-ai/forever-claude-template' }}
+          FCT_REF:      ${{ inputs.template_ref }}
+        run: |
+          set -euo pipefail
+          # `git ls-remote` returns "<sha>\t<full-ref>"; first line for
+          # branch / tag refs, the literal SHA itself when FCT_REF is
+          # already a 40-char SHA.
+          if [[ "$FCT_REF" =~ ^[a-f0-9]{40}$ ]]; then
+            FCT_SHA="$FCT_REF"
+          else
+            FCT_SHA=$(git ls-remote --refs "$FCT_REPO_URL" "$FCT_REF" "refs/heads/$FCT_REF" "refs/tags/$FCT_REF" 2>/dev/null | awk '{print $1; exit}')
+            if [[ -z "$FCT_SHA" ]]; then
+              echo "::error::could not resolve FCT ref '$FCT_REF' against $FCT_REPO_URL"
+              exit 1
+            fi
+          fi
+          echo "sha=$FCT_SHA" >> "$GITHUB_OUTPUT"
+          {
+            echo "## FCT template"
+            echo ""
+            echo "- repo: \`$FCT_REPO_URL\`"
+            echo "- ref input: \`$FCT_REF\`"
+            echo "- resolved SHA: \`$FCT_SHA\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "FCT $FCT_REPO_URL @ $FCT_REF -> $FCT_SHA"
+
       - name: launch-to-msg + slack flow (Python)
         env:
-          GIT_BRANCH:         ${{ inputs.template_ref }}
+          # GIT_BRANCH gets the resolved SHA, not the input ref, so the
+          # agent's clone is reproducible. The script logs the value, so
+          # the artifact's e2e-stdout.log also names the FCT commit.
+          GIT_BRANCH:         ${{ steps.fct_sha.outputs.sha }}
           GIT_URL:            ${{ inputs.template_url }}
           SKIP_FIRST_MESSAGE: ${{ inputs.skip_first_message && '1' || '0' }}
           SKIP_SLACK_FLOW:    ${{ inputs.skip_slack_flow    && '1' || '0' }}
