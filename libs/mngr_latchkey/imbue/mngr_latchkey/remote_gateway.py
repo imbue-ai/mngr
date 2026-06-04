@@ -7,13 +7,18 @@ the agent's outer host (the VPS) so a gateway can eventually be run there.
 """
 
 import time
+from pathlib import Path
 from typing import Final
 
 from loguru import logger
 
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.interfaces.host import OuterHostInterface
+from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import LatchkeyError
+from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
+from imbue.mngr_latchkey.store import permissions_path_for_host
+from imbue.mngr_latchkey.store import plugin_data_dir
 
 # Version of the upstream ``latchkey`` CLI to install on the VPS. Pinned so
 # every remote gateway runs a known-good release rather than whatever
@@ -33,6 +38,30 @@ _INSTALL_TIMEOUT_SECONDS: Final[float] = 300.0
 # mirror, slow npm registry) even though it eventually succeeded; warn so we
 # notice before it turns into an outright timeout.
 _SLOW_INSTALL_WARNING_THRESHOLD_SECONDS: Final[float] = 90.0
+
+# Filename of the upstream latchkey CLI's encrypted credential store, sitting
+# directly under the local ``latchkey_directory`` (the LATCHKEY_DIRECTORY the
+# desktop-side latchkey uses), e.g. ``~/.minds-staging/latchkey/credentials.json.enc``.
+_CREDENTIALS_FILENAME: Final[str] = "credentials.json.enc"
+
+# Name of the latchkey directory on the VPS, under the remote user's home. The
+# remote latchkey CLI runs as that user, so ``$HOME/.latchkey`` is the
+# LATCHKEY_DIRECTORY it reads its credentials and permissions from.
+_REMOTE_LATCHKEY_DIR_NAME: Final[str] = ".latchkey"
+
+# Filename the remote latchkey gateway reads its permissions config from. The
+# local per-host file is named ``latchkey_permissions.json``; on the VPS it
+# becomes the gateway's single ``permissions.json``.
+_REMOTE_PERMISSIONS_FILENAME: Final[str] = "permissions.json"
+
+# Quick remote command (e.g. resolving ``$HOME``); a few seconds of slack
+# covers a cold SSH channel without masking a hung connection.
+_REMOTE_COMMAND_TIMEOUT_SECONDS: Final[float] = 15.0
+
+# Mode for files we drop on the VPS. Both the encrypted credentials and the
+# permissions config are owned by the remote (root) user the gateway runs as;
+# 0600 matches the local ``save_permissions`` chmod and keeps secrets private.
+_REMOTE_FILE_MODE: Final[str] = "0600"
 
 
 class RemoteGatewayError(LatchkeyError, RuntimeError):
@@ -100,3 +129,76 @@ def ensure_latchkey_installed(host: OuterHostInterface) -> None:
             host_name,
             elapsed_seconds,
         )
+
+
+def _resolve_remote_latchkey_directory(host: OuterHostInterface) -> Path:
+    """Resolve ``$HOME/.latchkey`` on the VPS to an absolute path.
+
+    ``write_file`` transfers over SFTP with a literal path, so ``~`` is not
+    expanded for us; we ask the remote shell for ``$HOME`` and build the
+    absolute latchkey directory from it.
+    """
+    result = host.execute_idempotent_command('echo "$HOME"', timeout_seconds=_REMOTE_COMMAND_TIMEOUT_SECONDS)
+    home = result.stdout.strip()
+    if not result.success or not home:
+        raise RemoteGatewayError(
+            "Failed to resolve $HOME on VPS {}: {}".format(
+                host.get_name(), result.stderr.strip() or result.stdout.strip() or "empty $HOME"
+            )
+        )
+    return Path(home) / _REMOTE_LATCHKEY_DIR_NAME
+
+
+def _default_permissions_json() -> str:
+    """Serialize the deny-all default permissions config (matches ``save_permissions`` output)."""
+    config = LatchkeyPermissionsConfig()
+    # ``save_permissions`` omits an empty ``schemas`` block; mirror it so the
+    # remote file is byte-for-byte the same shape minds writes locally.
+    exclude = {"schemas"} if not config.schemas else set()
+    return config.model_dump_json(indent=2, exclude=exclude)
+
+
+def sync_credentials(host: OuterHostInterface, latchkey_directory: Path) -> None:
+    """Copy the local encrypted latchkey credentials onto the VPS.
+
+    Reads ``<latchkey_directory>/credentials.json.enc`` from the local
+    (desktop-side) latchkey directory and writes it to ``~/.latchkey/`` on the
+    VPS so the remote latchkey CLI can decrypt the same credential store.
+    Raises :class:`RemoteGatewayError` if the local file is missing or unreadable.
+    """
+    local_path = latchkey_directory / _CREDENTIALS_FILENAME
+    try:
+        content = local_path.read_bytes()
+    except FileNotFoundError as e:
+        raise RemoteGatewayError(f"Local latchkey credentials file does not exist: {local_path}") from e
+    except OSError as e:
+        raise RemoteGatewayError(f"Failed to read local latchkey credentials file {local_path}: {e}") from e
+
+    remote_path = _resolve_remote_latchkey_directory(host) / _CREDENTIALS_FILENAME
+    with log_span("Syncing latchkey credentials to VPS {} ({})", host.get_name(), remote_path):
+        host.write_file(remote_path, content, mode=_REMOTE_FILE_MODE, is_atomic=True)
+
+
+def sync_permissions(host: OuterHostInterface, latchkey_directory: Path, host_id: HostId) -> None:
+    """Copy the host's latchkey permissions config onto the VPS.
+
+    Reads the per-host permissions file
+    (``<latchkey_directory>/mngr_latchkey/hosts/<host_id>/latchkey_permissions.json``)
+    and writes it to ``~/.latchkey/permissions.json`` on the VPS. When the
+    local file does not exist, the restrictive deny-all default is written
+    instead, so a host with no explicit grants still gets a locked-down gateway.
+    Raises :class:`RemoteGatewayError` if the local file exists but is unreadable.
+    """
+    local_path = permissions_path_for_host(plugin_data_dir(latchkey_directory), host_id)
+    if local_path.is_file():
+        try:
+            content = local_path.read_text()
+        except OSError as e:
+            raise RemoteGatewayError(f"Failed to read host permissions file {local_path}: {e}") from e
+    else:
+        logger.debug("No local permissions file for host {} at {}; using the restrictive default", host_id, local_path)
+        content = _default_permissions_json()
+
+    remote_path = _resolve_remote_latchkey_directory(host) / _REMOTE_PERMISSIONS_FILENAME
+    with log_span("Syncing latchkey permissions for host {} to VPS {} ({})", host_id, host.get_name(), remote_path):
+        host.write_text_file(remote_path, content, mode=_REMOTE_FILE_MODE)
