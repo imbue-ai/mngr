@@ -86,9 +86,7 @@ _HEX_RE: Final[re.Pattern[str]] = re.compile(r"^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})
 _OKLCH_RE: Final[re.Pattern[str]] = re.compile(
     r"^oklch\(\s*(\d{1,3}(?:\.\d+)?)%\s+([\d.]+)\s+([\d.]+)(?:\s*/\s*[\d.%]+)?\s*\)$"
 )
-_RGB_RE: Final[re.Pattern[str]] = re.compile(
-    r"^rgb\(\s*(\d{1,3})\s*[, ]\s*(\d{1,3})\s*[, ]\s*(\d{1,3})\s*\)$"
-)
+_RGB_RE: Final[re.Pattern[str]] = re.compile(r"^rgb\(\s*(\d{1,3})\s*[, ]\s*(\d{1,3})\s*[, ]\s*(\d{1,3})\s*\)$")
 
 
 class WorkspaceColor(str):

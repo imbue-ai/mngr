@@ -30,7 +30,6 @@ from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.design_tokens import DEFAULT_WORKSPACE_PRESET
 from imbue.minds.desktop_client.design_tokens import WORKSPACE_PRESETS
 from imbue.minds.desktop_client.design_tokens import WorkspaceColor
-from imbue.minds.desktop_client.design_tokens import WorkspacePreset
 from imbue.minds.desktop_client.design_tokens import oklch_starting_color
 from imbue.minds.desktop_client.design_tokens import theme_for
 from imbue.minds.desktop_client.onboarding import expected_creation_duration_seconds
@@ -116,7 +115,10 @@ def workspace_render_kwargs(color: WorkspaceColor | None = None) -> dict[str, st
     literals pass through) and the theme is inferred from luminance.
     """
     if color is None:
-        return {"theme": theme_for(WorkspaceColor(DEFAULT_WORKSPACE_PRESET.value)).value, "workspace_bg": DEFAULT_WORKSPACE_BG_HEX}
+        return {
+            "theme": theme_for(WorkspaceColor(DEFAULT_WORKSPACE_PRESET.value)).value,
+            "workspace_bg": DEFAULT_WORKSPACE_BG_HEX,
+        }
     return {"theme": theme_for(color).value, "workspace_bg": color.resolve_hex()}
 
 
@@ -1105,7 +1107,8 @@ def render_workspace_settings(
         workspace_color=str(color),
         is_preset_color=color.is_preset(),
         workspace_presets=tuple(WORKSPACE_PRESETS.items()),
-        **render_kwargs,
+        theme=render_kwargs["theme"],
+        workspace_bg=render_kwargs["workspace_bg"],
     )
 
 

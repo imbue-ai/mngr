@@ -13,6 +13,7 @@ import logging
 import threading
 from pathlib import Path
 from typing import Final
+from typing import cast
 
 import tomlkit
 from pydantic import Field
@@ -119,8 +120,12 @@ class MindsConfig(MutableModel):
         """
         with self._lock:
             data = self._read_raw()
-            table = data.get(_WORKSPACE_COLORS_KEY)
-            if isinstance(table, dict):
+            table_obj = data.get(_WORKSPACE_COLORS_KEY)
+            if isinstance(table_obj, dict):
+                # tomlkit parses ``[workspace_colors]`` as a Table (dict
+                # subclass) whose key/value types ty can't infer; cast to
+                # the concrete shape we wrote.
+                table = cast(dict[str, object], table_obj)
                 stored = table.get(agent_id)
                 if stored is not None:
                     try:
@@ -157,9 +162,10 @@ class MindsConfig(MutableModel):
         """
         with self._lock:
             data = self._read_raw()
-            table = data.get(_WORKSPACE_COLORS_KEY)
-            if not isinstance(table, dict) or agent_id not in table:
+            table_obj = data.get(_WORKSPACE_COLORS_KEY)
+            if not isinstance(table_obj, dict) or agent_id not in table_obj:
                 return
+            table = cast(dict[str, object], table_obj)
             del table[agent_id]
             if not table:
                 del data[_WORKSPACE_COLORS_KEY]
@@ -176,8 +182,10 @@ class MindsConfig(MutableModel):
         Must be called while holding ``self._lock``. Hoists the
         ``[workspace_colors]`` table if missing.
         """
-        table = data.get(_WORKSPACE_COLORS_KEY)
-        if not isinstance(table, dict):
+        table_obj = data.get(_WORKSPACE_COLORS_KEY)
+        if isinstance(table_obj, dict):
+            table = cast(dict[str, object], table_obj)
+        else:
             table = {}
             data[_WORKSPACE_COLORS_KEY] = table
         table[agent_id] = str(color)

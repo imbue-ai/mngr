@@ -1630,9 +1630,7 @@ def _handle_chrome_page(
 
     authenticated = _is_authenticated(cookies=request.cookies, auth_store=auth_store)
     minds_config: MindsConfig | None = request.app.state.minds_config
-    initial_workspaces = (
-        _build_workspace_list(backend_resolver, minds_config=minds_config) if authenticated else []
-    )
+    initial_workspaces = _build_workspace_list(backend_resolver, minds_config=minds_config) if authenticated else []
 
     html = render_chrome_page(
         is_mac=is_mac,

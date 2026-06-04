@@ -129,9 +129,7 @@ def test_workspace_color_unparseable_falls_back_to_oklch_with_warning(
     """Corrupt stored value falls back to OKLCH starting color and logs a warning."""
     config = _make_config(tmp_path)
     # Hand-write a corrupt entry.
-    (tmp_path / "config.toml").write_text(
-        '[workspace_colors]\n"agent-bad" = "not-a-color"\n'
-    )
+    (tmp_path / "config.toml").write_text('[workspace_colors]\n"agent-bad" = "not-a-color"\n')
     with caplog.at_level(logging.WARNING, logger="imbue.minds.desktop_client.minds_config"):
         color = config.get_workspace_color("agent-bad")
     assert color.startswith("oklch(75%")
