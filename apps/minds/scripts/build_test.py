@@ -2,6 +2,7 @@
 
 import json
 import plistlib
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -60,3 +61,66 @@ def test_bundled_limactl_is_signed_with_virtualization_entitlement() -> None:
         "todesktop.js mac.additionalBinariesToSign must include the bundled "
         f"limactl so it is signed with mac.entitlements; got {additional}."
     )
+
+
+def test_bundle_latchkey_uses_pnpm_deploy_against_lockfile() -> None:
+    """Guard: bundleLatchkey() must use ``pnpm deploy --prod`` so the shipped
+    latchkey tree is pinned by ``pnpm-lock.yaml``, not a fresh registry resolve.
+
+    The previous implementation did ``npm install --no-package-lock`` into a
+    scratch dir, which re-resolved every latchkey transitive from version
+    ranges at build time. That floated the shipped ``playwright`` /
+    ``playwright-core`` independently of dev/CI and already caused user-facing
+    breakage (playwright-core 1.60 internals shipped against latchkey code
+    expecting the pre-1.60 layout). If a future change reintroduces an
+    install path that bypasses the lockfile, this guard fails.
+    """
+    text = (APP_ROOT / "scripts" / "build.js").read_text()
+    match = re.search(r"function bundleLatchkey\(\) \{(.*?)\n\}\n", text, re.DOTALL)
+    assert match is not None, "Could not locate bundleLatchkey() in build.js"
+    body = match.group(1)
+
+    assert "'pnpm'" in body and "'deploy'" in body and "'--prod'" in body, (
+        "bundleLatchkey() must invoke `pnpm deploy --prod` so the shipped "
+        "latchkey tree is lockfile-pinned. See "
+        "/tmp/minds-build-js-pnpm-deploy-handoff.md for context."
+    )
+    forbidden = [
+        ("npm install", "'install'"),
+        ("--no-package-lock flag", "--no-package-lock"),
+    ]
+    for label, needle in forbidden:
+        assert needle not in body, (
+            f"bundleLatchkey() contains {label} ({needle!r}). That bypasses "
+            "pnpm-lock.yaml and floats the shipped playwright independently "
+            "of what dev/CI tested. Use `pnpm deploy --prod` instead."
+        )
+
+
+def test_pnpm_workspace_pins_cross_platform_architectures() -> None:
+    """Guard: pnpm-workspace.yaml must list every target platform under
+    ``supportedArchitectures`` so cross-platform native prebuilds
+    (@napi-rs/keyring-*, playwright fsevents, ...) materialize in the
+    ``pnpm deploy`` output regardless of the build host's OS/arch/libc.
+
+    ToDesktop runs ``pnpm build`` once per release on a single host, so the
+    bundle must contain prebuilds for every target. Without this block,
+    pnpm (like npm) only installs prebuilds matching the build host and the
+    shipped resources/latchkey/ would crash on user platforms different
+    from the builder's. Every variant is already resolved in
+    ``pnpm-lock.yaml``, so this only changes which resolved entries get
+    materialized.
+    """
+    text = (APP_ROOT / "pnpm-workspace.yaml").read_text()
+    assert "supportedArchitectures:" in text, (
+        "pnpm-workspace.yaml must declare supportedArchitectures so "
+        "scripts/build.js's `pnpm deploy` materializes cross-platform "
+        "native prebuilds."
+    )
+    for platform_name in ("darwin", "linux", "win32"):
+        assert platform_name in text, (
+            f"pnpm-workspace.yaml supportedArchitectures.os must include "
+            f"'{platform_name}' (the ToDesktop build targets it)."
+        )
+    for cpu in ("x64", "arm64"):
+        assert cpu in text, f"pnpm-workspace.yaml supportedArchitectures.cpu must include '{cpu}'."
