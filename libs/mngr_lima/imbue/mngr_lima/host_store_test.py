@@ -112,7 +112,7 @@ def test_remove_persisted_agent_data(tmp_path: Path) -> None:
     assert len(store.list_persisted_agent_data_for_host(host_id)) == 0
 
 
-def test_cache_behavior(tmp_path: Path) -> None:
+def test_cache_serves_stale_value_until_bypassed_or_cleared(tmp_path: Path) -> None:
     store = _make_store(tmp_path)
     host_id = HostId.generate()
     certified_data = _make_certified_data(host_id)
@@ -120,16 +120,27 @@ def test_cache_behavior(tmp_path: Path) -> None:
     record = HostRecord(certified_host_data=certified_data, ssh_port=100)
     store.write_host_record(record)
 
-    # Should hit cache
+    # Mutate the on-disk record behind the cache's back so a cache hit and a
+    # disk read return distinguishable values. write_host_record already
+    # populated the in-memory cache with ssh_port=100.
+    mutated = HostRecord(certified_host_data=certified_data, ssh_port=200)
+    store.volume.write_files({f"host_state/{host_id}.json": mutated.model_dump_json(indent=2).encode("utf-8")})
+
+    # A default read is served from the cache, so it still sees the old port.
     cached = store.read_host_record(host_id)
     assert cached is not None
     assert cached.ssh_port == 100
 
-    # Clear cache and re-read from disk
+    # Bypassing the cache reads the freshly-written value from disk.
+    bypassed = store.read_host_record(host_id, use_cache=False)
+    assert bypassed is not None
+    assert bypassed.ssh_port == 200
+
+    # After clearing the cache, even a default read reflects the on-disk value.
     store.clear_cache()
-    from_disk = store.read_host_record(host_id)
-    assert from_disk is not None
-    assert from_disk.ssh_port == 100
+    after_clear = store.read_host_record(host_id)
+    assert after_clear is not None
+    assert after_clear.ssh_port == 200
 
 
 def test_lima_host_config_default_layout_is_bind_mount() -> None:
