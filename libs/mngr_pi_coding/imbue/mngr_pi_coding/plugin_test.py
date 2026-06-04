@@ -184,14 +184,11 @@ def test_get_provision_file_transfers_returns_empty(pi_agent: PiCodingAgent, tmp
 def test_on_before_provisioning_warns_when_no_credentials(
     pi_agent: PiCodingAgent,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     log_warnings: list[str],
 ) -> None:
     """on_before_provisioning warns when no API credentials are found anywhere."""
-    # _has_api_credentials_available reads Path.home()/.pi/agent/auth.json, so redirect
-    # HOME to the temp dir to keep the check off the real machine's credentials.
-    home = _setup_home_pi(tmp_path)
-    monkeypatch.setenv("HOME", str(home))
+    # _has_api_credentials_available reads Path.home()/.pi/agent/auth.json; the autouse
+    # setup_test_mngr_env fixture points HOME at tmp_path, which has no auth.json.
     host = _stub_host(tmp_path, is_local=False)
     options = _make_options()
     mngr_ctx = _make_test_mngr_ctx(tmp_path)
@@ -204,13 +201,13 @@ def test_on_before_provisioning_warns_when_no_credentials(
 def test_on_before_provisioning_does_not_warn_when_auth_file_present(
     pi_agent: PiCodingAgent,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     log_warnings: list[str],
 ) -> None:
     """on_before_provisioning stays silent when ~/.pi/agent/auth.json holds credentials."""
-    home = _setup_home_pi(tmp_path)
-    (home / ".pi" / "agent" / "auth.json").write_text('{"anthropic": {"type": "api_key"}}')
-    monkeypatch.setenv("HOME", str(home))
+    # HOME is redirected to tmp_path by the autouse setup_test_mngr_env fixture.
+    pi_auth_dir = tmp_path / ".pi" / "agent"
+    pi_auth_dir.mkdir(parents=True)
+    (pi_auth_dir / "auth.json").write_text('{"anthropic": {"type": "api_key"}}')
     host = _stub_host(tmp_path, is_local=False)
     options = _make_options()
     mngr_ctx = _make_test_mngr_ctx(tmp_path)
