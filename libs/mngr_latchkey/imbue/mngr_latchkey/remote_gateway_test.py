@@ -54,6 +54,7 @@ class _StubOuter(MutableModel):
     )
     home: str = Field(default="/root", description="Value returned for the $HOME resolution command")
     container_name: str = Field(default="mngr-ws", description="Container name returned for the 'docker ps' lookup")
+    is_local: bool = Field(default=False, description="Whether this outer host is the local machine")
     recorded: list[_Recorded] = Field(default_factory=list, description="Each command recorded in order")
     written: list[_WrittenFile] = Field(default_factory=list, description="Each file write recorded in order")
 
@@ -353,3 +354,11 @@ def test_provision_remote_gateway_raises_when_container_not_found() -> None:
     outer = cast(OuterHostInterface, _StubOuter(container_name=""))
     with pytest.raises(RemoteGatewayError, match="No container labeled"):
         provision_remote_gateway(outer, host_id=HostId(), container_ssh_user="root", container_ssh_port=2222)
+
+
+def test_provision_remote_gateway_is_noop_on_local_outer_host() -> None:
+    # A local outer (e.g. the local docker daemon's machine) must never be
+    # provisioned -- we don't apt/npm-install latchkey on the user's computer.
+    outer = cast(OuterHostInterface, _StubOuter(is_local=True))
+    provision_remote_gateway(outer, host_id=HostId(), container_ssh_user="root", container_ssh_port=2222)
+    assert _stub(outer).recorded == []

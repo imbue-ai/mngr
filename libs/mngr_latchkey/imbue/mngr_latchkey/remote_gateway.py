@@ -487,8 +487,17 @@ def provision_remote_gateway(
     reaches it. The container's ssh user/port come from the inner host's SSH
     info; the container itself is located on the VPS by its host-id label.
 
-    Raises :class:`RemoteGatewayError` if any step fails.
+    Only genuinely-remote outer hosts are provisioned: when ``host`` is the
+    local machine (e.g. the outer of a local docker daemon) this is a no-op, so
+    we never apt/npm-install latchkey or run a gateway on the user's own
+    computer. Raises :class:`RemoteGatewayError` if any step fails.
     """
+    if host.is_local:
+        logger.debug(
+            "Skipping remote latchkey gateway provisioning: outer host {} is local, not a remote VPS",
+            host.get_name(),
+        )
+        return
     ensure_latchkey_installed(host)
     ensure_latchkey_gateway_running(host)
     container_name = _resolve_container_name_for_host(host, host_id)
