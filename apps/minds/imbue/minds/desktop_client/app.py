@@ -1559,11 +1559,12 @@ async def _handle_provider_toggle(
     """Toggle ``is_enabled`` for a provider in minds' active settings and bounce observe.
 
     POST ``/api/providers/{provider_name}/toggle`` with body ``{"is_enabled": bool}``.
-    Writes via :func:`set_provider_is_enabled`, then sends ``SIGHUP`` to
-    ``mngr forward`` so it restarts its ``mngr observe`` child to pick up the
-    new setting. The next ``FullDiscoverySnapshotEvent`` will reflect the
-    change; the chrome's optimistic "waiting for refresh" state clears at that
-    point.
+    Writes via :func:`set_provider_is_enabled`, then bounces the detached
+    ``mngr latchkey forward`` supervisor's ``mngr observe`` child -- the single
+    discovery observer -- to pick up the new setting. The next
+    ``FullDiscoverySnapshotEvent`` it writes to the shared discovery log is tailed
+    by minds' ``mngr forward --observe-via-file``; the chrome's optimistic
+    "waiting for refresh" state clears at that point.
     """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
@@ -1593,11 +1594,9 @@ async def _handle_provider_toggle(
     # (e.g. user clicking Disable twice) should not trigger a SIGHUP and a full
     # mngr observe restart, since the next discovery snapshot would be identical.
     if changed:
-        consumer: EnvelopeStreamConsumer | None = request.app.state.envelope_stream_consumer
-        if consumer is not None:
-            consumer.bounce_observe()
-        # Keep latchkey's discovery in lockstep with minds' own observe so its
-        # gateway permission / reverse-tunnel setup reflects the new provider set.
+        # Bounce the single discovery observer (latchkey forward's `mngr observe`)
+        # so its next snapshot reflects the new provider set; minds' `mngr forward`
+        # tails the resulting shared discovery log.
         bounce_latchkey_forward_supervisor(request.app.state.latchkey_forward_supervisor)
     return Response(
         content=json.dumps({"provider_name": provider_name, "is_enabled": is_enabled, "changed": changed}),

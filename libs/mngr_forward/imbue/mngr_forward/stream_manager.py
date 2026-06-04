@@ -3,9 +3,12 @@
 Adapted from ``minds.desktop_client.backend_resolver.MngrStreamManager``,
 slimmed to the parts the plugin needs:
 
-- One ``mngr observe --discovery-only --quiet`` subprocess produces discovery
-  events. Lines pass through to the envelope writer's ``observe`` stream and
-  drive the ``ForwardResolver``'s known-agent set + per-host SSH info.
+- Discovery events come from one of two sources: a ``mngr observe
+  --discovery-only --quiet`` subprocess (default), or, when
+  ``discovery_events_path`` is set (``mngr forward --observe-via-file``), an
+  in-process tail of a shared discovery events file written by another
+  observer. Either way lines drive the envelope writer's ``observe`` stream and
+  the ``ForwardResolver``'s known-agent set + per-host SSH info.
 - One ``mngr event <id> services requests --follow --quiet`` per
   filter-matching agent produces service-registration / request events.
   Lines pass through to the envelope writer's ``event`` stream and drive
@@ -42,6 +45,7 @@ from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.api.discovery_events import partition_removed_agents_by_provider_error
+from imbue.mngr.api.discovery_events import tail_discovery_events_file
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
@@ -65,6 +69,15 @@ class ForwardStreamManager(MutableModel):
     resolver: ForwardResolver = Field(frozen=True, description="Resolver to update")
     envelope_writer: EnvelopeWriter = Field(frozen=True, description="Where parsed lines fan out to")
     mngr_binary: str = Field(default=MNGR_BINARY, frozen=True, description="Path to the mngr binary")
+    discovery_events_path: Path | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "If set (``--observe-via-file``), discovery is driven by tailing this discovery events file "
+            "in-process instead of spawning a ``mngr observe`` subprocess. Used when another process "
+            "(e.g. ``mngr latchkey forward``) is the sole discovery observer writing this shared log."
+        ),
+    )
     agent_include: tuple[str, ...] = Field(
         default=(),
         frozen=True,
@@ -101,6 +114,7 @@ class ForwardStreamManager(MutableModel):
     _ssh_by_host_id: dict[str, RemoteSSHInfo] = PrivateAttr(default_factory=dict)
     _discovered_agents: dict[str, DiscoveredAgent] = PrivateAttr(default_factory=dict)
     _observe_process: RunningProcess | None = PrivateAttr(default=None)
+    _tail_stop_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _events_processes: dict[str, RunningProcess] = PrivateAttr(default_factory=dict)
     _events_services: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
     _on_agent_discovered_callbacks: list[OnAgentDiscoveredCallback] = PrivateAttr(default_factory=list)
@@ -163,12 +177,16 @@ class ForwardStreamManager(MutableModel):
     # -- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
-        """Start the observe subprocess. Per-agent event subprocesses are started lazily."""
+        """Start discovery (observe subprocess, or file tail). Per-agent event subprocesses start lazily."""
         self._cg.__enter__()
-        self._observe_process = self._spawn_observe()
+        if self.discovery_events_path is not None:
+            self._start_tail_discovery()
+        else:
+            self._observe_process = self._spawn_observe()
 
     def stop(self) -> None:
-        """Terminate every managed subprocess and exit the ConcurrencyGroup."""
+        """Terminate every managed subprocess (and stop the file tail) and exit the ConcurrencyGroup."""
+        self._tail_stop_event.set()
         for process in self._all_managed_processes():
             try:
                 process.terminate()
@@ -184,6 +202,12 @@ class ForwardStreamManager(MutableModel):
         ``settings.toml`` provider changes take effect without restarting
         the whole plugin.
         """
+        if self.discovery_events_path is not None:
+            # --observe-via-file mode owns no observe child: the shared discovery
+            # log's writer (another `mngr observe`) re-emits a fresh snapshot that
+            # the tailer picks up on its own, so a bounce here is a no-op.
+            logger.debug("bounce_observe: --observe-via-file mode, nothing to bounce")
+            return
         if self._observe_process is None:
             logger.debug("bounce_observe: no observe process running; skipping")
             return
@@ -208,6 +232,23 @@ class ForwardStreamManager(MutableModel):
             is_checked_by_group=False,
         )
 
+    def _start_tail_discovery(self) -> None:
+        """Tail the shared discovery events file in-process instead of spawning observe."""
+        self._cg.start_new_thread(
+            target=self._run_tail_discovery,
+            name="mngr-forward-discovery-tail",
+            daemon=True,
+            is_checked=False,
+        )
+
+    def _run_tail_discovery(self) -> None:
+        assert self.discovery_events_path is not None
+        tail_discovery_events_file(
+            events_path=self.discovery_events_path,
+            stop_event=self._tail_stop_event,
+            on_line=self._process_observe_line,
+        )
+
     def _all_managed_processes(self) -> list[RunningProcess]:
         result: list[RunningProcess] = []
         if self._observe_process is not None:
@@ -221,6 +262,14 @@ class ForwardStreamManager(MutableModel):
             if stripped:
                 logger.debug("mngr observe stderr: {}", stripped)
             return
+        self._process_observe_line(line)
+
+    def _process_observe_line(self, line: str) -> None:
+        """Parse one discovery JSONL line into the envelope + resolver state.
+
+        Shared by the subprocess observe reader (``_on_observe_output``) and the
+        ``--observe-via-file`` tailer (``_run_tail_discovery``).
+        """
         stripped = line.strip()
         if not stripped:
             return

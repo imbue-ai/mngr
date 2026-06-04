@@ -34,6 +34,7 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
+from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_forward.data_types import ForwardServiceStrategy
 from imbue.mngr_forward.envelope import EnvelopeWriter
 from imbue.mngr_forward.resolver import ForwardResolver
@@ -412,3 +413,32 @@ def test_multiple_observe_lines_serialize_through_envelope(
     # envelope writer holds a lock; this asserts no interleaved bytes).
     assert len(envelopes) == 8
     assert all(env["stream"] == "observe" for env in envelopes)
+
+
+def test_observe_via_file_tails_discovery_log_without_spawning_observe(tmp_path: Path) -> None:
+    """With ``discovery_events_path`` set (``--observe-via-file``), the manager drives
+    discovery by tailing a file written by another process and spawns no ``mngr observe``."""
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    writer = EnvelopeWriter(output=io.StringIO())
+    events_path = tmp_path / "events.jsonl"
+    # event_sources=() so a discovered agent does not spawn a real per-agent
+    # `mngr event` subprocess; this test only exercises the discovery tail path.
+    manager = ForwardStreamManager(
+        resolver=resolver,
+        envelope_writer=writer,
+        discovery_events_path=events_path,
+        event_sources=(),
+    )
+    counter = [0]
+    discovered: list[AgentId] = []
+    manager.add_on_agent_discovered_callback(lambda aid, _ssh, _prov: discovered.append(aid))
+
+    manager.start()
+    try:
+        # A separate "writer" creates the shared discovery log after the tail is running.
+        events_path.write_text(_full_snapshot_line((_agent(TEST_AGENT_ID_1),), counter) + "\n")
+        poll_until(lambda: TEST_AGENT_ID_1 in discovered, timeout=5.0)
+        # Discovery came purely from the file tail -- no observe subprocess was spawned.
+        assert manager._observe_process is None  # noqa: SLF001 - asserts internal state
+    finally:
+        manager.stop()
