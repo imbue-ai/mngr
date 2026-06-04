@@ -1,9 +1,13 @@
 import os
 import re
 import tomllib
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 import pytest
+from loguru import logger
 
 from imbue.minds.bootstrap import BootstrapError
 from imbue.minds.bootstrap import DEFAULT_MINDS_ROOT_NAME
@@ -28,6 +32,26 @@ def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(MINDS_ROOT_NAME_ENV_VAR, raising=False)
     monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
     monkeypatch.delenv("MNGR_PREFIX", raising=False)
+
+
+@contextmanager
+def _captured_warning_messages() -> Generator[list[str], None, None]:
+    """Capture WARNING-level loguru messages emitted within the block.
+
+    Follows the loguru-sink convention used in
+    ``libs/imbue_common/.../logging_test.py``: install a temporary sink, yield
+    the list it appends formatted messages to, and always remove the sink.
+    """
+    messages: list[str] = []
+
+    def sink(message: Any) -> None:
+        messages.append(message.record["message"])
+
+    handler_id = logger.add(sink, level="WARNING", format="{message}")
+    try:
+        yield messages
+    finally:
+        logger.remove(handler_id)
 
 
 def test_defaults_to_minds_when_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -63,8 +87,13 @@ def test_legacy_devminds_value_falls_back_with_warning(monkeypatch: pytest.Monke
     """
     _clear_env(monkeypatch)
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "devminds")
-    # No SystemExit -- just fall back to the default.
-    assert resolve_minds_root_name() == DEFAULT_MINDS_ROOT_NAME
+    with _captured_warning_messages() as warnings:
+        # No SystemExit -- just fall back to the default.
+        assert resolve_minds_root_name() == DEFAULT_MINDS_ROOT_NAME
+    # The operator-facing warning is the behavior that distinguishes this case
+    # from a plain unset value, so assert it actually fired (and names the bad
+    # value) rather than only checking the fallback return.
+    assert any("devminds" in message and MINDS_ROOT_NAME_ENV_VAR in message for message in warnings), warnings
 
 
 def test_legacy_value_with_spaces_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -137,6 +166,11 @@ def test_root_name_for_env_name_staging() -> None:
     assert root_name_for_env_name("staging") == "minds-staging"
 
 
+# These three tests pin the on-disk layout contract that mngr and the CI cleanup
+# tooling rely on (the leading-dot ``.minds*`` data dir name, the ``mngr`` subdir,
+# and the trailing-dash prefix separator). They intentionally re-state the layout
+# rather than re-deriving it from the implementation, so a dropped dot or changed
+# separator fails here -- they are not redundant constructor-echo tests.
 def test_minds_data_dir_for() -> None:
     assert minds_data_dir_for("minds-dev-josh-3") == Path.home() / ".minds-dev-josh-3"
     assert minds_data_dir_for("minds") == Path.home() / ".minds"
@@ -321,9 +355,9 @@ def test_set_provider_is_enabled_creates_settings_file_when_missing(
 ) -> None:
     """If minds' active settings file does not yet exist, it is created."""
     settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
-    # Make sure no file exists yet
-    if settings_path.exists():
-        settings_path.unlink()
+    # stub_mngr_host_dir seeds the profile dir but not settings.toml, so we start
+    # from no settings file -- the precondition this test is about.
+    assert not settings_path.exists()
 
     changed = set_provider_is_enabled("modal", False, root_name="minds-dev-tname")
     assert changed is True
@@ -388,6 +422,63 @@ def test_ensure_mngr_settings_writes_default_imbue_cloud_disabled(
     parsed = tomllib.loads(settings_path.read_text())
     assert parsed["providers"]["imbue_cloud"] == {"backend": "imbue_cloud", "is_enabled": False}
     assert parsed["plugins"]["recursive"]["enabled"] is False
+
+
+def test_ensure_mngr_settings_strips_legacy_ssh_provider_and_cleans_dynamic_hosts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The legacy ``[providers.ssh]`` block and its ``ssh/`` data files are removed.
+
+    Stale ``dynamic_hosts.toml`` entries point at long-destroyed VPS IPs and make
+    ``mngr list`` discovery hang, so ``_ensure_mngr_settings`` must both drop the
+    provider section from settings.toml and delete the on-disk legacy artifacts.
+    """
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    settings_path.write_text(
+        '[providers.ssh]\ndynamic_hosts_file = "dynamic_hosts.toml"\n[plugins.recursive]\nenabled = true\n'
+    )
+    data_dir = minds_data_dir_for("minds-dev-tname")
+    dynamic_hosts = data_dir / "ssh" / "dynamic_hosts.toml"
+    leased_host_keys = data_dir / "ssh" / "keys" / "leased_host"
+    leased_host_keys.mkdir(parents=True, exist_ok=True)
+    dynamic_hosts.write_text('[hosts.dead]\nip = "203.0.113.7"\n')
+
+    _ensure_mngr_settings("minds-dev-tname")
+
+    parsed = tomllib.loads(settings_path.read_text())
+    # The stale ssh provider section is gone...
+    assert "ssh" not in parsed["providers"]
+    # ...recursive is forced off and the default imbue_cloud instance suppressed...
+    assert parsed["plugins"]["recursive"]["enabled"] is False
+    assert parsed["providers"]["imbue_cloud"] == {"backend": "imbue_cloud", "is_enabled": False}
+    # ...and the on-disk legacy artifacts are deleted so no reader fans out to them.
+    assert not dynamic_hosts.exists()
+    assert not leased_host_keys.exists()
+
+
+def test_ensure_mngr_settings_is_a_no_op_when_already_in_desired_shape(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A settings file already in the target shape is left byte-identical.
+
+    Guards the short-circuit that avoids a needless rewrite + fsync: recursive
+    disabled, no ssh section, default imbue_cloud suppressed.
+    """
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    desired = (
+        "[providers.imbue_cloud]\n"
+        'backend = "imbue_cloud"\n'
+        "is_enabled = false\n"
+        "\n"
+        "[plugins.recursive]\n"
+        "enabled = false\n"
+    )
+    settings_path.write_text(desired)
+
+    _ensure_mngr_settings("minds-dev-tname")
+
+    # No rewrite happened, so the exact bytes (including formatting) are preserved.
+    assert settings_path.read_text() == desired
 
 
 def test_set_imbue_cloud_provider_for_account_also_writes_default_disabled_block(
