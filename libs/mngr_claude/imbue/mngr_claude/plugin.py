@@ -842,16 +842,11 @@ def _provision_local_credentials(host: OnlineHostInterface, config_dir: Path, *,
 def _bridge_credentials_to_default_claude_home(
     host: OnlineHostInterface, config_dir: Path, generated_files: Mapping[Path, str]
 ) -> None:
-    """Point a remote host's ~/.claude/.credentials.json at the per-agent config dir's copy.
+    """Symlink ~/.claude/.credentials.json to the per-agent config dir's copy in the guest.
 
-    An mngr running inside this agent's VM reads credentials from the standard
-    ~/.claude/.credentials.json, not from this agent's per-agent config dir, so any
-    agent it spawns there starts unauthenticated -- that path is empty on a Linux VM,
-    where Claude CLI 2.x's macOS Keychain storage doesn't exist. Symlinking (rather
-    than copying) lets host-side credential refreshes propagate without re-staging;
-    ``ln -sfn`` replaces any stale link in place without dereferencing it.
-
-    No-op on local hosts and when no .credentials.json was staged for this agent.
+    Lets a nested mngr running in the guest, which reads the standard
+    ~/.claude/.credentials.json rather than the per-agent dir, authenticate the agents it
+    spawns. No-op on local hosts and when no credentials were staged.
     """
     if host.is_local or not generated_files.get(Path(".credentials.json")):
         return
@@ -2003,9 +1998,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         # 3. Write generated files to config_dir
         _write_generated_files(host, config_dir, generated_files, mngr_ctx)
 
-        # 4. Bridge credentials to the remote's default Claude home so an mngr
-        # running inside this agent's VM can authenticate the agents it spawns
-        # there (they read ~/.claude/.credentials.json, not the per-agent dir).
+        # 4. Bridge credentials to the guest's default Claude home for nested mngr.
         _bridge_credentials_to_default_claude_home(host, config_dir, generated_files)
 
     def provision(

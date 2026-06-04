@@ -3013,49 +3013,35 @@ def _make_command_tracking_host_with_locality(*, is_local: bool) -> tuple[Online
     return host, executed_commands
 
 
-def test_bridge_credentials_emits_symlink_command_on_remote_with_staged_credentials() -> None:
-    """On a remote host with a staged .credentials.json, the bridge creates the ~/.claude symlink."""
+def test_bridge_credentials_emits_symlink_command_on_non_local_host_with_staged_credentials() -> None:
+    """On a non-local host with a staged .credentials.json, the bridge symlinks it into ~/.claude.
+
+    Asserts the full command: the target is shlex-quoted, ~/.claude is created 0700, and
+    ln -sfn points the standard path at the per-agent copy.
+    """
     host, executed_commands = _make_command_tracking_host_with_locality(is_local=False)
     config_dir = Path("/mngr/agents/agent-123/plugin/claude/anthropic")
 
     _bridge_credentials_to_default_claude_home(host, config_dir, {Path(".credentials.json"): "{}"})
 
-    assert len(executed_commands) == 1
-    command = executed_commands[0]
     bridged_target = shlex.quote(str(config_dir / ".credentials.json"))
-    assert command == f"mkdir -p -m 0700 ~/.claude && ln -sfn {bridged_target} ~/.claude/.credentials.json"
+    assert executed_commands == [f"mkdir -p -m 0700 ~/.claude && ln -sfn {bridged_target} ~/.claude/.credentials.json"]
 
 
-def test_bridge_credentials_is_noop_on_local_host() -> None:
-    """The bridge does nothing on a local host even when credentials were staged."""
-    host, executed_commands = _make_command_tracking_host_with_locality(is_local=True)
+@pytest.mark.parametrize(
+    "is_local, generated_files",
+    [
+        (True, {Path(".credentials.json"): "{}"}),  # local host: nested mngr reuses the host's own creds
+        (False, {Path("settings.json"): "{}"}),  # non-local but nothing to bridge
+    ],
+)
+def test_bridge_credentials_is_noop(is_local: bool, generated_files: dict[Path, str]) -> None:
+    """The bridge runs no command on a local host or when no .credentials.json was staged."""
+    host, executed_commands = _make_command_tracking_host_with_locality(is_local=is_local)
 
-    _bridge_credentials_to_default_claude_home(host, Path("/some/config/dir"), {Path(".credentials.json"): "{}"})
-
-    assert executed_commands == []
-
-
-def test_bridge_credentials_is_noop_when_no_credentials_staged() -> None:
-    """The bridge does nothing on a remote host when no .credentials.json was staged."""
-    host, executed_commands = _make_command_tracking_host_with_locality(is_local=False)
-
-    _bridge_credentials_to_default_claude_home(host, Path("/some/config/dir"), {Path("settings.json"): "{}"})
+    _bridge_credentials_to_default_claude_home(host, Path("/some/config/dir"), generated_files)
 
     assert executed_commands == []
-
-
-def test_bridge_credentials_quotes_target_path_with_spaces() -> None:
-    """The bridge shell-quotes the symlink target so paths with spaces stay a single argument."""
-    host, executed_commands = _make_command_tracking_host_with_locality(is_local=False)
-    config_dir = Path("/mngr/agents/my agent/plugin/claude/anthropic")
-
-    _bridge_credentials_to_default_claude_home(host, config_dir, {Path(".credentials.json"): "{}"})
-
-    assert len(executed_commands) == 1
-    quoted_target = shlex.quote(str(config_dir / ".credentials.json"))
-    # The space-containing path is wrapped in quotes, so it stays a single argument.
-    assert quoted_target == f"'{config_dir / '.credentials.json'}'"
-    assert f"ln -sfn {quoted_target} ~/.claude/.credentials.json" in executed_commands[0]
 
 
 def test_get_claude_version_returns_version_on_success() -> None:
