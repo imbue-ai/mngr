@@ -184,12 +184,13 @@ class MindsConfig(MutableModel):
         """Write the ``[workspace_colors]`` table from a typed mapping.
 
         Drops the table entirely when ``colors`` is empty so an idle
-        config doesn't carry a vestigial header. Must be called while
-        holding ``self._lock``.
+        config doesn't carry a vestigial header (``dict.pop(key, None)``
+        is idempotent whether or not the key exists). Must be called
+        while holding ``self._lock``.
         """
         data = self._read_raw()
         if colors:
             data[_WORKSPACE_COLORS_KEY] = dict(colors)
-        elif _WORKSPACE_COLORS_KEY in data:
-            del data[_WORKSPACE_COLORS_KEY]
+        else:
+            data.pop(_WORKSPACE_COLORS_KEY, None)
         self._write_raw(data)
