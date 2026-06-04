@@ -14,6 +14,11 @@
 {% set _body_attrs %}data-mngr-forward-origin="{{ mngr_forward_origin }}"{% endset %}
 {% set _scripts %}
 <script src="/_static/workspace_color.js" defer></script>
+{# Legacy per-agent accent helper. sidebar.js still calls
+   `window.mindsAccent.get(...)` when an SSE workspace dict lacks an
+   `accent` field; without this tag every workspace row throws on the
+   first SSE update. Phase 3 migrates sidebar.js off this helper. #}
+<script src="/_static/workspace_accent.js" defer></script>
 <script src="/_static/sidebar.js" defer></script>
 {% endset %}
 <Base title="Projects"

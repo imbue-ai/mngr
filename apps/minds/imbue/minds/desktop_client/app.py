@@ -1948,11 +1948,15 @@ def _build_workspace_list(
     Each entry carries the workspace's persisted color (read from
     :class:`MindsConfig` when available; falls back to the OKLCH starting
     color from :func:`workspace_accent` when no config is wired in -- e.g.
-    smoke tests). Three color fields per entry:
+    smoke tests). Color fields per entry:
 
     - ``color``: the stored value (preset slug or CSS literal).
     - ``workspace_bg``: the resolved hex/literal background.
     - ``theme``: the inferred light/dark theme.
+    - ``accent``: the legacy SHA-256 OKLCH literal. Retained until Phase 3
+      migrates chrome.js / sidebar.js off ``window.mindsAccent`` and onto
+      the new ``window.mindsWorkspaceColor`` helper; dropping it now leaves
+      both files reading ``undefined`` for every workspace row.
 
     The chrome's titlebar quick-flip and the sidebar identity dots both
     consume these fields without doing any luminance math client-side.
@@ -1979,6 +1983,9 @@ def _build_workspace_list(
             "color": str(color),
             "workspace_bg": color.resolve_hex(),
             "theme": theme_for(color).value,
+            # Legacy field consumed by static/chrome.js and static/sidebar.js.
+            # See the docstring above; remove once those callers migrate.
+            "accent": workspace_accent(str(aid)),
         }
         # Mark the workspace stale when its provider's most recent discovery
         # poll errored: it was retained from prior state, so its liveness is

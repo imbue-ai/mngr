@@ -35,6 +35,11 @@
 {% set _body_attrs %}data-is-mac="{{ 'true' if is_mac else 'false' }}" data-is-authenticated="{{ 'true' if is_authenticated else 'false' }}" data-mngr-forward-origin="{{ mngr_forward_origin }}"{% endset %}
 {% set _scripts %}
 <script src="/_static/workspace_color.js" defer></script>
+{# Legacy per-agent accent helper. chrome.js still calls
+   `window.mindsAccent.get(...)` for the (currently hidden) `#title-swatch`
+   element until Phase 3 migrates its callers to the new workspace_color.js
+   pipeline; without this tag chrome.js throws on every Chrome page load. #}
+<script src="/_static/workspace_accent.js" defer></script>
 <script src="/_static/chrome.js" defer></script>
 {% endset %}
 <Base title="Minds"
@@ -65,6 +70,10 @@
               style="width: 16px; height: 16px; padding: 0;">
         <span id="ws-color-flyout-swatch" class="ws-dot" style="width: 10px; height: 10px;"></span>
       </button>
+      {# Legacy accent indicator. chrome.js still toggles its visibility +
+         CSS variable until Phase 3 migrates that wiring; rendered hidden
+         so it stays out of the way of the new flyout swatch above. #}
+      <span id="title-swatch" class="accent-swatch hidden w-2.5 h-2.5 rounded-sm shrink-0"></span>
       <span id="page-title" class="type-helper-12 text-token-secondary whitespace-nowrap overflow-hidden text-ellipsis">Minds</span>
     </div>
     <div class="relative minds-user-area shrink-0">
