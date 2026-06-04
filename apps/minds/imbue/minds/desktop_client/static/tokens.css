@@ -26,6 +26,11 @@
  * still generates layout utility classes at runtime. Color / type /
  * surface concerns are token-backed here; layout (flex, gap, padding)
  * stays on Tailwind.
+ *
+ * The end of the file contains a Phase 2 back-compat block (legacy
+ * --workspace-accent consumers: .page-workspace, .accent-spine,
+ * .sidebar-item, .accent-swatch) kept until Phase 3 migrates the
+ * remaining templates / JS off the old accent-stripe pipeline.
  */
 
 :root {
@@ -361,4 +366,68 @@ html {
 }
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+/* -- Phase 2 back-compat: legacy --workspace-accent consumers --
+ *
+ * Templates that haven't been migrated to the new --workspace-bg
+ * pipeline still rely on --workspace-accent driving these four
+ * selectors:
+ *
+ *   .page-workspace::before  -- 3px top stripe on full-page templates
+ *                               (Creating, Destroying, Sharing).
+ *   .accent-spine::before    -- 3px left spine on workspace-row cards
+ *                               (DevStyleguide).
+ *   .sidebar-item::before    -- per-row identity dot on the sidebar
+ *                               (chrome.js / sidebar.js set --workspace-accent
+ *                               per row from SSE).
+ *   .accent-swatch           -- backgrounded swatch (Chrome.jinja's
+ *                               #title-swatch, DevStyleguide preview).
+ *
+ * Kept here alongside the back-compat ``workspace_accent.js`` script tag
+ * and ``accent`` SSE field (commit 4eef6b566b) so the unmigrated
+ * templates keep their accent stripe / spine / sidebar dot rendering.
+ * Removed in Phase 3 once those templates flip to the new token
+ * classes.
+ */
+.page-workspace::before {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: var(--workspace-accent, oklch(65% 0.15 230));
+  z-index: 1000;
+}
+
+.accent-spine::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--workspace-accent, oklch(65% 0.15 230));
+}
+
+.sidebar-item::before {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--workspace-accent, oklch(65% 0.15 230));
+  opacity: 0.55;
+  transition: opacity 100ms;
+}
+.sidebar-item:hover::before,
+.sidebar-item.is-current::before {
+  opacity: 1;
+}
+
+.accent-swatch {
+  background: var(--workspace-accent, oklch(65% 0.15 230));
 }
