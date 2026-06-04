@@ -1,11 +1,13 @@
 """Tests for git utilities."""
 
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ProcessError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
@@ -25,6 +27,7 @@ from imbue.mngr.utils.git_utils import parse_project_name_from_url
 from imbue.mngr.utils.git_utils import parse_worktree_git_file
 from imbue.mngr.utils.git_utils import resolve_project_filter_values
 from imbue.mngr.utils.git_utils import rsync_worktree_over_clone
+from imbue.mngr.utils.testing import write_executable_script
 
 
 def test_github_https_url() -> None:
@@ -343,6 +346,30 @@ def test_find_git_worktree_root_returns_root_when_in_git(tmp_path: Path, cg: Con
 
     result = find_git_worktree_root(subdir, cg)
     assert result == git_dir
+
+
+def test_find_git_worktree_root_raises_on_unexpected_git_failure(
+    tmp_path: Path, cg: ConcurrencyGroup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """find_git_worktree_root should raise, not return None, when git fails for a
+    reason other than "not a git repository".
+
+    Only a clean "not a git repository" result means "no worktree root"; any
+    other failure (here, a git that exits non-zero with an unrelated error) must
+    surface loudly rather than be swallowed into None, which would silently drop
+    the project config layer with no explanation.
+    """
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    write_executable_script(fake_bin / "git", "#!/bin/bash\necho 'fatal: something went wrong' >&2\nexit 1\n")
+    # Prepend (don't replace) so our fake git wins while other tools (e.g. tmux,
+    # used by autouse test fixtures) stay resolvable on PATH.
+    monkeypatch.setenv("PATH", str(fake_bin) + os.pathsep + os.environ["PATH"])
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+
+    with pytest.raises(ProcessError):
+        find_git_worktree_root(work_dir, cg)
 
 
 def test_find_git_common_dir_returns_none_when_not_in_git(tmp_path: Path, cg: ConcurrencyGroup) -> None:

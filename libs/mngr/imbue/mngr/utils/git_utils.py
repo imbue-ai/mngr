@@ -361,17 +361,29 @@ def clone_git_url_to_managed_dir(url: str, base_dir: Path, name: str, cg: Concur
 
 
 def find_git_worktree_root(start: Path | None, cg: ConcurrencyGroup) -> Path | None:
-    """Find the git worktree root."""
+    """Find the git worktree root, or None if `start` is not inside a git repository.
+
+    Only git's own "not a git repository" result maps to None -- that is the one
+    case where "no worktree root" is a normal, expected answer, and every caller
+    treats None as "not in a repo / no project root". Any other failure (git
+    missing, a timeout, a failure to spawn the subprocess, or an unexpected
+    non-zero exit) is raised rather than swallowed, so transient or environmental
+    problems surface loudly instead of silently dropping the project config layer
+    and leaving callers to misbehave with no explanation.
+    """
     cwd = start or Path.cwd()
     try:
         result = cg.run_process_to_completion(
             ["git", "rev-parse", "--show-toplevel"],
             cwd=cwd,
         )
-        return Path(result.stdout.strip())
     except ProcessError as e:
-        logger.trace("Failed to find worktree root: {}", e)
-        return None
+        # git ran and cleanly reported that this path is not a git repository:
+        # the one outcome where None is the correct answer rather than an error.
+        if e.returncode is not None and "not a git repository" in e.stderr.lower():
+            return None
+        raise
+    return Path(result.stdout.strip())
 
 
 def is_git_repository(path: Path, cg: ConcurrencyGroup) -> bool:
