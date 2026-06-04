@@ -991,10 +991,12 @@ def render_chrome_page(
     and sidebar are handled by separate WebContentsViews.
 
     Chrome itself renders with the everywhere-default (``confusion``) workspace
-    color; the active workspace's color is applied client-side as the iframe
-    navigates -- ``workspace_color.js`` listens for navigation events and
-    fetches ``/api/workspace-color/<agent_id>`` to flip ``data-theme`` +
-    ``--workspace-bg`` on the chrome's ``<html>``.
+    color server-side. ``workspace_color.js`` is loaded so the new ``Color``
+    section on the workspace-settings page can call its ``apply()`` helper,
+    but the *live flip* of the chrome ``<html>`` on iframe navigation (i.e.
+    a navigation listener that calls ``/api/workspace-color/<agent_id>`` and
+    re-applies ``data-theme`` + ``--workspace-bg`` in place) is Phase 3
+    work and is not wired up yet.
     """
     return CATALOG.render(
         "pages.Chrome",

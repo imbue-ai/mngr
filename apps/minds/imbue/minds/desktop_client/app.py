@@ -1958,8 +1958,10 @@ def _build_workspace_list(
       the new ``window.mindsWorkspaceColor`` helper; dropping it now leaves
       both files reading ``undefined`` for every workspace row.
 
-    The chrome's titlebar quick-flip and the sidebar identity dots both
-    consume these fields without doing any luminance math client-side.
+    The current chrome.js / sidebar.js only consume ``accent``; the new
+    ``color`` / ``workspace_bg`` / ``theme`` fields are present for the
+    Phase 3 consumers (titlebar quick-flip flyout, sidebar identity
+    dots) so the SSE payload shape is stable from this PR forward.
 
     Entries whose provider's latest discovery poll errored carry
     ``is_stale="true"`` so the UI can flag them as retained-but-unverified

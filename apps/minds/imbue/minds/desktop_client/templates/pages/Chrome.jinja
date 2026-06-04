@@ -13,10 +13,12 @@
   workspace_presets is the list of (slug, hex) tuples for the titlebar
   workspace-color picker flyout.
 
-  Chrome renders with the everywhere-default (confusion) workspace color;
-  static/workspace_color.js applies the active workspace's color (read from
-  the iframe URL on navigation) by swapping <html>'s data-theme +
-  --workspace-bg in place.
+  Chrome renders with the everywhere-default (confusion) workspace color
+  server-side. static/workspace_color.js is loaded so the workspace-
+  settings page picker can call mindsWorkspaceColor.apply(); the live
+  flip of the chrome <html> on iframe navigation (i.e. a navigation
+  listener that re-fetches the per-workspace color and swaps data-theme
+  + --workspace-bg in place) is Phase 3 work and is not wired up yet.
 #}
 {% set _head %}
 <style>
@@ -98,11 +100,13 @@
     </div>
   </div>
 
-  {# Workspace-color quick-flip flyout. Anchored to the titlebar swatch
-     button; opens via static/chrome.js. The 11 swatches are rendered
-     server-side from workspace_presets; clicking one calls
-     mindsWorkspaceColor.apply() and the chrome's <html> attributes
-     update in place (no reload). #}
+  {# Workspace-color quick-flip flyout. The 11 swatches are rendered
+     server-side from workspace_presets so the markup is in place; the
+     toggle button + click-to-apply wiring lives in static/chrome.js
+     and is Phase 3 work, so for now the flyout button is rendered
+     ``hidden`` and the flyout itself never opens. When wired up,
+     clicking a swatch will call mindsWorkspaceColor.apply() and the
+     chrome's <html> attributes will update in place (no reload). #}
   <div id="minds-ws-color-flyout"
        class="hidden fixed top-[42px] left-1/2 -translate-x-1/2 z-[110] rounded-lg p-2"
        data-ws-color-flyout>
