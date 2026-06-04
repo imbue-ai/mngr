@@ -11,6 +11,23 @@ build target:
     exit 1; \
   fi
 
+# Install the dev `mngr` shim so `mngr` always runs the checkout you're working
+# in (not a stale global install). Symlinks ~/.local/bin/mngr -> scripts/mngr in
+# THIS checkout; the shim then routes per-cwd (and tools whose cwd is outside any
+# checkout, like minds, fall back to this checkout). Enforced by a pre-commit hook.
+install-mngr-shim:
+    #!/bin/bash
+    set -ueo pipefail
+    root=$(git rev-parse --show-toplevel)
+    mkdir -p ~/.local/bin
+    ln -sfn "$root/scripts/mngr" ~/.local/bin/mngr
+    echo "Linked ~/.local/bin/mngr -> $root/scripts/mngr"
+    case ":$PATH:" in
+      *":$HOME/.local/bin:"*) ;;
+      *) echo "WARN: ~/.local/bin is not on your PATH; add it ahead of any venv bin." >&2 ;;
+    esac
+    hash -r 2>/dev/null || true
+
 # Generate .dockerignore from .gitignore. Kept as a generator (not a
 # committed file) so .dockerignore stays in lockstep with .gitignore and
 # never needs manual sync. The generator strips:
