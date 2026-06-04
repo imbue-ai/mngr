@@ -34,6 +34,7 @@ members = [
     "imbue-mngr-pair",
     "imbue-mngr-pi-coding",
     "imbue-mngr-recursive",
+    "imbue-mngr-sbx",
     "imbue-mngr-schedule",
     "imbue-mngr-tmr",
     "imbue-mngr-ttyd",
@@ -2098,6 +2099,17 @@ requires-dist = [
     { name = "imbue-mngr", editable = "libs/mngr" },
     { name = "watchdog", specifier = ">=4.0" },
 ]
+
+[[package]]
+name = "imbue-mngr-sbx"
+version = "0.1.0"
+source = { editable = "libs/mngr_sbx" }
+dependencies = [
+    { name = "imbue-mngr" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-schedule"
