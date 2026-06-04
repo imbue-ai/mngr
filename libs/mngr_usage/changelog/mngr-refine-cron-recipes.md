@@ -7,7 +7,10 @@ Refined the cron automation recipes doc (`docs/cron_recipes.md`):
   the project is what gives the new agent a git root to branch from and applies
   the project's settings (`create_templates`, labels, etc.). Dropped the now
   redundant `--from ":$PROJECT_DIR"` from `dispatch-task.sh` (cd makes the
-  create source default to the project's git root).
+  create source default to the project's git root). Clarified that the
+  `warm-window.sh` warmer does no real work, so its `PROJECT_DIR` can be any git
+  repo already trusted in Claude Code -- the project context is irrelevant, and
+  `--no-connect` can't answer the trust prompt on first use.
 - Reworked the Scheduling section: the `PATH` note now covers both the Linux
   (`/usr/bin` via apt) and macOS (`/opt/homebrew/bin` via Homebrew) dependency
   locations around a single cron example.

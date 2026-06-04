@@ -122,10 +122,14 @@ the moment the last one elapses, it fires a one-off prompt to open the next.
 set -euo pipefail
 
 WARMER="window-warmer"
-PROJECT_DIR="$HOME/code/my-project"   # any git repo; the warmer just needs a home
+PROJECT_DIR="$HOME/code/my-project"   # any git repo already trusted in Claude Code
 
-# cron starts in $HOME (usually not a git repo); cd into the project so `mngr
-# create` has a git root to branch from and picks up the project's config.
+# The warmer does no real work -- it just opens a 5h window and lets its
+# statusline fire (that's what records the new window into `mngr usage`). It only
+# needs a valid source repo, so any handy one works; its project context is
+# irrelevant. cron starts in $HOME (not a repo), so cd in to give `mngr create` a
+# git root. The repo must already be trusted in Claude Code -- with --no-connect
+# there's no TTY to answer the trust prompt on first use.
 cd "$PROJECT_DIR"
 
 snapshot="$(mngr usage --format json)"
