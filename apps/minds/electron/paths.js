@@ -47,17 +47,15 @@ function getLimaBinDir() {
  * Path to the bundled restic binary used by the desktop client to
  * provision and query per-workspace backup repositories.
  *
- * Dev mode: requires `restic` on PATH (or the user's normal shell
- * resolution); we return null so the runtime falls back to
- * shutil.which("restic").
- *
- * Packaged mode: build.js downloads restic per target platform into
- * `resources/restic/restic` via scripts/download-binaries.js.
+ * Both dev and packaged mode resolve to ``resources/restic/restic``:
+ * build.js downloads restic per target platform into that location via
+ * scripts/download-binaries.js. In dev, ``pnpm start`` runs the
+ * ``prestart`` hook (``node scripts/download-binaries.js``) so the
+ * binary is present before Electron boots, mirroring the bundled-app
+ * UX -- a Minds end user (or dev) should never have to install restic
+ * separately.
  */
 function getResticPath() {
-  if (isDev()) {
-    return null;
-  }
   return path.join(getResourcesDir(), 'restic', 'restic');
 }
 

@@ -7,6 +7,7 @@
   "author": "Imbue <dev@imbue.com>",
   "main": "electron/main.js",
   "scripts": {
+    "prestart": "node scripts/ensure-binaries.js",
     "start": "electron .",
     "build": "node scripts/build.js",
     "dist": "pnpm build && pnpm exec todesktop build",
