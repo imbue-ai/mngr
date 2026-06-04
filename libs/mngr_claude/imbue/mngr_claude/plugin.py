@@ -842,16 +842,19 @@ def _provision_local_credentials(host: OnlineHostInterface, config_dir: Path, *,
 def _bridge_credentials_to_default_claude_home(
     host: OnlineHostInterface, config_dir: Path, generated_files: Mapping[Path, str]
 ) -> None:
-    """Point a remote host's ~/.claude/.credentials.json at the per-agent config dir's copy.
+    """Point a connected host's ~/.claude/.credentials.json at the per-agent config dir's copy.
 
-    An mngr running inside this agent's VM reads credentials from the standard
-    ~/.claude/.credentials.json, not from this agent's per-agent config dir, so any
-    agent it spawns there starts unauthenticated -- that path is empty on a Linux VM,
-    where Claude CLI 2.x's macOS Keychain storage doesn't exist. Symlinking (rather
+    An mngr running inside this agent's guest (a Lima/Docker/remote VM) reads credentials
+    from the standard ~/.claude/.credentials.json, not from this agent's per-agent config
+    dir, so any agent it spawns there starts unauthenticated -- that path is empty in the
+    guest, where Claude CLI 2.x's macOS Keychain storage doesn't exist. Symlinking (rather
     than copying) lets host-side credential refreshes propagate without re-staging;
     ``ln -sfn`` replaces any stale link in place without dereferencing it.
 
-    No-op on local hosts and when no .credentials.json was staged for this agent.
+    "Local" here means ``host.is_local`` -- the local pyinfra connector, i.e. mngr's own
+    machine with no guest in between. A Lima VM counts as non-local even though it runs on
+    that same machine, because we reach it (and the in-guest mngr) over SSH. This is a
+    no-op on a local host, and when no .credentials.json was staged for this agent.
     """
     if host.is_local or not generated_files.get(Path(".credentials.json")):
         return
@@ -1993,9 +1996,10 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         # 3. Write generated files to config_dir
         _write_generated_files(host, config_dir, generated_files, mngr_ctx)
 
-        # 4. Bridge credentials to the remote's default Claude home so an mngr
-        # running inside this agent's VM can authenticate the agents it spawns
-        # there (they read ~/.claude/.credentials.json, not the per-agent dir).
+        # 4. Bridge credentials to the guest's default Claude home so an mngr
+        # running inside this agent's guest (Lima/Docker/remote VM) can
+        # authenticate the agents it spawns there: they read
+        # ~/.claude/.credentials.json, not this agent's per-agent dir.
         _bridge_credentials_to_default_claude_home(host, config_dir, generated_files)
 
     def provision(
