@@ -15,6 +15,7 @@ from uuid import uuid4
 import pluggy
 import pytest
 from click.testing import CliRunner
+from loguru import logger
 
 import imbue.mngr.main
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -77,6 +78,25 @@ def register_test_placeholder_agent_type() -> None:
 def cli_runner() -> CliRunner:
     """Create a Click CLI runner for testing CLI commands."""
     return CliRunner()
+
+
+@pytest.fixture()
+def log_warnings() -> Generator[list[str], None, None]:
+    """Capture loguru warning messages for assertion in tests.
+
+    Tolerates handler removal during the test (e.g. setup_logging() calls
+    logger.remove() which clears all handlers, so the handler we added may
+    no longer exist by the time teardown runs).
+    """
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
+    try:
+        yield messages
+    finally:
+        try:
+            logger.remove(handler_id)
+        except ValueError:
+            pass
 
 
 @pytest.fixture(autouse=True)
@@ -320,6 +340,7 @@ def register_plugin_test_fixtures(namespace: dict[str, Any]) -> None:
     namespace["cli_runner"] = cli_runner
     namespace["local_host"] = local_host
     namespace["local_provider"] = local_provider
+    namespace["log_warnings"] = log_warnings
     namespace["mngr_test_id"] = mngr_test_id
     namespace["mngr_test_prefix"] = mngr_test_prefix
     namespace["mngr_test_root_name"] = mngr_test_root_name

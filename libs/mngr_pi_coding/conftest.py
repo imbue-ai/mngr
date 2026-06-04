@@ -9,12 +9,10 @@ and this file's register_conftest_hooks() call is a no-op (guarded by a module-l
 """
 
 from collections.abc import Callable
-from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
 import pytest
-from loguru import logger
 
 from imbue.imbue_common.conftest_hooks import register_conftest_hooks
 from imbue.mngr.api.testing import FakeHost
@@ -30,27 +28,9 @@ register_conftest_hooks(globals())
 
 # Register the standard mngr plugin test fixtures (the purpose-built helper for
 # plugin conftests). This injects the autouse setup_test_mngr_env fixture, which
-# redirects HOME to a temp dir so tests cannot read or write the real ~/.pi.
+# redirects HOME to a temp dir so tests cannot read or write the real ~/.pi, plus
+# the log_warnings capture fixture used by the on_before_provisioning tests.
 register_plugin_test_fixtures(globals())
-
-
-@pytest.fixture()
-def log_warnings() -> Generator[list[str], None, None]:
-    """Capture loguru warning messages for assertion in tests.
-
-    log_warnings is not part of register_plugin_test_fixtures' standard set (it
-    lives in mngr's own conftest), so it is defined here as a plugin-local extra.
-    Tolerates handler removal during the test.
-    """
-    messages: list[str] = []
-    handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
-    try:
-        yield messages
-    finally:
-        try:
-            logger.remove(handler_id)
-        except ValueError:
-            pass
 
 
 @pytest.fixture()
