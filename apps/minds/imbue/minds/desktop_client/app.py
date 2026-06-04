@@ -1,5 +1,4 @@
 import asyncio
-import concurrent.futures
 import html
 import json
 import os
@@ -94,6 +93,7 @@ from imbue.minds.desktop_client.sharing_handler import is_probeable_share_url
 from imbue.minds.desktop_client.sharing_handler import is_share_ready_from_edge_response
 from imbue.minds.desktop_client.sharing_handler import parse_emails_form_value
 from imbue.minds.desktop_client.sharing_handler import resolve_account_email_for_workspace
+from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.minds.desktop_client.supertokens_routes import create_supertokens_router
 from imbue.minds.desktop_client.supertokens_routes import signout_user_via_plugin
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
@@ -135,6 +135,7 @@ from imbue.minds.telegram.setup import TelegramSetupStatus
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import InvalidName
+from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
 
@@ -221,7 +222,7 @@ async def _managed_lifespan(
     inner_app: FastAPI,
     is_externally_managed_client: bool,
 ) -> AsyncGenerator[None, None]:
-    """Manage the httpx client lifecycle and capture the running event loop.
+    """Manage the httpx client lifecycle and root concurrency group teardown.
 
     SSH tunnels (forward + reverse) live in ``cli/run.py``'s
     ``SSHTunnelManager``, which is solely used by the surviving Latchkey
@@ -232,10 +233,6 @@ async def _managed_lifespan(
             follow_redirects=False,
             timeout=_PROXY_TIMEOUT_SECONDS,
         )
-    # Captured here so background callbacks (e.g. the mngr event refresh
-    # dispatch) can schedule async work on the server's running loop via
-    # asyncio.run_coroutine_threadsafe.
-    inner_app.state.event_loop = asyncio.get_running_loop()
     try:
         yield
     finally:
@@ -250,10 +247,6 @@ async def _managed_lifespan(
         backend_resolver = inner_app.state.backend_resolver
         if isinstance(backend_resolver, MngrCliBackendResolver):
             backend_resolver.notify_change()
-        # Clear the captured loop reference first so background callbacks that
-        # race with shutdown see None and drop their events instead of trying
-        # to schedule on a loop that is about to close.
-        inner_app.state.event_loop = None
         if not is_externally_managed_client:
             await inner_app.state.http_client.aclose()
         # Stop every long-lived strand that's blocked on external I/O
@@ -1566,11 +1559,12 @@ async def _handle_provider_toggle(
     """Toggle ``is_enabled`` for a provider in minds' active settings and bounce observe.
 
     POST ``/api/providers/{provider_name}/toggle`` with body ``{"is_enabled": bool}``.
-    Writes via :func:`set_provider_is_enabled`, then sends ``SIGHUP`` to
-    ``mngr forward`` so it restarts its ``mngr observe`` child to pick up the
-    new setting. The next ``FullDiscoverySnapshotEvent`` will reflect the
-    change; the chrome's optimistic "waiting for refresh" state clears at that
-    point.
+    Writes via :func:`set_provider_is_enabled`, then bounces the detached
+    ``mngr latchkey forward`` supervisor's ``mngr observe`` child -- the single
+    discovery observer -- to pick up the new setting. The next
+    ``FullDiscoverySnapshotEvent`` it writes to the shared discovery log is tailed
+    by minds' ``mngr forward --observe-via-file``; the chrome's optimistic
+    "waiting for refresh" state clears at that point.
     """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
@@ -1596,13 +1590,14 @@ async def _handle_provider_toggle(
             media_type="application/json",
         )
     changed = set_provider_is_enabled(provider_name, is_enabled)
-    # Only bounce observe when the settings file actually changed -- a no-op toggle
+    # Only bounce when the settings file actually changed -- a no-op toggle
     # (e.g. user clicking Disable twice) should not trigger a SIGHUP and a full
     # mngr observe restart, since the next discovery snapshot would be identical.
     if changed:
-        consumer: EnvelopeStreamConsumer | None = request.app.state.envelope_stream_consumer
-        if consumer is not None:
-            consumer.bounce_observe()
+        # Bounce the single discovery observer (latchkey forward's `mngr observe`)
+        # so its next snapshot reflects the new provider set; minds' `mngr forward`
+        # tails the resulting shared discovery log.
+        bounce_latchkey_forward_supervisor(request.app.state.latchkey_forward_supervisor)
     return Response(
         content=json.dumps({"provider_name": provider_name, "is_enabled": is_enabled, "changed": changed}),
         media_type="application/json",
@@ -1940,16 +1935,24 @@ def _build_workspace_list(
 
     Each entry carries a deterministic "accent" CSS color derived from the
     agent id so the chrome and sidebar can render a per-workspace accent
-    without running a digest in JS.
+    without running a digest in JS. Entries whose provider's latest discovery
+    poll errored carry ``is_stale="true"`` so the UI can flag them as
+    retained-but-unverified (they remain fully interactive).
     """
+    errored_provider_names = {str(name) for name in backend_resolver.get_provider_errors()}
     agent_ids = backend_resolver.list_known_workspace_ids()
     workspaces: list[dict[str, str]] = []
     for aid in agent_ids:
+        info = backend_resolver.get_agent_display_info(aid)
         ws_name = backend_resolver.get_workspace_name(aid)
         if not ws_name:
-            info = backend_resolver.get_agent_display_info(aid)
             ws_name = info.agent_name if info else str(aid)
         entry: dict[str, str] = {"id": str(aid), "name": ws_name, "accent": workspace_accent(str(aid))}
+        # Mark the workspace stale when its provider's most recent discovery
+        # poll errored: it was retained from prior state, so its liveness is
+        # unverified rather than confirmed healthy.
+        if info is not None and info.provider_name is not None and info.provider_name in errored_provider_names:
+            entry["is_stale"] = "true"
         if session_store is not None:
             account = session_store.get_account_for_workspace(str(aid))
             if account is not None:
@@ -3169,7 +3172,6 @@ async def _dispatch_request_action(
 
 
 _request_event_apps: dict[int, FastAPI] = {}
-_refresh_event_apps: dict[int, FastAPI] = {}
 
 
 def _handle_request_event_callback(agent_id_str: str, raw_line: str) -> None:
@@ -3207,105 +3209,6 @@ def _handle_request_event_callback(agent_id_str: str, raw_line: str) -> None:
                 backend_resolver.notify_change()
 
 
-def _parse_refresh_service_name(raw_line: str) -> str | None:
-    """Extract service_name from a refresh event line, or None if unparseable."""
-    try:
-        data = json.loads(raw_line)
-    except json.JSONDecodeError:
-        return None
-    service_name = data.get("service_name")
-    if not isinstance(service_name, str) or not service_name:
-        return None
-    return service_name
-
-
-async def _dispatch_refresh_broadcast(app: FastAPI, agent_id: AgentId, service_name: str) -> None:
-    """POST to the agent's system interface so it emits a refresh_service WS broadcast.
-
-    Routed through the ``mngr forward`` plugin's per-agent subdomain so we
-    reuse the plugin's existing SSH tunnel to the agent rather than
-    maintaining one in minds. The request connects to the plugin on loopback
-    and carries the agent's ``agent-<hex>.localhost`` vhost in the ``Host``
-    header (the plugin routes on that header), so it does not depend on
-    ``*.localhost`` name resolution. Auth on the plugin uses the same
-    ``preauth_cookie`` value the plugin trusts for the Electron-shell
-    pre-set; minds knows that value because it minted it in ``cli/run.py``.
-    Errors are logged but swallowed -- a missed refresh is never worth
-    crashing on.
-    """
-    plugin_port: int = app.state.mngr_forward_port or 8421
-    preauth_cookie: str | None = app.state.mngr_forward_preauth_cookie
-    if preauth_cookie is None:
-        logger.debug("Refresh broadcast skipped for {}/{}: no preauth cookie wired", agent_id, service_name)
-        return
-    url = f"http://127.0.0.1:{plugin_port}/api/refresh-service/{service_name}/broadcast"
-    host_header = f"{agent_id}.localhost"
-    http_client: httpx.AsyncClient = app.state.http_client
-    try:
-        response = await http_client.post(
-            url,
-            headers={"Host": host_header},
-            cookies={"mngr_forward_session": preauth_cookie},
-        )
-        response.raise_for_status()
-    except httpx.HTTPError as e:
-        logger.warning("Refresh broadcast POST to {} ({}) failed: {}", url, host_header, e)
-
-
-def _log_refresh_dispatch_result(
-    future: concurrent.futures.Future[None], agent_id_str: str, service_name: str
-) -> None:
-    """Surface any exception stashed on a scheduled refresh-dispatch future.
-
-    ``run_coroutine_threadsafe`` stores exceptions on the returned
-    ``concurrent.futures.Future``; if nothing calls ``.exception()`` they are
-    never logged. This callback runs when the coroutine finishes and logs
-    anything other than cancellation.
-    """
-    try:
-        exc = future.exception()
-    except asyncio.CancelledError:
-        logger.debug("Refresh dispatch cancelled for agent {} service {}", agent_id_str, service_name)
-        return
-    if exc is not None:
-        logger.warning("Refresh dispatch failed for agent {} service {}: {}", agent_id_str, service_name, exc)
-
-
-def _handle_refresh_event_callback(agent_id_str: str, raw_line: str) -> None:
-    """Fan a refresh event out to every registered app's system interface.
-
-    Runs on the mngr-events reader thread, so the async POST is scheduled
-    on each app's captured event loop via run_coroutine_threadsafe.
-    """
-    service_name = _parse_refresh_service_name(raw_line)
-    if service_name is None:
-        logger.debug("Ignoring malformed refresh event from {}: {}", agent_id_str, raw_line[:200])
-        return
-    agent_id = AgentId(agent_id_str)
-    for app in _refresh_event_apps.values():
-        # event_loop is set to None in create_desktop_client and populated by
-        # _managed_lifespan on startup. In production, stream_manager.start()
-        # (which feeds this callback) runs before uvicorn.run(app) starts the
-        # lifespan, so there is a brief window during which refresh events
-        # can arrive before the loop is captured. Drop such events rather
-        # than crashing the reader thread with AttributeError. The same guard
-        # also covers loops that have already been closed (e.g. the app was
-        # torn down but its entry in _refresh_event_apps has not yet been
-        # removed) -- scheduling on a closed loop would raise RuntimeError
-        # and leak an unawaited coroutine.
-        loop: asyncio.AbstractEventLoop | None = app.state.event_loop
-        if loop is None or loop.is_closed():
-            logger.debug(
-                "Dropping refresh for agent {} service {}: app event loop unavailable",
-                agent_id_str,
-                service_name,
-            )
-            continue
-        future = asyncio.run_coroutine_threadsafe(_dispatch_refresh_broadcast(app, agent_id, service_name), loop)
-        future.add_done_callback(lambda f, aid=agent_id_str, sn=service_name: _log_refresh_dispatch_result(f, aid, sn))
-        logger.info("Scheduled refresh broadcast for agent {} service {}", agent_id_str, service_name)
-
-
 # -- App factory --
 
 
@@ -3333,6 +3236,7 @@ def create_desktop_client(
     mngr_binary: str = "mngr",
     mngr_host_dir: Path | None = None,
     minds_api_key: str | None = None,
+    latchkey_forward_supervisor: LatchkeyForwardSupervisor | None = None,
 ) -> FastAPI:
     """Create the bare-origin minds FastAPI application.
 
@@ -3376,6 +3280,11 @@ def create_desktop_client(
     app.state.auth_store = auth_store
     app.state.backend_resolver = backend_resolver
     app.state.envelope_stream_consumer = envelope_stream_consumer
+    # Handle to the detached ``mngr latchkey forward`` supervisor so the
+    # provider-change request handlers (provider toggle, signin/signout) can
+    # ``bounce()`` it alongside the ``mngr forward`` observe bounce, keeping
+    # latchkey's provider set in lockstep with minds' own. None in tests.
+    app.state.latchkey_forward_supervisor = latchkey_forward_supervisor
     # Placeholder so the lifespan teardown can read this slot
     # unconditionally; ``cli/run.py`` overwrites it with the running
     # consumer right after starting it.
@@ -3420,11 +3329,6 @@ def create_desktop_client(
     app.state.system_interface_health_tracker = system_interface_health_tracker
     app.state.mngr_binary = mngr_binary
     app.state.mngr_host_dir = mngr_host_dir if mngr_host_dir is not None else Path.home() / ".mngr"
-    # Populated with the running loop by _managed_lifespan on startup. Defined
-    # up-front as None so background callbacks fired before startup (e.g. mngr
-    # events produced between consumer.start() and uvicorn.run()) see a
-    # valid attribute and can choose to drop the event instead of crashing.
-    app.state.event_loop = None
     # Always-set (possibly None) so consumers can read directly via
     # ``app.state.api_v1_paths`` instead of using a defaulting attribute
     # lookup -- the latter is flagged by the project ratchet.
@@ -3440,8 +3344,6 @@ def create_desktop_client(
     if isinstance(backend_resolver, MngrCliBackendResolver):
         _request_event_apps[id(backend_resolver)] = app
         backend_resolver.add_on_request_callback(_handle_request_event_callback)
-        _refresh_event_apps[id(backend_resolver)] = app
-        backend_resolver.add_on_refresh_callback(_handle_refresh_event_callback)
 
     # Mount the auth routes (proxy to the mngr_imbue_cloud plugin's auth subcommands)
     if session_store is not None and imbue_cloud_cli is not None:

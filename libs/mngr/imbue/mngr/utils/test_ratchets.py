@@ -17,7 +17,12 @@ pytestmark = pytest.mark.xdist_group(name="ratchets")
 
 
 def test_prevent_todos() -> None:
-    rc.check_todos(_DIR, snapshot(0))
+    # The 1 violation is in libs/mngr/imbue/mngr/e2e/tutorial/test_git.py inside
+    # an e2e.write_tutorial_block(\"\"\"...\"\"\") triple-quoted string -- it is a
+    # verbatim quote of a "# TODO: ..." line in mega_tutorial.sh that the
+    # tutorial_matcher requires to appear in the test body, not a TODO we
+    # added to the codebase. See PR #1806.
+    rc.check_todos(_DIR, snapshot(1))
 
 
 def test_prevent_exec() -> None:
@@ -296,6 +301,10 @@ def test_prevent_cast_usage() -> None:
 
 def test_prevent_assert_isinstance() -> None:
     rc.check_assert_isinstance(_DIR, snapshot(0))
+
+
+def test_prevent_per_file_host_upload() -> None:
+    rc.check_per_file_host_upload(_DIR, snapshot(2))
 
 
 # --- Project-level checks ---

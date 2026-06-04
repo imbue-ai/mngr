@@ -181,6 +181,45 @@ def _fake_order_router(
     return fake
 
 
+def test_order_never_configures_a_backup_option() -> None:
+    """Regression: the order/cart flow must never enable an OVH backup option.
+
+    OVH automated backups freeze the guest filesystem and cause serious
+    runtime problems, so we disable them at provision time by purging qemu.
+    This test locks in the other half of that guarantee: we must not
+    *order* backups in the first place. It records every
+    ``/order/cart/.../configuration`` call and asserts the configured
+    labels are exactly datacenter / OS / RTM (with RTM set to ``no``) and
+    that none is a backup option.
+    """
+    configured_labels_and_values: list[tuple[str, str]] = []
+    happy_path = _fake_order_router(resource_populated_after_n_polls=0)
+
+    def recording_fake(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+        if method == "POST" and path.endswith("/configuration") and isinstance(body, dict):
+            configured_labels_and_values.append((body["label"], body["value"]))
+        return happy_path(method, path, body, need_auth)
+
+    client = _client(recording_fake)
+    with patch("imbue.mngr_ovh.ordering._OVH_DELIVERY_POLL_INTERVAL_SECONDS", 0.0):
+        order_and_wait_for_vps(
+            client,
+            plan_code="vps-2025-model1",
+            datacenter="US-EAST-VA",
+            image_name="Debian 12 - Docker",
+            pricing_mode="default",
+            duration="P1M",
+            deliver_timeout_seconds=10.0,
+        )
+
+    configured_labels = {label for label, _value in configured_labels_and_values}
+    assert configured_labels == {"vps_datacenter", "vps_os", "vps_install_rtm"}
+    assert not any("backup" in label.lower() for label, _value in configured_labels_and_values)
+    # RTM (real-time monitoring) defaults off; assert it explicitly so a
+    # future default flip is caught alongside the backup guarantee.
+    assert ("vps_install_rtm", "no") in configured_labels_and_values
+
+
 def test_order_and_wait_for_vps_success_polled_path() -> None:
     """Happy path: serviceName arrives via the operations chain after a few polls."""
     client = _client(_fake_order_router(resource_populated_after_n_polls=2))

@@ -4,6 +4,7 @@ from typing import Any
 
 import celpy
 from celpy.celparser import CELParseError
+from celpy.celtypes import MapType
 from celpy.evaluation import CELEvalError
 from loguru import logger
 
@@ -31,7 +32,7 @@ class TolerantPathError(MngrError, TypeError):
     """
 
 
-class TolerantMapType(celpy.celtypes.MapType):
+class TolerantMapType(MapType):
     """A CEL MapType whose missing-key access yields a marked CELEvalError
     value, so that `apply_compiled_cel_filters` can suppress the per-agent
     warning that would otherwise fire on missing schemaless-field keys.

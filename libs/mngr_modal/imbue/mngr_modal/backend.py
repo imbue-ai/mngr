@@ -549,7 +549,7 @@ Supported build arguments for the modal provider:
         ``is_environment_creation_allowed=False``) or
         ``bootstrap_for_host_creation`` (which passes True). Tests call via
         ``mngr_modal.testing.make_testing_provider`` (which passes a
-        ``TestingModalInterface``). Output capture is yielded off
+        ``FakeModalInterface``). Output capture is yielded off
         ``modal_interface.enable_output_capture(...)`` so this function has
         no per-implementation branches.
 
