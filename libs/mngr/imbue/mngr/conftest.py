@@ -262,6 +262,27 @@ def project_config_dir(temp_git_repo: Path, mngr_test_root_name: str) -> Path:
 
 
 @pytest.fixture
+def env_project_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Return a project config directory wired up via MNGR_PROJECT_CONFIG_DIR.
+
+    Unlike `project_config_dir`, this does not rely on the config pre-readers
+    walking up from the cwd to the git worktree root (which spawns a `git`
+    subprocess that can transiently fail under heavy parallel test load, causing
+    the project config layer to be silently skipped). Instead it points
+    MNGR_PROJECT_CONFIG_DIR directly at the returned directory, and points
+    MNGR_HOST_DIR at a nonexistent path so no user-scope profile config is
+    loaded. Tests can write `settings.toml` / `settings.local.toml` into the
+    returned directory. Use this for tests that exercise config-reading behavior
+    but do not specifically need to test git-worktree-root resolution.
+    """
+    config_dir = tmp_path / "project_config"
+    config_dir.mkdir()
+    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path / "nonexistent"))
+    return config_dir
+
+
+@pytest.fixture
 def temp_git_repo_cwd(temp_git_repo: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Create a temporary git repository and chdir into it.
 
