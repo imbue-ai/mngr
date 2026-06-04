@@ -148,6 +148,7 @@ def render_landing_page(
     agent_names: dict[str, str] | None = None,
     destroying_status_by_agent_id: dict[str, str] | None = None,
     agent_colors: Mapping[str, WorkspaceColor] | None = None,
+    active_workspace_color: WorkspaceColor | None = None,
 ) -> str:
     """Render the landing page listing accessible workspaces.
 
@@ -174,16 +175,23 @@ def render_landing_page(
     envelope-stream consumer hasn't completed initial agent discovery yet.
 
     ``agent_colors`` maps agent ID strings to the workspace color persisted
-    via :class:`MindsConfig`. The landing page itself renders with the
-    ``confusion`` default (no specific workspace context); each row's
-    identity dot uses the agent's own persisted color. When None, dots fall
-    back to the OKLCH starting color.
+    via :class:`MindsConfig`. Each row's identity dot uses the agent's own
+    persisted color. When None, dots fall back to the OKLCH starting color.
+
+    ``active_workspace_color`` is the most-recently-visited workspace's
+    color (resolved by the route handler from :meth:`MindsConfig.
+    get_active_workspace_id`). When set, the landing surface itself renders
+    in that workspace's color -- so "click Home" keeps the chrome tinted
+    with whichever workspace you most recently opened. When None (fresh
+    install / never visited a workspace), falls back to the everywhere
+    default (``confusion``).
     """
     resolved_colors = {
         str(aid): (agent_colors.get(str(aid)) if agent_colors else None) or oklch_starting_color(str(aid))
         for aid in accessible_agent_ids
     }
     agent_color_hexes = {aid: str(WorkspaceColor(color).resolve_hex()) for aid, color in resolved_colors.items()}
+    render_kwargs = workspace_render_kwargs(active_workspace_color)
     return CATALOG.render(
         "pages.Landing",
         agent_ids=accessible_agent_ids,
@@ -194,6 +202,8 @@ def render_landing_page(
         is_discovering=is_discovering,
         agent_names=agent_names or {},
         destroying_status_by_agent_id=destroying_status_by_agent_id or {},
+        theme=render_kwargs["theme"],
+        workspace_bg=render_kwargs["workspace_bg"],
     )
 
 
@@ -979,6 +989,7 @@ def render_chrome_page(
     is_authenticated: bool = False,
     mngr_forward_origin: str = "",
     initial_workspaces: Sequence[dict[str, str]] | None = None,
+    active_workspace_color: WorkspaceColor | None = None,
 ) -> str:
     """Render the persistent chrome page (title bar + sidebar + content iframe).
 
@@ -992,14 +1003,13 @@ def render_chrome_page(
     In Electron mode, the iframe and browser sidebar are hidden via JS; the content
     and sidebar are handled by separate WebContentsViews.
 
-    Chrome itself renders with the everywhere-default (``confusion``) workspace
-    color server-side. ``workspace_color.js`` is loaded so the new ``Color``
-    section on the workspace-settings page can call its ``apply()`` helper,
-    but the *live flip* of the chrome ``<html>`` on iframe navigation (i.e.
-    a navigation listener that calls ``/api/workspace-color/<agent_id>`` and
-    re-applies ``data-theme`` + ``--workspace-bg`` in place) is Phase 3
-    work and is not wired up yet.
+    ``active_workspace_color`` is the most-recently-visited workspace's color
+    (resolved by the route handler from :meth:`MindsConfig.get_active_workspace_id`),
+    or None if no workspace has been visited yet. When set, the chrome
+    initially renders in that color so reloading the app picks up where the
+    user left off; the live flip on iframe navigation lives in ``chrome.js``.
     """
+    render_kwargs = workspace_render_kwargs(active_workspace_color)
     return CATALOG.render(
         "pages.Chrome",
         is_mac=is_mac,
@@ -1007,11 +1017,16 @@ def render_chrome_page(
         mngr_forward_origin=mngr_forward_origin,
         initial_workspaces=initial_workspaces or [],
         workspace_presets=tuple(WORKSPACE_PRESETS.items()),
+        theme=render_kwargs["theme"],
+        workspace_bg=render_kwargs["workspace_bg"],
     )
 
 
 @pure
-def render_sidebar_page(mngr_forward_origin: str = "") -> str:
+def render_sidebar_page(
+    mngr_forward_origin: str = "",
+    active_workspace_color: WorkspaceColor | None = None,
+) -> str:
     """Render the standalone sidebar page for the Electron sidebar WebContentsView.
 
     This page shows the workspace list and subscribes to SSE updates. In Electron,
@@ -1020,13 +1035,17 @@ def render_sidebar_page(mngr_forward_origin: str = "") -> str:
     ``data-mngr-forward-origin`` so sidebar.js can build the cross-origin
     ``/goto/<agent>/`` URL the plugin serves.
 
-    Sidebar renders with the everywhere-default workspace color; each row's
-    identity dot reads its own workspace color from the SSE workspaces event
-    on the JS side.
+    Sidebar renders in the active workspace's color (or the everywhere
+    default when no workspace has been visited yet). Per-row identity
+    dots reads each workspace's own color from the SSE workspaces event
+    on the JS side, independent of the page surface color.
     """
+    render_kwargs = workspace_render_kwargs(active_workspace_color)
     return CATALOG.render(
         "pages.Sidebar",
         mngr_forward_origin=mngr_forward_origin,
+        theme=render_kwargs["theme"],
+        workspace_bg=render_kwargs["workspace_bg"],
     )
 
 

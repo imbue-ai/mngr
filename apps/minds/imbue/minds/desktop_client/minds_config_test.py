@@ -175,3 +175,43 @@ def test_workspace_color_coexists_with_other_settings(tmp_path: Path) -> None:
     config.set_workspace_color("agent-x", WorkspaceColor("confusion"))
     assert config.get_default_account_id() == "user-1"
     assert config.get_workspace_color("agent-x") == "confusion"
+
+
+# -- active workspace id --
+
+
+def test_get_active_workspace_id_returns_none_when_unset(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    assert config.get_active_workspace_id() is None
+
+
+def test_set_and_get_active_workspace_id_round_trips(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    config.set_active_workspace_id("agent-abc")
+    assert config.get_active_workspace_id() == "agent-abc"
+
+
+def test_set_active_workspace_id_to_none_clears_it(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    config.set_active_workspace_id("agent-abc")
+    config.set_active_workspace_id(None)
+    assert config.get_active_workspace_id() is None
+    raw = (tmp_path / "config.toml").read_text()
+    assert "active_workspace_id" not in raw
+
+
+def test_active_workspace_id_persists_across_instances(tmp_path: Path) -> None:
+    config1 = _make_config(tmp_path)
+    config1.set_active_workspace_id("agent-xyz")
+    config2 = _make_config(tmp_path)
+    assert config2.get_active_workspace_id() == "agent-xyz"
+
+
+def test_active_workspace_id_coexists_with_other_settings(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    config.set_default_account_id("user-1")
+    config.set_workspace_color("agent-x", WorkspaceColor("peace"))
+    config.set_active_workspace_id("agent-x")
+    assert config.get_default_account_id() == "user-1"
+    assert config.get_workspace_color("agent-x") == "peace"
+    assert config.get_active_workspace_id() == "agent-x"

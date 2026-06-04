@@ -26,6 +26,7 @@ from imbue.minds.errors import MindsConfigError
 
 _CONFIG_FILENAME: Final[str] = "config.toml"
 _WORKSPACE_COLORS_KEY: Final[str] = "workspace_colors"
+_ACTIVE_WORKSPACE_KEY: Final[str] = "active_workspace_id"
 
 _LOG: Final[logging.Logger] = logging.getLogger(__name__)
 
@@ -101,6 +102,35 @@ class MindsConfig(MutableModel):
         with self._lock:
             data = self._read_raw()
             data["auto_open_requests_panel"] = enabled
+            self._write_raw(data)
+
+    def get_active_workspace_id(self) -> str | None:
+        """Return the most-recently-visited workspace's agent id, or None.
+
+        The chrome and pre-workspace pages render in this workspace's
+        color so a user who's "in" assistant-X sees its color across
+        Home, Landing, account flows, etc. until they open a different
+        workspace. None means no workspace has been visited yet (fresh
+        install or the active workspace was explicitly cleared).
+        """
+        with self._lock:
+            data = self._read_raw()
+            value = data.get(_ACTIVE_WORKSPACE_KEY)
+            return str(value) if value is not None else None
+
+    def set_active_workspace_id(self, agent_id: str | None) -> None:
+        """Set or clear the most-recently-visited workspace's id.
+
+        Callers: the workspace-color JS helper on iframe navigation, and
+        the destroy flow when the active workspace is the one being
+        destroyed (passes None to clear).
+        """
+        with self._lock:
+            data = self._read_raw()
+            if agent_id is None:
+                data.pop(_ACTIVE_WORKSPACE_KEY, None)
+            else:
+                data[_ACTIVE_WORKSPACE_KEY] = agent_id
             self._write_raw(data)
 
     def get_workspace_color(self, agent_id: str) -> WorkspaceColor:

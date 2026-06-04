@@ -384,6 +384,7 @@ def _handle_landing_page(
         agent_colors: dict[str, WorkspaceColor] | None = None
         if minds_config is not None:
             agent_colors = {str(aid): minds_config.get_workspace_color(str(aid)) for aid in all_agent_ids}
+        active_workspace_color = _resolve_active_workspace_color(minds_config, backend_resolver)
         html = render_landing_page(
             accessible_agent_ids=all_agent_ids,
             mngr_forward_origin=_get_mngr_forward_origin(request),
@@ -391,6 +392,7 @@ def _handle_landing_page(
             agent_names=agent_names,
             destroying_status_by_agent_id=destroying_status_by_agent_id,
             agent_colors=agent_colors,
+            active_workspace_color=active_workspace_color,
         )
         return HTMLResponse(content=html)
 
@@ -1631,19 +1633,52 @@ def _handle_chrome_page(
     authenticated = _is_authenticated(cookies=request.cookies, auth_store=auth_store)
     minds_config: MindsConfig | None = request.app.state.minds_config
     initial_workspaces = _build_workspace_list(backend_resolver, minds_config=minds_config) if authenticated else []
+    active_workspace_color = _resolve_active_workspace_color(minds_config, backend_resolver)
 
     html = render_chrome_page(
         is_mac=is_mac,
         is_authenticated=authenticated,
         mngr_forward_origin=_get_mngr_forward_origin(request),
         initial_workspaces=initial_workspaces,
+        active_workspace_color=active_workspace_color,
     )
     return HTMLResponse(content=html)
 
 
-def _handle_chrome_sidebar(request: Request) -> Response:
+def _resolve_active_workspace_color(
+    minds_config: MindsConfig | None,
+    backend_resolver: BackendResolverInterface,
+) -> WorkspaceColor | None:
+    """Return the color of the most-recently-visited workspace, or None.
+
+    Returns None when (a) minds_config isn't wired in, (b) no workspace
+    has ever been visited (fresh install), or (c) the stored active id
+    no longer maps to a known workspace (e.g. the user destroyed it and
+    we haven't yet cleared the active id). The chrome falls back to the
+    default ``confusion`` color in that case via :class:`Base.jinja`'s
+    own defaults.
+    """
+    if minds_config is None:
+        return None
+    active_id = minds_config.get_active_workspace_id()
+    if active_id is None:
+        return None
+    # Guard against an active id that points at a destroyed workspace --
+    # don't tint the chrome with a color whose owner doesn't exist.
+    known_ids = {str(aid) for aid in backend_resolver.list_known_workspace_ids()}
+    if active_id not in known_ids:
+        return None
+    return minds_config.get_workspace_color(active_id)
+
+
+def _handle_chrome_sidebar(request: Request, backend_resolver: BackendResolverDep) -> Response:
     """Serve the standalone sidebar page for the Electron sidebar WebContentsView."""
-    html = render_sidebar_page(mngr_forward_origin=_get_mngr_forward_origin(request))
+    minds_config: MindsConfig | None = request.app.state.minds_config
+    active_workspace_color = _resolve_active_workspace_color(minds_config, backend_resolver)
+    html = render_sidebar_page(
+        mngr_forward_origin=_get_mngr_forward_origin(request),
+        active_workspace_color=active_workspace_color,
+    )
     return HTMLResponse(content=html)
 
 
@@ -2918,6 +2953,72 @@ async def _handle_set_workspace_color(
     )
 
 
+def _handle_set_active_workspace(
+    request: Request,
+    agent_id: str,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Set the most-recently-visited workspace id.
+
+    Called from ``chrome.js`` whenever the iframe navigates to a
+    workspace-scoped URL (``/goto/<id>/``, ``/workspace/<id>/...``,
+    ``/sharing/<id>/...``, ``/destroying/<id>``) so the chrome and any
+    pre-workspace pages (Landing, Welcome) render in that workspace's
+    color from that point onward -- including across app restarts.
+
+    The response carries the new active workspace's color + theme so the
+    caller can apply it in-place without a second round-trip.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(
+            status_code=403,
+            content='{"error":"Not authenticated"}',
+            media_type="application/json",
+        )
+    minds_config: MindsConfig | None = request.app.state.minds_config
+    if minds_config is None:
+        return Response(
+            status_code=500,
+            content='{"error":"config unavailable"}',
+            media_type="application/json",
+        )
+    minds_config.set_active_workspace_id(agent_id)
+    color = minds_config.get_workspace_color(agent_id)
+    payload = {**_workspace_color_payload(color), "active_workspace_id": agent_id}
+    return Response(
+        status_code=200,
+        content=json.dumps(payload),
+        media_type="application/json",
+    )
+
+
+def _handle_clear_active_workspace(
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Clear the most-recently-visited workspace id.
+
+    Called from the destroy flow's success path when the destroyed
+    workspace was the active one. Idempotent: clearing an already-unset
+    value is a no-op.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(
+            status_code=403,
+            content='{"error":"Not authenticated"}',
+            media_type="application/json",
+        )
+    minds_config: MindsConfig | None = request.app.state.minds_config
+    if minds_config is None:
+        return Response(
+            status_code=500,
+            content='{"error":"config unavailable"}',
+            media_type="application/json",
+        )
+    minds_config.set_active_workspace_id(None)
+    return Response(status_code=204)
+
+
 def _resolve_ws_name_and_account(
     agent_id: str,
     request: Request,
@@ -3555,6 +3656,10 @@ def create_desktop_client(
     # WorkspaceSettings color picker; both call mindsWorkspaceColor.apply()).
     app.get("/api/workspace-color/{agent_id}")(_handle_get_workspace_color)
     app.post("/api/workspace-color/{agent_id}")(_handle_set_workspace_color)
+    # Active-workspace tracking (used by chrome.js to flip the chrome
+    # color when the iframe navigates into a workspace).
+    app.post("/api/active-workspace/{agent_id}")(_handle_set_active_workspace)
+    app.delete("/api/active-workspace")(_handle_clear_active_workspace)
     app.get("/requests/{request_id}")(_handle_request_page)
     app.post("/requests/{request_id}/grant")(_handle_request_grant)
     app.post("/requests/{request_id}/deny")(_handle_request_deny)

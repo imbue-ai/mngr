@@ -1446,6 +1446,70 @@ def test_workspace_color_routes_require_auth(tmp_path: Path) -> None:
     assert post_response.status_code == 403
 
 
+def test_active_workspace_routes_require_auth(tmp_path: Path) -> None:
+    """The /api/active-workspace endpoints require authentication."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    test_agent_id = AgentId()
+    post_response = client.post(f"/api/active-workspace/{test_agent_id}")
+    assert post_response.status_code == 403
+    delete_response = client.delete("/api/active-workspace")
+    assert delete_response.status_code == 403
+
+
+def test_set_active_workspace_persists_and_returns_color(tmp_path: Path) -> None:
+    """POST /api/active-workspace/<id> persists the active id and returns the agent's color."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    test_agent_id = AgentId()
+    # First set the workspace to a known preset.
+    client.post(f"/api/workspace-color/{test_agent_id}", json={"color": "peace"})
+    # Now activate it.
+    response = client.post(f"/api/active-workspace/{test_agent_id}")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["active_workspace_id"] == str(test_agent_id)
+    assert payload["color"] == "peace"
+    assert payload["resolved_hex"] == "#9FBBD3"
+    assert payload["theme"] == "light"
+
+
+def test_clear_active_workspace_removes_the_id(tmp_path: Path) -> None:
+    """DELETE /api/active-workspace clears the active id."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    test_agent_id = AgentId()
+    client.post(f"/api/active-workspace/{test_agent_id}")
+    delete_response = client.delete("/api/active-workspace")
+    assert delete_response.status_code == 204
+    # Verify the config no longer has the active_workspace_id key.
+    raw = (tmp_path / "config.toml").read_text()
+    assert "active_workspace_id" not in raw
+
+
+def test_set_active_workspace_id_ignored_in_chrome_render_when_workspace_unknown(tmp_path: Path) -> None:
+    """Chrome render falls back to the default color when the stored active id
+    no longer matches any known workspace (e.g. the workspace was destroyed
+    before the active id was cleared)."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    test_agent_id = AgentId()
+    client.post(f"/api/workspace-color/{test_agent_id}", json={"color": "peace"})
+    # Activate -- but the backend resolver in this test fixture has no known
+    # workspaces, so the chrome render's safety check should fall through.
+    client.post(f"/api/active-workspace/{test_agent_id}")
+    response = client.get("/_chrome")
+    assert response.status_code == 200
+    # The page <html> renders with the default (confusion) background, not
+    # peace, because the workspace isn't known. Other hex values may appear
+    # in the page (the titlebar flyout's 11 preset swatches each carry their
+    # own hex), so we assert on the actual style attribute including the
+    # CSS terminator so the trailing-comment ratchet doesn't false-positive
+    # on a `#RRGGBB"` pattern.
+    assert 'data-theme="dark"' in response.text
+    assert "--workspace-bg: #0B292B;" in response.text
+    assert "--workspace-bg: #9FBBD3;" not in response.text
+
+
 def test_get_workspace_color_returns_oklch_default_on_first_read(tmp_path: Path) -> None:
     """First read for an unknown agent materializes the OKLCH starting color."""
     client, auth_store = _create_test_client_with_stores(tmp_path)

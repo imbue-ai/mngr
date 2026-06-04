@@ -144,6 +144,17 @@
     window.minds.onCurrentWorkspaceChanged(function (agentId) {
       currentWorkspaceId = agentId || null;
       renderWorkspaces(lastWorkspaces);
+      // The sidebar is its own WebContentsView with its own <html>, so
+      // chrome.js's activate() doesn't reach it. Mirror the call here
+      // so the sidebar surface flips to the active workspace's color
+      // in sync with the chrome titlebar. No-op when agentId is null
+      // (the user navigated to a non-workspace URL); the sidebar stays
+      // tinted with whichever workspace it last saw.
+      if (agentId && window.mindsWorkspaceColor && window.mindsWorkspaceColor.activate) {
+        window.mindsWorkspaceColor.activate(agentId).catch(function (e) {
+          if (window.console && console.debug) console.debug('sidebar activate failed:', e);
+        });
+      }
     });
   }
 

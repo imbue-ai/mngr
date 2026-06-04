@@ -1,4 +1,4 @@
-{#def is_mac, is_authenticated, mngr_forward_origin, initial_workspaces, workspace_presets #}
+{#def is_mac, is_authenticated, mngr_forward_origin, initial_workspaces, workspace_presets, theme="dark", workspace_bg="#0B292B" #}
 {#
   Persistent chrome page (titlebar + sidebar + content iframe).
 
@@ -45,6 +45,8 @@
 <script src="/_static/chrome.js" defer></script>
 {% endset %}
 <Base title="Minds"
+      theme={{ theme }}
+      workspace_bg={{ workspace_bg }}
       body_class="font-sans antialiased bg-token-workspace text-token-primary"
       head={{ _head }}
       body_attrs={{ _body_attrs }}

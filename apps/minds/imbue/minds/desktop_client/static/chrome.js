@@ -59,6 +59,12 @@
   function applyTitleSwatch(agentId) {
     var swatch = document.getElementById('title-swatch');
     if (!agentId) {
+      // No workspace in view (e.g. /accounts, /create). DO NOT reset the
+      // chrome color -- per the design, the chrome stays tinted with the
+      // most recently visited workspace's color so "click Home" doesn't
+      // wipe the visual identity. We only hide the legacy small swatch
+      // and clear the legacy --workspace-accent CSS variable, both of
+      // which Phase 3 will retire entirely.
       swatch.classList.add('hidden');
       document.documentElement.style.removeProperty('--workspace-accent');
       currentTitleAgentId = null;
@@ -76,6 +82,20 @@
       document.documentElement.style.setProperty('--workspace-accent', c);
       swatch.classList.remove('hidden');
     });
+    // Activate the workspace as the most-recently-visited: server
+    // persists the id in MindsConfig (so reloads pick up where the
+    // user left off) and returns the workspace's color, which the
+    // helper applies to <html> in place. Idempotent if the workspace
+    // is already active.
+    if (window.mindsWorkspaceColor && window.mindsWorkspaceColor.activate) {
+      window.mindsWorkspaceColor.activate(agentId).catch(function (e) {
+        // Best-effort: if the POST fails we leave the chrome at its
+        // previous color rather than logging noisily on every navigation.
+        // The legacy --workspace-accent above still updates so the small
+        // title swatch still reflects the new workspace.
+        if (window.console && console.debug) console.debug('activate workspace color failed:', e);
+      });
+    }
     maybeRedirectToRecovery();
   }
 

@@ -1,14 +1,16 @@
-{#def agent_ids, agent_colors, mngr_forward_origin, telegram_enabled, telegram_status_by_agent_id, is_discovering, agent_names, destroying_status_by_agent_id #}
+{#def agent_ids, agent_colors, mngr_forward_origin, telegram_enabled, telegram_status_by_agent_id, is_discovering, agent_names, destroying_status_by_agent_id, theme="dark", workspace_bg="#0B292B" #}
 {#
   Landing page: list of accessible workspaces with per-row health, backup,
   and telegram status. Subscribes to the chrome SSE so the page reloads
   when a destroy completes (or any other workspace-list change lands).
 
-  The page renders with the everywhere-default (confusion) workspace
-  color -- it's the "no workspace selected" view -- but each row carries
-  its own workspace color via `--ws-row` set inline, picked up by the
-  per-row `.ws-dot` identity indicator. agent_colors maps agent id ->
-  resolved hex/oklch literal.
+  The page surface renders in the active workspace's color (theme +
+  workspace_bg threaded through to the Base component), so "click Home"
+  keeps the chrome tinted with whichever workspace you most recently
+  opened.
+  Each row additionally carries its own workspace color via `--ws-row`
+  set inline, picked up by the per-row `.ws-dot` identity indicator.
+  agent_colors maps agent id -> resolved hex/oklch literal.
 #}
 {% set _scripts %}
 <script>
@@ -381,7 +383,10 @@
   })();
 </script>
 {% endset %}
-<Base title="Projects" scripts={{ _scripts }}>
+<Base title="Projects"
+      theme={{ theme }}
+      workspace_bg={{ workspace_bg }}
+      scripts={{ _scripts }}>
   <PageContainer>
     {% if agent_ids %}
       <div class="flex items-center justify-between mb-5" data-landing-agent-ids="{{ agent_ids | map('string') | join(',') }}">

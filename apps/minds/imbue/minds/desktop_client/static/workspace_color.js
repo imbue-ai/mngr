@@ -61,9 +61,32 @@
     });
   }
 
+  // Mark agentId as the most-recently-visited workspace (persists in
+  // MindsConfig) and apply its color to the chrome's <html> in place.
+  // Called from chrome.js whenever the iframe navigates into a workspace
+  // URL, so the titlebar + sidebar + any pre-workspace pages (Landing,
+  // Welcome) flip to the workspace's color and stay there until a
+  // different workspace is opened. Idempotent if agentId is already
+  // active: the POST just confirms the existing state.
+  function activate(agentId) {
+    if (!agentId) return Promise.resolve(null);
+    return fetch('/api/active-workspace/' + encodeURIComponent(agentId), {
+      method: 'POST',
+      credentials: 'same-origin',
+    }).then(function (resp) {
+      if (!resp.ok) throw new Error('active-workspace POST failed: ' + resp.status);
+      return resp.json();
+    }).then(function (data) {
+      cache[agentId] = data;
+      applyToHtml(document.documentElement, data.resolved_hex, data.theme);
+      return data;
+    });
+  }
+
   window.mindsWorkspaceColor = {
     get: get,
     apply: apply,
+    activate: activate,
     applyToHtml: applyToHtml,
   };
 })();

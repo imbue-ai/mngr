@@ -1,4 +1,4 @@
-{#def mngr_forward_origin #}
+{#def mngr_forward_origin, theme="dark", workspace_bg="#0B292B" #}
 {#
   Standalone sidebar page served into the Electron sidebar WebContentsView.
   Same SSE subscription as the chrome-embedded sidebar but stripped down
@@ -22,6 +22,8 @@
 <script src="/_static/sidebar.js" defer></script>
 {% endset %}
 <Base title="Projects"
+      theme={{ theme }}
+      workspace_bg={{ workspace_bg }}
       body_class="bg-token-workspace text-token-primary font-sans antialiased overflow-y-auto"
       body_attrs={{ _body_attrs }}
       scripts={{ _scripts }}>
