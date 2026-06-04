@@ -1,6 +1,7 @@
 """Unit tests for AntigravityAgentConfig and AntigravityAgent."""
 
 import json
+import os
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -776,26 +777,50 @@ def test_provision_copies_oauth_token_when_symlink_disabled(
     assert dest.read_text() == "fake-oauth-token"
 
 
-def test_provision_succeeds_without_token_and_skips_seeding(
+def test_provision_symlinks_token_to_shared_path_even_when_shared_absent(
     local_provider: LocalProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """If no shared file token exists, provisioning still succeeds (agy signs in on first launch).
+    """With no shared token yet, the per-agent token is a (dangling) symlink to the shared path.
 
-    Mirrors mngr_claude's _provision_local_credentials: skip seeding rather than
-    block agent creation. The per-agent home is still built; only the token
-    symlink/copy is absent.
+    This is the write-through mechanism: agy writes the token in place, so the
+    first agent's login writes *through* this symlink to the shared path,
+    authenticating every agent that points at it. Provisioning still succeeds.
     """
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    # NB: no token seeded into the user's home.
+    # NB: no shared token seeded into the user's home -> the symlink is dangling.
     agent = _make_antigravity_agent(local_provider, tmp_path, AntigravityAgentConfig(auto_dismiss_dialogs=True))
 
     _provision(agent)
 
-    # Provisioning completed: the per-agent settings exist, but no token was seeded.
+    dest = get_antigravity_oauth_token_path(agent._get_agy_home_dir())
+    # It is a symlink pointing at the shared path, even though that target doesn't exist yet.
+    assert dest.is_symlink()
+    assert Path(os.readlink(dest)) == get_antigravity_oauth_token_path(home)
+    # Dangling: the shared target hasn't been written yet (the first login writes it through).
+    assert not dest.exists()
+    # Provisioning still completed (the per-agent settings exist).
     assert get_antigravity_settings_path(agent._get_agy_home_dir()).exists()
-    assert not get_antigravity_oauth_token_path(agent._get_agy_home_dir()).exists()
+
+
+def test_provision_copy_mode_skips_when_shared_token_absent(
+    local_provider: LocalProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In copy mode (no write-through), a missing shared token means no token is seeded at all."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    agent = _make_antigravity_agent(
+        local_provider, tmp_path, AntigravityAgentConfig(auto_dismiss_dialogs=True, symlink_oauth_token=False)
+    )
+
+    _provision(agent)
+
+    dest = get_antigravity_oauth_token_path(agent._get_agy_home_dir())
+    assert not dest.is_symlink()
+    assert not dest.exists()
+    assert get_antigravity_settings_path(agent._get_agy_home_dir()).exists()
 
 
 # =============================================================================

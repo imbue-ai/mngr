@@ -6,9 +6,12 @@ Plugin that registers the `antigravity` agent type for mngr.
 
 ## Authentication
 
-Each agent runs `agy` under its own `$HOME`, so it authenticates independently. If a file token exists at the host user's real `~/.gemini/antigravity-cli/antigravity-oauth-token`, mngr seeds it into each agent's home (symlinked by default, so refreshes propagate) and agents are authenticated with no per-agent login. Otherwise provisioning still succeeds and you simply sign in when `agy` prompts you on first launch — the token is then written into that agent's own home. (This mirrors `mngr_claude`, which skips credential seeding rather than blocking agent creation.)
+Each agent runs `agy` under its own `$HOME` and reads its token from `$HOME/.gemini/antigravity-cli/antigravity-oauth-token`. By default mngr creates that per-agent token as a **symlink to the shared** `~/.gemini/antigravity-cli/antigravity-oauth-token` — even when the shared token doesn't exist yet (a dangling symlink). Because `agy` writes the token **in place**, the result is "log in once, anywhere":
 
-On Linux (mngr's runtime) there is no OS keychain, so a normal `agy` login writes the shared file token and auth is shared across agents deterministically. On macOS `agy` normally stores the token in the login keychain, which is **not** reliably readable from a relocated per-agent `$HOME` (verified empirically — a fresh per-agent home with no file token falls through to agy's login flow). So unless a file token is present at the shared path, macOS per-agent agents typically prompt for login on first launch. (agy *does* write the file token when its keychain write times out, which happens under a relocated `$HOME`; once such a file token exists at `~/.gemini/antigravity-cli/antigravity-oauth-token`, mngr shares it across agents on macOS too.)
+- If the shared token already exists, every agent's symlink resolves to it → agents are authenticated with **no per-agent login**.
+- If it doesn't, the **first** agent you log into writes its token *through* the symlink to the shared path, which immediately authenticates every other agent pointing at it. Token refreshes propagate the same way.
+
+So you never need to manually place or copy a token: sign in once in any agent (or run a normal `agy` login on the host) and the rest follow. This works on both Linux (no keychain — the file token is native) and macOS (where `agy` stores the token in the login keychain, which a relocated per-agent `$HOME` can't reliably read, so the file token is the cross-agent mechanism there too). Set `symlink_oauth_token = false` for full per-agent isolation (each agent authenticates independently; no sharing or propagation).
 
 ## Usage
 

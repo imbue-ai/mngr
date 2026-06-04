@@ -37,9 +37,12 @@ agy process; mngr-owned files rewritten idempotently each ``provision``)::
 where ``settings.json`` is a copy of the user's settings (when
 ``sync_home_settings``) plus the workspace trust and ``settings_overrides``;
 ``cache/onboarding.json`` is the NUX seed that skips the first-run theme/ToS
-flow; ``antigravity-oauth-token`` is a symlink/copy of the user's real file
-token (auth); and ``config/hooks.json`` holds the active-marker hooks (agy
-executes them from there directly -- no ``--add-dir``).
+flow; ``antigravity-oauth-token`` is a symlink to the user's shared file token
+(auth) -- created even when that token doesn't exist yet, so the first agent's
+login writes *through* it to the shared path and authenticates every agent (agy
+writes the token in place; copy mode is available for full isolation); and
+``config/hooks.json`` holds the active-marker hooks (agy executes them from
+there directly -- no ``--add-dir``).
 
 Hooks: a ``PreInvocation``/``Stop`` pair maintains an ``active`` marker (see
 ``build_antigravity_hooks_config``). ``BaseAgent.get_lifecycle_state`` reads it
@@ -241,14 +244,19 @@ class AntigravityAgentConfig(AgentTypeConfig):
         "~/.gemini/antigravity-cli/settings.json (True, default) or start from an empty base (False).",
     )
     # symlink_oauth_token mirrors mngr_claude's symlink-vs-copy credential
-    # choice. The per-agent home needs agy's file token to authenticate without
-    # its own login flow. Symlinking (default) lets token refreshes on the
-    # shared file propagate to every agent; copying gives full isolation at the
-    # cost of going stale on refresh.
+    # choice. The per-agent home needs agy's file token to authenticate. With
+    # the default (symlink), the per-agent token is a symlink to the shared
+    # ~/.gemini/antigravity-cli/antigravity-oauth-token -- created even when that
+    # shared token doesn't exist yet. Because agy writes the token in place,
+    # the first agent's login writes *through* the symlink to the shared path,
+    # auto-authenticating every other agent and propagating refreshes ("log in
+    # once in any agent"). Copy mode (False) gives full isolation but no
+    # sharing/propagation and only works if the shared token already exists.
     symlink_oauth_token: bool = Field(
         default=True,
-        description="Symlink (True, default) the shared antigravity-oauth-token into each per-agent "
-        "home so refreshes propagate, or copy it (False) for full isolation.",
+        description="Symlink (True, default) each per-agent antigravity-oauth-token to the shared "
+        "~/.gemini one, so one agent's login writes through to the shared token and authenticates "
+        "all agents (and propagates refreshes). Copy (False) for full isolation (no sharing).",
     )
     # auto_allow_permissions adds agy's ``--dangerously-skip-permissions`` flag
     # (see ``assemble_command``). It is NOT a hook: agy's documented
@@ -481,47 +489,64 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
             host.write_text_file(hooks_path, serialize_antigravity_hooks(build_antigravity_hooks_config()))
 
     def _provision_oauth_token(self, host: OnlineHostInterface, host_home: Path, agy_home: Path) -> None:
-        """Seed the shared oauth file token into the per-agent home, if it exists.
+        """Point the per-agent oauth token at the shared host token (symlink), or copy it.
 
-        Symlinks (default) or copies the user's real
-        ``~/.gemini/antigravity-cli/antigravity-oauth-token`` into the per-agent
-        home. agy is keyring-first, file-fallback (``ChainedAuth``) and writes
-        this file at login; on Linux (mngr's runtime) there is no OS keyring so
-        the file is the native store. Symlinking lets refreshes on the shared
-        file propagate.
+        agy is keyring-first, file-fallback (``ChainedAuth``) and writes the
+        token file at login; on Linux (mngr's runtime) there is no OS keyring so
+        the file is the native store, and on macOS it falls back to the file when
+        the keyring write times out (which it does under a relocated ``$HOME``).
 
-        If the shared token does not exist (the user hasn't produced a file
-        token on this host -- e.g. on macOS a normal login lands only in the
-        keychain), this is a no-op: provisioning still succeeds and agy runs its
-        normal login flow on first launch (writing the token into this agent's
-        own home). This mirrors ``mngr_claude``'s ``_provision_local_credentials``,
-        which likewise skips seeding when no credential file is present rather
-        than blocking agent creation.
+        **Symlink mode (default).** Always create the per-agent
+        ``antigravity-oauth-token`` as a symlink to the user's *shared*
+        ``~/.gemini/antigravity-cli/antigravity-oauth-token`` -- even when that
+        shared token does not exist yet (a dangling symlink). agy writes the
+        token **in place** (verified empirically -- it does NOT use temp-file +
+        atomic rename), so the first agent's login writes *through* the symlink
+        to the shared path, which:
 
-        The existence check, ``mkdir``, and link/copy are batched into a single
-        remote command (CLAUDE.md: minimize remote round-trips); it echoes a
-        marker so we can log whether the token was seeded.
+        * authenticates every agent whose token symlinks to that shared path
+          (so you log in once in any agent and the rest are auto-authed), and
+        * propagates token refreshes the same way (the symlink survives, refresh
+          writes reach the shared file) -- resolving the spec's open
+          "refresh clobbering" risk.
+
+        The shared parent dir is created so the write-through target exists. This
+        is the mechanism on both Linux and macOS (it does not depend on the
+        keychain). One remote round-trip.
+
+        **Copy mode** (``symlink_oauth_token=False``, full isolation, no
+        propagation): copy the shared token in only if it exists; otherwise skip
+        and let agy run its login flow on first launch (matching
+        ``mngr_claude``'s ``_provision_local_credentials``, which skips seeding
+        rather than blocking agent creation).
         """
         source = get_antigravity_oauth_token_path(host_home)
         dest = get_antigravity_oauth_token_path(agy_home)
         quoted_source = shlex.quote(str(source))
         quoted_dest = shlex.quote(str(dest))
         quoted_dest_parent = shlex.quote(str(dest.parent))
+        quoted_source_parent = shlex.quote(str(source.parent))
         if self.agent_config.symlink_oauth_token:
-            seed_action = f"ln -sf {quoted_source} {quoted_dest}"
-        else:
-            seed_action = f"rm -f {quoted_dest} && cp {quoted_source} {quoted_dest} && chmod 600 {quoted_dest}"
-        # Single round-trip: seed iff the source exists, and report which branch ran.
+            # Always symlink (even when the shared token is absent -> dangling link
+            # that becomes live when an agent logs in and writes through it). Make
+            # both the per-agent and shared parent dirs so the write-through target
+            # resolves. One round-trip.
+            host.execute_idempotent_command(
+                f"mkdir -p {quoted_dest_parent} {quoted_source_parent} && ln -sfn {quoted_source} {quoted_dest}",
+                timeout_seconds=10.0,
+            )
+            return
+        # Copy mode: can only copy a token that exists; otherwise skip (agent logs in on first launch).
         result = host.execute_idempotent_command(
-            f"if [ -e {quoted_source} ]; then mkdir -p {quoted_dest_parent} && {seed_action} "
-            f"&& echo {_OAUTH_TOKEN_SEEDED_MARKER}; else echo {_OAUTH_TOKEN_MISSING_MARKER}; fi",
+            f"if [ -e {quoted_source} ]; then mkdir -p {quoted_dest_parent} && rm -f {quoted_dest} "
+            f"&& cp {quoted_source} {quoted_dest} && chmod 600 {quoted_dest} && echo {_OAUTH_TOKEN_SEEDED_MARKER}; "
+            f"else echo {_OAUTH_TOKEN_MISSING_MARKER}; fi",
             timeout_seconds=10.0,
         )
         if _OAUTH_TOKEN_MISSING_MARKER in result.stdout:
             logger.info(
-                "No shared Antigravity oauth token at {}; the agent will run agy's login flow on "
-                "first launch. Sign in with `agy` on this host (so a file token exists) to share "
-                "auth across agents without re-login.",
+                "No shared Antigravity oauth token at {} to copy (symlink_oauth_token=False); the agent "
+                "will run agy's login flow on first launch.",
                 source,
             )
 
