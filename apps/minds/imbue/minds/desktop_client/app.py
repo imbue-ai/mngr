@@ -2819,13 +2819,23 @@ def _workspace_color_payload(color: WorkspaceColor) -> dict[str, str]:
     }
 
 
-def _handle_get_workspace_color(request: Request, agent_id: str) -> Response:
+def _handle_get_workspace_color(
+    request: Request,
+    agent_id: str,
+    auth_store: AuthStoreDep,
+) -> Response:
     """Return the persisted workspace color for an agent.
 
     First read for an unconfigured agent materializes the OKLCH starting
     color into the config (see :meth:`MindsConfig.get_workspace_color`),
     so the response is stable from then on.
     """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(
+            status_code=403,
+            content='{"error":"Not authenticated"}',
+            media_type="application/json",
+        )
     minds_config: MindsConfig | None = request.app.state.minds_config
     if minds_config is None:
         return Response(
@@ -2841,12 +2851,22 @@ def _handle_get_workspace_color(request: Request, agent_id: str) -> Response:
     )
 
 
-async def _handle_set_workspace_color(request: Request, agent_id: str) -> Response:
+async def _handle_set_workspace_color(
+    request: Request,
+    agent_id: str,
+    auth_store: AuthStoreDep,
+) -> Response:
     """Persist a workspace color for an agent.
 
     Body shape: ``{"color": "<preset-slug-or-CSS-literal>"}``. Unparseable
     values return 422 with the validator's error message.
     """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(
+            status_code=403,
+            content='{"error":"Not authenticated"}',
+            media_type="application/json",
+        )
     minds_config: MindsConfig | None = request.app.state.minds_config
     if minds_config is None:
         return Response(

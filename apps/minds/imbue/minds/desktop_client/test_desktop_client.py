@@ -1427,9 +1427,29 @@ def test_workspace_settings_shows_unassociated_workspace(tmp_path: Path) -> None
 # -- Workspace color routes --
 
 
+def test_workspace_color_routes_require_auth(tmp_path: Path) -> None:
+    """The /api/workspace-color/<agent_id> endpoints require authentication.
+
+    Mirrors the auth gate every other /api/... route in app.py enforces; an
+    unauthenticated caller must not be able to read or overwrite a stored
+    workspace color (and the GET also materializes a config entry as a side
+    effect, which would let any local process spam junk into config.toml).
+    """
+    client, _ = _create_test_client_with_stores(tmp_path)
+    test_agent_id = AgentId()
+    get_response = client.get(f"/api/workspace-color/{test_agent_id}")
+    assert get_response.status_code == 403
+    post_response = client.post(
+        f"/api/workspace-color/{test_agent_id}",
+        json={"color": "confusion"},
+    )
+    assert post_response.status_code == 403
+
+
 def test_get_workspace_color_returns_oklch_default_on_first_read(tmp_path: Path) -> None:
     """First read for an unknown agent materializes the OKLCH starting color."""
-    client, _ = _create_test_client_with_stores(tmp_path)
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
     test_agent_id = AgentId()
     response = client.get(f"/api/workspace-color/{test_agent_id}")
     assert response.status_code == 200
@@ -1442,7 +1462,8 @@ def test_get_workspace_color_returns_oklch_default_on_first_read(tmp_path: Path)
 
 
 def test_set_workspace_color_preset_round_trips_via_get(tmp_path: Path) -> None:
-    client, _ = _create_test_client_with_stores(tmp_path)
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
     test_agent_id = AgentId()
     response = client.post(
         f"/api/workspace-color/{test_agent_id}",
@@ -1459,7 +1480,8 @@ def test_set_workspace_color_preset_round_trips_via_get(tmp_path: Path) -> None:
 
 
 def test_set_workspace_color_hex_literal_round_trips(tmp_path: Path) -> None:
-    client, _ = _create_test_client_with_stores(tmp_path)
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
     test_agent_id = AgentId()
     response = client.post(
         f"/api/workspace-color/{test_agent_id}",
@@ -1474,7 +1496,8 @@ def test_set_workspace_color_hex_literal_round_trips(tmp_path: Path) -> None:
 
 
 def test_set_workspace_color_rejects_unknown_slug(tmp_path: Path) -> None:
-    client, _ = _create_test_client_with_stores(tmp_path)
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
     test_agent_id = AgentId()
     response = client.post(
         f"/api/workspace-color/{test_agent_id}",
@@ -1485,14 +1508,16 @@ def test_set_workspace_color_rejects_unknown_slug(tmp_path: Path) -> None:
 
 
 def test_set_workspace_color_rejects_missing_color_field(tmp_path: Path) -> None:
-    client, _ = _create_test_client_with_stores(tmp_path)
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
     test_agent_id = AgentId()
     response = client.post(f"/api/workspace-color/{test_agent_id}", json={})
     assert response.status_code == 422
 
 
 def test_set_workspace_color_rejects_invalid_json(tmp_path: Path) -> None:
-    client, _ = _create_test_client_with_stores(tmp_path)
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
     test_agent_id = AgentId()
     response = client.post(
         f"/api/workspace-color/{test_agent_id}",
