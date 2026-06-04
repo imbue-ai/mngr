@@ -1,0 +1,1 @@
+Documented the intentional edge-case behavior in `minds/utils`: clarifying comments now explain why `emit_event` is a deliberate no-op in JSON mode and silently suppresses message-less events in HUMAN mode, why `_LEVEL_MAP` omits the `NONE` console level, and why the user-message formatter renders non-colored levels plainly. No behavior change.

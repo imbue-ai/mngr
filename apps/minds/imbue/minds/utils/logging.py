@@ -28,7 +28,9 @@ class ConsoleLogLevel(UpperCaseStrEnum):
     NONE = auto()
 
 
-# Map our enum to loguru level strings
+# Map our enum to loguru level strings. ``ConsoleLogLevel.NONE`` is intentionally
+# absent: it means "add no console sink at all" and is filtered out by the caller
+# (``setup_logging``) before any lookup here, so it never reaches this map.
 _LEVEL_MAP = {
     ConsoleLogLevel.TRACE: "TRACE",
     ConsoleLogLevel.DEBUG: "DEBUG",
@@ -60,6 +62,10 @@ def _format_user_message(record: Any) -> str:
         return f"{_DEBUG_COLOR}{{message}}{_RESET_COLOR}\n"
     if level_name == "TRACE":
         return f"{_TRACE_COLOR}{{message}}{_RESET_COLOR}\n"
+    # INFO (the common case) is rendered plain and uncolored by design; any other
+    # loguru level we don't explicitly color (e.g. SUCCESS) also falls through to
+    # this plain format. If minds ever logs at CRITICAL, revisit whether it should
+    # get the error color.
     return "{message}\n"
 
 

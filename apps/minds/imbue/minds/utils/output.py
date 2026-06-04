@@ -22,6 +22,10 @@ def emit_event(
     """Emit a structured event to stdout in the appropriate format."""
     match output_format:
         case OutputFormat.HUMAN:
+            # Some events are machine-only coordination signals (e.g.
+            # ``mngr_forward_started``) with no human-readable form, so they
+            # carry no ``message`` key and are intentionally suppressed in
+            # HUMAN mode. JSONL consumers still receive the full event below.
             if "message" in data:
                 write_stdout_line(str(data["message"]))
         case OutputFormat.JSONL:
@@ -29,6 +33,12 @@ def emit_event(
             sys.stdout.write(json.dumps(event) + "\n")
             sys.stdout.flush()
         case OutputFormat.JSON:
+            # ``emit_event`` is for streaming, per-event output. JSON denotes a
+            # single self-contained document, into which a stream of events has
+            # no place, so emitting events is a deliberate no-op here. Commands
+            # that produce a JSON document build it separately (see
+            # ``cli/env.py``); structured consumers of streaming commands such
+            # as ``minds run`` should select ``jsonl`` rather than ``json``.
             pass
         case _ as unreachable:
             assert_never(unreachable)
