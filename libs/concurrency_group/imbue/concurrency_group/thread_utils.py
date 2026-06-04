@@ -39,7 +39,7 @@ class ObservableThread(threading.Thread):
         """Initialize ObservableThread."""
         super().__init__(name=name, daemon=daemon)
         self._target = target
-        self._target_name = getattr(target, "__name__", None) if target else None
+        self._target_name = getattr(target, "__name__", None)
         self._args = args
         self._kwargs = kwargs or {}
         self._exception: BaseException | None = None

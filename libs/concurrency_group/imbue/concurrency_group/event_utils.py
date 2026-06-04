@@ -45,7 +45,11 @@ class ShutdownEvent(MutableModel):
         # Don't busy-wait if another thread is already doing so for us.
         acquired = self._wait_lock.acquire(timeout=timeout if timeout is not None else -1)
         if not acquired:
-            return False
+            # We could not get the busy-wait lock within the timeout because another thread is
+            # already polling. That says nothing about whether the event is set, so report the
+            # actual current state rather than an unconditional False (which would let a caller
+            # conclude "not shutting down" while a shutdown is in fact already in progress).
+            return self.is_set()
         try:
             # Use a dummy event for polling instead of time.sleep
             poll_event = Event()

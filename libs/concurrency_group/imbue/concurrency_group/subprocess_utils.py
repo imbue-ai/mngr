@@ -223,11 +223,14 @@ def run_local_command_modern_version(
                 # Popen failed, so no output was ever streamed regardless of trace_output.
                 is_output_already_logged=False,
             ) from e
-
-        on_initialization_complete(None)
     except BaseException as e:
         on_initialization_complete(e)
         raise
+
+    # Notify success only on the happy path, and outside the try above: if it lived inside the try,
+    # a raise from this call would be caught by the broad handler above and report initialization
+    # twice (the caller's single-slot queue would then raise on the second put).
+    on_initialization_complete(None)
 
     if trace_output:
         assert trace_on_line_callback, "Must pass trace_on_line_callback"
@@ -251,11 +254,13 @@ def run_local_command_modern_version(
 
         timeout_time = time.time() + timeout if timeout is not None else None
 
+        is_completed_normally = False
         while not shutdown_event.wait(poll_time) and not _is_timeout(timeout_time):
             maybe_exit_code = process.poll()
             gatherer.gather_output()
             if maybe_exit_code is not None:
                 exit_code = maybe_exit_code
+                is_completed_normally = True
                 break
         else:
             exit_code = _shutdown_popen(process, command_as_string, shutdown_timeout_sec)
@@ -276,7 +281,10 @@ def run_local_command_modern_version(
             stdout=stdout.decode("utf-8", errors="replace"),
             stderr=stderr.decode("utf-8", errors="replace"),
             command=tuple(command),
-            is_timed_out=_is_timeout(timeout_time),
+            # Only a process we actually killed for running past its deadline is "timed out". A
+            # process that exited on its own (the break path) is never timed out, even if the clock
+            # happens to have crossed timeout_time by the time we build the result here.
+            is_timed_out=_is_timeout(timeout_time) and not is_completed_normally,
             is_output_already_logged=trace_output,
         )
         if is_checked:
