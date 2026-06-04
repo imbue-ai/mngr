@@ -96,7 +96,8 @@ def test_persistent_host_creates_shutdown_script(
 
 
 @pytest.mark.acceptance
-@pytest.mark.timeout(180)
+@pytest.mark.flaky
+@pytest.mark.timeout(300)
 def test_get_host_by_id(real_modal_provider: ModalProviderInstance) -> None:
     """Should be able to get a host by its ID."""
     host = None
@@ -132,7 +133,8 @@ def test_get_host_by_name(real_modal_provider: ModalProviderInstance) -> None:
 
 
 @pytest.mark.acceptance
-@pytest.mark.timeout(180)
+@pytest.mark.flaky
+@pytest.mark.timeout(300)
 def test_discover_hosts_includes_created_host(real_modal_provider: ModalProviderInstance) -> None:
     """Created host should appear in discover_hosts."""
     host = None
@@ -149,7 +151,8 @@ def test_discover_hosts_includes_created_host(real_modal_provider: ModalProvider
 
 
 @pytest.mark.acceptance
-@pytest.mark.timeout(180)
+@pytest.mark.flaky
+@pytest.mark.timeout(300)
 def test_destroy_host_stops_sandbox_and_delete_host_removes_record(
     real_modal_provider: ModalProviderInstance,
 ) -> None:

@@ -54,6 +54,7 @@ mngr forward [OPTIONS]
 | `--forward-port` | integer | Forward to a fixed remote port on the agent's host (manual mode). Mutually exclusive with --service. | None |
 | `--reverse` | text | Reverse tunnel pair REMOTE:LOCAL. Repeatable. REMOTE may be 0 (sshd-assigned). | None |
 | `--no-observe` | boolean | Do not spawn `mngr observe` / `mngr event`; take a single `mngr list` snapshot instead. Requires --forward-port. | `False` |
+| `--observe-via-file` | boolean | Do not spawn `mngr observe`; instead tail the shared discovery events file written by another `mngr observe --discovery-only` (e.g. the one `mngr latchkey forward` runs). Per-agent `mngr event` streams are still spawned. Mutually exclusive with --no-observe. | `False` |
 | `--agent-include` | text | CEL expression to include agents (repeatable). Default: include every discovered agent. | None |
 | `--agent-exclude` | text | CEL expression to exclude agents (repeatable). | None |
 | `--event-include` | text | CEL expression to include `mngr event` source streams (repeatable). | None |
@@ -74,6 +75,12 @@ $ mngr forward --service system_interface
 
 ```bash
 $ mngr forward --no-observe --forward-port 8080
+```
+
+**Tail a shared discovery log instead of spawning observe**
+
+```bash
+$ mngr forward --service system_interface --observe-via-file
 ```
 
 **Set up reverse tunnels**
