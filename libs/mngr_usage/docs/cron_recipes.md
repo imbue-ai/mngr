@@ -122,6 +122,11 @@ the moment the last one elapses, it fires a one-off prompt to open the next.
 set -euo pipefail
 
 WARMER="window-warmer"
+PROJECT_DIR="$HOME/code/my-project"   # any git repo; the warmer just needs a home
+
+# cron starts in $HOME (usually not a git repo); cd into the project so `mngr
+# create` has a git root to branch from and picks up the project's config.
+cd "$PROJECT_DIR"
 
 snapshot="$(mngr usage --format json)"
 
@@ -169,6 +174,11 @@ DOING_DIR="$HOME/agent-tasks/in-progress"
 PROJECT_DIR="$HOME/code/my-project"   # all tasks target this repo
 MAX_PARALLEL=2
 
+# cron starts in $HOME; cd into the project so agents are created from its git
+# root and mngr loads the project's config (create_templates, labels, etc.).
+# (Absolute paths below -- $0, TODO_DIR, DOING_DIR -- are unaffected by the cd.)
+cd "$PROJECT_DIR"
+
 # Retire finished agents first: pool members (queue=live) that have gone WAITING,
 # i.e. done with their turn. Stop each and move it to queue=in-review -- that frees
 # a pool slot (the cap below counts only queue=live) while parking the agent for
@@ -201,10 +211,10 @@ mv "$task_file" "$claimed" || exit 0
 name="$(basename "$claimed" .md | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')"
 [[ -n "$name" ]] || name="task-$(date +%s)"
 
-# Create (auto-starts) from the project repo, tag it into the live pool, and hand
-# it the task file as its first message. --no-connect keeps it non-interactive
-# (cron has no TTY to attach a tmux session to).
-mngr create "$name" claude --from ":$PROJECT_DIR" --label queue=live \
+# Create (auto-starts) in the project repo we cd'd into, tag it into the live
+# pool, and hand it the task file as its first message. --no-connect keeps it
+# non-interactive (cron has no TTY to attach a tmux session to).
+mngr create "$name" claude --label queue=live \
   --message-file "$claimed" --no-connect
 ```
 
@@ -213,10 +223,32 @@ Finished agents are stopped and moved to `queue=in-review`; to see them, run
 
 ## Scheduling
 
-`cron` runs with a bare `PATH`, so set one that finds `mngr`, `jq`, and `claude`:
+`cron` runs with a bare environment, so each script has to establish its own
+context. Two things bite in practice:
+
+- **`PATH`** is minimal, so set one that finds `mngr`, `jq`, `git`, `tmux`, and
+  `claude`. `mngr` (and the Claude CLI) install under `~/.local/bin`; `jq`,
+  `git`, and `tmux` come from your system package manager.
+- **The working directory** is your home dir, which usually isn't a git repo --
+  that's why the recipes above `cd "$PROJECT_DIR"` before spawning an agent.
+  `mngr` resolves project-scoped settings (`.mngr/` config, `create_templates`,
+  labels) from the cwd's git worktree root, so running inside the project is
+  what makes those settings apply. (`--from` only sets the agent's source repo,
+  not which config loads.)
+
+On Linux (deps installed via `apt`, so they land in `/usr/bin`):
 
 ```cron
-PATH=/usr/local/bin:/usr/bin:/bin:/home/you/.local/bin
+PATH=/usr/bin:/bin:/home/you/.local/bin
+
+*/5 * * * * /path/to/your/script.sh
+```
+
+On macOS (Homebrew on Apple Silicon puts deps in `/opt/homebrew/bin`; Intel Macs
+use `/usr/local/bin`, kept below for either):
+
+```cron
+PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/you/.local/bin
 
 */5 * * * * /path/to/your/script.sh
 ```
