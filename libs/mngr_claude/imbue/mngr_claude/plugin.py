@@ -1984,7 +1984,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         if not host.is_local and generated_files.get(Path(".credentials.json")):
             bridged_target = config_dir / ".credentials.json"
             host.execute_idempotent_command(
-                f"mkdir -p ~/.claude && ln -sfn {shlex.quote(str(bridged_target))} ~/.claude/.credentials.json",
+                f"mkdir -p -m 0700 ~/.claude && ln -sfn {shlex.quote(str(bridged_target))} ~/.claude/.credentials.json",
                 timeout_seconds=5.0,
             )
 
