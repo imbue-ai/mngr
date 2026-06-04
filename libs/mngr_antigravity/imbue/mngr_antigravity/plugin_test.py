@@ -401,24 +401,6 @@ def test_modify_env_vars_exposes_agy_log_file_and_app_data_dir(antigravity_agent
 # =============================================================================
 
 
-@pytest.fixture
-def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect ``$HOME`` to a tmpdir and seed the shared oauth token.
-
-    Redirecting ``$HOME`` keeps trust-file writes off the user's real config and
-    makes the host-resolved home (``printf $HOME``) point here. Seeding the token
-    lets provision()'s oauth check pass (it errors clearly when the user has
-    never run ``agy`` login on the host).
-    """
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    token_path = get_antigravity_oauth_token_path(home)
-    token_path.parent.mkdir(parents=True, exist_ok=True)
-    token_path.write_text("fake-oauth-token")
-    return home
-
-
 def _read_global_settings(home: Path) -> dict[str, Any]:
     """Read the user-tier (global) settings.json under the redirected home."""
     settings_path = get_antigravity_settings_path(home)
@@ -778,18 +760,17 @@ def test_provision_copies_oauth_token_when_symlink_disabled(
 
 
 def test_provision_symlinks_token_to_shared_path_even_when_shared_absent(
-    local_provider: LocalProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
     """With no shared token yet, the per-agent token is a (dangling) symlink to the shared path.
 
     This is the write-through mechanism: agy writes the token in place, so the
     first agent's login writes *through* this symlink to the shared path,
     authenticating every agent that points at it. Provisioning still succeeds.
+
+    Does NOT request ``isolated_home`` (so no shared token is seeded); ``$HOME``
+    is still the autouse-isolated ``tmp_path``.
     """
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    # NB: no shared token seeded into the user's home -> the symlink is dangling.
     agent = _make_antigravity_agent(local_provider, tmp_path, AntigravityAgentConfig(auto_dismiss_dialogs=True))
 
     _provision(agent)
@@ -797,7 +778,7 @@ def test_provision_symlinks_token_to_shared_path_even_when_shared_absent(
     dest = get_antigravity_oauth_token_path(agent._get_agy_home_dir())
     # It is a symlink pointing at the shared path, even though that target doesn't exist yet.
     assert dest.is_symlink()
-    assert Path(os.readlink(dest)) == get_antigravity_oauth_token_path(home)
+    assert Path(os.readlink(dest)) == get_antigravity_oauth_token_path(tmp_path)
     # Dangling: the shared target hasn't been written yet (the first login writes it through).
     assert not dest.exists()
     # Provisioning still completed (the per-agent settings exist).
@@ -805,12 +786,13 @@ def test_provision_symlinks_token_to_shared_path_even_when_shared_absent(
 
 
 def test_provision_copy_mode_skips_when_shared_token_absent(
-    local_provider: LocalProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    """In copy mode (no write-through), a missing shared token means no token is seeded at all."""
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    """In copy mode (no write-through), a missing shared token means no token is seeded at all.
+
+    Does NOT request ``isolated_home`` (no shared token); ``$HOME`` is the
+    autouse-isolated ``tmp_path``.
+    """
     agent = _make_antigravity_agent(
         local_provider, tmp_path, AntigravityAgentConfig(auto_dismiss_dialogs=True, symlink_oauth_token=False)
     )
