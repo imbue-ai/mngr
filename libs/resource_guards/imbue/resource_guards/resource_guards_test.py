@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from inline_snapshot import snapshot
 
 import imbue.resource_guards.resource_guards as resource_guards
 from imbue.resource_guards.resource_guards import MethodKind
@@ -91,6 +92,29 @@ def pytest_sessionfinish(session, exitstatus):
     stop_resource_guards()
 """
 
+# Conftest registering a guard for a binary that does NOT exist on PATH, so the
+# guard system falls back to a stub wrapper (generate_stub_wrapper_script). Used
+# to exercise the stub's runtime enforcement end to end. The name is deliberately
+# unlikely to match any real binary on the host.
+_PYTESTER_CONFTEST_ABSENT_BINARY = """\
+from imbue.resource_guards.resource_guards import (
+    register_resource_guard,
+    start_resource_guards,
+    stop_resource_guards,
+)
+
+register_resource_guard("guardteststub")
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "guardteststub: test uses guardteststub")
+
+def pytest_sessionstart(session):
+    start_resource_guards(session)
+
+def pytest_sessionfinish(session, exitstatus):
+    stop_resource_guards()
+"""
+
 pytest_plugins = ["pytester"]
 
 
@@ -99,26 +123,51 @@ pytest_plugins = ["pytester"]
 # ---------------------------------------------------------------------------
 
 
-def test_generate_stub_wrapper_script_contains_shebang_and_exit() -> None:
-    script = generate_stub_wrapper_script("mybin")
-    assert script.startswith("#!/bin/bash\n")
-    assert "not installed on this machine" in script
-    assert "exit 127" in script
-    assert "$_PYTEST_GUARD_MYBIN" in script
+# Snapshot the full generated scripts rather than asserting on scattered
+# substrings: the bash is a small but branchy control-flow block (phase check ->
+# block arm that touches blocked_<resource> + exits 127, allow arm that touches
+# the tracking file, then exec/delegate). A whole-text snapshot fails on a branch
+# swap, a dropped tracking touch, or a corrupted exec line -- things substring
+# `in` checks would let through.
+def test_generate_stub_wrapper_script_matches_expected() -> None:
+    assert generate_stub_wrapper_script("mybin") == snapshot("""\
+#!/bin/bash
+if [ "$_PYTEST_GUARD_PHASE" = "call" ]; then
+    if [ "$_PYTEST_GUARD_MYBIN" = "block" ]; then
+        if [ -n "$_PYTEST_GUARD_TRACKING_DIR" ]; then
+            touch "$_PYTEST_GUARD_TRACKING_DIR/blocked_mybin"
+        fi
+        echo "RESOURCE GUARD: Test invoked 'mybin' without @pytest.mark.mybin mark." >&2
+        echo "Add @pytest.mark.mybin to the test, or remove the mybin usage." >&2
+        exit 127
+    fi
+    if [ "$_PYTEST_GUARD_MYBIN" = "allow" ] && [ -n "$_PYTEST_GUARD_TRACKING_DIR" ]; then
+        touch "$_PYTEST_GUARD_TRACKING_DIR/mybin"
+    fi
+fi
+echo "RESOURCE GUARD: 'mybin' is not installed on this machine." >&2
+exit 127
+""")
 
 
-def test_generate_wrapper_script_contains_shebang_and_exec() -> None:
-    script = generate_wrapper_script("mybin", "/usr/bin/mybin")
-    assert script.startswith("#!/bin/bash\n")
-    assert 'exec "/usr/bin/mybin" "$@"' in script
-
-
-def test_generate_wrapper_script_contains_guard_check() -> None:
-    script = generate_wrapper_script("mybin", "/usr/bin/mybin")
-    assert "$_PYTEST_GUARD_MYBIN" in script
-    assert "@pytest.mark.mybin" in script
-    assert '"block"' in script
-    assert '"allow"' in script
+def test_generate_wrapper_script_matches_expected() -> None:
+    assert generate_wrapper_script("mybin", "/usr/bin/mybin") == snapshot("""\
+#!/bin/bash
+if [ "$_PYTEST_GUARD_PHASE" = "call" ]; then
+    if [ "$_PYTEST_GUARD_MYBIN" = "block" ]; then
+        if [ -n "$_PYTEST_GUARD_TRACKING_DIR" ]; then
+            touch "$_PYTEST_GUARD_TRACKING_DIR/blocked_mybin"
+        fi
+        echo "RESOURCE GUARD: Test invoked 'mybin' without @pytest.mark.mybin mark." >&2
+        echo "Add @pytest.mark.mybin to the test, or remove the mybin usage." >&2
+        exit 127
+    fi
+    if [ "$_PYTEST_GUARD_MYBIN" = "allow" ] && [ -n "$_PYTEST_GUARD_TRACKING_DIR" ]; then
+        touch "$_PYTEST_GUARD_TRACKING_DIR/mybin"
+    fi
+fi
+exec "/usr/bin/mybin" "$@"
+""")
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +293,51 @@ def test_unmarked_test_that_does_not_call_resource_passes(pytester: pytest.Pytes
     pytester.makepyfile("""
         def test_no_cat():
             assert 1 + 1 == 2
+    """)
+    result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
+    result.assert_outcomes(passed=1)
+
+
+def test_unmarked_test_calling_absent_binary_fails_via_stub(pytester: pytest.Pytester, clean_guard_env: None) -> None:
+    """An unmarked test that invokes a guarded-but-absent binary is failed by the stub wrapper.
+
+    The binary has no real implementation, so create_resource_guard_wrappers()
+    installs a stub instead of a delegating wrapper. The stub must still record
+    the blocked invocation (blocked_<resource>) so the missing mark is caught --
+    this exercises the stub's enforcement path end to end, which the script-text
+    and file-existence unit tests never actually run.
+    """
+    pytester.makeconftest(_PYTESTER_CONFTEST_ABSENT_BINARY)
+    pytester.makepyfile("""
+        import subprocess
+
+        def test_calls_absent_binary():
+            subprocess.run(["guardteststub"], capture_output=True)
+    """)
+    result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(["*without @pytest.mark.guardteststub*"])
+
+
+def test_marked_test_calling_absent_binary_tracks_via_stub(pytester: pytest.Pytester, clean_guard_env: None) -> None:
+    """A marked test that invokes a guarded-but-absent binary passes: the stub tracks the allowed call.
+
+    The stub exits 127 (there is no real binary to delegate to), but in 'allow'
+    mode it still touches the tracking file. That satisfies the mark, so the
+    superfluous-mark (NEVER_INVOKED) check does not fire and the test passes --
+    verifying the stub's allow/track path that the docstring promises.
+    """
+    pytester.makeconftest(_PYTESTER_CONFTEST_ABSENT_BINARY)
+    pytester.makepyfile("""
+        import subprocess
+
+        import pytest
+
+        @pytest.mark.guardteststub
+        def test_calls_absent_binary():
+            result = subprocess.run(["guardteststub"], capture_output=True)
+            # No real binary to delegate to, so the stub always exits 127.
+            assert result.returncode == 127
     """)
     result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
     result.assert_outcomes(passed=1)
@@ -1133,20 +1227,31 @@ def test_start_and_stop_resource_guards_owner_case_unregisters_plugin(
 
 
 def test_register_sdk_guard_adds_entry(isolated_guard_state: None) -> None:
+    """A registered SDK guard surfaces in the public guarded-resource names and wires
+    up its install hook (asserted behaviorally, not by indexing private state)."""
     install_called = []
     register_sdk_guard("test_sdk", lambda: install_called.append(1), lambda: None)
 
-    assert len(resource_guards._registered_sdk_guards) == 1
-    assert resource_guards._registered_sdk_guards[0][0] == "test_sdk"
-    # Guard name is in _guarded_resources (added by register_sdk_guard).
-    assert "test_sdk" in resource_guards._guarded_resources
+    assert "test_sdk" in get_guarded_resource_names()
+
+    # The stored install callable is the one invoked when guards are created --
+    # confirms the registration wired up the install hook, not just the name.
+    create_sdk_resource_guards()
+    assert install_called == [1]
 
 
 def test_register_sdk_guard_deduplicates(isolated_guard_state: None) -> None:
-    register_sdk_guard("test_sdk", lambda: None, lambda: None)
-    register_sdk_guard("test_sdk", lambda: None, lambda: None)
+    """Registering the same SDK guard name twice installs it only once."""
+    install_called = []
+    register_sdk_guard("test_sdk", lambda: install_called.append(1), lambda: None)
+    register_sdk_guard("test_sdk", lambda: install_called.append(1), lambda: None)
 
-    assert len(resource_guards._registered_sdk_guards) == 1
+    create_sdk_resource_guards()
+
+    # Only the first registration's install runs; the duplicate was dropped. The
+    # name appears exactly once in the public registry.
+    assert install_called == [1]
+    assert get_guarded_resource_names() == ("test_sdk",)
 
 
 def test_create_sdk_resource_guards_calls_install(
@@ -2086,7 +2191,9 @@ def test_check_fixture_at_scope_end_skips_when_setup_failed(
 ) -> None:
     """When setup raised, the deferred check is suppressed (no teardown ran; never_invoked is misleading)."""
     register_resource_guard("cat")
-    # No tracking files; ordinarily would raise NEVER_INVOKED, but setup_failed suppresses it.
+    # No tracking files: with setup_failed=False this would raise NEVER_INVOKED for
+    # "cat". setup_failed=True must suppress that, so returning here without raising
+    # is the assertion -- if suppression regressed, this call would raise.
     _check_fixture_at_scope_end("my_fixture", {"cat"}, str(tmp_path), setup_failed=True)
 
 
@@ -2114,6 +2221,13 @@ def test_check_fixture_at_scope_end_multi_resource_one_invoked_one_not(
         _check_fixture_at_scope_end("my_fixture", {"cat", "ls"}, str(tmp_path), setup_failed=False)
 
 
+# The tests below drive the _pytest_fixture_setup hookwrapper by hand
+# (next(hook) / hook.send(...)) so they can assert on details that are invisible
+# to the end-to-end pytester tests above: exactly when the inline BLOCKED check
+# vs. the deferred at-scope-end finalizer fires, and that the original setup
+# exception is chained onto a guard violation via __cause__. That coupling to the
+# generator/hookwrapper protocol is deliberate and is the cost of testing those
+# internals; a wrapper-style refactor would be expected to update them.
 def test_pytest_fixture_setup_skips_undeclared_fixture() -> None:
     """An ordinary fixture without @fixture_uses_resources should pass through untouched."""
 
@@ -2226,7 +2340,9 @@ def test_pytest_fixture_setup_at_scope_end_skipped_when_setup_failed(
     with pytest.raises(StopIteration):
         hook.send(_FakeOutcome(excinfo=(type(original), original, None)))  # ty: ignore[invalid-argument-type]
 
-    # The deferred finalizer runs but skips both checks (setup_failed=True).
+    # empty_fixture declares "cat" but invokes nothing, so the finalizer would
+    # raise NEVER_INVOKED if setup_failed did not suppress it. Running the
+    # finalizers without raising is the assertion here.
     request.run_finalizers()
 
 
@@ -2339,10 +2455,14 @@ def test_pytest_runtest_setup_defers_closure_violation_until_after_yield(
     assert item._guard_state is not None
     assert item._guard_state.tracking_dir.startswith("/")
 
-    # After the inner setup completes (yield resumes), the held error is raised.
+    # After the inner setup completes (yield resumes), the held error is raised
+    # directly -- the post-yield body runs `raise closure_error` before the
+    # generator can finish, so this propagates ResourceGuardMisconfiguration (not
+    # StopIteration). If the deferred-raise logic regressed and dropped the error,
+    # the generator would instead complete with StopIteration and this would fail
+    # with "DID NOT RAISE", which is exactly the bug we want to catch.
     with pytest.raises(ResourceGuardMisconfiguration, match="multiple definitions"):
-        with pytest.raises(StopIteration):
-            hook.send(None)
+        hook.send(None)
 
     # Clean up the env patcher we started.
     item._guard_state.env_patcher.stop()
