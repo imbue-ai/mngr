@@ -249,7 +249,12 @@ def _check_deps_impl(ctx: click.Context, scope: DependencyScope, install_mode: I
         to_install = prompted
 
     if not to_install and not need_bash:
+        # Nothing in scope to install (e.g. --scope core when only optional deps
+        # are missing). Honor the scope verdict uniformly rather than assuming a
+        # zero exit -- a dep with no install_method would otherwise slip through.
         write_human_line("Nothing to install.")
+        if _should_fail(missing, scope, need_bash):
+            ctx.exit(1)
         return
 
     failed = _run_installation(to_install, need_bash, os_name)
