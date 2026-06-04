@@ -1,22 +1,39 @@
 #!/usr/bin/env bash
-# Pre-commit guard: the `mngr` on your PATH must be the dev shim (scripts/mngr),
-# so `mngr` -- and anything that shells out to it (e.g. minds) -- runs the
-# checkout you are working in rather than a stale global install. No opt-out by
-# design: a misresolved `mngr` is always a bug. Run `just install-mngr-shim`.
+# Pre-commit hook: ensure the `mngr` dev shim (scripts/mngr) is on your PATH, so
+# `mngr` -- and anything that shells out to it (e.g. minds) -- always runs the
+# checkout you're working in, never a stale global install.
+#
+# It INSTALLS the shim if missing (a symlink in ~/.local/bin), so there is no
+# per-worktree setup: the shim routes by cwd, and this hook keeps the single
+# symlink healthy. The one thing it can't do for you is edit PATH, so it fails
+# (with instructions) if ~/.local/bin isn't ahead of any other `mngr`.
 set -euo pipefail
 
+# Point the symlink at the main clone (stable across worktrees). Fall back to the
+# checkout being committed if the main clone doesn't have the shim yet (e.g. the
+# branch that adds it, before it has merged into the main clone's branch).
+primary=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || git rev-parse --show-toplevel)")
+target="$primary/scripts/mngr"
+[ -f "$target" ] || target="$(git rev-parse --show-toplevel)/scripts/mngr"
+
+bindir="$HOME/.local/bin"
+link="$bindir/mngr"
+mkdir -p "$bindir"
+if [ "$(readlink "$link" 2>/dev/null || true)" != "$target" ]; then
+    ln -sfn "$target" "$link"
+    echo "installed mngr shim: $link -> $target"
+fi
+
+# Verify the shim actually wins on PATH (catches ~/.local/bin missing from PATH,
+# or another `mngr` shadowing it).
 resolved=$(command -v mngr 2>/dev/null || true)
-# grep follows the ~/.local/bin/mngr symlink through to scripts/mngr.
 if [ -n "$resolved" ] && grep -q "MNGR_DEV_SHIM_V1" "$resolved" 2>/dev/null; then
     exit 0
 fi
 
 cat >&2 <<EOF
-error: \`mngr\` on your PATH is not the dev shim (scripts/mngr).
-  Found: ${resolved:-<mngr not found on PATH>}
-  Fix:   just install-mngr-shim   (then \`hash -r\` or open a new shell)
-  Why:   otherwise \`mngr\` runs one global install instead of the checkout you
-         are in -- silently running the wrong code (how the gVisor change
-         appeared not to work).
+error: mngr dev shim installed at $link but \`mngr\` does not resolve to it.
+  Resolved: ${resolved:-<mngr not on PATH>}
+  Fix: put $bindir on your PATH ahead of any venv bin, then run \`hash -r\`.
 EOF
 exit 1
