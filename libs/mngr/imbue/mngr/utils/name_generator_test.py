@@ -1,5 +1,9 @@
 """Unit tests for the name generator module."""
 
+from collections.abc import Callable
+
+import pytest
+
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentNameStyle
 from imbue.mngr.primitives import HostName
@@ -107,13 +111,14 @@ _DRAW_COUNT = 50
 _MIN_DISTINCT = 10
 
 
-def test_generate_agent_name_english_produces_varied_names() -> None:
-    names = {str(generate_agent_name(AgentNameStyle.ENGLISH)) for _ in range(_DRAW_COUNT)}
-
-    assert len(names) >= _MIN_DISTINCT
-
-
-def test_generate_host_name_astronomy_produces_varied_names() -> None:
-    names = {str(generate_host_name(HostNameStyle.ASTRONOMY)) for _ in range(_DRAW_COUNT)}
+@pytest.mark.parametrize(
+    "make_name",
+    [
+        pytest.param(lambda: generate_agent_name(AgentNameStyle.ENGLISH), id="agent_english"),
+        pytest.param(lambda: generate_host_name(HostNameStyle.ASTRONOMY), id="host_astronomy"),
+    ],
+)
+def test_name_generator_produces_varied_names(make_name: Callable[[], object]) -> None:
+    names = {str(make_name()) for _ in range(_DRAW_COUNT)}
 
     assert len(names) >= _MIN_DISTINCT
