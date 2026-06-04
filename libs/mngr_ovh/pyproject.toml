@@ -51,7 +51,7 @@ omit = [
 ]
 
 [tool.coverage.report]
-fail_under = 60
+fail_under = 75
 omit = [
   "*_test.py",
   "test_*.py",

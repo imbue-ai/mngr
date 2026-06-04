@@ -5,3 +5,4 @@ Strengthened the modal_proxy test suite so it catches regressions in the Modal e
 - Added direct unit tests for `is_environment_not_found_error` covering the empty-name, no-quotes, leading-text, path-containing-"Environment", and empty-string edges, pinning the regex that drives the retry decision.
 - The stream-type and file-entry-type converters now test their unsupported-value default arm, so deleting or weakening it is caught.
 - The unwrap helpers now wrap genuinely-validated `Direct*` objects around real `modal.Image`/`App`/`Volume`/`Secret` instances instead of sentinel-filled `model_construct` shells, exercising real field validation.
+- Raised the stale coverage floor from 35% to 75% to match the coverage CI already measures (~80%).

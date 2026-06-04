@@ -1,0 +1,1 @@
+Raised the stale coverage floor from 90% to 95% to match the coverage CI already measures (~96%).

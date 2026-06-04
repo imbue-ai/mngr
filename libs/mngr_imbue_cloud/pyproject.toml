@@ -68,7 +68,7 @@ format-command="uv run ruff format --force-exclude --config pyproject.toml --std
 [tool.coverage.report]
 # Pinned to the current coverage of the new plugin's tested modules. Bring this
 # up incrementally as more of host.py / instance.py / cli/* gain unit tests.
-fail_under = 19
+fail_under = 45
 omit = [
   "*_test.py",
   "test_*.py",
