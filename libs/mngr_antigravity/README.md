@@ -13,6 +13,8 @@ Each agent runs `agy` under its own `$HOME` and reads its token from `$HOME/.gem
 
 So you never need to manually place or copy a token: sign in once in any agent (or run a normal `agy` login on the host) and the rest follow. This works on both Linux (no keychain — the file token is native) and macOS (where `agy` stores the token in the login keychain, which a relocated per-agent `$HOME` can't reliably read, so the file token is the cross-agent mechanism there too). Set `symlink_oauth_token = false` for full per-agent isolation (each agent authenticates independently; no sharing or propagation).
 
+> **macOS popup during login is expected and harmless.** When you sign in to an agent on macOS you may see a system dialog: *"A keychain cannot be found to store \"antigravity.\""* Because each agent runs under a relocated `$HOME`, agy has no per-agent keychain to write to, so it falls back to writing the **file token** — which is exactly the mechanism mngr relies on (the file token is then shared across agents via the symlink, as above). Just dismiss the dialog; authentication still completes and propagates normally.
+
 ## Usage
 
 ```bash
