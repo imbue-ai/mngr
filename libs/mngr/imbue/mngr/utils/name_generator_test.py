@@ -95,27 +95,25 @@ def test_generate_host_name() -> None:
         assert len(name) > 0
 
 
+# Draw many names and require a healthy number of distinct ones. This pins the observable
+# behavior -- the generator actually varies its output over a large space -- without seeding
+# the global RNG or asserting an exact unique count (which would couple the test to the
+# wordlist size and the generator's internal draw order, the "fails for the wrong reason"
+# anti-pattern). The threshold is set so a correct generator essentially never flakes: the
+# smallest space here is the 40-word astronomy host list, and the chance of 50 draws yielding
+# fewer than 10 distinct values is bounded by C(40, 9) * (9/40)**50 ~= 1e-24 (far below
+# 1e-10). It also tolerates wordlist edits -- it holds for any list of more than ~15 words.
+_DRAW_COUNT = 50
+_MIN_DISTINCT = 10
+
+
 def test_generate_agent_name_english_produces_varied_names() -> None:
-    """Repeated English-style calls produce more than one distinct name.
+    names = {str(generate_agent_name(AgentNameStyle.ENGLISH)) for _ in range(_DRAW_COUNT)}
 
-    This pins the observable behavior -- the generator actually varies its output rather
-    than returning a constant -- without seeding the global RNG or asserting an exact
-    unique count. An exact count would couple the test to the wordlist size and the
-    generator's internal draw order (a behavior-preserving wordlist edit would break it),
-    which is the very "fails for the wrong reason" anti-pattern this kind of test should
-    avoid. Per-name validity is covered by `test_generate_agent_name`.
-    """
-    names = {str(generate_agent_name(AgentNameStyle.ENGLISH)) for _ in range(20)}
-
-    assert len(names) > 1
+    assert len(names) >= _MIN_DISTINCT
 
 
 def test_generate_host_name_astronomy_produces_varied_names() -> None:
-    """Repeated astronomy-style calls produce more than one distinct name.
+    names = {str(generate_host_name(HostNameStyle.ASTRONOMY)) for _ in range(_DRAW_COUNT)}
 
-    Same rationale as `test_generate_agent_name_english_produces_varied_names`: assert the
-    output varies, not an exact (wordlist- and RNG-order-dependent) unique count.
-    """
-    names = {str(generate_host_name(HostNameStyle.ASTRONOMY)) for _ in range(20)}
-
-    assert len(names) > 1
+    assert len(names) >= _MIN_DISTINCT
