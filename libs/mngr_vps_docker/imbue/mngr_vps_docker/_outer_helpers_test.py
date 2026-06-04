@@ -23,7 +23,6 @@ from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import HostId
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.instance import LABEL_HOST_ID
-from imbue.mngr_vps_docker.instance import _build_container_port_mappings
 from imbue.mngr_vps_docker.instance import _build_image_on_outer
 from imbue.mngr_vps_docker.instance import _check_directory_exists_on_outer
 from imbue.mngr_vps_docker.instance import _check_file_exists_on_outer
@@ -123,15 +122,6 @@ def _stub(outer: OuterHostInterface) -> _StubOuter:
 # =============================================================================
 # Lightweight string helpers
 # =============================================================================
-
-
-def test_build_container_port_mappings_maps_sshd_when_no_extras() -> None:
-    assert _build_container_port_mappings(2222, {}) == {"0.0.0.0:2222": "22"}
-
-
-def test_build_container_port_mappings_merges_extra_mappings() -> None:
-    result = _build_container_port_mappings(2222, {"0.0.0.0:1989": "1989"})
-    assert result == {"0.0.0.0:2222": "22", "0.0.0.0:1989": "1989"}
 
 
 def test_redact_secret_env_replaces_depot_token() -> None:

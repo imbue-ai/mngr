@@ -6,6 +6,7 @@ each agent, this module installs the upstream ``latchkey`` CLI directly on
 the agent's outer host (the VPS) so a gateway can eventually be run there.
 """
 
+import shlex
 import time
 from pathlib import Path
 from typing import Final
@@ -25,16 +26,16 @@ from imbue.mngr_latchkey.store import plugin_data_dir
 # ``npm install -g latchkey`` happens to resolve to at install time.
 LATCHKEY_VERSION: Final[str] = "2.15.1"
 
-# Port the latchkey gateway binds to on the VPS, passed as ``LATCHKEY_GATEWAY_PORT``.
-# This is the port reached from *inside* the agent container (the in-container
-# ``LATCHKEY_GATEWAY`` env var points here), matching the upstream ``latchkey
-# gateway`` default of 1989.
+# Port the agent reaches the gateway on from *inside* the container: its
+# ``LATCHKEY_GATEWAY`` env var points at ``http://127.0.0.1:INNER_PORT``,
+# matching the upstream agent-side default of 1989. The reverse tunnel set up by
+# ``ensure_latchkey_gateway_reachable_from_container`` binds this port inside the
+# container.
 INNER_PORT: Final[int] = 1989
 
-# Port exposed on the *outer* host (the VPS) that bridges to the inner gateway
-# port. Reserved for the container/tunnel wiring that connects an agent's
-# loopback to the VPS-resident gateway; currently the same value, since no
-# remapping is needed yet.
+# Port the latchkey gateway binds to on the VPS's loopback (passed as
+# ``LATCHKEY_GATEWAY_PORT``). The reverse tunnel forwards the container's
+# ``INNER_PORT`` to this port, so the gateway never has to leave VPS loopback.
 OUTER_PORT: Final[int] = 1989
 
 # Major Node.js version installed via NodeSource. The latchkey CLI is an npm
@@ -220,12 +221,14 @@ def sync_permissions(host: OuterHostInterface, latchkey_directory: Path, host_id
         host.write_text_file(remote_path, content, mode=_REMOTE_FILE_MODE)
 
 
-def _build_gateway_start_script(inner_port: int) -> str:
+def _build_gateway_start_script(outer_port: int) -> str:
     """Build a script that starts a detached ``latchkey gateway`` unless one is already running.
 
     Exits early (no-op) when a ``latchkey gateway`` process is already present.
     Otherwise launches it under ``nohup`` with stdio detached so it outlives
     the SSH session that started it, logging to ``$HOME/.latchkey/gateway.log``.
+    The gateway binds ``outer_port`` on the VPS loopback only -- it is reached
+    from the container via the reverse tunnel, never exposed off-host.
     """
     return "\n".join(
         (
@@ -237,7 +240,8 @@ def _build_gateway_start_script(inner_port: int) -> str:
             'mkdir -p "$HOME/.latchkey"',
             # Detach from the SSH session: nohup + closed stdin + redirected
             # stdio so the channel can close while the gateway keeps running.
-            f"LATCHKEY_GATEWAY_PORT={inner_port} LATCHKEY_DISABLE_COUNTING=1 nohup latchkey gateway "
+            f"LATCHKEY_GATEWAY_PORT={outer_port} LATCHKEY_GATEWAY_LISTEN_HOST=127.0.0.1 "
+            f"LATCHKEY_DISABLE_COUNTING=1 nohup latchkey gateway "
             f'</dev/null >"$HOME/.latchkey/{_REMOTE_GATEWAY_LOG_FILENAME}" 2>&1 &',
             "exit 0",
         )
@@ -247,17 +251,104 @@ def _build_gateway_start_script(inner_port: int) -> str:
 def ensure_latchkey_gateway_running(host: OuterHostInterface) -> None:
     """Start ``latchkey gateway`` on the VPS unless it is already running.
 
-    Launches ``LATCHKEY_GATEWAY_PORT=<INNER_PORT> latchkey gateway`` detached so
-    it survives the SSH session. Idempotent: a no-op when a gateway process is
-    already present. Raises :class:`RemoteGatewayError` if the launch command fails.
+    Launches ``LATCHKEY_GATEWAY_PORT=<OUTER_PORT> latchkey gateway`` bound to the
+    VPS loopback, detached so it survives the SSH session. Idempotent: a no-op
+    when a gateway process is already present. Raises :class:`RemoteGatewayError`
+    if the launch command fails.
     """
-    script = _build_gateway_start_script(INNER_PORT)
+    script = _build_gateway_start_script(OUTER_PORT)
     host_name = host.get_name()
-    with log_span("Ensuring latchkey gateway is running on VPS {} (port {})", host_name, INNER_PORT):
+    with log_span("Ensuring latchkey gateway is running on VPS {} (port {})", host_name, OUTER_PORT):
         result = host.execute_idempotent_command(script, timeout_seconds=_REMOTE_COMMAND_TIMEOUT_SECONDS)
     if not result.success:
         raise RemoteGatewayError(
             "Failed to start latchkey gateway on VPS {}: {}".format(
+                host_name, result.stderr.strip() or result.stdout.strip()
+            )
+        )
+
+
+def _build_reverse_tunnel_script(
+    container_ssh_user: str,
+    container_ssh_port: int,
+    container_ssh_key_path: Path,
+    inner_port: int,
+    outer_port: int,
+) -> str:
+    """Build a command that opens a reverse SSH tunnel from the VPS into the container.
+
+    Run on the VPS, it SSHes into the container (reachable at
+    ``127.0.0.1:<container_ssh_port>`` via the published sshd) and binds the
+    container's ``127.0.0.1:<inner_port>``, forwarding it back to the VPS's
+    ``127.0.0.1:<outer_port>`` where the gateway listens. The agent's
+    ``LATCHKEY_GATEWAY=http://127.0.0.1:<inner_port>`` therefore reaches the
+    VPS-resident gateway unchanged.
+
+    Skips when a matching tunnel is already running. The tunnel is detached via
+    ``ssh -f -N``; reconnect/lifecycle handling is intentionally out of scope.
+    Host-key verification is disabled because the target is our own freshly
+    created container reached over VPS loopback (a hardened version would pin
+    the container host key).
+    """
+    forward_spec = f"127.0.0.1:{inner_port}:127.0.0.1:{outer_port}"
+    ssh_command = (
+        "ssh -f -N "
+        "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+        "-o ExitOnForwardFailure=yes -o ServerAliveInterval=30 "
+        f"-i {shlex.quote(str(container_ssh_key_path))} -p {container_ssh_port} "
+        f"-R {forward_spec} {shlex.quote(container_ssh_user)}@127.0.0.1"
+    )
+    return "\n".join(
+        (
+            "set -e",
+            # Already tunneled: leave it be.
+            f"if pgrep -f {shlex.quote('-R ' + forward_spec)} >/dev/null 2>&1; then",
+            "  exit 0",
+            "fi",
+            ssh_command,
+            "exit 0",
+        )
+    )
+
+
+def ensure_latchkey_gateway_reachable_from_container(
+    host: OuterHostInterface,
+    container_ssh_user: str,
+    container_ssh_port: int,
+    container_ssh_key_path: Path,
+) -> None:
+    """Open a reverse SSH tunnel from the VPS into the container so the agent can reach the gateway.
+
+    Binds the container's ``127.0.0.1:INNER_PORT`` and forwards it to the VPS's
+    ``127.0.0.1:OUTER_PORT`` (where :func:`ensure_latchkey_gateway_running`
+    started the gateway), so the agent's ``LATCHKEY_GATEWAY=http://127.0.0.1:INNER_PORT``
+    reaches the VPS-resident gateway with no change to how the agent env is
+    injected.
+
+    ``container_ssh_key_path`` must be a private key present *on the VPS* that
+    authenticates to the container's sshd. Idempotent on a best-effort basis
+    (skips when a matching tunnel is already running); reconnect/lifecycle
+    handling is out of scope. Raises :class:`RemoteGatewayError` if the tunnel
+    cannot be established.
+    """
+    script = _build_reverse_tunnel_script(
+        container_ssh_user=container_ssh_user,
+        container_ssh_port=container_ssh_port,
+        container_ssh_key_path=container_ssh_key_path,
+        inner_port=INNER_PORT,
+        outer_port=OUTER_PORT,
+    )
+    host_name = host.get_name()
+    with log_span(
+        "Ensuring latchkey gateway is reachable from the container on VPS {} (container:{} -> gateway:{})",
+        host_name,
+        INNER_PORT,
+        OUTER_PORT,
+    ):
+        result = host.execute_idempotent_command(script, timeout_seconds=_REMOTE_COMMAND_TIMEOUT_SECONDS)
+    if not result.success:
+        raise RemoteGatewayError(
+            "Failed to open latchkey reverse tunnel into the container on VPS {}: {}".format(
                 host_name, result.stderr.strip() or result.stdout.strip()
             )
         )

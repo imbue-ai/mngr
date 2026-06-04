@@ -13,6 +13,7 @@ from imbue.mngr_latchkey.remote_gateway import INNER_PORT
 from imbue.mngr_latchkey.remote_gateway import LATCHKEY_VERSION
 from imbue.mngr_latchkey.remote_gateway import OUTER_PORT
 from imbue.mngr_latchkey.remote_gateway import RemoteGatewayError
+from imbue.mngr_latchkey.remote_gateway import ensure_latchkey_gateway_reachable_from_container
 from imbue.mngr_latchkey.remote_gateway import ensure_latchkey_gateway_running
 from imbue.mngr_latchkey.remote_gateway import ensure_latchkey_installed
 from imbue.mngr_latchkey.remote_gateway import sync_credentials
@@ -225,12 +226,16 @@ def test_ports_are_integers() -> None:
     assert isinstance(OUTER_PORT, int)
 
 
-def test_ensure_latchkey_gateway_running_starts_detached_gateway_on_inner_port() -> None:
+def test_ensure_latchkey_gateway_running_starts_detached_gateway_on_outer_port_loopback() -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
     ensure_latchkey_gateway_running(outer)
     assert len(_stub(outer).recorded) == 1
     command = _stub(outer).recorded[0].command
-    assert f"LATCHKEY_GATEWAY_PORT={INNER_PORT} LATCHKEY_DISABLE_COUNTING=1 nohup latchkey gateway" in command
+    # Gateway binds OUTER_PORT on loopback, with counting disabled.
+    assert (
+        f"LATCHKEY_GATEWAY_PORT={OUTER_PORT} LATCHKEY_GATEWAY_LISTEN_HOST=127.0.0.1 "
+        "LATCHKEY_DISABLE_COUNTING=1 nohup latchkey gateway"
+    ) in command
     # Skips the launch when a gateway is already running.
     assert "pgrep -f 'latchkey gateway'" in command
     # Detached so it outlives the SSH session.
@@ -242,3 +247,49 @@ def test_ensure_latchkey_gateway_running_raises_on_failure() -> None:
     outer = _outer(CommandResult(stdout="", stderr="latchkey: command not found", success=False))
     with pytest.raises(RemoteGatewayError, match="command not found"):
         ensure_latchkey_gateway_running(outer)
+
+
+def test_ensure_latchkey_gateway_reachable_opens_reverse_tunnel_into_container() -> None:
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+    ensure_latchkey_gateway_reachable_from_container(
+        outer,
+        container_ssh_user="root",
+        container_ssh_port=2222,
+        container_ssh_key_path=Path("/etc/mngr/container_key"),
+    )
+    command = _stub(outer).recorded[0].command
+    # Reverse-forwards the container's INNER_PORT loopback to the VPS gateway's OUTER_PORT.
+    assert f"-R 127.0.0.1:{INNER_PORT}:127.0.0.1:{OUTER_PORT}" in command
+    # SSHes into the published container sshd over VPS loopback, as the given user.
+    assert "-p 2222" in command
+    assert "-i /etc/mngr/container_key" in command
+    assert "root@127.0.0.1" in command
+    # Detached, fails loudly if the forward can't bind, and skips if already up.
+    assert "ssh -f -N" in command
+    assert "ExitOnForwardFailure=yes" in command
+    assert f"pgrep -f '-R 127.0.0.1:{INNER_PORT}:127.0.0.1:{OUTER_PORT}'" in command
+
+
+def test_ensure_latchkey_gateway_reachable_quotes_key_path_with_spaces() -> None:
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+    ensure_latchkey_gateway_reachable_from_container(
+        outer,
+        container_ssh_user="root",
+        container_ssh_port=2222,
+        container_ssh_key_path=Path("/tmp/key dir/id_ed25519"),
+    )
+    command = _stub(outer).recorded[0].command
+    assert "-i '/tmp/key dir/id_ed25519'" in command
+
+
+def test_ensure_latchkey_gateway_reachable_raises_on_failure() -> None:
+    outer = _outer(
+        CommandResult(stdout="", stderr="ssh: connect to host port 2222: Connection refused", success=False)
+    )
+    with pytest.raises(RemoteGatewayError, match="Connection refused"):
+        ensure_latchkey_gateway_reachable_from_container(
+            outer,
+            container_ssh_user="root",
+            container_ssh_port=2222,
+            container_ssh_key_path=Path("/etc/mngr/container_key"),
+        )
