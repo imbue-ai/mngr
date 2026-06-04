@@ -17,7 +17,7 @@ Once you've gathered that context, please do the below.
 
 Your task is to identify tests within the scan scope that are low-quality, fragile, or misleading -- tests that pass without establishing that the code is correct, that break for reasons unrelated to real bugs, or that are placed or structured wrongly. A bad test is worse than no test: it costs CI time and maintenance, and it lulls readers into thinking a behavior is covered when it is not.
 
-The style guide's "# Testing" section defines what a good test looks like; you have just read it, so use it as the standard and find where the tests in scope fall short of it. Focus on semantic quality, the things a linter or ratchet cannot see. The per-project `test_ratchets.py` already counts raw occurrences of `unittest.mock`, `monkeypatch.setattr`, `time.sleep`, and inline imports, so do not report those as findings on their own. Do report the semantic damage when one of those patterns makes a test meaningless -- e.g. a mock that fakes out the very thing under test -- describing what is wrong with the test, not merely that it "uses a mock".
+The style guide's "# Testing" section, together with the testing conventions in CLAUDE.md, defines what a good test looks like; use them as the standard and find where the tests in scope fall short. Focus on semantic quality, the things a linter or ratchet cannot see. The per-project `test_ratchets.py` already counts raw occurrences of `unittest.mock`, `monkeypatch.setattr`, `time.sleep`, and inline imports, so do not report those as findings on their own. Do report the semantic damage when one of those patterns makes a test meaningless -- e.g. a mock that fakes out the very thing under test -- describing what is wrong with the test, not merely that it "uses a mock".
 
 ## How to judge each test
 
@@ -29,7 +29,7 @@ Judge every test along two axes.
 2. **Behavior or implementation?** Would a behavior-preserving refactor break it? Then it is coupled to implementation details (internal call order, private attributes, how a result was computed) and is a candidate; good tests assert on observable effects.
 3. **Could it fail for the wrong reasons?** Sleep-based synchronization, non-unique IDs, shared state, order-dependence, real network access, or anything not self-isolating makes it flaky -- flag it.
 
-**Is it well-formed per the style guide?** Flag structural divergences the guide defines: wrong test type, location, or marker for the dependencies it actually uses; classes used to group test functions; undescriptive names; misuse of `parametrize`; missing edge / branch / empty-collection cases; and snapshot misuse (hand-written expected values that just duplicate the code, or oversized inline snapshots that should be hashed).
+**Is it well-formed and properly structured?** Flag divergences from the style guide and the CLAUDE.md test conventions: wrong test type, location, or marker for the dependencies it actually uses; classes used to group test functions; undescriptive names; misuse of `parametrize`; missing edge / branch / empty-collection cases; snapshot misuse (hand-written expected values that just duplicate the code, or oversized inline snapshots that should be hashed); and fixture problems -- a test that hand-rolls setup a shared fixture already provides (`temp_host_dir`, `temp_mngr_ctx`, `local_provider`, etc.) instead of reusing it, or defines fixtures in the test file rather than in `conftest.py`.
 
 ## Reporting
 
