@@ -251,8 +251,15 @@ class DiscoveryStreamConsumer(MutableModel):
         host_id_str = str(event.host_id)
         with self._lock:
             self._ssh_by_host_id[host_id_str] = ssh_info
+            # ``_host_id_by_agent_id`` and ``_provider_by_agent_id`` are always
+            # mutated together under ``_lock`` (set together in
+            # ``_handle_agent_discovered`` / ``_handle_full_snapshot``, popped
+            # together in ``_destroy_agent``), so every key here is guaranteed
+            # to be in ``_provider_by_agent_id``. Subscript directly so a future
+            # edit that breaks that invariant crashes loudly instead of
+            # injecting a synthetic provider name downstream.
             agents_on_host = [
-                (AgentId(aid_str), self._provider_by_agent_id.get(aid_str, "unknown"))
+                (AgentId(aid_str), self._provider_by_agent_id[aid_str])
                 for aid_str, hid_str in self._host_id_by_agent_id.items()
                 if hid_str == host_id_str
             ]
@@ -294,6 +301,17 @@ class DiscoveryStreamConsumer(MutableModel):
                 return None
             return self._ssh_by_host_id.get(host_id)
 
+    # The two ``_safely_call_*`` dispatchers run on the single observe-output
+    # thread, so an exception escaping a callback would kill the entire
+    # discovery stream -- after which no further agent comes or goes events are
+    # processed for the lifetime of the supervisor. We deliberately isolate
+    # each callback: a misbehaving handler must not take the stream down with
+    # it. The caught set covers the failure modes a lifecycle handler can
+    # realistically hit -- SSH / filesystem I/O (``OSError``), concurrency-group
+    # state errors raised as ``RuntimeError`` (e.g. ``LatchkeyDiscoveryHandler``
+    # re-raises these from a failed ``start_new_thread`` after rolling back its
+    # pending flag), and ``ValueError`` from event/model construction. Anything
+    # outside this set is treated as a genuine bug and allowed to propagate.
     def _safely_call_discovered(
         self,
         agent_id: AgentId,

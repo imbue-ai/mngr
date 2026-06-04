@@ -165,10 +165,21 @@ def _is_scope_schema(schema_name: str, schema: Mapping[str, object], file_name: 
     """Whether a detent schema identifies a whole service (a scope) vs. a narrower permission."""
     if file_name == _AWS_SCHEMA_FILE:
         return schema_name in _AWS_SCOPE_SCHEMAS
+    # Distinguish "field absent" (legitimate: no required fields / no
+    # properties) from "field present but wrong-typed" (corrupt detent schema).
+    # Coercing the malformed case to empty would silently flip a schema's
+    # scope/permission classification and skew the generated catalog, so we
+    # raise on it instead of papering over it.
     required = schema.get("required")
-    required_fields = required if isinstance(required, list) else []
+    if required is not None and not isinstance(required, list):
+        raise GenerateServicesError(f"Schema {schema_name!r} in {file_name} has a non-list ``required``: {required!r}")
+    required_fields = required if required is not None else []
     properties = schema.get("properties")
-    property_names = properties if isinstance(properties, dict) else {}
+    if properties is not None and not isinstance(properties, dict):
+        raise GenerateServicesError(
+            f"Schema {schema_name!r} in {file_name} has a non-object ``properties``: {properties!r}"
+        )
+    property_names = properties if properties is not None else {}
     return "domain" in required_fields and "method" not in property_names
 
 

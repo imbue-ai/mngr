@@ -154,7 +154,15 @@ def update_forward_info_gateway_port(data_dir: Path, gateway_port: int) -> None:
 
 
 def load_forward_info(data_dir: Path) -> LatchkeyForwardInfo | None:
-    """Read the forward supervisor info, or None if missing or malformed."""
+    """Read the forward supervisor info, or None if missing or malformed.
+
+    A malformed / unreadable record is deliberately collapsed into the same
+    ``None`` ("no supervisor") result as an absent one: callers respond to
+    ``None`` by spawning a fresh supervisor, which is the correct recovery for
+    a corrupted record -- a bad on-disk file must not permanently wedge the
+    supervisor. The warning log is the breadcrumb that distinguishes corruption
+    from a normal first-run absence.
+    """
     path = forward_info_path(data_dir)
     if not path.is_file():
         return None
@@ -346,8 +354,18 @@ def link_opaque_permissions_to_host(
     """
     host_path = permissions_path_for_host(data_dir, host_id)
     host_path.parent.mkdir(parents=True, exist_ok=True)
+    # The canonical host path is only ever a real file (written here via
+    # ``os.replace`` or by the gateway's permission writer) or absent. A symlink
+    # there is a "shouldn't happen" state -- refuse to silently clobber it (which
+    # ``os.replace`` in the else-branch would do) so the anomaly surfaces instead
+    # of being papered over.
+    if host_path.is_symlink():
+        raise LatchkeyStoreError(
+            f"Canonical host permissions path {host_path} is unexpectedly a symlink; "
+            f"refusing to overwrite it while linking opaque handle {opaque_path}."
+        )
     try:
-        if host_path.is_file() and not host_path.is_symlink():
+        if host_path.is_file():
             # Re-use case: another agent on the same host already has a
             # permissions file with prior grants. Keep them and discard
             # the freshly-created baseline.
