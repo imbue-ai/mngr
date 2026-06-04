@@ -4,11 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       commit_sha:
-        description: 'Commit SHA (or branch / tag) to build a fresh ToDesktop draft from. Mutually exclusive with app_zip_url. Leave both empty to verify the latest released build.'
-        required: false
-        default: ''
+        description: 'REQUIRED. Commit SHA (or branch / tag) to build a fresh ToDesktop draft from. Required so the verify job can never silently re-test the released bundle instead of the code at this SHA; see PR #1317 history -- skipping this silently shipped three "green" runs against a stale released bundle.'
+        required: true
       app_zip_url:
-        description: 'ToDesktop .zip URL to verify directly (skips the build job). Takes precedence over commit_sha.'
+        description: 'Optional escape hatch: ToDesktop .zip URL to verify directly. When set, skips the build job and verifies this URL against the test infra in commit_sha. Takes precedence over the built artifact. Useful for re-validating a known-good bundle against test-script changes.'
         required: false
         default: ''
       skip_first_message:
@@ -41,10 +40,13 @@ concurrency:
 
 jobs:
   build:
-    # Run only when a commit_sha was supplied AND no direct URL was given.
-    # When both are empty, skip; `verify` will resolve the latest released
-    # build via the electron-updater feed instead.
-    if: ${{ inputs.commit_sha != '' && inputs.app_zip_url == '' }}
+    # commit_sha is required at the dispatch level, so build always has a
+    # SHA to package from. The only way to skip it is to pass app_zip_url
+    # explicitly: "I want to verify THIS bundle, not build a new one." The
+    # silent "verify the latest released" path that lived here was the
+    # root cause of three "green" runs that actually validated nothing on
+    # this branch; that fallback no longer exists.
+    if: ${{ inputs.app_zip_url == '' }}
     # MUST be macOS: scripts/download-binaries.js uses `xcrun --find git`
     # for the darwin git bundle, and bundling uv/lima needs the target's
     # native binary. Linux runners produce ELF binaries that the shipped
@@ -243,10 +245,10 @@ jobs:
 
   verify:
     needs: [build]
-    # Run when build succeeded, or when build was skipped (workflow_dispatch
-    # with app_zip_url, or no inputs at all). On build failure verify is
-    # skipped; the build job's own `upload build log` step uses always() so
-    # the dist log artifact is preserved either way.
+    # Run when build succeeded (commit_sha drove a fresh package) or when
+    # build was skipped (app_zip_url given explicitly). On build failure
+    # verify is skipped; the build job's own `upload build log` step uses
+    # always() so the dist log artifact is preserved either way.
     if: ${{ always() && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
     runs-on: [self-hosted, macOS, minds-runner]
     timeout-minutes: 40
@@ -277,15 +279,19 @@ jobs:
       - name: resolve build URL
         id: url
         run: |
+          # Two cases, both explicit. The third historic case (no inputs ->
+          # latest released bundle) is gone: it silently tested infra, not
+          # code, and shipped three "green" runs against a stale release.
           if [[ -n "${{ inputs.app_zip_url }}" ]]; then
             URL='${{ inputs.app_zip_url }}'
-            SRC='direct input'
+            SRC='direct input (app_zip_url)'
           elif [[ -n '${{ needs.build.outputs.app_zip_url }}' ]]; then
             URL='${{ needs.build.outputs.app_zip_url }}'
-            SRC='build job (commit ${{ inputs.commit_sha }}, build_id ${{ needs.build.outputs.build_id }})'
+            SRC='fresh build (commit ${{ inputs.commit_sha }}, build_id ${{ needs.build.outputs.build_id }})'
           else
-            URL=$(bash apps/minds/scripts/resolve-latest-todesktop-url.sh)
-            SRC='resolved latest released build'
+            echo "::error::No bundle URL resolved. build job did not produce one and app_zip_url was empty."
+            echo "::error::This should be impossible -- commit_sha is required, so build runs unless app_zip_url is set."
+            exit 1
           fi
           echo "url=$URL" >> "$GITHUB_OUTPUT"
           echo "Verifying: $URL"
