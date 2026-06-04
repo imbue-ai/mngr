@@ -20,13 +20,8 @@ register_conftest_hooks(globals())
 register_plugin_test_fixtures(globals())
 
 # mngr_claude's tests also exercise mngr_modal's test fixtures (modal_subprocess_env,
-# temp_source_dir, real_modal_provider, ...), shared via pytest_plugins. mngr_modal
-# ships its own autouse setup_test_mngr_env that does everything the base one does
-# AND additionally loads Modal credentials from ~/.modal.toml. Drop the base
-# setup_test_mngr_env injected just above so that superset version wins: a
-# conftest-local fixture would otherwise shadow the one coming from a
-# pytest_plugins module, silently dropping Modal token loading for the real-Modal
-# acceptance/release tests.
-del globals()["setup_test_mngr_env"]
-
+# temp_source_dir, real_modal_provider, ...), shared via pytest_plugins. mngr_modal's
+# autouse _load_modal_test_credentials fixture layers Modal tokens on top of the
+# base HOME isolation above (the two set independent env vars and no longer
+# collide), so real-Modal acceptance/release tests can authenticate.
 pytest_plugins = ["imbue.mngr_modal.conftest"]
