@@ -527,12 +527,19 @@ async def find_chat_window(ctx: BrowserContext) -> Page | None:
 # --- main flow ---
 
 
-def _kill_named_processes(pgrep_pattern: str, label: str) -> None:
+def _kill_named_processes(pgrep_pattern: str, label: str, *, argv0_must_start_with: str | None = None) -> None:
     """Kill processes whose argv matches ``pgrep_pattern``, by exact PID.
 
     Per CLAUDE.md, ``pkill -f`` / ``killall`` with broad patterns can hit
     unrelated processes (including this Claude Code session). Resolve PIDs
     with ``pgrep -f`` first, log each one, then ``kill`` by exact PID.
+
+    ``argv0_must_start_with`` is a second-pass guard against false positives.
+    pgrep -f matches anywhere in argv -- a shell command line containing the
+    literal string ``/Applications/Minds.app/Contents/MacOS/Minds`` (e.g.
+    this very docstring in a script being inspected) would match without it.
+    Resolve each candidate's argv via ps and verify argv[0] starts with the
+    expected absolute path before killing.
     """
     try:
         out = subprocess.run(
@@ -550,6 +557,16 @@ def _kill_named_processes(pgrep_pattern: str, label: str) -> None:
         pid_str, _, argv = line.partition(" ")
         if not pid_str.isdigit():
             continue
+        if argv0_must_start_with is not None:
+            ps_out = subprocess.run(
+                ["ps", "-p", pid_str, "-o", "command="],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            real_argv = ps_out.stdout.strip()
+            if not real_argv.startswith(argv0_must_start_with):
+                continue
         logger.info("[runner-sweep] killing {} pid={} ({})", label, pid_str, argv)
         subprocess.run(["kill", pid_str], check=False)
 
@@ -595,7 +612,11 @@ def pre_run_sweep() -> None:
     # backend on :8421 and CDP holding a port.
     _kill_named_processes("mngr event", "stale mngr event")
     _kill_named_processes("mngr forward", "stale mngr forward")
-    _kill_named_processes("/Applications/Minds.app/Contents/MacOS/Minds", "stale Minds.app")
+    _kill_named_processes(
+        "/Applications/Minds.app/Contents/MacOS/Minds",
+        "stale Minds.app",
+        argv0_must_start_with="/Applications/Minds.app/Contents/MacOS/Minds",
+    )
     # 4. Stale caffeinate -- this script always spawns its own, multiple
     # surviving instances are wasteful.
     _kill_named_processes("caffeinate -dimsu", "stale caffeinate")
@@ -701,13 +722,17 @@ async def amain() -> int:
             #     - expand the "Configure..." panel (otherwise
             #       launch_mode/ai_provider/api_key inputs are
             #       display:none and Playwright can't fill them)
-            #     - set launch_mode=LIMA and ai_provider=API_KEY (the
-            #       form's default ai_provider is SUBSCRIPTION on
-            #       no-account, which needs a host keychain OAuth that
-            #       CI runners don't have)
-            #     - paste the ANTHROPIC_API_KEY secret into
+            #     - set launch_mode=LIMA + ai_provider per MINDS_AI_PROVIDER
+            #       (default API_KEY: CI runners have no Claude.ai OAuth
+            #       in the host keychain. Local dev sets SUBSCRIPTION to
+            #       use the user's already-synced Claude.ai credential
+            #       without exposing an API key.)
+            #     - when API_KEY, paste ANTHROPIC_API_KEY into
             #       anthropic_api_key (the api-key-row is .hidden until
             #       the provider select fires its change event)
+            #     - when SUBSCRIPTION, skip the api-key fill entirely
+            #       and rely on mngr_claude's host-keychain credential
+            #       sync at agent-create time
             #     - fill host_name, submit the form, follow the server
             #       redirect to /creating/<id> which renders the
             #       "Setting up your workspace" progress UI
@@ -717,18 +742,25 @@ async def amain() -> int:
             # the click sequence makes those screenshots match their
             # phase claims AND exercises the same code path a real
             # user hits (more representative of UI regressions).
+            ai_provider = os.environ.get("MINDS_AI_PROVIDER", "API_KEY").upper()
+            if ai_provider not in ("API_KEY", "SUBSCRIPTION"):
+                raise RuntimeError(f"MINDS_AI_PROVIDER={ai_provider!r} -- must be API_KEY or SUBSCRIPTION")
             anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
-            if not anthropic_key:
-                raise RuntimeError("ANTHROPIC_API_KEY not set; can't create LIMA agent")
+            if ai_provider == "API_KEY" and not anthropic_key:
+                raise RuntimeError(
+                    "MINDS_AI_PROVIDER=API_KEY but ANTHROPIC_API_KEY not set; "
+                    "either set ANTHROPIC_API_KEY or pass MINDS_AI_PROVIDER=SUBSCRIPTION."
+                )
             # /create is the form's action target; landing page is `/`.
             await win.goto(origin + "/create")
             await win.wait_for_selector("#create-form", timeout=10_000)
             await win.click("#configure-toggle")
             await win.wait_for_selector("#configure-panel:not(.hidden)", timeout=5_000)
             await win.select_option("#launch_mode", value="LIMA")
-            await win.select_option("#ai_provider", value="API_KEY")
-            await win.wait_for_selector("#api-key-row:not(.hidden)", timeout=5_000)
-            await win.fill("#anthropic_api_key", anthropic_key)
+            await win.select_option("#ai_provider", value=ai_provider)
+            if ai_provider == "API_KEY":
+                await win.wait_for_selector("#api-key-row:not(.hidden)", timeout=5_000)
+                await win.fill("#anthropic_api_key", anthropic_key)
             await win.fill("#host_name", HOST_NAME)
             # Submit triggers a POST /create -> server redirects to
             # /creating/<id>. wait_for_url scopes to that path so we
