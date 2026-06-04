@@ -194,9 +194,14 @@ def build_isolated_settings(
 ) -> dict[str, Any]:
     """Build a per-agent ``settings.json`` body by layering (low -> high precedence).
 
-    1. ``base_settings`` -- a copy of the user's real ``settings.json`` (when
-       ``sync_home_settings``) so the agent inherits the user's preferences, or
-       an empty dict otherwise. Copied, never mutated.
+    1. ``base_settings`` -- a copy of the user's real (global) ``settings.json``
+       (when ``sync_home_settings``), or an empty dict otherwise. Copied, never
+       mutated. This is only agy's *global* ``settings.json`` scope (in practice
+       theme/telemetry/trust); the user's model, permission grants, and
+       behavioral policies live in other scopes (``config/config.json``
+       ``userSettings``, per-project ``config/projects/<uuid>.json``) that the
+       caller does not read, so they are not inherited -- per-agent model and
+       permissions come from ``settings_overrides`` (step 3).
     2. ``trusted_workspaces`` -- the agent's effective workspace path(s),
        appended (deduped) to the inherited ``trustedWorkspaces`` list, so the
        isolated agy trusts its own cwd. Pass an empty sequence to leave the

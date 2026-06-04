@@ -1,7 +1,7 @@
 Each `antigravity` agent now runs `agy` under its own per-agent `$HOME` (at `<agent_state_dir>/plugin/antigravity/home/`), giving each agent its own permission policy, model, and isolated config/transcript/session state instead of today's all-or-nothing `--dangerously-skip-permissions` and shared global `~/.gemini`. Two new agent-type config fields:
 
 - `settings_overrides` (dict, default `{}`) -- a free-form blob merged last into the per-agent `settings.json`, covering `permissions` (`{allow, deny, ask}`, precedence Deny > Ask > Allow), `toolPermission`, and `model` (an `agy models` display name). Mirrors `mngr_claude`'s field of the same name.
-- `sync_home_settings` (bool, default `true`) -- base the per-agent `settings.json` on a copy of the user's real settings (so agents inherit the user's preferences), with `settings_overrides` layered on top; `false` starts from an empty base.
+- `sync_home_settings` (bool, default `true`) -- base the per-agent `settings.json` on a copy of the user's real (global) `settings.json`, with `settings_overrides` layered on top; `false` starts from an empty base. This copies only agy's *global* `settings.json` scope (in practice theme/telemetry/trust); the user's model, permission grants, and behavioral policies live in other agy config scopes (`config/config.json`, per-project `config/projects/<uuid>.json`) that are intentionally not read, so set per-agent model/permissions via `settings_overrides`.
 - `symlink_oauth_token` (bool, default `true`) -- symlink each agent's `antigravity-oauth-token` to the shared `~/.gemini` token (enables write-through sharing/propagation, see below) vs copy it for full per-agent isolation.
 
 Other changes:

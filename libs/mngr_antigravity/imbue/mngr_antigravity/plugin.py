@@ -230,9 +230,13 @@ class AntigravityAgentConfig(AgentTypeConfig):
     # sync_home_settings mirrors mngr_claude's flag: a *data-source* choice
     # inside the one settings builder, never a second code path. When True
     # (default, claude-parity), the per-agent settings.json starts from a copy
-    # of the user's real ~/.gemini/antigravity-cli/settings.json so each agent
-    # inherits the user's preferences/model/permissions; settings_overrides
-    # layer on top. When False, the base is an empty dict.
+    # of the user's real ~/.gemini/antigravity-cli/settings.json; settings_overrides
+    # layer on top. When False, the base is an empty dict. This copies only the
+    # *global* settings.json scope (in practice theme/telemetry/trust); the
+    # user's model, permission grants, and behavioral policies live in other agy
+    # scopes (config/config.json userSettings, per-project config/projects/<uuid>.json)
+    # that are intentionally NOT read -- importing the user's grants would weaken
+    # per-agent isolation. Per-agent model/permissions come from settings_overrides.
     sync_home_settings: bool = Field(
         default=True,
         description="Whether to base the per-agent settings.json on a copy of the user's real "
