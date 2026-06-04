@@ -88,12 +88,18 @@ class ReportSection(UpperCaseStrEnum):
 class TestRunInfo(FrozenModel):
     """Metadata for a single test run within an agent's work."""
 
+    # Tell pytest not to collect this as a test class (its name starts with "Test").
+    __test__ = False
+
     run_name: str = Field(description="The --mngr-e2e-run-name value used for this run")
     description_markdown: str = Field(description="Brief description of what this run was for")
 
 
 class TestResult(FrozenModel):
     """Result reported by a test agent, read from its outcome JSON."""
+
+    # Tell pytest not to collect this as a test class (its name starts with "Test").
+    __test__ = False
 
     changes: dict[ChangeKind, Change] = Field(
         default_factory=dict, description="Changes the agent attempted, keyed by kind"
@@ -127,6 +133,9 @@ class IntegratorResult(FrozenModel):
 
 class TestMapReduceResult(FrozenModel):
     """Result for one test in the map-reduce run."""
+
+    # Tell pytest not to collect this as a test class (its name starts with "Test").
+    __test__ = False
 
     test_node_id: str = Field(description="The pytest node ID for the test")
     agent_name: AgentName = Field(description="Name of the agent that ran this test")

@@ -90,7 +90,7 @@ jobs:
         with:
           ref: ${{ inputs.commit_sha }}
       - name: setup node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '24.15.0'
       - name: setup pnpm
@@ -98,7 +98,7 @@ jobs:
           npm install -g pnpm@10.33.4
           pnpm --version
       - name: setup uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v7
         with:
           version: latest
       - name: pnpm install
@@ -237,7 +237,7 @@ jobs:
           }
       - name: upload build log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: minds-dist-log-${{ github.run_id }}
           path: /tmp/minds-dist.log
@@ -452,7 +452,10 @@ jobs:
             cp "$HOME/.minds/latchkey/latchkey_ensure_browser.log" artifacts/latchkey/ 2>/dev/null || true
           fi
           [ -d apps/minds/test-results ] && cp -R apps/minds/test-results artifacts/playwright-test-results 2>/dev/null || true
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
+        # Always upload: this branch's verify step relies on downloading
+        # the artifact every run to inspect screenshots + timings, even
+        # on green runs. failure-only would break that loop.
         if: always()
         with:
           name: launch-to-first-message-${{ github.run_id }}

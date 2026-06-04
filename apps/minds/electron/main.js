@@ -6,27 +6,11 @@ const paths = require('./paths');
 const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 
-// Use ToDesktop's default auto-update behavior: it checks on launch +
-// on an interval, downloads in the background, and shows its own
-// "Restart to update" prompt when a download completes. We previously
-// suppressed that prompt to build a custom titlebar pill, but the pill
-// renderer was never wired up -- leaving users with detection but no
-// way to install. Defaults are simpler and actually work.
-//
-// Only init when packaged: in dev (`pnpm start`), `electron.autoUpdater`
-// is undefined on macOS (Squirrel is not linked in the unsigned dev
-// binary), and todesktop's constructor throws trying to subscribe to
-// it. Skipping init keeps dev launches working; the auto-updater is
-// never useful in dev anyway.
+// Only init the auto-updater in packaged builds: in dev, electron.autoUpdater
+// is undefined on macOS, so todesktop's constructor throws.
 if (app.isPackaged) {
-  // @todesktop/runtime defaults `showInstallAndRestartPrompt: "never"`,
-  // which leaves a downloaded update silently staged on disk with no UI
-  // surfacing -- users see the initial "Update found. Downloading in
-  // the background. You will be prompted to restart when it is ready."
-  // dialog, the download completes, and they are never prompted again.
-  // Set to "always" so the runtime shows a native "Install on next
-  // launch / Install now and restart" dialog as soon as the staged
-  // bundle is ready.
+  // Default is "never", which stages a downloaded update without ever
+  // prompting the user to install it.
   todesktop.init({
     updateReadyAction: {
       showInstallAndRestartPrompt: 'always',
@@ -1506,24 +1490,18 @@ async function onReady() {
   await runStartupSequence(initialBundle);
 }
 
-// User-initiated update check from File > Check for Updates.
-//
-// Follows ToDesktop's documented API: `autoUpdater.checkForUpdates()`
-// returns a Promise resolving to `{ updateInfo }` -- `updateInfo` is the
-// release metadata when a newer version exists (ToDesktop then downloads
-// it in the background and shows its own "Restart to update" prompt via
-// the default updateReadyAction), or null/absent when already current.
-// We branch on that return value for the menu-click feedback rather
-// than listening for events -- events are ToDesktop's "granular control"
-// path and may not fire on every resolve, which is exactly what made an
-// earlier version of this function silent.
+// User-initiated update check from the app menu's Check for Updates item.
+// autoUpdater.checkForUpdates() resolves to { updateInfo }: present when a
+// newer version exists (then downloaded in the background), absent when current.
 async function triggerUpdateCheck() {
   const autoUpdater = todesktop.autoUpdater;
   if (!autoUpdater || typeof autoUpdater.checkForUpdates !== 'function') {
     dialog.showMessageBox({
       type: 'info',
       message: 'Update check unavailable.',
-      detail: 'This build is running in draft mode; the auto-updater is disabled until the build is released to the latest channel.',
+      detail: app.isPackaged
+        ? 'The auto-updater is disabled until this build is released to the latest channel.'
+        : 'Updates are only available in installed builds.',
     });
     return;
   }
@@ -1605,10 +1583,8 @@ function installApplicationMenu() {
       submenu: [
         {
           label: 'Toggle Developer Tools',
-          // Default Electron binding (`role: 'toggleDevTools'`) targets the
-          // focused BrowserWindow's contents; we use BaseWindow with multiple
-          // WebContentsViews, so call toggleDevTools explicitly on the
-          // focused bundle's content view.
+          // role: 'toggleDevTools' targets a BrowserWindow; we use BaseWindow,
+          // so toggle the focused bundle's content view explicitly.
           accelerator: 'Alt+Cmd+I',
           click: () => {
             const bundle = getMostRecentWindow();
