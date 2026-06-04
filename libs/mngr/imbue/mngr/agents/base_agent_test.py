@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.base_agent import quote_agent_args
 from imbue.mngr.cli.testing import create_test_agent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
@@ -504,6 +505,16 @@ def test_assemble_command_appends_agent_args(
         command_override=None,
     )
     assert result == CommandString("my-cmd --extra arg")
+
+
+def test_quote_agent_args_quotes_special_chars_and_leaves_plain_args() -> None:
+    """quote_agent_args wraps values needing escaping and leaves already-safe tokens untouched."""
+    assert quote_agent_args(()) == ()
+    assert quote_agent_args(("--flag", "value")) == ("--flag", "value")
+    assert quote_agent_args(("--model", "Gemini 3.5 Flash (Medium)")) == (
+        "--model",
+        "'Gemini 3.5 Flash (Medium)'",
+    )
 
 
 def test_assemble_command_shell_quotes_agent_args_with_special_chars(
