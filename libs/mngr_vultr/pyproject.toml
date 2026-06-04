@@ -53,7 +53,7 @@ omit = [
 [tool.coverage.report]
 # Initial threshold; recalibrate once we have a reliable CI measurement
 # of this package's coverage.
-fail_under = 60
+fail_under = 70
 omit = [
   "*_test.py",
   "test_*.py",

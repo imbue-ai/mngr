@@ -91,4 +91,4 @@ strict = ["**/*.py"]
 # distribution across sandboxes is not deterministic), so the threshold
 # needs a small margin below observed coverage to absorb that variance.
 # See commit 1446ad297 for the original calibration done for the same reason.
-fail_under = 88
+fail_under = 90

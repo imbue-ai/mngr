@@ -61,7 +61,7 @@ omit = [
 # fixture to be exercised end-to-end; that test infrastructure is logged as a
 # follow-up. cli.py is similarly hard to test in isolation because it depends
 # on the full mngr context. Raise once those integration tests land.
-fail_under = 65
+fail_under = 75
 exclude_lines = [
     "assert_never",
 ]
