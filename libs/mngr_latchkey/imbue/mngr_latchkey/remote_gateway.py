@@ -23,7 +23,7 @@ LATCHKEY_VERSION: Final[str] = "2.15.1"
 # Major Node.js version installed via NodeSource. The latchkey CLI is an npm
 # package, so it needs a reasonably recent Node runtime; the Debian-shipped
 # nodejs is too old, hence the NodeSource setup script.
-_NODE_MAJOR_VERSION: Final[str] = "22"
+_NODE_MAJOR_VERSION: Final[str] = "24"
 
 # Generous wall-clock ceiling: ``apt-get update`` + a NodeSource install +
 # ``npm install -g`` on a cold VPS routinely runs into the low minutes.
