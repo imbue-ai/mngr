@@ -11,9 +11,9 @@ from pathlib import Path
 from uuid import uuid4
 
 from imbue.minds.desktop_client.supertokens_routes import _OAuthFlowStatus
-from imbue.minds.desktop_client.supertokens_routes import _bounce_latchkey_forward_supervisor
 from imbue.minds.desktop_client.supertokens_routes import _read_oauth_status
 from imbue.minds.desktop_client.supertokens_routes import _record_oauth_status
+from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
@@ -79,4 +79,4 @@ def test_bounce_latchkey_forward_supervisor_swallows_latchkey_error(tmp_path: Pa
     assert raised, "expected bounce() to raise LatchkeyError when the mngr binary is missing"
 
     # The helper must swallow it (no exception propagates).
-    _bounce_latchkey_forward_supervisor(supervisor)
+    bounce_latchkey_forward_supervisor(supervisor)

@@ -257,10 +257,10 @@ def _bounce_forward_observe(request: Request) -> None:
     envelope_stream_consumer = request.app.state.envelope_stream_consumer
     if envelope_stream_consumer is not None:
         envelope_stream_consumer.bounce_observe()
-    _bounce_latchkey_forward_supervisor(request.app.state.latchkey_forward_supervisor)
+    bounce_latchkey_forward_supervisor(request.app.state.latchkey_forward_supervisor)
 
 
-def _bounce_latchkey_forward_supervisor(supervisor: LatchkeyForwardSupervisor | None) -> None:
+def bounce_latchkey_forward_supervisor(supervisor: LatchkeyForwardSupervisor | None) -> None:
     """Bounce the detached ``mngr latchkey forward`` supervisor's observe child.
 
     No-op when no supervisor handle is available (e.g. tests). ``bounce()``
@@ -559,7 +559,7 @@ def _run_oauth_subprocess(
     ):
         if envelope_stream_consumer is not None:
             envelope_stream_consumer.bounce_observe()
-        _bounce_latchkey_forward_supervisor(latchkey_forward_supervisor)
+        bounce_latchkey_forward_supervisor(latchkey_forward_supervisor)
 
     emit_event(
         "auth_success",

@@ -93,7 +93,7 @@ from imbue.minds.desktop_client.sharing_handler import is_probeable_share_url
 from imbue.minds.desktop_client.sharing_handler import is_share_ready_from_edge_response
 from imbue.minds.desktop_client.sharing_handler import parse_emails_form_value
 from imbue.minds.desktop_client.sharing_handler import resolve_account_email_for_workspace
-from imbue.minds.desktop_client.supertokens_routes import _bounce_latchkey_forward_supervisor
+from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.minds.desktop_client.supertokens_routes import create_supertokens_router
 from imbue.minds.desktop_client.supertokens_routes import signout_user_via_plugin
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
@@ -1598,7 +1598,7 @@ async def _handle_provider_toggle(
             consumer.bounce_observe()
         # Keep latchkey's discovery in lockstep with minds' own observe so its
         # gateway permission / reverse-tunnel setup reflects the new provider set.
-        _bounce_latchkey_forward_supervisor(request.app.state.latchkey_forward_supervisor)
+        bounce_latchkey_forward_supervisor(request.app.state.latchkey_forward_supervisor)
     return Response(
         content=json.dumps({"provider_name": provider_name, "is_enabled": is_enabled, "changed": changed}),
         media_type="application/json",
