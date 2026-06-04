@@ -6,11 +6,9 @@ Plugin that registers the `antigravity` agent type for mngr.
 
 ## Authentication
 
-Each agent runs `agy` under its own `$HOME`, and `agy` reads its auth from `$HOME/.gemini/antigravity-cli/antigravity-oauth-token`. If a shared file token exists at the host user's real `~/.gemini/antigravity-cli/antigravity-oauth-token`, mngr seeds it into each agent's home (symlink by default, so refreshes propagate) and the agent is authenticated immediately. If it does not exist, provisioning still succeeds and the agent runs agy's normal login flow on first launch (writing the token into that agent's own home) — the same posture as `mngr_claude`, which skips credential seeding rather than blocking agent creation.
+Each agent runs `agy` under its own `$HOME`, so it authenticates independently. If a file token exists at the host user's real `~/.gemini/antigravity-cli/antigravity-oauth-token`, mngr seeds it into each agent's home (symlinked by default, so refreshes propagate) and agents are authenticated with no per-agent login. Otherwise provisioning still succeeds and you simply sign in when `agy` prompts you on first launch — the token is then written into that agent's own home. (This mirrors `mngr_claude`, which skips credential seeding rather than blocking agent creation.)
 
-To share auth across agents without re-logging-in per agent, sign in once on the host so the file token exists:
-- **Linux** (mngr's runtime, no OS keyring): a normal `agy` login writes the file token.
-- **macOS**: a normal login lands in the keychain, not the file, and mngr's fresh per-agent homes can't read the keychain. To produce the shared file token, sign in once from a relocated `$HOME` (e.g. `HOME=/tmp/agy-login agy`), which misses the keychain and writes the file token there; copy it to `~/.gemini/antigravity-cli/antigravity-oauth-token`. (Otherwise each agent simply prompts for login on first launch.)
+On Linux (mngr's runtime) a normal `agy` login writes that shared file token, so auth is shared across agents automatically. On macOS `agy` stores credentials in the keychain instead, which mngr's per-agent homes can't read, so you'll sign in the first time you launch each agent (unless you place a token file at the shared path yourself).
 
 ## Usage
 
