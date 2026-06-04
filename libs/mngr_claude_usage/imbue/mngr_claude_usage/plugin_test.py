@@ -3,17 +3,13 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
-from datetime import timezone
 from pathlib import Path
 
 from imbue.mngr.agents.base_agent import BaseAgent
-from imbue.mngr.config.data_types import AgentTypeConfig
+from imbue.mngr.cli.testing import create_test_agent
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.host import Host
-from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import AgentName
-from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_claude_usage.plugin import _capture_existing_statusline_command
 from imbue.mngr_claude_usage.plugin import _install_settings_local_statusline
 from imbue.mngr_claude_usage.plugin import _provision_statusline_shim
@@ -214,29 +210,28 @@ def test_provision_preserves_user_cmd_when_only_in_settings_local(local_host: Ho
 # =============================================================================
 
 
-def test_hookimpl_skips_non_claude_agent(local_host: Host, temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+def test_hookimpl_skips_non_claude_agent(
+    local_provider: LocalProviderInstance, temp_mngr_ctx: MngrContext, tmp_path: Path
+) -> None:
     """The hookimpl filters with isinstance(agent, ClaudeAgent). A real non-Claude
     agent (a plain BaseAgent of the 'generic' type) must be a no-op -- no host
-    commands dir, no settings.local.json. Using the real local_host means that if
-    the isinstance guard were removed, provisioning would actually run and create
+    commands dir, no settings.local.json. Because the agent runs on a real host,
+    removing the isinstance guard would make provisioning actually run and create
     those artifacts, so these assertions fail for the right reason rather than on
     a fake object's missing methods. Real ClaudeAgent provisioning is exercised in
     mngr_claude's own tests; this test just locks in the filter behavior."""
     work_dir = tmp_path / "work"
     work_dir.mkdir()
-    agent = BaseAgent(
-        id=AgentId.generate(),
-        host_id=local_host.id,
-        name=AgentName("non-claude-agent"),
-        agent_type=AgentTypeName("generic"),
-        agent_config=AgentTypeConfig(),
-        work_dir=work_dir,
-        create_time=datetime.now(timezone.utc),
-        host=local_host,
-        mngr_ctx=temp_mngr_ctx,
+    agent = create_test_agent(
+        local_provider,
+        work_dir,
+        agent_config=None,
+        agent_type=None,
+        extra_data=None,
+        agent_class=BaseAgent,
     )
 
-    on_before_provisioning(agent=agent, host=local_host, mngr_ctx=temp_mngr_ctx)
+    on_before_provisioning(agent=agent, host=agent.host, mngr_ctx=temp_mngr_ctx)
 
-    assert not (local_host.host_dir / "commands").exists()
+    assert not (agent.host.host_dir / "commands").exists()
     assert not (work_dir / ".claude" / "settings.local.json").exists()
