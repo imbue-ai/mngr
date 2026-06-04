@@ -101,7 +101,7 @@ from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import CommandString
-from imbue.mngr.utils.git_utils import find_git_common_dir
+from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr_antigravity import resources as _antigravity_resources
 from imbue.mngr_antigravity.antigravity_config import TRUSTED_WORKSPACES_KEY
 from imbue.mngr_antigravity.antigravity_config import build_antigravity_hooks_config
@@ -529,15 +529,14 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         """Find the source repo root for this agent's ``work_dir``, if it's inside a git repo.
 
         Returns the parent of the git common dir (the source repo root), or
-        ``None`` if ``work_dir`` is not inside a git repo. Mirrors
-        ``mngr_claude``'s helper of the same name -- the source-path concept
-        is what makes a single trust grant cover every worktree of the same
-        repo: it is the durable thing we persist in the global settings.
+        ``None`` if ``work_dir`` is not inside a git repo. Delegates to the
+        shared core helper ``imbue.mngr.utils.git_utils.find_git_source_path``
+        (also used by ``mngr_claude``) -- the source-path concept is what makes a
+        single trust grant cover every worktree of the same repo: it is the
+        durable thing we persist in the global settings. Kept as a method so
+        tests can subclass and override it without monkeypatching.
         """
-        git_common_dir = find_git_common_dir(self.work_dir, concurrency_group)
-        if git_common_dir is None:
-            return None
-        return git_common_dir.parent
+        return find_git_source_path(self.work_dir, concurrency_group)
 
     def _ensure_source_repo_trusted(self, host: OnlineHostInterface, host_home: Path, mngr_ctx: MngrContext) -> None:
         """Ensure the agent's source repo is trusted, persisting it to the global settings.

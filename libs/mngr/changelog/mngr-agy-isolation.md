@@ -1,0 +1,1 @@
+Refactor (no behavior change): the per-agent source-repo trust resolution now delegates to a shared core helper `imbue.mngr.utils.git_utils.find_git_source_path`, eliminating logic that was duplicated byte-for-byte between the `antigravity` and `claude` plugins.

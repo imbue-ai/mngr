@@ -12,3 +12,5 @@ Other changes:
 - Path resolution is host-aware (the user's real `$HOME` and OS are resolved on the host), so the token/settings/cache sharing works on remote hosts too. Heavy `ms-playwright-go` browser binaries are shared across agents by symlinking each agent's home cache to the user's real host cache.
 
 Auth note: on Linux (mngr's runtime, no keychain) a normal `agy` login writes the shared file token, so auth is shared across agents deterministically. On macOS `agy` stores the token in the login keychain, which is not reliably readable from a relocated per-agent `$HOME` (verified), so per-agent agents typically prompt for login on first launch unless a file token is present at the shared path. See the package README.
+
+Internal refactor (no behavior change): the per-agent source-repo trust resolution now delegates to the shared core helper `imbue.mngr.utils.git_utils.find_git_source_path` (extracted from the previously duplicated `mngr_claude` / `mngr_antigravity` methods).
