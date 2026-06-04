@@ -98,16 +98,16 @@ def _find_last_release_tag() -> str:
         sys.exit(1)
 
 
-def _get_pypi_version() -> str | None:
-    """Query PyPI for the latest published version of mngr. Returns None if the query fails."""
-    try:
-        response = httpx.get("https://pypi.org/pypi/imbue-mngr/json", timeout=10)
-        response.raise_for_status()
-    except httpx.HTTPError as e:
-        # Network/HTTP failure is non-fatal: the caller treats None as "(could not check)".
-        # A KeyError/JSONDecodeError from an unexpected payload is a real problem and propagates.
-        print(f"WARNING: Could not query PyPI for the latest mngr version: {e}", file=sys.stderr)
-        return None
+def _get_pypi_version() -> str:
+    """Query PyPI for the latest published version of mngr.
+
+    Any failure -- network/HTTP error or an unexpected payload shape -- propagates rather
+    than being swallowed: release.py needs PyPI access to do its job, so an unreachable or
+    misbehaving PyPI should surface loudly instead of silently disabling the release-state
+    checks below.
+    """
+    response = httpx.get("https://pypi.org/pypi/imbue-mngr/json", timeout=10)
+    response.raise_for_status()
     return response.json()["info"]["version"]
 
 
@@ -115,27 +115,35 @@ def _detect_changed_packages(since_tag: str) -> set[str]:
     """Return the set of pypi names for packages whose source changed since the given tag."""
     changed: set[str] = set()
     for pkg in PACKAGES:
-        # git diff --quiet exits 1 if there are differences
+        # git diff --quiet exits 0 (no diff), 1 (differences), or >1 on error. Treat only
+        # exit 1 as "changed"; a real git failure (e.g. a bad since_tag) must not be
+        # misread as a change -- which would silently mark every package changed -- so fail
+        # loudly instead.
         result = subprocess.run(
             ["git", "diff", "--quiet", since_tag, "HEAD", "--", f"libs/{pkg.dir_name}/"],
             cwd=REPO_ROOT,
             capture_output=True,
         )
-        if result.returncode != 0:
+        if result.returncode == 1:
             changed.add(pkg.pypi_name)
+        elif result.returncode != 0:
+            print(
+                f"ERROR: git diff failed for libs/{pkg.dir_name}/ (exit {result.returncode}): "
+                f"{result.stderr.decode().strip()}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     return changed
 
 
 def _is_published_on_pypi(pypi_name: str) -> bool:
-    """Check whether a package has ever been published on PyPI."""
-    try:
-        response = httpx.head(f"https://pypi.org/pypi/{pypi_name}/json", timeout=10)
-    except httpx.HTTPError as e:
-        # If we can't reach PyPI, assume published to avoid accidentally
-        # treating existing packages as new. Only the network-failure case is
-        # tolerated here; any other error is a real problem and propagates.
-        print(f"WARNING: Could not reach PyPI to check {pypi_name}; assuming published: {e}", file=sys.stderr)
-        return True
+    """Check whether a package has ever been published on PyPI.
+
+    Any failure to reach PyPI propagates rather than defaulting to "published": guessing
+    "published" on error would silently let a genuinely-new package skip its
+    first-publication safeguards (see _detect_new_packages).
+    """
+    response = httpx.head(f"https://pypi.org/pypi/{pypi_name}/json", timeout=10)
     return response.status_code == 200
 
 
@@ -791,15 +799,10 @@ def main() -> None:
     pypi_version = _get_pypi_version()
 
     print(f"Last release tag: {last_tag}")
-    if pypi_version is not None:
-        print(f"Latest on PyPI:   v{pypi_version}")
-    else:
-        print("Latest on PyPI:   (could not check)")
+    print(f"Latest on PyPI:   v{pypi_version}")
 
-    is_unpublished = (
-        pypi_version is not None
-        and tag_version != pypi_version
-        and semver.Version.parse(tag_version) > semver.Version.parse(pypi_version)
+    is_unpublished = tag_version != pypi_version and semver.Version.parse(tag_version) > semver.Version.parse(
+        pypi_version
     )
     if is_unpublished:
         print(f"\nWARNING: {last_tag} appears unpublished (PyPI is at v{pypi_version}).")
