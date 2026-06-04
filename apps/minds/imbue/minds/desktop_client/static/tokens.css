@@ -1,17 +1,33 @@
 /*
  * Design tokens for the minds desktop client.
  *
- * Three scopes:
- *   1. :root            -- preset workspace bgs, spacing scale, radii,
- *                          type ramp, shadows, badges, sidebar / titlebar
- *                          / workspace-row / skeleton component classes.
- *   2. [data-theme=dark]  -- foreground-at-opacity tokens (white-on-dark),
- *                            semantic colors, focus ring.
- *   3. [data-theme=light] -- same token names, black-on-light values. The
- *                            light-side semantic values currently mirror
- *                            dark; they live in their own scope so they
- *                            can drift independently without touching
- *                            consumers.
+ * Layout (top to bottom):
+ *   1. :root              -- only --shadow-seam; the rest of the
+ *                            theme-agnostic tokens (workspace presets,
+ *                            spacing scale, radii) sit under ``html``
+ *                            instead, as a temporary workaround for the
+ *                            styleguide-token ratchet -- see the
+ *                            comment block above the ``html`` rule.
+ *   2. [data-theme="dark"]  -- foreground-at-opacity tokens
+ *                              (white-on-dark), semantic colors, focus
+ *                              ring.
+ *   3. [data-theme="light"] -- same token names, black-on-light values.
+ *                              The light-side semantic values currently
+ *                              mirror dark; they live in their own scope
+ *                              so they can drift independently without
+ *                              touching consumers.
+ *   4. Top-level rules      -- token utility classes (.text-token-*,
+ *                              .bg-token-*, .border-token-*), the type
+ *                              ramp (.type-*), badges (.badge-*), and
+ *                              component classes (.ws-dot,
+ *                              .workspace-row, .titlebar-btn,
+ *                              .menu-item, .sidebar-item, .skeleton,
+ *                              .opt-*, .spinner).
+ *   5. Back-compat block    -- legacy --workspace-accent consumers
+ *                              (.page-workspace, .accent-spine,
+ *                              .sidebar-item::before, .accent-swatch)
+ *                              kept until Phase 3 migrates the
+ *                              remaining templates / JS.
  *
  * Pages set `--workspace-bg` and `data-theme` inline on <html>. The page
  * surface reads `--workspace-bg` (which may be a preset var like
@@ -26,11 +42,6 @@
  * still generates layout utility classes at runtime. Color / type /
  * surface concerns are token-backed here; layout (flex, gap, padding)
  * stays on Tailwind.
- *
- * The end of the file contains a Phase 2 back-compat block (legacy
- * --workspace-accent consumers: .page-workspace, .accent-spine,
- * .sidebar-item, .accent-swatch) kept until Phase 3 migrates the
- * remaining templates / JS off the old accent-stripe pipeline.
  */
 
 :root {
