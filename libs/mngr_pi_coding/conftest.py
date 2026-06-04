@@ -8,6 +8,7 @@ When running from the monorepo root, the root conftest.py registers the hooks fi
 and this file's register_conftest_hooks() call is a no-op (guarded by a module-level flag).
 """
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -33,19 +34,29 @@ register_plugin_test_fixtures(globals())
 
 
 @pytest.fixture()
-def pi_agent(tmp_path: Path) -> PiCodingAgent:
-    """Create a minimally-configured PiCodingAgent for testing.
+def make_pi_agent(tmp_path: Path) -> Callable[..., PiCodingAgent]:
+    """Factory for minimally-populated PiCodingAgents.
 
-    Construction is bypassed (``__new__`` + ``object.__setattr__``) because the
-    full agent constructor wires up infrastructure (tmux, host connection) that
-    these unit tests do not exercise; only the attributes the tested methods read
-    are populated.
+    Uses pydantic's ``model_construct`` to populate only the fields these unit
+    tests read (``agent_config``, ``host``, ``id``, ``name``) and skip both
+    validation and the fields they never touch (``work_dir``, ``mngr_ctx``,
+    etc.). The real constructor would require a full MngrContext and wire up host
+    connections/tmux that are irrelevant here.
     """
-    agent = PiCodingAgent.__new__(PiCodingAgent)
-    object.__setattr__(agent, "agent_config", PiCodingAgentConfig())
-    # Typed as Any: FakeHost satisfies the OnlineHostInterface the agent expects.
-    host: Any = FakeHost(host_dir=tmp_path, is_local=True)
-    object.__setattr__(agent, "host", host)
-    object.__setattr__(agent, "id", AgentId.generate())
-    object.__setattr__(agent, "name", AgentName("test-pi"))
-    return agent
+
+    def _make(*, agent_config: PiCodingAgentConfig | None = None, host: Any = None) -> PiCodingAgent:
+        return PiCodingAgent.model_construct(
+            agent_config=agent_config if agent_config is not None else PiCodingAgentConfig(),
+            # FakeHost stands in for the OnlineHostInterface the agent expects.
+            host=host if host is not None else FakeHost(host_dir=tmp_path, is_local=True),
+            id=AgentId.generate(),
+            name=AgentName("test-pi"),
+        )
+
+    return _make
+
+
+@pytest.fixture()
+def pi_agent(make_pi_agent: Callable[..., PiCodingAgent]) -> PiCodingAgent:
+    """A minimally-populated PiCodingAgent with default config and a local FakeHost."""
+    return make_pi_agent()

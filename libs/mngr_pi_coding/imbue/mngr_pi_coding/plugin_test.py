@@ -2,6 +2,7 @@
 
 import inspect
 import os
+from collections.abc import Callable
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -378,7 +379,7 @@ def test_provision_raises_when_pi_not_installed_locally(tmp_path: Path, pi_agent
         pi_agent.provision(host, options, mngr_ctx)
 
 
-def test_provision_auto_installs_on_remote(tmp_path: Path, pi_agent: PiCodingAgent) -> None:
+def test_provision_auto_installs_on_remote(tmp_path: Path, make_pi_agent: Callable[..., PiCodingAgent]) -> None:
     host = _stub_host(
         tmp_path,
         is_local=False,
@@ -389,12 +390,11 @@ def test_provision_auto_installs_on_remote(tmp_path: Path, pi_agent: PiCodingAge
         },
     )
     config = PiCodingAgentConfig(check_installation=True, sync_auth=False, sync_home_settings=False)
-    object.__setattr__(pi_agent, "agent_config", config)
-    object.__setattr__(pi_agent, "host", host)
+    agent = make_pi_agent(agent_config=config, host=host)
     options = _make_options()
     mngr_ctx = _make_test_mngr_ctx(tmp_path)
 
-    pi_agent.provision(host, options, mngr_ctx)
+    agent.provision(host, options, mngr_ctx)
 
     # The install branch must actually run: provision would otherwise complete
     # silently (the only other command, mkdir -p, also succeeds) without installing pi.
