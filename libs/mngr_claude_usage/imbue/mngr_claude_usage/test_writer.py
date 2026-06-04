@@ -13,7 +13,6 @@ import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -66,16 +65,16 @@ def test_writer_emits_event_with_rate_limits(writer_path: Path, events_file: Pat
     assert event["source"] == "claude/usage"
     assert event["type"] == "cost_snapshot"
     assert event["event_id"].startswith("evt-")
-    # The event timestamp must be canonical nanosecond-precision UTC ISO 8601
-    # (the writer emits `<date>T<time>.000000000Z`). A bare `"T" in ts` check
-    # would pass on garbage like "garbageT", so validate the full shape and that
-    # the calendar instant actually parses. datetime.fromisoformat rejects the
+    # The event timestamp must be canonical UTC ISO 8601 with a fixed 9-digit
+    # fractional part (the writer emits `<date>T<time>.000000000Z`). A bare
+    # `"T" in ts` check would pass on garbage like "garbageT", so validate the
+    # full shape -- including the trailing `Z` that pins it to UTC -- and that
+    # the calendar prefix is a real instant. datetime.fromisoformat rejects the
     # 9-digit fractional part, so we regex the shape and strptime the
-    # seconds-resolution prefix as UTC.
+    # seconds-resolution prefix to confirm it parses (e.g. rejects month 13).
     timestamp = event["timestamp"]
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{9}Z", timestamp), timestamp
-    parsed_timestamp = datetime.strptime(timestamp[:19] + "+0000", "%Y-%m-%dT%H:%M:%S%z")
-    assert parsed_timestamp.utcoffset() == timedelta(0)
+    datetime.strptime(timestamp[:19], "%Y-%m-%dT%H:%M:%S")
     # session_id and cost are passed through unchanged. They let downstream
     # consumers correlate a cost reading to the session it accumulated in.
     assert event["session_id"] == "abc"
