@@ -100,6 +100,10 @@ def _warm_server(entry_module, entry_func_name, socket_path, timeout):
     # Receive client's file descriptors and payload in one recvmsg call
     raw_payload, fds = _recv_fds(conn, 3)
 
+    # A well-behaved client always passes exactly stdin/stdout/stderr. Fewer than 3 FDs
+    # means the client aborted mid-handshake; drop the connection and let it observe the
+    # closed socket (its recv returns empty -> exit code 1) rather than IndexError-ing on
+    # the unpack below.
     if len(fds) < 3:
         conn.close()
         return
@@ -161,6 +165,8 @@ def _warm_server(entry_module, entry_func_name, socket_path, timeout):
     exit_code = 0
     try:
         result = func(standalone_mode=False)
+        # Click commands normally return None on success (the exit code is conveyed via
+        # SystemExit), so a non-int result legitimately leaves exit_code at 0.
         if isinstance(result, int):
             exit_code = result
     except SystemExit as e:
@@ -270,6 +276,8 @@ def warm_cli(func, socket_path=None, timeout=DEFAULT_TIMEOUT):
     exit_code = 0
     try:
         result = func(standalone_mode=False)
+        # Click commands normally return None on success (the exit code is conveyed via
+        # SystemExit), so a non-int result legitimately leaves exit_code at 0.
         if isinstance(result, int):
             exit_code = result
     except SystemExit as e:

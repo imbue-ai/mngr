@@ -74,8 +74,11 @@ def _parse_env_dump(raw: str) -> dict[str, str]:
         if not entry:
             continue
         key, sep, value = entry.partition("=")
+        # `env -0` always emits `KEY=VALUE\0` (an empty value still has the `=`), so an
+        # entry with no separator means the output is corrupt; crash rather than silently
+        # drop a key, which would mean a vault secret is never pushed.
         if not sep:
-            continue
+            raise ValueError(f"Malformed env entry (no '='): {entry!r}")
         result[key] = value
     return result
 

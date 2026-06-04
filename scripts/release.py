@@ -521,11 +521,14 @@ def wait_for_run_completion(run_id: str, after_workflow_attempt: int) -> str:
 def print_run_failure(run_id: str) -> None:
     """Print the failure logs for a workflow run."""
     print("\n--- Workflow failure logs ---\n")
+    # Best-effort: we are already on the publish-failure path and will print the run URL
+    # and exit non-zero below, so a *secondary* failure to fetch the logs must not mask
+    # the primary failure. Only the `gh run view` call can raise here.
     try:
         logs = run("gh", "run", "view", run_id, "--log-failed")
-        print(logs)
     except subprocess.CalledProcessError:
-        print("(Could not retrieve failure logs)")
+        logs = "(Could not retrieve failure logs)"
+    print(logs)
     print(f"\nFull details: https://github.com/imbue-ai/mngr/actions/runs/{run_id}")
 
 

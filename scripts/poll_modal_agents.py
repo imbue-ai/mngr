@@ -91,6 +91,10 @@ def detect_state_transitions(
     # (they ran and finished between two polls, so we never saw them as RUNNING)
     for name, state in current_state_by_name.items():
         if name not in known_agent_names and state != "RUNNING":
+            # We never observed this agent, so its prior state is assumed, not measured:
+            # report the expected pre-terminal state "RUNNING" so the notification reads
+            # as a normal completion. (An agent that failed without ever running would be
+            # mislabeled here, but that is acceptable for a best-effort notifier.)
             transitions.append((name, "RUNNING", state))
 
     return transitions

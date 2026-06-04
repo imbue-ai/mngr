@@ -590,21 +590,28 @@ def build_command_doc(command_name: str, base_dir: Path) -> tuple[Path, str] | N
     return output_file, content
 
 
-def build_alias_doc(command_name: str, base_dir: Path) -> tuple[Path, str] | None:
-    """Build the (output path, markdown content) for an alias command, or None to skip it.
+def build_alias_doc(command_name: str, base_dir: Path) -> tuple[Path, str]:
+    """Build the (output path, markdown content) for an alias command.
 
     Alias commands (like clone, migrate) use UNPROCESSED args and delegate to
-    other commands. Their docs are built entirely from CommandHelpMetadata.
+    other commands. Their docs are built entirely from CommandHelpMetadata, so a
+    missing metadata entry means the page cannot be built at all -- we raise rather
+    than skip, because a silently-absent alias doc would not be caught by --check
+    (which only compares files we actually generate).
     """
+    # Only ever called with names from ALIAS_COMMANDS (see collect_generated_files),
+    # which get_command_category always maps to the "aliases" category, so output_dir
+    # is never None here. Assert rather than branch so a future miswiring fails loudly.
     output_dir = get_output_dir(command_name, base_dir)
-    if output_dir is None:
-        print(f"Skipping: {command_name} (not in ALIAS_COMMANDS)")
-        return None
+    assert output_dir is not None, f"No output dir for alias command {command_name!r} (not in ALIAS_COMMANDS?)"
 
     metadata = get_help_metadata(command_name)
     if metadata is None:
-        print(f"Warning: No help metadata for alias command '{command_name}'")
-        return None
+        raise ValueError(
+            f"No help metadata registered for alias command {command_name!r}. "
+            f"Alias docs are built entirely from CommandHelpMetadata; register it "
+            f"(see CommandHelpMetadata registrations in libs/mngr/imbue/mngr/cli/)."
+        )
 
     content_parts: list[str] = []
 
@@ -715,10 +722,8 @@ def collect_generated_files(repo_root: Path) -> dict[Path, str]:
 
     # Alias command docs
     for command_name in sorted(ALIAS_COMMANDS):
-        result = build_alias_doc(command_name, base_dir)
-        if result is not None:
-            path, content = result
-            generated[path] = content
+        path, content = build_alias_doc(command_name, base_dir)
+        generated[path] = content
 
     return generated
 
