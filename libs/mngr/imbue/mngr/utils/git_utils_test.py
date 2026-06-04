@@ -2,6 +2,7 @@
 
 import subprocess
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -512,13 +513,21 @@ def test_find_source_repo_of_worktree_returns_path_for_valid_worktree(
 
 
 def test_get_current_branch_returns_branch_name(temp_git_repo: Path, cg: ConcurrencyGroup) -> None:
-    """get_current_branch should return the current branch name."""
-    # temp_git_repo is initialized with git init, which creates a default branch
+    """get_current_branch should return the exact name of the checked-out branch."""
+    # Check out a deterministic, uniquely-named branch so we can assert the exact value
+    # rather than just "some non-empty, non-HEAD string" (which would still pass if the
+    # function returned a commit-ish or a remote ref).
+    expected_branch = f"known-branch-{uuid4().hex}"
+    subprocess.run(
+        ["git", "checkout", "-b", expected_branch],
+        cwd=temp_git_repo,
+        capture_output=True,
+        check=True,
+    )
+
     branch = get_current_branch(temp_git_repo, cg)
-    # The branch name depends on git config, but it should be a non-empty string
-    assert isinstance(branch, str)
-    assert len(branch) > 0
-    assert branch != "HEAD"
+
+    assert branch == expected_branch
 
 
 def test_get_current_branch_raises_on_detached_head(temp_git_repo: Path, cg: ConcurrencyGroup) -> None:
