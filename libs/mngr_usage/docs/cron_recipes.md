@@ -277,5 +277,5 @@ Unload it (by label):
 launchctl bootout gui/$(id -u)/com.you.mngr-dispatch
 ```
 
-Tradeoff vs cron: a LaunchAgent only runs while you're logged in, whereas cron
-runs regardless. On a dev machine that's usually fine -- often what you want.
+Unlike cron, a LaunchAgent only runs while you're logged in -- usually fine on a
+dev machine.
