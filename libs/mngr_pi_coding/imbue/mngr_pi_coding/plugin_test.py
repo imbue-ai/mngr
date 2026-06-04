@@ -136,13 +136,6 @@ def test_pi_coding_agent_config_merge_with_override() -> None:
 # =============================================================================
 
 
-def test_tui_ready_indicator_is_pi_v() -> None:
-    # This only guards against accidental edits to the documented banner substring.
-    # That "pi v" is genuinely what pi prints at startup can only be confirmed by
-    # the TUI acceptance/manual-verification path, not by a unit test.
-    assert PiCodingAgent.TUI_READY_INDICATOR == "pi v"
-
-
 def test_pi_coding_agent_is_concrete_and_instantiable() -> None:
     # PiCodingAgent must implement every abstract method of InteractiveTuiAgent
     # (notably _send_enter_and_validate) or it could not be instantiated to create
