@@ -499,11 +499,16 @@ def test_render_dev_styleguide_page_renders_typography_ramp() -> None:
 
 
 def test_render_dev_styleguide_page_renders_spacing_and_radius_scales() -> None:
-    """Every spacing / radius primitive surfaces as a data-token swatch."""
+    """Every spacing / radius primitive surfaces as a data-token swatch.
+
+    Spacing tokens are pixel-named (``--space-4`` is 4px), matching the
+    Figma ``--space-N = N pixels`` convention. Radius tokens are
+    pixel-named for measured radii; ``--radius-pill`` is semantic.
+    """
     html = render_dev_styleguide_page()
-    for n in (1, 2, 3, 4, 5, 6, 8, 10, 12):
+    for n in (4, 8, 12, 16, 20, 24, 32, 40, 48):
         assert f'data-token="--space-{n}"' in html, f"missing space token --space-{n}"
-    for level in ("sm", "md", "lg", "xl", "pill"):
+    for level in (6, 8, 12, 16, "pill"):
         assert f'data-token="--radius-{level}"' in html, f"missing radius token --radius-{level}"
 
 

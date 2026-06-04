@@ -91,28 +91,29 @@ window.tailwind.config = {
         label:   ['var(--type-label-size)',    { lineHeight: 'var(--type-label-line)',    fontWeight: 'var(--type-label-weight)' }],
       },
       spacing: {
-        // Additive: default 0..96 stays. These are semantic aliases the
-        // styleguide can demo and macros can reach for when they want to
-        // commit to a specific scale step rather than a raw Tailwind size.
-        's-1':  'var(--space-1)',
-        's-2':  'var(--space-2)',
-        's-3':  'var(--space-3)',
+        // Pixel-named keys (matches the --space-N = N pixels convention
+        // in tokens.css). The ``s-`` prefix avoids collision with default
+        // Tailwind sizes (e.g. ``p-8`` is 32px in default Tailwind, but
+        // ``p-s-8`` resolves to --space-8 = 8px).
         's-4':  'var(--space-4)',
-        's-5':  'var(--space-5)',
-        's-6':  'var(--space-6)',
         's-8':  'var(--space-8)',
-        's-10': 'var(--space-10)',
         's-12': 'var(--space-12)',
+        's-16': 'var(--space-16)',
+        's-20': 'var(--space-20)',
+        's-24': 'var(--space-24)',
+        's-32': 'var(--space-32)',
+        's-40': 'var(--space-40)',
+        's-48': 'var(--space-48)',
       },
       borderRadius: {
-        // Additive scale: keep Tailwind defaults intact (rounded-sm/md/lg/xl
-        // stay at the original 2/6/8/12px so unmigrated production pages
-        // don't shift pixels) and expose the design-system scale under
-        // ``rounded-ds-{sm,md,lg,xl}`` and ``rounded-pill``.
-        'ds-sm': 'var(--radius-sm)',
-        'ds-md': 'var(--radius-md)',
-        'ds-lg': 'var(--radius-lg)',
-        'ds-xl': 'var(--radius-xl)',
+        // Pixel-named additive scale. Default Tailwind ``rounded-sm/md/lg/xl``
+        // stay at their original 2/6/8/12px (so unmigrated production pages
+        // don't shift pixels); the design-system scale lives under
+        // ``rounded-ds-{6,8,12,16}`` + ``rounded-pill``.
+        'ds-6':  'var(--radius-6)',
+        'ds-8':  'var(--radius-8)',
+        'ds-12': 'var(--radius-12)',
+        'ds-16': 'var(--radius-16)',
         pill:    'var(--radius-pill)',
       },
       boxShadow: {

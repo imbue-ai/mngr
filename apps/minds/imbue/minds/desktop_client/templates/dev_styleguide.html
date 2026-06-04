@@ -186,11 +186,11 @@
       stays available).
     </p>
     <div class="bg-surface-elevated border border-line rounded-xl p-5 shadow-card space-y-2">
-      {% for n in [1, 2, 3, 4, 5, 6, 8, 10, 12] %}
+      {% for n in [4, 8, 12, 16, 20, 24, 32, 40, 48] %}
       <div data-token="--space-{{ n }}" class="flex items-center gap-4">
         <div class="font-mono text-caption text-ink-muted w-24 shrink-0">--space-{{ n }}</div>
         <div class="bg-accent rounded-sm" style="height: 12px; width: var(--space-{{ n }});"></div>
-        <div class="font-mono text-[11px] text-ink-muted">{{ {1:4,2:8,3:12,4:16,5:20,6:24,8:32,10:40,12:48}[n] }}px</div>
+        <div class="font-mono text-[11px] text-ink-muted">{{ n }}px</div>
       </div>
       {% endfor %}
     </div>
@@ -205,11 +205,11 @@
       pixel values are unchanged).
     </p>
     <div class="bg-surface-elevated border border-line rounded-xl p-5 shadow-card flex flex-wrap gap-4">
-      {% for level, px in [('sm', '6'), ('md', '8'), ('lg', '12'), ('xl', '16'), ('pill', '9999')] %}
+      {% for level in [6, 8, 12, 16, 'pill'] %}
       <div data-token="--radius-{{ level }}" class="flex flex-col items-center gap-2">
         <div class="w-16 h-16 bg-accent" style="border-radius: var(--radius-{{ level }});"></div>
         <div class="font-mono text-[11px] text-ink-muted">--radius-{{ level }}</div>
-        <div class="font-mono text-[11px] text-ink-muted">{{ px }}px</div>
+        <div class="font-mono text-[11px] text-ink-muted">{% if level == 'pill' %}9999{% else %}{{ level }}{% endif %}px</div>
       </div>
       {% endfor %}
     </div>
