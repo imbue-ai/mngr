@@ -1,15 +1,22 @@
-{#def agent_id, ws_name, current_account, accounts, servers, telegram_state, accent #}
+{#def agent_id, ws_name, current_account, accounts, servers, telegram_state, theme, workspace_bg, workspace_color, is_preset_color, workspace_presets #}
 {#
   Workspace settings page. Account section, sharing servers list,
-  optional Telegram setup, and the danger-zone destroy flow.
+  workspace-color picker, optional Telegram setup, and the danger-zone
+  destroy flow.
 
   telegram_state controls the Telegram section:
     - None        : no Telegram orchestrator; section hidden
     - "active"    : Telegram already set up for this workspace
     - "pending"   : show the setup button
+
+  theme + workspace_bg flow through to the Base component for the
+  page-wide chrome color. workspace_color is the persisted slug or
+  literal; is_preset_color controls whether the "Current" chip in the
+  picker shows the raw value. workspace_presets is the (slug, hex)
+  tuples list for the swatch row.
 #}
-{% set _body_style = "--workspace-accent: " ~ accent ~ ";" %}
 {% set _scripts %}
+<script src="/_static/workspace_color.js" defer></script>
 <script src="/_static/workspace_settings.js" defer></script>
 <script>
   (function() {
@@ -54,28 +61,77 @@
           destroyDialog.classList.add('hidden');
         });
     });
+
+    // Workspace-color picker. Each swatch calls mindsWorkspaceColor.apply()
+    // which POSTs to /api/workspace-color/<agent_id> and live-applies the
+    // returned color + theme to <html> (no page reload). The selected
+    // swatch is re-marked aria-pressed=true after the apply succeeds. A
+    // small "Saved" affordance fades in for ~2s to confirm persistence.
+    var swatches = document.querySelectorAll('[data-ws-color-preset]');
+    var savedEl = document.getElementById('workspace-color-saved');
+    function markSelected(slug) {
+      swatches.forEach(function (btn) {
+        var matches = btn.getAttribute('data-ws-color-preset') === slug;
+        btn.setAttribute('aria-pressed', matches ? 'true' : 'false');
+      });
+    }
+    swatches.forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var slug = btn.getAttribute('data-ws-color-preset');
+        window.mindsWorkspaceColor.apply(agentId, slug).then(function () {
+          markSelected(slug);
+          if (savedEl) {
+            savedEl.classList.remove('opacity-0');
+            setTimeout(function () { savedEl.classList.add('opacity-0'); }, 1800);
+          }
+        }).catch(function (err) {
+          console.error('apply workspace color failed:', err);
+        });
+      });
+    });
   })();
 </script>
 {% endset %}
 <Base title={{ "Settings: " ~ ws_name }}
-      body_class="bg-zinc-50 text-zinc-900 font-sans antialiased page-workspace"
-      body_style={{ _body_style }}
+      theme={{ theme }}
+      workspace_bg={{ workspace_bg }}
       scripts={{ _scripts }}>
   <PageContainer>
     <div id="workspace-settings" data-agent-id="{{ agent_id }}">
-      <h1 class="text-xl font-semibold text-zinc-900 leading-tight">{{ ws_name }}</h1>
-      <p class="text-xs text-zinc-400 mb-5">{{ agent_id }}</p>
+      <h1 class="type-display-24 text-token-primary leading-tight">{{ ws_name }}</h1>
+      <p class="type-helper-12 text-token-tertiary mb-5">{{ agent_id }}</p>
 
-      <SectionHeader>Account</SectionHeader>
+      <SectionHeader>Color</SectionHeader>
+      <div class="flex items-center gap-3 flex-wrap mb-5">
+        <div class="flex flex-wrap gap-1.5" role="radiogroup" aria-label="Workspace color">
+          {% for preset_slug, preset_hex in workspace_presets %}
+            <button type="button"
+                    class="ws-swatch focus-ring-token"
+                    data-ws-color-preset="{{ preset_slug }}"
+                    title="{{ preset_slug }}"
+                    aria-label="{{ preset_slug }}"
+                    aria-pressed="{{ 'true' if (is_preset_color and workspace_color == preset_slug) else 'false' }}"
+                    style="background: {{ preset_hex }}; width: 28px; height: 28px; border-radius: var(--radius-sm); border: 1px solid var(--border-default); cursor: pointer;"></button>
+          {% endfor %}
+        </div>
+        {% if not is_preset_color %}
+          <span class="badge badge-neutral" title="The current color is a freeform value, not a preset. Pick a preset to replace it.">
+            Current: <code class="type-helper-12">{{ workspace_color }}</code>
+          </span>
+        {% endif %}
+        <span id="workspace-color-saved" class="type-helper-12 text-token-success opacity-0 transition-opacity duration-200">Saved</span>
+      </div>
+
+      <SectionHeader divider>Account</SectionHeader>
       <div id="account-section">
       {% if current_account %}
-        <p>Associated with: <strong>{{ current_account.email }}</strong></p>
+        <p class="text-token-primary">Associated with: <strong>{{ current_account.email }}</strong></p>
         <Notice variant="warn" extra="my-3">
           Disassociating will remove all sharing (tunnels) for this workspace.
           You will need to set up sharing again after re-associating.
         </Notice>
         <Button variant="danger" id="disassociate-btn">Disassociate</Button>
-        <span id="disassociate-spinner" class="hidden text-zinc-500 ml-2">Disassociating...</span>
+        <span id="disassociate-spinner" class="hidden text-token-tertiary ml-2">Disassociating...</span>
       {% else %}
         <Associate :agent_id="agent_id" :accounts="accounts" />
       {% endif %}
@@ -84,30 +140,30 @@
       <SectionHeader divider>Sharing</SectionHeader>
       {% for server in servers %}
         <CardRow>
-          <span class="font-medium">{{ server }}</span>
+          <span class="type-label-14 text-token-primary">{{ server }}</span>
           <ButtonLink href={{ "/sharing/" ~ agent_id ~ "/" ~ server }} variant="secondary">Manage sharing</ButtonLink>
         </CardRow>
       {% else %}
-        <p class="text-zinc-500">No servers discovered for this workspace.</p>
+        <p class="text-token-tertiary">No servers discovered for this workspace.</p>
       {% endfor %}
 
       {% if telegram_state %}
         <SectionHeader divider>Telegram</SectionHeader>
         {% if telegram_state == 'active' %}
-          <p class="text-emerald-700">Telegram is active for this workspace.</p>
+          <p class="text-token-success">Telegram is active for this workspace.</p>
         {% elif telegram_state == 'pending' %}
           <Button variant="primary" id="tg-btn">Setup Telegram</Button>
         {% endif %}
       {% endif %}
 
       <SectionHeader divider>Danger zone</SectionHeader>
-      <p class="text-sm text-zinc-500 mb-3">Permanently destroy this project and release any associated resources.</p>
+      <p class="type-body-14 text-token-tertiary mb-3">Permanently destroy this project and release any associated resources.</p>
       <Button variant="danger" id="destroy-btn">Destroy project</Button>
-      <p id="destroy-error" class="hidden text-sm text-red-600 mt-2"></p>
+      <p id="destroy-error" class="hidden type-body-14 text-token-important mt-2"></p>
 
       <Modal id="destroy-dialog">
-        <h2 class="text-lg font-semibold text-zinc-900 mb-3">Destroy project?</h2>
-        <p class="text-sm text-zinc-600 mb-4">This will permanently destroy <strong>{{ ws_name }}</strong> and all its data. This action cannot be undone.</p>
+        <h2 class="type-heading-16 text-token-primary mb-3">Destroy project?</h2>
+        <p class="type-body-14 text-token-secondary mb-4">This will permanently destroy <strong>{{ ws_name }}</strong> and all its data. This action cannot be undone.</p>
         <div class="flex justify-end gap-3">
           <Button variant="secondary" id="destroy-cancel-btn">Cancel</Button>
           <Button variant="danger" id="destroy-confirm-btn">Destroy</Button>
@@ -115,7 +171,7 @@
       </Modal>
 
       <div class="mt-8">
-        <a href="/" class="text-blue-600 hover:underline">&larr; Back to projects</a>
+        <a href="/" class="type-body-14 text-token-info hover:underline">&larr; Back to projects</a>
       </div>
     </div>
   </PageContainer>

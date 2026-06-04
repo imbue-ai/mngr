@@ -6,18 +6,22 @@
 
   mngr_forward_origin is exposed via data-mngr-forward-origin so sidebar.js
   can build the cross-origin /goto/<agent>/ URL the plugin serves.
+
+  Renders with the everywhere-default (confusion) workspace color; each
+  row carries its own identity color as `--ws-row` set inline per row,
+  and the row's swatch dot reads from that var.
 #}
 {% set _body_attrs %}data-mngr-forward-origin="{{ mngr_forward_origin }}"{% endset %}
 {% set _scripts %}
-<script src="/_static/workspace_accent.js" defer></script>
+<script src="/_static/workspace_color.js" defer></script>
 <script src="/_static/sidebar.js" defer></script>
 {% endset %}
 <Base title="Projects"
-      body_class="bg-zinc-900 font-sans antialiased overflow-y-auto"
+      body_class="bg-token-workspace text-token-primary font-sans antialiased overflow-y-auto"
       body_attrs={{ _body_attrs }}
       scripts={{ _scripts }}>
-  <h2 class="text-sm text-zinc-200 p-3 m-0 border-b border-white/10 font-medium">Projects</h2>
+  <h2 class="type-label-14 text-token-primary p-3 m-0 border-b border-token-subtle">Projects</h2>
   <div id="sidebar-workspaces">
-    <div class="px-4 py-6 text-sm text-zinc-400 text-center">No projects</div>
+    <div class="px-4 py-6 type-helper-12 text-token-tertiary text-center">No projects</div>
   </div>
 </Base>

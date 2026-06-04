@@ -1,25 +1,37 @@
-{#def title="Minds", body_class="bg-zinc-50 text-zinc-900 font-sans antialiased", body_style="", body_attrs="", head="", scripts="" #}
+{#def title="Minds", theme="dark", workspace_bg="#0B292B", body_class="font-sans antialiased bg-token-workspace text-token-primary", body_style="", body_attrs="", head="", scripts="" #}
 {#
   Base layout. Every page wraps its content in this component.
+
   Pulls in the Tailwind Play CDN JS (downloaded once into /_static/tailwind.js
-  and served locally, so this is offline-safe after the first fetch) plus the
-  hand-written tokens.css. The Play CDN script generates utility classes at
-  runtime, so there is no "rebuild when you add a class" step.
+  and served locally, so this is offline-safe after the first fetch) plus
+  the hand-written tokens.css. Tailwind generates layout utilities at
+  runtime; colors / type / surfaces come from tokens.css via the
+  token-utility classes (text-token-*, bg-token-*, border-token-*).
 
   Args:
-    title       contents. Defaults to "Minds".
-    body_class  classes on body. Default is the light page surface.
-    body_style  inline style on body. Used to set --workspace-accent on
-                in-workspace pages so the top stripe picks up the
-                deterministic per-project color.
-    body_attrs  extra attributes on body, as a raw HTML fragment (e.g.
-                'data-is-mac="true" data-mngr-forward-origin="..."').
-    head        extra head content (page-specific link/meta tags). HTML.
-    scripts     script tags emitted just before /body. HTML. Prefer
-                src=/_static/foo.js over inline JS.
+    title         <title> contents. Defaults to "Minds".
+    theme         "dark" | "light" -- written to <html data-theme="...">.
+                  Inferred server-side from the picked workspace color's
+                  luminance (see design_tokens.theme_for); foreground
+                  tokens auto-flip via the [data-theme=*] CSS scopes.
+    workspace_bg  Resolved CSS color (hex / oklch / rgb literal) for the
+                  page surface; written to `<html style="--workspace-bg:
+                  ..."> so .bg-token-workspace and any other token-bound
+                  surface picks it up. Defaults to the `confusion`
+                  preset's hex (#0B292B), which is the everywhere-default.
+    body_class    classes on body. Default consumes the workspace bg
+                  + token-primary text. Override only when you need a
+                  non-standard surface.
+    body_style    inline style on body. Pages may stack additional
+                  custom-property bindings (e.g. --ws-row for per-row
+                  identity dots).
+    body_attrs    extra attributes on body, as a raw HTML fragment.
+    head          extra head content (page-specific link/meta tags).
+    scripts       script tags emitted just before /body. Prefer
+                  src=/_static/foo.js over inline JS.
 #}
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="{{ theme }}" style="--workspace-bg: {{ workspace_bg }};">
 <head>
   <meta charset="UTF-8">
   <title>{{ title }}</title>

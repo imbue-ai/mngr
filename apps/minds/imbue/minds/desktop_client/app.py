@@ -115,6 +115,8 @@ from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates import status_text_for
+from imbue.minds.desktop_client.design_tokens import WorkspaceColor
+from imbue.minds.desktop_client.design_tokens import theme_for
 from imbue.minds.desktop_client.templates import workspace_accent
 from imbue.minds.desktop_client.tunnel_token_injection import clear_tunnel_token_from_agent
 from imbue.minds.desktop_client.tunnel_token_injection import inject_tunnel_token_into_agent
@@ -378,12 +380,17 @@ def _handle_landing_page(
             else:
                 info = backend_resolver.get_agent_display_info(aid)
                 agent_names[str(aid)] = info.agent_name if info else str(aid)
+        minds_config: MindsConfig | None = request.app.state.minds_config
+        agent_colors: dict[str, WorkspaceColor] | None = None
+        if minds_config is not None:
+            agent_colors = {str(aid): minds_config.get_workspace_color(str(aid)) for aid in all_agent_ids}
         html = render_landing_page(
             accessible_agent_ids=all_agent_ids,
             mngr_forward_origin=_get_mngr_forward_origin(request),
             telegram_status_by_agent_id=telegram_status,
             agent_names=agent_names,
             destroying_status_by_agent_id=destroying_status_by_agent_id,
+            agent_colors=agent_colors,
         )
         return HTMLResponse(content=html)
 
@@ -1622,7 +1629,10 @@ def _handle_chrome_page(
     is_mac = "Macintosh" in user_agent or "Mac OS" in user_agent
 
     authenticated = _is_authenticated(cookies=request.cookies, auth_store=auth_store)
-    initial_workspaces = _build_workspace_list(backend_resolver) if authenticated else []
+    minds_config: MindsConfig | None = request.app.state.minds_config
+    initial_workspaces = (
+        _build_workspace_list(backend_resolver, minds_config=minds_config) if authenticated else []
+    )
 
     html = render_chrome_page(
         is_mac=is_mac,
@@ -1692,7 +1702,8 @@ async def _handle_chrome_events(
             # Send initial workspace list and request count
             session_store: MultiAccountSessionStore | None = request.app.state.session_store
             paths: WorkspacePaths | None = request.app.state.api_v1_paths
-            last_workspace_data = _build_workspace_list(backend_resolver, session_store)
+            minds_config: MindsConfig | None = request.app.state.minds_config
+            last_workspace_data = _build_workspace_list(backend_resolver, session_store, minds_config=minds_config)
             last_destroying_ids = _destroying_agent_ids(paths, backend_resolver.list_known_workspace_ids())
             has_accounts = bool(session_store and session_store.list_accounts())
             yield "data: {}\n\n".format(
@@ -1777,7 +1788,7 @@ async def _handle_chrome_events(
                     aid_str, status = health_queue.get_nowait()
                     yield "data: {}\n\n".format(json.dumps(_system_interface_status_payload(tracker, aid_str, status)))
 
-                current_data = _build_workspace_list(backend_resolver, session_store)
+                current_data = _build_workspace_list(backend_resolver, session_store, minds_config=minds_config)
                 current_destroying_ids = _destroying_agent_ids(paths, backend_resolver.list_known_workspace_ids())
                 if current_data != last_workspace_data or current_destroying_ids != last_destroying_ids:
                     last_workspace_data = current_data
@@ -1930,14 +1941,25 @@ def _destroying_agent_ids(paths: WorkspacePaths | None, known_workspace_ids: tup
 def _build_workspace_list(
     backend_resolver: BackendResolverInterface,
     session_store: MultiAccountSessionStore | None = None,
+    minds_config: MindsConfig | None = None,
 ) -> list[dict[str, str]]:
     """Build a JSON-serializable list of workspaces from the backend resolver.
 
-    Each entry carries a deterministic "accent" CSS color derived from the
-    agent id so the chrome and sidebar can render a per-workspace accent
-    without running a digest in JS. Entries whose provider's latest discovery
-    poll errored carry ``is_stale="true"`` so the UI can flag them as
-    retained-but-unverified (they remain fully interactive).
+    Each entry carries the workspace's persisted color (read from
+    :class:`MindsConfig` when available; falls back to the OKLCH starting
+    color from :func:`workspace_accent` when no config is wired in -- e.g.
+    smoke tests). Three color fields per entry:
+
+    - ``color``: the stored value (preset slug or CSS literal).
+    - ``workspace_bg``: the resolved hex/literal background.
+    - ``theme``: the inferred light/dark theme.
+
+    The chrome's titlebar quick-flip and the sidebar identity dots both
+    consume these fields without doing any luminance math client-side.
+
+    Entries whose provider's latest discovery poll errored carry
+    ``is_stale="true"`` so the UI can flag them as retained-but-unverified
+    (they remain fully interactive).
     """
     errored_provider_names = {str(name) for name in backend_resolver.get_provider_errors()}
     agent_ids = backend_resolver.list_known_workspace_ids()
@@ -1947,7 +1969,17 @@ def _build_workspace_list(
         ws_name = backend_resolver.get_workspace_name(aid)
         if not ws_name:
             ws_name = info.agent_name if info else str(aid)
-        entry: dict[str, str] = {"id": str(aid), "name": ws_name, "accent": workspace_accent(str(aid))}
+        if minds_config is not None:
+            color = minds_config.get_workspace_color(str(aid))
+        else:
+            color = WorkspaceColor(workspace_accent(str(aid)))
+        entry: dict[str, str] = {
+            "id": str(aid),
+            "name": ws_name,
+            "color": str(color),
+            "workspace_bg": color.resolve_hex(),
+            "theme": theme_for(color).value,
+        }
         # Mark the workspace stale when its provider's most recent discovery
         # poll errored: it was retained from prior state, so its liveness is
         # unverified rather than confirmed healthy.
@@ -2594,6 +2626,9 @@ def _handle_workspace_settings(
     if telegram_orchestrator is not None:
         telegram_state = "active" if telegram_orchestrator.agent_has_telegram(AgentId(agent_id)) else "pending"
 
+    minds_config: MindsConfig | None = request.app.state.minds_config
+    workspace_color = minds_config.get_workspace_color(agent_id) if minds_config is not None else None
+
     html = render_workspace_settings(
         agent_id=agent_id,
         ws_name=ws_name,
@@ -2601,6 +2636,7 @@ def _handle_workspace_settings(
         accounts=accounts,
         servers=servers,
         telegram_state=telegram_state,
+        workspace_color=workspace_color,
     )
     return HTMLResponse(content=html)
 
@@ -2767,6 +2803,86 @@ async def _handle_requests_auto_open(
         except (json.JSONDecodeError, ValueError):
             pass
     return Response(status_code=200, content='{"ok": true}', media_type="application/json")
+
+
+def _workspace_color_payload(color: WorkspaceColor) -> dict[str, str]:
+    """Shape the GET / POST response body for the workspace-color endpoint.
+
+    Always includes both the stored value (preset slug or literal) and the
+    resolved hex + inferred theme so JS callers don't repeat the luminance
+    math client-side.
+    """
+    return {
+        "color": str(color),
+        "resolved_hex": color.resolve_hex(),
+        "theme": theme_for(color).value,
+    }
+
+
+def _handle_get_workspace_color(request: Request, agent_id: str) -> Response:
+    """Return the persisted workspace color for an agent.
+
+    First read for an unconfigured agent materializes the OKLCH starting
+    color into the config (see :meth:`MindsConfig.get_workspace_color`),
+    so the response is stable from then on.
+    """
+    minds_config: MindsConfig | None = request.app.state.minds_config
+    if minds_config is None:
+        return Response(
+            status_code=500,
+            content='{"error":"config unavailable"}',
+            media_type="application/json",
+        )
+    color = minds_config.get_workspace_color(agent_id)
+    return Response(
+        status_code=200,
+        content=json.dumps(_workspace_color_payload(color)),
+        media_type="application/json",
+    )
+
+
+async def _handle_set_workspace_color(request: Request, agent_id: str) -> Response:
+    """Persist a workspace color for an agent.
+
+    Body shape: ``{"color": "<preset-slug-or-CSS-literal>"}``. Unparseable
+    values return 422 with the validator's error message.
+    """
+    minds_config: MindsConfig | None = request.app.state.minds_config
+    if minds_config is None:
+        return Response(
+            status_code=500,
+            content='{"error":"config unavailable"}',
+            media_type="application/json",
+        )
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return Response(
+            status_code=400,
+            content='{"error":"invalid JSON"}',
+            media_type="application/json",
+        )
+    raw = body.get("color") if isinstance(body, dict) else None
+    if not isinstance(raw, str):
+        return Response(
+            status_code=422,
+            content='{"error":"missing or non-string \\"color\\" field"}',
+            media_type="application/json",
+        )
+    try:
+        color = WorkspaceColor(raw)
+    except ValueError as e:
+        return Response(
+            status_code=422,
+            content=json.dumps({"error": str(e)}),
+            media_type="application/json",
+        )
+    minds_config.set_workspace_color(agent_id, color)
+    return Response(
+        status_code=200,
+        content=json.dumps(_workspace_color_payload(color)),
+        media_type="application/json",
+    )
 
 
 def _resolve_ws_name_and_account(
@@ -3402,6 +3518,10 @@ def create_desktop_client(
     # Request inbox routes
     app.get("/_chrome/requests-panel")(_handle_requests_panel)
     app.post("/_chrome/requests-auto-open")(_handle_requests_auto_open)
+    # Per-workspace color routes (used by the titlebar quick-flip and the
+    # WorkspaceSettings color picker; both call mindsWorkspaceColor.apply()).
+    app.get("/api/workspace-color/{agent_id}")(_handle_get_workspace_color)
+    app.post("/api/workspace-color/{agent_id}")(_handle_set_workspace_color)
     app.get("/requests/{request_id}")(_handle_request_page)
     app.post("/requests/{request_id}/grant")(_handle_request_grant)
     app.post("/requests/{request_id}/deny")(_handle_request_deny)

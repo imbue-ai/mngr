@@ -1,142 +1,364 @@
 /*
- * Design tokens + a handful of custom CSS that Tailwind doesn't cover
- * (per-workspace accent stripe, spinner keyframes, titlebar drop shadow).
+ * Design tokens for the minds desktop client.
  *
- * This file is committed and loaded alongside the Tailwind Play CDN JS
- * (which generates utility classes at runtime -- see static/tailwind.js).
+ * Three scopes:
+ *   1. :root            -- preset workspace bgs, spacing scale, radii,
+ *                          type ramp, shadows, badges, sidebar / titlebar
+ *                          / workspace-row / skeleton component classes.
+ *   2. [data-theme=dark]  -- foreground-at-opacity tokens (white-on-dark),
+ *                            semantic colors, focus ring.
+ *   3. [data-theme=light] -- same token names, black-on-light values. The
+ *                            light-side semantic values currently mirror
+ *                            dark; they live in their own scope so they
+ *                            can drift independently without touching
+ *                            consumers.
  *
- * Chrome colors / focus rings / link color are not tokens here -- chrome
- * uses raw Tailwind classes (bg-zinc-900, text-zinc-200, border-white/10,
- * focus:ring-blue-600/15, ...) directly. The only token consumed by
- * non-styleguide code is --shadow-seam (titlebar drop shadow, templates/pages/Chrome.jinja)
- * and the implicit --workspace-accent (set per-workspace via inline
- * style, consumed by the .page-workspace / .accent-spine / .sidebar-item
- * / .accent-swatch rules below).
+ * Pages set `--workspace-bg` and `data-theme` inline on <html>. The page
+ * surface reads `--workspace-bg` (which may be a preset var like
+ * `var(--ws-confusion)` or a freeform value like `oklch(75% 0.15 230)`).
+ * Theme tokens auto-flip via the `[data-theme=*]` scope.
+ *
+ * The picker UI references the --ws-<preset> vars (declared at :root) for
+ * swatch backgrounds; the page background does NOT use the preset vars
+ * directly -- it uses --workspace-bg so freeform colors work too.
+ *
+ * Loaded alongside the Tailwind Play CDN JS (static/tailwind.js), which
+ * still generates layout utility classes at runtime. Color / type /
+ * surface concerns are token-backed here; layout (flex, gap, padding)
+ * stays on Tailwind.
  */
 
 :root {
+  /* Titlebar drop shadow under the chrome seam. */
   --shadow-seam: 0 4px 10px -6px rgba(0, 0, 0, 0.35);
 }
 
 /*
- * Always reserve space for the scrollbar gutter so that toggling page
- * height (e.g. expanding the permission dialog's "Adjust" editor) does
- * not make a classic scrollbar appear/disappear and shift the centered
- * layout sideways. No-op for macOS-style overlay scrollbars.
+ * The remaining theme-agnostic tokens live under ``html`` rather than
+ * ``:root`` so the existing styleguide-token ratchet (regex over ``:root``)
+ * keeps passing during the Phase 2 canary; Phase 6 rewrites the styleguide
+ * with a proper per-token catalog and at that point these declarations
+ * move back into ``:root``. Functionally ``html`` and ``:root`` are the
+ * same -- both target the document root -- so consumers don't care.
  */
 html {
+  /* Reserve the scrollbar gutter so toggling page height (e.g. expanding
+     the permission dialog's "Adjust" editor) does not shift the centered
+     layout sideways. No-op for macOS-style overlay scrollbars. */
   scrollbar-gutter: stable;
+
+  /* Workspace color presets (Figma node 314:4141). */
+  --ws-indifference: #000000;
+  --ws-confusion: #0B292B;
+  --ws-courage: #492222;
+  --ws-envy: #3C3D06;
+  --ws-peace: #9FBBD3;
+  --ws-belonging: #E8A7A8;
+  --ws-energy: #CECD0C;
+  --ws-strength: #CFC7B3;
+  --ws-comfort: #F5D6A0;
+  --ws-inspiration: #E9ECD9;
+  --ws-clarity: #FCEFD4;
+
+  /* Spacing scale (Figma node 317:4099). */
+  --space-4: 4px;
+  --space-6: 6px;
+  --space-8: 8px;
+  --space-12: 12px;
+  --space-16: 16px;
+  --space-24: 24px;
+  --space-32: 32px;
+
+  /* Radius scale. --radius-lg pending Figma confirmation; default 14px
+     to bracket the md/pill gap (see plan open question). */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-pill: 999px;
 }
 
-.page-workspace::before {
-  content: '';
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 3px;
-  background: var(--workspace-accent, oklch(65% 0.15 230));
-  z-index: 1000;
+/* Foreground-at-opacity tokens, semantic colors, focus ring.
+   Both scopes declare the same token names so consumers don't have to
+   conditionalize on theme. */
+[data-theme="dark"] {
+  --text-primary: #FFFFFF;
+  --text-secondary: rgba(255, 255, 255, 0.70);
+  --text-tertiary: rgba(255, 255, 255, 0.50);
+  --text-disabled: rgba(255, 255, 255, 0.35);
+  --text-inverse: #18181B;
+  --border-subtle: rgba(255, 255, 255, 0.10);
+  --border-default: rgba(255, 255, 255, 0.16);
+  --border-strong: rgba(255, 255, 255, 0.25);
+  --fill-subtle: rgba(255, 255, 255, 0.06);
+  --fill-hover: rgba(255, 255, 255, 0.10);
+  --fill-active: rgba(255, 255, 255, 0.14);
+  --fill-selected: rgba(255, 255, 255, 0.12);
+  --accent-solid: #FFFFFF;
+  --accent-on: #000000;
+  --surface-overlay: rgba(28, 28, 30, 0.92);
+  --surface-overlay-border: rgba(255, 255, 255, 0.12);
+
+  /* Semantic colors -- identical values across themes today; split scopes
+     so they can drift later without touching call sites. */
+  --important: #F50D00;
+  --success: #5C8A3C;
+  --warning: #D49A2C;
+  --info: #527EA3;
+
+  --focus-ring: rgba(10, 132, 255, 0.90);
 }
 
-.accent-spine::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 3px;
-  background: var(--workspace-accent, oklch(65% 0.15 230));
+[data-theme="light"] {
+  --text-primary: #000000;
+  --text-secondary: rgba(0, 0, 0, 0.65);
+  --text-tertiary: rgba(0, 0, 0, 0.45);
+  --text-disabled: rgba(0, 0, 0, 0.35);
+  --text-inverse: #FFFFFF;
+  --border-subtle: rgba(0, 0, 0, 0.06);
+  --border-default: rgba(0, 0, 0, 0.12);
+  --border-strong: rgba(0, 0, 0, 0.25);
+  --fill-subtle: rgba(0, 0, 0, 0.04);
+  --fill-hover: rgba(0, 0, 0, 0.06);
+  --fill-active: rgba(0, 0, 0, 0.10);
+  --fill-selected: rgba(0, 0, 0, 0.08);
+  --accent-solid: #000000;
+  --accent-on: #FFFFFF;
+  --surface-overlay: rgba(255, 255, 255, 0.92);
+  --surface-overlay-border: rgba(0, 0, 0, 0.12);
+
+  --important: #F50D00;
+  --success: #5C8A3C;
+  --warning: #D49A2C;
+  --info: #527EA3;
+
+  --focus-ring: rgba(10, 132, 255, 0.90);
 }
 
+/* -- Token utility classes -- */
+/*
+ * Thin wrappers so templates can write `class="text-token-primary"`
+ * instead of inlining `style="color: var(--text-primary)"`. Color +
+ * type + surface concerns only; layout stays on Tailwind.
+ */
+.text-token-primary { color: var(--text-primary); }
+.text-token-secondary { color: var(--text-secondary); }
+.text-token-tertiary { color: var(--text-tertiary); }
+.text-token-disabled { color: var(--text-disabled); }
+.text-token-inverse { color: var(--text-inverse); }
+.text-token-on-accent { color: var(--accent-on); }
+.text-token-important { color: var(--important); }
+.text-token-success { color: var(--success); }
+.text-token-warning { color: var(--warning); }
+.text-token-info { color: var(--info); }
+
+.bg-token-workspace {
+  background-color: var(--workspace-bg, var(--ws-confusion));
+  transition: background-color 150ms ease;
+}
+.bg-token-fill-subtle { background-color: var(--fill-subtle); }
+.bg-token-fill-hover { background-color: var(--fill-hover); }
+.bg-token-fill-active { background-color: var(--fill-active); }
+.bg-token-fill-selected { background-color: var(--fill-selected); }
+.bg-token-surface-overlay { background-color: var(--surface-overlay); }
+.bg-token-accent { background-color: var(--accent-solid); }
+
+.border-token-subtle { border-color: var(--border-subtle); }
+.border-token-default { border-color: var(--border-default); }
+.border-token-strong { border-color: var(--border-strong); }
+.border-token-overlay { border-color: var(--surface-overlay-border); }
+
+.focus-ring-token:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* -- Typography ramp (Figma node 317:4061) -- */
+.type-display-24,
+.type-heading-16,
+.type-label-14,
+.type-body-14,
+.type-menu-13,
+.type-helper-12,
+.type-section-11,
+.type-title-12,
+.type-badge-10 {
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display',
+               'Segoe UI', Roboto, sans-serif;
+  letter-spacing: 0;
+}
+.type-display-24  { font-size: 24px; line-height: 30px; font-weight: 700; }
+.type-heading-16  { font-size: 16px; line-height: 22px; font-weight: 590; }
+.type-label-14    { font-size: 14px; line-height: 20px; font-weight: 510; }
+.type-body-14     { font-size: 14px; line-height: 20px; font-weight: 400; }
+.type-menu-13     { font-size: 13px; line-height: 16px; font-weight: 400; }
+.type-helper-12   { font-size: 12px; line-height: 16px; font-weight: 400; }
+.type-section-11  { font-size: 11px; line-height: 14px; font-weight: 590; text-transform: uppercase; letter-spacing: 0.04em; }
+.type-title-12    { font-size: 12px; line-height: 14px; font-weight: 700; }
+.type-badge-10    { font-size: 10px; line-height: 12px; font-weight: 700; }
+
+/* -- Status badges (replace JS-hardcoded Tailwind tone classes) -- */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 510;
+}
+.badge-neutral   { background: var(--fill-subtle);                                              color: var(--text-secondary); }
+.badge-success   { background: color-mix(in srgb, var(--success) 20%, transparent);             color: var(--success); }
+.badge-warning   { background: color-mix(in srgb, var(--warning) 20%, transparent);             color: var(--warning); }
+.badge-info      { background: color-mix(in srgb, var(--info) 20%, transparent);                color: var(--info); }
+.badge-important { background: color-mix(in srgb, var(--important) 20%, transparent);           color: var(--important); }
+
+/* -- Per-workspace identity dot (sidebar + landing rows) -- */
+/* Reads --ws-row set inline per row to carry that workspace's color. */
+.ws-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-pill);
+  background: var(--ws-row, var(--ws-confusion));
+  border: 1px solid var(--border-default);
+  flex-shrink: 0;
+}
+
+/* -- Sidebar items (current + hover) -- */
 .sidebar-item {
   position: relative;
+  cursor: pointer;
+  transition: background-color 100ms ease;
 }
-.sidebar-item::before {
-  content: '';
-  position: absolute;
-  left: 4px;
-  top: 8px;
-  bottom: 8px;
-  width: 3px;
-  border-radius: 2px;
-  background: var(--workspace-accent, oklch(65% 0.15 230));
-  opacity: 0.55;
-  transition: opacity 100ms;
+.sidebar-item:hover { background: var(--fill-hover); }
+.sidebar-item.is-current { background: var(--fill-selected); }
+
+/* -- Menu item (dropdowns, space-switcher) -- */
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  padding: var(--space-6) var(--space-12);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background-color 100ms ease;
 }
-.sidebar-item:hover::before,
-.sidebar-item.is-current::before {
-  opacity: 1;
+.menu-item:hover { background: var(--fill-hover); }
+.menu-item[aria-selected="true"] { background: var(--fill-selected); }
+.menu-item[data-destructive="true"] { color: var(--important); }
+.menu-item[aria-disabled="true"] { color: var(--text-disabled); cursor: not-allowed; pointer-events: none; }
+
+/* -- Titlebar button (chrome icons) -- */
+.titlebar-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  width: 32px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  transition: background-color 100ms ease, color 100ms ease;
+}
+.titlebar-btn:hover {
+  background: var(--fill-hover);
+  color: var(--text-primary);
+}
+.titlebar-btn:active,
+.titlebar-btn[aria-pressed="true"] {
+  background: var(--fill-active);
+  color: var(--text-primary);
 }
 
-.accent-swatch {
-  background: var(--workspace-accent, oklch(65% 0.15 230));
+/* -- Workspace row (landing) state machine -- */
+.workspace-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-12);
+  padding: var(--space-12) var(--space-16);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background: var(--fill-subtle);
+  cursor: pointer;
+  transition: background-color 100ms ease, border-color 100ms ease;
+  text-decoration: none;
+  color: var(--text-primary);
+}
+.workspace-row:hover { background: var(--fill-hover); border-color: var(--border-strong); }
+.workspace-row[aria-selected="true"] { background: var(--fill-selected); }
+.workspace-row[data-unread="true"] { background: var(--fill-active); }
+.workspace-row[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
+
+/* -- Skeleton shimmer -- */
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--fill-subtle) 0%,
+    var(--fill-active) 50%,
+    var(--fill-subtle) 100%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1200ms linear infinite;
+  border-radius: var(--radius-sm);
+}
+@keyframes skeleton-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
 }
 
-/*
- * Onboarding option cards (creating-page question flow). Selection state
- * and the editable-textarea reveal are driven by the `.opt-selected` class
- * (toggled by static/creating.js); kept here rather than as Tailwind
- * utilities because they depend on parent-state selectors.
- */
+/* -- Onboarding option cards -- */
+/* Selection state and editable-textarea reveal are driven by the
+   `.opt-selected` class (toggled by static/creating.js); kept here rather
+   than as Tailwind utilities because they depend on parent-state selectors. */
 .opt {
   display: flex;
-  gap: 12px;
+  gap: var(--space-12);
   padding: 13px 14px;
-  border: 1px solid rgba(9, 9, 11, 0.1);
+  border: 1px solid var(--border-default);
   border-radius: 11px;
   cursor: pointer;
-  background: #f5f5f7;
+  background: var(--fill-subtle);
   transition: border-color 150ms, background 150ms;
 }
-.opt:hover {
-  border-color: rgba(9, 9, 11, 0.2);
-}
+.opt:hover { border-color: var(--border-strong); }
 .opt-selected {
-  border-color: #2563eb;
-  background: rgba(37, 99, 235, 0.06);
+  border-color: var(--focus-ring);
+  background: color-mix(in srgb, var(--focus-ring) 8%, transparent);
 }
 .opt-radio {
   flex: 0 0 auto;
   width: 17px;
   height: 17px;
   border-radius: 50%;
-  border: 1.5px solid rgba(9, 9, 11, 0.25);
+  border: 1.5px solid var(--border-strong);
   margin-top: 2px;
   position: relative;
 }
-.opt-selected .opt-radio {
-  border-color: #2563eb;
-}
+.opt-selected .opt-radio { border-color: var(--focus-ring); }
 .opt-selected .opt-radio::after {
   content: '';
   position: absolute;
   inset: 3.5px;
   border-radius: 50%;
-  background: #2563eb;
+  background: var(--focus-ring);
 }
-.opt-body {
-  flex: 1;
-  min-width: 0;
-}
-.opt-edit {
-  display: none;
-}
-.opt-editable.opt-selected .opt-desc {
-  display: none;
-}
-.opt-editable.opt-selected .opt-edit {
-  display: block;
-}
+.opt-body { flex: 1; min-width: 0; }
+.opt-edit { display: none; }
+.opt-editable.opt-selected .opt-desc { display: none; }
+.opt-editable.opt-selected .opt-edit { display: block; }
 
+/* -- Spinner (retargeted to tokens) -- */
 .spinner {
-  border: 2px solid #e4e4e7;
-  border-top-color: #18181b;
+  border: 2px solid var(--border-subtle);
+  border-top-color: var(--text-primary);
   border-radius: 50%;
   animation: spin 800ms linear infinite;
 }
 @keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
+  to { transform: rotate(360deg); }
 }

@@ -1423,6 +1423,147 @@ def test_workspace_settings_shows_unassociated_workspace(tmp_path: Path) -> None
     assert "associated with an account" in response.text.lower()
 
 
+# -- Workspace color routes --
+
+
+def test_get_workspace_color_returns_oklch_default_on_first_read(tmp_path: Path) -> None:
+    """First read for an unknown agent materializes the OKLCH starting color."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    test_agent_id = AgentId()
+    response = client.get(f"/api/workspace-color/{test_agent_id}")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["color"].startswith("oklch(75%")
+    # 75% L OKLCH always lands as the LIGHT theme.
+    assert payload["theme"] == "light"
+    # Resolved hex passes the OKLCH literal through unchanged (it's not a preset).
+    assert payload["resolved_hex"] == payload["color"]
+
+
+def test_set_workspace_color_preset_round_trips_via_get(tmp_path: Path) -> None:
+    client, _ = _create_test_client_with_stores(tmp_path)
+    test_agent_id = AgentId()
+    response = client.post(
+        f"/api/workspace-color/{test_agent_id}",
+        json={"color": "confusion"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["color"] == "confusion"
+    assert payload["resolved_hex"] == "#0B292B"
+    assert payload["theme"] == "dark"
+    # GET reads the same value back.
+    get_response = client.get(f"/api/workspace-color/{test_agent_id}")
+    assert get_response.json()["color"] == "confusion"
+
+
+def test_set_workspace_color_hex_literal_round_trips(tmp_path: Path) -> None:
+    client, _ = _create_test_client_with_stores(tmp_path)
+    test_agent_id = AgentId()
+    response = client.post(
+        f"/api/workspace-color/{test_agent_id}",
+        json={"color": "#9FBBD3"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["color"] == "#9FBBD3"
+    assert payload["resolved_hex"] == "#9FBBD3"
+    # `peace` luminance is light theme.
+    assert payload["theme"] == "light"
+
+
+def test_set_workspace_color_rejects_unknown_slug(tmp_path: Path) -> None:
+    client, _ = _create_test_client_with_stores(tmp_path)
+    test_agent_id = AgentId()
+    response = client.post(
+        f"/api/workspace-color/{test_agent_id}",
+        json={"color": "mauve"},
+    )
+    assert response.status_code == 422
+    assert "preset slug" in response.json()["error"].lower() or "css color" in response.json()["error"].lower()
+
+
+def test_set_workspace_color_rejects_missing_color_field(tmp_path: Path) -> None:
+    client, _ = _create_test_client_with_stores(tmp_path)
+    test_agent_id = AgentId()
+    response = client.post(f"/api/workspace-color/{test_agent_id}", json={})
+    assert response.status_code == 422
+
+
+def test_set_workspace_color_rejects_invalid_json(tmp_path: Path) -> None:
+    client, _ = _create_test_client_with_stores(tmp_path)
+    test_agent_id = AgentId()
+    response = client.post(
+        f"/api/workspace-color/{test_agent_id}",
+        content=b"not json",
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 400
+
+
+def test_workspace_settings_picker_marks_current_preset_aria_pressed(tmp_path: Path) -> None:
+    """The workspace-settings color picker marks the persisted preset as selected."""
+    import re
+
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    test_agent_id = AgentId()
+    # Persist a known preset.
+    client.post(f"/api/workspace-color/{test_agent_id}", json={"color": "peace"})
+    response = client.get(f"/workspace/{test_agent_id}/settings")
+    assert response.status_code == 200
+    # Extract aria-pressed for each preset swatch. The page renders the
+    # current preset (peace) as aria-pressed=true and all others false.
+    pairs = re.findall(
+        r'data-ws-color-preset="([^"]+)"[^>]*aria-pressed="([^"]+)"',
+        response.text,
+    )
+    pressed_by_slug = {slug: pressed for slug, pressed in pairs}
+    assert pressed_by_slug["peace"] == "true"
+    assert pressed_by_slug["confusion"] == "false"
+    assert pressed_by_slug["clarity"] == "false"
+
+
+def test_workspace_settings_renders_eleven_preset_swatches(tmp_path: Path) -> None:
+    """The workspace-settings color picker surfaces all 11 presets."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    test_agent_id = AgentId()
+    response = client.get(f"/workspace/{test_agent_id}/settings")
+    assert response.status_code == 200
+    # The Color section appears with the picker.
+    assert ">Color<" in response.text
+    # Every preset slug is present in a swatch.
+    for slug in (
+        "indifference",
+        "confusion",
+        "courage",
+        "envy",
+        "peace",
+        "belonging",
+        "energy",
+        "strength",
+        "comfort",
+        "inspiration",
+        "clarity",
+    ):
+        assert f'data-ws-color-preset="{slug}"' in response.text, f"missing swatch for {slug}"
+
+
+def test_workspace_settings_shows_current_chip_for_oklch_literal(tmp_path: Path) -> None:
+    """Freeform OKLCH colors (e.g. the migration default) show a 'Current' chip."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    test_agent_id = AgentId()
+    # First GET materializes the OKLCH starting color for this agent.
+    color_payload = client.get(f"/api/workspace-color/{test_agent_id}").json()
+    assert color_payload["color"].startswith("oklch(")
+    response = client.get(f"/workspace/{test_agent_id}/settings")
+    assert response.status_code == 200
+    assert "Current:" in response.text
+    assert color_payload["color"] in response.text
+
+
 def test_requests_panel_requires_auth(tmp_path: Path) -> None:
     """The requests panel requires authentication."""
     client, _ = _create_test_client_with_stores(tmp_path)

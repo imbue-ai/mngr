@@ -12,7 +12,6 @@ so neither callers nor tests have to know the templates moved from raw
 Jinja2 macros + ``{% extends %}`` to JinjaX components.
 """
 
-import hashlib
 import html
 import os
 from collections.abc import Mapping
@@ -28,6 +27,12 @@ from imbue.imbue_common.pure import pure
 from imbue.minds.bootstrap import DEFAULT_MINDS_ROOT_NAME
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
+from imbue.minds.desktop_client.design_tokens import DEFAULT_WORKSPACE_PRESET
+from imbue.minds.desktop_client.design_tokens import WORKSPACE_PRESETS
+from imbue.minds.desktop_client.design_tokens import WorkspaceColor
+from imbue.minds.desktop_client.design_tokens import WorkspacePreset
+from imbue.minds.desktop_client.design_tokens import oklch_starting_color
+from imbue.minds.desktop_client.design_tokens import theme_for
 from imbue.minds.desktop_client.onboarding import expected_creation_duration_seconds
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupEncryptionMethod
@@ -88,28 +93,45 @@ CATALOG: Final[Catalog] = _build_catalog()
 
 
 # -- Per-workspace identity color --
-# See docs on workspace_accent() for why OKLCH + fixed L/C + SHA-256-derived
-# hue. Mirrored on the JS side (static/chrome.js, static/sidebar.js).
+#
+# Workspace color is the actual page background -- not just an accent
+# stripe. The 11 named presets in design_tokens.WORKSPACE_PRESETS are
+# user-pickable; existing agents that haven't been picked yet inherit a
+# deterministic OKLCH starting color (75% lightness, mid chroma, SHA-256-
+# derived hue) so each one still has a stable identity. The picker UI
+# writes the choice through MindsConfig.set_workspace_color.
 
-# Lightness percent and chroma for the OKLCH workspace accent. Fixed across
-# all workspaces so the only axis of variation is the hue.
-_WORKSPACE_L: Final[int] = 65
-_WORKSPACE_C: Final[float] = 0.15
+
+# Default color resolved as a hex literal -- used by Base.jinja defaults
+# and any pre-workspace page (Landing, Welcome, auth flow).
+DEFAULT_WORKSPACE_BG_HEX: Final[str] = WORKSPACE_PRESETS[DEFAULT_WORKSPACE_PRESET]
+
+
+@pure
+def workspace_render_kwargs(color: WorkspaceColor | None = None) -> dict[str, str]:
+    """Resolve a workspace color into the Base.jinja theme + workspace_bg kwargs.
+
+    ``color=None`` returns the everywhere-default (`confusion`). Otherwise
+    the color is resolved to its hex value (preset slugs → palette value;
+    literals pass through) and the theme is inferred from luminance.
+    """
+    if color is None:
+        return {"theme": theme_for(WorkspaceColor(DEFAULT_WORKSPACE_PRESET.value)).value, "workspace_bg": DEFAULT_WORKSPACE_BG_HEX}
+    return {"theme": theme_for(color).value, "workspace_bg": color.resolve_hex()}
 
 
 @pure
 def workspace_accent(agent_id: str) -> str:
-    """Deterministically map an agent id to a CSS OKLCH color.
+    """Deprecated: deterministic OKLCH starting color for an agent id.
 
-    Uses a fixed lightness and chroma so every workspace accent sits at the
-    same readable mid-tone, and only the hue varies. Full 360 degree hue
-    range means collisions are effectively impossible, and OKLCH's
-    perceptual uniformity means close hashes still read as visibly
-    different colors.
+    Kept for backwards compatibility while in-flight callers migrate to
+    the new persisted-workspace-color pipeline (MindsConfig.get_workspace_color +
+    workspace_render_kwargs). Returns the same 75%-lightness OKLCH literal
+    that the migration helper produces; downstream JS clients have been
+    retargeted to read from /api/workspace-color/<agent_id> instead, but
+    this function remains as a synchronous fallback during the migration.
     """
-    digest = hashlib.sha256(agent_id.encode("utf-8")).digest()
-    hue = int.from_bytes(digest[:4], "big") % 360
-    return f"oklch({_WORKSPACE_L}% {_WORKSPACE_C} {hue})"
+    return str(oklch_starting_color(agent_id))
 
 
 # -- Page renderers --
@@ -123,6 +145,7 @@ def render_landing_page(
     is_discovering: bool = False,
     agent_names: dict[str, str] | None = None,
     destroying_status_by_agent_id: dict[str, str] | None = None,
+    agent_colors: Mapping[str, WorkspaceColor] | None = None,
 ) -> str:
     """Render the landing page listing accessible workspaces.
 
@@ -147,12 +170,22 @@ def render_landing_page(
     When is_discovering is True, the page shows a "Discovering agents..." message
     with auto-refresh instead of the empty state. This is used when the
     envelope-stream consumer hasn't completed initial agent discovery yet.
+
+    ``agent_colors`` maps agent ID strings to the workspace color persisted
+    via :class:`MindsConfig`. The landing page itself renders with the
+    ``confusion`` default (no specific workspace context); each row's
+    identity dot uses the agent's own persisted color. When None, dots fall
+    back to the OKLCH starting color.
     """
-    agent_accents = {str(aid): workspace_accent(str(aid)) for aid in accessible_agent_ids}
+    resolved_colors = {
+        str(aid): (agent_colors.get(str(aid)) if agent_colors else None) or oklch_starting_color(str(aid))
+        for aid in accessible_agent_ids
+    }
+    agent_color_hexes = {aid: str(WorkspaceColor(color).resolve_hex()) for aid, color in resolved_colors.items()}
     return CATALOG.render(
         "pages.Landing",
         agent_ids=accessible_agent_ids,
-        agent_accents=agent_accents,
+        agent_colors=agent_color_hexes,
         mngr_forward_origin=mngr_forward_origin,
         telegram_enabled=telegram_status_by_agent_id is not None,
         telegram_status_by_agent_id=telegram_status_by_agent_id or {},
@@ -956,6 +989,12 @@ def render_chrome_page(
 
     In Electron mode, the iframe and browser sidebar are hidden via JS; the content
     and sidebar are handled by separate WebContentsViews.
+
+    Chrome itself renders with the everywhere-default (``confusion``) workspace
+    color; the active workspace's color is applied client-side as the iframe
+    navigates -- ``workspace_color.js`` listens for navigation events and
+    fetches ``/api/workspace-color/<agent_id>`` to flip ``data-theme`` +
+    ``--workspace-bg`` on the chrome's ``<html>``.
     """
     return CATALOG.render(
         "pages.Chrome",
@@ -963,6 +1002,7 @@ def render_chrome_page(
         is_authenticated=is_authenticated,
         mngr_forward_origin=mngr_forward_origin,
         initial_workspaces=initial_workspaces or [],
+        workspace_presets=tuple(WORKSPACE_PRESETS.items()),
     )
 
 
@@ -975,6 +1015,10 @@ def render_sidebar_page(mngr_forward_origin: str = "") -> str:
     the content WebContentsView. ``mngr_forward_origin`` is exposed via
     ``data-mngr-forward-origin`` so sidebar.js can build the cross-origin
     ``/goto/<agent>/`` URL the plugin serves.
+
+    Sidebar renders with the everywhere-default workspace color; each row's
+    identity dot reads its own workspace color from the SSE workspaces event
+    on the JS side.
     """
     return CATALOG.render(
         "pages.Sidebar",
@@ -1027,6 +1071,7 @@ def render_workspace_settings(
     accounts: Sequence[object],
     servers: Sequence[str],
     telegram_state: str | None = None,
+    workspace_color: WorkspaceColor | None = None,
 ) -> str:
     """Render the workspace settings page.
 
@@ -1038,7 +1083,15 @@ def render_workspace_settings(
 
     Interactivity for the setup flow lives in ``static/workspace_settings.js``,
     which reads the agent id from the page's ``data-agent-id`` attribute.
+
+    ``workspace_color`` is the agent's persisted workspace color (resolved
+    from :class:`MindsConfig` by the route handler). When None, falls back
+    to the OKLCH starting color (matching the persistence-layer migration
+    rule). The Color section shows all 11 presets; the current value is
+    marked ``aria-pressed="true"``.
     """
+    color = workspace_color if workspace_color is not None else oklch_starting_color(agent_id)
+    render_kwargs = workspace_render_kwargs(color)
     return CATALOG.render(
         "pages.WorkspaceSettings",
         agent_id=agent_id,
@@ -1047,7 +1100,10 @@ def render_workspace_settings(
         accounts=accounts,
         servers=servers,
         telegram_state=telegram_state,
-        accent=workspace_accent(agent_id),
+        workspace_color=str(color),
+        is_preset_color=color.is_preset(),
+        workspace_presets=tuple(WORKSPACE_PRESETS.items()),
+        **render_kwargs,
     )
 
 

@@ -9,6 +9,7 @@ the per-tier ``ClientEnvConfig`` loaded via ``--config-file``; this file is
 only for genuinely user-personal preferences and never carries tier state.
 """
 
+import logging
 import threading
 from pathlib import Path
 from typing import Final
@@ -18,9 +19,14 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.desktop_client.design_tokens import WorkspaceColor
+from imbue.minds.desktop_client.design_tokens import oklch_starting_color
 from imbue.minds.errors import MindsConfigError
 
 _CONFIG_FILENAME: Final[str] = "config.toml"
+_WORKSPACE_COLORS_KEY: Final[str] = "workspace_colors"
+
+_LOG: Final[logging.Logger] = logging.getLogger(__name__)
 
 
 class MindsConfig(MutableModel):
@@ -95,3 +101,84 @@ class MindsConfig(MutableModel):
             data = self._read_raw()
             data["auto_open_requests_panel"] = enabled
             self._write_raw(data)
+
+    def get_workspace_color(self, agent_id: str) -> WorkspaceColor:
+        """Return the persisted workspace color for an agent.
+
+        If no entry exists, materializes the deterministic OKLCH starting
+        color (computed via SHA-256 over the agent id) into the config
+        under the same lock and returns it. The agent creator can pre-empt
+        this by calling :meth:`set_workspace_color` with an explicit preset
+        before the first read; without that, every agent ever observed by
+        minds ends up with a stable starting color from first read onward.
+
+        On an unparseable stored value (corruption), logs a warning and
+        falls back to the OKLCH starting color *without* overwriting the
+        existing entry -- the user can see and correct the bad value rather
+        than having it silently replaced.
+        """
+        with self._lock:
+            data = self._read_raw()
+            table = data.get(_WORKSPACE_COLORS_KEY)
+            if isinstance(table, dict):
+                stored = table.get(agent_id)
+                if stored is not None:
+                    try:
+                        return WorkspaceColor(str(stored))
+                    except ValueError:
+                        _LOG.warning(
+                            "Unparseable workspace color for %s in config: %r; "
+                            "rendering with the OKLCH starting color and leaving "
+                            "the stored value in place.",
+                            agent_id,
+                            stored,
+                        )
+                        return oklch_starting_color(agent_id)
+            starting = oklch_starting_color(agent_id)
+            self._write_workspace_color_locked(data, agent_id, starting)
+            return starting
+
+    def set_workspace_color(self, agent_id: str, color: WorkspaceColor) -> None:
+        """Persist a workspace color for an agent.
+
+        Stores the value as-is (preset slug or CSS literal). Validation
+        happens at the :class:`WorkspaceColor` construction boundary, so
+        callers can rely on stored values round-tripping cleanly.
+        """
+        with self._lock:
+            data = self._read_raw()
+            self._write_workspace_color_locked(data, agent_id, color)
+
+    def remove_workspace_color(self, agent_id: str) -> None:
+        """Drop the stored workspace color for an agent.
+
+        Called from the destroy flow's success path to keep ``config.toml``
+        tidy. Idempotent: missing entries are a no-op.
+        """
+        with self._lock:
+            data = self._read_raw()
+            table = data.get(_WORKSPACE_COLORS_KEY)
+            if not isinstance(table, dict) or agent_id not in table:
+                return
+            del table[agent_id]
+            if not table:
+                del data[_WORKSPACE_COLORS_KEY]
+            self._write_raw(data)
+
+    def _write_workspace_color_locked(
+        self,
+        data: dict[str, object],
+        agent_id: str,
+        color: WorkspaceColor,
+    ) -> None:
+        """Write a single workspace color into ``data`` and flush.
+
+        Must be called while holding ``self._lock``. Hoists the
+        ``[workspace_colors]`` table if missing.
+        """
+        table = data.get(_WORKSPACE_COLORS_KEY)
+        if not isinstance(table, dict):
+            table = {}
+            data[_WORKSPACE_COLORS_KEY] = table
+        table[agent_id] = str(color)
+        self._write_raw(data)
