@@ -5,7 +5,6 @@ Also broadened the identify-* `_tasks/` ignore rule from `*/*/_tasks/` to `**/_t
 Hardened edge-case handling across `scripts/` per a suspicious-edge-case review:
 
 - `release.py`: narrowed the broad `except Exception` in `_get_pypi_version` and `_is_published_on_pypi` to `httpx.HTTPError`, so an unexpected PyPI payload (KeyError/JSONDecodeError) now propagates instead of being silently treated as "unreachable"; the caught network error is logged.
-- `josh/coordinator.py`: removed the trailing catch-all `except Exception: return set()` in `process_tasks` so unexpected errors crash loudly instead of silently corrupting deletion detection (the legitimate `except OSError` is retained).
 - `modal_nuke.py`: replaced the `.get(..., "unknown")` fallback chains feeding `modal app stop`/`modal volume delete` with direct reads of the keys Modal's `--json` output actually emits (`"App ID"`, `"Name"`), raising a clear `ModalSchemaError` naming the unexpected schema if a key is missing, so the destructive path never runs against a placeholder identifier.
 - `make_cli_docs.py`: dropped a dead `option.type is not None` guard, removed a redundant `hasattr(command, "commands")` guard, and made an unresolved See-Also reference raise (caught by `--check`) instead of emitting a broken markdown link.
 - `sync_common_ratchets.py`: a check function in the source-of-truth file with no `# --- section ---` header now raises instead of silently syncing a bogus `# --- Unknown ---` section monorepo-wide.
