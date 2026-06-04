@@ -1,1 +1,1 @@
-Raised the stale coverage floor from 88% to 90% to match the coverage CI already measures (~95%).
+Raised the stale coverage floor from 88% to 90% to match the coverage CI already measures (~95%), and removed the now-obsolete comment about per-package offload coverage drift (the offload bug that caused that drift has since been fixed, so coverage is deterministic).
