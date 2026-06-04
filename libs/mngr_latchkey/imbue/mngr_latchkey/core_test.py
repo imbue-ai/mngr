@@ -837,6 +837,61 @@ def test_discovery_handler_swallows_gateway_errors(tmp_path: Path, temp_mngr_ctx
     assert tunnel_manager._calls == []
 
 
+class _ProvisionRecordingHandler(LatchkeyDiscoveryHandler):
+    """Handler stub that forces the VPS branch and records provisioning instead of running it."""
+
+    _provisioned: list[tuple[AgentId, HostId]] = PrivateAttr(default_factory=list)
+
+    def _host_has_outer_host(self, host_id: HostId, provider_name: str) -> bool:
+        return True
+
+    def _run_remote_gateway_provisioning(
+        self,
+        agent_id: AgentId,
+        host_id: HostId,
+        ssh_info: RemoteSSHInfo,
+        provider_name: str,
+    ) -> None:
+        try:
+            self._provisioned.append((agent_id, host_id))
+        finally:
+            with self._pending_lock:
+                self._pending_remote_agents.discard(str(agent_id))
+
+
+def test_discovery_handler_dispatches_vps_provisioning_off_thread_for_outer_host(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """An agent whose host has an outer host gets VPS provisioning dispatched (not the desktop tunnel)."""
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    tunnel_manager = _RecordingTunnelManager()
+    agent_id = AgentId()
+    host_id = HostId()
+    ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=2222, key_path=tmp_path / "k")
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _ProvisionRecordingHandler(
+            latchkey=manager,
+            tunnel_manager=tunnel_manager,
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        handler(agent_id, host_id, ssh_info, "imbue_cloud")
+
+        # Provisioning runs on its own fire-and-forget CG thread; poll for it.
+        poll_event = threading.Event()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not handler._provisioned:
+            poll_event.wait(timeout=_POLL_INTERVAL_SECONDS)
+
+        # The VPS path was taken: provisioning recorded, and NO desktop-side
+        # reverse tunnel was set up (the VPS owns the agent's reachability).
+        assert handler._provisioned == [(agent_id, host_id)]
+        assert tunnel_manager._calls == []
+        manager.stop_gateway()
+
+
 def _make_fake_latchkey_binary_with_ensure_browser_counter(tmp_path: Path, counter_path: Path) -> Path:
     """Build a fake ``latchkey`` that handles ``gateway`` (blocking),
     ``gateway create-jwt`` (deterministic stub), and ``ensure-browser``

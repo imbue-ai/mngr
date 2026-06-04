@@ -50,7 +50,6 @@ from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
-from imbue.mngr_latchkey.remote_gateway import RemoteGatewayError
 from imbue.mngr_latchkey.remote_gateway import provision_remote_gateway
 
 
@@ -124,17 +123,31 @@ class LatchkeyDiscoveryHandler(MutableModel):
         provider_name: str,
         host_side_port: int,
     ) -> None:
-        """Worker-thread entry point. Always clears the pending flag in
-        ``finally`` so a crash inside the setup doesn't permanently block
-        subsequent fires for this agent.
+        """Worker-thread entry point that routes the agent to the right reachability path.
 
         Agents whose host has an accessible outer host (the VPS -- e.g.
-        imbue_cloud / vps_docker) get a VPS-resident gateway reverse-tunneled
-        into their container. Everything else (local, modal, ssh, docker-over-tcp)
-        falls back to the desktop-side gateway reverse tunnel.
+        imbue_cloud / vps_docker) get the heavy VPS-resident gateway
+        provisioning thrown onto its own CG thread (fire-and-forget, so this
+        worker never waits on apt/npm installs); the pending flag is then owned
+        by that thread. Everything else (local, modal, ssh, docker-over-tcp)
+        falls back to the fast desktop-side gateway reverse tunnel here, and the
+        pending flag is cleared in ``finally``.
         """
+        is_pending_handed_off = False
         try:
-            if self._try_provision_remote_gateway(agent_id, host_id, ssh_info, provider_name):
+            if self._host_has_outer_host(host_id, provider_name):
+                # Throw the (potentially minutes-long) provisioning to its own
+                # CG thread and return immediately. The CG's ObservableThread
+                # logs any uncaught failure at error level, so a provisioning
+                # failure is never silently missed; the thread is unchecked so a
+                # single agent's failure does not tear down the shared supervisor.
+                self.concurrency_group.start_new_thread(
+                    target=self._run_remote_gateway_provisioning,
+                    args=(agent_id, host_id, ssh_info, provider_name),
+                    name=f"latchkey-provision-{str(agent_id)}",
+                    is_checked=False,
+                )
+                is_pending_handed_off = True
                 return
             self.tunnel_manager.setup_reverse_tunnel(
                 ssh_info=ssh_info,
@@ -148,38 +161,73 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 # ports that no longer exist.
                 agent_id=str(agent_id),
             )
-        except (SSHTunnelError, OSError, paramiko.SSHException) as e:
+        except (
+            SSHTunnelError,
+            OSError,
+            paramiko.SSHException,
+            ConcurrencyExceptionGroup,
+            InvalidConcurrencyGroupStateError,
+            RuntimeError,
+        ) as e:
             logger.warning(
-                "Failed to set up Latchkey reverse tunnel for agent {} (host-side port {}): {}",
+                "Failed to set up Latchkey reachability for agent {} (host-side port {}): {}",
                 agent_id,
                 host_side_port,
                 e,
             )
         finally:
-            with self._pending_lock:
-                self._pending_remote_agents.discard(str(agent_id))
+            # The provisioning thread owns clearing the pending flag once the
+            # heavy work finishes; the synchronous desktop-tunnel path clears it
+            # here (including when dispatching the provisioning thread failed).
+            if not is_pending_handed_off:
+                with self._pending_lock:
+                    self._pending_remote_agents.discard(str(agent_id))
 
-    def _try_provision_remote_gateway(
+    def _host_has_outer_host(self, host_id: HostId, provider_name: str) -> bool:
+        """Cheaply decide whether the agent's host has an accessible outer host (the VPS).
+
+        Uses the connection-free ``outer_host_id_for``; any failure (unknown
+        host, provider construction error) is treated as 'no outer' so the agent
+        falls back to the desktop-side reverse tunnel.
+        """
+        try:
+            provider = get_provider_instance(ProviderInstanceName(provider_name), self.mngr_ctx)
+            return provider.outer_host_id_for(host_id) is not None
+        except (MngrError, OSError) as e:
+            logger.debug(
+                "Could not determine outer host for host {} via provider {}; treating as non-VPS: {}",
+                host_id,
+                provider_name,
+                e,
+            )
+            return False
+
+    def _run_remote_gateway_provisioning(
         self,
         agent_id: AgentId,
         host_id: HostId,
         ssh_info: RemoteSSHInfo,
         provider_name: str,
-    ) -> bool:
-        """Stand up a VPS-resident gateway for the agent if its host has an outer host.
+    ) -> None:
+        """Fire-and-forget worker: stand up the VPS-resident gateway for a remote agent.
 
-        Returns ``True`` when the agent is VPS-style (its provider exposes an
-        outer host) and the VPS-resident gateway was provisioned, so the caller
-        skips the desktop-side reverse tunnel. Returns ``False`` -- so the
-        caller falls back to the desktop tunnel -- when the host has no outer
-        host or provisioning fails. The container's ssh user/port come from the
-        inner host's SSH info.
+        Opens the agent's outer host and runs the full provisioning sequence on
+        it. Exceptions are intentionally *not* swallowed: they propagate out of
+        the thread target so the CG's ObservableThread logs them at error level
+        (we never silently miss a provisioning failure). The pending flag is
+        always cleared in ``finally`` so a later discovery fire retries.
         """
         try:
             provider = get_provider_instance(ProviderInstanceName(provider_name), self.mngr_ctx)
             with provider.outer_host_for(host_id) as outer:
                 if outer is None:
-                    return False
+                    # Raced: the outer host vanished between the cheap check and now.
+                    logger.warning(
+                        "Outer host for agent {} (host {}) vanished before provisioning; skipping",
+                        agent_id,
+                        host_id,
+                    )
+                    return
                 provision_remote_gateway(
                     outer,
                     host_id=host_id,
@@ -187,16 +235,9 @@ class LatchkeyDiscoveryHandler(MutableModel):
                     container_ssh_port=ssh_info.port,
                 )
             logger.info("Provisioned VPS-resident Latchkey gateway for agent {} on host {}", agent_id, host_id)
-            return True
-        except (RemoteGatewayError, MngrError, OSError, paramiko.SSHException) as e:
-            logger.warning(
-                "Failed to provision VPS-resident Latchkey gateway for agent {} on host {}; "
-                "falling back to desktop tunnel: {}",
-                agent_id,
-                host_id,
-                e,
-            )
-            return False
+        finally:
+            with self._pending_lock:
+                self._pending_remote_agents.discard(str(agent_id))
 
 
 class LatchkeyDestructionHandler(FrozenModel):
