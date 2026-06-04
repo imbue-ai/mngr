@@ -96,7 +96,7 @@ def test_discover_host_state_failed_for_bad_build(
 
 
 # =========================================================================
-# Release tests -- marked @pytest.mark.release, run on `v*` tag pushes and via the TMR workflow
+# Release tests -- marked @pytest.mark.release, run via the Release Tests workflow and TMR
 # =========================================================================
 
 
