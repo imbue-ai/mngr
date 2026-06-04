@@ -1,6 +1,5 @@
 import hashlib
 import json
-import os
 import socket
 import threading
 import time
@@ -10,6 +9,7 @@ from uuid import uuid4
 import psutil
 import pytest
 from pydantic import PrivateAttr
+from watchdog.events import FileModifiedEvent
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
@@ -28,6 +28,7 @@ from imbue.mngr_latchkey.core import LatchkeyNotInitializedError
 from imbue.mngr_latchkey.core import LatchkeyVersionError
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
+from imbue.mngr_latchkey.discovery import _LatchkeyStateChangeHandler
 from imbue.mngr_latchkey.remote_gateway import local_credentials_path
 from imbue.mngr_latchkey.store import admin_permissions_path
 from imbue.mngr_latchkey.store import default_permissions_path
@@ -913,51 +914,69 @@ class _SyncRecordingHandler(LatchkeyDiscoveryHandler):
         self._synced.append((host_id_str, do_permissions, do_credentials))
 
 
-def test_remote_state_sync_does_initial_full_sync_then_credential_and_permission_deltas(
+def _make_sync_recording_handler(
+    tmp_path: Path, temp_mngr_ctx: MngrContext, cg: ConcurrencyGroup
+) -> _SyncRecordingHandler:
+    return _SyncRecordingHandler(
+        latchkey=FakeLatchkey(latchkey_directory=tmp_path),
+        tunnel_manager=SSHTunnelManager(),
+        concurrency_group=cg,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+
+def test_remote_state_sync_initial_pass_does_permissions_then_credentials_for_known_hosts(
     tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    latchkey = FakeLatchkey(latchkey_directory=tmp_path)
-    credentials_path = local_credentials_path(tmp_path)
-    credentials_path.write_bytes(b"enc")
+    host_id_str = str(HostId())
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _make_sync_recording_handler(tmp_path, temp_mngr_ctx, cg)
+        with handler._remote_hosts_lock:
+            handler._remote_host_provider_by_id[host_id_str] = "imbue_cloud"
+        handler._sync_all_known_hosts()
+        # Full initial sync requests both permissions and credentials for the host.
+        assert handler._synced == [(host_id_str, True, True)]
+
+
+def test_remote_state_watch_handler_routes_credential_and_permission_changes(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
     host_id = HostId()
     host_id_str = str(host_id)
-    permissions_path = permissions_path_for_host(latchkey.plugin_data_dir, host_id)
-    permissions_path.parent.mkdir(parents=True)
-    permissions_path.write_text('{"rules": []}')
-    # Pin mtimes so deltas are detectable regardless of filesystem timestamp resolution.
-    os.utime(credentials_path, (1000, 1000))
-    os.utime(permissions_path, (1000, 1000))
-
     with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
-        handler = _SyncRecordingHandler(
-            latchkey=latchkey,
-            tunnel_manager=SSHTunnelManager(),
-            concurrency_group=cg,
-            mngr_ctx=temp_mngr_ctx,
-        )
+        handler = _make_sync_recording_handler(tmp_path, temp_mngr_ctx, cg)
         with handler._remote_hosts_lock:
             handler._remote_host_provider_by_id[host_id_str] = "imbue_cloud"
 
-        # First pass: full initial sync (permissions AND credentials) for the new host.
-        handler._run_remote_state_sync_once()
-        assert handler._synced == [(host_id_str, True, True)]
+        credentials_path = local_credentials_path(tmp_path)
+        permissions_path = permissions_path_for_host(handler.latchkey.plugin_data_dir, host_id)
+        event_handler = _LatchkeyStateChangeHandler(
+            credentials_path=credentials_path,
+            plugin_data_dir=handler.latchkey.plugin_data_dir,
+            known_remote_host_ids=handler._known_remote_host_ids,
+            on_credentials_changed=handler._sync_credentials_to_all_known_hosts,
+            on_host_permissions_changed=handler._sync_permissions_to_host,
+        )
 
-        # No changes: nothing re-synced.
-        handler._synced.clear()
-        handler._run_remote_state_sync_once()
-        assert handler._synced == []
-
-        # Credentials file changes: push credentials (only) to the host.
-        handler._synced.clear()
-        os.utime(credentials_path, (2000, 2000))
-        handler._run_remote_state_sync_once()
+        # A change to the credentials file pushes credentials (only) to all hosts.
+        event_handler.dispatch(FileModifiedEvent(str(credentials_path)))
         assert handler._synced == [(host_id_str, False, True)]
 
-        # Host permissions file changes: push permissions (only) to that host.
+        # A change to a host's permissions file pushes permissions (only) to that host.
         handler._synced.clear()
-        os.utime(permissions_path, (2000, 2000))
-        handler._run_remote_state_sync_once()
+        event_handler.dispatch(FileModifiedEvent(str(permissions_path)))
         assert handler._synced == [(host_id_str, True, False)]
+
+        # An unrelated path (e.g. the gateway log) is ignored.
+        handler._synced.clear()
+        event_handler.dispatch(FileModifiedEvent(str(tmp_path / "mngr_latchkey" / "latchkey_gateway.log")))
+        assert handler._synced == []
+
+        # A permissions file for an unknown host is ignored.
+        handler._synced.clear()
+        unknown_permissions = permissions_path_for_host(handler.latchkey.plugin_data_dir, HostId())
+        event_handler.dispatch(FileModifiedEvent(str(unknown_permissions)))
+        assert handler._synced == []
 
 
 def _make_fake_latchkey_binary_with_ensure_browser_counter(tmp_path: Path, counter_path: Path) -> Path:

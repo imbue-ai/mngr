@@ -18,6 +18,9 @@ dependencies = [
     "pluggy>=1.0",
     "psutil>=5.9",
     "pydantic>=2.0",
+    # Event-based watching of the local credentials / per-host permissions files
+    # so the remote-state sync loop reacts to changes without polling.
+    "watchdog>=4.0",
 ]
 
 [project.entry-points.mngr]

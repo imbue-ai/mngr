@@ -27,14 +27,20 @@ but coalescing avoids spinning up a redundant worker just to find an
 existing tunnel and exit.
 """
 
+import os
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Final
 
 import paramiko
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
+from watchdog.events import FileSystemEvent
+from watchdog.events import FileSystemEventHandler
+from watchdog.events import FileSystemMovedEvent
+from watchdog.observers import Observer
+from watchdog.observers.api import BaseObserver
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -59,31 +65,47 @@ from imbue.mngr_latchkey.remote_gateway import local_credentials_path
 from imbue.mngr_latchkey.remote_gateway import provision_remote_gateway
 from imbue.mngr_latchkey.remote_gateway import sync_credentials
 from imbue.mngr_latchkey.remote_gateway import sync_permissions
+from imbue.mngr_latchkey.store import hosts_dir
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
-# How often the remote-state sync loop re-checks the local credentials file and
-# each known remote host's permissions file for changes. Credential/permission
-# edits are infrequent and not latency-critical, so a couple of seconds keeps
-# propagation prompt without busy-spinning.
-_REMOTE_STATE_SYNC_POLL_INTERVAL_SECONDS: Final[float] = 2.0
+# How long to wait for the watchdog observer to wind down on shutdown before
+# giving up (it is a daemon thread, so the process can exit regardless).
+_OBSERVER_STOP_TIMEOUT_SECONDS: float = 5.0
 
 
-def _file_mtime(path: Path) -> float | None:
-    """Return ``path``'s mtime, or ``None`` if it does not exist / can't be stat'd."""
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return None
+class _LatchkeyStateChangeHandler(MutableModel, FileSystemEventHandler):
+    """watchdog handler that routes credential / per-host-permission file changes to sync callbacks.
 
+    Implements the ``dispatch`` method the watchdog observer calls for every
+    filesystem event; it matches the changed path against the local credentials
+    file and each currently-known remote host's permissions file and fires the
+    corresponding callback. Unrelated paths (gateway logs, ``.tmp`` atomic-write
+    siblings, unknown hosts) are ignored.
+    """
 
-class _RemoteSyncState(MutableModel):
-    """Mutable bookkeeping carried across iterations of the remote-state sync loop."""
-
-    synced_host_ids: set[str] = Field(default_factory=set, description="Hosts that have had their initial full sync")
-    credentials_mtime: float | None = Field(default=None, description="Last-seen mtime of the local credentials file")
-    permissions_mtime_by_host: dict[str, float | None] = Field(
-        default_factory=dict, description="Last-seen mtime of each host's permissions file"
+    credentials_path: Path = Field(description="Absolute path of the local encrypted credentials file")
+    plugin_data_dir: Path = Field(description="Plugin data dir under which per-host permissions files live")
+    known_remote_host_ids: Callable[[], frozenset[str]] = Field(
+        description="Returns the set of currently-known remote host ids (stringified)"
     )
+    on_credentials_changed: Callable[[], None] = Field(description="Called when the credentials file changes")
+    on_host_permissions_changed: Callable[[str], None] = Field(
+        description="Called with a host id when that host's permissions file changes"
+    )
+
+    def dispatch(self, event: FileSystemEvent) -> None:
+        if event.is_directory:
+            return
+        # A move reports both src and dest; an atomic write (tmp -> rename)
+        # surfaces the real file as the move dest, so consider both.
+        changed_paths = {Path(os.fsdecode(event.src_path))}
+        if isinstance(event, FileSystemMovedEvent):
+            changed_paths.add(Path(os.fsdecode(event.dest_path)))
+        if self.credentials_path in changed_paths:
+            self.on_credentials_changed()
+        for host_id_str in self.known_remote_host_ids():
+            if permissions_path_for_host(self.plugin_data_dir, HostId(host_id_str)) in changed_paths:
+                self.on_host_permissions_changed(host_id_str)
 
 
 class LatchkeyDiscoveryHandler(MutableModel):
@@ -117,8 +139,6 @@ class LatchkeyDiscoveryHandler(MutableModel):
     # provisioned a gateway on. Drives the remote-state sync loop.
     _remote_host_provider_by_id: dict[str, str] = PrivateAttr(default_factory=dict)
     _remote_hosts_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-    # Bookkeeping carried across iterations of the single remote-state sync loop.
-    _remote_sync_state: "_RemoteSyncState" = PrivateAttr(default_factory=lambda: _RemoteSyncState())
 
     def __call__(self, agent_id: AgentId, host_id: HostId, ssh_info: RemoteSSHInfo | None, provider_name: str) -> None:
         try:
@@ -277,7 +297,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
                         host_id,
                     )
                     return
-                # Register the host so the remote-state sync loop keeps its
+                # Register the host so the remote-state watcher keeps its
                 # credentials/permissions in sync from now on.
                 with self._remote_hosts_lock:
                     self._remote_host_provider_by_id[str(host_id)] = provider_name
@@ -287,6 +307,10 @@ class LatchkeyDiscoveryHandler(MutableModel):
                     container_ssh_user=ssh_info.user,
                     container_ssh_port=ssh_info.port,
                 )
+                # Initial sync for the freshly-provisioned host, reusing the
+                # open outer connection: permissions first, then credentials.
+                sync_permissions(outer, self.latchkey.latchkey_directory, host_id)
+                sync_credentials(outer, self.latchkey.latchkey_directory)
             logger.info("Provisioned VPS-resident Latchkey gateway for agent {} on host {}", agent_id, host_id)
         finally:
             with self._pending_lock:
@@ -295,74 +319,72 @@ class LatchkeyDiscoveryHandler(MutableModel):
     # -- Remote credential/permission sync ----------------------------------
 
     def start_remote_state_sync(self, concurrency_group: ConcurrencyGroup) -> None:
-        """Start a background thread that keeps every known remote host's VPS in sync.
+        """Sync known remote hosts now, then watch for credential/permission changes.
 
-        On startup (and whenever a new remote host is provisioned) it syncs that
-        host's permissions and then credentials to its VPS -- permissions first,
-        which matters. It then watches the local credentials file (pushing
-        credentials to every known remote host on change) and each known host's
-        permissions file (pushing that host's permissions on change). The thread
-        is unchecked so a sync failure never tears down the shared supervisor;
-        the CG's ObservableThread still surfaces any uncaught error.
+        First syncs every currently-known remote host (permissions, then
+        credentials -- order matters). Then starts a ``watchdog`` observer that
+        pushes credentials to every known remote host whenever the local
+        credentials file changes, and pushes a single host's permissions
+        whenever that host's permissions file changes. (Newly-provisioned hosts
+        get their initial sync inline in the provisioning path.) The observer is
+        stopped when ``concurrency_group`` shuts down.
         """
+        self._sync_all_known_hosts()
+
+        latchkey_directory = self.latchkey.latchkey_directory
+        data_dir = self.latchkey.plugin_data_dir
+        watched_hosts_dir = hosts_dir(data_dir)
+        watched_hosts_dir.mkdir(parents=True, exist_ok=True)
+        event_handler = _LatchkeyStateChangeHandler(
+            credentials_path=local_credentials_path(latchkey_directory),
+            plugin_data_dir=data_dir,
+            known_remote_host_ids=self._known_remote_host_ids,
+            on_credentials_changed=self._sync_credentials_to_all_known_hosts,
+            on_host_permissions_changed=self._sync_permissions_to_host,
+        )
+        observer = Observer()
+        # The credentials file sits at the latchkey-directory root; the per-host
+        # permissions files live under the recursive hosts subtree.
+        observer.schedule(event_handler, str(latchkey_directory), recursive=False)
+        observer.schedule(event_handler, str(watched_hosts_dir), recursive=True)
+        observer.daemon = True
+        observer.start()
         concurrency_group.start_new_thread(
-            target=self._run_remote_state_sync_loop,
-            args=(concurrency_group,),
-            name="latchkey-remote-state-sync",
+            target=self._stop_observer_on_shutdown,
+            args=(observer, concurrency_group),
+            name="latchkey-remote-state-watch",
             is_checked=False,
         )
 
-    def _run_remote_state_sync_loop(self, concurrency_group: ConcurrencyGroup) -> None:
-        """Poll for credential/permission changes and sync them to remote hosts until shutdown."""
-        poll_event = threading.Event()
-        while not concurrency_group.is_shutting_down():
-            try:
-                self._run_remote_state_sync_once()
-            except (OSError, RuntimeError) as e:
-                logger.warning("Latchkey remote-state sync iteration failed: {}", e)
-            poll_event.wait(timeout=_REMOTE_STATE_SYNC_POLL_INTERVAL_SECONDS)
+    def _stop_observer_on_shutdown(self, observer: BaseObserver, concurrency_group: ConcurrencyGroup) -> None:
+        """Block until the CG shuts down, then stop the watchdog observer."""
+        concurrency_group.shutdown_event.wait()
+        observer.stop()
+        observer.join(timeout=_OBSERVER_STOP_TIMEOUT_SECONDS)
 
-    def _run_remote_state_sync_once(self) -> None:
-        """Run a single sync pass: initial syncs for new hosts, then credential / permission deltas."""
-        state = self._remote_sync_state
-        latchkey_directory = self.latchkey.latchkey_directory
-        data_dir = self.latchkey.plugin_data_dir
+    def _known_remote_host_ids(self) -> frozenset[str]:
+        with self._remote_hosts_lock:
+            return frozenset(self._remote_host_provider_by_id)
+
+    def _sync_all_known_hosts(self) -> None:
+        """Initial full sync (permissions then credentials) for every currently-known remote host."""
         with self._remote_hosts_lock:
             remote_hosts = dict(self._remote_host_provider_by_id)
-
-        # Newly-appeared remote hosts get a full initial sync: permissions first,
-        # then credentials. We record the baseline mtimes so the delta checks
-        # below don't immediately re-sync what we just pushed.
         for host_id_str, provider_name in remote_hosts.items():
-            if host_id_str not in state.synced_host_ids:
-                self._sync_state_to_host(host_id_str, provider_name, do_permissions=True, do_credentials=True)
-                state.synced_host_ids.add(host_id_str)
-                state.permissions_mtime_by_host[host_id_str] = _file_mtime(
-                    permissions_path_for_host(data_dir, HostId(host_id_str))
-                )
+            self._sync_state_to_host(host_id_str, provider_name, do_permissions=True, do_credentials=True)
 
-        # Local credentials file change -> push credentials to every known remote host.
-        current_credentials_mtime = _file_mtime(local_credentials_path(latchkey_directory))
-        if state.credentials_mtime is None:
-            # First pass: the initial sync above already pushed credentials, so
-            # just establish the baseline rather than re-pushing.
-            state.credentials_mtime = current_credentials_mtime
-        elif current_credentials_mtime != state.credentials_mtime:
-            state.credentials_mtime = current_credentials_mtime
-            for host_id_str, provider_name in remote_hosts.items():
-                self._sync_state_to_host(host_id_str, provider_name, do_permissions=False, do_credentials=True)
-        else:
-            # Credentials unchanged since the last pass; nothing to push.
-            pass
-
-        # Per-host permissions file change -> push that host's permissions.
+    def _sync_credentials_to_all_known_hosts(self) -> None:
+        with self._remote_hosts_lock:
+            remote_hosts = dict(self._remote_host_provider_by_id)
         for host_id_str, provider_name in remote_hosts.items():
-            if host_id_str not in state.synced_host_ids:
-                continue
-            permissions_mtime = _file_mtime(permissions_path_for_host(data_dir, HostId(host_id_str)))
-            if permissions_mtime != state.permissions_mtime_by_host.get(host_id_str):
-                state.permissions_mtime_by_host[host_id_str] = permissions_mtime
-                self._sync_state_to_host(host_id_str, provider_name, do_permissions=True, do_credentials=False)
+            self._sync_state_to_host(host_id_str, provider_name, do_permissions=False, do_credentials=True)
+
+    def _sync_permissions_to_host(self, host_id_str: str) -> None:
+        with self._remote_hosts_lock:
+            provider_name = self._remote_host_provider_by_id.get(host_id_str)
+        if provider_name is None:
+            return
+        self._sync_state_to_host(host_id_str, provider_name, do_permissions=True, do_credentials=False)
 
     def _sync_state_to_host(
         self,
