@@ -28,14 +28,12 @@ def redact_secret_flag_values(
     # mistaken for a flag on a later pass.
     for idx, token in enumerate(command):
         for flag in flags:
+            # A token that is neither the bare flag nor its joined form carries
+            # no secret for this flag, so it is left untouched.
             if token == flag:
                 value_idx = idx + 1
                 if value_idx < len(redacted):
                     redacted[value_idx] = REDACTED_PLACEHOLDER
             elif token.startswith(f"{flag}="):
                 redacted[idx] = f"{flag}={REDACTED_PLACEHOLDER}"
-            else:
-                # This token is neither the bare flag nor its joined form, so it
-                # carries no secret for this flag; leave it untouched.
-                pass
     return redacted
