@@ -59,6 +59,7 @@ from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import build_ssh_transport_command
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
+from imbue.mngr.hosts.file_upload import upload_files_in_bulk
 from imbue.mngr.hosts.offline_host import BaseHost
 from imbue.mngr.hosts.offline_host import apply_rename_to_agent_data
 from imbue.mngr.hosts.outer_host import OuterHost
@@ -1633,6 +1634,45 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             exclude_git=exclude_git,
         )
 
+    def copy_local_directory(self, source_path: Path, target_path: Path, extra_args: str | None) -> None:
+        """Copy a local-machine directory to self:target_path. See OnlineHostInterface."""
+        # rsync does not create intermediate parents for the destination root.
+        self.execute_idempotent_command(f"mkdir -p {shlex.quote(str(target_path))}", timeout_seconds=5.0)
+        # --keep-dirlinks (-K) is essential: on some hosts a destination directory is a
+        # symlink to real storage (e.g. on Modal, host_dir /mngr is a symlink into the
+        # mounted volume). Without -K, when the source has a real directory where the
+        # receiver has a symlink-to-directory, rsync DELETES the symlink and replaces it
+        # with a real directory on the ephemeral filesystem -- stranding everything that
+        # lived behind the symlink (e.g. agents/<id>/data.json on the volume) and writing
+        # our files to a non-persistent location. -K makes rsync follow the symlinked dir
+        # and write through it instead. See github issue 1825.
+        rsync_args = ["rsync", "-rlpt", "--keep-dirlinks"]
+        if extra_args:
+            rsync_args.extend(shlex.split(extra_args))
+        source_str = str(source_path).rstrip("/") + "/"
+        target_str = str(target_path).rstrip("/") + "/"
+
+        if self.is_local:
+            rsync_args.extend([source_str, target_str])
+            rsync_cmd = " ".join(shlex.quote(a) for a in rsync_args)
+            with log_span("rsync: local dir {} -> {}", source_path, target_path):
+                result = self.execute_idempotent_command(rsync_cmd)
+                if not result.success:
+                    raise MngrError(f"rsync failed (local): {result.stderr}")
+            return
+
+        ssh_info = self.get_ssh_connection_info()
+        assert ssh_info is not None
+        user, hostname, port, key_path = ssh_info
+        known_hosts = get_ssh_known_hosts_file(self)
+        rsync_args.extend(["-e", build_ssh_transport_command(key_path, port, known_hosts)])
+        rsync_args.extend([source_str, f"{user}@{hostname}:{target_str}"])
+        with log_span("rsync: local dir -> {}@{}:{}", user, hostname, port):
+            try:
+                self.mngr_ctx.concurrency_group.run_process_to_completion(rsync_args)
+            except ProcessError as e:
+                raise MngrError(f"rsync failed (push to {hostname}): {e.stderr}") from e
+
     def _rsync_files(
         self,
         source_host: OnlineHostInterface,
@@ -2126,9 +2166,23 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     agent.get_provision_file_transfers(host=self, options=options, mngr_ctx=mngr_ctx)
                 )
 
+            # Resolve the remote home once: bulk uploads stage files under their
+            # absolute remote paths, and relative destinations resolve against it.
+            # (Unused for local hosts, which write directly.) Fail loudly if the remote
+            # home cannot be determined -- an empty home would silently misplace every
+            # `~/...` or relative upload at the filesystem root instead of under $HOME.
+            remote_home = ""
+            if not self.is_local:
+                home_result = self.execute_idempotent_command("echo $HOME")
+                if not home_result.success:
+                    raise MngrError(f"Failed to determine remote home directory: {home_result.stderr}")
+                remote_home = home_result.stdout.strip()
+                if not remote_home:
+                    raise MngrError("Failed to determine remote home directory: $HOME resolved to an empty string")
+
             # Validate required files exist and execute transfers
             agent_file_transfer_thread = concurrency_group.start_new_thread(
-                self._execute_agent_file_transfers, (agent, all_file_transfers)
+                self._execute_agent_file_transfers, (agent, all_file_transfers, remote_home)
             )
 
             # Write environment variables to agent env file (before agent.provision()
@@ -2161,12 +2215,15 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     self._mkdir(directory)
                     logger.trace("Created directory: {}", directory)
 
-                # Upload files (read from local filesystem, write to host)
-                for upload_spec in provisioning.upload_files:
-                    # Read from local filesystem (not via host primitives)
-                    local_content = upload_spec.local_path.read_bytes()
-                    self.write_file(upload_spec.remote_path, local_content)
-                    logger.trace("Uploaded file: {} -> {}", upload_spec.local_path, upload_spec.remote_path)
+                # Upload files in a single bulk transfer (rsync for remote hosts).
+                # skip_missing=False: a user-specified upload whose source is missing
+                # is an error.
+                upload_files_in_bulk(
+                    self,
+                    {spec.remote_path: spec.local_path for spec in provisioning.upload_files},
+                    remote_home,
+                    skip_missing=False,
+                )
 
                 # Build the source prefix for commands (sources host env, then agent env)
                 source_prefix = self.build_source_env_prefix(agent)
@@ -2204,6 +2261,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         """
         host_commands = self.host_dir / "commands"
         agent_commands = self._get_agent_state_dir(agent) / "commands"
+        # These should stay per-file write_file calls (not upload_files_in_bulk) because
+        # they need the executable bit (mode="0755"), which the rsync staging helper does
+        # not preserve. The set is fixed and tiny (two libs x two destinations), so the
+        # per-file cost is negligible and this is exempt from the bulk-upload ratchet.
         for name in self._SHARED_SHELL_LIB_NAMES:
             content_bytes = importlib.resources.files(mngr_resources).joinpath(name).read_text().encode()
             self.write_file(host_commands / name, content_bytes, mode="0755")
@@ -2213,12 +2274,14 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         self,
         agent: AgentInterface,
         transfers: list[FileTransferSpec],
+        remote_home: str,
     ) -> None:
         """Validate and execute file transfers from the agent.
 
-        First validates that all required files exist, then executes transfers.
-        Always emits a "Transferring agent files" log_span (with count=0 when
-        the agent declared no transfers) so timing is visible at -vv.
+        First validates that all required files exist, then transfers everything in a
+        single bulk upload (rsync for remote hosts). Always emits a "Transferring agent
+        files" log_span (with count=0 when the agent declared no transfers) so timing is
+        visible at -vv.
         """
         with log_span("Transferring agent files", count=len(transfers)):
             if not transfers:
@@ -2234,18 +2297,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 missing_str = ", ".join(str(p) for p in missing_required)
                 raise MngrError(f"Required files for provisioning not found: {missing_str}")
 
-            for transfer in transfers:
-                if not transfer.local_path.exists():
-                    # Optional file doesn't exist, skip it
-                    logger.trace("Skipped optional file transfer (file not found): {}", transfer.local_path)
-                    continue
-
-                # Resolve relative remote paths to work_dir
-                remote_path = agent.work_dir / transfer.agent_path
-
-                local_content = transfer.local_path.read_bytes()
-                self.write_file(remote_path, local_content)
-                logger.trace("Transferred agent file: {} -> {}", transfer.local_path, remote_path)
+            # Required files were validated above; skip_missing=True drops any optional
+            # transfer whose source does not exist.
+            uploads = {agent.work_dir / transfer.agent_path: transfer.local_path for transfer in transfers}
+            upload_files_in_bulk(self, uploads, remote_home, skip_missing=True)
 
     def rename_agent(
         self,

@@ -603,6 +603,18 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
         ...
 
     @abstractmethod
+    def copy_local_directory(self, source_path: Path, target_path: Path, extra_args: str | None) -> None:
+        """Copy a directory from the local machine (where mngr runs) to self:target_path.
+
+        Like ``copy_directory`` with a local source, but takes no source-host object --
+        the source is always the local filesystem. This lets the host layer push staged
+        files without resolving a local host (which would require ``mngr.api.providers``
+        and hit an import cycle). Uses rsync (additive, no ``--delete``); ``extra_args``
+        is appended to the rsync invocation (e.g. ``--include``/``--exclude`` filters).
+        """
+        ...
+
+    @abstractmethod
     def save_agent_data(self, agent_id: AgentId, agent_data: Mapping[str, object]) -> None:
         """Persist agent data to external storage.
 

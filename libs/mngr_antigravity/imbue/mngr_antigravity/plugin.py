@@ -37,9 +37,11 @@ agent exposes no permission-specific WAITING reason.
 Transcript support: enabled by default. ``stream_transcript.sh`` tails agy's
 per-conversation JSONL files at
 ``~/.gemini/antigravity-cli/brain/<conv_id>/.system_generated/logs/transcript.jsonl``,
-filtered to conversation IDs that *this* agent created (discovered by
-grepping agy's own ``--log-file``). ``common_transcript.sh`` converts to
-the agent-agnostic schema that ``mngr transcript`` reads.
+filtered to conversation IDs that *this* agent worked on (discovered from the
+per-agent conversation-ids file the ``PreInvocation`` capture hook maintains;
+see ``CONVERSATION_IDS_FILENAME`` and ``capture_conversation_id.sh``).
+``common_transcript.sh`` converts to the agent-agnostic schema that ``mngr
+transcript`` reads.
 """
 
 from __future__ import annotations
@@ -75,6 +77,8 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.utils.git_utils import find_git_common_dir
 from imbue.mngr_antigravity import resources as _antigravity_resources
+from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
+from imbue.mngr_antigravity.antigravity_config import CONVERSATION_IDS_FILENAME
 from imbue.mngr_antigravity.antigravity_config import TRUSTED_WORKSPACES_KEY
 from imbue.mngr_antigravity.antigravity_config import build_antigravity_hooks_config
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_user_settings_path
@@ -113,13 +117,10 @@ _RAW_TRANSCRIPT_SCRIPT_NAME: Final[str] = "stream_transcript.sh"
 # converter. Mirrors the mngr_claude background-tasks pattern.
 _BACKGROUND_TASKS_SCRIPT_NAME: Final[str] = "antigravity_background_tasks.sh"
 
-# Env var consumed by stream_transcript.sh to locate agy's --log-file. We
-# also pass `--log-file <path>` to agy itself in ``assemble_command`` so
-# the conversation-id discovery has something to grep against.
-_AGY_LOG_FILE_ENV_VAR: Final[str] = "ANTIGRAVITY_AGY_LOG_FILE"
-
 # Relative path under $MNGR_AGENT_STATE_DIR for the agy --log-file. Keeping
-# it under logs/ groups it with the other per-agent log artifacts.
+# it under logs/ groups it with the other per-agent log artifacts. This is a
+# debugging log; conversation-id discovery uses the capture-hook file (see
+# ``CONVERSATION_IDS_FILENAME``), not this log.
 _AGY_LOG_FILE_RELATIVE_PATH: Final[str] = "logs/agy_cli.log"
 
 # Parent directory for the per-agent symlinks that work around agy's
@@ -280,15 +281,17 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         """
         return self._get_agy_hooks_dir() / ".agents" / "hooks.json"
 
-    def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
-        """Expose the agy --log-file path to stream_transcript.sh.
+    def _get_conversation_ids_file_path(self) -> Path:
+        """Per-agent file recording the agy conversation IDs this agent worked on.
 
-        The streamer needs to grep agy's own log for ``Created conversation
-        <uuid>`` lines to scope its watch to this agent's conversations.
-        Setting the env var here keeps the script-side path consistent with
-        the value we pass to ``agy --log-file`` in ``assemble_command``.
+        Written by ``capture_conversation_id.sh`` (the ``PreInvocation`` capture
+        hook); read on restart by ``assemble_command`` (last line -> resume that
+        conversation) and by ``stream_transcript.sh`` (unique lines -> tail each
+        conversation's transcript). Lives directly under the agent state dir so
+        the hook's ``$MNGR_AGENT_STATE_DIR/{CONVERSATION_IDS_FILENAME}`` and this
+        path resolve to the same file.
         """
-        env_vars[_AGY_LOG_FILE_ENV_VAR] = str(self._get_agy_log_file_path())
+        return self._get_agent_dir() / CONVERSATION_IDS_FILENAME
 
     def provision(
         self,
@@ -331,7 +334,14 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
             provision_scripts_to_commands_dir(
                 host,
                 self._get_agent_dir(),
-                {_BACKGROUND_TASKS_SCRIPT_NAME: _load_antigravity_resource_script(_BACKGROUND_TASKS_SCRIPT_NAME)},
+                {
+                    _BACKGROUND_TASKS_SCRIPT_NAME: _load_antigravity_resource_script(_BACKGROUND_TASKS_SCRIPT_NAME),
+                    # Run by the PreInvocation capture hook to record the active
+                    # conversation ID (see build_antigravity_hooks_config).
+                    CAPTURE_CONVERSATION_ID_SCRIPT_NAME: _load_antigravity_resource_script(
+                        CAPTURE_CONVERSATION_ID_SCRIPT_NAME
+                    ),
+                },
                 concurrency_group,
             )
 
@@ -612,25 +622,31 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         4. ``cd <ws_symlink>`` -- launches agy with cwd set to the workspace
            symlink, so agy's "project: using project ..." log line names the
            symlink path (not the resolved dotted target).
-        5. ``agy <user_args> --log-file <state>/logs/agy_cli.log
-           --add-dir <hooks_symlink> [--dangerously-skip-permissions]`` --
+        5. ``{ <resume-prelude>; agy <user_args> --log-file <state>/logs/agy_cli.log
+           --add-dir <hooks_symlink> [--dangerously-skip-permissions] "$@"; }`` --
            foreground process. The ``--add-dir`` makes agy load and execute the
-           per-agent ``hooks.json`` (the active marker; see
-           ``build_antigravity_hooks_config``). The flag is appended only when
+           per-agent ``hooks.json`` (the active marker + the conversation-ID
+           capture hook; see ``build_antigravity_hooks_config``). The
+           ``--dangerously-skip-permissions`` flag is appended only when
            ``auto_allow_permissions`` is set.
+
+        The resume-prelude resumes the agent's most-recently-active
+        conversation via ``agy --conversation`` on restart; it is shell-
+        evaluated at launch because the stored command is replayed on every
+        ``mngr start`` (see the inline comment on its construction below).
 
         Bash precedence note: ``A & B && C && D && E`` parses as ``A &``
         followed by ``B && C && D && E``. The supervisor's subshell is
-        therefore scoped to ``&``, while ``mkdir`` / ``ln`` / ``cd`` / ``agy``
-        form a foreground sequential chain.
+        therefore scoped to ``&``, while ``mkdir`` / ``ln`` / ``cd`` / the agy
+        group form a foreground sequential chain.
 
         ``ln -sfn`` is idempotent: re-running on every launch (including
         restarts) updates the symlink in place; ``/tmp`` wipes self-repair
         on the next launch.
 
-        The ``--log-file`` arg pipes agy's internal log to a per-agent
-        path; stream_transcript.sh greps it for ``Created conversation
-        <uuid>`` to scope its watch to this agent.
+        The ``--log-file`` arg writes agy's internal log to a per-agent path
+        for debugging. (Conversation-ID discovery reads the capture-hook file,
+        ``CONVERSATION_IDS_FILENAME``, not this log.)
         """
         log_file_path = self._get_agy_log_file_path()
         hooks_dir = self._get_agy_hooks_dir()
@@ -662,9 +678,25 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         hooks_ln_cmd = f"ln -sfn {shlex.quote(str(hooks_dir))} {shlex.quote(hooks_symlink_path)}"
         cd_cmd = f"cd {shlex.quote(symlink_path)}"
 
+        # Resume the last-recorded conversation via `agy --conversation`,
+        # evaluated here in the shell because the stored command is replayed on
+        # each restart. agy resumes from its own incrementally-written store
+        # (which survives the hard kill `mngr stop` performs) and, if the
+        # conversation was pruned, warns and starts fresh on its own -- so we
+        # pass the flag whenever an id is recorded and don't stat the store
+        # ourselves (which would couple us to agy's on-disk layout). `set --` /
+        # "$@" appends the flag without unquoted-substitution word splitting,
+        # so it works under both bash and zsh.
+        quoted_ids_file = shlex.quote(str(self._get_conversation_ids_file_path()))
+        resume_prelude = (
+            f"__mngr_cid=$(tail -n 1 {quoted_ids_file} 2>/dev/null || true); set --; "
+            'if [ -n "$__mngr_cid" ]; then set -- --conversation "$__mngr_cid"; fi'
+        )
+        agy_invocation = f"{base_command} {' '.join(extra_args)}"
+
         return CommandString(
             f"{background_cmd} {mkdir_cmd} && {ln_cmd} && {hooks_ln_cmd} && {cd_cmd} "
-            f"&& {base_command} {' '.join(extra_args)}"
+            f'&& {{ {resume_prelude}; {agy_invocation} "$@" ; }}'
         )
 
 
