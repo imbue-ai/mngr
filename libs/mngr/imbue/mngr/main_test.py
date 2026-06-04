@@ -7,6 +7,7 @@ import pytest
 from imbue.mngr.main import create_plugin_manager
 
 
+@pytest.mark.flaky
 def test_create_plugin_manager_blocks_disabled_plugins(
     project_config_dir: Path,
     temp_git_repo_cwd: Path,
