@@ -1044,7 +1044,6 @@ def _emit_latest_cached_snapshot(
     emitted_event_ids: set[str],
     emit_lock: Lock,
     on_line: Callable[[str], None] | None,
-    # (byte offset consumed so a subsequent tail resumes there, whether a cached snapshot was emitted)
 ) -> tuple[int, bool]:
     """Emit lines from the latest full snapshot on disk, if any.
 
