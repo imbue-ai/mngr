@@ -13,6 +13,7 @@ from imbue.mngr.errors import NestedTmuxError
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.utils.deps import SSH
 from imbue.mngr.utils.duration import parse_duration_to_seconds
 from imbue.mngr.utils.interactive_subprocess import run_interactive_subprocess
 from imbue.mngr.utils.polling import poll_until
@@ -114,7 +115,11 @@ def build_ssh_base_args(
 
     Raises MngrError if no known_hosts file is configured and
     is_unknown_host_allowed is False.
+    Raises BinaryNotInstalledError if the ssh binary is not installed (ssh is an
+    optional dependency, only needed to attach to remote agents).
     """
+    SSH.require()
+
     pyinfra_host = host.connector.host
     ssh_host = pyinfra_host.name
     ssh_user = pyinfra_host.data.get("ssh_user")
