@@ -98,7 +98,14 @@ def _has_api_credentials_available(
 
     auth_path = _get_pi_home_dir(home_dir) / "auth.json"
     if auth_path.exists():
-        auth_data = json.loads(auth_path.read_text())
+        # This is a best-effort heuristic that only drives a warning, so a corrupt or
+        # unreadable auth.json must not abort provisioning -- treat it as "no credentials".
+        try:
+            auth_data = json.loads(auth_path.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("Could not read pi auth.json at {}: {}", auth_path, e)
+            return False
+        # A present-but-empty auth.json ({}) legitimately means no credentials.
         if auth_data:
             return True
 
@@ -197,6 +204,10 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig]):
         """Set up the per-agent config dir on a local host via symlinks."""
         home_pi = _get_pi_home_dir(home_dir)
 
+        # Resource sync is best-effort: unlike the mkdir in _setup_per_agent_config_dir
+        # (which raises), an individual symlink failure here only warns and continues. Pi
+        # credential/settings sync is advisory -- on_before_provisioning already surfaces
+        # the no-credentials case -- so a failed symlink should not abort provisioning.
         if config.sync_auth:
             auth_source = home_pi / "auth.json"
             if auth_source.exists():
@@ -219,7 +230,9 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig]):
 
             for dir_name in ("skills", "prompts", "extensions", "themes"):
                 source = home_pi / dir_name
-                if source.exists():
+                # These resources are expected to be directories; skip non-dir entries to
+                # stay consistent with the remote path (_setup_remote_config_dir).
+                if source.exists() and source.is_dir():
                     result = host.execute_idempotent_command(
                         f"ln -sf {shlex.quote(str(source))} {shlex.quote(str(config_dir / dir_name))}",
                         timeout_seconds=5.0,

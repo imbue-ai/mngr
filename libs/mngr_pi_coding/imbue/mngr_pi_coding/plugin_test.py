@@ -21,6 +21,7 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr_pi_coding.plugin import PiCodingAgent
 from imbue.mngr_pi_coding.plugin import PiCodingAgentConfig
+from imbue.mngr_pi_coding.plugin import _has_api_credentials_available
 from imbue.mngr_pi_coding.plugin import register_agent_type
 
 # =============================================================================
@@ -192,6 +193,33 @@ def test_on_before_provisioning_completes_without_credentials(pi_agent: PiCoding
     mngr_ctx = _make_test_mngr_ctx(tmp_path)
 
     pi_agent.on_before_provisioning(host, options, mngr_ctx)
+
+
+def test_has_api_credentials_available_with_corrupt_auth_returns_false(tmp_path: Path) -> None:
+    """A corrupt auth.json must not raise -- it is treated as no credentials available."""
+    home = _setup_home_pi(tmp_path)
+    (home / ".pi" / "agent" / "auth.json").write_text("{not valid json")
+    host = _stub_host(tmp_path, is_local=False)
+
+    assert _has_api_credentials_available(host, _make_options(), home) is False
+
+
+def test_has_api_credentials_available_with_valid_auth_returns_true(tmp_path: Path) -> None:
+    """A non-empty auth.json indicates credentials are available."""
+    home = _setup_home_pi(tmp_path)
+    (home / ".pi" / "agent" / "auth.json").write_text('{"anthropic": {"type": "api_key"}}')
+    host = _stub_host(tmp_path, is_local=False)
+
+    assert _has_api_credentials_available(host, _make_options(), home) is True
+
+
+def test_has_api_credentials_available_with_empty_auth_returns_false(tmp_path: Path) -> None:
+    """A present-but-empty auth.json ({}) means no credentials are configured."""
+    home = _setup_home_pi(tmp_path)
+    (home / ".pi" / "agent" / "auth.json").write_text("{}")
+    host = _stub_host(tmp_path, is_local=False)
+
+    assert _has_api_credentials_available(host, _make_options(), home) is False
 
 
 # =============================================================================
