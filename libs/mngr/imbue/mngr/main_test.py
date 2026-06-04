@@ -10,8 +10,13 @@ from imbue.mngr.main import create_plugin_manager
 def test_create_plugin_manager_blocks_disabled_plugins(
     project_config_dir: Path,
     temp_git_repo_cwd: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """create_plugin_manager should block plugins disabled in config files."""
+    # Blocking is skipped when MNGR_LOAD_ALL_PLUGINS is set, so make this test's
+    # precondition explicit rather than relying on it being absent from the ambient
+    # environment (e.g. another test or an imported module may have set it).
+    monkeypatch.delenv("MNGR_LOAD_ALL_PLUGINS", raising=False)
     (project_config_dir / "settings.toml").write_text(
         "is_allowed_in_pytest = true\n\n[plugins.modal]\nenabled = false\n"
     )
