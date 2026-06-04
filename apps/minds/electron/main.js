@@ -494,6 +494,20 @@ function wireContentViewEvents(bundle, contentView) {
   });
 }
 
+// Open devtools in a detached window (vs. the default docked panel) because
+// several minds views -- the 38px titlebar, the 260px sidebar, the requests
+// panel -- are too small to render a useful docked devtools next to them.
+// A detached window means devtools can be sized + repositioned independently
+// without stealing any real estate from the view being inspected.
+function toggleDevToolsDetached(wc) {
+  if (!wc || wc.isDestroyed()) return;
+  if (wc.isDevToolsOpened()) {
+    wc.closeDevTools();
+  } else {
+    wc.openDevTools({ mode: 'detach' });
+  }
+}
+
 function registerShortcutsFor(bundle, wc) {
   wc.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown') return;
@@ -517,7 +531,7 @@ function registerShortcutsFor(bundle, wc) {
         : bundle.contentView && !bundle.contentView.webContents.isDestroyed()
           ? bundle.contentView.webContents
           : null;
-      if (target) target.toggleDevTools();
+      toggleDevToolsDetached(target);
       return;
     }
     // When the app menu is installed, it owns cmd+W / cmd+Q / cmd+N; handling
@@ -1586,15 +1600,13 @@ function installApplicationMenu() {
           click: () => {
             const focused = webContents.getFocusedWebContents();
             if (focused && !focused.isDestroyed()) {
-              focused.toggleDevTools();
+              toggleDevToolsDetached(focused);
               return;
             }
             const bundle = getMostRecentWindow();
             if (!bundle || bundle.window.isDestroyed()) return;
             const cv = bundle.contentView;
-            if (cv && !cv.webContents.isDestroyed()) {
-              cv.webContents.toggleDevTools();
-            }
+            if (cv) toggleDevToolsDetached(cv.webContents);
           },
         },
         { type: 'separator' },
