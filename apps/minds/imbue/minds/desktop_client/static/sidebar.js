@@ -18,7 +18,10 @@
   function getAccent(agentId, cb) { window.mindsAccent.get(agentId, cb); }
 
   function selectWorkspace(agentId) {
-    if (isElectron) window.minds.navigateContent(mngrForwardOrigin + '/goto/' + agentId + '/');
+    // Route through minds' /select-workspace/<id> chokepoint so the
+    // server persists the active id and fans out an SSE event before
+    // 303-ing onward to mngr_forward's /goto/<id>/. See chrome.js.
+    if (isElectron) window.minds.navigateContent('/select-workspace/' + agentId);
   }
 
   function openInNewWindow(agentId) {
@@ -144,24 +147,29 @@
     window.minds.onCurrentWorkspaceChanged(function (agentId) {
       currentWorkspaceId = agentId || null;
       renderWorkspaces(lastWorkspaces);
-      // The sidebar is its own WebContentsView with its own <html>, so
-      // chrome.js's activate() doesn't reach it. Mirror the call here
-      // so the sidebar surface flips to the active workspace's color
-      // in sync with the chrome titlebar. No-op when agentId is null
-      // (the user navigated to a non-workspace URL); the sidebar stays
-      // tinted with whichever workspace it last saw.
-      if (agentId && window.mindsWorkspaceColor && window.mindsWorkspaceColor.activate) {
-        window.mindsWorkspaceColor.activate(agentId).catch(function (e) {
-          if (window.console && console.debug) console.debug('sidebar activate failed:', e);
-        });
-      }
+      // Workspace-color flip is driven by the `active_workspace` SSE
+      // event (server fans it out to every subscribed surface). This
+      // IPC handler only re-renders the workspace list so the "active"
+      // row gets its visual mark.
     });
   }
 
   function handleChromeEvent(data) {
-    if (data.type !== 'workspaces') return;
-    lastWorkspaces = data.workspaces || [];
-    renderWorkspaces(lastWorkspaces);
+    if (data.type === 'workspaces') {
+      lastWorkspaces = data.workspaces || [];
+      renderWorkspaces(lastWorkspaces);
+      return;
+    }
+    // The sidebar is its own WebContentsView with its own <html>, so the
+    // active-workspace SSE event needs to be applied here independently
+    // of chrome.js. Same payload shape; same two <html> attributes.
+    if (data.type === 'active_workspace' && window.mindsWorkspaceColor) {
+      window.mindsWorkspaceColor.applyToHtml(
+        document.documentElement,
+        data.resolved_hex,
+        data.theme,
+      );
+    }
   }
 
   if (isElectron && window.minds.onChromeEvent) {

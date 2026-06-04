@@ -53,10 +53,11 @@ let hasCompletedInitialStart = false;
 // chrome/sidebar webContents can be primed without opening their own SSE
 // connection.
 const latestChromeState = {
-  workspaces: null, // most recent workspaces payload
-  authStatus: null, // most recent auth_status payload
-  requestCount: 0,  // most recent pending-request count
-  requestIds: [],   // most recent ordered list of pending request ids
+  workspaces: null,       // most recent workspaces payload
+  authStatus: null,       // most recent auth_status payload
+  requestCount: 0,        // most recent pending-request count
+  requestIds: [],         // most recent ordered list of pending request ids
+  activeWorkspace: null,  // most recent active_workspace payload (color flip)
 };
 
 const chromeSseAbortRef = { current: null };
@@ -82,10 +83,16 @@ function parseWorkspaceId(url) {
     // Final workspace URL: `<agent-id>.localhost:PORT/...`
     const hostMatch = parsed.hostname.match(/^(agent-[a-f0-9]+)\.localhost$/i);
     if (hostMatch) return hostMatch[1];
-    // Auth-bridge URL: `localhost:PORT/goto/<agent-id>/` is the pending
-    // state before the subdomain cookie is installed. Recognising it lets
-    // findBundleForWorkspace de-dupe clicks during the redirect window.
-    const pathMatch = parsed.pathname.match(/^\/goto\/(agent-[a-f0-9]+)(?:\/|$)/i);
+    // Workspace-selection chokepoint and auth-bridge URLs, both pending
+    // states before the subdomain cookie is installed:
+    //   - `/select-workspace/<agent-id>`  -> minds, 303s to /goto/<id>/
+    //   - `/goto/<agent-id>/`             -> mngr_forward, redirects to subdomain
+    // Recognising both lets findBundleForWorkspace de-dupe clicks during
+    // the redirect window even if the content view briefly sits on the
+    // chokepoint URL before its 303 lands.
+    const pathMatch = parsed.pathname.match(
+      /^\/(?:goto|select-workspace)\/(agent-[a-f0-9]+)(?:\/|$)/i,
+    );
     return pathMatch ? pathMatch[1] : null;
   } catch {
     return null;
@@ -1144,6 +1151,12 @@ function handleChromeSSEEvent(evt) {
         }
       }
     }
+  } else if (evt.type === 'active_workspace') {
+    // Cache so newly-opened views can be primed without waiting for the
+    // next /select-workspace/<id> click. The renderer applies the
+    // payload's resolved_hex + theme to <html>; this main-process side
+    // just stores the latest so primeViewWithCachedChromeState sends it.
+    latestChromeState.activeWorkspace = evt;
   }
   broadcastChromeEvent(evt);
 }
@@ -1168,6 +1181,9 @@ function primeViewWithCachedChromeState(wc) {
   }
   if (latestChromeState.authStatus) {
     wc.send('chrome-event', latestChromeState.authStatus);
+  }
+  if (latestChromeState.activeWorkspace) {
+    wc.send('chrome-event', latestChromeState.activeWorkspace);
   }
   wc.send('chrome-event', {
     type: 'requests',

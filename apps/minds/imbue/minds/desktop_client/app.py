@@ -7,6 +7,7 @@ import shlex
 import threading
 import time
 from collections.abc import AsyncGenerator
+from collections.abc import Callable
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -60,6 +61,7 @@ from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
 from imbue.minds.desktop_client.deps import BackendResolverDep
+from imbue.minds.desktop_client.design_tokens import DEFAULT_WORKSPACE_PRESET
 from imbue.minds.desktop_client.design_tokens import WorkspaceColor
 from imbue.minds.desktop_client.design_tokens import theme_for
 from imbue.minds.desktop_client.destroying import DestroyingStatus
@@ -1645,6 +1647,32 @@ def _handle_chrome_page(
     return HTMLResponse(content=html)
 
 
+def _build_active_workspace_payload(
+    minds_config: MindsConfig | None,
+    backend_resolver: BackendResolverInterface,
+) -> dict[str, str | None]:
+    """SSE payload describing the current active workspace's color.
+
+    Sent to every subscribed chrome surface so each one can flip its
+    own ``<html data-theme>`` + ``--workspace-bg`` in place without any
+    chrome <-> content communication. Always includes the resolved hex
+    + theme so JS callers don't repeat the luminance math. When no
+    workspace is active (fresh install, or the active id no longer
+    maps to a known workspace), returns the everywhere-default
+    ``confusion`` color so the chrome flips back to its baseline.
+    """
+    color = _resolve_active_workspace_color(minds_config, backend_resolver) or WorkspaceColor(
+        DEFAULT_WORKSPACE_PRESET.value
+    )
+    active_id = minds_config.get_active_workspace_id() if minds_config is not None else None
+    return {
+        "active_workspace_id": active_id,
+        "color": str(color),
+        "resolved_hex": color.resolve_hex(),
+        "theme": theme_for(color).value,
+    }
+
+
 def _resolve_active_workspace_color(
     minds_config: MindsConfig | None,
     backend_resolver: BackendResolverInterface,
@@ -1731,6 +1759,17 @@ async def _handle_chrome_events(
         if tracker is not None:
             tracker.add_on_change_callback(_on_health_change)
 
+        # Active-workspace fan-out: subscribe to the per-app listener list
+        # so /select-workspace/<id> and /api/active-workspace/<id> wake us
+        # immediately. ``call_soon_threadsafe`` keeps the writer safe to
+        # invoke from any thread (today both writers are on the same loop,
+        # but the contract is the same as the resolver / tracker callbacks).
+        def _on_active_workspace_change() -> None:
+            loop.call_soon_threadsafe(change_event.set)
+
+        active_workspace_listeners: list[Callable[[], None]] = request.app.state.active_workspace_listeners
+        active_workspace_listeners.append(_on_active_workspace_change)
+
         try:
             # Send initial workspace list and request count
             session_store: MultiAccountSessionStore | None = request.app.state.session_store
@@ -1769,6 +1808,13 @@ async def _handle_chrome_events(
                     yield "data: {}\n\n".format(
                         json.dumps(_system_interface_status_payload(tracker, str(aid), status))
                     )
+
+            # Initial active-workspace state: every subscribed chrome
+            # surface needs to know the current color on connect so it
+            # can render without waiting for the next click. Tracks the
+            # last-emitted payload so the loop only re-emits on change.
+            last_active_workspace_payload = _build_active_workspace_payload(minds_config, backend_resolver)
+            yield "data: {}\n\n".format(json.dumps({"type": "active_workspace", **last_active_workspace_payload}))
 
             # Wait for changes and push updates until client disconnects.
             #
@@ -1852,11 +1898,22 @@ async def _handle_chrome_events(
                     yield "data: {}\n\n".format(
                         json.dumps({"type": "requests", **current_requests_payload, "auto_open": auto_open})
                     )
+
+                current_active_workspace_payload = _build_active_workspace_payload(minds_config, backend_resolver)
+                if current_active_workspace_payload != last_active_workspace_payload:
+                    last_active_workspace_payload = current_active_workspace_payload
+                    yield "data: {}\n\n".format(
+                        json.dumps({"type": "active_workspace", **current_active_workspace_payload})
+                    )
         finally:
             if isinstance(backend_resolver, MngrCliBackendResolver):
                 backend_resolver.remove_on_change_callback(_on_change)
             if tracker is not None:
                 tracker.remove_on_change_callback(_on_health_change)
+            try:
+                active_workspace_listeners.remove(_on_active_workspace_change)
+            except ValueError:
+                pass
 
     return StreamingResponse(
         _event_generator(),
@@ -2953,6 +3010,66 @@ async def _handle_set_workspace_color(
     )
 
 
+def _notify_active_workspace_change(request: Request) -> None:
+    """Wake every open /_chrome/events SSE so it can diff + emit the new active workspace.
+
+    Each subscribed SSE generator registered a callback (typically a
+    threadsafe wrapper over ``asyncio.Event.set``) in
+    ``app.state.active_workspace_listeners`` on entry. Calling them all
+    here is the only synchronization mechanism between writes
+    (``/select-workspace/<id>``, ``/api/active-workspace/<id>``) and the
+    SSE generators that need to fan the new color out to every
+    subscribed chrome surface.
+    """
+    listeners: list[Callable[[], None]] | None = request.app.state.active_workspace_listeners
+    if not listeners:
+        return
+    # Iterate over a copy so a listener that removes itself doesn't
+    # mutate the list mid-iteration. RuntimeError can fire from
+    # ``call_soon_threadsafe`` if the event loop has been closed (e.g.
+    # the SSE connection is shutting down concurrently with the write);
+    # treat that as "this subscriber is going away, skip it" rather
+    # than failing the write.
+    for listener in list(listeners):
+        try:
+            listener()
+        except RuntimeError as e:
+            logger.warning("active_workspace listener raised RuntimeError: {}", e)
+
+
+def _handle_select_workspace(
+    request: Request,
+    agent_id: str,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Single chokepoint for "user opened workspace <id>".
+
+    Every workspace-selection click (Landing row, sidebar item, future
+    titlebar workspace switcher) navigates here -- the server then
+    persists the new active id, fans the change out over the chrome SSE
+    so subscribed surfaces flip color in place, and 302s onward to the
+    actual workspace URL.
+
+    Routing through one server-side URL (rather than each click handler
+    POSTing then navigating) means minds always learns about workspace
+    selection without the chrome having to introspect what URL the
+    content view is on. That's important architecturally: the trust
+    boundary forbids chrome <-> content communication, so the chrome
+    can't infer "you're now in workspace X" by reading the iframe URL.
+    The selection URL gives the server one observation point that every
+    selection naturally flows through.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content="Not authenticated")
+    minds_config: MindsConfig | None = request.app.state.minds_config
+    if minds_config is not None:
+        minds_config.set_active_workspace_id(agent_id)
+        _notify_active_workspace_change(request)
+    mngr_forward_origin = _get_mngr_forward_origin(request)
+    target = f"{mngr_forward_origin}/goto/{agent_id}/" if mngr_forward_origin else f"/goto/{agent_id}/"
+    return Response(status_code=303, headers={"Location": target})
+
+
 def _handle_set_active_workspace(
     request: Request,
     agent_id: str,
@@ -2960,14 +3077,10 @@ def _handle_set_active_workspace(
 ) -> Response:
     """Set the most-recently-visited workspace id.
 
-    Called from ``chrome.js`` whenever the iframe navigates to a
-    workspace-scoped URL (``/goto/<id>/``, ``/workspace/<id>/...``,
-    ``/sharing/<id>/...``, ``/destroying/<id>``) so the chrome and any
-    pre-workspace pages (Landing, Welcome) render in that workspace's
-    color from that point onward -- including across app restarts.
-
-    The response carries the new active workspace's color + theme so the
-    caller can apply it in-place without a second round-trip.
+    Kept alongside the canonical ``/select-workspace/<id>`` chokepoint
+    for callers that need the color/theme returned in the response
+    body (e.g. the WorkspaceSettings color picker, which applies the
+    change in-place). Both paths persist + notify identically.
     """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(
@@ -2983,6 +3096,7 @@ def _handle_set_active_workspace(
             media_type="application/json",
         )
     minds_config.set_active_workspace_id(agent_id)
+    _notify_active_workspace_change(request)
     color = minds_config.get_workspace_color(agent_id)
     payload = {**_workspace_color_payload(color), "active_workspace_id": agent_id}
     return Response(
@@ -3016,6 +3130,7 @@ def _handle_clear_active_workspace(
             media_type="application/json",
         )
     minds_config.set_active_workspace_id(None)
+    _notify_active_workspace_change(request)
     return Response(status_code=204)
 
 
@@ -3547,6 +3662,15 @@ def create_desktop_client(
     # event loop's thread but the SSE handlers read it from the same
     # thread, so awaitability buys us nothing here.
     app.state.shutdown_event = threading.Event()
+    # Per-app list of wakeup callbacks invoked whenever the active workspace
+    # id changes (via /select-workspace/<id> or /api/active-workspace/<id>).
+    # Each open /_chrome/events SSE connection registers a callback on entry
+    # and removes it on exit; the callback wakes the SSE generator so it can
+    # diff + emit an ``active_workspace`` event with the new color. Using a
+    # plain list (not asyncio.Event) so multiple concurrent SSE connections
+    # each get woken; the callbacks themselves use ``call_soon_threadsafe``
+    # internally so the writer can be called from any thread.
+    app.state.active_workspace_listeners = []
     app.state.agent_creator = agent_creator
     # Applies onboarding answers (Q1 local scan, Q2 chat message, Q3 memory
     # file) on a background thread. Available whenever agent creation is: it
@@ -3660,6 +3784,10 @@ def create_desktop_client(
     # color when the iframe navigates into a workspace).
     app.post("/api/active-workspace/{agent_id}")(_handle_set_active_workspace)
     app.delete("/api/active-workspace")(_handle_clear_active_workspace)
+    # Canonical workspace-selection chokepoint: every "open workspace X"
+    # click navigates here; the route persists the active id, fans out
+    # over the chrome SSE, then 302s to mngr_forward's /goto/<id>/.
+    app.get("/select-workspace/{agent_id}")(_handle_select_workspace)
     app.get("/requests/{request_id}")(_handle_request_page)
     app.post("/requests/{request_id}/grant")(_handle_request_grant)
     app.post("/requests/{request_id}/deny")(_handle_request_deny)

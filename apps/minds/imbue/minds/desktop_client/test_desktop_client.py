@@ -1486,6 +1486,33 @@ def test_clear_active_workspace_removes_the_id(tmp_path: Path) -> None:
     assert "active_workspace_id" not in raw
 
 
+def test_select_workspace_requires_auth(tmp_path: Path) -> None:
+    """/select-workspace/<id> requires authentication just like every other minds route."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    test_agent_id = AgentId()
+    response = client.get(f"/select-workspace/{test_agent_id}", follow_redirects=False)
+    assert response.status_code == 403
+
+
+def test_select_workspace_persists_active_id_and_redirects_to_goto(tmp_path: Path) -> None:
+    """/select-workspace/<id> writes the active id then 303s to /goto/<id>/.
+
+    The 303 target uses the configured mngr_forward origin when one is
+    available; in tests the origin is empty so the redirect is a relative
+    /goto/<id>/ path.
+    """
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    test_agent_id = AgentId()
+    response = client.get(f"/select-workspace/{test_agent_id}", follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"].endswith(f"/goto/{test_agent_id}/")
+    # Active id is now persisted; the chrome page renders with this id's color.
+    raw = (tmp_path / "config.toml").read_text()
+    assert str(test_agent_id) in raw
+    assert "active_workspace_id" in raw
+
+
 def test_set_active_workspace_id_ignored_in_chrome_render_when_workspace_unknown(tmp_path: Path) -> None:
     """Chrome render falls back to the default color when the stored active id
     no longer matches any known workspace (e.g. the workspace was destroyed

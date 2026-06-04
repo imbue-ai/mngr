@@ -45,7 +45,13 @@
   }
 
   function selectWorkspace(agentId) {
-    navigateContent(mngrForwardOrigin + '/goto/' + agentId + '/');
+    // Route every workspace-selection click through minds' chokepoint
+    // (/select-workspace/<id>), which persists the active id and fans
+    // out an SSE event before 303-ing the navigation to mngr_forward's
+    // /goto/<id>/. This means the chrome learns about the selection
+    // via SSE rather than by inspecting iframe URLs -- the trust
+    // boundary forbids chrome <-> content communication.
+    navigateContent('/select-workspace/' + agentId);
     if (isElectron) {
       sidebarOpen = false;
     } else {
@@ -55,16 +61,18 @@
   }
 
   // -- Titlebar per-project swatch ------------------------------------------
+  //
+  // The chrome's workspace color (data-theme + --workspace-bg on <html>) is
+  // driven entirely by the `active_workspace` SSE event below -- the server
+  // is the single source of truth, fanned out to every subscribed surface.
+  // This function only updates the legacy small `#title-swatch` indicator
+  // (which Phase 3 retires entirely) and handles the recovery-redirect
+  // bookkeeping that's tied to "which workspace is the user currently
+  // viewing". It deliberately does NOT touch <html>'s color anymore.
   var currentTitleAgentId = null;
   function applyTitleSwatch(agentId) {
     var swatch = document.getElementById('title-swatch');
     if (!agentId) {
-      // No workspace in view (e.g. /accounts, /create). DO NOT reset the
-      // chrome color -- per the design, the chrome stays tinted with the
-      // most recently visited workspace's color so "click Home" doesn't
-      // wipe the visual identity. We only hide the legacy small swatch
-      // and clear the legacy --workspace-accent CSS variable, both of
-      // which Phase 3 will retire entirely.
       swatch.classList.add('hidden');
       document.documentElement.style.removeProperty('--workspace-accent');
       currentTitleAgentId = null;
@@ -82,20 +90,6 @@
       document.documentElement.style.setProperty('--workspace-accent', c);
       swatch.classList.remove('hidden');
     });
-    // Activate the workspace as the most-recently-visited: server
-    // persists the id in MindsConfig (so reloads pick up where the
-    // user left off) and returns the workspace's color, which the
-    // helper applies to <html> in place. Idempotent if the workspace
-    // is already active.
-    if (window.mindsWorkspaceColor && window.mindsWorkspaceColor.activate) {
-      window.mindsWorkspaceColor.activate(agentId).catch(function (e) {
-        // Best-effort: if the POST fails we leave the chrome at its
-        // previous color rather than logging noisily on every navigation.
-        // The legacy --workspace-accent above still updates so the small
-        // title swatch still reflects the new workspace.
-        if (window.console && console.debug) console.debug('activate workspace color failed:', e);
-      });
-    }
     maybeRedirectToRecovery();
   }
 
@@ -309,6 +303,18 @@
       if (data.type === 'auth_status') updateAuthUI(data);
       if (data.type === 'requests') updateRequestsBadge(data.count);
       if (data.type === 'system_interface_status') handleSystemInterfaceStatus(data.agent_id, data.status);
+      // Server fans this out whenever the active workspace id changes
+      // (via /select-workspace/<id> or /api/active-workspace/<id>). The
+      // payload carries the resolved hex + theme so we don't recompute
+      // luminance; we just apply the two <html> attributes and let CSS
+      // variable inheritance flip every descendant surface.
+      if (data.type === 'active_workspace' && window.mindsWorkspaceColor) {
+        window.mindsWorkspaceColor.applyToHtml(
+          document.documentElement,
+          data.resolved_hex,
+          data.theme,
+        );
+      }
     } catch (e) {}
   }
 

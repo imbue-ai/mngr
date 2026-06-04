@@ -29,8 +29,12 @@ _AGENT_B: AgentId = AgentId("agent-00000000000000000000000000000002")
 def test_render_landing_page_with_agents_lists_them_as_links() -> None:
     ids = (_AGENT_A, _AGENT_B)
     html = render_landing_page(accessible_agent_ids=ids)
-    assert f"/goto/{_AGENT_A}/" in html
-    assert f"/goto/{_AGENT_B}/" in html
+    # Rows route through the minds-owned chokepoint (/select-workspace/<id>)
+    # rather than directly at mngr_forward's /goto/<id>/. The chokepoint
+    # 303s onward after persisting the active id + fanning out an SSE
+    # event; see _handle_select_workspace.
+    assert f"/select-workspace/{_AGENT_A}" in html
+    assert f"/select-workspace/{_AGENT_B}" in html
     assert str(_AGENT_A) in html
     assert str(_AGENT_B) in html
 
@@ -45,7 +49,7 @@ def test_render_landing_page_discovering_shows_auto_refresh() -> None:
     assert "Discovering agents" in html
     assert "reload" in html
     assert "No projects yet" not in html
-    assert "/goto/" not in html
+    assert "/select-workspace/" not in html
 
 
 def test_render_login_redirect_page_contains_redirect_script() -> None:
