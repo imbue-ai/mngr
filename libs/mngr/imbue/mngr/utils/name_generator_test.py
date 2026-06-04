@@ -1,7 +1,5 @@
 """Unit tests for the name generator module."""
 
-import random
-
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentNameStyle
 from imbue.mngr.primitives import HostName
@@ -97,44 +95,27 @@ def test_generate_host_name() -> None:
         assert len(name) > 0
 
 
-def test_generate_agent_name_generates_unique_names() -> None:
-    """generate_agent_name yields distinct names across calls under a fixed RNG seed.
+def test_generate_agent_name_english_produces_varied_names() -> None:
+    """Repeated English-style calls produce more than one distinct name.
 
-    The English agent style draws from a large first/last-name cartesian product, so a
-    correct generator produces 10 distinct names from 10 draws. Seeding the global RNG
-    (and restoring it afterwards) makes this exact and deterministic rather than relying
-    on a probabilistic `>= 5` threshold that could flake.
+    This pins the observable behavior -- the generator actually varies its output rather
+    than returning a constant -- without seeding the global RNG or asserting an exact
+    unique count. An exact count would couple the test to the wordlist size and the
+    generator's internal draw order (a behavior-preserving wordlist edit would break it),
+    which is the very "fails for the wrong reason" anti-pattern this kind of test should
+    avoid. Per-name validity is covered by `test_generate_agent_name`.
     """
-    # Warm the cached generator before seeding so the seed governs only the draws, not
-    # the (RNG-consuming) generator construction -- otherwise the result would depend on
-    # whether an earlier test already populated the cache.
-    _get_agent_generator(AgentNameStyle.ENGLISH)
-    saved_state = random.getstate()
-    try:
-        random.seed(12345)
-        names = {str(generate_agent_name(AgentNameStyle.ENGLISH)) for _ in range(10)}
-    finally:
-        random.setstate(saved_state)
+    names = {str(generate_agent_name(AgentNameStyle.ENGLISH)) for _ in range(20)}
 
-    assert len(names) == 10
+    assert len(names) > 1
 
 
-def test_generate_host_name_generates_unique_names() -> None:
-    """generate_host_name yields mostly-distinct names across calls under a fixed RNG seed.
+def test_generate_host_name_astronomy_produces_varied_names() -> None:
+    """Repeated astronomy-style calls produce more than one distinct name.
 
-    The astronomy host style draws from a single wordlist, so 10 draws collide more often
-    than the agent cartesian product; with seed 12345 exactly 9 of the 10 draws are unique.
-    Seeding (and restoring) the RNG pins this exactly instead of using a loose threshold.
+    Same rationale as `test_generate_agent_name_english_produces_varied_names`: assert the
+    output varies, not an exact (wordlist- and RNG-order-dependent) unique count.
     """
-    # Warm the cached generator before seeding so the seed governs only the draws, not
-    # the (RNG-consuming) generator construction -- otherwise the result would depend on
-    # whether an earlier test already populated the cache.
-    _get_host_generator(HostNameStyle.ASTRONOMY)
-    saved_state = random.getstate()
-    try:
-        random.seed(12345)
-        names = {str(generate_host_name(HostNameStyle.ASTRONOMY)) for _ in range(10)}
-    finally:
-        random.setstate(saved_state)
+    names = {str(generate_host_name(HostNameStyle.ASTRONOMY)) for _ in range(20)}
 
-    assert len(names) == 9
+    assert len(names) > 1
