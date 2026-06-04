@@ -330,8 +330,9 @@ def test_symlink_or_copy_on_host_symlinks_even_when_source_absent(
     assert result is True
     assert dest.is_symlink()
     assert Path(os.readlink(dest)) == source
-    assert not dest.exists()  # dangling: source not created yet
-    assert source.parent.is_dir()  # ensure_source_parent created the shared parent
+    # Dangling: source not created yet; ensure_source_parent created the shared parent dir.
+    assert not dest.exists()
+    assert source.parent.is_dir()
     # A write through the dangling symlink creates the source (the write-through property).
     dest.write_text("tok-data")
     assert source.read_text() == "tok-data"
