@@ -776,21 +776,26 @@ def test_provision_copies_oauth_token_when_symlink_disabled(
     assert dest.read_text() == "fake-oauth-token"
 
 
-def test_provision_errors_clearly_when_oauth_token_missing(
+def test_provision_succeeds_without_token_and_skips_seeding(
     local_provider: LocalProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """If the user has never run `agy` login on the host, provisioning errors with guidance."""
+    """If no shared file token exists, provisioning still succeeds (agy signs in on first launch).
+
+    Mirrors mngr_claude's _provision_local_credentials: skip seeding rather than
+    block agent creation. The per-agent home is still built; only the token
+    symlink/copy is absent.
+    """
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    # NB: no token seeded.
+    # NB: no token seeded into the user's home.
     agent = _make_antigravity_agent(local_provider, tmp_path, AntigravityAgentConfig(auto_dismiss_dialogs=True))
 
-    with pytest.raises(UserInputError) as excinfo:
-        _provision(agent)
-    message = str(excinfo.value)
-    assert "OAuth token not found" in message
-    assert str(get_antigravity_oauth_token_path(home)) in message
+    _provision(agent)
+
+    # Provisioning completed: the per-agent settings exist, but no token was seeded.
+    assert get_antigravity_settings_path(agent._get_agy_home_dir()).exists()
+    assert not get_antigravity_oauth_token_path(agent._get_agy_home_dir()).exists()
 
 
 # =============================================================================

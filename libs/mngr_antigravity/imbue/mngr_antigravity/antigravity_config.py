@@ -191,8 +191,6 @@ def build_isolated_settings(
     base_settings: Mapping[str, Any],
     settings_overrides: Mapping[str, Any],
     trusted_workspaces: Sequence[str],
-    *,
-    should_trust: bool,
 ) -> dict[str, Any]:
     """Build a per-agent ``settings.json`` body by layering (low -> high precedence).
 
@@ -200,25 +198,24 @@ def build_isolated_settings(
        ``sync_home_settings``) so the agent inherits the user's preferences, or
        an empty dict otherwise. Copied, never mutated.
     2. ``trusted_workspaces`` -- the agent's effective workspace path(s),
-       appended (deduped) to the inherited ``trustedWorkspaces`` list when
-       ``should_trust`` is True, so the isolated agy trusts its own cwd. When
-       ``should_trust`` is False the trust list is left exactly as the base had
-       it (used by tests; in practice provisioning only reaches this builder
-       once trust has been granted).
+       appended (deduped) to the inherited ``trustedWorkspaces`` list, so the
+       isolated agy trusts its own cwd. Pass an empty sequence to leave the
+       trust list exactly as the base had it.
     3. ``settings_overrides`` -- the per-agent-type blob (``permissions``,
        ``toolPermission``, ``model``, ...), applied last so it wins.
 
     A non-list ``trustedWorkspaces`` in ``base_settings`` is coerced to an empty
-    list (matching ``merge_trusted_workspace``); the plugin hard-errors on that
-    shape before reaching here, so this is only a defensive fallback.
+    list (matching ``merge_trusted_workspace``); callers that read the base from
+    the user's real settings validate that shape first (see the plugin's
+    ``_check_existing_trustedworkspaces_shape``), so this is a defensive fallback.
     """
     settings: dict[str, Any] = dict(base_settings)
-    if should_trust:
-        existing_raw = settings.get(TRUSTED_WORKSPACES_KEY, [])
-        existing = list(existing_raw) if isinstance(existing_raw, list) else []
-        for workspace_path in trusted_workspaces:
-            if workspace_path not in existing:
-                existing.append(workspace_path)
+    existing_raw = settings.get(TRUSTED_WORKSPACES_KEY, [])
+    existing = list(existing_raw) if isinstance(existing_raw, list) else []
+    for workspace_path in trusted_workspaces:
+        if workspace_path not in existing:
+            existing.append(workspace_path)
+    if existing or TRUSTED_WORKSPACES_KEY in settings:
         settings[TRUSTED_WORKSPACES_KEY] = existing
     settings.update(settings_overrides)
     return settings

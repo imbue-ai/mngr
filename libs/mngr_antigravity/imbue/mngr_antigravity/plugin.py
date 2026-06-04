@@ -94,7 +94,6 @@ from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_best_effort
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -155,6 +154,12 @@ _AGY_LOG_FILE_RELATIVE_PATH: Final[str] = "logs/agy_cli.log"
 # path -- agy only rejects dot-prefixed *workspace*/``--add-dir`` paths, not its
 # own config dir). Mirrors mngr_claude's per-agent ``get_claude_config_dir``.
 _AGY_HOME_RELATIVE_PATH: Final[tuple[str, ...]] = ("plugin", "antigravity", "home")
+
+# Markers echoed by the batched oauth-token provisioning command so a single
+# remote round-trip both does the work and reports which branch ran (token
+# seeded vs. no shared token present). See ``_provision_oauth_token``.
+_OAUTH_TOKEN_SEEDED_MARKER: Final[str] = "MNGR_AGY_TOKEN_SEEDED"
+_OAUTH_TOKEN_MISSING_MARKER: Final[str] = "MNGR_AGY_TOKEN_MISSING"
 
 # Parent directory for the per-agent symlinks that work around agy's
 # refusal to treat hidden paths (anything with a dot-prefixed segment, like
@@ -358,16 +363,25 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
 
         Read from the host shell (not local ``Path.home()``) so the source of
         the user's real ``~/.gemini`` settings/token is correct on remote hosts
-        too. The user must have run ``agy`` and signed in on this host once so
-        that real tree (in particular the oauth token) exists.
+        too.
+
+        On the (essentially never) chance ``printf $HOME`` fails, exit cleanly
+        via ``SystemExit`` rather than a plain ``Exception``: provision runs
+        inside ``provision_agent``'s ``ConcurrencyExceptionGroup``, which wraps
+        ``Exception`` subclasses into a noisy auto-diagnostics traceback but
+        re-raises ``BaseException`` (``SystemExit``) unwrapped (same reason
+        ``_ensure_source_repo_trusted`` uses ``SystemExit``).
         """
         result = host.execute_idempotent_command('printf %s "$HOME"', timeout_seconds=10.0)
         home = result.stdout.strip()
         if not result.success or not home:
-            raise MngrError(
-                f"Could not resolve the host's $HOME for antigravity provisioning "
-                f"(exit_success={result.success}, stdout={result.stdout!r})."
+            logger.error(
+                "Could not resolve the host's $HOME for antigravity provisioning "
+                "(exit_success={}, stdout={!r}). Cannot build the per-agent home tree.",
+                result.success,
+                result.stdout,
             )
+            raise SystemExit(1)
         return Path(home)
 
     def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
@@ -442,16 +456,18 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         """
         agy_home = self._get_agy_home_dir()
         self._provision_oauth_token(host, host_home, agy_home)
-        base_settings = (
-            read_antigravity_settings(host, get_antigravity_settings_path(host_home))
-            if self.agent_config.sync_home_settings
-            else {}
-        )
+        base_settings: dict[str, Any] = {}
+        if self.agent_config.sync_home_settings:
+            user_settings_path = get_antigravity_settings_path(host_home)
+            base_settings = read_antigravity_settings(host, user_settings_path)
+            # Validate the copied base independently of _ensure_source_repo_trusted's
+            # check (which reads the same file earlier) so the per-agent build never
+            # silently coerces a corrupt user trustedWorkspaces regardless of call order.
+            self._check_existing_trustedworkspaces_shape(user_settings_path, base_settings)
         per_agent_settings = build_isolated_settings(
             base_settings,
             self.agent_config.settings_overrides,
             [self._get_agy_workspace_symlink_path()],
-            should_trust=True,
         )
         settings_path = get_antigravity_settings_path(agy_home)
         with log_span("Writing per-agent antigravity settings to {}", settings_path):
@@ -465,36 +481,48 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
             host.write_text_file(hooks_path, serialize_antigravity_hooks(build_antigravity_hooks_config()))
 
     def _provision_oauth_token(self, host: OnlineHostInterface, host_home: Path, agy_home: Path) -> None:
-        """Make the shared oauth file token available in the per-agent home.
+        """Seed the shared oauth file token into the per-agent home, if it exists.
 
         Symlinks (default) or copies the user's real
         ``~/.gemini/antigravity-cli/antigravity-oauth-token`` into the per-agent
         home. agy is keyring-first, file-fallback (``ChainedAuth``) and writes
-        this file at login on both macOS and Linux; on Linux (mngr's runtime)
-        there is no OS keyring so the file is the native store. Symlinking lets
-        refreshes on the shared file propagate.
+        this file at login; on Linux (mngr's runtime) there is no OS keyring so
+        the file is the native store. Symlinking lets refreshes on the shared
+        file propagate.
 
-        Errors clearly if the source token is missing -- the user must run
-        ``agy`` once on this host and sign in first, otherwise agy's login flow
-        would block the TUI.
+        If the shared token does not exist (the user hasn't produced a file
+        token on this host -- e.g. on macOS a normal login lands only in the
+        keychain), this is a no-op: provisioning still succeeds and agy runs its
+        normal login flow on first launch (writing the token into this agent's
+        own home). This mirrors ``mngr_claude``'s ``_provision_local_credentials``,
+        which likewise skips seeding when no credential file is present rather
+        than blocking agent creation.
+
+        The existence check, ``mkdir``, and link/copy are batched into a single
+        remote command (CLAUDE.md: minimize remote round-trips); it echoes a
+        marker so we can log whether the token was seeded.
         """
         source = get_antigravity_oauth_token_path(host_home)
-        if not host.path_exists(source):
-            raise UserInputError(
-                f"Antigravity OAuth token not found at {source}. Run `agy` once on this host and "
-                f"sign in, so the shared file token exists, then re-run. (mngr seeds this token "
-                f"into each per-agent home; without it agy's login flow blocks the TUI.)"
-            )
         dest = get_antigravity_oauth_token_path(agy_home)
         quoted_source = shlex.quote(str(source))
         quoted_dest = shlex.quote(str(dest))
-        host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(dest.parent))}", timeout_seconds=10.0)
+        quoted_dest_parent = shlex.quote(str(dest.parent))
         if self.agent_config.symlink_oauth_token:
-            host.execute_idempotent_command(f"ln -sf {quoted_source} {quoted_dest}", timeout_seconds=10.0)
+            seed_action = f"ln -sf {quoted_source} {quoted_dest}"
         else:
-            host.execute_idempotent_command(
-                f"rm -f {quoted_dest} && cp {quoted_source} {quoted_dest} && chmod 600 {quoted_dest}",
-                timeout_seconds=10.0,
+            seed_action = f"rm -f {quoted_dest} && cp {quoted_source} {quoted_dest} && chmod 600 {quoted_dest}"
+        # Single round-trip: seed iff the source exists, and report which branch ran.
+        result = host.execute_idempotent_command(
+            f"if [ -e {quoted_source} ]; then mkdir -p {quoted_dest_parent} && {seed_action} "
+            f"&& echo {_OAUTH_TOKEN_SEEDED_MARKER}; else echo {_OAUTH_TOKEN_MISSING_MARKER}; fi",
+            timeout_seconds=10.0,
+        )
+        if _OAUTH_TOKEN_MISSING_MARKER in result.stdout:
+            logger.info(
+                "No shared Antigravity oauth token at {}; the agent will run agy's login flow on "
+                "first launch. Sign in with `agy` on this host (so a file token exists) to share "
+                "auth across agents without re-login.",
+                source,
             )
 
     def _find_git_source_path(self, concurrency_group: ConcurrencyGroup) -> Path | None:

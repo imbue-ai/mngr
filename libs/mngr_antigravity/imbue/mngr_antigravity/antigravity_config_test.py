@@ -89,7 +89,7 @@ def test_build_isolated_settings_layers_base_trust_and_overrides() -> None:
     base = {"colorScheme": "dark", "model": "Base Model", "trustedWorkspaces": ["/repo"]}
     overrides = {"model": "Override Model", "permissions": {"allow": ["command(git)"]}}
 
-    result = build_isolated_settings(base, overrides, ["/tmp/ws"], should_trust=True)
+    result = build_isolated_settings(base, overrides, ["/tmp/ws"])
 
     # Inherited base key survives.
     assert result["colorScheme"] == "dark"
@@ -103,26 +103,32 @@ def test_build_isolated_settings_layers_base_trust_and_overrides() -> None:
 def test_build_isolated_settings_does_not_mutate_base() -> None:
     """The builder is @pure: the caller's base mapping is left untouched."""
     base = {"trustedWorkspaces": ["/repo"]}
-    build_isolated_settings(base, {}, ["/tmp/ws"], should_trust=True)
+    build_isolated_settings(base, {}, ["/tmp/ws"])
     assert base == {"trustedWorkspaces": ["/repo"]}
 
 
 def test_build_isolated_settings_dedupes_already_trusted_workspace() -> None:
     base = {"trustedWorkspaces": ["/tmp/ws"]}
-    result = build_isolated_settings(base, {}, ["/tmp/ws"], should_trust=True)
+    result = build_isolated_settings(base, {}, ["/tmp/ws"])
     assert result["trustedWorkspaces"] == ["/tmp/ws"]
 
 
-def test_build_isolated_settings_leaves_trust_untouched_when_should_trust_false() -> None:
-    """should_trust=False must not add the workspace path to the trust list."""
+def test_build_isolated_settings_leaves_trust_untouched_for_empty_workspace_list() -> None:
+    """An empty trusted_workspaces sequence must not change the inherited trust list."""
     base = {"trustedWorkspaces": ["/repo"]}
-    result = build_isolated_settings(base, {}, ["/tmp/ws"], should_trust=False)
+    result = build_isolated_settings(base, {}, [])
     assert result["trustedWorkspaces"] == ["/repo"]
+
+
+def test_build_isolated_settings_omits_trust_key_for_empty_base_and_empty_workspaces() -> None:
+    """No spurious empty trustedWorkspaces key when there's nothing to trust."""
+    result = build_isolated_settings({}, {}, [])
+    assert "trustedWorkspaces" not in result
 
 
 def test_build_isolated_settings_seeds_trust_list_from_empty_base() -> None:
     """With an empty base (sync_home_settings=False) the workspace still gets trusted."""
-    result = build_isolated_settings({}, {}, ["/tmp/ws"], should_trust=True)
+    result = build_isolated_settings({}, {}, ["/tmp/ws"])
     assert result["trustedWorkspaces"] == ["/tmp/ws"]
 
 

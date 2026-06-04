@@ -4,9 +4,13 @@ Plugin that registers the `antigravity` agent type for mngr.
 
 [Antigravity CLI](https://antigravity.google/docs/cli-overview) is Google's terminal-based AI coding assistant, the successor to the legacy Gemini CLI. Google announced on 2026-05-19 that Gemini CLI is being replaced by Antigravity CLI, with the legacy request path turning off for paid-tier accounts on 2026-06-18. This plugin lets you run the new CLI (`agy`) as an mngr agent.
 
-## Prerequisites
+## Authentication
 
-Run `agy` once on the host and sign in before creating agents. `agy` stores a file token at `~/.gemini/antigravity-cli/antigravity-oauth-token`; mngr seeds that token into each agent's isolated home so the agent is authenticated without its own login flow. If the token is missing, `mngr create` errors with guidance (otherwise agy's login flow would block the TUI).
+Each agent runs `agy` under its own `$HOME`, and `agy` reads its auth from `$HOME/.gemini/antigravity-cli/antigravity-oauth-token`. If a shared file token exists at the host user's real `~/.gemini/antigravity-cli/antigravity-oauth-token`, mngr seeds it into each agent's home (symlink by default, so refreshes propagate) and the agent is authenticated immediately. If it does not exist, provisioning still succeeds and the agent runs agy's normal login flow on first launch (writing the token into that agent's own home) — the same posture as `mngr_claude`, which skips credential seeding rather than blocking agent creation.
+
+To share auth across agents without re-logging-in per agent, sign in once on the host so the file token exists:
+- **Linux** (mngr's runtime, no OS keyring): a normal `agy` login writes the file token.
+- **macOS**: a normal login lands in the keychain, not the file, and mngr's fresh per-agent homes can't read the keychain. To produce the shared file token, sign in once from a relocated `$HOME` (e.g. `HOME=/tmp/agy-login agy`), which misses the keychain and writes the file token there; copy it to `~/.gemini/antigravity-cli/antigravity-oauth-token`. (Otherwise each agent simply prompts for login on first launch.)
 
 ## Usage
 
