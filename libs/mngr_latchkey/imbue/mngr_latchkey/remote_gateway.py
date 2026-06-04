@@ -85,6 +85,13 @@ _REMOTE_GATEWAY_LOG_FILENAME: Final[str] = "gateway.log"
 # remote ``$HOME/.latchkey`` directory; the matching ``.pub`` sits beside it.
 _CONTAINER_TUNNEL_KEY_FILENAME: Final[str] = "container_tunnel_key"
 
+# Docker label key every mngr container carries, valued with the host id. Used
+# to locate an agent's container on the VPS by host id. Must match the
+# ``com.imbue.mngr.host-id`` label the docker / vps_docker providers stamp on
+# each container (kept as a literal here to avoid a dependency on those
+# provider packages).
+_CONTAINER_HOST_ID_LABEL: Final[str] = "com.imbue.mngr.host-id"
+
 
 class RemoteGatewayError(LatchkeyError, RuntimeError):
     """Raised when provisioning the latchkey CLI on a remote VPS fails."""
@@ -437,3 +444,58 @@ def ensure_container_tunnel_keypair(
             )
         )
     return key_path
+
+
+def _resolve_container_name_for_host(host: OuterHostInterface, host_id: HostId) -> str:
+    """Return the docker container name on the VPS for the given mngr host id.
+
+    Looks the container up by the ``com.imbue.mngr.host-id`` label every mngr
+    container carries. Raises :class:`RemoteGatewayError` if the lookup fails or
+    no matching container is found.
+    """
+    filter_arg = shlex.quote(f"label={_CONTAINER_HOST_ID_LABEL}={host_id}")
+    command = f"docker ps -a --filter {filter_arg} --format '{{{{.Names}}}}'"
+    result = host.execute_idempotent_command(command, timeout_seconds=_REMOTE_COMMAND_TIMEOUT_SECONDS)
+    if not result.success:
+        raise RemoteGatewayError(
+            "Failed to locate container for host {} on VPS {}: {}".format(
+                host_id, host.get_name(), result.stderr.strip() or result.stdout.strip()
+            )
+        )
+    names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not names:
+        raise RemoteGatewayError(
+            f"No container labeled {_CONTAINER_HOST_ID_LABEL}={host_id} found on VPS {host.get_name()}"
+        )
+    return names[0]
+
+
+def provision_remote_gateway(
+    host: OuterHostInterface,
+    host_id: HostId,
+    container_ssh_user: str,
+    container_ssh_port: int,
+) -> None:
+    """Stand up a VPS-resident latchkey gateway and tunnel it into the agent's container.
+
+    Runs the full remote-gateway sequence on the agent's outer host (the VPS):
+    install the latchkey CLI, start the gateway on the VPS loopback, mint an
+    ad-hoc VPS->container keypair, and reverse-tunnel the gateway into the
+    container so the agent's ``LATCHKEY_GATEWAY=http://127.0.0.1:INNER_PORT``
+    reaches it. The container's ssh user/port come from the inner host's SSH
+    info; the container itself is located on the VPS by its host-id label.
+
+    Raises :class:`RemoteGatewayError` if any step fails.
+    """
+    ensure_latchkey_installed(host)
+    ensure_latchkey_gateway_running(host)
+    container_name = _resolve_container_name_for_host(host, host_id)
+    container_ssh_key_path = ensure_container_tunnel_keypair(
+        host, container_name=container_name, container_ssh_user=container_ssh_user
+    )
+    ensure_latchkey_gateway_reachable_from_container(
+        host,
+        container_ssh_user=container_ssh_user,
+        container_ssh_port=container_ssh_port,
+        container_ssh_key_path=container_ssh_key_path,
+    )

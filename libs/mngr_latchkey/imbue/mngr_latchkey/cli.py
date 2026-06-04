@@ -541,6 +541,7 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
         latchkey=latchkey,
         tunnel_manager=tunnel_manager,
         concurrency_group=mngr_ctx.concurrency_group,
+        mngr_ctx=mngr_ctx,
     )
     destruction_handler = LatchkeyDestructionHandler(tunnel_manager=tunnel_manager)
 

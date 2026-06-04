@@ -17,6 +17,7 @@ from imbue.mngr_latchkey.remote_gateway import ensure_container_tunnel_keypair
 from imbue.mngr_latchkey.remote_gateway import ensure_latchkey_gateway_reachable_from_container
 from imbue.mngr_latchkey.remote_gateway import ensure_latchkey_gateway_running
 from imbue.mngr_latchkey.remote_gateway import ensure_latchkey_installed
+from imbue.mngr_latchkey.remote_gateway import provision_remote_gateway
 from imbue.mngr_latchkey.remote_gateway import sync_credentials
 from imbue.mngr_latchkey.remote_gateway import sync_permissions
 from imbue.mngr_latchkey.store import permissions_path_for_host
@@ -52,6 +53,7 @@ class _StubOuter(MutableModel):
         description="Canned result returned for every command",
     )
     home: str = Field(default="/root", description="Value returned for the $HOME resolution command")
+    container_name: str = Field(default="mngr-ws", description="Container name returned for the 'docker ps' lookup")
     recorded: list[_Recorded] = Field(default_factory=list, description="Each command recorded in order")
     written: list[_WrittenFile] = Field(default_factory=list, description="Each file write recorded in order")
 
@@ -67,10 +69,13 @@ class _StubOuter(MutableModel):
         timeout_seconds: float | None = None,
     ) -> CommandResult:
         self.recorded.append(_Recorded(command=command, timeout_seconds=timeout_seconds))
-        # Only the dedicated $HOME-resolution probe gets the home response; any
-        # other command (install/gateway scripts) returns the configured result.
+        # Only the dedicated $HOME-resolution probe gets the home response; the
+        # container lookup returns the configured name; everything else
+        # (install/gateway/keypair/tunnel scripts) returns the configured result.
         if command.strip() == 'echo "$HOME"':
             return CommandResult(stdout=f"{self.home}\n", stderr="", success=True)
+        if command.startswith("docker ps"):
+            return CommandResult(stdout=f"{self.container_name}\n", stderr="", success=True)
         return self.result
 
     def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
@@ -326,3 +331,25 @@ def test_ensure_container_tunnel_keypair_raises_on_failure() -> None:
     outer = _outer(CommandResult(stdout="", stderr="Error: No such container: mngr-ws", success=False))
     with pytest.raises(RemoteGatewayError, match="No such container"):
         ensure_container_tunnel_keypair(outer, container_name="mngr-ws", container_ssh_user="root")
+
+
+def test_provision_remote_gateway_runs_full_sequence_on_the_outer_host() -> None:
+    outer = cast(OuterHostInterface, _StubOuter(container_name="mngr-ws-1"))
+    provision_remote_gateway(outer, host_id=HostId(), container_ssh_user="root", container_ssh_port=2222)
+    commands = "\n\n".join(r.command for r in _stub(outer).recorded)
+    # Install latchkey, run the gateway, find the container, mint+authorize a
+    # key, and reverse-tunnel the gateway into the container.
+    assert "npm install -g latchkey@" in commands
+    assert "nohup latchkey gateway" in commands
+    assert "docker ps -a --filter" in commands
+    assert "com.imbue.mngr.host-id=" in commands
+    assert "ssh-keygen -t ed25519" in commands
+    assert "docker exec -u root" in commands
+    assert "mngr-ws-1" in commands
+    assert "-R 127.0.0.1:" in commands
+
+
+def test_provision_remote_gateway_raises_when_container_not_found() -> None:
+    outer = cast(OuterHostInterface, _StubOuter(container_name=""))
+    with pytest.raises(RemoteGatewayError, match="No container labeled"):
+        provision_remote_gateway(outer, host_id=HostId(), container_ssh_user="root", container_ssh_port=2222)

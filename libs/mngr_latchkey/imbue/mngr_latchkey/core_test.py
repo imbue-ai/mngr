@@ -11,7 +11,9 @@ import pytest
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
@@ -682,7 +684,9 @@ def test_start_gateway_passes_password_to_subprocess(tmp_path: Path) -> None:
 # -- Discovery handler --
 
 
-def test_discovery_handler_spawns_shared_gateway_for_every_provider(tmp_path: Path) -> None:
+def test_discovery_handler_spawns_shared_gateway_for_every_provider(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
     """Every provider triggers the shared gateway to start; a second call is a no-op."""
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
@@ -699,10 +703,11 @@ def test_discovery_handler_spawns_shared_gateway_for_every_provider(tmp_path: Pa
                 latchkey=manager,
                 tunnel_manager=tunnel_manager,
                 concurrency_group=cg,
+                mngr_ctx=temp_mngr_ctx,
             )
             for provider_name in ("local", "docker", "lima", "vultr", "modal"):
                 # ssh_info=None is fine here -- it keeps the test off the SSH path.
-                handler(AgentId(), None, provider_name)
+                handler(AgentId(), HostId(), None, provider_name)
             assert manager.is_gateway_running
             # Same shared gateway across all five callbacks; ensure it actually came up.
             # ``start_gateway`` is idempotent and returns the bound port even
@@ -735,12 +740,16 @@ class _RecordingTunnelManager(SSHTunnelManager):
         return 0
 
 
-def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(tmp_path: Path) -> None:
+def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
     tunnel_manager = _RecordingTunnelManager()
     agent_id = AgentId()
+    # The ``local`` provider has no outer host, so the handler falls back to the
+    # desktop-side reverse tunnel (rather than the VPS-resident gateway path).
     ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=22, key_path=tmp_path / "k")
     # The handler dispatches tunnel setup onto a CG worker thread, so
     # exit the CG (joining its threads) before asserting on the
@@ -752,14 +761,23 @@ def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(tmp_path: 
             latchkey=manager,
             tunnel_manager=tunnel_manager,
             concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
         )
-        handler(agent_id, ssh_info, "docker")
+        handler(agent_id, HostId(), ssh_info, "local")
 
         assert manager.is_gateway_running
         # ``start_gateway`` is idempotent and returns the bound port even
         # when the gateway is already running, so the test can use it as
         # the supported way to read the live port.
         host_side_port = manager.start_gateway(cg)
+
+        # Tunnel setup runs on a CG worker thread (now behind a provider-lookup
+        # that resolves the local provider has no outer host), so poll until it
+        # records before asserting rather than racing the worker.
+        _poll_event = threading.Event()
+        _deadline = time.monotonic() + 5.0
+        while time.monotonic() < _deadline and not tunnel_manager._calls:
+            _poll_event.wait(timeout=_POLL_INTERVAL_SECONDS)
 
         # Exactly one reverse tunnel, bridging the dynamic host-side gateway port
         # to the fixed agent-side port on the container's loopback. The tunnel
@@ -771,7 +789,9 @@ def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(tmp_path: 
         manager.stop_gateway()
 
 
-def test_discovery_handler_skips_reverse_tunnel_when_ssh_info_missing(tmp_path: Path) -> None:
+def test_discovery_handler_skips_reverse_tunnel_when_ssh_info_missing(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
     """Agents discovered without SSH info skip reverse-tunnel setup.
 
     Without an SSH route the handler cannot forward the host-side gateway
@@ -786,15 +806,16 @@ def test_discovery_handler_skips_reverse_tunnel_when_ssh_info_missing(tmp_path: 
             latchkey=manager,
             tunnel_manager=tunnel_manager,
             concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
         )
-        handler(AgentId(), None, "local")
+        handler(AgentId(), HostId(), None, "local")
 
         assert manager.is_gateway_running
         assert tunnel_manager._calls == []
         manager.stop_gateway()
 
 
-def test_discovery_handler_swallows_gateway_errors(tmp_path: Path) -> None:
+def test_discovery_handler_swallows_gateway_errors(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
     """A missing binary must not crash the discovery callback -- just log a warning."""
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
@@ -809,8 +830,9 @@ def test_discovery_handler_swallows_gateway_errors(tmp_path: Path) -> None:
             latchkey=manager,
             tunnel_manager=tunnel_manager,
             concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
         )
-        handler(AgentId(), None, "local")
+        handler(AgentId(), HostId(), None, "local")
     assert not manager.is_gateway_running
     assert tunnel_manager._calls == []
 

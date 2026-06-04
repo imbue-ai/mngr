@@ -3,11 +3,14 @@
 Exposes two callables:
 
 * :class:`LatchkeyDiscoveryHandler` -- on every agent discovery, ensures
-  the shared ``latchkey gateway`` subprocess is up and (for agents
-  reachable via SSH) opens a reverse port-forward so the agent's
-  loopback ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT`` reaches the host-side
-  gateway. Agents discovered without SSH info are expected to reach the
-  gateway via whatever direct route already exists.
+  the shared ``latchkey gateway`` subprocess is up and makes it reachable
+  on the agent's loopback ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT``. Agents
+  whose host has an accessible outer host (the VPS -- e.g. imbue_cloud /
+  vps_docker) get a VPS-resident gateway provisioned and reverse-tunneled
+  into their container (see :func:`provision_remote_gateway`). All other
+  SSH-reachable agents (local docker, modal, ssh) fall back to a reverse
+  port-forward of the desktop-side gateway. Agents discovered without SSH
+  info are expected to reach the gateway via whatever direct route exists.
 * :class:`LatchkeyDestructionHandler` -- on every agent destruction,
   tears down the reverse tunnel that belongs to that agent so the
   manager's health-check loop doesn't keep spinning paramiko transports
@@ -35,13 +38,20 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
+from imbue.mngr_latchkey.remote_gateway import RemoteGatewayError
+from imbue.mngr_latchkey.remote_gateway import provision_remote_gateway
 
 
 class LatchkeyDiscoveryHandler(MutableModel):
@@ -65,12 +75,14 @@ class LatchkeyDiscoveryHandler(MutableModel):
         description="SSH tunnel manager used to reverse-forward the host-side gateway into remote agents"
     )
     concurrency_group: ConcurrencyGroup = Field(description="CG used to dispatch off-thread tunnel setups")
+    mngr_ctx: MngrContext = Field(
+        description="Mngr context used to open an agent's outer host (VPS) for the VPS-resident gateway path"
+    )
 
     _pending_remote_agents: set[str] = PrivateAttr(default_factory=set)
     _pending_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
-    def __call__(self, agent_id: AgentId, ssh_info: RemoteSSHInfo | None, provider_name: str) -> None:
-        del provider_name
+    def __call__(self, agent_id: AgentId, host_id: HostId, ssh_info: RemoteSSHInfo | None, provider_name: str) -> None:
         try:
             host_side_port = self.latchkey.start_gateway(self.concurrency_group)
         except LatchkeyError as e:
@@ -93,7 +105,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
         try:
             self.concurrency_group.start_new_thread(
                 target=self._run_remote_setup,
-                args=(agent_id, ssh_info, host_side_port),
+                args=(agent_id, host_id, ssh_info, provider_name, host_side_port),
                 name=f"latchkey-discovery-setup-{agent_id_str}",
                 is_checked=False,
             )
@@ -104,12 +116,26 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 self._pending_remote_agents.discard(agent_id_str)
             raise
 
-    def _run_remote_setup(self, agent_id: AgentId, ssh_info: RemoteSSHInfo, host_side_port: int) -> None:
+    def _run_remote_setup(
+        self,
+        agent_id: AgentId,
+        host_id: HostId,
+        ssh_info: RemoteSSHInfo,
+        provider_name: str,
+        host_side_port: int,
+    ) -> None:
         """Worker-thread entry point. Always clears the pending flag in
-        ``finally`` so a crash inside the SSH tunnel setup doesn't
-        permanently block subsequent fires for this agent.
+        ``finally`` so a crash inside the setup doesn't permanently block
+        subsequent fires for this agent.
+
+        Agents whose host has an accessible outer host (the VPS -- e.g.
+        imbue_cloud / vps_docker) get a VPS-resident gateway reverse-tunneled
+        into their container. Everything else (local, modal, ssh, docker-over-tcp)
+        falls back to the desktop-side gateway reverse tunnel.
         """
         try:
+            if self._try_provision_remote_gateway(agent_id, host_id, ssh_info, provider_name):
+                return
             self.tunnel_manager.setup_reverse_tunnel(
                 ssh_info=ssh_info,
                 local_port=host_side_port,
@@ -132,6 +158,45 @@ class LatchkeyDiscoveryHandler(MutableModel):
         finally:
             with self._pending_lock:
                 self._pending_remote_agents.discard(str(agent_id))
+
+    def _try_provision_remote_gateway(
+        self,
+        agent_id: AgentId,
+        host_id: HostId,
+        ssh_info: RemoteSSHInfo,
+        provider_name: str,
+    ) -> bool:
+        """Stand up a VPS-resident gateway for the agent if its host has an outer host.
+
+        Returns ``True`` when the agent is VPS-style (its provider exposes an
+        outer host) and the VPS-resident gateway was provisioned, so the caller
+        skips the desktop-side reverse tunnel. Returns ``False`` -- so the
+        caller falls back to the desktop tunnel -- when the host has no outer
+        host or provisioning fails. The container's ssh user/port come from the
+        inner host's SSH info.
+        """
+        try:
+            provider = get_provider_instance(ProviderInstanceName(provider_name), self.mngr_ctx)
+            with provider.outer_host_for(host_id) as outer:
+                if outer is None:
+                    return False
+                provision_remote_gateway(
+                    outer,
+                    host_id=host_id,
+                    container_ssh_user=ssh_info.user,
+                    container_ssh_port=ssh_info.port,
+                )
+            logger.info("Provisioned VPS-resident Latchkey gateway for agent {} on host {}", agent_id, host_id)
+            return True
+        except (RemoteGatewayError, MngrError, OSError, paramiko.SSHException) as e:
+            logger.warning(
+                "Failed to provision VPS-resident Latchkey gateway for agent {} on host {}; "
+                "falling back to desktop tunnel: {}",
+                agent_id,
+                host_id,
+                e,
+            )
+            return False
 
 
 class LatchkeyDestructionHandler(FrozenModel):
