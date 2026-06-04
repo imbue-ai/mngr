@@ -24,6 +24,7 @@ from imbue.mngr_ovh import hookimpl
 from imbue.mngr_ovh.bootstrap import bootstrap_root_authorized_keys_via_user
 from imbue.mngr_ovh.bootstrap import install_required_outer_packages
 from imbue.mngr_ovh.bootstrap import pin_host_key_via_tofu
+from imbue.mngr_ovh.bootstrap import purge_qemu_packages
 from imbue.mngr_ovh.bootstrap import verify_root_ssh
 from imbue.mngr_ovh.bootstrap import wait_for_ssh_after_rebuild
 from imbue.mngr_ovh.catalog import resolve_image_id
@@ -550,6 +551,18 @@ class OvhProvider(VpsDockerProvider):
                 # final outer-bootstrap step before the base
                 # VpsDockerProvider takes over.
                 install_required_outer_packages(
+                    hostname=service_name,
+                    port=22,
+                    private_key_path=vps_private_key_path,
+                    known_hosts_path=self._vps_known_hosts_path(),
+                    timeout_seconds=self.config.ssh_connect_timeout,
+                )
+                # OVH automated backups freeze the guest filesystem (via the
+                # image's qemu-guest-agent) and cause serious runtime problems,
+                # so purge all qemu packages. Runs on both the fresh-order and
+                # recycle paths -- the recycle rebuild reinstalls the agent.
+                # A failure aborts provisioning so no host runs with backups on.
+                purge_qemu_packages(
                     hostname=service_name,
                     port=22,
                     private_key_path=vps_private_key_path,
