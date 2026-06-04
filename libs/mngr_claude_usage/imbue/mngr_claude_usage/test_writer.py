@@ -184,8 +184,10 @@ def test_writer_appends_one_event_per_render(writer_path: Path, events_file: Pat
 
 
 def test_writer_handles_concurrent_appends(writer_path: Path, events_file: Path) -> None:
-    """Concurrent renders must end with a parsable events file -- short lines are
-    atomic on append, so we don't need flock; we just check no torn JSON."""
+    """Concurrent renders must end with an events file in which every distinct
+    event survives exactly once -- short lines are atomic on append, so we don't
+    need flock. We check both that no output is torn and that no event is dropped
+    or duplicated."""
     payloads = [
         json.dumps({"rate_limits": {"five_hour": {"used_percentage": float(i), "resets_at": 1700000000 + i}}})
         for i in range(20)
