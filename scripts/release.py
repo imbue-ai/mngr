@@ -65,6 +65,7 @@ BUMP_LEVEL_ORDER: Final[dict[str, int]] = {"patch": 0, "minor": 1, "major": 2}
 DEPENDENCY_COOLDOWN: Final[timedelta] = timedelta(weeks=2)
 
 PUBLISH_WORKFLOW: Final[str] = "publish.yml"
+RELEASE_TESTS_WORKFLOW: Final[str] = "release-tests.yml"
 ACTIONS_URL: Final[str] = "https://github.com/imbue-ai/mngr/actions/workflows/publish.yml"
 POLL_INTERVAL_SECONDS: Final[int] = 10
 MAX_WAIT_FOR_RUN_SECONDS: Final[int] = 300
@@ -803,6 +804,32 @@ def main() -> None:
         )
         print("Run 'git pull' first.", file=sys.stderr)
         sys.exit(1)
+
+    # Advisory: surface whether the Release Tests workflow has passed on this
+    # exact commit. Release tests are not a hard publish gate, so this only
+    # warns -- the user decides at the confirmation prompt below.
+    if gh_is_available():
+        runs = json.loads(
+            run(
+                "gh",
+                "run",
+                "list",
+                "-w",
+                RELEASE_TESTS_WORKFLOW,
+                "-b",
+                "main",
+                "-L",
+                "20",
+                "--json",
+                "headSha,conclusion",
+            )
+        )
+        match = next((r for r in runs if r["headSha"] == local_sha), None)
+        if match is None:
+            print(f"\nWARNING: no Release Tests run found for this commit ({local_sha[:8]}).")
+            print(f"  Run them first: gh workflow run {RELEASE_TESTS_WORKFLOW} --ref main")
+        elif match["conclusion"] != "success":
+            print(f"\nWARNING: Release Tests for this commit concluded '{match['conclusion']}', not success.")
 
     confirm = input(f"\nProceed with release {tag}? [y/N] ")
     if confirm.lower() != "y":
