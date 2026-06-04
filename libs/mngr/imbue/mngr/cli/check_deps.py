@@ -227,10 +227,24 @@ def _check_deps_impl(ctx: click.Context, scope: DependencyScope, install_mode: I
         write_human_line("All system dependencies are present.")
         return
 
-    # Check only: report status, then exit based on the requested scope.
+    # Check only: report status scoped to what determines the exit code, then exit.
     if install_mode == InstallMode.NONE:
-        count = len(missing) + (0 if bash_ok else 1)
-        write_human_line("{} missing dependency(ies). Use --install interactive to choose what to install.", count)
+        # bash (macOS) is a core requirement, so it counts toward the in-scope total.
+        in_scope_count = len(_scope_missing(missing, scope)) + (0 if bash_ok else 1)
+        if in_scope_count > 0:
+            noun = "core dependency(ies)" if scope == DependencyScope.CORE else "dependency(ies)"
+            write_human_line(
+                "{} missing {}. Use --install interactive to choose what to install.", in_scope_count, noun
+            )
+        else:
+            # We only reach the NONE branch when something is missing, and a zero
+            # in-scope count with no missing bash means scope is core and every
+            # missing dep is optional -- tolerated, so this still exits 0.
+            optional_missing_count = len(missing) - len(missing_core)
+            write_human_line(
+                "All core dependencies present. {} optional dependency(ies) missing (tolerated by --scope core).",
+                optional_missing_count,
+            )
         if _should_fail(missing, scope, need_bash):
             ctx.exit(1)
         return
