@@ -19,7 +19,7 @@ _EID = EventId("evt-1234")
 _SRC = EventSource("test_source")
 
 
-def test_event_envelope_requires_all_fields() -> None:
+def test_event_envelope_stores_all_envelope_fields() -> None:
     envelope = EventEnvelope(
         timestamp=_TS,
         type=EventType("test_event"),
@@ -32,6 +32,15 @@ def test_event_envelope_requires_all_fields() -> None:
     assert envelope.source == _SRC
 
 
+def test_event_envelope_rejects_missing_field() -> None:
+    with pytest.raises(ValidationError):
+        EventEnvelope(  # ty: ignore[missing-argument]
+            timestamp=_TS,
+            type=EventType("test_event"),
+            event_id=_EID,
+        )
+
+
 def test_event_envelope_serializes_all_fields() -> None:
     envelope = EventEnvelope(
         timestamp=_TS,
@@ -40,10 +49,12 @@ def test_event_envelope_serializes_all_fields() -> None:
         source=_SRC,
     )
     data = json.loads(envelope.model_dump_json())
-    assert "timestamp" in data
-    assert "type" in data
-    assert "event_id" in data
-    assert "source" in data
+    assert data == {
+        "timestamp": str(_TS),
+        "type": "test_event",
+        "event_id": str(_EID),
+        "source": str(_SRC),
+    }
 
 
 def test_event_envelope_is_frozen() -> None:
