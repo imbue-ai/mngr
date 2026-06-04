@@ -1,5 +1,6 @@
 """Unit tests for OpenCodeAgentConfig."""
 
+from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr_opencode.plugin import OpenCodeAgentConfig
 
 
@@ -55,3 +56,22 @@ def test_opencode_agent_config_merge_cli_args_is_assign_by_default() -> None:
     merged = base.merge_with(override)
 
     assert merged.cli_args == ("--from-override",)
+
+
+def test_opencode_agent_config_merge_accepts_base_class_override() -> None:
+    """Merging a plain AgentTypeConfig override into an OpenCodeAgentConfig base must not raise.
+
+    A secondary config file that redefines the same custom type without
+    repeating ``parent_type`` is parsed as the base ``AgentTypeConfig``. The
+    inherited ``merge_with`` permits this (its check is
+    ``isinstance(self, type(override))``), so the merge must succeed, preserve
+    the OpenCodeAgentConfig type, and apply the override's value.
+    """
+    base = OpenCodeAgentConfig()
+    override = AgentTypeConfig(cli_args=("--verbose",))
+
+    merged = base.merge_with(override)
+
+    assert isinstance(merged, OpenCodeAgentConfig)
+    assert merged.cli_args == ("--verbose",)
+    assert str(merged.command) == "opencode"
