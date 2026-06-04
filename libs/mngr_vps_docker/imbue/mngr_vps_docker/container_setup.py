@@ -5,15 +5,19 @@ import shutil
 import tempfile
 import time
 from collections.abc import Callable
+from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
+from contextlib import contextmanager
 from importlib import resources as importlib_resources
 from pathlib import Path
 from typing import Final
 
 from loguru import logger
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.errors import MngrError
@@ -26,6 +30,7 @@ from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
 from imbue.mngr.providers.ssh_host_setup import build_check_and_install_packages_command
 from imbue.mngr.providers.ssh_host_setup import build_configure_ssh_command
 from imbue.mngr.utils.git_utils import rsync_worktree_over_clone
+from imbue.mngr_vps_docker.errors import ContainerSetupError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.host_store import AGENTS_SUBPATH
 
@@ -237,6 +242,35 @@ def is_fstab_entry_present_on_outer(outer: OuterHostInterface, loop_file_path: P
     return result.success
 
 
+def _summarize_concurrency_exception_group(group: ConcurrencyExceptionGroup) -> str:
+    """Extract the most useful single message from a ConcurrencyExceptionGroup."""
+    if group.main_exception is not None:
+        return str(group.main_exception)
+    if len(group.exceptions) == 1:
+        return str(group.exceptions[0])
+    return str(group)
+
+
+@contextmanager
+def translate_outer_concurrency_errors(operation_description: str) -> Iterator[None]:
+    """Re-raise raw concurrency-group failures as ContainerSetupError (a MngrError).
+
+    The outer-host docker/rsync/snapshot helpers run their work inside
+    ConcurrencyGroups, so failures surface as ConcurrencyExceptionGroup or
+    ProcessError/ProcessTimeoutError -- neither of which is a MngrError. Wrapping
+    them here lets provider-level ``except MngrError`` cleanup clauses catch them
+    (and tear down the half-built host) instead of letting them escape unhandled.
+    """
+    try:
+        yield
+    except ConcurrencyExceptionGroup as e:
+        raise ContainerSetupError(
+            f"Failed to {operation_description}: {_summarize_concurrency_exception_group(e)}"
+        ) from e
+    except ProcessError as e:
+        raise ContainerSetupError(f"Failed to {operation_description}: {e}") from e
+
+
 def exec_in_container(
     outer: OuterHostInterface,
     container_name: str,
@@ -352,7 +386,10 @@ def provision_snapshot_helper_on_outer(
     )
     snapshots_dir = btrfs_mount_path / "snapshots"
 
-    with log_span("Provisioning snapshot helper on outer (host_id={})", host_id):
+    with (
+        translate_outer_concurrency_errors("provision the snapshot helper on the host"),
+        log_span("Provisioning snapshot helper on outer (host_id={})", host_id),
+    ):
         with ConcurrencyGroupExecutor(
             parent_cg=cg,
             name="snapshot_helper_phase_a",
@@ -989,7 +1026,7 @@ def build_image_on_outer_from_build_args(
             clone_target = local_clone_dir / "repo"
             clone_cmd.extend([f"file://{local_context}", str(clone_target)])
             clone_cg = ConcurrencyGroup(name="git-clone-build-context")
-            with clone_cg:
+            with translate_outer_concurrency_errors("clone the build context"), clone_cg:
                 clone_result = clone_cg.run_process_to_completion(
                     command=clone_cmd,
                     is_checked_after=False,
@@ -1023,7 +1060,7 @@ def build_image_on_outer_from_build_args(
                         f"Failed to create remote build dir {remote_build_dir}: {mkdir_result.stderr.strip()}"
                     )
                 upload_cg = ConcurrencyGroup(name="rsync-build-context")
-                with upload_cg:
+                with translate_outer_concurrency_errors("upload the build context to the host"), upload_cg:
                     upload_directory_to_outer(outer, upload_cg, upload_context, remote_build_dir)
 
             # Rewrite --file/--dockerfile paths to absolute paths on the outer.

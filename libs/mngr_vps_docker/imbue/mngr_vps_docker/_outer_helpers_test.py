@@ -16,6 +16,8 @@ import pytest
 from pydantic import ConfigDict
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
+from imbue.concurrency_group.errors import ProcessTimeoutError
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CommandResult
@@ -48,6 +50,8 @@ from imbue.mngr_vps_docker.container_setup import run_docker
 from imbue.mngr_vps_docker.container_setup import seed_host_volume_layout_on_outer
 from imbue.mngr_vps_docker.container_setup import start_container
 from imbue.mngr_vps_docker.container_setup import stop_container
+from imbue.mngr_vps_docker.container_setup import translate_outer_concurrency_errors
+from imbue.mngr_vps_docker.errors import ContainerSetupError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.instance import _read_host_id_label_from_vps
 
@@ -847,3 +851,44 @@ def test_build_ssh_transport_raises_for_local_outer() -> None:
     outer = _SshTransportOuter(info=None)
     with pytest.raises(MngrError):
         build_ssh_transport_for_outer(cast(OuterHostInterface, outer))
+
+
+def test_translate_outer_concurrency_errors_wraps_concurrency_exception_group() -> None:
+    # Regression for the leaked-lima-VM bug: a build/upload failure inside a
+    # ConcurrencyGroup surfaces as ConcurrencyExceptionGroup, which is NOT a
+    # MngrError and so escapes provider `except MngrError` cleanup clauses. The
+    # boundary must convert it into a ContainerSetupError (a MngrError subclass).
+    inner = MngrError("Upload failed: host key verification failed")
+    with pytest.raises(ContainerSetupError) as exc_info:
+        with translate_outer_concurrency_errors("upload the build context to the host"):
+            raise ConcurrencyExceptionGroup("group", [inner], main_exception=inner)
+    assert isinstance(exc_info.value, MngrError)
+    assert "upload the build context to the host" in str(exc_info.value)
+    assert "host key verification failed" in str(exc_info.value)
+    assert exc_info.value.__cause__ is not None
+
+
+def test_translate_outer_concurrency_errors_wraps_process_timeout_error() -> None:
+    with pytest.raises(ContainerSetupError) as exc_info:
+        with translate_outer_concurrency_errors("build the image"):
+            raise ProcessTimeoutError(command=("docker", "build"), stdout="", stderr="")
+    assert isinstance(exc_info.value, MngrError)
+    assert "build the image" in str(exc_info.value)
+
+
+def test_translate_outer_concurrency_errors_passes_mngr_error_through_unwrapped() -> None:
+    # A plain MngrError raised directly (not inside a ConcurrencyGroup) must not
+    # be double-wrapped -- callers already handle MngrError.
+    sentinel = MngrError("already a mngr error")
+    with pytest.raises(MngrError) as exc_info:
+        with translate_outer_concurrency_errors("do a thing"):
+            raise sentinel
+    assert exc_info.value is sentinel
+    assert not isinstance(exc_info.value, ContainerSetupError)
+
+
+def test_translate_outer_concurrency_errors_is_noop_on_success() -> None:
+    results: list[int] = []
+    with translate_outer_concurrency_errors("do a thing"):
+        results.append(1)
+    assert results == [1]

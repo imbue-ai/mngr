@@ -17,6 +17,7 @@ from pydantic import PrivateAttr
 from pyinfra.api import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import HostNotFoundError
@@ -396,6 +397,37 @@ sudo poweroff
         with log_span("Saving failed host record for host_id={}", host_id):
             self._host_store.write_host_record(host_record)
 
+    def _cleanup_failed_lima_instance(
+        self,
+        *,
+        instance_name: str,
+        host_data_disk_name: str | None,
+        container_host_port: int | None,
+    ) -> None:
+        """Best-effort teardown of a half-created Lima VM, its btrfs disk, and forwarded-port known_hosts entry.
+
+        Tolerates already-absent resources so it is safe to call from a `finally`
+        on any failure path. Also swallows concurrency-group ``ProcessError``s
+        (e.g. a limactl timeout) so a slow cleanup never masks the original
+        creation failure that triggered it.
+        """
+        try:
+            limactl_delete(self.mngr_ctx.concurrency_group, instance_name, force=True)
+        except (LimaCommandError, OSError, ProcessError) as cleanup_err:
+            logger.debug("Failed to clean up Lima instance {} during error recovery: {}", instance_name, cleanup_err)
+        if host_data_disk_name is not None:
+            try:
+                limactl_disk_delete(self.mngr_ctx.concurrency_group, host_data_disk_name, force=True)
+            except (LimaCommandError, OSError, ProcessError) as cleanup_err:
+                logger.debug(
+                    "Failed to clean up Lima disk {} during error recovery: {}", host_data_disk_name, cleanup_err
+                )
+        if container_host_port is not None:
+            try:
+                remove_host_from_known_hosts(self._container_known_hosts_path(), "127.0.0.1", container_host_port)
+            except OSError as cleanup_err:
+                logger.trace("Failed to clean up container known_hosts during error recovery: {}", cleanup_err)
+
     def _wait_for_cloud_init(self, instance_name: str) -> None:
         """Wait for cloud-init to complete inside the VM."""
         with log_span("Waiting for cloud-init to complete in {}", instance_name):
@@ -532,6 +564,12 @@ sudo poweroff
         yaml_path = write_lima_yaml(lima_config)
         effective_start_args = tuple(self.config.default_start_args) + tuple(start_args or ())
 
+        # Tracked so the `finally` can tear down a half-built VM + disk on ANY
+        # failure -- including ConcurrencyExceptionGroup / ProcessTimeoutError /
+        # KeyboardInterrupt, which are not MngrError/OSError and would otherwise
+        # escape the `except` below leaving an orphaned, untracked VM behind.
+        is_creation_successful = False
+        failure_reason = "Lima docker host creation was interrupted by an unexpected error"
         try:
             limactl_disk_create(self.mngr_ctx.concurrency_group, host_data_disk_name, self.config.host_data_disk_size)
             limactl_start_new(
@@ -575,27 +613,25 @@ sudo poweroff
                     tags=tags,
                     lima_config=lima_config,
                 )
+            is_creation_successful = True
         except (MngrError, OSError) as e:
             failure_reason = str(e)
-            logger.error("Lima docker host creation failed: {}", failure_reason)
-            try:
-                limactl_delete(self.mngr_ctx.concurrency_group, instance_name, force=True)
-            except (LimaCommandError, OSError) as cleanup_err:
-                logger.debug(
-                    "Failed to clean up Lima instance {} during error recovery: {}", instance_name, cleanup_err
-                )
-            try:
-                limactl_disk_delete(self.mngr_ctx.concurrency_group, host_data_disk_name, force=True)
-            except (LimaCommandError, OSError) as cleanup_err:
-                logger.debug(
-                    "Failed to clean up Lima disk {} during error recovery: {}", host_data_disk_name, cleanup_err
-                )
-            self._save_failed_host_record(
-                host_id=host_id, host_name=name, tags=tags, failure_reason=failure_reason, build_log=""
-            )
             raise LimaHostCreationError(self.name, failure_reason) from e
         finally:
             yaml_path.unlink(missing_ok=True)
+            if not is_creation_successful:
+                logger.error("Lima docker host creation failed; tearing down {}: {}", instance_name, failure_reason)
+                self._cleanup_failed_lima_instance(
+                    instance_name=instance_name,
+                    host_data_disk_name=host_data_disk_name,
+                    container_host_port=container_host_port,
+                )
+                try:
+                    self._save_failed_host_record(
+                        host_id=host_id, host_name=name, tags=tags, failure_reason=failure_reason, build_log=""
+                    )
+                except (MngrError, OSError) as record_err:
+                    logger.warning("Failed to write failed-host record for {}: {}", host_id, record_err)
 
         self._evict_cached_host(host_id, replacement=host)
         return host
@@ -916,6 +952,12 @@ sudo poweroff
 
         effective_start_args = tuple(self.config.default_start_args) + tuple(start_args or ())
 
+        # Tracked so the `finally` can tear down a half-built VM + disk on ANY
+        # failure -- including ConcurrencyExceptionGroup / ProcessTimeoutError /
+        # KeyboardInterrupt, which are not MngrError/OSError and would otherwise
+        # escape the `except` below leaving an orphaned, untracked VM behind.
+        is_creation_successful = False
+        failure_reason = "Lima host creation was interrupted by an unexpected error"
         try:
             # Pre-create the Lima-managed additional disk in btrfs mode.
             # `additionalDisks` with `format: true` only auto-formats an
@@ -949,39 +991,29 @@ sudo poweroff
 
             # Create the Host object
             host = self._create_host_object(host_id, name, ssh_config)
+            is_creation_successful = True
 
         except (MngrError, OSError) as e:
             failure_reason = str(e)
-            logger.error("Lima host creation failed: {}", failure_reason)
-            # Clean up the Lima instance
-            try:
-                limactl_delete(self.mngr_ctx.concurrency_group, instance_name, force=True)
-            except (LimaCommandError, OSError) as cleanup_err:
-                logger.debug(
-                    "Failed to clean up Lima instance {} during error recovery: {}", instance_name, cleanup_err
-                )
-            # Also clean up the orphaned btrfs additional disk so a retry with
-            # the same host_id can re-create it without colliding.
-            if host_data_disk_name is not None:
-                try:
-                    limactl_disk_delete(self.mngr_ctx.concurrency_group, host_data_disk_name, force=True)
-                except (LimaCommandError, OSError) as cleanup_err:
-                    logger.debug(
-                        "Failed to clean up Lima disk {} during error recovery: {}",
-                        host_data_disk_name,
-                        cleanup_err,
-                    )
-            self._save_failed_host_record(
-                host_id=host_id,
-                host_name=name,
-                tags=tags,
-                failure_reason=failure_reason,
-                build_log="",
-            )
             raise LimaHostCreationError(self.name, failure_reason) from e
         finally:
             # Clean up the temporary YAML config file
             yaml_path.unlink(missing_ok=True)
+            if not is_creation_successful:
+                logger.error("Lima host creation failed; tearing down {}: {}", instance_name, failure_reason)
+                # Tear down the VM (and the orphaned btrfs additional disk so a
+                # retry with the same host_id can re-create it without colliding).
+                self._cleanup_failed_lima_instance(
+                    instance_name=instance_name,
+                    host_data_disk_name=host_data_disk_name,
+                    container_host_port=None,
+                )
+                try:
+                    self._save_failed_host_record(
+                        host_id=host_id, host_name=name, tags=tags, failure_reason=failure_reason, build_log=""
+                    )
+                except (MngrError, OSError) as record_err:
+                    logger.warning("Failed to write failed-host record for {}: {}", host_id, record_err)
 
         # Build lifecycle config
         lifecycle_options = lifecycle if lifecycle is not None else HostLifecycleOptions()
@@ -1409,6 +1441,24 @@ sudo poweroff
                     provider_name=self.name,
                     host_state=host_state,
                 )
+            )
+
+        # Surface orphaned Lima VMs: prefix-matched instances that no host record
+        # claims (whatever is left in instance_status after the loop above popped
+        # every recorded host). These are leftovers from a create that failed
+        # before its record was written -- e.g. a build-time error that escaped
+        # cleanup -- so they are invisible to the record-driven discovery above
+        # and are never reaped by gc. Warn loudly with the manual cleanup command.
+        # We deliberately do not emit synthetic DiscoveredHosts for them: gc would
+        # call get_host(), which raises HostNotFoundError for an id with no record.
+        for orphan_instance_name, orphan_status in instance_status.items():
+            logger.warning(
+                "Found orphaned Lima VM {!r} (status={}) with no mngr host record -- likely a failed or "
+                "interrupted create. mngr cannot manage or garbage-collect it; remove it manually with "
+                "`limactl delete --force {}`.",
+                orphan_instance_name,
+                orphan_status,
+                orphan_instance_name,
             )
 
         return discovered
