@@ -2601,7 +2601,6 @@ _NO_CREDENTIALS_WARNING_SUBSTRING = "No API credentials detected for Claude Code
 
 
 @pytest.mark.usefixtures("_no_api_key_in_env")
-@pytest.mark.usefixtures("_no_api_key_in_env")
 def test_on_before_provisioning_does_not_raise_when_no_credentials(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
