@@ -4,6 +4,52 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-03
+
+Discovery no longer masks failures as "zero hosts". `_list_provider_vps_hostnames`
+previously caught any IAM-listing error and returned an empty list, so a
+transient OVH outage / expired credentials looked identical to a real empty
+result -- which the discovery layer can't distinguish, and which defeats mngr's
+"mark hosts UNKNOWN when a provider's discovery fails" safeguard. It now lets the
+error propagate (the genuinely-unconfigured case is still the early-return), so
+`mngr list --on-error continue` records the failure instead of silently dropping
+live hosts.
+
+## 2026-06-02
+
+Collapsed redundant `except` clauses: clauses listing `VpsApiError` / `VpsProvisioningError`
+alongside `MngrError` now catch just `MngrError` (those VPS errors are already `MngrError`
+subclasses via `VpsDockerError`). No behavior change.
+
+- pyproject.toml: align `imbue-mngr*==` pin stragglers with the satellites bumped in main's `e22e7010e` release commit. Several `imbue-mngr-*` libs still pinned to older versions even though `libs/mngr` had moved to 0.2.10; building the apps/minds ToDesktop bundle from main today would fail at `uv lock` in `apps/minds/scripts/build.js` because the workspace constraint graph is unsatisfiable. Day-to-day dev hides this because `[tool.uv.sources]` redirects every `imbue-mngr-*` to its workspace path, bypassing the `==` pin.
+
+## 2026-05-29
+
+User-visible: minds workspaces running on OVH (docker-on-VPS) hosts can now
+be backed up off-site (restic) when a backup provider is selected at creation
+time.
+
+(No code change in this project in this PR; the integration lives in the
+minds app and the forever-claude-template `host_backup` service.)
+
+Added `inotify-tools` and `jq` to `_REQUIRED_OUTER_PACKAGES` so the new
+`snapshot_helper.service` provisioned by `mngr_vps_docker` has the tools
+it needs on OVH-leased outers (the cloud-init path on Vultr / generic
+VPSes pulls these in via the cloud-init `packages:` list).
+
+OVH hosts created by `mngr create --provider ovh` now back their per-host
+unified docker volume with a btrfs subvolume on a loop-mounted btrfs filesystem
+on the VPS (`/mngr-btrfs/<host_id_hex>` on `/var/lib/mngr-btrfs.img`). This
+makes future consistent snapshotting of the agent data via
+`btrfs subvolume snapshot -r` possible. The setup happens in the shared
+`VpsDockerProvider._setup_container_on_vps` path, so OVH's bootstrap (rebuild +
+TOFU + root SSH + `rsync` install) is unchanged; the `apt-get install btrfs-progs`
+runs on the freshly-bootstrapped root SSH session. See `mngr_vps_docker`'s
+changelog for the full mechanism.
+
+**Breaking change:** existing ovh hosts created before this release cannot
+be discovered or managed after upgrade. Destroy and recreate them.
+
 ## 2026-05-28
 
 # Dropped redundant per-project ty/ruff ratchet tests

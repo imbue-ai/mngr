@@ -20,16 +20,14 @@ import click
 from loguru import logger
 
 from imbue.imbue_common.model_update import to_update
+from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.cli.env_utils import resolve_env_vars
 from imbue.mngr.cli.env_utils import resolve_labels
-from imbue.mngr.cli.headless_runner import get_local_host
 from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
-from imbue.mngr.errors import AgentError
-from imbue.mngr.errors import HostError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UnknownBackendError
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
@@ -365,7 +363,7 @@ def _run_reducer_phase(
             run_name=ctx.run_name,
             output_dir=ctx.output_dir,
         )
-    except (MngrError, HostError, AgentError, OSError, BaseExceptionGroup) as exc:
+    except (MngrError, OSError, BaseExceptionGroup) as exc:
         logger.warning("Failed to launch reducer agent: {}", exc)
         return None
 

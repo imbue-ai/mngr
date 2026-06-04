@@ -19,6 +19,7 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_user_settings_path
 from imbue.mngr_antigravity.plugin import AntigravityAgent
 from imbue.mngr_antigravity.plugin import AntigravityAgentConfig
@@ -251,27 +252,72 @@ def test_assemble_command_appends_user_agent_args(antigravity_agent: Antigravity
 def test_assemble_command_omits_dangerously_skip_permissions_when_auto_allow_disabled(
     antigravity_agent: AntigravityAgent,
 ) -> None:
+    """Default config does not auto-approve, so the flag is absent."""
     command = str(antigravity_agent.assemble_command(antigravity_agent.host, (), command_override=None))
     assert "--dangerously-skip-permissions" not in command
 
 
-def test_assemble_command_appends_dangerously_skip_permissions_when_auto_allow_enabled(
+def test_assemble_command_adds_dangerously_skip_permissions_when_auto_allow_enabled(
     antigravity_agent_auto_allow: AntigravityAgent,
 ) -> None:
-    """`auto_allow_permissions=True` wires Antigravity's documented auto-approve flag."""
+    """auto_allow_permissions appends the CLI flag.
+
+    Auto-approval goes through the flag, NOT a PreToolUse hook: agy's
+    {"decision": "allow"} hook output does not gate the run_command
+    confirmation dialog (verified live against agy 1.0.3).
+    """
     agent = antigravity_agent_auto_allow
     command = str(agent.assemble_command(agent.host, (), command_override=None))
-    assert command.endswith("--dangerously-skip-permissions")
+    assert "--dangerously-skip-permissions" in command
+
+
+def test_assemble_command_adds_hooks_via_nondotted_tmp_symlink(antigravity_agent: AntigravityAgent) -> None:
+    """agy gets --add-dir pointing at a non-dotted /tmp symlink to the hooks dir.
+
+    Regression for the hidden-path bug: agy rejects --add-dir paths with a
+    dot-prefixed segment, so pointing it straight at the state-dir hooks path
+    (under ~/.mngr/) silently loads no hooks. A /tmp symlink resolving to the
+    durable hooks dir bypasses the rejection.
+    """
+    agent = antigravity_agent
+    command = str(agent.assemble_command(agent.host, (), command_override=None))
+    hooks_symlink = agent._get_agy_hooks_symlink_path()
+    hooks_dir = str(agent._get_agy_hooks_dir())
+    # --add-dir uses the symlink, never the dotted state-dir path.
+    assert f"--add-dir {hooks_symlink}" in command
+    assert f"--add-dir {hooks_dir}" not in command
+    # The symlink path must be non-dotted (no dot-prefixed segment) so agy accepts it.
+    assert hooks_symlink.startswith("/tmp/")
+    assert not any(segment.startswith(".") for segment in hooks_symlink.split("/") if segment)
+    # And it is created (ln -sfn <hooks_dir> <symlink>) before agy launches.
+    assert f"ln -sfn {hooks_dir} {hooks_symlink}" in command
+    assert command.index(f"ln -sfn {hooks_dir} {hooks_symlink}") < command.index(" agy ")
+
+
+def test_assemble_command_premakes_hooks_agents_dir(antigravity_agent: AntigravityAgent) -> None:
+    """The foreground mkdir creates the hooks .agents dir so --add-dir never points at a missing path.
+
+    provision() writes hooks.json there; the mkdir guarantees the directory
+    exists at launch even when the hooks file has not been provisioned (e.g. a
+    restart that runs before re-provision).
+    """
+    agent = antigravity_agent
+    command = str(agent.assemble_command(agent.host, (), command_override=None))
+    hooks_agents_dir = str(agent._get_agy_hooks_file_path().parent)
+    assert hooks_agents_dir in command.split(" agy ")[0]
+    assert command.index("mkdir -p") < command.index(" agy "), command
 
 
 def test_assemble_command_preserves_user_args_when_auto_allow_enabled(
     antigravity_agent_auto_allow: AntigravityAgent,
 ) -> None:
-    """User-supplied agent_args still land before the auto-allow flag."""
+    """User-supplied agent_args land right after `agy`, with the auto-allow flag still appended after."""
     agent = antigravity_agent_auto_allow
     command = str(agent.assemble_command(agent.host, ("--add-dir", "/tmp"), command_override=None))
     assert "agy --add-dir /tmp --log-file" in command
-    assert command.endswith("--dangerously-skip-permissions")
+    # The user args do not displace the appended auto-allow flag.
+    assert "--dangerously-skip-permissions" in command
+    assert command.index("agy --add-dir /tmp") < command.index("--dangerously-skip-permissions")
 
 
 def test_assemble_command_launches_background_tasks_supervisor(antigravity_agent: AntigravityAgent) -> None:
@@ -329,15 +375,37 @@ def test_get_expected_process_name_returns_agy(antigravity_agent: AntigravityAge
     assert antigravity_agent.get_expected_process_name() == "agy"
 
 
-def test_modify_env_vars_exposes_agy_log_file_path(antigravity_agent: AntigravityAgent) -> None:
-    """The streamer needs the agy --log-file location to grep for `Created conversation`."""
-    env_vars: dict[str, str] = {"PRE_EXISTING": "kept"}
-    antigravity_agent.modify_env_vars(antigravity_agent.host, env_vars)
-    assert env_vars["PRE_EXISTING"] == "kept"
-    assert "ANTIGRAVITY_AGY_LOG_FILE" in env_vars
-    assert env_vars["ANTIGRAVITY_AGY_LOG_FILE"].endswith("logs/agy_cli.log")
-    # Must be inside the per-agent state dir so the path is unique per agent.
-    assert "/agents/" in env_vars["ANTIGRAVITY_AGY_LOG_FILE"]
+def test_assemble_command_resumes_last_conversation_via_set_dash_dash(antigravity_agent: AntigravityAgent) -> None:
+    """The launch command resumes the last-recorded conversation, evaluated in the shell.
+
+    The stored command is replayed verbatim on every `mngr start`, so the
+    resume decision is shell-evaluated at launch: read the last line of the
+    per-agent conversation-ids file and, when present, pass `--conversation
+    "$id"` via `set --` / "$@" (which avoids unquoted-substitution word
+    splitting so it works in bash and zsh). We do not stat agy's store to
+    pre-check existence -- agy warns and starts fresh on its own for a pruned
+    conversation -- so the command stays decoupled from agy's on-disk layout.
+    """
+    command = str(antigravity_agent.assemble_command(antigravity_agent.host, (), command_override=None))
+    ids_file = str(antigravity_agent._get_conversation_ids_file_path())
+    # Reads the last recorded id from the per-agent ids file.
+    assert f"__mngr_cid=$(tail -n 1 {ids_file} 2>/dev/null || true)" in command
+    # Passes the flag positionally whenever an id is recorded (no store stat).
+    assert 'if [ -n "$__mngr_cid" ]; then set -- --conversation "$__mngr_cid"; fi' in command
+    # No coupling to agy's conversation store path/extension.
+    assert ".db" not in command
+    assert "conversations/" not in command
+    assert "agy " in command and '"$@"' in command
+
+
+def test_assemble_command_resume_prelude_runs_after_cd_and_before_agy(antigravity_agent: AntigravityAgent) -> None:
+    """The resume prelude + agy run as a `{ ...; }` group gated on the cd succeeding."""
+    command = str(antigravity_agent.assemble_command(antigravity_agent.host, (), command_override=None))
+    symlink_path = antigravity_agent._get_agy_workspace_symlink_path()
+    # cd -> resume-prelude -> agy "$@", all inside a brace group after the cd.
+    assert f"cd {symlink_path} && {{ __mngr_cid=" in command
+    assert command.index("__mngr_cid=") < command.index(" agy ")
+    assert command.rstrip().endswith('"$@" ; }')
 
 
 def test_provision_does_not_create_workspace_subdirs(
@@ -363,6 +431,28 @@ def test_provision_does_not_create_workspace_subdirs(
     assert not (agent.work_dir / ".agents").exists()
     assert not (agent.work_dir / ".antigravityignore").exists()
     assert not (agent.work_dir / ".gemini").exists()
+
+
+def test_provision_installs_capture_conversation_id_script(
+    auto_approve_ctx: AntigravityAgent,
+    isolated_home: Path,
+) -> None:
+    """provision() installs capture_conversation_id.sh into the agent's commands/ dir.
+
+    The PreInvocation capture hook invokes this script by that path
+    (build_antigravity_hooks_config), so it must be provisioned for conversation
+    resume + transcript scoping to work.
+    """
+    agent = auto_approve_ctx
+    agent.provision(
+        host=agent.host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
+        mngr_ctx=agent.mngr_ctx,
+    )
+    script_path = agent._get_agent_dir() / "commands" / CAPTURE_CONVERSATION_ID_SCRIPT_NAME
+    assert script_path.exists()
+    # Sanity-check it's the capture script (extracts conversationId from stdin).
+    assert "conversationId" in script_path.read_text()
 
 
 def _read_user_settings(monkeypatched_home: Path) -> dict[str, Any]:
@@ -749,3 +839,76 @@ def test_provision_writes_supervisor_even_when_common_transcript_disabled(
         antigravity_agent_without_common_transcript._get_agent_dir() / "commands" / "antigravity_background_tasks.sh"
     )
     assert expected.exists()
+
+
+# =============================================================================
+# Per-agent hooks.json provisioning
+# =============================================================================
+
+
+@pytest.fixture
+def antigravity_agent_auto_allow_and_dismiss(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> AntigravityAgent:
+    """auto_allow_permissions=True with auto_dismiss_dialogs=True so provision() completes in tests."""
+    return _make_antigravity_agent(
+        local_provider,
+        tmp_path,
+        AntigravityAgentConfig(auto_allow_permissions=True, auto_dismiss_dialogs=True),
+    )
+
+
+def _read_hooks_json(agent: AntigravityAgent) -> dict[str, Any]:
+    """Read the per-agent hooks.json that provision() writes into the agent state dir."""
+    parsed: Any = json.loads(agent._get_agy_hooks_file_path().read_text())
+    assert isinstance(parsed, dict)
+    return parsed
+
+
+def test_provision_writes_hooks_json_into_state_dir_agents_subdir(
+    antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path
+) -> None:
+    """hooks.json lands at <state>/agy_hooks/.agents/hooks.json -- the path agy reads via --add-dir."""
+    agent = antigravity_agent_auto_dismiss
+    _provision(agent)
+    hooks_path = agent._get_agy_hooks_file_path()
+    assert hooks_path == agent._get_agent_dir() / "agy_hooks" / ".agents" / "hooks.json"
+    assert hooks_path.exists()
+
+
+def test_provision_hooks_json_sets_active_marker_on_preinvocation_and_clears_on_stop(
+    antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path
+) -> None:
+    """The active marker hooks are always present (they drive RUNNING vs WAITING)."""
+    agent = antigravity_agent_auto_dismiss
+    _provision(agent)
+    mngr = _read_hooks_json(agent)["mngr"]
+    assert mngr["PreInvocation"][0]["command"] == 'touch "$MNGR_AGENT_STATE_DIR/active"'
+    assert mngr["Stop"][0]["command"] == 'rm -f "$MNGR_AGENT_STATE_DIR/active"'
+
+
+def test_provision_hooks_json_never_includes_pretooluse(
+    antigravity_agent_auto_allow_and_dismiss: AntigravityAgent, isolated_home: Path
+) -> None:
+    """The provisioned hooks.json carries only lifecycle markers, never a PreToolUse hook.
+
+    Even with auto_allow_permissions=True, auto-approval is the
+    --dangerously-skip-permissions flag (see assemble_command), not a hook --
+    agy's {"decision": "allow"} hook output does not gate the run_command
+    dialog.
+    """
+    agent = antigravity_agent_auto_allow_and_dismiss
+    _provision(agent)
+    mngr = _read_hooks_json(agent)["mngr"]
+    assert "PreToolUse" not in mngr
+    assert set(mngr) == {"PreInvocation", "Stop"}
+
+
+def test_provision_does_not_write_hooks_into_work_dir(
+    antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path
+) -> None:
+    """Hooks live in the agent state dir, never in the user's work_dir/.agents."""
+    agent = antigravity_agent_auto_dismiss
+    _provision(agent)
+    assert not (agent.work_dir / ".agents").exists()

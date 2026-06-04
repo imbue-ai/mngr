@@ -32,9 +32,9 @@ import click
 from click_option_group import GroupedOption
 
 from imbue.mngr.cli.common_opts import COMMON_OPTIONS_GROUP_NAME
-from imbue.mngr.cli.help import get_topic
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import get_help_metadata
+from imbue.mngr.cli.help_topics import get_topic
 from imbue.mngr.main import BUILTIN_COMMANDS
 from imbue.mngr.main import PLUGIN_COMMANDS
 from imbue.mngr.main import cli

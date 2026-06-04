@@ -51,6 +51,16 @@ _MINDS_DEPLOY_ID = os.environ.get("MINDS_DEPLOY_ID", "MINDS_DEPLOY_ID_UNSET")
 # var gets the cheapest possible warm pool (cold start on first hit).
 _MIN_CONTAINERS = int(os.environ.get("MINDS_LITELLM_PROXY_MIN_CONTAINERS", "0"))
 
+# Idle-before-scaledown window (seconds). ``minds env deploy`` threads the
+# tier's ``[scaledown_window].litellm_proxy`` here as
+# ``MINDS_LITELLM_PROXY_SCALEDOWN_WINDOW`` at ``modal deploy`` time. Dev tiers
+# set this high (~10 min) so the no-warm-pool proxy stays hot across a dev
+# session; staging / production leave it unset and rely on ``min_containers``.
+# ``0`` (the default, and what the ci/test tier uses) means "don't pin it" --
+# Modal uses its own default. Modal requires the value > 0, so 0 is normalized
+# to ``None`` at the call site below.
+_SCALEDOWN_WINDOW = int(os.environ.get("MINDS_LITELLM_PROXY_SCALEDOWN_WINDOW", "0"))
+
 LITELLM_CONFIG = {
     "model_list": [
         {
@@ -129,6 +139,10 @@ app = modal.App(name=f"llm-{_DEPLOY_ENV}", image=image)
         modal.Secret.from_dict({"MNGR_DEPLOY_ENV": _DEPLOY_ENV, "MINDS_DEPLOY_ID": _MINDS_DEPLOY_ID}),
     ],
     min_containers=_MIN_CONTAINERS,
+    # Idle-before-scaledown window driven by ``_SCALEDOWN_WINDOW``. ``0``
+    # (default / ci) -> ``None`` so Modal uses its own default; dev pins this
+    # high so the no-warm-pool proxy stays hot across a dev session.
+    scaledown_window=_SCALEDOWN_WINDOW or None,
     timeout=600,
 )
 @modal.asgi_app()

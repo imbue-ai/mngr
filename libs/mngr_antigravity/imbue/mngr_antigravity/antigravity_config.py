@@ -8,11 +8,31 @@ array. On subsequent launches, agy reads the array and suppresses the dialog
 for any matching path.
 
 Antigravity does **not** expose an env-var override for this file
-(no ``GEMINI_CLI_SYSTEM_SETTINGS_PATH`` analog exists in the v1.0.0 binary), so
+(no ``GEMINI_CLI_SYSTEM_SETTINGS_PATH`` analog exists in the binary), so
 mngr cannot redirect the file to a per-agent path. We therefore *merge* into
 the user's global file -- appending the agent's ``work_dir`` to the
 ``trustedWorkspaces`` array if it isn't already present, leaving every other
 key untouched. This is additive and idempotent.
+
+Hooks, by contrast, ARE provisioned per-agent. agy discovers a ``hooks.json``
+from any workspace directory's ``.agents/`` subdir (and from the global
+``~/.gemini/config/hooks.json``) and executes the hooks it finds. mngr writes a
+per-agent ``hooks.json`` into the agent state dir and points agy at it with
+``--add-dir`` (see ``build_antigravity_hooks_config`` and the plugin's
+``assemble_command``), so the user's global config stays untouched and each
+agent's marker files land in its own state dir.
+
+The in-TUI ``/hooks`` command instead writes to
+``~/.gemini/antigravity-cli/hooks.json``, which the execution engine does not
+run -- that path is loaded only for the TUI's display, while hooks execute only
+from ``~/.gemini/config/hooks.json`` and per-workspace ``.agents/hooks.json``
+(google-antigravity/antigravity-cli#49). mngr therefore does not use the TUI.
+
+The hooks here only maintain the lifecycle ``active`` marker. Permission
+auto-approval is NOT done via a hook -- agy's documented ``PreToolUse``
+``{"decision": "allow"}`` output does not gate the ``run_command`` confirmation
+dialog -- so the plugin uses the ``--dangerously-skip-permissions`` CLI flag
+instead (see the plugin's ``assemble_command``).
 """
 
 from __future__ import annotations
@@ -107,3 +127,101 @@ def merge_trusted_workspace(settings: Mapping[str, Any], workspace_path: str) ->
     merged: dict[str, Any] = dict(settings)
     merged[TRUSTED_WORKSPACES_KEY] = existing + [workspace_path]
     return merged
+
+
+# =============================================================================
+# Hook config builder
+# =============================================================================
+
+# Top-level key for mngr's named hook group in the per-agent ``hooks.json``.
+# agy keys hooks.json by hook *name* (each name maps to per-event handler
+# lists); a single mngr-owned name keeps the file self-contained and easy to
+# identify.
+_MNGR_HOOK_NAME: str = "mngr"
+
+# Marker file (in ``$MNGR_AGENT_STATE_DIR``) whose presence the base
+# ``BaseAgent.get_lifecycle_state`` reads as "agent is actively working"
+# (RUNNING); its absence means WAITING. Name kept in sync with the literal
+# ``"active"`` that ``BaseAgent`` and the provider listing scripts check.
+ACTIVE_MARKER_FILENAME: str = "active"
+
+# Per-agent file (in ``$MNGR_AGENT_STATE_DIR``) recording the agy conversation
+# IDs this agent has worked on, one per line, appended whenever the active
+# conversation changes (see ``capture_conversation_id.sh``). Its last line is
+# the most-recently-active conversation -- ``AntigravityAgent.assemble_command``
+# resumes it via ``agy --conversation`` on restart -- and its unique lines are
+# every conversation this agent touched, which ``stream_transcript.sh`` tails.
+# The shell scripts hardcode this same literal; keep them in sync.
+CONVERSATION_IDS_FILENAME: str = "antigravity_conversation_ids"
+
+# Script (provisioned into ``$MNGR_AGENT_STATE_DIR/commands/``) that the
+# ``PreInvocation`` capture hook runs to extract ``conversationId`` from agy's
+# hook payload and append it to ``CONVERSATION_IDS_FILENAME``. Name kept in
+# sync with the resource file under ``resources/``.
+CAPTURE_CONVERSATION_ID_SCRIPT_NAME: str = "capture_conversation_id.sh"
+
+# ``active`` is touched on every ``PreInvocation`` (the loop is about to call
+# the model, i.e. the agent is working) and removed on ``Stop`` (the execution
+# loop terminated and the agent is back to waiting for input). ``$MNGR_AGENT_STATE_DIR``
+# expands in agy's shell at hook-execution time. Both commands intentionally
+# emit no stdout: ``PreInvocation``/``Stop`` treat empty output as "no
+# injected steps" / "allow stop" (verified live against agy 1.0.3).
+_SET_ACTIVE_COMMAND: str = f'touch "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'
+_CLEAR_ACTIVE_COMMAND: str = f'rm -f "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'
+
+# Second ``PreInvocation`` handler: records the conversation ID from agy's hook
+# payload (delivered on stdin). agy hands each handler its own copy of the
+# payload stdin (verified live against agy 1.0.4), so this runs independently
+# of the active-marker handler above. ``$MNGR_AGENT_STATE_DIR`` expands in
+# agy's shell at hook-execution time.
+_CAPTURE_CONVERSATION_ID_COMMAND: str = f'bash "$MNGR_AGENT_STATE_DIR/commands/{CAPTURE_CONVERSATION_ID_SCRIPT_NAME}"'
+
+
+@pure
+def build_antigravity_hooks_config() -> dict[str, Any]:
+    """Build the per-agent ``hooks.json`` body for the antigravity agent.
+
+    Emits two ``PreInvocation`` handlers plus a ``Stop`` handler:
+
+    * The ``active``-marker pair: ``PreInvocation`` touches the marker and
+      ``Stop`` removes it. ``BaseAgent.get_lifecycle_state`` reads that marker
+      to report RUNNING while the agent works and WAITING when it's idle; agy
+      maintains no such marker on its own.
+    * The conversation-ID capture handler: a second ``PreInvocation`` handler
+      runs ``capture_conversation_id.sh``, which reads agy's hook payload from
+      stdin and records the active conversation ID (see
+      ``CONVERSATION_IDS_FILENAME``). ``assemble_command`` resumes that
+      conversation on restart and ``stream_transcript.sh`` tails its
+      transcript. agy delivers the payload stdin to each handler independently
+      (verified live against agy 1.0.4), so the two ``PreInvocation`` handlers
+      do not contend for stdin.
+
+    Auto-approval of tool permissions is NOT a hook: agy's documented
+    ``PreToolUse`` ``{"decision": "allow"}`` output does not actually gate the
+    ``run_command`` confirmation dialog (verified live against agy 1.0.3 -- the
+    hook runs but the dialog still appears). The plugin routes
+    ``auto_allow_permissions`` through the ``--dangerously-skip-permissions``
+    CLI flag instead (see ``assemble_command``).
+
+    ``PreInvocation``/``Stop`` take a flat list of handlers (their matcher is
+    ignored). The file is mngr-owned and rewritten from scratch each provision,
+    so no merge-with-existing-content logic is needed.
+    """
+    mngr_hook: dict[str, Any] = {
+        "PreInvocation": [
+            {"type": "command", "command": _SET_ACTIVE_COMMAND},
+            {"type": "command", "command": _CAPTURE_CONVERSATION_ID_COMMAND},
+        ],
+        "Stop": [{"type": "command", "command": _CLEAR_ACTIVE_COMMAND}],
+    }
+    return {_MNGR_HOOK_NAME: mngr_hook}
+
+
+@pure
+def serialize_antigravity_hooks(hooks_config: Mapping[str, Any]) -> str:
+    """Serialize a ``hooks.json`` body as two-space-indented JSON.
+
+    Matches the indentation agy itself uses for its config files; the file is
+    mngr-owned so the exact formatting only matters for readable diffs.
+    """
+    return json.dumps(dict(hooks_config), indent=2)

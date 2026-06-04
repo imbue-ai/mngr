@@ -51,12 +51,15 @@ from imbue.minds.config.loader import EnvConfigError
 from imbue.minds.config.loader import load_client_config
 from imbue.minds.config.loader import load_deploy_config
 from imbue.minds.config.loader import repo_tier_client_config_path
+from imbue.minds.envs.docker_cleanup import cleanup_env_state_container
 from imbue.minds.envs.generation import delete_generation_id as real_delete_generation_id
 from imbue.minds.envs.generation import ensure_generation_id as real_ensure_generation_id
 from imbue.minds.envs.health_check import await_apps_healthy as real_await_apps_healthy
 from imbue.minds.envs.local_store import env_root_exists
 from imbue.minds.envs.migrations import apply_pool_hosts_migrations as real_apply_pool_hosts_migrations
-from imbue.minds.envs.mngr_agent_cleanup import real_destroy_mngr_agent
+from imbue.minds.envs.migrations import seed_paid_list_defaults as real_seed_paid_list_defaults
+from imbue.minds.envs.mngr_agent_cleanup import destroy_all_mngr_agents_in_env
+from imbue.minds.envs.mngr_agent_cleanup import real_destroy_mngr_agents
 from imbue.minds.envs.paths import active_env_name_or_none
 from imbue.minds.envs.paths import client_config_file
 from imbue.minds.envs.paths import env_root_dir
@@ -74,6 +77,7 @@ from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.primitives import DevEnvNotFoundError
 from imbue.minds.envs.primitives import InvalidDevEnvNameError
 from imbue.minds.envs.primitives import VaultReadError
+from imbue.minds.envs.primitives import VaultSecretNotFoundError
 from imbue.minds.envs.providers.cloudflare_tunnels import delete_tunnels as real_delete_cloudflare_tunnels
 from imbue.minds.envs.providers.cloudflare_tunnels import list_tunnels_for_env as real_list_cloudflare_tunnels_for_env
 from imbue.minds.envs.providers.modal_env import delete_modal_env as real_delete_modal_env
@@ -101,6 +105,7 @@ from imbue.minds.envs.provisioning import Providers
 from imbue.minds.envs.provisioning import deploy_env
 from imbue.minds.envs.provisioning import destroy_env
 from imbue.minds.envs.provisioning import list_dev_envs
+from imbue.minds.envs.recover import NotInMonorepoError
 from imbue.minds.envs.recover import RecoverFailedError
 from imbue.minds.envs.recover import RecoverTargetMissingError
 from imbue.minds.envs.recover import find_all_recover_target_files
@@ -209,6 +214,7 @@ def _deploy_litellm_proxy_for_provider(
     modal_env: str,
     tier: str,
     min_containers: int,
+    scaledown_window: int,
     deploy_id: str,
     strategy: DeployStrategy,
     cg: ConcurrencyGroup,
@@ -217,6 +223,7 @@ def _deploy_litellm_proxy_for_provider(
         modal_env=modal_env,
         tier=tier,
         min_containers=min_containers,
+        scaledown_window=scaledown_window,
         deploy_id=deploy_id,
         strategy=strategy,
         parent_cg=cg,
@@ -227,6 +234,7 @@ def _deploy_connector_for_provider(
     modal_env: str,
     tier: str,
     min_containers: int,
+    scaledown_window: int,
     deploy_id: str,
     strategy: DeployStrategy,
     cg: ConcurrencyGroup,
@@ -235,6 +243,7 @@ def _deploy_connector_for_provider(
         modal_env=modal_env,
         tier=tier,
         min_containers=min_containers,
+        scaledown_window=scaledown_window,
         deploy_id=deploy_id,
         strategy=strategy,
         parent_cg=cg,
@@ -255,6 +264,15 @@ def _list_modal_secrets_for_provider(modal_env: str, cg: ConcurrencyGroup) -> tu
 
 def _apply_pool_hosts_migrations_for_provider(host_pool_dsn: SecretStr, cg: ConcurrencyGroup) -> tuple[Path, ...]:
     return real_apply_pool_hosts_migrations(host_pool_dsn, migrations_dir=pool_hosts_migrations_dir(), parent_cg=cg)
+
+
+def _seed_paid_list_defaults_for_provider(
+    host_pool_dsn: SecretStr,
+    domains: tuple[str, ...],
+    emails: tuple[str, ...],
+    cg: ConcurrencyGroup,
+) -> None:
+    real_seed_paid_list_defaults(host_pool_dsn, domains=domains, emails=emails, parent_cg=cg)
 
 
 def _get_modal_app_latest_version_for_provider(app_name: str, modal_env: str, cg: ConcurrencyGroup) -> str | None:
@@ -303,6 +321,10 @@ def _delete_generation_id_for_provider(tier_vault_prefix: str, cg: ConcurrencyGr
     real_delete_generation_id(tier_vault_prefix, parent_concurrency_group=cg)
 
 
+def _cleanup_state_container_for_provider(name: DevEnvName, cg: ConcurrencyGroup) -> None:
+    cleanup_env_state_container(name, parent_concurrency_group=cg)
+
+
 def _list_cloudflare_tunnels_for_env_for_provider(
     name: DevEnvName, account_id: str, api_token: SecretStr
 ) -> tuple[str, ...]:
@@ -339,6 +361,7 @@ def _build_real_providers() -> Providers:
         delete_modal_secret=_delete_modal_secret_for_provider,
         list_modal_secrets=_list_modal_secrets_for_provider,
         apply_pool_hosts_migrations=_apply_pool_hosts_migrations_for_provider,
+        seed_paid_list_defaults=_seed_paid_list_defaults_for_provider,
         get_modal_app_latest_version=_get_modal_app_latest_version_for_provider,
         rollback_modal_app=_rollback_modal_app_for_provider,
         create_neon_snapshot_branch=_create_neon_snapshot_branch_for_provider,
@@ -346,7 +369,8 @@ def _build_real_providers() -> Providers:
         resolve_neon_default_branch_id=_resolve_neon_default_branch_id_for_provider,
         verify_neon_token_has_restore_scope=_verify_neon_token_has_restore_scope_for_provider,
         await_apps_healthy=_await_apps_healthy_for_provider,
-        destroy_mngr_agent=real_destroy_mngr_agent,
+        destroy_mngr_agents=real_destroy_mngr_agents,
+        cleanup_state_container=_cleanup_state_container_for_provider,
         wipe_supertokens_app_data=_wipe_supertokens_for_provider,
         wipe_neon_db_schema=_wipe_neon_db_schema_for_provider,
         ensure_generation_id=_ensure_generation_id_for_provider,
@@ -380,14 +404,17 @@ def _load_dev_credentials_from_vault(vault_prefix: str, *, cg: ConcurrencyGroup)
     """
     neon_admin = read_vault_kv(VaultPath(f"{vault_prefix}/neon-admin"), parent_concurrency_group=cg)
     supertokens = read_vault_kv(VaultPath(f"{vault_prefix}/supertokens"), parent_concurrency_group=cg)
-    # The ovh entry is optional -- a tier with no OVH provisioning yet
-    # may not have it populated. Treat a missing entry as empty so the
-    # deploy still progresses; per-env OVH-touching operations will fail
-    # later if/when the operator wires them up without populating Vault.
+    # The ovh entry is optional -- a tier with no OVH provisioning yet may not
+    # have it populated. Treat a genuinely *missing* entry as empty so the
+    # deploy still progresses; per-env OVH-touching operations will fail later
+    # if/when the operator wires them up without populating Vault. Only catch
+    # VaultSecretNotFoundError here: a transient/auth VaultReadError must NOT be
+    # silently turned into empty OVH credentials (that would deploy a broken
+    # `ovh` Modal Secret on a Vault blip), so let those propagate.
     try:
         ovh_secret = read_vault_kv(VaultPath(f"{vault_prefix}/ovh"), parent_concurrency_group=cg)
-    except VaultReadError as exc:
-        logger.warning("No ovh Vault entry yet ({}); proceeding with empty OVH credentials.", exc)
+    except VaultSecretNotFoundError as exc:
+        logger.warning("No ovh Vault entry at {}/ovh ({}); proceeding with empty OVH credentials.", vault_prefix, exc)
         ovh_secret = {}
 
     org_id = neon_admin.get("NEON_ORG_ID", "")
@@ -483,7 +510,10 @@ def _exec_into_recover(*, deploy_error: Exception) -> None:
     re-type the follow-up command. Uses the process-replacement primitive
     so the recover process INHERITS our stdout/stderr and exit code --
     from the operator's shell it looks like one command (``minds env
-    deploy``) that just kept running through the rollback.
+    deploy``) that just kept running through the rollback. We pass
+    ``--from-failed-deploy`` so that inherited exit code is non-zero even
+    when the rollback succeeds: the deploy failed, and a clean rollback
+    must not let a caller / CI read that failure as success.
 
     The first argv element comes from ``sys.argv[0]`` so the same
     minds binary (or ``uv run minds`` wrapper) the operator launched
@@ -515,18 +545,22 @@ def _exec_into_recover(*, deploy_error: Exception) -> None:
     sys.stdout.flush()
     sys.stderr.flush()
     argv0 = sys.argv[0]
-    os.execvp(argv0, [argv0, "env", "recover"])
+    # `--from-failed-deploy` makes recover exit non-zero even when the rollback
+    # succeeds, so the deploy failure that triggered this is never masked by a
+    # clean rollback's exit code (we exec, so recover's exit code becomes ours).
+    os.execvp(argv0, [argv0, "env", "recover", "--from-failed-deploy"])
 
 
 def _refuse_if_any_recover_target_exists() -> None:
     """Block the command if ANY per-env recover-target file sits at the monorepo root.
 
-    Used by env-agnostic commands (``activate``, ``deactivate``,
-    ``list``) -- they don't have a single env in mind, but we still
-    want to surface any in-flight failed deploy that the operator
-    might have forgotten about. Each matching file's env name is
-    listed in the error so the operator knows which env(s) need
-    ``minds env recover``.
+    Used by env-agnostic commands (``deactivate``, ``list``) -- they
+    don't have a single env in mind, but we still want to surface any
+    in-flight failed deploy that the operator might have forgotten
+    about. Each matching file's env name is listed in the error so the
+    operator knows which env(s) need ``minds env recover``. (``activate``
+    uses the env-scoped :func:`_refuse_if_recover_target_blocks_activation`
+    instead, so it can still activate an env in order to recover it.)
 
     Tolerates ``NotInMonorepoError`` for commands that don't strictly
     require monorepo context (e.g. ``list`` from $HOME); when we can't
@@ -534,7 +568,10 @@ def _refuse_if_any_recover_target_exists() -> None:
     """
     try:
         repo_root = find_monorepo_root()
-    except MindError:
+    except NotInMonorepoError:
+        # No monorepo root reachable means no recover-target file can be
+        # there; tolerate it. Any other MindError propagates.
+        logger.debug("Not inside the monorepo; skipping recover-target check")
         return
     files = find_all_recover_target_files(repo_root=repo_root)
     if not files:
@@ -559,7 +596,10 @@ def _refuse_if_this_env_recover_target_exists(env_name: str) -> None:
     """
     try:
         repo_root = find_monorepo_root()
-    except MindError:
+    except NotInMonorepoError:
+        # No monorepo root reachable means no recover-target file can be
+        # there; tolerate it. Any other MindError propagates.
+        logger.debug("Not inside the monorepo; skipping recover-target check")
         return
     if recover_target_exists(repo_root=repo_root, env_name=env_name):
         raise click.ClickException(
@@ -567,6 +607,53 @@ def _refuse_if_this_env_recover_target_exists(env_name: str) -> None:
             f"a prior `minds env deploy` against env {env_name!r} failed mid-flight. Run `minds env recover` "
             "(with this env activated) to roll back, or delete the file manually if it's known-stale."
         )
+
+
+def _refuse_if_recover_target_blocks_activation(env_name: str) -> None:
+    """Block activating ``env_name`` only when a DIFFERENT env's recover-target exists.
+
+    ``minds env recover`` requires an *activated* env, so the blanket
+    "refuse activation while ANY recover-target exists" guard created a
+    catch-22: a failed deploy's own recover-target sat at the monorepo
+    root and made it impossible to activate that env in order to recover
+    it. Instead we allow activating an env that has its own pending
+    recover-target (the activate-then-recover path), and only hard-refuse
+    when the pending recover-target(s) belong solely to *other* envs -- a
+    forgotten failed deploy the operator should clear first. When
+    activating an affected env, any other envs' targets are surfaced as a
+    warning rather than blocking.
+    """
+    try:
+        repo_root = find_monorepo_root()
+    except NotInMonorepoError:
+        # No monorepo root reachable from cwd means there can't be a
+        # recover-target file there either, so there's nothing to guard
+        # against. Any other MindError is a real failure and propagates.
+        logger.debug("Not inside the monorepo; skipping recover-target activation guard")
+        return
+    files = find_all_recover_target_files(repo_root=repo_root)
+    if not files:
+        return
+    this_env_path = recover_target_path(repo_root=repo_root, env_name=env_name)
+    other_files = [recover_file for recover_file in files if recover_file != this_env_path]
+    if this_env_path in files:
+        # Activating the very env that needs recovery: allow it so `minds
+        # env recover` can run next. Surface any unrelated failed deploys.
+        if other_files:
+            other_list = "\n".join(f"  - {recover_file.name}" for recover_file in other_files)
+            logger.warning(
+                "Other env(s) still have a pending recover-target file:\n{}\n"
+                "Activate each and run `minds env recover` before deploying them.",
+                other_list,
+            )
+        return
+    file_list = "\n".join(f"  - {recover_file.name}" for recover_file in other_files)
+    raise click.ClickException(
+        f"{len(other_files)} recover-target file(s) for other env(s) sit at {repo_root} -- one or "
+        f"more prior `minds env deploy` runs failed mid-flight:\n{file_list}\n"
+        "Activate each affected env and run `minds env recover` (or delete a known-stale file "
+        "manually) before activating an unaffected env."
+    )
 
 
 def _emit_destroy_result(env_name: str, *, output_format: OutputFormat) -> None:
@@ -672,7 +759,7 @@ def env_activate(name: str, create: bool, is_deploy_mode: bool) -> None:
       and proceeds. Without ``--create``, the error message tells the
       operator how to bootstrap a fresh dev env in one line.
     """
-    _refuse_if_any_recover_target_exists()
+    _refuse_if_recover_target_blocks_activation(name)
 
     if name in _RESERVED_TIER_ENV_NAMES or name == _PRODUCTION_ENV_NAME:
         _activate_reserved_env(name, is_deploy_mode=is_deploy_mode)
@@ -854,6 +941,27 @@ def _try_run_generation_check(*, env_name: str, client_config_path: Path, env_ro
     )
 
 
+def _destroy_agents_and_state_container_for_wipe(env_name: str) -> None:
+    """Destroy the env's mngr agents + remove its Docker state container.
+
+    Run from the activate-time auto-wipe, *before* the local profile is
+    rmtree'd, so the freed Docker resources (host containers, the singleton
+    state container) don't outlive the env. Errors are NOT swallowed: a
+    teardown failure must surface so the operator can fix it instead of
+    silently leaking containers.
+    """
+    dev_env_name = DevEnvName(env_name)
+    with ConcurrencyGroup(name=f"minds-env-wipe-{env_name}") as cg:
+        destroyed_count = destroy_all_mngr_agents_in_env(
+            dev_env_name,
+            destroy_agents=real_destroy_mngr_agents,
+            parent_concurrency_group=cg,
+        )
+        if destroyed_count:
+            logger.info("Destroyed {} mngr agent(s) during wipe of env {!r}", destroyed_count, env_name)
+        cleanup_env_state_container(dev_env_name, parent_concurrency_group=cg)
+
+
 def _check_generation_id_and_wipe_local_state_on_mismatch(
     *,
     env_name: str,
@@ -915,6 +1023,12 @@ def _check_generation_id_and_wipe_local_state_on_mismatch(
             current,
             env_root,
         )
+        # Tear down the env's now-stale mngr agents + its Docker state
+        # container BEFORE wiping the local profile: destroying agents removes
+        # their host containers (and build images) via mngr, and the state
+        # container must be removed while the profile it derives user_id from
+        # still exists.
+        _destroy_agents_and_state_container_for_wipe(env_name)
         for subdir in _AUTO_WIPED_LOCAL_STATE_SUBDIRS:
             target = env_root / subdir
             if target.exists():
@@ -1139,7 +1253,7 @@ def env_deploy(
             # follow-up command on every failure is a footgun.
             try:
                 repo_root_for_recover = find_monorepo_root()
-            except MindError:
+            except NotInMonorepoError:
                 repo_root_for_recover = None
             if repo_root_for_recover is not None and recover_target_exists(
                 repo_root=repo_root_for_recover, env_name=env_name
@@ -1239,8 +1353,19 @@ def env_destroy(ctx: click.Context, keep_agents: bool, yes_i_mean_staging: bool)
 
 
 @env.command("recover")
+@click.option(
+    "--from-failed-deploy",
+    "is_from_failed_deploy",
+    is_flag=True,
+    hidden=True,
+    help=(
+        "Internal: set when `minds env deploy` auto-chains (execs) into recover after a "
+        "failed deploy. Forces a non-zero exit even when the rollback itself succeeds, so "
+        "the failed deploy is never reported to a caller / CI as success."
+    ),
+)
 @click.pass_context
-def env_recover(_ctx: click.Context) -> None:
+def env_recover(_ctx: click.Context, is_from_failed_deploy: bool) -> None:
     """Roll back to the pre-deploy state captured by a failed `minds env deploy`.
 
     Reads ``.minds-deploy-recover-target-<env-name>.json`` at the
@@ -1252,6 +1377,11 @@ def env_recover(_ctx: click.Context) -> None:
     Refuses to run if no recover-target file exists for the activated
     env. To recover a different env, activate it first. Also refuses
     unless the shell is *deploy-activated* (see :func:`env_deploy`).
+
+    With ``--from-failed-deploy`` (set only by the deploy auto-rollback
+    path), a *successful* rollback still exits non-zero -- the deploy
+    that triggered it failed, and the exec'd recover owns the exit code
+    the operator's shell / CI sees.
     """
     try:
         repo_root = find_monorepo_root()
@@ -1299,3 +1429,13 @@ def env_recover(_ctx: click.Context) -> None:
             raise click.ClickException(str(exc)) from exc
         except RecoverFailedError as exc:
             raise click.ClickException(str(exc)) from exc
+
+    # The rollback succeeded. When recover was auto-chained from a failed
+    # deploy, the overall command still represents a FAILED deploy, so exit
+    # non-zero -- otherwise a successful rollback would mask the deploy
+    # failure from any caller / CI reading the exit code.
+    if is_from_failed_deploy:
+        raise click.ClickException(
+            "Deploy failed; rolled back to the pre-deploy state. Exiting non-zero to reflect "
+            "the deploy failure (the rollback itself succeeded)."
+        )

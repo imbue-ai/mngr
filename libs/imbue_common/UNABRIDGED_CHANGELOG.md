@@ -4,6 +4,11 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-02
+
+A logging test that imported `BaseMngrError` from `imbue.mngr` (now removed) no longer reaches
+into the `mngr` package: it uses a local test-only exception instead. No runtime behavior change.
+
 ## 2026-05-28
 
 # Dropped redundant per-project ty/ruff ratchet tests

@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed: Discovery no longer masks failures as "zero hosts" — `_list_provider_vps_hostnames` previously caught any IAM-listing error and returned an empty list, so a transient OVH outage / expired credentials looked identical to a real empty result and defeated mngr's "mark hosts UNKNOWN when a provider's discovery fails" safeguard. It now lets the error propagate so `mngr list --on-error continue` records the failure instead of silently dropping live hosts.
+
 ### Added
 
 - Added: New `mngr_ovh` provider plugin that runs mngr agents in Docker containers on OVH classic VPS instances (e.g. `vps-2025-model1` / "VPS-1" at ~$7.99/mo). Uses `python-ovh`, supports OAuth2 / AK-AS-CK / `~/.ovh.conf` credentials, provisions via `/order/cart` + `POST /vps/{s}/rebuild`, discovers via OVH IAM v2 tags, and TOFU-pins the host key on first SSH.
@@ -21,6 +25,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `OvhVpsClient.set_renew_at_expiration` now retries on the OVH transient 400 `"Unable to synchronize l1::Service, subscription is not active yet"` (5-minute default budget, 15 s poll interval, both injectable).
 - Changed: `parse_extra_tags_env(MNGR_VPS_EXTRA_TAGS)` now runs at the top of `_provision_vps`, before any OVH API call, so a typo fails before we pay for a VPS.
 - Changed: `OuterHost.get_name` / `OuterHostInterface.get_name` now return `str` instead of `HostName` (the outer host's name is an SSH hostname / IP address that routinely contains dots).
+- Changed: **Breaking** — OVH hosts created by `mngr create --provider ovh` now back their per-host unified docker volume with a btrfs subvolume on a loop-mounted btrfs filesystem on the VPS (`/mngr-btrfs/<host_id_hex>` on `/var/lib/mngr-btrfs.img`), enabling consistent `btrfs subvolume snapshot -r` of agent data. See `mngr_vps_docker`'s changelog for the full mechanism. Existing OVH hosts created on the prior layout cannot be discovered or managed after upgrade — destroy and recreate them.
+- Changed: Added `inotify-tools` and `jq` to `_REQUIRED_OUTER_PACKAGES` so the new `snapshot_helper.service` (provisioned by `mngr_vps_docker`) has the tools it needs on OVH-leased outers.
 
 ### Fixed
 

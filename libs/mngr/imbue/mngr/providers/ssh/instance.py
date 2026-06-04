@@ -213,6 +213,16 @@ class SSHProviderInstance(BaseProviderInstance):
     def on_connection_error(self, host_id: HostId) -> None:
         pass
 
+    # FIXME: implement to_offline_host so an SSH pool host that becomes
+    # unreachable mid-discovery can fall back to persisted offline data instead
+    # of aborting the provider's enumeration. This requires persisting
+    # host/agent records somewhere durable (the remote host_dir, or a local
+    # store) the way the docker provider does. Until then, a connection error to
+    # an SSH host propagates out of the default
+    # ProviderInstanceInterface.discover_hosts_and_agents (which assumes any host
+    # that can raise HostConnectionError implements to_offline_host) and surfaces
+    # as a per-provider ProviderDiscoveryError.
+
     # =========================================================================
     # Discovery Methods
     # =========================================================================

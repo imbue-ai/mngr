@@ -515,7 +515,7 @@ Supported build arguments for the modal provider:
         Production calls via ``build_provider_instance`` (which selects a
         ``DirectModalInterface`` per ``ModalMode.DIRECT``); tests call via
         ``mngr_modal.testing.make_testing_provider`` (which passes a
-        ``TestingModalInterface``). Output capture is yielded off
+        ``FakeModalInterface``). Output capture is yielded off
         ``modal_interface.enable_output_capture(...)`` so this function has
         no per-implementation branches.
 

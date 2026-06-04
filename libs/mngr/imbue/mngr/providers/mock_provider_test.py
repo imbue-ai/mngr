@@ -39,9 +39,12 @@ class MockProviderInstance(BaseProviderInstance):
     mock_agent_data: list[dict[str, Any]] = Field(default_factory=list)
     mock_hosts: list[HostInterface] = Field(default_factory=list)
     mock_offline_hosts: dict[str, HostInterface] = Field(default_factory=dict)
+    mock_discovered_hosts: list[DiscoveredHost] = Field(default_factory=list)
+    stopped_hosts: list[HostId] = Field(default_factory=list)
     deleted_hosts: list[HostId] = Field(default_factory=list)
     deleted_snapshots: list[tuple[HostId, SnapshotId]] = Field(default_factory=list)
     deleted_volumes: list[VolumeId] = Field(default_factory=list)
+    connection_errors_cleared: list[HostId] = Field(default_factory=list)
 
     @property
     def supports_snapshots(self) -> bool:
@@ -77,13 +80,16 @@ class MockProviderInstance(BaseProviderInstance):
     def stop_host(
         self, host: HostInterface | HostId, create_snapshot: bool = True, timeout_seconds: float = 60.0
     ) -> None:
-        raise NotImplementedError()
+        host_id = host.id if isinstance(host, HostInterface) else host
+        self.stopped_hosts.append(host_id)
 
     def discover_hosts(
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
     ) -> list[DiscoveredHost]:
+        if self.mock_discovered_hosts:
+            return list(self.mock_discovered_hosts)
         return [
             DiscoveredHost(
                 host_id=h.id,
@@ -101,7 +107,7 @@ class MockProviderInstance(BaseProviderInstance):
         self.deleted_hosts.append(host.id)
 
     def on_connection_error(self, host_id: HostId) -> None:
-        pass
+        self.connection_errors_cleared.append(host_id)
 
     def to_offline_host(self, host_id: HostId) -> OfflineHost:
         offline = self.mock_offline_hosts.get(str(host_id))

@@ -66,7 +66,7 @@ from imbue.minds.envs.local_store import env_root_exists
 from imbue.minds.envs.local_store import read_client_config_file
 from imbue.minds.envs.local_store import write_client_config
 from imbue.minds.envs.local_store import write_secrets_file
-from imbue.minds.envs.mngr_agent_cleanup import DestroyMngrAgentFn
+from imbue.minds.envs.mngr_agent_cleanup import DestroyMngrAgentsFn
 from imbue.minds.envs.mngr_agent_cleanup import destroy_all_mngr_agents_in_env
 from imbue.minds.envs.paths import client_config_file
 from imbue.minds.envs.paths import env_root_dir
@@ -236,7 +236,8 @@ PushPerEnvSecretFn = Callable[[str, dict[str, str], str, ConcurrencyGroup], None
 # ``<svc>-<tier>-<id>`` Modal Secrets. ``strategy`` is forwarded to
 # ``modal deploy --strategy`` so a single deploy can cycle both apps
 # the same way (see :class:`DeployStrategy`).
-DeployModalAppFn = Callable[[str, str, int, str, DeployStrategy, ConcurrencyGroup], AnyUrl]
+# (modal_env, tier, min_containers, scaledown_window, deploy_id, strategy, cg) -> deployed URL.
+DeployModalAppFn = Callable[[str, str, int, int, str, DeployStrategy, ConcurrencyGroup], AnyUrl]
 # (app_name, modal_env, cg) -> None. Used by tier destroys to ``modal
 # app stop`` each deployed app. Idempotent in the underlying call.
 StopModalAppFn = Callable[[str, str, ConcurrencyGroup], None]
@@ -251,6 +252,9 @@ ListModalSecretsFn = Callable[[str, ConcurrencyGroup], tuple[str, ...]]
 # schema_migrations runner against the per-env host_pool DB. Tests
 # pass a no-op fake; the real implementation shells out to psql.
 ApplyPoolHostsMigrationsFn = Callable[[SecretStr, ConcurrencyGroup], tuple[Path, ...]]
+# (host_pool_dsn, domains, emails, cg) -> None. Seed-if-absent default paid
+# domains/emails into the host_pool DB after migrations. Tests pass a no-op fake.
+SeedPaidListDefaultsFn = Callable[[SecretStr, tuple[str, ...], tuple[str, ...], ConcurrencyGroup], None]
 # (app_name, modal_env, cg) -> latest deployed version id, or None for
 # never-deployed. Used at deploy start to capture pre-deploy state so
 # ``minds env recover`` can `modal app rollback` to it on failure.
@@ -294,6 +298,10 @@ ListCloudflareTunnelsFn = Callable[[DevEnvName, str, SecretStr], tuple[str, ...]
 # (tunnel_ids, account_id, api_token) -> None. Deletes the listed tunnels.
 DeleteCloudflareTunnelsFn = Callable[[tuple[str, ...], str, SecretStr], None]
 ReadPerEnvSecretValuesFn = Callable[[str, str, dict[str, str], ConcurrencyGroup], dict[str, str]]
+# (name, cg) -> None. Removes the env's mngr Docker state container +
+# backing volume, targeting the one exact container by name. No-op when
+# there is no Docker daemon. Real impl lives in ``envs.docker_cleanup``.
+CleanupStateContainerFn = Callable[[DevEnvName, ConcurrencyGroup], None]
 
 
 class Providers(FrozenModel):
@@ -348,6 +356,12 @@ class Providers(FrozenModel):
             "Runs the schema_migrations runner against the per-env host_pool DB."
         ),
     )
+    seed_paid_list_defaults: SeedPaidListDefaultsFn = Field(
+        description=(
+            "(host_pool_dsn, domains, emails, cg) -> seed-if-absent the tier's default "
+            "paid domains/emails into the host_pool DB after migrations."
+        ),
+    )
     get_modal_app_latest_version: GetModalAppLatestVersionFn = Field(
         description="(app_name, modal_env, cg) -> latest deployed version id, or None for never-deployed.",
     )
@@ -376,11 +390,19 @@ class Providers(FrozenModel):
             "definitive failure or timeout."
         ),
     )
-    destroy_mngr_agent: DestroyMngrAgentFn = Field(
+    destroy_mngr_agents: DestroyMngrAgentsFn = Field(
         description=(
-            "(agent_id, mngr_host_dir, mngr_prefix, cg) -> `mngr destroy <agent_id>` "
+            "(agent_ids, mngr_host_dir, mngr_prefix, cg) -> single `mngr destroy -f <ids...>` "
             "with the env's MNGR_* vars exported. Used before cloud teardown so the env's "
             "agents stop cleanly before their resources go away."
+        ),
+    )
+    cleanup_state_container: CleanupStateContainerFn = Field(
+        description=(
+            "(name, cg) -> remove the env's mngr Docker state container + backing volume. "
+            "Targets the one exact container by name; no-op when there is no Docker daemon. "
+            "Run right after the mngr-agent teardown so the singleton state container "
+            "(which `mngr destroy` does not touch) doesn't outlive the env."
         ),
     )
     wipe_supertokens_app_data: WipeSuperTokensAppFn = Field(
@@ -760,6 +782,17 @@ def _deploy_env_locked(
         if applied:
             logger.info("Applied {} pool-hosts migration(s): {}", len(applied), [m.name for m in applied])
 
+    # Seed the tier's default paid domains/emails (seed-if-absent) now that the
+    # paid_domains / paid_emails tables exist. Runs every deploy for every tier;
+    # idempotent and a no-op when the tier configures no defaults.
+    paid_domains = tuple(str(d) for d in deploy_config.paid.domains)
+    paid_emails = tuple(str(e) for e in deploy_config.paid.emails)
+    if paid_domains or paid_emails:
+        with info_span(
+            "Seeding default paid-list entries (domains={}, emails={})", list(paid_domains), list(paid_emails)
+        ):
+            providers.seed_paid_list_defaults(host_pool_dsn, paid_domains, paid_emails, parent_concurrency_group)
+
     # Resolve the Modal deploy strategy now that we know whether a
     # migration ran. Done here (rather than at the CLI boundary) so the
     # decision sees the full deploy context the policy depends on; the
@@ -862,18 +895,22 @@ def _deploy_env_locked(
     # Step 5: modal deploys.
     litellm_proxy_min_containers = int(deploy_config.min_containers.litellm_proxy)
     connector_min_containers = int(deploy_config.min_containers.connector)
+    litellm_proxy_scaledown_window = int(deploy_config.scaledown_window.litellm_proxy)
+    connector_scaledown_window = int(deploy_config.scaledown_window.connector)
 
     with info_span(
-        "Deploying llm-{} into env {!r} (min_containers={}, strategy={})",
+        "Deploying llm-{} into env {!r} (min_containers={}, scaledown_window={}, strategy={})",
         tier,
         modal_env,
         litellm_proxy_min_containers,
+        litellm_proxy_scaledown_window,
         deploy_strategy.value,
     ):
         litellm_proxy_url = providers.deploy_litellm_proxy(
             modal_env,
             tier,
             litellm_proxy_min_containers,
+            litellm_proxy_scaledown_window,
             deploy_id,
             deploy_strategy,
             parent_concurrency_group,
@@ -881,16 +918,18 @@ def _deploy_env_locked(
     _assert_deploy_url_matches(actual=litellm_proxy_url, expected=expected_litellm_proxy_url, app=f"llm-{tier}")
 
     with info_span(
-        "Deploying rsc-{} into env {!r} (min_containers={}, strategy={})",
+        "Deploying rsc-{} into env {!r} (min_containers={}, scaledown_window={}, strategy={})",
         tier,
         modal_env,
         connector_min_containers,
+        connector_scaledown_window,
         deploy_strategy.value,
     ):
         connector_url = providers.deploy_remote_service_connector(
             modal_env,
             tier,
             connector_min_containers,
+            connector_scaledown_window,
             deploy_id,
             deploy_strategy,
             parent_concurrency_group,
@@ -1180,7 +1219,8 @@ def destroy_env(
     # resources they reference.
     if keep_agents:
         logger.warning(
-            "minds env destroy {!r}: --keep-agents passed; skipping mngr-agent teardown. "
+            "minds env destroy {!r}: --keep-agents passed; skipping mngr-agent teardown "
+            "(and the Docker state-container cleanup, since kept agents still rely on it). "
             "Run `mngr destroy <agent>` manually for any agents bound to this env.",
             str(name),
         )
@@ -1188,11 +1228,19 @@ def destroy_env(
         with info_span("Destroying mngr agents under env {!r}", str(name)):
             destroyed_count = destroy_all_mngr_agents_in_env(
                 name,
-                destroy_agent=providers.destroy_mngr_agent,
+                destroy_agents=providers.destroy_mngr_agents,
                 parent_concurrency_group=parent_concurrency_group,
             )
             if destroyed_count:
                 logger.info("Destroyed {} mngr agent(s) under env {!r}", destroyed_count, str(name))
+
+        # Step 1b: remove the env's mngr Docker state container + backing
+        # volume. The singleton state container is independent of individual
+        # agents (it is not torn down by `mngr destroy`), so it must be removed
+        # explicitly -- before the env root, and the profile it derives user_id
+        # from, are gone. Skipped under keep_agents since kept agents need it.
+        with info_span("Cleaning up Docker state container for env {!r}", str(name)):
+            providers.cleanup_state_container(name, parent_concurrency_group)
 
     # Step 2: OVH VPSes tagged with this env.
     with info_span("Cleaning up OVH VPSes tagged for env {!r}", str(name)):

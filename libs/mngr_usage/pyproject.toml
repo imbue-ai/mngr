@@ -22,6 +22,12 @@ build-backend = "hatchling.build"
 packages = ["imbue"]
 exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py"]
 
+# Ship the plugin's help-topic doc files inside the package so the topics it
+# contributes to `mngr help` work in a PyPI wheel install. plugin.py reads these
+# from imbue/mngr_usage/docs at runtime.
+[tool.hatch.build.targets.wheel.force-include]
+"docs" = "imbue/mngr_usage/docs"
+
 [tool.uv.sources]
 imbue-mngr = { workspace = true }
 

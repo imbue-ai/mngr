@@ -4,6 +4,128 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-04
+
+- The `/sync-tutorial-to-e2e-tests` skill's default test-directory argument now points at the new `libs/mngr/imbue/mngr/e2e/tutorial/` subdirectory, so it no longer flags non-tutorial e2e tests as unmatched.
+
+## 2026-06-03
+
+Updated the root `.minds/template/ovh.sh` secret template comment to note that the OVH AK/AS/CK credentials are now pushed to Modal (as the `ovh-<tier>` secret) for the connector's runtime cleanup of released pool hosts, not just read on the operator's machine during deploy/destroy. Also adds the blueprint plan for the leased-host cleanup work.
+
+Fixed stale references in the `minds-dev-workflow` skill and the `minds-start`
+justfile error hints:
+
+- Dev env naming corrected from `<your-user>-dev` to `dev-<your-user>`. The
+  `DevEnvName` validator requires the tier prefix first (`dev-`/`ci-`), so
+  `josh-dev` is invalid while `dev-josh` is valid. Also corrected the derived
+  paths the skill documented (`MINDS_ROOT_NAME=minds-dev-<user>`, env root
+  `~/.minds-dev-<user>/`, container `minds-dev-<user>-mindtest-host`).
+- Worktree base branch example `josh/start-minds` (no longer exists on the FCT
+  remote) replaced with `origin/main` in the skill and in both `just
+  minds-start` error hints.
+- Pool-host baking described as OVH-backed (the imbue_cloud pool's VPS provider)
+  rather than the outdated "Vultr".
+
+`just forward-system-interface` now writes the Cloudflare tunnel token to
+`runtime/secrets/cloudflare_tunnel.env` (one of the per-secret env files in the
+`runtime/secrets/` directory) instead of the old single `runtime/secrets` file,
+matching the directory-based secrets layout the FCT runner and minds now use.
+
+`just minds-start` and `just minds-build` now select the Node version pinned in
+`apps/minds/.nvmrc` (via nvm) before launching, so they no longer fail with
+`ERR_PNPM_UNSUPPORTED_ENGINE` when the shell's default Node has drifted off the
+pin. The selection is a no-op when the active Node already matches and errors
+with an actionable hint when nvm or the pinned version is missing (it never
+auto-installs Node). Shared with `propagate_changes` via the new
+`apps/minds/scripts/select_node_version.sh` helper.
+
+Added `specs/discovery-provider-error-resilience.md` documenting the two remaining discovery-resilience loose threads from the workspace-flicker debugging: (1) retaining known hosts/agents through a transient provider discovery error (drop only on explicit destroy or a successful poll; mark retained items unknown/stale by reusing `error_by_provider_name`), and (2) bouncing/restarting the latchkey forward on the same triggers minds uses to bounce its own observe, so latchkey picks up mid-session provider/config changes.
+
+Removed the `.minds/template/paid-accounts.sh` secret template and folded `MINDS_PAID_ADMIN_KEY` + `MINDS_PAID_LIST_CACHE_TTL_SECONDS` into `.minds/template/supertokens.sh`, reflecting the move of paid-user tracking from a Modal-secret allowlist to database tables. Updated the vault-environments spec's service list. Added the implementation blueprint under `blueprint/paid-user-tables/`.
+
+Added a design blueprint (`blueprint/imbue-cloud-slow-path/`) for the imbue_cloud
+robust fast/slow-path host-leasing change.
+
+## 2026-06-02
+
+Added the design doc for the tiered system-interface restart
+(`blueprint/tiered-restart-v2/plan-tiered-restart-v2.md`), describing the
+two-tier minds workspace recovery flow and the `mngr stop --stop-host`
+flag that backs the host-restart tier.
+
+Added the implementation plan for the error-hierarchy collapse under `blueprint/`. No runtime
+or tooling change.
+
+## 2026-06-01
+
+Tightened the `test_every_project_has_changelog_layout` meta-ratchet to also require a `.gitkeep` inside each project's `changelog/` directory. Previously only the directory's existence was checked, so a newly added project with no `.gitkeep` would pass until a later consolidation run drained its entries and the empty directory silently vanished from git. Requiring the `.gitkeep` upfront catches the omission when the project is first added.
+
+## 2026-06-01
+
+`markdown-it-py` is now an explicit (rather than only transitive) dependency in the lockfile: mngr uses rich's own CommonMark parser directly to rewrite links when rendering help topics for the terminal.
+
+## 2026-05-29
+
+# Spec file-tree updates for the apps/minds todesktop config rename
+
+- `specs/electron-desktop-app/concise.md` and `specs/electron-desktop-app/spec.md`:
+  the file-tree listings for `apps/minds/` now show `todesktop.js` instead of
+  `todesktop.json`. The rename happens in the apps/minds slice of this PR (see
+  `apps/minds/changelog/mngr-activate-todesktop-binary-hook.md`); these spec
+  updates keep the documented layout in sync with the actual one.
+
+- Added a design spec under `specs/docker-cleanup-state-and-images/` documenting the Docker build-image and state-container cleanup work.
+
+Added the implementation spec for Imbue Cloud R2 bucket support
+(`specs/imbue-cloud-r2-buckets/spec.md`).
+
+Updated the `.minds/template/cloudflare.sh` secret template to document that
+`CLOUDFLARE_API_TOKEN` must now be an account-owned (`cfat_`) token carrying
+`Workers R2 Storage: Edit` + `Account API Tokens: Edit` (on top of the existing
+tunnel/DNS/Access/KV permissions), and that R2 must be enabled on the Cloudflare
+account.
+
+- Drop the now-removed `--use-snapshot` flag from the TMR GHA workflow (`.github/workflows/tmr.yml`) so the scheduled/manual TMR runs don't fail at invocation. Snapshot building on `--provider modal` is automatic now, so behavior is unchanged. Also refresh a stale comment in `.github/workflows/tmr-reintegrate.yml` that mentioned the same removed flag.
+
+# Self-hosted Mac runner + launch-to-first-message workflow
+
+- Added `.github/workflows/minds-launch-to-msg.yml`, a `workflow_dispatch` job that (given a minds commit SHA and forever-claude-template ref) either reuses an existing ToDesktop build matching the commit or runs `pnpm dist` to build a fresh draft, then on the self-hosted `minds-runner` macOS host downloads the resulting `.app`, launches it, waits for the backend to come up, and optionally round-trips a real first-message chat against a LIMA agent before cleaning up. Collects diagnostic artifacts on failure.
+- Added `.github/workflows/minds-runner-reset.yml`, a `workflow_dispatch` job to manually reset the self-hosted runner to a clean state (and optionally install a fresh `.app` from a ToDesktop `.zip` URL).
+- Companion infrastructure (the runner Mac itself: Tailscale-tagged, LaunchAgent-installed GitHub Actions runner) lives outside this repo. The runner is registered at the `imbue-ai` org level and is targeted by `runs-on: [self-hosted, macOS, minds-runner]`.
+
+Added `specs/minds-backup-provider/concise.md`, the spec for wiring the
+imbue_cloud bucket capability into the minds workspace-creation flow (backup
+provider toggle, async post-creation restic config injection, and the
+forever-claude-template `host_backup` contract changes).
+
+Added spec `specs/host-backup/concise.md` for a new continuous-backup
+service that runs inside every mind workspace. The service uses restic
+against a Cloudflare R2 bucket by default and takes consistent btrfs
+subvolume snapshots on lima / vps-docker (no-op on plain docker). The
+in-container `host_backup` library + bootstrap config wiring lives in
+forever-claude-template (separate PR). This monorepo's changes provision
+the outer-side `snapshot_helper.sh` systemd unit on vps-docker hosts;
+see `libs/mngr_vps_docker/changelog/mngr-mind-backup.md` and
+`libs/mngr_ovh/changelog/mngr-mind-backup.md` for the per-project
+details.
+
+- Added a spec (``specs/symlink-code-onto-mngr-volume/concise.md``) describing the relocation of the forever-claude-template workspace from ``/code/`` onto the ``/mngr/`` persistent volume (as ``/mngr/code/``), with safety-net ``/code -> /mngr/code`` and ``/worktree -> /mngr/worktree`` symlinks. The spec covers the Dockerfile bake-and-relocate dance (workspace baked at ``/mngr/code/`` then renamed to ``/docker_build_code`` so the volume mount path is empty in the image), the first-boot atomic-seed CMD logic, the per-template scope (``docker``/``vultr``/``ovh`` run the full dance; ``lima`` aligns the path but skips the dance; ``imbue_cloud`` inherits from the ``ovh`` bake), and the no-auto-migration story for existing live hosts. The actual implementation lives in the forever-claude-template repo on the ``mngr/symlink-code`` branch.
+
+Added the design doc for putting the per-host VPS docker unified volume onto
+a loop-mounted btrfs subvolume (`specs/vps-docker-btrfs/concise.md`). See the
+per-project entries under `libs/mngr_vps_docker/`, `libs/mngr_vultr/`, and
+`libs/mngr_ovh/` for the implementation details.
+
+Added a new design spec under `specs/vps-docker-unified-volume/concise.md`
+that documents the docker_vps provider's move from a two-volume layout
+(per-user state container + per-host data volume) to a single unified
+per-host Docker volume on the VPS. The spec captures the rationale,
+expected on-volume layout (`host_state.json`, `agents/<agent_id>.json`,
+`host_dir/`), discovery behavior (find the volume via the agent
+container's `com.imbue.mngr.host-id` label), and the breaking-change
+caveat that pre-existing docker_vps hosts cannot be discovered after
+upgrade.
+
 ## 2026-05-28
 
 Bump the `test-docker-electron` CI job's Node.js to 24.15.0 and pnpm to 10.33.4 to match the new exact-version pins in `apps/minds/package.json`. Also refresh the example `pyproject.toml` block in `specs/electron-desktop-app/spec.md` so it matches the real packaged file (`requires-python = "==3.12.13"` and the actual three-dependency list) instead of the older `>=3.12` / single-`imbue-minds` snapshot, and correct the standalone-pyproject path reference in that spec from `electron/pyproject.toml` to `electron/pyproject/pyproject.toml`.

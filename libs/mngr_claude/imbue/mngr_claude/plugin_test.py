@@ -19,8 +19,10 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.api.testing import FakeHost
+from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -3138,17 +3140,17 @@ def test_register_cli_options_returns_none_for_other_commands() -> None:
 # =============================================================================
 
 
-def test_on_before_create_skips_when_no_adopt_session() -> None:
+def test_on_before_create_skips_when_no_adopt_session(temp_mngr_ctx: MngrContext) -> None:
     """on_before_create should return None when adopt_session is not in plugin_data."""
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(agent_type=AgentTypeName("claude")),
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
     )
-    assert on_before_create(args=args) is None
+    assert on_before_create(args=args, mngr_ctx=temp_mngr_ctx) is None
 
 
-def test_on_before_create_passes_with_adopt_session() -> None:
+def test_on_before_create_passes_with_adopt_session(temp_mngr_ctx: MngrContext) -> None:
     """on_before_create should pass when --adopt-session is used with a claude agent."""
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(
@@ -3158,11 +3160,11 @@ def test_on_before_create_passes_with_adopt_session() -> None:
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
     )
-    result = on_before_create(args=args)
+    result = on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
     assert result is None
 
 
-def test_on_before_create_rejects_non_claude_agent_type() -> None:
+def test_on_before_create_rejects_non_claude_agent_type(temp_mngr_ctx: MngrContext) -> None:
     """on_before_create should raise UserInputError for non-claude agent types."""
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(
@@ -3172,12 +3174,39 @@ def test_on_before_create_rejects_non_claude_agent_type() -> None:
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
     )
-    with pytest.raises(UserInputError, match="--adopt-session can only be used with the claude agent type"):
-        on_before_create(args=args)
+    with pytest.raises(UserInputError, match="--adopt-session can only be used with a Claude agent type"):
+        on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
+
+
+def test_on_before_create_passes_with_claude_subtype(temp_mngr_ctx: MngrContext) -> None:
+    """on_before_create should accept a config-defined subtype whose parent_type
+    chain reaches claude (e.g. a ``write-plus`` template), not just the literal
+    ``claude`` type name. This is the centralized "is a claude agent" check via
+    resolve_agent_type, rather than a string comparison against "claude".
+    """
+    subtype = AgentTypeName("write-plus")
+    config_with_subtype = temp_mngr_ctx.config.model_copy_update(
+        to_update(
+            temp_mngr_ctx.config.field_ref().agent_types,
+            {subtype: AgentTypeConfig(parent_type=AgentTypeName("claude"))},
+        ),
+    )
+    mngr_ctx = temp_mngr_ctx.model_copy_update(
+        to_update(temp_mngr_ctx.field_ref().config, config_with_subtype),
+    )
+    args = OnBeforeCreateArgs(
+        agent_options=CreateAgentOptions(
+            agent_type=subtype,
+            plugin_data={"adopt_session": ("some-id",)},
+        ),
+        target_host=NewHostOptions(provider=ProviderInstanceName("local")),
+        create_work_dir=True,
+    )
+    assert on_before_create(args=args, mngr_ctx=mngr_ctx) is None
 
 
 def test_on_before_create_rejects_adopt_session_with_clone_source(
-    local_provider: LocalProviderInstance, tmp_path: Path
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """on_before_create should raise UserInputError when both --adopt-session
     and a clone source (source_agent_state_location) are passed: each is its
@@ -3196,7 +3225,7 @@ def test_on_before_create_rejects_adopt_session_with_clone_source(
         create_work_dir=True,
     )
     with pytest.raises(UserInputError, match="incompatible with cloning via --from"):
-        on_before_create(args=args)
+        on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
 
 
 # =============================================================================
@@ -4259,7 +4288,7 @@ def test_write_generated_files_writes_through_symlink_safely(tmp_path: Path, tem
     # Only settings.json, no installed_plugins.json (as happens for local hosts)
     generated_files = {Path("settings.json"): '{"some": "setting"}'}
 
-    _write_generated_files(host, config_dir, generated_files, temp_mngr_ctx)
+    _write_generated_files(host, config_dir, generated_files)
 
     # The symlink and source file should both be untouched
     assert symlink.is_symlink()
@@ -4287,7 +4316,7 @@ def test_write_generated_files_breaks_symlink_before_writing(tmp_path: Path, tem
     rewritten_content = '{"rewritten": true}'
     generated_files = {Path("plugins") / "known_marketplaces.json": rewritten_content}
 
-    _write_generated_files(host, config_dir, generated_files, temp_mngr_ctx)
+    _write_generated_files(host, config_dir, generated_files)
 
     # The symlink should be replaced with a regular file containing the rewritten content
     assert not symlink.is_symlink()

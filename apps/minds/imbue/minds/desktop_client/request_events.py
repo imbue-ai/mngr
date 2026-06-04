@@ -138,7 +138,8 @@ class RequestResponseEvent(EventEnvelope):
         default=None,
         description=(
             "Detent scope schema (for request types that scope to one, e.g. latchkey-permission). "
-            "Used as part of the dedup key."
+            "Informational only -- pending-request filtering joins requests and responses on "
+            "``request_event_id``, not on ``scope``."
         ),
     )
     request_type: str = Field(description="Type of request that was responded to")
@@ -209,34 +210,13 @@ def create_request_response_event(
     )
 
 
-def _dedup_key(event: RequestEvent | RequestResponseEvent) -> tuple[str, str | None, str]:
-    """Compute the deduplication key for a request or response event.
-
-    Latchkey-permission requests are deduplicated by ``(agent_id,
-    scope, request_type)``: a fresh request for the same scope replaces
-    the earlier one in the pending list. File-sharing requests are
-    deduplicated by ``(agent_id, path, request_type)`` -- the file
-    path takes the role of the scope, so the same agent re-requesting
-    the same path collapses to one card while different paths stay
-    separate.
-    """
-    if isinstance(event, LatchkeyPredefinedPermissionRequestEvent):
-        scope_or_path = event.scope
-    elif isinstance(event, LatchkeyFileSharingPermissionRequestEvent):
-        scope_or_path = event.path
-    elif isinstance(event, RequestResponseEvent):
-        scope_or_path = event.scope
-    else:
-        scope_or_path = None
-    return (event.agent_id, scope_or_path, event.request_type)
-
-
 class RequestInbox(FrozenModel):
     """Aggregates request and response events to compute the pending inbox.
 
     Maintains two ordered lists: requests and responses. The pending inbox
-    is computed by finding the latest request per dedup key that has no
-    corresponding response.
+    is every request, keyed only by ``event_id``, that has no corresponding
+    response. Each request the agent makes is a distinct card, even when
+    several share the same agent, scope, and permissions.
     """
 
     requests: list[RequestEvent] = Field(default_factory=list)
@@ -257,30 +237,53 @@ class RequestInbox(FrozenModel):
     def get_pending_requests(self) -> list[RequestEvent]:
         """Compute the list of pending (unresolved) requests.
 
-        For each dedup key, takes the most recent request. A request is
-        pending if no response references its event_id.
+        Requests are keyed solely by ``event_id``: every distinct
+        request the agent makes is its own pending card, even when
+        several carry the same agent, scope, and permissions. A request
+        is pending if no response references its ``event_id``.
+
+        Keying by ``event_id`` (rather than by content) means a
+        redelivery of the *same* request -- the gateway re-emits every
+        still-pending request on each stream reconnect -- collapses
+        onto the existing entry instead of producing a duplicate card,
+        while two genuinely separate requests are never merged.
         """
         responded_event_ids: set[str] = {str(r.request_event_id) for r in self.responses}
 
-        # Find latest request per dedup key
-        latest_by_key: dict[tuple[str, str | None, str], RequestEvent] = {}
+        # Keep the latest occurrence per event_id so a redelivered
+        # request idempotently overwrites the earlier copy.
+        latest_by_id: dict[str, RequestEvent] = {}
         for req in self.requests:
-            key = _dedup_key(req)
-            latest_by_key[key] = req
+            latest_by_id[str(req.event_id)] = req
 
         # Filter out responded requests
-        pending = [req for req in latest_by_key.values() if str(req.event_id) not in responded_event_ids]
+        pending = [req for req in latest_by_id.values() if str(req.event_id) not in responded_event_ids]
 
         # Sort by timestamp descending (most recent first)
         pending.sort(key=lambda r: str(r.timestamp), reverse=True)
         return pending
 
     def get_request_by_id(self, event_id: str) -> RequestEvent | None:
-        """Find a request event by its event_id."""
+        """Find a request event by its event_id.
+
+        Note: this returns the request regardless of whether it has been
+        responded to. Callers that must not act on an already-resolved
+        request (e.g. re-rendering the grant/deny page) should additionally
+        check :meth:`is_request_resolved`.
+        """
         for req in self.requests:
             if str(req.event_id) == event_id:
                 return req
         return None
+
+    def is_request_resolved(self, event_id: str) -> bool:
+        """Return whether a response has already been recorded for this request.
+
+        A granted or denied request lingers in ``requests`` (the log is
+        append-only), so its presence alone does not mean it is still
+        actionable -- a matching response in ``responses`` means it is done.
+        """
+        return any(str(r.request_event_id) == event_id for r in self.responses)
 
     def get_pending_count(self) -> int:
         """Return the number of pending requests."""

@@ -18,6 +18,7 @@ from loguru import logger
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.imbue_common.primitives import PositiveInt
+from imbue.mngr.api.discovery_events import get_discovery_events_path
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -58,6 +59,7 @@ class ForwardCliOptions(CommonCliOptions):
     forward_port: int | None = None
     reverse: tuple[str, ...] = ()
     no_observe: bool = False
+    observe_via_file: bool = False
     agent_include: tuple[str, ...] = ()
     agent_exclude: tuple[str, ...] = ()
     event_include: tuple[str, ...] = ()
@@ -172,6 +174,14 @@ def _bind_listen_socket(host: str, requested_port: int | None) -> socket.socket:
     help="Do not spawn `mngr observe` / `mngr event`; take a single `mngr list` snapshot instead. Requires --forward-port.",
 )
 @click.option(
+    "--observe-via-file",
+    is_flag=True,
+    default=False,
+    help="Do not spawn `mngr observe`; instead tail the shared discovery events file written by another "
+    "`mngr observe --discovery-only` (e.g. the one `mngr latchkey forward` runs). Per-agent `mngr event` "
+    "streams are still spawned. Mutually exclusive with --no-observe.",
+)
+@click.option(
     "--agent-include",
     multiple=True,
     help="CEL expression to include agents (repeatable). Default: include every discovered agent.",
@@ -240,7 +250,7 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
     envelope_writer = EnvelopeWriter()
 
     strategy = _build_strategy(opts)
-    resolver = ForwardResolver(strategy=strategy)
+    resolver = ForwardResolver(strategy=strategy, envelope_writer=envelope_writer)
     tunnel_manager = SSHTunnelManager()
 
     reverse_specs = _parse_reverse_specs(opts.reverse)
@@ -260,6 +270,7 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
         del kept  # used internally by the helper
         stream_manager: ForwardStreamManager | None = None
     else:
+        discovery_events_path = get_discovery_events_path(mngr_ctx.config) if opts.observe_via_file else None
         stream_manager = ForwardStreamManager(
             resolver=resolver,
             envelope_writer=envelope_writer,
@@ -267,6 +278,7 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
             agent_exclude=tuple(opts.agent_exclude),
             event_include=tuple(opts.event_include),
             event_exclude=tuple(opts.event_exclude),
+            discovery_events_path=discovery_events_path,
         )
         if reverse_specs:
             stream_manager.add_on_agent_discovered_callback(reverse_handler)
@@ -335,6 +347,11 @@ def _validate_options(opts: ForwardCliOptions) -> None:
         # consistency with the other mutex checks above.
         raise click.UsageError(
             "--no-observe is only valid with --forward-port REMOTE_PORT (service URLs are not in `mngr list` output)."
+        )
+    if opts.no_observe and opts.observe_via_file:
+        raise click.UsageError(
+            "--no-observe and --observe-via-file are mutually exclusive: one takes a single `mngr list` "
+            "snapshot, the other tails a live discovery events file."
         )
 
 
@@ -513,6 +530,10 @@ signing key is persisted to disk under ``$MNGR_HOST_DIR/plugin/forward/``.""",
     examples=(
         ("Forward system_interface for every workspace agent", "mngr forward --service system_interface"),
         ("Manual mode against a fixed port", "mngr forward --no-observe --forward-port 8080"),
+        (
+            "Tail a shared discovery log instead of spawning observe",
+            "mngr forward --service system_interface --observe-via-file",
+        ),
         ("Set up reverse tunnels", "mngr forward --service system_interface --reverse 8420:8420"),
         (
             "Filter to a single label set",

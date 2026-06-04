@@ -11,6 +11,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from imbue.minds.desktop_client.latchkey.gateway_client import AvailablePermission
 from imbue.minds.desktop_client.latchkey.gateway_client import AvailableServiceEntry
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
@@ -205,16 +206,28 @@ def test_approve_permission_request_raises_on_4xx() -> None:
 def test_get_available_services_returns_typed_entries() -> None:
     """``get_available_services`` GETs the catalog endpoint and returns validated entries."""
     payload = {
-        "slack": {
-            "scope": "slack-api",
-            "display_name": "Slack",
-            "permissions": ["slack-read-all"],
-        },
-        "linear": {
-            "scope": "linear-api",
-            "display_name": "Linear",
-            "permissions": [],
-        },
+        "slack": [
+            {
+                "scope": "slack-api",
+                "display_name": "Slack",
+                "description": "Any interaction with the Slack API.",
+                "permissions": [{"name": "slack-read-all", "description": "All read operations."}],
+            },
+        ],
+        "google": [
+            {
+                "scope": "google-gmail-api",
+                "display_name": "Gmail",
+                "description": "",
+                "permissions": [],
+            },
+            {
+                "scope": "google-drive-api",
+                "display_name": "Drive",
+                "description": "",
+                "permissions": [{"name": "drive-read", "description": "Read files."}],
+            },
+        ],
     }
 
     captured: dict[str, object] = {}
@@ -230,21 +243,69 @@ def test_get_available_services_returns_typed_entries() -> None:
     result = client.get_available_services()
 
     assert result == {
-        "slack": AvailableServiceEntry(
-            scope="slack-api",
-            display_name="Slack",
-            permissions=("slack-read-all",),
+        "slack": (
+            AvailableServiceEntry(
+                scope="slack-api",
+                display_name="Slack",
+                description="Any interaction with the Slack API.",
+                permissions=(AvailablePermission(name="slack-read-all", description="All read operations."),),
+            ),
         ),
-        "linear": AvailableServiceEntry(
-            scope="linear-api",
-            display_name="Linear",
-            permissions=(),
+        "google": (
+            AvailableServiceEntry(
+                scope="google-gmail-api",
+                display_name="Gmail",
+                permissions=(),
+            ),
+            AvailableServiceEntry(
+                scope="google-drive-api",
+                display_name="Drive",
+                permissions=(AvailablePermission(name="drive-read", description="Read files."),),
+            ),
         ),
     }
     assert captured["method"] == "GET"
     assert captured["path"] == "/permissions/available"
     assert captured["auth"] == "hunter2"
     assert captured["override"] == "admin-jwt-token"
+
+
+def test_get_available_services_parses_colocated_descriptions_and_defaults_to_empty() -> None:
+    """Scope and per-permission descriptions are parsed; omitted ones default to empty strings."""
+    payload = {
+        "slack": [
+            {
+                "scope": "slack-api",
+                "display_name": "Slack",
+                "description": "Any interaction with the Slack API.",
+                "permissions": [
+                    {"name": "slack-read-all", "description": "All read operations across the Slack API."},
+                ],
+            },
+        ],
+        "linear": [
+            {
+                "scope": "linear-api",
+                "display_name": "Linear",
+                "permissions": [{"name": "linear-read"}],
+            },
+        ],
+    }
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, json=payload)
+
+    client = _build_client(_handler)
+    result = client.get_available_services()
+
+    assert result["slack"][0].description == "Any interaction with the Slack API."
+    assert result["slack"][0].permissions == (
+        AvailablePermission(name="slack-read-all", description="All read operations across the Slack API."),
+    )
+    # Omitted descriptions default to empty strings.
+    assert result["linear"][0].description == ""
+    assert result["linear"][0].permissions == (AvailablePermission(name="linear-read", description=""),)
 
 
 def test_get_available_services_raises_on_non_2xx() -> None:
@@ -282,8 +343,12 @@ def test_get_available_services_raises_on_non_object_body() -> None:
         {"scope": 0, "display_name": "X", "permissions": []},
         # Non-list permissions.
         {"scope": "x-api", "display_name": "X", "permissions": "not a list"},
-        # List with a non-string element.
-        {"scope": "x-api", "display_name": "X", "permissions": ["valid", 7]},
+        # Permission element is a bare string instead of a ``{name, ...}`` object.
+        {"scope": "x-api", "display_name": "X", "permissions": ["valid"]},
+        # Permission element is an object missing the required ``name``.
+        {"scope": "x-api", "display_name": "X", "permissions": [{"description": "no name"}]},
+        # Permission element has a non-string ``name``.
+        {"scope": "x-api", "display_name": "X", "permissions": [{"name": 7}]},
         # Top-level is not an object.
         "definitely not a service entry",
     ],
@@ -298,7 +363,23 @@ def test_get_available_services_raises_on_malformed_entry(bad_entry: object) -> 
 
     def _handler(request: httpx.Request) -> httpx.Response:
         del request
-        return httpx.Response(200, json={"broken": bad_entry})
+        return httpx.Response(200, json={"broken": [bad_entry]})
+
+    client = _build_client(_handler)
+    with pytest.raises(LatchkeyGatewayClientError) as exc_info:
+        client.get_available_services()
+    assert "broken" in str(exc_info.value)
+
+
+def test_get_available_services_raises_when_service_value_is_not_a_list() -> None:
+    """Each service must map to a JSON array of scope entries, not a bare object."""
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            json={"broken": {"scope": "x-api", "display_name": "X", "permissions": []}},
+        )
 
     client = _build_client(_handler)
     with pytest.raises(LatchkeyGatewayClientError) as exc_info:

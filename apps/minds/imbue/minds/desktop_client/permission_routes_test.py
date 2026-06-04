@@ -155,20 +155,25 @@ def _get_app_request_inbox(client: TestClient) -> RequestInbox:
 
 
 _TEST_SERVICES_CATALOG_PAYLOAD: dict[str, object] = {
-    "slack": {
-        "scope": "slack-api",
-        "display_name": "Slack",
-        "permissions": [
-            "slack-read-all",
-            "slack-write-all",
-            "slack-chat-read",
-        ],
-    },
-    "github": {
-        "scope": "github-rest-api",
-        "display_name": "GitHub",
-        "permissions": ["github-read-all"],
-    },
+    "slack": [
+        {
+            "scope": "slack-api",
+            "display_name": "Slack",
+            "description": "Any interaction with the Slack API.",
+            "permissions": [
+                {"name": "slack-read-all", "description": "All read operations across the Slack API."},
+                {"name": "slack-write-all"},
+                {"name": "slack-chat-read"},
+            ],
+        },
+    ],
+    "github": [
+        {
+            "scope": "github-rest-api",
+            "display_name": "GitHub",
+            "permissions": [{"name": "github-read-all"}],
+        },
+    ],
 }
 
 
@@ -293,6 +298,79 @@ def test_get_permission_request_page_pre_checks_agent_requested_permissions(tmp_
     # user confirms / interacts with the form).
     assert 'id="permissions-approve-btn"' in body
     assert "disabled" in body
+
+
+def test_get_permission_request_page_renders_as_modal(tmp_path: Path) -> None:
+    """The request page is rendered as a dismissable modal overlay.
+
+    The desktop client hosts it in a transparent full-window overlay view
+    stacked over the workspace, so the page provides a dim backdrop, a
+    centered dialog card, and a close affordance. Dismissal (close button,
+    backdrop click, Escape, or a completed grant/deny) must prefer the
+    Electron modal host (``window.minds.closeModal``) so the workspace view
+    is left untouched, falling back to navigating home only when no modal
+    host is present (page opened directly in a browser).
+    """
+    agent_id = AgentId()
+    request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        permissions=("slack-read-all",),
+        rationale="reason",
+    )
+    inbox = RequestInbox().add_request(request)
+    handler = _make_recording_handler(tmp_path)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    response = client.get(f"/requests/{request.event_id}")
+
+    assert response.status_code == 200
+    body = response.text
+    # Modal scaffolding: a dim backdrop, a dialog card, and a close button.
+    assert 'id="permissions-backdrop"' in body
+    assert 'id="permissions-dialog"' in body
+    assert 'id="permissions-close-btn"' in body
+    # The transparent body lets the overlay reveal the workspace behind it.
+    assert "bg-transparent" in body
+    # Dismissal prefers the Electron modal host over a home navigation.
+    assert "window.minds.closeModal" in body
+    closemodal_idx = body.find("window.minds.closeModal")
+    href_idx = body.find('window.location.href = "/"')
+    assert closemodal_idx != -1 and href_idx != -1
+    assert closemodal_idx < href_idx, "closeModal must be preferred over the home-nav fallback"
+    # Backdrop click and Escape are wired to the same dismissal helper.
+    assert "onBackdropClick" in body
+    assert 'e.key === "Escape"' in body
+    # Overflow scrolls inside the dialog card (capped at the viewport height
+    # with an inner scroll region), not down the full width of the app.
+    dialog_idx = body.find('id="permissions-dialog"')
+    dialog_tag_end = body.find(">", dialog_idx)
+    assert "max-h-full" in body[dialog_idx:dialog_tag_end]
+    assert "overflow-y-auto" in body
+
+
+def test_get_permission_request_page_shows_descriptions_when_present(tmp_path: Path) -> None:
+    """detent's per-permission descriptions are rendered next to each permission when present."""
+    agent_id = AgentId()
+    request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        permissions=("slack-read-all",),
+        rationale="reason",
+    )
+    inbox = RequestInbox().add_request(request)
+    handler = _make_recording_handler(tmp_path)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    response = client.get(f"/requests/{request.event_id}")
+
+    assert response.status_code == 200
+    body = response.text
+    # The requested permission's summary comes from the catalog fixture's
+    # per-permission ``description`` field.
+    assert "All read operations across the Slack API." in body
+    # The scope-level description is intentionally not surfaced on the dialog.
+    assert "Any interaction with the Slack API." not in body
 
 
 def test_get_permission_request_page_renders_no_pre_checks_when_request_and_existing_are_empty(
@@ -463,6 +541,85 @@ def test_post_permission_deny_calls_handler_and_resolves_inbox(tmp_path: Path) -
     assert len(handler.deny_calls) == 1
     final_inbox = _get_app_request_inbox(client)
     assert final_inbox.get_pending_count() == 0
+
+
+def test_get_permission_request_page_shows_unavailable_after_resolution(tmp_path: Path) -> None:
+    """Re-opening a granted/denied request shows the "no longer available" page.
+
+    The granted request lingers in the append-only log, so the page handler
+    must detect the recorded response and render the friendly notice instead
+    of the (re-submittable) grant/deny form.
+    """
+    agent_id = AgentId()
+    request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        rationale="reason",
+    )
+    inbox = RequestInbox().add_request(request)
+    handler = _make_recording_handler(tmp_path)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    # Deny resolves the request without needing a discovered host.
+    deny = client.post(f"/requests/{request.event_id}/deny")
+    assert deny.status_code == 200
+
+    page = client.get(f"/requests/{request.event_id}")
+    assert page.status_code == 200
+    body = page.text
+    assert "This permission request is no longer available" in body
+    # The actionable form must be gone so it cannot be submitted again.
+    assert 'id="permissions-approve-btn"' not in body
+    assert 'action="/requests/' not in body
+
+
+def test_post_permission_grant_after_resolution_returns_409(tmp_path: Path) -> None:
+    """A second grant on an already-resolved request is rejected, not re-applied."""
+    agent_id = AgentId()
+    host_id = HostId()
+    request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        rationale="reason",
+    )
+    inbox = RequestInbox().add_request(request)
+    handler = _make_recording_handler(tmp_path)
+    client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id, host_id=host_id)
+
+    first = client.post(
+        f"/requests/{request.event_id}/grant",
+        data={"permissions": ["slack-read-all"]},
+    )
+    assert first.status_code == 200
+    assert len(handler.grant_calls) == 1
+
+    second = client.post(
+        f"/requests/{request.event_id}/grant",
+        data={"permissions": ["slack-read-all"]},
+    )
+    assert second.status_code == 409
+    # The handler must not have been invoked a second time.
+    assert len(handler.grant_calls) == 1
+
+
+def test_post_permission_deny_after_resolution_returns_409(tmp_path: Path) -> None:
+    """A second deny on an already-resolved request is rejected, not re-applied."""
+    agent_id = AgentId()
+    request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        rationale="reason",
+    )
+    inbox = RequestInbox().add_request(request)
+    handler = _make_recording_handler(tmp_path)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    assert client.post(f"/requests/{request.event_id}/deny").status_code == 200
+    assert len(handler.deny_calls) == 1
+
+    second = client.post(f"/requests/{request.event_id}/deny")
+    assert second.status_code == 409
+    assert len(handler.deny_calls) == 1
 
 
 def test_post_permission_grant_unknown_service_returns_400(tmp_path: Path) -> None:

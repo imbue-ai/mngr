@@ -373,6 +373,16 @@ PREVENT_PYTEST_MARK_INTEGRATION = RegexRatchetRule(
 
 # --- AST-based ratchet metadata ---
 
+PREVENT_PER_FILE_HOST_UPLOAD = RatchetRuleInfo(
+    rule_name="per-file host uploads inside loops",
+    rule_description=(
+        "Do not upload files to a host one at a time by calling write_file/write_text_file/put_file "
+        "inside a loop. Each call is a separate round-trip (an SFTP channel open per file), which over "
+        "an SSH tunnel scales linearly and has repeatedly caused upload timeouts and 'connection reset / "
+        "SSH protocol banner' failures. Transfer many files with a single host.copy_directory (rsync) call."
+    ),
+)
+
 PREVENT_IF_ELIF_WITHOUT_ELSE = RatchetRuleInfo(
     rule_name="if/elif without else",
     rule_description=(

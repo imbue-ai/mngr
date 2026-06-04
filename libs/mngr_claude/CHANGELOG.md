@@ -6,6 +6,20 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed: Aligned the workspace's `imbue-mngr*==` pin stragglers in `pyproject.toml` with the satellites bumped in main's release commit. Previously the workspace constraint graph was unsatisfiable, which would have broken the `apps/minds` ToDesktop bundle build at `uv lock` time (day-to-day dev hides this because `[tool.uv.sources]` redirects every `imbue-mngr-*` to its workspace path, bypassing the `==` pin).
+
+## [v0.2.10] - 2026-06-01
+
+### Changed
+
+- Changed: `on_before_create` hook implementation (used for `--adopt-session` validation) updated to accept the new `mngr_ctx` parameter now passed by mngr; simplified to require the agent type to be `claude` (no longer special-cases an unset type, since `CreateAgentOptions.agent_type` is now always set).
+
+### Fixed
+
+- Fixed: `--adopt-session` no longer rejects valid Claude agent subtypes. It now accepts any agent type that resolves to a Claude agent (including config-defined templates like `write-plus` whose `parent_type` chain reaches `claude`), instead of only the literal `claude` type name. The check routes through the centralized `resolve_agent_type` registry rather than a string comparison.
+
 ## [v0.2.9] - 2026-05-28
 
 ### Added

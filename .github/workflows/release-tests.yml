@@ -113,7 +113,7 @@ jobs:
 
       - name: Upload test timing data
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-durations-release-${{ matrix.os }}-${{ matrix.group }}
           path: .test_output/test_durations_*.json
