@@ -11,9 +11,9 @@ only for genuinely user-personal preferences and never carries tier state.
 
 import logging
 import threading
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
-from typing import cast
 
 import tomlkit
 from pydantic import Field
@@ -119,28 +119,23 @@ class MindsConfig(MutableModel):
         than having it silently replaced.
         """
         with self._lock:
-            data = self._read_raw()
-            table_obj = data.get(_WORKSPACE_COLORS_KEY)
-            if isinstance(table_obj, dict):
-                # tomlkit parses ``[workspace_colors]`` as a Table (dict
-                # subclass) whose key/value types ty can't infer; cast to
-                # the concrete shape we wrote.
-                table = cast(dict[str, object], table_obj)
-                stored = table.get(agent_id)
-                if stored is not None:
-                    try:
-                        return WorkspaceColor(str(stored))
-                    except ValueError:
-                        _LOG.warning(
-                            "Unparseable workspace color for %s in config: %r; "
-                            "rendering with the OKLCH starting color and leaving "
-                            "the stored value in place.",
-                            agent_id,
-                            stored,
-                        )
-                        return oklch_starting_color(agent_id)
+            colors = self._read_workspace_colors_locked()
+            stored = colors.get(agent_id)
+            if stored is not None:
+                try:
+                    return WorkspaceColor(stored)
+                except ValueError:
+                    _LOG.warning(
+                        "Unparseable workspace color for %s in config: %r; "
+                        "rendering with the OKLCH starting color and leaving "
+                        "the stored value in place.",
+                        agent_id,
+                        stored,
+                    )
+                    return oklch_starting_color(agent_id)
             starting = oklch_starting_color(agent_id)
-            self._write_workspace_color_locked(data, agent_id, starting)
+            colors[agent_id] = str(starting)
+            self._write_workspace_colors_locked(colors)
             return starting
 
     def set_workspace_color(self, agent_id: str, color: WorkspaceColor) -> None:
@@ -151,8 +146,9 @@ class MindsConfig(MutableModel):
         callers can rely on stored values round-tripping cleanly.
         """
         with self._lock:
-            data = self._read_raw()
-            self._write_workspace_color_locked(data, agent_id, color)
+            colors = self._read_workspace_colors_locked()
+            colors[agent_id] = str(color)
+            self._write_workspace_colors_locked(colors)
 
     def remove_workspace_color(self, agent_id: str) -> None:
         """Drop the stored workspace color for an agent.
@@ -161,32 +157,39 @@ class MindsConfig(MutableModel):
         tidy. Idempotent: missing entries are a no-op.
         """
         with self._lock:
-            data = self._read_raw()
-            table_obj = data.get(_WORKSPACE_COLORS_KEY)
-            if not isinstance(table_obj, dict) or agent_id not in table_obj:
+            colors = self._read_workspace_colors_locked()
+            if agent_id not in colors:
                 return
-            table = cast(dict[str, object], table_obj)
-            del table[agent_id]
-            if not table:
-                del data[_WORKSPACE_COLORS_KEY]
-            self._write_raw(data)
+            del colors[agent_id]
+            self._write_workspace_colors_locked(colors)
 
-    def _write_workspace_color_locked(
-        self,
-        data: dict[str, object],
-        agent_id: str,
-        color: WorkspaceColor,
-    ) -> None:
-        """Write a single workspace color into ``data`` and flush.
+    def _read_workspace_colors_locked(self) -> dict[str, str]:
+        """Pull the ``[workspace_colors]`` table out as a typed str->str map.
 
-        Must be called while holding ``self._lock``. Hoists the
-        ``[workspace_colors]`` table if missing.
+        tomlkit parses sub-tables as ``Table`` instances (dict subclasses)
+        whose key/value types ty can only narrow to ``Unknown``. Rebuilding
+        the map via dict comprehension over ``.items()`` lets every
+        downstream callsite use a real ``dict[str, str]`` instead of
+        forcing ``# ty: ignore`` or ``cast(...)`` at each access. Must be
+        called while holding ``self._lock`` (the caller owns the read-
+        modify-write cycle that follows).
         """
-        table_obj = data.get(_WORKSPACE_COLORS_KEY)
-        if isinstance(table_obj, dict):
-            table = cast(dict[str, object], table_obj)
-        else:
-            table = {}
-            data[_WORKSPACE_COLORS_KEY] = table
-        table[agent_id] = str(color)
+        data = self._read_raw()
+        raw = data.get(_WORKSPACE_COLORS_KEY)
+        if not isinstance(raw, Mapping):
+            return {}
+        return {str(k): str(v) for k, v in raw.items()}
+
+    def _write_workspace_colors_locked(self, colors: Mapping[str, str]) -> None:
+        """Write the ``[workspace_colors]`` table from a typed mapping.
+
+        Drops the table entirely when ``colors`` is empty so an idle
+        config doesn't carry a vestigial header. Must be called while
+        holding ``self._lock``.
+        """
+        data = self._read_raw()
+        if colors:
+            data[_WORKSPACE_COLORS_KEY] = dict(colors)
+        elif _WORKSPACE_COLORS_KEY in data:
+            del data[_WORKSPACE_COLORS_KEY]
         self._write_raw(data)
