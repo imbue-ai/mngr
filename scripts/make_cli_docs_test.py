@@ -1,6 +1,15 @@
+import os
+
 import pytest
 
 from scripts.make_cli_docs import get_relative_link
+
+# Importing make_cli_docs sets MNGR_LOAD_ALL_PLUGINS=1 process-wide at import time (it
+# must, so doc generation loads every provider regardless of local config). Pop it here
+# so that import side effect cannot leak into other tests sharing this xdist worker --
+# notably main_test.py::test_create_plugin_manager_blocks_disabled_plugins, which calls
+# create_plugin_manager() and would otherwise see plugin blocking silently skipped.
+os.environ.pop("MNGR_LOAD_ALL_PLUGINS", None)
 
 
 def test_get_relative_link_resolves_known_command() -> None:

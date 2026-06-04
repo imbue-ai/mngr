@@ -1,1 +1,3 @@
 Regenerated command docs: the `file` and `tmr` See-Also sections now link to `mngr rsync` instead of the removed `push`/`pull` commands, fixing broken `[mngr help push](mngr help push)` / `[mngr help pull](mngr help pull)` markdown links. The doc generator (`scripts/make_cli_docs.py`) now fails `--check` on any See-Also reference that resolves to neither a known command nor a help topic, so stale references like these are caught going forward.
+
+Made `test_create_plugin_manager_blocks_disabled_plugins` robust to a leaked `MNGR_LOAD_ALL_PLUGINS` environment variable by explicitly clearing it (the env var disables plugin blocking, so the test now states its precondition rather than relying on the ambient environment).
