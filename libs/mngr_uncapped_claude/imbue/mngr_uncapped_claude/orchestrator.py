@@ -21,7 +21,7 @@ from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.api.events import read_event_content
 from imbue.mngr.api.events import try_build_events_target_for_agent
 from imbue.mngr.api.message import send_message_to_agents
-from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.cli.common_opts import apply_settings_to_config
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrContext
@@ -37,10 +37,8 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentNameStyle
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import ErrorBehavior
-from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import TransferMode
-from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 from imbue.mngr.utils.jsonl_warn import split_complete_lines
 from imbue.mngr.utils.name_generator import generate_agent_name
@@ -268,7 +266,7 @@ def _run_with_agent(
     even an unexpected exception inside this function (anything other than the
     ``MngrError`` cases handled internally) cannot leak the agent.
     """
-    local_host = _get_local_host(mngr_ctx)
+    local_host = get_local_host(mngr_ctx)
     cwd = Path.cwd().resolve()
     source_location = HostLocation(host=local_host, path=cwd)
 
@@ -385,15 +383,6 @@ def _run_with_agent(
 
     _finalize_run(writer, start_time, agent_id=str(agent.id), error_text=None, turn_count=turn_count)
     return EXIT_SUCCESS
-
-
-def _get_local_host(mngr_ctx: MngrContext) -> OnlineHostInterface:
-    """Return the online local host interface."""
-    provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
-    host = provider.get_host(HostName(LOCAL_HOST_NAME))
-    if not isinstance(host, OnlineHostInterface):
-        raise MngrError("Local host is not online; cannot run uncapped-claude")
-    return host
 
 
 def _build_agent_name() -> AgentName:

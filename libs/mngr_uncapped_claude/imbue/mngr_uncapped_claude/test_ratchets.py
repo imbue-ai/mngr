@@ -238,3 +238,10 @@ def test_prevent_code_in_init_files() -> None:
 
 def test_prevent_bare_tmux_targets() -> None:
     rc.check_bare_tmux_targets(_DIR, snapshot(0))
+
+
+# --- AST-based ratchets ---
+
+
+def test_prevent_per_file_host_upload() -> None:
+    rc.check_per_file_host_upload(_DIR, snapshot(0))
