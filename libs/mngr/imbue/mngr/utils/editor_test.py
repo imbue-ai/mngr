@@ -26,9 +26,15 @@ def long_running_editor(tmp_path: Path) -> Path:
     The script ignores its file argument and just sleeps, which is useful
     for testing process management without the editor exiting immediately.
     """
+    # Use a large, globally-unique sleep duration so the session-cleanup leak
+    # detector (which scans for leftover child processes by name/args) can't
+    # misattribute an unrelated test's stray `sleep` to this one. The process
+    # is terminated on cleanup regardless of the duration, so a long sleep is
+    # harmless and just guarantees the editor outlives every synchronous
+    # is_running() assertion below.
     script_content = """#!/bin/bash
 # Accept file argument but ignore it, just sleep
-sleep 10
+sleep 38291
 """
     return _create_executable_script(tmp_path, "long_editor.sh", script_content)
 
@@ -124,7 +130,9 @@ def test_editor_session_is_running_returns_true_when_process_running(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test that is_running() returns True when process is running."""
-    # Use a long-running script so the process stays running
+    # Use a long-running script so the process stays running. The long sleep in
+    # long_running_editor guarantees the editor outlives this synchronous
+    # assertion, so there is no race between start() and the is_running() check.
     monkeypatch.setenv("EDITOR", str(long_running_editor))
     with EditorSession.create() as session:
         session.start()
@@ -227,10 +235,12 @@ def test_editor_session_cleanup_handles_stubborn_process(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test that cleanup() can handle a process that requires killing."""
-    # Create a script that ignores SIGTERM
+    # Create a script that ignores SIGTERM. Use a large, globally-unique sleep
+    # duration (distinct from long_running_editor's) so the leak detector can't
+    # confuse leftover processes between tests; cleanup() kills it regardless.
     script_content = """#!/bin/bash
 trap "" SIGTERM
-sleep 100
+sleep 47213
 """
     script_path = _create_executable_script(tmp_path, "stubborn_editor.sh", script_content)
 

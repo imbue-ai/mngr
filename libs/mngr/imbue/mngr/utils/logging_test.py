@@ -13,6 +13,7 @@ from typing import cast
 
 import paramiko.channel
 import pytest
+from inline_snapshot import snapshot
 from loguru import logger
 
 import imbue.mngr.utils.logging as mngr_logging_module
@@ -205,11 +206,14 @@ def test_format_arg_value_truncates_long_value() -> None:
 
 
 def test_format_arg_value_handles_complex_objects() -> None:
-    """_format_arg_value should handle complex objects."""
+    """_format_arg_value should render a complex object as its full repr.
+
+    Asserting the exact repr (rather than just substring membership) catches a
+    regression that dropped the nested list, changed quoting, or reordered keys.
+    """
     complex_obj = {"key": "value", "list": [1, 2, 3]}
     result = _format_arg_value(complex_obj)
-    assert "key" in result
-    assert "value" in result
+    assert result == snapshot("{'key': 'value', 'list': [1, 2, 3]}")
 
 
 # =============================================================================
@@ -481,7 +485,11 @@ def test_logging_suppressor_buffers_messages() -> None:
         logger.info("Test message 1")
         logger.info("Test message 2")
 
-        # Check that messages were buffered
+        # Check that messages were buffered. The membership checks below are the
+        # real assertions; the count is `>= 2` (not `== 2`) on purpose: tests run
+        # with the autouse warning sink and other handlers attached, so the
+        # suppressor may capture incidental log records from unrelated code. Do
+        # not tighten this to `==` -- it would flake under shared logging.
         buffered = LoggingSuppressor.get_buffered_messages()
         assert len(buffered) >= 2
         assert any("Test message 1" in msg.formatted_message for msg in buffered)
