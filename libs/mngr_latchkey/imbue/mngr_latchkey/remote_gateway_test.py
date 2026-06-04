@@ -9,8 +9,11 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.remote_gateway import INNER_PORT
 from imbue.mngr_latchkey.remote_gateway import LATCHKEY_VERSION
+from imbue.mngr_latchkey.remote_gateway import OUTER_PORT
 from imbue.mngr_latchkey.remote_gateway import RemoteGatewayError
+from imbue.mngr_latchkey.remote_gateway import ensure_latchkey_gateway_running
 from imbue.mngr_latchkey.remote_gateway import ensure_latchkey_installed
 from imbue.mngr_latchkey.remote_gateway import sync_credentials
 from imbue.mngr_latchkey.remote_gateway import sync_permissions
@@ -62,7 +65,9 @@ class _StubOuter(MutableModel):
         timeout_seconds: float | None = None,
     ) -> CommandResult:
         self.recorded.append(_Recorded(command=command, timeout_seconds=timeout_seconds))
-        if "$HOME" in command:
+        # Only the dedicated $HOME-resolution probe gets the home response; any
+        # other command (install/gateway scripts) returns the configured result.
+        if command.strip() == 'echo "$HOME"':
             return CommandResult(stdout=f"{self.home}\n", stderr="", success=True)
         return self.result
 
@@ -213,3 +218,27 @@ def test_sync_permissions_raises_when_home_resolution_fails(tmp_path: Path) -> N
 
     with pytest.raises(RemoteGatewayError, match="resolve \\$HOME"):
         sync_permissions(outer, latchkey_directory, host_id)
+
+
+def test_ports_are_integers() -> None:
+    assert isinstance(INNER_PORT, int)
+    assert isinstance(OUTER_PORT, int)
+
+
+def test_ensure_latchkey_gateway_running_starts_detached_gateway_on_inner_port() -> None:
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+    ensure_latchkey_gateway_running(outer)
+    assert len(_stub(outer).recorded) == 1
+    command = _stub(outer).recorded[0].command
+    assert f"LATCHKEY_GATEWAY_PORT={INNER_PORT} nohup latchkey gateway" in command
+    # Skips the launch when a gateway is already running.
+    assert "pgrep -f 'latchkey gateway'" in command
+    # Detached so it outlives the SSH session.
+    assert "nohup" in command
+    assert "</dev/null" in command
+
+
+def test_ensure_latchkey_gateway_running_raises_on_failure() -> None:
+    outer = _outer(CommandResult(stdout="", stderr="latchkey: command not found", success=False))
+    with pytest.raises(RemoteGatewayError, match="command not found"):
+        ensure_latchkey_gateway_running(outer)

@@ -25,6 +25,18 @@ from imbue.mngr_latchkey.store import plugin_data_dir
 # ``npm install -g latchkey`` happens to resolve to at install time.
 LATCHKEY_VERSION: Final[str] = "2.15.1"
 
+# Port the latchkey gateway binds to on the VPS, passed as ``LATCHKEY_GATEWAY_PORT``.
+# This is the port reached from *inside* the agent container (the in-container
+# ``LATCHKEY_GATEWAY`` env var points here), matching the upstream ``latchkey
+# gateway`` default of 1989.
+INNER_PORT: Final[int] = 1989
+
+# Port exposed on the *outer* host (the VPS) that bridges to the inner gateway
+# port. Reserved for the container/tunnel wiring that connects an agent's
+# loopback to the VPS-resident gateway; currently the same value, since no
+# remapping is needed yet.
+OUTER_PORT: Final[int] = 1989
+
 # Major Node.js version installed via NodeSource. The latchkey CLI is an npm
 # package, so it needs a reasonably recent Node runtime; the Debian-shipped
 # nodejs is too old, hence the NodeSource setup script.
@@ -62,6 +74,10 @@ _REMOTE_COMMAND_TIMEOUT_SECONDS: Final[float] = 15.0
 # permissions config are owned by the remote (root) user the gateway runs as;
 # 0600 matches the local ``save_permissions`` chmod and keeps secrets private.
 _REMOTE_FILE_MODE: Final[str] = "0600"
+
+# Filename the detached gateway's stdout/stderr is redirected to on the VPS,
+# under the remote ``$HOME/.latchkey`` directory.
+_REMOTE_GATEWAY_LOG_FILENAME: Final[str] = "gateway.log"
 
 
 class RemoteGatewayError(LatchkeyError, RuntimeError):
@@ -202,3 +218,46 @@ def sync_permissions(host: OuterHostInterface, latchkey_directory: Path, host_id
     remote_path = _resolve_remote_latchkey_directory(host) / _REMOTE_PERMISSIONS_FILENAME
     with log_span("Syncing latchkey permissions for host {} to VPS {} ({})", host_id, host.get_name(), remote_path):
         host.write_text_file(remote_path, content, mode=_REMOTE_FILE_MODE)
+
+
+def _build_gateway_start_script(inner_port: int) -> str:
+    """Build a script that starts a detached ``latchkey gateway`` unless one is already running.
+
+    Exits early (no-op) when a ``latchkey gateway`` process is already present.
+    Otherwise launches it under ``nohup`` with stdio detached so it outlives
+    the SSH session that started it, logging to ``$HOME/.latchkey/gateway.log``.
+    """
+    return "\n".join(
+        (
+            "set -e",
+            # Already running: leave it be.
+            "if pgrep -f 'latchkey gateway' >/dev/null 2>&1; then",
+            "  exit 0",
+            "fi",
+            'mkdir -p "$HOME/.latchkey"',
+            # Detach from the SSH session: nohup + closed stdin + redirected
+            # stdio so the channel can close while the gateway keeps running.
+            f"LATCHKEY_GATEWAY_PORT={inner_port} nohup latchkey gateway "
+            f'</dev/null >"$HOME/.latchkey/{_REMOTE_GATEWAY_LOG_FILENAME}" 2>&1 &',
+            "exit 0",
+        )
+    )
+
+
+def ensure_latchkey_gateway_running(host: OuterHostInterface) -> None:
+    """Start ``latchkey gateway`` on the VPS unless it is already running.
+
+    Launches ``LATCHKEY_GATEWAY_PORT=<INNER_PORT> latchkey gateway`` detached so
+    it survives the SSH session. Idempotent: a no-op when a gateway process is
+    already present. Raises :class:`RemoteGatewayError` if the launch command fails.
+    """
+    script = _build_gateway_start_script(INNER_PORT)
+    host_name = host.get_name()
+    with log_span("Ensuring latchkey gateway is running on VPS {} (port {})", host_name, INNER_PORT):
+        result = host.execute_idempotent_command(script, timeout_seconds=_REMOTE_COMMAND_TIMEOUT_SECONDS)
+    if not result.success:
+        raise RemoteGatewayError(
+            "Failed to start latchkey gateway on VPS {}: {}".format(
+                host_name, result.stderr.strip() or result.stdout.strip()
+            )
+        )
