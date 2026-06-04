@@ -39,6 +39,7 @@ from imbue.minds.desktop_client.templates_auth import render_forgot_password_pag
 from imbue.minds.desktop_client.templates_auth import render_settings_page
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.utils.output import emit_event
+from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
 
@@ -269,7 +270,7 @@ def _bounce_latchkey_forward_supervisor(supervisor: LatchkeyForwardSupervisor | 
         return
     try:
         supervisor.bounce()
-    except (OSError, RuntimeError) as e:
+    except (OSError, RuntimeError, LatchkeyError) as e:
         logger.warning("Failed to bounce mngr latchkey forward: {}", e)
 
 
