@@ -237,7 +237,7 @@ def _build_gateway_start_script(inner_port: int) -> str:
             'mkdir -p "$HOME/.latchkey"',
             # Detach from the SSH session: nohup + closed stdin + redirected
             # stdio so the channel can close while the gateway keeps running.
-            f"LATCHKEY_GATEWAY_PORT={inner_port} nohup latchkey gateway "
+            f"LATCHKEY_GATEWAY_PORT={inner_port} LATCHKEY_DISABLE_COUNTING=1 nohup latchkey gateway "
             f'</dev/null >"$HOME/.latchkey/{_REMOTE_GATEWAY_LOG_FILENAME}" 2>&1 &',
             "exit 0",
         )

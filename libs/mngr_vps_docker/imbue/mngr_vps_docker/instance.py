@@ -862,6 +862,17 @@ def _pull_image(outer: OuterHostInterface, image: str, timeout_seconds: float = 
     _run_docker(outer, ["pull", image], timeout_seconds=timeout_seconds)
 
 
+def _build_container_port_mappings(container_ssh_port: int, extra_port_mappings: Mapping[str, str]) -> dict[str, str]:
+    """Build the docker ``-p`` host-bind -> container-port map for a new container.
+
+    Always maps the container's sshd (port 22) to the VPS ``container_ssh_port``.
+    Any ``extra_port_mappings`` supplied via config (e.g. the latchkey gateway
+    port) are merged on top, so a caller can publish additional ports without
+    this provider knowing what they are for.
+    """
+    return {f"0.0.0.0:{container_ssh_port}": "22", **dict(extra_port_mappings)}
+
+
 def _run_container(
     outer: OuterHostInterface,
     *,
@@ -1657,7 +1668,9 @@ class VpsDockerProvider(BaseProviderInstance):
                 outer,
                 image=base_image,
                 name=container_name,
-                port_mappings={f"0.0.0.0:{self.config.container_ssh_port}": "22"},
+                port_mappings=_build_container_port_mappings(
+                    self.config.container_ssh_port, self.config.extra_container_port_mappings
+                ),
                 volumes=[
                     f"{volume_name}:{HOST_VOLUME_MOUNT_PATH}:rw",
                     # Snapshot helper IPC volume (bind-shared with the outer

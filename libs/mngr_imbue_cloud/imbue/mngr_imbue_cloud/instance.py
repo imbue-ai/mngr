@@ -111,6 +111,8 @@ from imbue.mngr_imbue_cloud.host import ImbueCloudHost
 from imbue.mngr_imbue_cloud.primitives import FastMode
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.session_store import ImbueCloudSessionStore
+from imbue.mngr_latchkey.remote_gateway import INNER_PORT
+from imbue.mngr_latchkey.remote_gateway import OUTER_PORT
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
@@ -128,6 +130,15 @@ _VPS_BTRFS_MOUNT_PATH: Final[str] = "/mngr-btrfs"
 # is named ``mngr-host-vol-<host_id_hex>``).
 _LABEL_HOST_ID_KEY: Final[str] = "com.imbue.mngr.host-id"
 _HOST_VOLUME_NAME_PREFIX: Final[str] = "mngr-host-vol-"
+
+
+def _latchkey_gateway_port_mappings() -> dict[str, str]:
+    """Docker ``-p`` mapping that publishes the per-VPS latchkey gateway port into the container.
+
+    Maps the VPS-host ``OUTER_PORT`` to the container's ``INNER_PORT`` so an
+    agent in a remote workspace can reach the latchkey gateway running on the VPS.
+    """
+    return {f"0.0.0.0:{OUTER_PORT}": str(INNER_PORT)}
 
 
 def build_pool_host_wipe_script(host_id: HostId) -> str:
@@ -1360,6 +1371,9 @@ class ImbueCloudProvider(BaseProviderInstance):
             backend=ProviderBackendName("vps_docker"),
             host_dir=self.config.host_dir,
             container_ssh_port=self.config.container_ssh_port,
+            # Publish the per-VPS latchkey gateway port into the container so a
+            # remote workspace's agent can reach the gateway running on the VPS.
+            extra_container_port_mappings=_latchkey_gateway_port_mappings(),
         )
         return VpsDockerProvider(
             name=self.name,

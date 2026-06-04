@@ -230,7 +230,7 @@ def test_ensure_latchkey_gateway_running_starts_detached_gateway_on_inner_port()
     ensure_latchkey_gateway_running(outer)
     assert len(_stub(outer).recorded) == 1
     command = _stub(outer).recorded[0].command
-    assert f"LATCHKEY_GATEWAY_PORT={INNER_PORT} nohup latchkey gateway" in command
+    assert f"LATCHKEY_GATEWAY_PORT={INNER_PORT} LATCHKEY_DISABLE_COUNTING=1 nohup latchkey gateway" in command
     # Skips the launch when a gateway is already running.
     assert "pgrep -f 'latchkey gateway'" in command
     # Detached so it outlives the SSH session.

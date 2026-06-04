@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from pathlib import Path
 
 from pydantic import Field
@@ -66,6 +67,16 @@ class VpsDockerProviderConfig(ProviderInstanceConfig):
     default_start_args: tuple[str, ...] = Field(
         default=(),
         description="Default docker run arguments applied to all containers",
+    )
+    extra_container_port_mappings: Mapping[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Additional docker ``-p`` publishes applied to every container, keyed by host bind "
+            "(e.g. ``0.0.0.0:1989``) with the container port as the value (e.g. ``1989``). Merged "
+            "with the always-present sshd mapping. Used by higher-level providers (e.g. imbue_cloud) "
+            "to expose the per-VPS latchkey gateway port without this generic provider needing to "
+            "know about latchkey."
+        ),
     )
     builder: DockerBuilder = Field(
         default=DockerBuilder.DOCKER,

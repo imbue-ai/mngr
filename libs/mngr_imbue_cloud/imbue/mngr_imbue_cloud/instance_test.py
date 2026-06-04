@@ -15,9 +15,12 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_imbue_cloud.data_types import LeasedHostInfo
 from imbue.mngr_imbue_cloud.instance import ImbueCloudProvider
+from imbue.mngr_imbue_cloud.instance import _latchkey_gateway_port_mappings
 from imbue.mngr_imbue_cloud.instance import _map_docker_status_to_host_state
 from imbue.mngr_imbue_cloud.instance import build_pool_host_wipe_script
 from imbue.mngr_imbue_cloud.primitives import LeaseDbId
+from imbue.mngr_latchkey.remote_gateway import INNER_PORT
+from imbue.mngr_latchkey.remote_gateway import OUTER_PORT
 
 
 @pytest.mark.parametrize(
@@ -55,6 +58,10 @@ def test_map_docker_status_to_host_state(status: str, exit_code: int, expected_s
     # the user sees *something* in the listing.
     assert note is not None
     assert note != ""
+
+
+def test_latchkey_gateway_port_mappings_uses_outer_and_inner_ports() -> None:
+    assert _latchkey_gateway_port_mappings() == {f"0.0.0.0:{OUTER_PORT}": str(INNER_PORT)}
 
 
 def test_map_docker_status_running_note_mentions_inner_ssh() -> None:
