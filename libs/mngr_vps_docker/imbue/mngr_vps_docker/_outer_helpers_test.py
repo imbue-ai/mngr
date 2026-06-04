@@ -8,6 +8,7 @@ keeps these unit tests fast and free of any real SSH/Docker dependency.
 
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from typing import cast
 
@@ -23,6 +24,7 @@ from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import HostId
 from imbue.mngr_vps_docker.container_setup import LABEL_HOST_ID
 from imbue.mngr_vps_docker.container_setup import build_image_on_outer
+from imbue.mngr_vps_docker.container_setup import build_ssh_transport_for_outer
 from imbue.mngr_vps_docker.container_setup import check_directory_exists_on_outer
 from imbue.mngr_vps_docker.container_setup import check_file_exists_on_outer
 from imbue.mngr_vps_docker.container_setup import commit_container
@@ -805,3 +807,43 @@ def test_prepare_btrfs_on_outer_skips_free_space_check_when_loop_file_present() 
     )
     joined = "\n".join(cast(_ScriptedOuter, outer).recorded)
     assert "df --output=avail" not in joined
+
+
+# =========================================================================
+# build_ssh_transport_for_outer
+# =========================================================================
+
+
+class _SshTransportOuter(MutableModel):
+    """Minimal outer exposing only what build_ssh_transport_for_outer reads:
+    get_ssh_connection_info() and connector.host.data."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    info: tuple[str, str, int, Path] | None = Field(description="(user, hostname, port, key_path) or None")
+    known_hosts_file: str = Field(default="", description="value for host.data['ssh_known_hosts_file']")
+
+    def get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
+        return self.info
+
+    @property
+    def connector(self) -> Any:
+        return SimpleNamespace(host=SimpleNamespace(data={"ssh_known_hosts_file": self.known_hosts_file}))
+
+
+def test_build_ssh_transport_passes_the_ssh_port() -> None:
+    # Regression: the lima docker-mode outer is reached via a Lima-forwarded
+    # port on 127.0.0.1, so the rsync ssh transport must pass -p <port>;
+    # without it ssh hits 127.0.0.1:22 and strict host-key checking fails.
+    outer = _SshTransportOuter(info=("root", "127.0.0.1", 38519, Path("/k/key")), known_hosts_file="/k/known_hosts")
+    ssh_cmd, user, hostname, port, key = build_ssh_transport_for_outer(cast(OuterHostInterface, outer))
+    assert "-p 38519" in ssh_cmd
+    assert "-o UserKnownHostsFile=/k/known_hosts" in ssh_cmd
+    assert "-o StrictHostKeyChecking=yes" in ssh_cmd
+    assert (user, hostname, port) == ("root", "127.0.0.1", 38519)
+
+
+def test_build_ssh_transport_raises_for_local_outer() -> None:
+    outer = _SshTransportOuter(info=None)
+    with pytest.raises(MngrError):
+        build_ssh_transport_for_outer(cast(OuterHostInterface, outer))

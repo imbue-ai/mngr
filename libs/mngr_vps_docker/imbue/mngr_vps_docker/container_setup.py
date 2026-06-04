@@ -743,8 +743,14 @@ def build_ssh_transport_for_outer(outer: OuterHostInterface) -> tuple[str, str, 
     # so rsync's ssh subprocess uses the same trust store as the outer host.
     host_data = outer.connector.host.data
     known_hosts = host_data.get("ssh_known_hosts_file", "")
+    # Pass the SSH port explicitly. VPS outers listen on 22, but the lima
+    # docker-mode outer is the VM reached via a Lima-forwarded port on
+    # 127.0.0.1 (e.g. 38519). Without -p, rsync's ssh would connect to
+    # 127.0.0.1:22 (the wrong target) and strict host-key checking fails,
+    # since the known_hosts entry is keyed as [127.0.0.1]:<forwarded-port>.
     ssh_cmd = (
         f"ssh -i {shlex.quote(str(key_path))} "
+        f"-p {port} "
         f"-o UserKnownHostsFile={shlex.quote(str(known_hosts))} "
         f"-o StrictHostKeyChecking=yes "
         f"-o BatchMode=yes "
