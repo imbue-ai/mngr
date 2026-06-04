@@ -5,42 +5,21 @@ import json
 import shlex
 import subprocess
 import tempfile
-import time
-from concurrent.futures import Future
-from concurrent.futures import TimeoutError as FuturesTimeoutError
 from pathlib import Path
-from typing import Final
 from typing import assert_never
 
 from loguru import logger
 
-from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
-from imbue.mngr.hosts.host import Host
+from imbue.mngr.hosts.file_upload import upload_files_in_bulk
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.providers.deploy_utils import MngrInstallMode
 from imbue.mngr.providers.deploy_utils import collect_deploy_files
 from imbue.mngr.providers.deploy_utils import resolve_mngr_install_mode
 from imbue.mngr_recursive.data_types import RecursivePluginConfig
-
-# Cap parallel SSH writes well below paramiko's known thread-safety
-# breakdown threshold. Multithreaded paramiko racing on a single
-# Transport hits "Oops, unhandled type 3 ('unimplemented')" plus
-# "Unable to open channel" deadlocks past roughly 5-15 concurrent
-# threads (see open paramiko issues 1904, 2346, 2534), and the
-# deadlock is permanent: the python-side futures never resolve.
-# 4 workers is the maintainer recommendation in 2346 and well within
-# the safe band on every server we have tested.
-_UPLOAD_MAX_WORKERS: Final[int] = 4
-
-# Hard wall-clock cap on the entire upload phase. Even at 4 workers,
-# any single hung future would eventually deadlock the create flow
-# without this. 5 minutes is generous for the realistic deploy-file
-# set sizes (a few hundred files, mostly tiny configs).
-_UPLOAD_TIMEOUT_SECONDS: Final[float] = 300.0
 
 
 def _get_remote_home(host: OnlineHostInterface) -> str:
@@ -51,113 +30,26 @@ def _get_remote_home(host: OnlineHostInterface) -> str:
     return result.stdout.strip()
 
 
-def _resolve_remote_path(dest_path: Path, remote_home: str) -> Path:
-    """Resolve a deploy destination path to an absolute path on the remote host.
-
-    Paths starting with '~/' are resolved relative to the remote user's home.
-    A bare '~' resolves to the remote home directory itself.
-    Relative paths are left as-is.
-    """
-    dest_str = str(dest_path)
-    if dest_str == "~":
-        return Path(remote_home)
-    if dest_str.startswith("~/"):
-        return Path(remote_home) / dest_str.removeprefix("~/")
-    return dest_path
-
-
 def _upload_deploy_files(
     host: OnlineHostInterface,
     deploy_files: dict[Path, Path | str],
     remote_home: str,
-    mngr_ctx: MngrContext,
 ) -> int:
-    """Upload collected deploy files to the remote host.
+    """Upload collected deploy files to the remote host with a single rsync.
 
-    Submits each file as a separate parallel ``host.write_file`` call,
-    capped at ``_UPLOAD_MAX_WORKERS`` to stay below paramiko's
-    multithreaded breakdown threshold. The whole phase has a wall-clock
-    deadline (``_UPLOAD_TIMEOUT_SECONDS``); when it's exceeded we cancel
-    pending futures, force-close the host's SSH transport so any
-    paramiko thread wedged on a deadlocked lock gets unstuck, and raise
-    a clear ``MngrError`` so the create flow fails loudly instead of
-    sitting forever.
+    Delegates to the shared ``upload_files_in_bulk`` helper, which stages every file
+    into a local temp dir mirroring its absolute remote path and transfers the whole
+    tree with one ``copy_local_directory`` (rsync) call. This replaces the previous
+    per-file SFTP approach, which opened a fresh SFTP channel per file -- a full
+    round-trip over the SSH connection (~0.7s/file measured over a Modal tunnel) -- so
+    a few hundred files (e.g. a user's ``~/.claude/plugins`` tree) would either blow
+    past the upload timeout or reset the connection mid-transfer ("Error reading SSH
+    protocol banner"). Returns the number of files uploaded.
 
-    Returns the number of files submitted for upload.
+    skip_missing=True: deploy files are collected best-effort, so a source that no
+    longer exists locally is skipped rather than failing the whole provision.
     """
-    # do this in parallel, since there can sometimes be a bunch of things to transfer
-    # first, figure out all directories and do a single mkdir -p that captures all of them:
-    remote_paths: list[str] = []
-    for dest_path in deploy_files:
-        resolved_path = _resolve_remote_path(dest_path, remote_home)
-        remote_paths.append(shlex.quote(str(resolved_path.parent)))
-    mkdir_result = host.execute_idempotent_command(f"mkdir -p {' '.join(remote_paths)}")
-    if not mkdir_result.success:
-        raise MngrError(f"Failed to create directories: {mkdir_result.stderr}")
-
-    count = 0
-    futures: list[Future[None]] = []
-    deadline = time.monotonic() + _UPLOAD_TIMEOUT_SECONDS
-    executor = ConcurrencyGroupExecutor(
-        parent_cg=mngr_ctx.concurrency_group, name="upload_deploy_files", max_workers=_UPLOAD_MAX_WORKERS
-    )
-    try:
-        with executor:
-            for dest_path, source in deploy_files.items():
-                resolved_path = _resolve_remote_path(dest_path, remote_home)
-                if isinstance(source, Path):
-                    if not source.exists():
-                        logger.debug("Skipping non-existent deploy file: {}", source)
-                        continue
-                    content = source.read_bytes()
-                    futures.append(executor.submit(host.write_file, path=resolved_path, content=content))
-                else:
-                    futures.append(executor.submit(host.write_text_file, path=resolved_path, content=source))
-                logger.trace("Uploaded deploy file: {} -> {}", dest_path, resolved_path)
-                count += 1
-
-            # Wait on each future against the shared wall-clock deadline.
-            # The first future that exceeds the deadline triggers full
-            # teardown -- there's no point waiting on the rest if we've
-            # already hit a paramiko-thread-deadlock scenario.
-            for future in futures:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise FuturesTimeoutError("deploy-file upload exceeded its wall-clock budget")
-                future.result(timeout=remaining)
-    except FuturesTimeoutError as exc:
-        _abort_upload(host, executor, futures)
-        raise MngrError(
-            f"Deploy-file upload timed out after {_UPLOAD_TIMEOUT_SECONDS:.0f}s "
-            "(see paramiko issues 1904, 2346, 2534 for the underlying SSH-thread deadlock). "
-            "Connection has been torn down."
-        ) from exc
-
-    return count
-
-
-def _abort_upload(
-    host: OnlineHostInterface,
-    executor: ConcurrencyGroupExecutor,
-    futures: list[Future[None]],
-) -> None:
-    """Cancel pending upload futures and force the SSH transport closed.
-
-    Cancelling pending futures handles work that hasn't started yet.
-    Closing the paramiko transport is what actually unblocks already-running
-    workers wedged in paramiko's deadlock paths -- their socket reads/writes
-    will fail and the threads can finally exit.
-    """
-    cancelled = 0
-    for future in futures:
-        if not future.done() and future.cancel():
-            cancelled += 1
-    logger.warning("Cancelled {}/{} pending upload futures during timeout teardown", cancelled, len(futures))
-    if isinstance(host, Host):
-        try:
-            host.disconnect()
-        except (OSError, MngrError) as exc:
-            logger.warning("Best-effort host.disconnect() during upload teardown failed: {}", exc)
+    return upload_files_in_bulk(host, deploy_files, remote_home, skip_missing=True)
 
 
 def _get_installed_mngr_packages() -> list[tuple[str, str]]:
@@ -434,7 +326,7 @@ def provision_mngr_on_host(
 
                 if deploy_files:
                     with log_span("Uploading {} deploy files to remote host", len(deploy_files)):
-                        uploaded = _upload_deploy_files(host, deploy_files, remote_home, mngr_ctx)
+                        uploaded = _upload_deploy_files(host, deploy_files, remote_home)
                         logger.info("Uploaded {} mngr config files to remote host", uploaded)
 
             # Ensure uv is available on the host
