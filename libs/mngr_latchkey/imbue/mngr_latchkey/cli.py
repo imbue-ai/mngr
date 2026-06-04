@@ -583,6 +583,10 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
         shutdown_event.wait()
     finally:
         logger.info("Shutting down: terminating mngr observe, reverse tunnels, and shared gateway.")
+        # Wake the SIGHUP watcher so it observes ``shutdown_event`` and exits;
+        # it blocks on ``bounce_event`` and the concurrency group joins it on
+        # teardown, so without this nudge a clean shutdown would hang there.
+        bounce_event.set()
         consumer.stop()
         tunnel_manager.cleanup()
         try:
