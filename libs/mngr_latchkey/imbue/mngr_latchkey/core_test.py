@@ -859,10 +859,10 @@ class _ProvisionRecordingHandler(LatchkeyDiscoveryHandler):
                 self._pending_remote_agents.discard(str(agent_id))
 
 
-def test_discovery_handler_dispatches_vps_provisioning_off_thread_for_outer_host(
+def test_discovery_handler_dispatches_vps_provisioning_in_addition_to_desktop_tunnel(
     tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """An agent whose host has an outer host gets VPS provisioning dispatched (not the desktop tunnel)."""
+    """A VPS agent gets BOTH the desktop reverse tunnel and the VPS-resident gateway provisioning."""
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
@@ -878,6 +878,7 @@ def test_discovery_handler_dispatches_vps_provisioning_off_thread_for_outer_host
             mngr_ctx=temp_mngr_ctx,
         )
         handler(agent_id, host_id, ssh_info, "imbue_cloud")
+        host_side_port = manager.start_gateway(cg)
 
         # Provisioning runs on its own fire-and-forget CG thread; poll for it.
         poll_event = threading.Event()
@@ -885,10 +886,10 @@ def test_discovery_handler_dispatches_vps_provisioning_off_thread_for_outer_host
         while time.monotonic() < deadline and not handler._provisioned:
             poll_event.wait(timeout=_POLL_INTERVAL_SECONDS)
 
-        # The VPS path was taken: provisioning recorded, and NO desktop-side
-        # reverse tunnel was set up (the VPS owns the agent's reachability).
+        # Both paths ran: the desktop gateway is reverse-tunneled onto the
+        # agent-side port AND the VPS-resident gateway provisioning was dispatched.
+        assert tunnel_manager._calls == [(ssh_info, host_side_port, AGENT_SIDE_LATCHKEY_PORT, str(agent_id))]
         assert handler._provisioned == [(agent_id, host_id)]
-        assert tunnel_manager._calls == []
         manager.stop_gateway()
 
 

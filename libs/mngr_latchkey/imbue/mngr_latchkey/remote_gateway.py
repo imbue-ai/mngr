@@ -16,6 +16,7 @@ from loguru import logger
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import permissions_path_for_host
@@ -26,12 +27,13 @@ from imbue.mngr_latchkey.store import plugin_data_dir
 # ``npm install -g latchkey`` happens to resolve to at install time.
 LATCHKEY_VERSION: Final[str] = "2.15.1"
 
-# Port the agent reaches the gateway on from *inside* the container: its
-# ``LATCHKEY_GATEWAY`` env var points at ``http://127.0.0.1:INNER_PORT``,
-# matching the upstream agent-side default of 1989. The reverse tunnel set up by
-# ``ensure_latchkey_gateway_reachable_from_container`` binds this port inside the
-# container.
-INNER_PORT: Final[int] = 1989
+# Port inside the container on which the VPS-resident gateway is reachable (the
+# VPS->container reverse tunnel binds it). Deliberately distinct from
+# ``AGENT_SIDE_LATCHKEY_PORT``, which the desktop-side gateway's own reverse
+# tunnel already binds inside the container: a VPS agent reaches the desktop
+# gateway on ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT`` and the VPS gateway on
+# ``127.0.0.1:INNER_PORT`` at the same time, so the two must not collide.
+INNER_PORT: Final[int] = AGENT_SIDE_LATCHKEY_PORT + 1
 
 # Port the latchkey gateway binds to on the VPS's loopback (passed as
 # ``LATCHKEY_GATEWAY_PORT``). The reverse tunnel forwards the container's

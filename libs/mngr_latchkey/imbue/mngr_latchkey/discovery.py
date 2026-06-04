@@ -3,14 +3,15 @@
 Exposes two callables:
 
 * :class:`LatchkeyDiscoveryHandler` -- on every agent discovery, ensures
-  the shared ``latchkey gateway`` subprocess is up and makes it reachable
-  on the agent's loopback ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT``. Agents
-  whose host has an accessible outer host (the VPS -- e.g. imbue_cloud /
-  vps_docker) get a VPS-resident gateway provisioned and reverse-tunneled
-  into their container (see :func:`provision_remote_gateway`). All other
-  SSH-reachable agents (local docker, modal, ssh) fall back to a reverse
-  port-forward of the desktop-side gateway. Agents discovered without SSH
-  info are expected to reach the gateway via whatever direct route exists.
+  the shared desktop ``latchkey gateway`` subprocess is up and makes it
+  reachable on the agent's loopback ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT``.
+  Agents whose host *also* has an accessible outer host (the VPS -- e.g.
+  imbue_cloud / vps_docker) additionally get a VPS-resident gateway
+  provisioned and reverse-tunneled into their container on a distinct
+  ``127.0.0.1:INNER_PORT`` (see :func:`provision_remote_gateway`), so they
+  can reach both the desktop gateway and the VPS gateway at once. Agents
+  discovered without SSH info are expected to reach the gateway via
+  whatever direct route exists.
 * :class:`LatchkeyDestructionHandler` -- on every agent destruction,
   tears down the reverse tunnel that belongs to that agent so the
   manager's health-check loop doesn't keep spinning paramiko transports
@@ -123,24 +124,38 @@ class LatchkeyDiscoveryHandler(MutableModel):
         provider_name: str,
         host_side_port: int,
     ) -> None:
-        """Worker-thread entry point that routes the agent to the right reachability path.
+        """Worker-thread entry point that wires the gateway(s) into the agent.
 
-        Agents whose host has an accessible outer host (the VPS -- e.g.
-        imbue_cloud / vps_docker) get the heavy VPS-resident gateway
-        provisioning thrown onto its own CG thread (fire-and-forget, so this
-        worker never waits on apt/npm installs); the pending flag is then owned
-        by that thread. Everything else (local, modal, ssh, docker-over-tcp)
-        falls back to the fast desktop-side gateway reverse tunnel here, and the
-        pending flag is cleared in ``finally``.
+        Every SSH-reachable agent gets the desktop-side gateway reverse-tunneled
+        onto its ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT`` (this runs inline here
+        since it is fast). Agents whose host *also* has an accessible outer host
+        (the VPS -- e.g. imbue_cloud / vps_docker) additionally get a VPS-resident
+        gateway provisioned and reverse-tunneled onto a distinct
+        ``127.0.0.1:INNER_PORT``, so they can reach both gateways at once. That
+        heavy provisioning is thrown onto its own fire-and-forget CG thread
+        (which then owns clearing the pending flag); local agents clear it here.
         """
         is_pending_handed_off = False
         try:
+            # Always: make the desktop-side gateway reachable on the agent's
+            # ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT``. The ``agent_id`` tag lets the
+            # destruction handler drop this tunnel via
+            # ``remove_reverse_tunnels_for_agent``; without it the registry leaks
+            # across destroyed agents and the 30s health-check loop spins
+            # paramiko transports against ports that no longer exist.
+            self.tunnel_manager.setup_reverse_tunnel(
+                ssh_info=ssh_info,
+                local_port=host_side_port,
+                remote_port=AGENT_SIDE_LATCHKEY_PORT,
+                agent_id=str(agent_id),
+            )
+            # Additionally, for VPS agents: throw the (potentially minutes-long)
+            # VPS-resident gateway provisioning onto its own CG thread and return
+            # immediately. The CG's ObservableThread logs any uncaught failure at
+            # error level, so a provisioning failure is never silently missed;
+            # the thread is unchecked so a single agent's failure does not tear
+            # down the shared supervisor.
             if self._host_has_outer_host(host_id, provider_name):
-                # Throw the (potentially minutes-long) provisioning to its own
-                # CG thread and return immediately. The CG's ObservableThread
-                # logs any uncaught failure at error level, so a provisioning
-                # failure is never silently missed; the thread is unchecked so a
-                # single agent's failure does not tear down the shared supervisor.
                 self.concurrency_group.start_new_thread(
                     target=self._run_remote_gateway_provisioning,
                     args=(agent_id, host_id, ssh_info, provider_name),
@@ -148,19 +163,6 @@ class LatchkeyDiscoveryHandler(MutableModel):
                     is_checked=False,
                 )
                 is_pending_handed_off = True
-                return
-            self.tunnel_manager.setup_reverse_tunnel(
-                ssh_info=ssh_info,
-                local_port=host_side_port,
-                remote_port=AGENT_SIDE_LATCHKEY_PORT,
-                # Tag the tunnel with the owning agent so the destruction
-                # handler can ask the manager to drop it via
-                # ``remove_reverse_tunnels_for_agent``. Without this the
-                # tunnel registry leaks across destroyed agents and the
-                # 30s health check loop spins paramiko transports against
-                # ports that no longer exist.
-                agent_id=str(agent_id),
-            )
         except (
             SSHTunnelError,
             OSError,
@@ -177,8 +179,8 @@ class LatchkeyDiscoveryHandler(MutableModel):
             )
         finally:
             # The provisioning thread owns clearing the pending flag once the
-            # heavy work finishes; the synchronous desktop-tunnel path clears it
-            # here (including when dispatching the provisioning thread failed).
+            # heavy work finishes; otherwise (local agents, or a failure before
+            # the provisioning thread was dispatched) clear it here.
             if not is_pending_handed_off:
                 with self._pending_lock:
                     self._pending_remote_agents.discard(str(agent_id))
