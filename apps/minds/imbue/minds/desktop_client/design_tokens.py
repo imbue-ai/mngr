@@ -27,6 +27,8 @@ from pydantic import GetCoreSchemaHandler
 from pydantic_core import CoreSchema
 from pydantic_core import core_schema
 
+from imbue.minds.errors import InvalidWorkspaceColorError
+
 
 class WorkspacePreset(StrEnum):
     """The 11 named background-color presets surfaced by the workspace-color picker."""
@@ -103,14 +105,16 @@ class WorkspaceColor(str):
     def __new__(cls, value: str) -> Self:
         stripped = value.strip()
         if not stripped:
-            raise ValueError("WorkspaceColor cannot be empty")
+            raise InvalidWorkspaceColorError("WorkspaceColor cannot be empty")
         if stripped in _PRESET_SLUGS:
             return super().__new__(cls, stripped)
         if _HEX_RE.match(stripped) or _OKLCH_RE.match(stripped) or _RGB_RE.match(stripped):
             return super().__new__(cls, stripped)
-        raise ValueError(
+        raise InvalidWorkspaceColorError(
             "WorkspaceColor must be a preset slug or a CSS color literal "
-            f"(#RRGGBB / #RRGGBBAA / oklch(L% C H) / rgb(r g b)), got: {value!r}"
+            "such as hex (six or eight hex digits with a leading hash), "
+            "oklch(L% C H), or rgb(r g b); "
+            f"got: {value!r}"
         )
 
     @classmethod
@@ -185,7 +189,7 @@ def _perceptual_lightness(color: WorkspaceColor) -> float:
         b = int(hex_str[4:6], 16)
         return _hsp(r, g, b)
     # Unreachable: the WorkspaceColor validator already gated all formats.
-    raise ValueError(f"Cannot compute lightness for color: {raw!r}")
+    raise InvalidWorkspaceColorError(f"Cannot compute lightness for color: {raw!r}")
 
 
 def _hsp(r: int, g: int, b: int) -> float:

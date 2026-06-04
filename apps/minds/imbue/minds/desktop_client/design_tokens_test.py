@@ -67,8 +67,9 @@ def test_workspace_color_rejects_unknown_slug() -> None:
 def test_workspace_color_rejects_unparseable_literal() -> None:
     with pytest.raises(ValueError):
         WorkspaceColor("not a color")
+    # 4-character hex is not supported; only 6 (RGB) or 8 (RGBA) forms.
     with pytest.raises(ValueError):
-        WorkspaceColor("#1234")  # 4-char hex not supported
+        WorkspaceColor("#1234")
     with pytest.raises(ValueError):
         WorkspaceColor("hsl(220 50% 50%)")
 

@@ -58,6 +58,17 @@ class MindsConfigError(MindError):
     ...
 
 
+class InvalidWorkspaceColorError(MindError, ValueError):
+    """Raised when a workspace color value can't be parsed as a preset slug or CSS literal.
+
+    Inherits ``ValueError`` so Pydantic surfaces it as a 422 validation
+    error when used in API request bodies, and so callers that already
+    handle ``ValueError`` (e.g. preset enum lookups) keep working.
+    """
+
+    ...
+
+
 class BackupProvisioningError(MindError):
     """Raised when configuring restic backups for a workspace fails."""
 

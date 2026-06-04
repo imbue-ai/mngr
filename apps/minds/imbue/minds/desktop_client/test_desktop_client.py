@@ -1,6 +1,7 @@
 import json
 import os
 import queue
+import re
 from pathlib import Path
 
 import httpx
@@ -1503,8 +1504,6 @@ def test_set_workspace_color_rejects_invalid_json(tmp_path: Path) -> None:
 
 def test_workspace_settings_picker_marks_current_preset_aria_pressed(tmp_path: Path) -> None:
     """The workspace-settings color picker marks the persisted preset as selected."""
-    import re
-
     client, auth_store = _create_test_client_with_stores(tmp_path)
     _authenticate_client(client, auth_store)
     test_agent_id = AgentId()

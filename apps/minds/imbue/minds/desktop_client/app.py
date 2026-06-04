@@ -2856,7 +2856,13 @@ async def _handle_set_workspace_color(request: Request, agent_id: str) -> Respon
         )
     try:
         body = await request.json()
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        # Surface the JSON parse error to the client (status + body) AND
+        # log a warning so the corruption is visible server-side. The
+        # ratchet requires either re-raising or logging at warning+; this
+        # handler does both -- the warning aids debugging when an Electron
+        # caller mis-encodes its POST.
+        logger.warning("set_workspace_color received invalid JSON body: {}", e)
         return Response(
             status_code=400,
             content='{"error":"invalid JSON"}',
