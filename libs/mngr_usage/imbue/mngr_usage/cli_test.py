@@ -347,6 +347,57 @@ def test_aggregate_drops_events_without_session_id() -> None:
     assert "claude" in warning_text
 
 
+def test_aggregate_drops_event_with_unparseable_timestamp_and_warns() -> None:
+    """An event whose ``timestamp`` won't parse is dropped (its cost would
+    otherwise undercount silently) and the reader warns, naming the event_id
+    so the data loss is visible. A valid sibling event still aggregates."""
+    events = [
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-bad-ts",
+            "timestamp": "not-a-timestamp",
+            "session_id": "session-x",
+            "cost": {"total_cost_usd": 5.0},
+        },
+        _cost_event("2026-05-08T11:00:00.000000000Z", session_id="session-x", cost_usd=3.0),
+    ]
+    now = int(datetime(2026, 5, 8, 11, 1, 0, tzinfo=timezone.utc).timestamp())
+    captured: list[str] = []
+    sink_id = logger.add(lambda msg: captured.append(msg.record["message"]), level="WARNING", format="{message}")
+    try:
+        snapshots = aggregate_events_to_snapshots({"claude": {"agent-x": events}}, since_seconds=86400, now=now)
+    finally:
+        logger.remove(sink_id)
+    # Only the well-formed event contributes; the unparseable one is gone, not summed in.
+    assert len(snapshots) == 1
+    assert snapshots[0].sessions[0].cost.total_cost_usd == 3.0
+    warning_text = " ".join(captured)
+    assert "timestamp" in warning_text
+    assert "evt-bad-ts" in warning_text
+
+
+def test_aggregate_skips_non_dict_window_value() -> None:
+    """A window whose value isn't a dict (blatant writer drift) is skipped
+    while valid sibling windows in the same event survive."""
+    events = [
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "timestamp": "2026-05-08T11:00:00.000000000Z",
+            "session_id": "session-x",
+            "rate_limits": {
+                "five_hour": {"used_percentage": 42.0, "resets_at": 9_999_999_999},
+                "seven_day": 0.5,
+            },
+        }
+    ]
+    snapshots = aggregate_events_to_snapshots({"claude": {"agent-x": events}}, since_seconds=86400, now=2_000_000_000)
+    assert len(snapshots) == 1
+    assert snapshots[0].windows["five_hour"].used_percentage == 42.0
+    assert "seven_day" not in snapshots[0].windows
+
+
 def test_aggregate_groups_per_session_and_computes_session_contribution_delta() -> None:
     """Within one Claude Code process, ``SessionCostRecord.cost`` is the
     session's *own* contribution -- delta from the prior session's

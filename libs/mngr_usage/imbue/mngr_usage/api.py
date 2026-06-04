@@ -142,6 +142,9 @@ def _windows_from_event(event: dict[str, Any]) -> dict[str, WindowSnapshot]:
     windows: dict[str, WindowSnapshot] = {}
     for window_key, window_value in rate_limits.items():
         if not isinstance(window_value, dict):
+            # A non-dict window value is the most blatant writer/reader drift;
+            # log it like the ValidationError path below rather than masking it.
+            logger.debug("Skipping window {}: value is not a dict ({})", window_key, type(window_value).__name__)
             continue
         try:
             windows[str(window_key)] = WindowSnapshot.model_validate(window_value)
@@ -237,10 +240,17 @@ def _sub_optional(current: int | float | None, baseline: int | float | None) -> 
     Treats a missing baseline as zero so the first session in a process
     (baseline = all-None CostSnapshot) just gets its own cumulative
     reading. A missing current field stays None (no delta to report).
-    Negative deltas are clamped to zero defensively -- they shouldn't
-    occur within a process (cost is monotonic) but if a writer ever emits
-    an out-of-order pair we'd rather show 0 than a misleading negative
-    spend.
+
+    Negative deltas are clamped to zero defensively. They cannot occur on
+    a well-formed stream: ``_finalize_process`` walks a process's sessions
+    in first-appearance order, which equals cumulative-reading order
+    *because sessions within one Claude Code process are sequential and
+    non-overlapping* (``/clear`` advances ``session_id`` forward and never
+    returns to a prior one; ``/resume`` is a fresh process). So each
+    session's cumulative reading is >= the prior session's, and every
+    field (cost, durations, line counts) is monotonic non-decreasing. The
+    clamp is purely a safety net for a writer emitting out-of-order events:
+    we'd rather show 0 than a misleading negative spend.
 
     Overloaded for ``int`` and ``float`` separately so the delta's typed
     field signature matches the per-session field type in CostSnapshot
@@ -362,6 +372,16 @@ def _walk_agent_events(events: list[dict[str, Any]], source_name: str) -> _Agent
     for event in events:
         ts = _parse_iso_timestamp(event.get("timestamp"))
         if ts is None:
+            # Drop the event but say so: an unparseable timestamp takes the
+            # event's cost contribution with it, so a silent skip would
+            # undercount spend. Mirrors the session_id drop below (writers are
+            # lockstep with the reader, so a miss is drift worth surfacing).
+            logger.warning(
+                "Dropping event with unparseable timestamp from source {} (event_id={}, timestamp={!r})",
+                source_name,
+                event.get("event_id"),
+                event.get("timestamp"),
+            )
             continue
         timed.append((ts, event))
     timed.sort(key=lambda pair: pair[0])
