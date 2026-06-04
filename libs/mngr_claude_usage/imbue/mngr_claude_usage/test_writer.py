@@ -67,11 +67,13 @@ def test_writer_emits_event_with_rate_limits(writer_path: Path, events_file: Pat
     assert event["event_id"].startswith("evt-")
     # The event timestamp must be canonical UTC ISO 8601 with a fixed 9-digit
     # fractional part (the writer emits `<date>T<time>.000000000Z`). A bare
-    # `"T" in ts` check would pass on garbage like "garbageT", so validate the
-    # full shape -- including the trailing `Z` that pins it to UTC -- and that
-    # the calendar prefix is a real instant. datetime.fromisoformat rejects the
-    # 9-digit fractional part, so we regex the shape and strptime the
-    # seconds-resolution prefix to confirm it parses (e.g. rejects month 13).
+    # `"T" in ts` check would pass on garbage like "garbageT", so regex the full
+    # shape -- including the trailing `Z` that pins it to UTC. The regex alone
+    # can't tell that the calendar fields name a real instant (it would accept
+    # month 13), so also strptime the seconds-resolution `[:19]` prefix. We slice
+    # to 19 chars because strptime's `%f` only parses 1-6 fractional digits and
+    # would choke on the 9-digit fraction; the prefix carries the calendar fields
+    # we want to validate.
     timestamp = event["timestamp"]
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{9}Z", timestamp), timestamp
     datetime.strptime(timestamp[:19], "%Y-%m-%dT%H:%M:%S")
