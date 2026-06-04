@@ -1,11 +1,18 @@
-{#def name, value="", placeholder="", type="text", id="", required=false, extra="" #}
+{#def name, value="", placeholder="", type="text", id="", required=false, extra="", radius="md", autocomplete="", minlength=0 #}
 {#
   Styled <input>. Matches the focus-ring token used across the app. Usage:
     <TextInput name="email" type="email" placeholder="you@example.com" required />
+
+  ``radius`` is "md" (the in-workspace default) or "lg" (the auth cards
+  use the larger radius). ``autocomplete`` and ``minlength`` are
+  pass-throughs for forms that need them (auth flow signup password
+  uses minlength=8; every auth field declares an autocomplete hint).
 #}
 <input type="{{ type }}" name="{{ name }}"
        {% if id %}id="{{ id }}"{% endif %}
-       class="w-full px-3 py-2.5 text-sm rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15 {{ extra }}"
+       class="w-full px-3 py-2.5 text-sm rounded-{{ radius }} border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15 {{ extra }}"
        value="{{ value }}"
        placeholder="{{ placeholder }}"
+       {% if autocomplete %}autocomplete="{{ autocomplete }}"{% endif %}
+       {% if minlength %}minlength="{{ minlength }}"{% endif %}
        {% if required %}required{% endif %}>

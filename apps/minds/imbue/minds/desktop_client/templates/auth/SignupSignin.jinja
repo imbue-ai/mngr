@@ -20,13 +20,11 @@
     <form id="signup-form">
       <div class="mb-4">
         <label for="signup-email" class="block text-sm font-medium text-zinc-900 mb-1.5">Email</label>
-        <input type="email" id="signup-email" name="email" required autocomplete="email"
-               class="w-full px-3 py-2.5 text-sm rounded-lg border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
+        <TextInput type="email" name="email" id="signup-email" required radius="lg" autocomplete="email" />
       </div>
       <div class="mb-4">
         <label for="signup-password" class="block text-sm font-medium text-zinc-900 mb-1.5">Password</label>
-        <input type="password" id="signup-password" name="password" required minlength="8" autocomplete="new-password"
-               class="w-full px-3 py-2.5 text-sm rounded-lg border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
+        <TextInput type="password" name="password" id="signup-password" required radius="lg" autocomplete="new-password" minlength={{ 8 }} />
       </div>
       <button type="submit" id="signup-btn"
               class="w-full py-3 rounded-lg bg-zinc-900 text-zinc-50 font-semibold cursor-pointer transition-colors hover:bg-zinc-800 disabled:bg-zinc-400 disabled:cursor-not-allowed">Create account</button>
@@ -56,13 +54,11 @@
     <form id="signin-form">
       <div class="mb-4">
         <label for="signin-email" class="block text-sm font-medium text-zinc-900 mb-1.5">Email</label>
-        <input type="email" id="signin-email" name="email" required autocomplete="email"
-               class="w-full px-3 py-2.5 text-sm rounded-lg border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
+        <TextInput type="email" name="email" id="signin-email" required radius="lg" autocomplete="email" />
       </div>
       <div class="mb-4">
         <label for="signin-password" class="block text-sm font-medium text-zinc-900 mb-1.5">Password</label>
-        <input type="password" id="signin-password" name="password" required autocomplete="current-password"
-               class="w-full px-3 py-2.5 text-sm rounded-lg border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
+        <TextInput type="password" name="password" id="signin-password" required radius="lg" autocomplete="current-password" />
       </div>
       <div class="text-right -mt-2 mb-4"><a href="/auth/forgot-password" class="text-xs text-blue-600 hover:underline">Forgot password?</a></div>
       <button type="submit" id="signin-btn"

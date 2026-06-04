@@ -266,9 +266,8 @@
             {% if has_saved_backup_password %}
               <p class="text-xs text-zinc-500">A saved backup password will be used for this workspace.</p>
             {% else %}
-              <input type="password" id="backup_master_password" name="backup_master_password"
-                     placeholder="remember this -- backups are unrecoverable without it"
-                     class="w-full px-3 py-2.5 text-sm rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15" />
+              <TextInput type="password" name="backup_master_password" id="backup_master_password"
+                         placeholder="remember this -- backups are unrecoverable without it" />
               <label class="mt-2 flex items-center gap-2 text-xs text-zinc-500">
                 <input type="checkbox" id="backup_save_password" name="backup_save_password" value="1" />
                 Save this password for all my workspaces

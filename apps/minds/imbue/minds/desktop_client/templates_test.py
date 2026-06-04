@@ -564,3 +564,108 @@ def test_oauth_icon_unknown_provider_renders_nothing_visible() -> None:
     # provider just produces empty output (no exception).
     html = CATALOG.render("auth.OauthIcon", provider="not-a-provider").strip()
     assert html == ""
+
+
+def test_text_input_default_radius_is_md() -> None:
+    html = CATALOG.render("TextInput", name="email")
+    assert "rounded-md" in html
+    assert "rounded-lg" not in html
+
+
+def test_text_input_radius_lg_for_auth_cards() -> None:
+    html = CATALOG.render("TextInput", name="email", radius="lg")
+    assert "rounded-lg" in html
+    assert "rounded-md" not in html
+
+
+def test_text_input_autocomplete_and_minlength_pass_through() -> None:
+    html = CATALOG.render(
+        "TextInput",
+        name="password",
+        type="password",
+        radius="lg",
+        autocomplete="new-password",
+        minlength=8,
+    )
+    assert 'autocomplete="new-password"' in html
+    assert 'minlength="8"' in html
+
+
+def test_text_input_omits_autocomplete_and_minlength_when_unset() -> None:
+    html = CATALOG.render("TextInput", name="email")
+    assert "autocomplete=" not in html
+    assert "minlength=" not in html
+
+
+def test_section_header_plain_has_no_divider_classes() -> None:
+    html = CATALOG.render("SectionHeader", _content="Account")
+    assert "Account" in html
+    assert "border-t" not in html
+    assert "mt-8" not in html
+
+
+def test_section_header_divider_renders_top_border() -> None:
+    html = CATALOG.render("SectionHeader", divider=True, _content="Sharing")
+    assert "Sharing" in html
+    assert "border-t" in html
+    assert "border-zinc-200" in html
+    assert "mt-8" in html
+    assert "pt-5" in html
+
+
+def test_dialog_close_button_renders_x_svg_and_onclick() -> None:
+    html = CATALOG.render("DialogCloseButton", onclick="closePermissionDialog()")
+    assert 'aria-label="Close"' in html
+    assert 'onclick="closePermissionDialog()"' in html
+    # The X-glyph path data fragment that identifies the close SVG.
+    assert "M4.22 4.22a.75.75 0 0 1 1.06 0L10 8.94" in html
+
+
+def test_dialog_close_button_id_optional() -> None:
+    without_id = CATALOG.render("DialogCloseButton", onclick="x()")
+    with_id = CATALOG.render("DialogCloseButton", id="my-close", onclick="x()")
+    assert "id=" not in without_id
+    assert 'id="my-close"' in with_id
+
+
+def test_modal_renders_hidden_overlay_with_default_card() -> None:
+    html = CATALOG.render("Modal", id="my-dialog", _content="<p>body</p>")
+    assert 'id="my-dialog"' in html
+    assert "hidden fixed inset-0 z-50" in html
+    assert "bg-black/30" in html
+    assert "<p>body</p>" in html
+
+
+def test_modal_card_extra_appends_to_inner_card_classes() -> None:
+    html = CATALOG.render("Modal", id="x", card_extra="text-left", _content="hi")
+    # The card_extra value lands on the inner card div, NOT on the outer overlay.
+    assert "text-left" in html
+
+
+def test_status_badge_renders_each_variant_class_set() -> None:
+    variants_to_class = {
+        "neutral": "bg-zinc-100",
+        "success": "bg-emerald-100",
+        "error": "bg-red-100",
+        "warn": "bg-amber-100",
+        "info": "bg-blue-100",
+    }
+    for variant, css_class in variants_to_class.items():
+        html = CATALOG.render("StatusBadge", variant=variant, _content="x")
+        assert css_class in html, f"variant={variant} missing {css_class}"
+
+
+def test_status_badge_size_xs_uses_text_xs() -> None:
+    html = CATALOG.render("StatusBadge", size="xs", _content="x")
+    assert "text-xs" in html
+    assert "text-sm" not in html
+
+
+def test_status_badge_title_renders_when_present() -> None:
+    html = CATALOG.render("StatusBadge", title="why this is shown", _content="x")
+    assert 'title="why this is shown"' in html
+
+
+def test_status_badge_title_omitted_when_empty() -> None:
+    html = CATALOG.render("StatusBadge", _content="x")
+    assert "title=" not in html

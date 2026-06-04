@@ -22,7 +22,7 @@
             <div class="font-medium">
               {{ acct.email }}
               {% if not acct_enabled %}
-                <span class="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-800 border border-amber-200" title="Session was rejected by the server. Sign in again to re-enable.">Signed out</span>
+                <StatusBadge variant="warn" size="xs" extra="ml-2" title="Session was rejected by the server. Sign in again to re-enable.">Signed out</StatusBadge>
               {% endif %}
             </div>
             <div class="text-xs text-zinc-400">

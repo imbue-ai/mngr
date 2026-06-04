@@ -279,6 +279,59 @@
         <div class="mt-1 text-[11px] text-zinc-500 font-mono">auth/OauthIcon.jinja</div>
       </div>
 
+      {# Status badges #}
+      <div class="mb-6">
+        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Status badges</div>
+        <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-wrap items-center gap-3">
+          <StatusBadge>Neutral</StatusBadge>
+          <StatusBadge variant="success">Done</StatusBadge>
+          <StatusBadge variant="error">Failed</StatusBadge>
+          <StatusBadge variant="warn">Warning</StatusBadge>
+          <StatusBadge variant="info">Info</StatusBadge>
+          <StatusBadge variant="warn" size="xs">Tiny</StatusBadge>
+        </div>
+        <div class="mt-1 text-[11px] text-zinc-500 font-mono">StatusBadge.jinja</div>
+      </div>
+
+      {# Section header #}
+      <div class="mb-6">
+        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Section header</div>
+        <div class="bg-white border border-zinc-200 rounded-lg p-4">
+          <SectionHeader>Plain</SectionHeader>
+          <p class="text-sm text-zinc-600 mb-2">Content under the plain header.</p>
+          <SectionHeader divider>With divider</SectionHeader>
+          <p class="text-sm text-zinc-600">Content under the divider header.</p>
+        </div>
+        <div class="mt-1 text-[11px] text-zinc-500 font-mono">SectionHeader.jinja</div>
+      </div>
+
+      {# Dialog close button #}
+      <div class="mb-6">
+        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Dialog close button</div>
+        <div class="bg-white border border-zinc-200 rounded-lg p-4 relative h-16">
+          <DialogCloseButton onclick="void(0)" />
+          <p class="text-sm text-zinc-500">Top-right X used by overlay dialogs.</p>
+        </div>
+        <div class="mt-1 text-[11px] text-zinc-500 font-mono">DialogCloseButton.jinja</div>
+      </div>
+
+      {# Modal -- styleguide only shows the *inside* of the modal because
+         the real wrapper occupies the whole viewport. #}
+      <div class="mb-6">
+        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Modal (inner card preview)</div>
+        <div class="bg-zinc-100 border border-zinc-200 rounded-lg p-6 flex items-center justify-center">
+          <div class="bg-white rounded-xl shadow-lg border border-zinc-200 max-w-sm w-full p-6">
+            <h2 class="text-lg font-semibold text-zinc-900 mb-3">Confirm action?</h2>
+            <p class="text-sm text-zinc-600 mb-4">This is what the inner card of a Modal looks like.</p>
+            <div class="flex justify-end gap-3">
+              <Button variant="secondary">Cancel</Button>
+              <Button variant="danger">Confirm</Button>
+            </div>
+          </div>
+        </div>
+        <div class="mt-1 text-[11px] text-zinc-500 font-mono">Modal.jinja (full overlay wraps a hidden flex container; preview shows the card only)</div>
+      </div>
+
     </section>
 
   </div>

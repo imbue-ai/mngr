@@ -22,13 +22,9 @@
           <Spinner />
           <span id="status-text" class="text-zinc-700">Running...</span>
         {% elif status == 'failed' %}
-          <span class="inline-flex items-center px-2 py-0.5 rounded text-sm font-medium bg-red-100 text-red-800">
-            Failed
-          </span>
+          <StatusBadge variant="error">Failed</StatusBadge>
         {% else %}
-          <span class="inline-flex items-center px-2 py-0.5 rounded text-sm font-medium bg-emerald-100 text-emerald-800">
-            Done
-          </span>
+          <StatusBadge variant="success">Done</StatusBadge>
         {% endif %}
       </div>
 

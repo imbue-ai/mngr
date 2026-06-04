@@ -66,7 +66,7 @@
       <h1 class="text-xl font-semibold text-zinc-900 leading-tight">{{ ws_name }}</h1>
       <p class="text-xs text-zinc-400 mb-5">{{ agent_id }}</p>
 
-      <h2 class="text-sm font-medium text-zinc-600 mb-3">Account</h2>
+      <SectionHeader>Account</SectionHeader>
       <div id="account-section">
       {% if current_account %}
         <p>Associated with: <strong>{{ current_account.email }}</strong></p>
@@ -81,7 +81,7 @@
       {% endif %}
       </div>
 
-      <h2 class="text-sm font-medium text-zinc-600 mt-8 mb-3 pt-5 border-t border-zinc-200">Sharing</h2>
+      <SectionHeader divider>Sharing</SectionHeader>
       {% for server in servers %}
         <CardRow>
           <span class="font-medium">{{ server }}</span>
@@ -92,7 +92,7 @@
       {% endfor %}
 
       {% if telegram_state %}
-        <h2 class="text-sm font-medium text-zinc-600 mt-8 mb-3 pt-5 border-t border-zinc-200">Telegram</h2>
+        <SectionHeader divider>Telegram</SectionHeader>
         {% if telegram_state == 'active' %}
           <p class="text-emerald-700">Telegram is active for this workspace.</p>
         {% elif telegram_state == 'pending' %}
@@ -100,21 +100,19 @@
         {% endif %}
       {% endif %}
 
-      <h2 class="text-sm font-medium text-zinc-600 mt-8 mb-3 pt-5 border-t border-zinc-200">Danger zone</h2>
+      <SectionHeader divider>Danger zone</SectionHeader>
       <p class="text-sm text-zinc-500 mb-3">Permanently destroy this project and release any associated resources.</p>
       <Button variant="danger" id="destroy-btn">Destroy project</Button>
       <p id="destroy-error" class="hidden text-sm text-red-600 mt-2"></p>
 
-      <div id="destroy-dialog" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-        <div class="bg-white rounded-xl shadow-lg border border-zinc-200 max-w-sm w-full mx-4 p-6">
-          <h2 class="text-lg font-semibold text-zinc-900 mb-3">Destroy project?</h2>
-          <p class="text-sm text-zinc-600 mb-4">This will permanently destroy <strong>{{ ws_name }}</strong> and all its data. This action cannot be undone.</p>
-          <div class="flex justify-end gap-3">
-            <Button variant="secondary" id="destroy-cancel-btn">Cancel</Button>
-            <Button variant="danger" id="destroy-confirm-btn">Destroy</Button>
-          </div>
+      <Modal id="destroy-dialog">
+        <h2 class="text-lg font-semibold text-zinc-900 mb-3">Destroy project?</h2>
+        <p class="text-sm text-zinc-600 mb-4">This will permanently destroy <strong>{{ ws_name }}</strong> and all its data. This action cannot be undone.</p>
+        <div class="flex justify-end gap-3">
+          <Button variant="secondary" id="destroy-cancel-btn">Cancel</Button>
+          <Button variant="danger" id="destroy-confirm-btn">Destroy</Button>
         </div>
-      </div>
+      </Modal>
 
       <div class="mt-8">
         <a href="/" class="text-blue-600 hover:underline">&larr; Back to projects</a>
