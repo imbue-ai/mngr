@@ -108,9 +108,7 @@ def _repo_root() -> Path:
 
 
 REPO_ROOT: Final[Path] = _repo_root()
-STATIC_DIR: Final[Path] = (
-    REPO_ROOT / "apps" / "minds" / "imbue" / "minds" / "desktop_client" / "static"
-)
+STATIC_DIR: Final[Path] = REPO_ROOT / "apps" / "minds" / "imbue" / "minds" / "desktop_client" / "static"
 OUTPUT_ROOT: Final[Path] = REPO_ROOT / "apps" / "minds" / ".visual-diff"
 
 VIEWPORT_W: Final[int] = 1440
@@ -270,21 +268,15 @@ def _build_scenarios() -> list[Scenario]:
         # -- Destroying detail page --------------------------------------
         Scenario(
             name="destroying_running",
-            builder=lambda: render_destroying_page(
-                agent_id=agent_a, agent_name="alpha", pid=12345, status="running"
-            ),
+            builder=lambda: render_destroying_page(agent_id=agent_a, agent_name="alpha", pid=12345, status="running"),
         ),
         Scenario(
             name="destroying_failed",
-            builder=lambda: render_destroying_page(
-                agent_id=agent_a, agent_name="alpha", pid=12345, status="failed"
-            ),
+            builder=lambda: render_destroying_page(agent_id=agent_a, agent_name="alpha", pid=12345, status="failed"),
         ),
         Scenario(
             name="destroying_done",
-            builder=lambda: render_destroying_page(
-                agent_id=agent_a, agent_name="alpha", pid=12345, status="done"
-            ),
+            builder=lambda: render_destroying_page(agent_id=agent_a, agent_name="alpha", pid=12345, status="done"),
         ),
         # -- Accounts page -----------------------------------------------
         Scenario(
@@ -524,9 +516,7 @@ def _render_all_html(scenarios: list[Scenario], html_dir: Path) -> None:
             rendered = sc.builder()
         except _BUILDER_EXCEPTIONS as exc:
             logger.opt(exception=exc).warning("[render fail] {}: {}", sc.name, type(exc).__name__)
-            (html_dir / f"{sc.name}.html").write_text(
-                f"<!-- RENDER FAILED: {html.escape(str(exc))} -->"
-            )
+            (html_dir / f"{sc.name}.html").write_text(f"<!-- RENDER FAILED: {html.escape(str(exc))} -->")
             continue
         (html_dir / f"{sc.name}.html").write_text(rendered)
 
@@ -550,9 +540,7 @@ def _screenshot_all(scenarios: list[Scenario], png_dir: Path, port: int) -> None
                     page.screenshot(path=str(png_dir / f"{sc.name}.png"), full_page=True)
                     logger.info("[shot] {}", sc.name)
                 except _PLAYWRIGHT_EXCEPTIONS as exc:
-                    logger.opt(exception=exc).warning(
-                        "[shot fail] {}: {}", sc.name, type(exc).__name__
-                    )
+                    logger.opt(exception=exc).warning("[shot fail] {}: {}", sc.name, type(exc).__name__)
         finally:
             browser.close()
 
