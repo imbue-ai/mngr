@@ -61,7 +61,6 @@ from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_claude.plugin import CostThresholdDialogIndicator
 from imbue.mngr_claude.plugin import ProvisioningContext
 from imbue.mngr_claude.plugin import WaitingReason
-from imbue.mngr_claude.plugin import _bridge_credentials_to_default_claude_home
 from imbue.mngr_claude.plugin import _build_install_command_hint
 from imbue.mngr_claude.plugin import _build_settings_json
 from imbue.mngr_claude.plugin import _check_settings_local_gitignored
@@ -3004,44 +3003,6 @@ def _make_command_tracking_host() -> tuple[OnlineHostInterface, list[str]]:
         ),
     )
     return host, executed_commands
-
-
-def _make_command_tracking_host_with_locality(*, is_local: bool) -> tuple[OnlineHostInterface, list[str]]:
-    """Like _make_command_tracking_host, but exposes a controllable is_local attribute."""
-    host, executed_commands = _make_command_tracking_host()
-    cast(SimpleNamespace, host).is_local = is_local
-    return host, executed_commands
-
-
-def test_bridge_credentials_emits_symlink_command_on_non_local_host_with_staged_credentials() -> None:
-    """On a non-local host with a staged .credentials.json, the bridge symlinks it into ~/.claude.
-
-    Asserts the full command: the target is shlex-quoted, ~/.claude is created 0700, and
-    ln -sfn points the standard path at the per-agent copy.
-    """
-    host, executed_commands = _make_command_tracking_host_with_locality(is_local=False)
-    config_dir = Path("/mngr/agents/agent-123/plugin/claude/anthropic")
-
-    _bridge_credentials_to_default_claude_home(host, config_dir, {Path(".credentials.json"): "{}"})
-
-    bridged_target = shlex.quote(str(config_dir / ".credentials.json"))
-    assert executed_commands == [f"mkdir -p -m 0700 ~/.claude && ln -sfn {bridged_target} ~/.claude/.credentials.json"]
-
-
-@pytest.mark.parametrize(
-    "is_local, generated_files",
-    [
-        (True, {Path(".credentials.json"): "{}"}),  # local host: nested mngr reuses the host's own creds
-        (False, {Path("settings.json"): "{}"}),  # non-local but nothing to bridge
-    ],
-)
-def test_bridge_credentials_is_noop(is_local: bool, generated_files: dict[Path, str]) -> None:
-    """The bridge runs no command on a local host or when no .credentials.json was staged."""
-    host, executed_commands = _make_command_tracking_host_with_locality(is_local=is_local)
-
-    _bridge_credentials_to_default_claude_home(host, Path("/some/config/dir"), generated_files)
-
-    assert executed_commands == []
 
 
 def test_get_claude_version_returns_version_on_success() -> None:

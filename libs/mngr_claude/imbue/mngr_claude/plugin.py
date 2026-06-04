@@ -838,24 +838,6 @@ def _provision_local_credentials(host: OnlineHostInterface, config_dir: Path, *,
         logger.debug("No .credentials.json found to provision")
 
 
-def _bridge_credentials_to_default_claude_home(
-    host: OnlineHostInterface, config_dir: Path, generated_files: Mapping[Path, str]
-) -> None:
-    """Symlink ~/.claude/.credentials.json to the per-agent config dir's copy in the guest.
-
-    Lets a nested mngr running in the guest, which reads the standard
-    ~/.claude/.credentials.json rather than the per-agent dir, authenticate the agents it
-    spawns. No-op on local hosts and when no credentials were staged.
-    """
-    if host.is_local or not generated_files.get(Path(".credentials.json")):
-        return
-    bridged_target = config_dir / ".credentials.json"
-    host.execute_idempotent_command(
-        f"mkdir -p -m 0700 ~/.claude && ln -sfn {shlex.quote(str(bridged_target))} ~/.claude/.credentials.json",
-        timeout_seconds=5.0,
-    )
-
-
 def _read_credentials_content(
     source_claude_dir: Path, config: ClaudeAgentConfig, concurrency_group: ConcurrencyGroup
 ) -> str | None:
@@ -1952,9 +1934,6 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
 
         # 3. Write generated files to config_dir
         _write_generated_files(host, config_dir, generated_files)
-
-        # 4. Bridge credentials to the guest's default Claude home for nested mngr.
-        _bridge_credentials_to_default_claude_home(host, config_dir, generated_files)
 
     def provision(
         self,
