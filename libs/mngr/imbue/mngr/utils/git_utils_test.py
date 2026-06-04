@@ -348,6 +348,24 @@ def test_find_git_worktree_root_returns_root_when_in_git(tmp_path: Path, cg: Con
     assert result == git_dir
 
 
+def _install_failing_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Put a fake ``git`` on PATH that exits non-zero with an unrelated error.
+
+    Returns a work directory to run in. Used to verify the repo-detection helpers
+    raise on unexpected git failures rather than swallowing them into a
+    misleading "not a git repository" sentinel. PATH is prepended (not replaced)
+    so the fake git wins while other tools (e.g. tmux, used by autouse fixtures)
+    stay resolvable.
+    """
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    write_executable_script(fake_bin / "git", "#!/bin/bash\necho 'fatal: something went wrong' >&2\nexit 1\n")
+    monkeypatch.setenv("PATH", str(fake_bin) + os.pathsep + os.environ["PATH"])
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    return work_dir
+
+
 def test_find_git_worktree_root_raises_on_unexpected_git_failure(
     tmp_path: Path, cg: ConcurrencyGroup, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -359,17 +377,32 @@ def test_find_git_worktree_root_raises_on_unexpected_git_failure(
     surface loudly rather than be swallowed into None, which would silently drop
     the project config layer with no explanation.
     """
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    write_executable_script(fake_bin / "git", "#!/bin/bash\necho 'fatal: something went wrong' >&2\nexit 1\n")
-    # Prepend (don't replace) so our fake git wins while other tools (e.g. tmux,
-    # used by autouse test fixtures) stay resolvable on PATH.
-    monkeypatch.setenv("PATH", str(fake_bin) + os.pathsep + os.environ["PATH"])
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
+    work_dir = _install_failing_git(tmp_path, monkeypatch)
 
     with pytest.raises(ProcessError):
         find_git_worktree_root(work_dir, cg)
+
+
+def test_is_git_repository_raises_on_unexpected_git_failure(
+    tmp_path: Path, cg: ConcurrencyGroup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """is_git_repository should raise on an unexpected git failure rather than
+    swallowing it into a misleading False."""
+    work_dir = _install_failing_git(tmp_path, monkeypatch)
+
+    with pytest.raises(ProcessError):
+        is_git_repository(work_dir, cg)
+
+
+def test_find_git_common_dir_raises_on_unexpected_git_failure(
+    tmp_path: Path, cg: ConcurrencyGroup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """find_git_common_dir should raise on an unexpected git failure rather than
+    swallowing it into a misleading None."""
+    work_dir = _install_failing_git(tmp_path, monkeypatch)
+
+    with pytest.raises(ProcessError):
+        find_git_common_dir(work_dir, cg)
 
 
 def test_find_git_common_dir_returns_none_when_not_in_git(tmp_path: Path, cg: ConcurrencyGroup) -> None:
