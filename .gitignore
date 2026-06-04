@@ -3,6 +3,9 @@
 **/*.py[codz]
 **/*$py.class
 
+# macOS Finder metadata
+**/.DS_Store
+
 # C extensions
 **/*.so
 

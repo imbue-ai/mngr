@@ -43,6 +43,7 @@ from imbue.mngr.cli.list import list_command
 from imbue.mngr.cli.message import message
 from imbue.mngr.cli.migrate import migrate
 from imbue.mngr.cli.observe import observe
+from imbue.mngr.cli.output_helpers import emit_error_event
 from imbue.mngr.cli.plugin import plugin as plugin_command
 from imbue.mngr.cli.rename import rename
 from imbue.mngr.cli.rsync import rsync_command
@@ -112,11 +113,18 @@ class AliasAwareGroup(DefaultCommandGroup):
         except NotImplementedError as e:
             _call_on_error_hook(ctx, e)
             handle_not_implemented_error(e, is_interactive=ctx.meta.get("is_interactive"))
-        except (click.ClickException, click.Abort, click.exceptions.Exit, MngrError, bdb.BdbQuit) as e:
+        except (click.Abort, click.exceptions.Exit, bdb.BdbQuit) as e:
+            # Control-flow exits (Ctrl-C, normal exit, debugger quit), not real
+            # errors -- run the hook but don't emit a structured error event.
             _call_on_error_hook(ctx, e)
+            raise
+        except (click.ClickException, MngrError) as e:
+            _call_on_error_hook(ctx, e)
+            emit_error_event(e, ctx.meta.get("output_format"))
             raise
         except Exception as e:
             _call_on_error_hook(ctx, e)
+            emit_error_event(e, ctx.meta.get("output_format"))
             if ctx.meta.get("is_error_reporting_enabled", False):
                 handle_unexpected_error(e, is_interactive=ctx.meta.get("is_interactive"))
             raise

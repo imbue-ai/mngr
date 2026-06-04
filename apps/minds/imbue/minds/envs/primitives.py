@@ -132,3 +132,11 @@ class DevEnvProvisioningError(MindError):
 
 class VaultReadError(MindError):
     """Raised when a Vault read fails (no auth, missing path, bad data)."""
+
+
+class VaultSecretNotFoundError(VaultReadError):
+    """Raised specifically when the Vault path has no secret (CLI exit code 2).
+
+    A subclass so callers can distinguish "this secret genuinely doesn't exist"
+    (safe to treat as absent) from a transient/auth ``VaultReadError`` (which
+    must NOT be silently treated as an empty secret)."""

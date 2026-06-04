@@ -331,23 +331,33 @@ def clone_git_repo(
     clone_dir: Path,
     on_output: OutputCallback | None = None,
     *,
-    is_shallow: bool = False,
+    branch: GitBranch | None = None,
     parent_cg: ConcurrencyGroup | None = None,
     reference_repo: Path | None = None,
 ) -> None:
     """Clone a git repository into the specified directory.
 
     The clone_dir must not already exist -- git clone will create it.
-    When is_shallow is True, clones with --depth 1 to skip history.
-    When reference_repo points at a local pre-fetched bare-or-full clone
-    of the same repo, ``--reference`` reuses its objects so the network
-    fetch is small (just the delta from the prefetch point).
-    Raises GitCloneError if the clone fails.
+
+    When ``branch`` is given, only that branch is fetched (``--single-branch
+    --branch``), which avoids downloading every other branch's history. This is
+    still a *complete* (non-shallow) clone of that branch -- its full ancestry is
+    present. We deliberately do NOT offer a shallow (``--depth 1``) clone: this
+    clone is the source ``mngr create`` mirror-pushes into the agent container's
+    bare repo, and git rejects pushes from a shallow source with "shallow update
+    not allowed" (the pushed tip's parent is missing from the pack).
+
+    When ``reference_repo`` points at a local pre-fetched clone of the same repo
+    (e.g. the first-launch FCT prefetch), ``--reference-if-able`` reuses its
+    objects so the network fetch shrinks to the delta from the prefetch point.
+
+    Raises GitCloneError if the clone fails (including when ``branch`` does not
+    exist on the remote).
     """
     logger.debug("Cloning {} to {}", _redact_url_credentials(str(git_url)), clone_dir)
     command = ["git", "clone"]
-    if is_shallow:
-        command.extend(["--depth", "1"])
+    if branch is not None:
+        command.extend(["--single-branch", "--branch", str(branch)])
     if reference_repo is not None and (reference_repo / ".git").is_dir():
         command.extend(["--reference-if-able", str(reference_repo)])
     command.extend([str(git_url), str(clone_dir)])
@@ -433,6 +443,20 @@ def _rsync_worktree_over_clone(
 # also needs it, for the recovery flow's system-services lookup).
 _DEFAULT_AGENT_NAME: Final[AgentName] = AgentName(SYSTEM_SERVICES_AGENT_NAME)
 
+# imbue_cloud create-path knobs forwarded as ``-b fast_mode=<value>``. ``require``
+# adopts an exact-attribute pre-baked pool host (fast); ``prevent`` leases any
+# available host and rebuilds it from the FCT Dockerfile (slow).
+_FAST_MODE_REQUIRE: Final[str] = "require"
+_FAST_MODE_PREVENT: Final[str] = "prevent"
+
+# ``error_class`` of the imbue_cloud provider's ``FastPathUnavailableError``,
+# emitted by ``mngr create --format jsonl`` as a structured
+# ``{"event": "error", "error_class": ...}`` line when ``fast_mode=require``
+# finds no exact-attribute pool match. minds matches on this (not on
+# human-formatted error text) to fall back to the slow path. Kept in sync with
+# ``imbue.mngr_imbue_cloud.errors.FastPathUnavailableError``.
+_FAST_PATH_UNAVAILABLE_ERROR_CLASS: Final[str] = "FastPathUnavailableError"
+
 
 def _build_mngr_create_command(
     launch_mode: LaunchMode,
@@ -440,6 +464,7 @@ def _build_mngr_create_command(
     imbue_cloud_account: str | None = None,
     imbue_cloud_repo_url: str | None = None,
     imbue_cloud_branch_or_tag: str | None = None,
+    imbue_cloud_fast_mode: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Build the ``mngr create`` command for a freshly-provisioned workspace.
@@ -589,6 +614,14 @@ def _build_mngr_create_command(
                 mngr_command.extend(["-b", f"repo_url={imbue_cloud_repo_url}"])
             if imbue_cloud_branch_or_tag:
                 mngr_command.extend(["-b", f"repo_branch_or_tag={imbue_cloud_branch_or_tag}"])
+            # ``fast_mode`` selects the imbue_cloud create path: ``require``
+            # adopts an exact-attribute pre-baked pool host (fast); ``prevent``
+            # leases any available host and rebuilds it from the FCT Dockerfile
+            # (slow, but always works). minds tries ``require`` first and falls
+            # back to ``prevent`` on FastPathUnavailableError (see
+            # ``_run_imbue_cloud_create_with_fallback``).
+            if imbue_cloud_fast_mode:
+                mngr_command.extend(["-b", f"fast_mode={imbue_cloud_fast_mode}"])
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -704,6 +737,14 @@ class _CreateEventCapture(MutableModel):
         default=None,
         description="Populated alongside ``canonical_agent_id`` from the same JSONL event",
     )
+    error_class: str | None = Field(
+        default=None,
+        description=(
+            "Populated when a JSONL ``error`` event is seen on stdout. Carries mngr's exception "
+            "class name (e.g. ``FastPathUnavailableError``) so callers can branch on the error "
+            "*type* instead of substring-matching human-formatted text."
+        ),
+    )
 
     def __call__(self, line: str, is_stdout: bool) -> None:
         if self.inner_on_output is not None:
@@ -717,7 +758,15 @@ class _CreateEventCapture(MutableModel):
             event = json.loads(stripped)
         except json.JSONDecodeError:
             return
-        if not isinstance(event, dict) or event.get("event") != "created":
+        if not isinstance(event, dict):
+            return
+        event_type = event.get("event")
+        if event_type == "error":
+            error_class_raw = event.get("error_class")
+            if isinstance(error_class_raw, str) and error_class_raw:
+                self.error_class = error_class_raw
+            return
+        if event_type != "created":
             return
         agent_id_raw = event.get("agent_id")
         if isinstance(agent_id_raw, str) and agent_id_raw:
@@ -735,6 +784,7 @@ def run_mngr_create(
     imbue_cloud_account: str | None = None,
     imbue_cloud_repo_url: str | None = None,
     imbue_cloud_branch_or_tag: str | None = None,
+    imbue_cloud_fast_mode: str | None = None,
     anthropic_api_key: str | None = None,
     anthropic_base_url: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
@@ -770,6 +820,7 @@ def run_mngr_create(
         imbue_cloud_account=imbue_cloud_account,
         imbue_cloud_repo_url=imbue_cloud_repo_url,
         imbue_cloud_branch_or_tag=imbue_cloud_branch_or_tag,
+        imbue_cloud_fast_mode=imbue_cloud_fast_mode,
         latchkey_env=latchkey_env,
     )
 
@@ -804,7 +855,8 @@ def run_mngr_create(
             "mngr create failed (exit code {}):\n{}".format(
                 result.returncode,
                 result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
-            )
+            ),
+            error_class=capture.error_class,
         )
 
     if capture.canonical_agent_id is None or capture.canonical_host_id is None:
@@ -823,6 +875,57 @@ def run_mngr_create(
         raise MngrCommandError(f"mngr create emitted an invalid host_id {capture.canonical_host_id!r}: {e}") from e
 
     return capture.canonical_agent_id, canonical_host_id
+
+
+class _MngrCreateAttemptParams(FrozenModel):
+    """Per-creation inputs shared across a ``fast_mode`` retry loop.
+
+    Bundles everything ``_attempt_mngr_create`` needs except the ``fast_mode``
+    knob, which is the only value that differs between the fast-path and
+    slow-path attempts.
+    """
+
+    launch_mode: LaunchMode
+    workspace_dir: Path | None
+    host_name: HostName
+    on_output: OutputCallback
+    latchkey_env: Mapping[str, str] | None
+    account_email: str | None
+    branch_or_tag: str | None
+    anthropic_api_key: str | None
+    anthropic_base_url: str | None
+    parent_cg: ConcurrencyGroup | None
+
+
+def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams) -> tuple[AgentId, HostId]:
+    """Run a single ``mngr create`` attempt for ``create``'s ``fast_mode`` retry loop.
+
+    ``fast_mode`` is the only knob that varies between the fast-path and
+    slow-path attempts; the imbue_cloud-only inputs are gated on ``launch_mode``
+    exactly as before.
+    """
+    is_imbue_cloud = params.launch_mode is LaunchMode.IMBUE_CLOUD
+    return run_mngr_create(
+        launch_mode=params.launch_mode,
+        workspace_dir=params.workspace_dir,
+        host_name=params.host_name,
+        on_output=params.on_output,
+        latchkey_env=params.latchkey_env,
+        imbue_cloud_account=params.account_email if is_imbue_cloud else None,
+        # Don't constrain the lease on ``repo_url`` here: ``repo_source`` is
+        # whatever the user picked in the UI (often a local FCT clone path),
+        # but pool hosts are operator-baked with whatever ``--attributes`` JSON
+        # the admin chose -- typically ``cpus``/``memory_gb``/
+        # ``repo_branch_or_tag`` and not ``repo_url``. Including ``repo_url``
+        # here would make every lease request fail the JSONB ``@>`` match.
+        # Constraining on ``repo_branch_or_tag`` (when minds knows it) is enough
+        # to pick the right pool generation.
+        imbue_cloud_branch_or_tag=(params.branch_or_tag if is_imbue_cloud and params.branch_or_tag else None),
+        imbue_cloud_fast_mode=fast_mode,
+        anthropic_api_key=params.anthropic_api_key,
+        anthropic_base_url=params.anthropic_base_url,
+        parent_cg=params.parent_cg,
+    )
 
 
 class AgentCreator(MutableModel):
@@ -1193,12 +1296,19 @@ class AgentCreator(MutableModel):
                     if clone_target.exists():
                         shutil.rmtree(clone_target)
                     log_queue.put("[minds] Cloning {}...".format(_redact_url_credentials(repo_source)))
-                    # Full clone (no --depth=1): a shallow clone only pulls
-                    # the default branch, so the subsequent `git checkout
-                    # <branch>` for any non-default target branch fails with
-                    # `pathspec did not match`. When the first-launch
-                    # prefetch left a warm copy of FCT under
-                    # ``data_dir/template-cache/forever-claude-template``,
+                    # Clone only the requested branch (non-shallow) when one is
+                    # given: cheaper than a full clone, yet keeps the complete
+                    # ancestry that the downstream mirror-push into the agent
+                    # container requires (a shallow clone would be rejected with
+                    # "shallow update not allowed"). Every launch mode reaches
+                    # mngr create's git-mirror push (a cloned-repo source + a
+                    # new host always resolves to TransferMode.GIT_MIRROR), so a
+                    # shallow clone is never safe here regardless of mode. The
+                    # checkout below is then a no-op for this path, but still
+                    # does the work when the source is a pre-existing local
+                    # directory.
+                    # When the first-launch prefetch left a warm copy of FCT
+                    # under ``data_dir/template-cache/forever-claude-template``,
                     # pass it as ``--reference-if-able`` so we reuse those
                     # objects and the network fetch shrinks to the delta.
                     ref_repo = self.paths.data_dir / "template-cache" / "forever-claude-template"
@@ -1206,6 +1316,7 @@ class AgentCreator(MutableModel):
                         GitUrl(repo_source),
                         clone_target,
                         on_output=emit_log,
+                        branch=GitBranch(branch) if branch else None,
                         parent_cg=self.root_concurrency_group,
                         reference_repo=ref_repo,
                     )
@@ -1289,30 +1400,27 @@ class AgentCreator(MutableModel):
 
                 parsed_host = HostName(host_name)
                 log_queue.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))
-                canonical_id, canonical_host_id = run_mngr_create(
+
+                # ``fast_mode`` is the only knob that varies between the fast-
+                # path and slow-path attempts; bundle the rest of the per-
+                # creation inputs so each attempt takes just it.
+                attempt_params = _MngrCreateAttemptParams(
                     launch_mode=launch_mode,
                     workspace_dir=workspace_dir,
                     host_name=parsed_host,
                     on_output=emit_log,
                     latchkey_env=latchkey_setup.env,
-                    imbue_cloud_account=account_email if launch_mode is LaunchMode.IMBUE_CLOUD else None,
-                    # Don't constrain the lease on ``repo_url`` here:
-                    # ``repo_source`` is whatever the user picked in the UI
-                    # (often a local FCT clone path), but pool hosts are
-                    # operator-baked with whatever ``--attributes`` JSON the
-                    # admin chose -- typically ``cpus``/``memory_gb``/
-                    # ``repo_branch_or_tag`` and not ``repo_url``. Including
-                    # ``repo_url`` here would make every lease request fail
-                    # the JSONB ``@>`` match. Constraining on
-                    # ``repo_branch_or_tag`` (when minds knows it) is enough
-                    # to pick the right pool generation.
-                    imbue_cloud_branch_or_tag=(
-                        branch_or_tag if launch_mode is LaunchMode.IMBUE_CLOUD and branch_or_tag else None
-                    ),
+                    account_email=account_email,
+                    branch_or_tag=branch_or_tag,
                     anthropic_api_key=effective_anthropic_api_key,
                     anthropic_base_url=effective_anthropic_base_url,
                     parent_cg=self.root_concurrency_group,
                 )
+
+                if launch_mode is LaunchMode.IMBUE_CLOUD:
+                    canonical_id, canonical_host_id = self._create_imbue_cloud_with_fallback(attempt_params, log_queue)
+                else:
+                    canonical_id, canonical_host_id = _attempt_mngr_create(None, attempt_params)
 
                 # Now that we know the canonical host id, point the
                 # opaque permissions handle (which the JWT references)
@@ -1416,6 +1524,36 @@ class AgentCreator(MutableModel):
                 self._errors[cid_str] = str(e)
         finally:
             log_queue.put(LOG_SENTINEL)
+
+    def _create_imbue_cloud_with_fallback(
+        self,
+        attempt_params: _MngrCreateAttemptParams,
+        log_queue: queue.Queue[str],
+    ) -> tuple[AgentId, HostId]:
+        """Try the fast (adopt) path, then fall back to the slow (rebuild) path.
+
+        The first attempt requests ``fast_mode=require`` -- the imbue_cloud
+        provider adopts a pre-baked pool host whose attributes exactly match.
+        If none is available the provider raises ``FastPathUnavailableError``,
+        which ``mngr create --format jsonl`` surfaces as a structured
+        ``{"event": "error", "error_class": "FastPathUnavailableError"}`` line;
+        minds matches on that ``error_class`` and retries with
+        ``fast_mode=prevent``, which leases any available host and rebuilds it
+        from the FCT Dockerfile (full client-side setup). Any other failure
+        (including a genuinely empty pool) propagates unchanged.
+        """
+        log_queue.put("[minds] Trying fast path (adopt a matching pre-baked pool host)...")
+        try:
+            return _attempt_mngr_create(_FAST_MODE_REQUIRE, attempt_params)
+        except MngrCommandError as exc:
+            if exc.error_class != _FAST_PATH_UNAVAILABLE_ERROR_CLASS:
+                raise
+            logger.info("imbue_cloud fast path unavailable; retrying with the slow path (full rebuild)")
+            log_queue.put(
+                "[minds] No matching pre-baked pool host; falling back to slow path (leasing any host "
+                "and rebuilding it). This is slower but always works when the pool has free hosts..."
+            )
+            return _attempt_mngr_create(_FAST_MODE_PREVENT, attempt_params)
 
     def _prepare_latchkey_or_warn(
         self,

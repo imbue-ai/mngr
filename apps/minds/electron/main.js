@@ -335,7 +335,7 @@ function createBundleWebContentsViews(win) {
   });
   const contentView = new WebContentsView({
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, 'content-relay-preload.js'),
       partition: CONTENT_PARTITION,
       contextIsolation: true,
       nodeIntegration: false,
@@ -916,6 +916,7 @@ function prepareAllWindowsForRetry() {
     if (!bundle.contentView) {
       const contentView = new WebContentsView({
         webPreferences: {
+          preload: path.join(__dirname, 'content-relay-preload.js'),
           partition: CONTENT_PARTITION,
           contextIsolation: true,
           nodeIntegration: false,
@@ -1986,6 +1987,18 @@ ipcMain.on('navigate-to-request', (event, _agentId, eventId) => {
   // with no context lost, and no window switching.
   const sender = getBundleFromEvent(event);
   if (sender) openModal(sender, url);
+});
+
+// Open a permission-request modal on behalf of the (otherwise unprivileged)
+// workspace content view. Only content-relay-preload.js can emit this channel
+// -- the page itself never sees ipcRenderer -- and it does so only for an
+// allowlisted `minds:open-request-modal` postMessage. We re-validate the id
+// here (never trust the renderer) before building the `/requests/<id>` URL,
+// then reuse the same modal path as the requests-panel card click above.
+ipcMain.on('open-request-modal', (event, requestId) => {
+  if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
+  const sender = getBundleFromEvent(event);
+  if (sender) openModal(sender, toAbsoluteUrl('/requests/' + requestId));
 });
 
 ipcMain.on('close-modal', (event) => {
