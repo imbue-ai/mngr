@@ -1,22 +1,31 @@
 """Unit tests for create_plugin_manager."""
 
+import os
 from pathlib import Path
 
 import pytest
 
 from imbue.mngr.main import create_plugin_manager
+from imbue.mngr.utils.env_utils import parse_bool_env
 
 
 def test_create_plugin_manager_blocks_disabled_plugins(
     project_config_dir: Path,
     temp_git_repo_cwd: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """create_plugin_manager should block plugins disabled in config files."""
-    # Blocking is skipped when MNGR_LOAD_ALL_PLUGINS is set, so make this test's
-    # precondition explicit rather than relying on it being absent from the ambient
-    # environment (e.g. another test or an imported module may have set it).
-    monkeypatch.delenv("MNGR_LOAD_ALL_PLUGINS", raising=False)
+    # MNGR_LOAD_ALL_PLUGINS disables config-based blocking, so if it is set it would
+    # silently mask this test. It must never be set during a normal test run, so treat
+    # its presence as a leak and fail loudly -- some other test or imported module set
+    # it process-wide (e.g. importing scripts/make_cli_docs, which sets it at import
+    # time and is expected to pop it again). Surface the leak so it gets fixed at the
+    # source rather than papered over here.
+    assert not parse_bool_env(os.environ.get("MNGR_LOAD_ALL_PLUGINS", "")), (
+        "MNGR_LOAD_ALL_PLUGINS is set in the test environment, which disables plugin "
+        "blocking and would mask this test. It leaked into the process from another "
+        "test or an imported module (e.g. an importer of scripts/make_cli_docs that "
+        "failed to pop it). Find and contain the leak at its source."
+    )
     (project_config_dir / "settings.toml").write_text(
         "is_allowed_in_pytest = true\n\n[plugins.modal]\nenabled = false\n"
     )
