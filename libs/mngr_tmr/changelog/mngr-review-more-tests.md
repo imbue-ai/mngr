@@ -1,0 +1,1 @@
+Fixed a stale See-Also reference in the `tmr` command's help metadata. The `pull` reference pointed at a top-level command that was removed when push/pull were restructured into `rsync` and `git push`/`git pull`; it is now replaced with an `rsync` reference. Previously this produced a broken `[mngr help pull](mngr help pull)` markdown link in the generated docs.

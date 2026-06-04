@@ -36,13 +36,37 @@ from imbue.imbue_common.logging import setup_logging
 DEFAULT_MNGR_DIR: Final[Path] = Path("~/.mngr")
 DEFAULT_PREFIX: Final[str] = "mngr-"
 
+# Keys emitted by `modal app list --json` / `modal volume list --json`. These are
+# the column headers from the Modal CLI's `display_table` (modal/cli/app.py and
+# modal/cli/volume.py); the JSON output keys are exactly those headers.
+_APP_ID_KEY: Final[str] = "App ID"
+_VOLUME_NAME_KEY: Final[str] = "Name"
+
+
+class ModalSchemaError(KeyError):
+    """Raised when Modal's --json output is missing an expected key.
+
+    A destructive tool must never fall back to a placeholder identifier, so we
+    fail loudly (naming the unexpected schema) if Modal renames a field.
+    """
+
+
+def _require_key(resource: Mapping[str, str], key: str, resource_type: str) -> str:
+    if key not in resource:
+        raise ModalSchemaError(
+            f"Modal {resource_type} entry is missing the expected key {key!r}; "
+            f"got keys {sorted(resource.keys())!r}. Refusing to act on an unknown "
+            f"identifier. The Modal CLI may have changed its --json schema."
+        )
+    return resource[key]
+
 
 def _get_app_id(app: Mapping[str, str]) -> str:
-    return app.get("App ID", app.get("app_id", app.get("id", "unknown")))
+    return _require_key(app, _APP_ID_KEY, "app")
 
 
 def _get_volume_name(volume: Mapping[str, str]) -> str:
-    return volume.get("Name", volume.get("name", "unknown"))
+    return _require_key(volume, _VOLUME_NAME_KEY, "volume")
 
 
 def _read_user_id(mngr_dir: Path) -> str | None:
@@ -150,7 +174,8 @@ def _display_resources(apps: Sequence[Mapping[str, str]], volumes: Sequence[Mapp
     if apps:
         logger.info(f"Apps to stop ({len(apps)}):")
         for app in apps:
-            description = app.get("Description", app.get("description", app.get("name", "")))
+            # Description is a non-destructive display label only, so an empty default is fine.
+            description = app.get("Description", "")
             logger.info(f"  {_get_app_id(app)}  {description}")
     else:
         logger.info("No apps found.")
