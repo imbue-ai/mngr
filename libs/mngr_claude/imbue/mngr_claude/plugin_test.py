@@ -3031,8 +3031,10 @@ def test_bridge_credentials_emits_symlink_command_on_non_local_host_with_staged_
 @pytest.mark.parametrize(
     "is_local, generated_files",
     [
-        (True, {Path(".credentials.json"): "{}"}),  # local host: nested mngr reuses the host's own creds
-        (False, {Path("settings.json"): "{}"}),  # non-local but nothing to bridge
+        # local host: a nested mngr reuses the host's own credentials
+        (True, {Path(".credentials.json"): "{}"}),
+        # non-local host, but no credentials were staged
+        (False, {Path("settings.json"): "{}"}),
     ],
 )
 def test_bridge_credentials_is_noop(is_local: bool, generated_files: dict[Path, str]) -> None:
