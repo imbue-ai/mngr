@@ -564,7 +564,7 @@ def test_pr_has_changelog_entry() -> None:
     """
     branch = detect_branch()
 
-    if not branch or branch in ("main", "release"):
+    if not branch or branch == "main":
         pytest.skip("Not a PR branch")
 
     for prefix in _CHANGELOG_EXEMPT_BRANCH_PREFIXES:
