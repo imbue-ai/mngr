@@ -2341,6 +2341,19 @@ wheels = [
 ]
 
 [[package]]
+name = "jinjax"
+version = "0.63"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jinja2" },
+    { name = "markupsafe" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6c/11/d86874087e96cd56fd59050b9a87beede2fa8ea6e1b16632324ae9d2f828/jinjax-0.63.tar.gz", hash = "sha256:2cab0bb8e336a0a12a46541e407ad002bc70f3408a36d2a560215ac791fee006", size = 31431, upload-time = "2025-12-03T20:07:03.788Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/74/8d/6c52f82511e523e4ef219bcdb2b601991f71995662b5a2e55f85a6ef8adb/jinjax-0.63-py3-none-any.whl", hash = "sha256:74b0c9a6dc360ed4b9d3ef26dd46e280d61f89ce847d0f29dd876f2f062fdd94", size = 20224, upload-time = "2025-12-03T20:07:04.815Z" },
+]
+
+[[package]]
 name = "jiter"
 version = "0.14.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2715,6 +2728,7 @@ dependencies = [
     { name = "imbue-mngr-vps-docker" },
     { name = "itsdangerous" },
     { name = "jinja2" },
+    { name = "jinjax" },
     { name = "loguru" },
     { name = "modal" },
     { name = "paramiko" },
@@ -2745,6 +2759,7 @@ requires-dist = [
     { name = "imbue-mngr-vps-docker", editable = "libs/mngr_vps_docker" },
     { name = "itsdangerous", specifier = ">=2.2.0" },
     { name = "jinja2", specifier = ">=3.1.0" },
+    { name = "jinjax", specifier = ">=0.45" },
     { name = "loguru" },
     { name = "modal", specifier = ">=1.4.3" },
     { name = "paramiko", specifier = ">=3.0" },

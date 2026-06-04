@@ -3,8 +3,9 @@
 Phase 2 deletes minds' in-process subdomain-forwarding, auth, and observe-
 spawning code; this file replaces them with a thin consumer that:
 
-- spawns ``mngr forward`` as a subprocess (via ``subprocess.Popen`` so we get
-  direct access to the PID for ``SIGHUP``);
+- spawns ``mngr forward --observe-via-file`` as a subprocess so it tails the
+  shared discovery events file written by the single ``mngr observe`` under
+  ``mngr latchkey forward`` instead of running its own observe;
 - reads stdout line-by-line on a background thread and parses each line as a
   ``ForwardEnvelope``;
 - dispatches by ``stream``: ``observe`` lines drive the surviving
@@ -13,18 +14,18 @@ spawning code; this file replaces them with a thin consumer that:
   service map and fan out to request callbacks; ``forward`` lines
   feed the ``system_interface_backend_failure`` health tracker and the
   ``listening`` port handshake;
-- exposes ``bounce_observe()`` (sends ``SIGHUP`` to the plugin's PID), used
-  by ``supertokens_routes`` after a freshly-written
-  ``[providers.imbue_cloud_<slug>]`` block in ``settings.toml``;
 - watches the subprocess for premature exit and surfaces stderr + exit code
   via ``NotificationDispatcher``.
+
+Provider-set changes are picked up by bouncing the detached ``mngr latchkey
+forward`` supervisor (the single discovery observer); the tailer here then sees
+the fresh snapshot automatically, so this consumer no longer sends ``SIGHUP``.
 """
 
 import json
 import os
 import secrets
 import shutil
-import signal
 import subprocess
 import threading
 from collections.abc import Callable
@@ -217,29 +218,6 @@ class EnvelopeStreamConsumer(MutableModel):
             return None
         with self._lock:
             return self._listening_port
-
-    def bounce_observe(self) -> None:
-        """Send ``SIGHUP`` to the plugin so its observe child is bounced.
-
-        Used whenever minds writes a change to its providers settings that
-        should take effect on the next discovery poll: either after a new
-        ``[providers.imbue_cloud_<slug>]`` block is registered on signin,
-        or after the providers panel's Enable/Disable toggle flips
-        ``is_enabled`` on any provider block via ``set_provider_is_enabled``.
-        Per-agent event subprocesses, SSH tunnels, and the FastAPI app on
-        the plugin side stay alive (the plugin's SIGHUP handler only
-        restarts ``mngr observe``).
-
-        No-op if the plugin process is no longer running.
-        """
-        process = self._process
-        if process is None or process.poll() is not None:
-            logger.debug("bounce_observe: plugin not running; skipping")
-            return
-        try:
-            os.kill(process.pid, signal.SIGHUP)
-        except OSError as e:
-            logger.warning("bounce_observe: failed to send SIGHUP to {}: {}", process.pid, e)
 
     def terminate(self) -> None:
         """Stop the plugin subprocess (SIGTERM, then SIGKILL on timeout).
@@ -684,6 +662,9 @@ def start_mngr_forward(
         "127.0.0.1",
         "--service",
         config.service,
+        # Tail the shared discovery log written by the single `mngr observe` under
+        # `mngr latchkey forward` rather than spawning a second discovery observer.
+        "--observe-via-file",
         "--preauth-cookie",
         preauth_cookie,
         "--format",
