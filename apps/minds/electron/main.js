@@ -310,11 +310,10 @@ function createBundleWebContentsViews(win) {
   win.contentView.addChildView(contentView);
 
   // Auto-open DevTools for dev-time inspection. Opens panels for both the
-  // chrome (titlebar + sidebar + minds-rendered pages) and the content
-  // (iframe) views so design-system / chrome work can be inspected without
-  // having to manually focus + Cmd-Option-I each one. Sidebar + requests
-  // panels are created lazily; they get the same env-var treatment in
-  // `openSidebar` / `openRequestsPanel`.
+  // chrome (titlebar + minds-rendered pages) and the content (iframe) views
+  // so design-system / chrome work can be inspected without having to
+  // manually focus + Cmd-Option-I each one. The lazily-created sidebar and
+  // requests panels are not auto-opened; use Cmd-Option-I once they're up.
   if (process.env.MINDS_OPEN_DEVTOOLS === '1') {
     chromeView.webContents.once('did-finish-load', () => {
       chromeView.webContents.openDevTools({ mode: 'detach' });
