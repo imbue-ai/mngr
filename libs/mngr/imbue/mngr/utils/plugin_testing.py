@@ -15,7 +15,6 @@ from uuid import uuid4
 import pluggy
 import pytest
 from click.testing import CliRunner
-from loguru import logger
 
 import imbue.mngr.main
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -41,6 +40,7 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.providers.registry import reset_backend_registry
+from imbue.mngr.utils.testing import capture_log_warnings
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import isolate_git
 from imbue.mngr.utils.testing import isolate_tmux_server
@@ -84,19 +84,11 @@ def cli_runner() -> CliRunner:
 def log_warnings() -> Generator[list[str], None, None]:
     """Capture loguru warning messages for assertion in tests.
 
-    Tolerates handler removal during the test (e.g. setup_logging() calls
-    logger.remove() which clears all handlers, so the handler we added may
-    no longer exist by the time teardown runs).
+    Delegates to capture_log_warnings() in testing.py (the single source of
+    truth shared with mngr/conftest.py's identically-named fixture).
     """
-    messages: list[str] = []
-    handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
-    try:
+    with capture_log_warnings() as messages:
         yield messages
-    finally:
-        try:
-            logger.remove(handler_id)
-        except ValueError:
-            pass
 
 
 @pytest.fixture(autouse=True)
