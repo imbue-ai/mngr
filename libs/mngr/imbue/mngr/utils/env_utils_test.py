@@ -1,9 +1,11 @@
 """Unit tests for environment utilities."""
 
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
+from imbue.mngr.utils.env_utils import build_source_env_shell_commands
 from imbue.mngr.utils.env_utils import looks_like_mngr_test_container_name
 from imbue.mngr.utils.env_utils import parse_bool_env
 from imbue.mngr.utils.env_utils import parse_env_file
@@ -94,3 +96,46 @@ def test_looks_like_mngr_test_container_name_matches_real_per_test_prefix() -> N
 )
 def test_looks_like_mngr_test_container_name_rejects_non_test_names(name: str) -> None:
     assert looks_like_mngr_test_container_name(name) is False
+
+
+def test_parse_env_file_drops_keys_without_values() -> None:
+    """A bare KEY line (no ``=``) parses to None and must be dropped from the result."""
+    content = "BARE_KEY\nKEY=val"
+    env = parse_env_file(content)
+    assert "BARE_KEY" not in env
+    assert env == {"KEY": "val"}
+
+
+def test_parse_env_file_handles_export_prefix() -> None:
+    """dotenv strips a leading ``export`` so the key is the bare name."""
+    content = "export FOO=bar"
+    env = parse_env_file(content)
+    assert env == {"FOO": "bar"}
+
+
+def test_build_source_env_shell_commands_quotes_special_chars() -> None:
+    """Paths with spaces and shell metacharacters must be shell-quoted in both source lines."""
+    host_raw = "/tmp/host env;rm -rf/.env"
+    agent_raw = "/tmp/agent env;echo/.env"
+    commands = build_source_env_shell_commands(Path(host_raw), Path(agent_raw))
+
+    # Each path must appear in single-quoted form so the embedded space and
+    # ``;`` are inert (shlex.quote wraps strings with metacharacters in single
+    # quotes). Each path appears twice in its line ([ -f <path> ] && . <path>),
+    # and every raw occurrence must be the single-quoted one -- i.e. removing
+    # the quoted forms must leave no bare copy of the path behind.
+    assert commands[1].count(f"'{host_raw}'") == 2
+    assert host_raw not in commands[1].replace(f"'{host_raw}'", "")
+    assert commands[2].count(f"'{agent_raw}'") == 2
+    assert agent_raw not in commands[2].replace(f"'{agent_raw}'", "")
+
+
+def test_build_source_env_shell_commands_sources_host_before_agent() -> None:
+    """The host env must be sourced before the agent env so the agent can override."""
+    commands = build_source_env_shell_commands(Path("/host/.env"), Path("/agent/.env"))
+
+    assert commands[0] == "set -a"
+    assert commands[-1] == "set +a"
+    host_index = next(i for i, c in enumerate(commands) if "/host/.env" in c)
+    agent_index = next(i for i, c in enumerate(commands) if "/agent/.env" in c)
+    assert host_index < agent_index

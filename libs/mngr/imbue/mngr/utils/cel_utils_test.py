@@ -88,6 +88,14 @@ def test_cel_string_ends_with_method() -> None:
     )
     assert matches is True
 
+    no_match = apply_cel_filters_to_context(
+        context={"name": "myapp-prod"},
+        include_filters=includes,
+        exclude_filters=excludes,
+        error_context_description="test",
+    )
+    assert no_match is False
+
 
 def test_cel_invalid_include_filter_raises_mngr_error() -> None:
     """compile_cel_filters should raise MngrError for invalid include filter."""
@@ -140,6 +148,31 @@ def test_cel_exclude_filter_eval_error_continues() -> None:
     )
     # Should return True since the exclude filter errored and was skipped
     assert result is True
+
+
+def test_cel_include_filter_genuine_eval_error_logs_warning() -> None:
+    """A genuine (non-tolerant) CELEvalError in an include filter logs the warning.
+
+    This is the positive counterpart to the tolerant-miss tests (which assert
+    the warning is ABSENT): a real evaluation failure -- here, referencing a
+    field absent from a strict context -- must still emit "Error evaluating",
+    so a regression that made `_is_tolerant_miss` return True unconditionally
+    would be caught.
+    """
+    includes, excludes = compile_cel_filters(
+        include_filters=('nonexistent_field == "value"',),
+        exclude_filters=(),
+    )
+    cel_context = build_cel_context({"name": "test"})
+    with capture_loguru(level="WARNING") as log_output:
+        result = apply_compiled_cel_filters(
+            cel_context=cel_context,
+            include_filters=includes,
+            exclude_filters=excludes,
+            error_context_description="test-agent",
+        )
+    assert result is False
+    assert "Error evaluating include filter on test-agent" in log_output.getvalue()
 
 
 def test_cel_exclude_filter_matches_returns_false() -> None:
@@ -274,19 +307,27 @@ def test_parse_cel_sort_spec_ignores_empty_parts() -> None:
 
 
 def test_compile_cel_sort_keys_valid_expression() -> None:
-    """compile_cel_sort_keys should compile a valid CEL field expression."""
+    """compile_cel_sort_keys should compile a valid, evaluable CEL field expression."""
     compiled = compile_cel_sort_keys("name")
     assert len(compiled) == 1
-    _program, is_descending = compiled[0]
+    program, is_descending = compiled[0]
     assert is_descending is False
+    # The compiled program must actually evaluate the named field, not merely exist.
+    result = program.evaluate(build_cel_context({"name": "x"}))
+    assert result == celpy.celtypes.StringType("x")
 
 
 def test_compile_cel_sort_keys_multiple_expressions() -> None:
-    """compile_cel_sort_keys should compile multiple sort expressions."""
+    """compile_cel_sort_keys should compile multiple evaluable sort expressions."""
     compiled = compile_cel_sort_keys("name asc, create_time desc")
     assert len(compiled) == 2
-    assert compiled[0][1] is False
-    assert compiled[1][1] is True
+    name_program, name_is_descending = compiled[0]
+    time_program, time_is_descending = compiled[1]
+    assert name_is_descending is False
+    assert time_is_descending is True
+    cel_context = build_cel_context({"name": "x", "create_time": "2024-01-01"})
+    assert name_program.evaluate(cel_context) == celpy.celtypes.StringType("x")
+    assert time_program.evaluate(cel_context) == celpy.celtypes.StringType("2024-01-01")
 
 
 def test_compile_cel_sort_keys_invalid_expression_raises() -> None:
@@ -306,7 +347,8 @@ def test_evaluate_cel_sort_key_returns_value_for_existing_field() -> None:
     program, _is_descending = compiled[0]
     cel_ctx = build_cel_context({"name": "test-agent"})
     result = evaluate_cel_sort_key(program, cel_ctx)
-    assert str(result) == "test-agent"
+    assert isinstance(result, celpy.celtypes.StringType)
+    assert result == celpy.celtypes.StringType("test-agent")
 
 
 def test_evaluate_cel_sort_key_returns_none_for_missing_field() -> None:
@@ -467,8 +509,13 @@ def test_with_tolerant_paths_raises_tolerant_path_error_when_target_is_not_dict(
     """
     raw_context = {"name": "h1"}
     cel_context = build_cel_context(raw_context)
-    with pytest.raises(TolerantPathError):
+    with pytest.raises(TolerantPathError) as excinfo:
         _ = with_tolerant_paths(cel_context, (("name",),))
+    # TolerantPathError's dual inheritance is load-bearing: it must be a TypeError
+    # (so existing except-TypeError callers keep catching it) and an MngrError (so an
+    # uncaught instance renders as a clean CLI error). Guard both here.
+    assert isinstance(excinfo.value, TypeError)
+    assert isinstance(excinfo.value, MngrError)
 
 
 def test_with_tolerant_paths_raises_when_path_segment_missing() -> None:

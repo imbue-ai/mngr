@@ -122,7 +122,7 @@ def test_resolve_project_filter_values_dedupes_preserving_order(
 
 
 def test_resolve_project_filter_values_uses_project_root_over_cwd(
-    tmp_path: Path, cg: ConcurrencyGroup, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, cg: ConcurrencyGroup, monkeypatch: pytest.MonkeyPatch, setup_git_config: None
 ) -> None:
     """When project_root is provided, '.' resolves from there, not the (possibly nested) cwd."""
     project_dir = tmp_path / "my-project"
@@ -216,7 +216,9 @@ def test_derive_from_folder_name_when_no_git(tmp_path: Path, cg: ConcurrencyGrou
     assert derive_project_name_from_path(project_dir, cg) == "my-project"
 
 
-def test_derive_from_folder_name_when_git_has_no_remote(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+def test_derive_from_folder_name_when_git_has_no_remote(
+    tmp_path: Path, cg: ConcurrencyGroup, setup_git_config: None
+) -> None:
     """Test deriving project name from folder name when git has no remote."""
     project_dir = tmp_path / "my-project"
     project_dir.mkdir()
@@ -227,7 +229,7 @@ def test_derive_from_folder_name_when_git_has_no_remote(tmp_path: Path, cg: Conc
     assert derive_project_name_from_path(project_dir, cg) == "my-project"
 
 
-def test_derive_from_git_remote_github(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+def test_derive_from_git_remote_github(tmp_path: Path, cg: ConcurrencyGroup, setup_git_config: None) -> None:
     """Test deriving project name from GitHub git remote."""
     project_dir = tmp_path / "local-folder"
     project_dir.mkdir()
@@ -245,7 +247,7 @@ def test_derive_from_git_remote_github(tmp_path: Path, cg: ConcurrencyGroup) -> 
     assert derive_project_name_from_path(project_dir, cg) == "remote-project"
 
 
-def test_derive_from_git_remote_ssh(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+def test_derive_from_git_remote_ssh(tmp_path: Path, cg: ConcurrencyGroup, setup_git_config: None) -> None:
     """Test deriving project name from SSH git remote."""
     project_dir = tmp_path / "local-folder"
     project_dir.mkdir()
@@ -334,7 +336,9 @@ def test_find_git_worktree_root_returns_none_when_not_in_git(tmp_path: Path, cg:
     assert result is None
 
 
-def test_find_git_worktree_root_returns_root_when_in_git(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+def test_find_git_worktree_root_returns_root_when_in_git(
+    tmp_path: Path, cg: ConcurrencyGroup, setup_git_config: None
+) -> None:
     """Test that find_git_worktree_root returns the root when in a git repo."""
     git_dir = tmp_path / "my-repo"
     git_dir.mkdir()
@@ -356,7 +360,9 @@ def test_find_git_common_dir_returns_none_when_not_in_git(tmp_path: Path, cg: Co
     assert result is None
 
 
-def test_find_git_common_dir_returns_git_dir_for_regular_repo(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+def test_find_git_common_dir_returns_git_dir_for_regular_repo(
+    tmp_path: Path, cg: ConcurrencyGroup, setup_git_config: None
+) -> None:
     """Test that find_git_common_dir returns .git for a regular repository."""
     git_dir = tmp_path / "my-repo"
     git_dir.mkdir()
@@ -384,7 +390,7 @@ def test_find_git_common_dir_returns_main_git_from_worktree(
     assert result == temp_git_repo / ".git"
 
 
-def test_find_git_common_dir_from_subdirectory(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+def test_find_git_common_dir_from_subdirectory(tmp_path: Path, cg: ConcurrencyGroup, setup_git_config: None) -> None:
     """Test that find_git_common_dir works from a subdirectory."""
     git_dir = tmp_path / "my-repo"
     git_dir.mkdir()
@@ -566,12 +572,18 @@ def test_get_current_branch_raises_for_non_git_dir(tmp_path: Path, cg: Concurren
 
 
 def test_get_head_commit_returns_commit_hash(temp_git_repo: Path, cg: ConcurrencyGroup) -> None:
-    """get_head_commit should return the HEAD commit hash."""
+    """get_head_commit should return the actual HEAD commit hash of the repo."""
+    expected = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=temp_git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
     commit = get_head_commit(temp_git_repo, cg)
-    assert commit is not None
-    # SHA-1 hash is 40 hex characters
-    assert len(commit) == 40
-    assert all(c in "0123456789abcdef" for c in commit)
+
+    assert commit == expected
 
 
 def test_get_head_commit_returns_none_for_non_git_dir(tmp_path: Path, cg: ConcurrencyGroup) -> None:
@@ -789,13 +801,31 @@ def test_is_git_url_rejects_non_urls(value: str) -> None:
 def test_clone_git_url_to_managed_dir_clones_local_repo(
     cg: ConcurrencyGroup, tmp_path: Path, temp_git_repo: Path
 ) -> None:
-    """clone_git_url_to_managed_dir produces a working clone at <base>/<name>-<hex>."""
+    """clone_git_url_to_managed_dir produces a working clone of the source repo's content."""
     base_dir = tmp_path / "clones"
     dest = clone_git_url_to_managed_dir(str(temp_git_repo), base_dir, "my-agent", cg)
 
     assert dest.parent == base_dir
     assert dest.name.startswith("my-agent-")
     assert (dest / ".git").exists()
+
+    # The clone must actually contain the source repo's history, not just an
+    # empty .git -- assert the cloned HEAD matches the source's HEAD.
+    source_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=temp_git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    clone_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=dest,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert clone_head == source_head
 
 
 def test_clone_git_url_to_managed_dir_raises_on_invalid_url(

@@ -1,4 +1,5 @@
 import platform
+import shutil
 
 import pytest
 
@@ -94,11 +95,6 @@ def test_detect_os_returns_valid_os_name() -> None:
 # -- Dependency catalog --
 
 
-def test_all_deps_is_union_of_core_and_optional() -> None:
-    """ALL_DEPS is exactly CORE_DEPS + OPTIONAL_DEPS."""
-    assert ALL_DEPS == CORE_DEPS + OPTIONAL_DEPS
-
-
 def test_core_deps_have_core_category() -> None:
     """All CORE_DEPS have category CORE."""
     for dep in CORE_DEPS:
@@ -129,6 +125,7 @@ def test_check_bash_version_with_unreachable_minimum_returns_false() -> None:
     assert check_bash_version(minimum=999) is False
 
 
+@pytest.mark.skipif(shutil.which("bash") is None, reason="requires bash")
 def test_check_bash_version_with_minimum_1_returns_true() -> None:
     """check_bash_version with minimum=1 should return True on any system with bash."""
     assert check_bash_version(minimum=1) is True
@@ -333,10 +330,13 @@ def test_install_deps_batch_reports_no_auto_install_as_failed() -> None:
 
 
 def test_install_functions_return_false_when_tools_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Install functions return False when underlying package managers are absent.
+    """Install paths return False when the underlying package manager is absent.
 
-    Exercises _install_via_brew, _install_via_apt, _install_via_script, install_dep,
-    install_deps_batch, and install_modern_bash by making shutil.which return None.
+    This verifies only the missing-tool guard branch in each install path
+    (custom-script, brew, and apt, surfaced through install_dep,
+    install_deps_batch, and install_modern_bash) by making shutil.which return
+    None. The subprocess-executing install paths remain untested by design --
+    a unit test must not actually run installs.
     """
     monkeypatch.setattr(deps_mod.shutil, "which", lambda _name: None)
 

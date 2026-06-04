@@ -52,6 +52,23 @@ def test_detect_aliases_by_command_groups_aliases() -> None:
     assert "destroy" not in result
 
 
+def test_detect_aliases_by_command_accumulates_multiple_aliases() -> None:
+    """When one command is registered under several aliases, all are collected into the list."""
+    group = click.Group()
+
+    @click.command(name="create")
+    def create_cmd() -> None:
+        pass
+
+    group.add_command(create_cmd)
+    group.add_command(create_cmd, name="c")
+    group.add_command(create_cmd, name="cr")
+
+    result = detect_aliases_by_command(group)
+
+    assert sorted(result["create"]) == ["c", "cr"]
+
+
 def test_detect_aliases_by_command_empty_for_no_aliases() -> None:
     """detect_aliases_by_command should return empty dict when no aliases exist."""
     group = click.Group()

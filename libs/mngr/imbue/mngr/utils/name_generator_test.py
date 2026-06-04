@@ -8,6 +8,8 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentNameStyle
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostNameStyle
+from imbue.mngr.utils.name_generator import _COOLNAME_WORD_COUNT
+from imbue.mngr.utils.name_generator import _STYLES_WITH_LAST_NAMES
 from imbue.mngr.utils.name_generator import _get_agent_generator
 from imbue.mngr.utils.name_generator import _get_host_generator
 from imbue.mngr.utils.name_generator import _get_resources_path
@@ -60,6 +62,15 @@ def test_get_agent_generator_returns_generator() -> None:
     assert generator is _get_agent_generator(AgentNameStyle.ENGLISH)
 
 
+def test_get_agent_generator_cache_is_keyed_by_style() -> None:
+    """Distinct styles must yield distinct cached generators (a cache key that ignored the
+    style would return the same generator for every style and silently break name styling)."""
+    english = _get_agent_generator(AgentNameStyle.ENGLISH)
+    animals = _get_agent_generator(AgentNameStyle.ANIMALS)
+
+    assert english is not animals
+
+
 def test_get_host_generator_returns_generator() -> None:
     """Test that _get_host_generator returns a RandomGenerator."""
     generator = _get_host_generator(HostNameStyle.ASTRONOMY)
@@ -73,30 +84,88 @@ def test_get_host_generator_returns_generator() -> None:
     assert generator is _get_host_generator(HostNameStyle.ASTRONOMY)
 
 
-def test_generate_agent_name_english_returns_agent_name() -> None:
-    """Test generating agent name with English style."""
+def test_get_host_generator_cache_is_keyed_by_style() -> None:
+    """Distinct host styles must yield distinct cached generators."""
+    astronomy = _get_host_generator(HostNameStyle.ASTRONOMY)
+    cities = _get_host_generator(HostNameStyle.CITIES)
+
+    assert astronomy is not cities
+
+
+def test_generate_agent_name_english_is_first_last_from_wordlists() -> None:
+    """English is a first+last style, so the name must be `first-last` with each part drawn
+    from the corresponding english / english_last wordlists."""
+    first_names = set(_load_wordlist("agent", "english"))
+    last_names = set(_load_wordlist("agent", "english_last"))
+
     name = generate_agent_name(AgentNameStyle.ENGLISH)
 
     assert isinstance(name, AgentName)
-    assert len(name) > 0
+    parts = str(name).split("-")
+    assert len(parts) == 2, f"expected first-last, got {name!r}"
+    first, last = parts
+    assert first in first_names
+    assert last in last_names
 
 
 def test_generate_agent_name() -> None:
-    """Test generating agent name with all styles."""
+    """Every agent style must produce a name composed of words drawn from its own wordlist(s).
+
+    Last-name styles produce `first-last`; COOLNAME produces a fixed-length coolname slug;
+    all other styles produce a single word from their wordlist.
+    """
     for name_style in AgentNameStyle.__members__.values():
         name = generate_agent_name(name_style)
 
         assert isinstance(name, AgentName)
-        assert len(name) > 0
+        parts = str(name).split("-")
+
+        if name_style == AgentNameStyle.COOLNAME:
+            # coolname.generate_slug(_COOLNAME_WORD_COUNT) joins that many *concepts*,
+            # but some concepts expand to multi-token phrases (e.g. "...-of-..."), so the
+            # hyphen-token count is _COOLNAME_WORD_COUNT or more -- asserting exact equality
+            # would flake ~1/3 of the time. We pin the floor and that every token is a
+            # non-empty lowercase word, which still catches an empty/single-word regression.
+            assert len(parts) >= _COOLNAME_WORD_COUNT
+            for part in parts:
+                assert part.isalpha() and part.islower()
+            continue
+
+        style_name = name_style.value.lower()
+        first_names = set(_load_wordlist("agent", style_name))
+
+        if name_style in _STYLES_WITH_LAST_NAMES:
+            last_names = set(_load_wordlist("agent", f"{style_name}_last"))
+            assert len(parts) == 2, f"{name_style}: expected first-last, got {name!r}"
+            assert parts[0] in first_names
+            assert parts[1] in last_names
+        else:
+            assert len(parts) == 1, f"{name_style}: expected single word, got {name!r}"
+            assert parts[0] in first_names
 
 
 def test_generate_host_name() -> None:
-    """Test generating host name with all styles."""
+    """Every host style must produce a name drawn from its own wordlist.
+
+    COOLNAME produces a fixed-length slug; every other host style is a single word.
+    """
     for name_style in HostNameStyle.__members__.values():
         name = generate_host_name(name_style)
 
         assert isinstance(name, HostName)
-        assert len(name) > 0
+        parts = str(name).split("-")
+
+        if name_style == HostNameStyle.COOLNAME:
+            # See test_generate_agent_name: coolname concepts can expand to multi-token
+            # phrases, so the hyphen-token count is a lower bound, not an exact match.
+            assert len(parts) >= _COOLNAME_WORD_COUNT
+            for part in parts:
+                assert part.isalpha() and part.islower()
+            continue
+
+        words = set(_load_wordlist("host", name_style.value.lower()))
+        assert len(parts) == 1, f"{name_style}: expected single word, got {name!r}"
+        assert parts[0] in words
 
 
 # Draw many names and require a healthy number of distinct ones. This pins the observable
