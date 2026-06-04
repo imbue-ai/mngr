@@ -906,8 +906,9 @@ def test_list_agents_streaming_mode_on_agent_callback_is_called(
     assert "list-stream-test" in found_names
 
 
-@pytest.mark.flaky
 @pytest.mark.tmux
+# real agent setup/teardown occasionally exceeds the 10s default.
+@pytest.mark.timeout(30)
 def test_list_agents_with_include_filter_excludes_non_matching(
     temp_work_dir: Path,
     temp_mngr_ctx: MngrContext,
