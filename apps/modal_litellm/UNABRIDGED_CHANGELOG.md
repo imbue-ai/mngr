@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-03
+
+Added a configurable `scaledown_window` to the LiteLLM proxy Modal function, driven by `MINDS_LITELLM_PROXY_SCALEDOWN_WINDOW` (from the tier's `[scaledown_window].litellm_proxy` in `deploy.toml`). `0` (default) keeps Modal's own default; dev tiers set it high (~10 min) so the no-warm-pool proxy stays hot across a dev session.
+
 ## 2026-05-28
 
 # Dropped redundant per-project ty/ruff ratchet tests
