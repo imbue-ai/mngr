@@ -330,7 +330,11 @@ def test_prevent_bare_tmux_targets() -> None:
 
 
 def test_prevent_if_elif_without_else() -> None:
-    rc.check_if_elif_without_else(_DIR, snapshot(1))
+    # Both violations are in apps/minds/scripts/launch_to_msg_e2e.py:
+    # pre_run_sweep's cleanup dispatch (is_dir vs exists) and
+    # _advance_approval's stage-machine switch. Both exhaustively cover
+    # the values they branch on; an else: pass would be cosmetic.
+    rc.check_if_elif_without_else(_DIR, snapshot(2))
 
 
 def test_prevent_inline_functions() -> None:
