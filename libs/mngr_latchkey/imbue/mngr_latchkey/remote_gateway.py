@@ -67,7 +67,7 @@ def _build_ensure_installed_script(latchkey_version: str, node_major_version: st
             "fi",
             # latchkey CLI, pinned to the exact version. Reinstall whenever the
             # installed version differs (missing latchkey reports an empty string).
-            f'if [ "$(latchkey --version 2>/dev/null | sed \'s/^v//\')" != "{latchkey_version}" ]; then',
+            f'if [ "$(LATCHKEY_DISABLE_COUNTING=1 latchkey --version 2>/dev/null | sed \'s/^v//\')" != "{latchkey_version}" ]; then',
             f"  npm install -g latchkey@{latchkey_version}",
             "fi",
         )
