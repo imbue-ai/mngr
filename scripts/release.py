@@ -103,9 +103,12 @@ def _get_pypi_version() -> str | None:
     try:
         response = httpx.get("https://pypi.org/pypi/imbue-mngr/json", timeout=10)
         response.raise_for_status()
-        return response.json()["info"]["version"]
-    except Exception:
+    except httpx.HTTPError as e:
+        # Network/HTTP failure is non-fatal: the caller treats None as "(could not check)".
+        # A KeyError/JSONDecodeError from an unexpected payload is a real problem and propagates.
+        print(f"WARNING: Could not query PyPI for the latest mngr version: {e}", file=sys.stderr)
         return None
+    return response.json()["info"]["version"]
 
 
 def _detect_changed_packages(since_tag: str) -> set[str]:
@@ -127,11 +130,13 @@ def _is_published_on_pypi(pypi_name: str) -> bool:
     """Check whether a package has ever been published on PyPI."""
     try:
         response = httpx.head(f"https://pypi.org/pypi/{pypi_name}/json", timeout=10)
-        return response.status_code == 200
-    except Exception:
+    except httpx.HTTPError as e:
         # If we can't reach PyPI, assume published to avoid accidentally
-        # treating existing packages as new.
+        # treating existing packages as new. Only the network-failure case is
+        # tolerated here; any other error is a real problem and propagates.
+        print(f"WARNING: Could not reach PyPI to check {pypi_name}; assuming published: {e}", file=sys.stderr)
         return True
+    return response.status_code == 200
 
 
 def _detect_new_packages(since_tag: str) -> set[str]:

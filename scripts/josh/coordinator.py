@@ -442,9 +442,6 @@ def process_tasks(
     except OSError as e:
         logger.error(f"Failed to read task file: {e}")
         return set()
-    except Exception as e:
-        logger.error(f"Error processing tasks: {e}")
-        return set()
 
 
 @click.command()
