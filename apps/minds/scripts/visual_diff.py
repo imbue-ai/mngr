@@ -532,9 +532,22 @@ def _screenshot_all(scenarios: list[Scenario], png_dir: Path, port: int) -> None
                 target = f"http://127.0.0.1:{port}/html/{sc.name}.html"
                 try:
                     page.goto(target, wait_until="networkidle", timeout=15000)
-                    # Tailwind Play CDN generates the utility styles at
-                    # runtime; give it a beat to settle before snapshotting.
-                    page.wait_for_timeout(400)
+                    # `networkidle` fires once tailwind.js finishes downloading,
+                    # but the Play CDN does its utility-class scan + <style>
+                    # injection on DOMContentLoaded -- which can land AFTER
+                    # networkidle. Wait for the global to be defined AND for
+                    # the injected <style> element to have non-empty content,
+                    # so a screenshot can never race the runtime stylesheet.
+                    page.wait_for_function(
+                        "() => typeof tailwind !== 'undefined' "
+                        "&& Array.from(document.querySelectorAll('style'))"
+                        ".some(s => s.textContent.length > 0)",
+                        timeout=5000,
+                    )
+                    # System-font pages resolve fonts.ready immediately; this
+                    # guards against future web-font additions silently
+                    # screenshotting before glyphs render.
+                    page.evaluate("async () => { await document.fonts.ready; }")
                     for action in sc.interactions:
                         action(page)
                     page.screenshot(path=str(png_dir / f"{sc.name}.png"), full_page=True)
