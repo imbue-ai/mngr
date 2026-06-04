@@ -63,8 +63,10 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         The base comes from ``command_override`` if provided, otherwise
         ``agent_config.command`` if set, otherwise nothing. After the base,
         ``cli_args`` and then ``agent_args`` are appended (joined with spaces).
-        Raises ``UserInputError`` if the final command would be empty -- i.e.
-        no base, no ``cli_args``, and no ``agent_args``.
+        ``agent_args`` are shell-quoted (they are raw argv); ``cli_args`` and the
+        base are left as-is (they arrive already shell-safe). Raises
+        ``UserInputError`` if the final command would be empty -- i.e. no base,
+        no ``cli_args``, and no ``agent_args``.
 
         ``initial_message`` is accepted for interface compatibility but is
         not used here. Subclasses that bake the prompt into the command line
@@ -84,7 +86,14 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             parts.append(base)
         if self.agent_config.cli_args:
             parts.extend(self.agent_config.cli_args)
-        parts.extend(agent_args)
+        # cli_args reach here already shell-safe (string-form configs are split with non-POSIX
+        # shlex that preserves quotes; see ``split_cli_args_string``). agent_args, by contrast,
+        # are raw argv strings passed through Click as ``click.UNPROCESSED`` -- the OS shell
+        # stripped quote chars when it built argv at invocation time, so we must re-quote each
+        # element before splicing it into the (shell-evaluated) command string. Without this, an
+        # arg like ``--model "Gemini 3.5 Flash (Medium)"`` word-splits and the ``(`` is parsed as
+        # a subshell. (``mngr_claude`` overrides this method but applies the identical rule.)
+        parts.extend(shlex.quote(arg) for arg in agent_args)
 
         if not parts:
             raise UserInputError(

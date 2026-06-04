@@ -1,0 +1,5 @@
+Fixed a shell-quoting bug in agent launch: extra `agent_args` (the arguments passed after `--` on `mngr create`) are now shell-quoted before being spliced into the launch command.
+
+Previously, `BaseAgent.assemble_command` joined `agent_args` into the command string with plain spaces. An argument whose value contained spaces or shell metacharacters -- for example `--model "Gemini 3.5 Flash (Medium)"` -- was emitted raw (`--model Gemini 3.5 Flash (Medium)`), so the shell that evaluates the launch command word-split the value and parsed `(Medium)` as a subshell, failing with `syntax error near unexpected token '('`.
+
+Each `agent_args` element is now passed through `shlex.quote`, matching the rule the `mngr_claude` plugin already applied in its own override. `cli_args` are left unquoted, unchanged: string-form `cli_args` configs are split with a quote-preserving (non-POSIX) shlex and so already arrive shell-safe. This fixes every agent type that inherits the base method, including `antigravity`/`agy`.

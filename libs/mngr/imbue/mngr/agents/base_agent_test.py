@@ -506,6 +506,36 @@ def test_assemble_command_appends_agent_args(
     assert result == CommandString("my-cmd --extra arg")
 
 
+def test_assemble_command_shell_quotes_agent_args_with_special_chars(
+    local_provider: LocalProviderInstance,
+    temp_work_dir: Path,
+) -> None:
+    """agent_args with spaces/parens are shell-quoted so the command stays valid.
+
+    Regression test: passing ``--model "Gemini 3.5 Flash (Medium)"`` used to splice
+    the raw value into the shell-evaluated command, so bash word-split it and parsed
+    ``(Medium)`` as a subshell ("syntax error near unexpected token `('").
+    """
+    config = AgentTypeConfig(command=CommandString("agy"))
+    agent = create_test_agent(
+        local_provider,
+        temp_work_dir,
+        agent_config=config,
+        agent_type=None,
+        extra_data=None,
+        agent_class=BaseAgent,
+    )
+
+    result = agent.assemble_command(
+        host=agent.host,
+        agent_args=("--model", "Gemini 3.5 Flash (Medium)"),
+        command_override=None,
+    )
+    assert result == CommandString("agy --model 'Gemini 3.5 Flash (Medium)'")
+    # The model value must be a single shell token (no bare parens/spaces).
+    assert "'Gemini 3.5 Flash (Medium)'" in str(result)
+
+
 def test_assemble_command_appends_both_cli_and_agent_args(
     local_provider: LocalProviderInstance,
     temp_work_dir: Path,
