@@ -41,6 +41,7 @@ from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
+from imbue.mngr.api.discovery_events import partition_removed_agents_by_provider_error
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
@@ -277,31 +278,56 @@ class ForwardStreamManager(MutableModel):
         )
 
     def _handle_full_snapshot(self, event: FullDiscoverySnapshotEvent) -> None:
-        kept_ids: list[AgentId] = []
-        kept_agents: dict[str, DiscoveredAgent] = {}
+        # Agents present (post-filter) in this snapshot.
+        fresh_agents: dict[str, DiscoveredAgent] = {}
         agent_host_map: dict[str, str] = {}
         for agent in event.agents:
             if not self._agent_passes_filter(agent):
                 continue
-            kept_ids.append(agent.agent_id)
-            kept_agents[str(agent.agent_id)] = agent
+            fresh_agents[str(agent.agent_id)] = agent
             agent_host_map[str(agent.agent_id)] = str(agent.host_id)
 
         with self._lock:
-            previously_known = set(self._discovered_agents.keys())
-            self._discovered_agents = kept_agents
-            self._agent_host_map = agent_host_map
-            new_known = set(agent_host_map.keys())
-            removed = previously_known - new_known
+            prior_agents = dict(self._discovered_agents)
+            prior_host_map = dict(self._agent_host_map)
+            removed = prior_agents.keys() - fresh_agents.keys()
+            # An agent absent because its provider errored is retained (its
+            # service mapping + per-agent events stream stay alive) rather than
+            # dropped; only genuinely-removed agents are torn down.
+            partition = partition_removed_agents_by_provider_error(
+                removed_agent_ids=removed,
+                provider_name_by_prior_agent_id={
+                    aid_str: str(agent.provider_name) for aid_str, agent in prior_agents.items()
+                },
+                error_by_provider_name=event.error_by_provider_name,
+            )
+            merged_agents = dict(fresh_agents)
+            merged_host_map = dict(agent_host_map)
+            for aid_str in partition.retained:
+                merged_agents[aid_str] = prior_agents[aid_str]
+                merged_host_map[aid_str] = prior_host_map[aid_str]
+            self._discovered_agents = merged_agents
+            self._agent_host_map = merged_host_map
 
-        self.resolver.update_known_agents(tuple(kept_ids))
+        # Pass the merged set (fresh + retained) so the resolver keeps the
+        # retained agents' known-agent entry and their service mapping.
+        self.resolver.update_known_agents(tuple(agent.agent_id for agent in merged_agents.values()))
 
-        for aid_str in removed:
+        if partition.retained:
+            logger.debug(
+                "Retained {} agent(s) through a provider discovery error; keeping their service mappings: {}",
+                len(partition.retained),
+                sorted(partition.retained),
+            )
+
+        for aid_str in partition.dropped:
             self._stop_events_stream(AgentId(aid_str))
             for callback in self._on_agent_destroyed_callbacks:
                 self._safely_call(callback, AgentId(aid_str), name="on_agent_destroyed")
 
-        for agent in kept_agents.values():
+        # Only (re)fire discovery for agents actually present in this snapshot;
+        # retained agents were already set up and must not be re-announced.
+        for agent in fresh_agents.values():
             ssh_info = self._ssh_for_agent(agent.agent_id)
             if ssh_info is not None:
                 self.resolver.update_ssh_info(agent.agent_id, ssh_info)

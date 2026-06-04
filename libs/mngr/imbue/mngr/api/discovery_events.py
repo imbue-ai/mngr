@@ -4,6 +4,7 @@ import threading
 from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
+from collections.abc import Set as AbstractSet
 from datetime import datetime
 from datetime import timezone
 from enum import auto
@@ -130,9 +131,15 @@ class FullDiscoverySnapshotEvent(EventEnvelope):
     """A full snapshot of all agents and hosts from a complete discovery scan.
 
     Always emitted on every discovery poll, including when zero providers
-    succeeded. Consumers treat this as authoritative state: previously-known
-    agents and hosts for providers in ``error_by_provider_name`` MUST NOT be
-    retained (their state is genuinely unknown, not just stale).
+    succeeded. A snapshot is authoritative *only* for providers that
+    succeeded on this poll. Previously-known agents and hosts whose provider
+    is in ``error_by_provider_name`` MUST be retained from prior consumer
+    state and surfaced as unknown/stale -- their absence from this snapshot
+    reflects the errored poll, not a confirmed removal. A retained item is
+    dropped only on an explicit destroy event or a subsequent *successful*
+    (non-errored) snapshot of its provider that shows it absent. See
+    :func:`partition_removed_agents_by_provider_error`, the shared helper
+    every consumer uses to make this decision.
     """
 
     type: Literal[DiscoveryEventType.DISCOVERY_FULL] = DiscoveryEventType.DISCOVERY_FULL
@@ -212,6 +219,49 @@ def get_discovery_events_dir(config: MngrConfig) -> Path:
 def get_discovery_events_path(config: MngrConfig) -> Path:
     """Return the path to the discovery events JSONL file."""
     return get_discovery_events_dir(config) / "events.jsonl"
+
+
+# === Provider-error retention ===
+
+
+class RemovedAgentPartition(FrozenModel):
+    """How a snapshot's removed agents split by their prior provider's error state.
+
+    ``retained`` are agents absent from the new snapshot whose prior provider
+    is currently errored: their state is unknown, not gone, so the consumer
+    keeps them. ``dropped`` are agents the consumer should now forget (their
+    provider succeeded and still omitted them, or it is unknown).
+    """
+
+    retained: frozenset[str] = Field(description="Agent id strings to keep despite absence from the snapshot")
+    dropped: frozenset[str] = Field(description="Agent id strings to drop (confirmed gone or unattributable)")
+
+
+@pure
+def partition_removed_agents_by_provider_error(
+    removed_agent_ids: AbstractSet[str],
+    provider_name_by_prior_agent_id: Mapping[str, str],
+    error_by_provider_name: Mapping[ProviderInstanceName, DiscoveryError],
+) -> RemovedAgentPartition:
+    """Split removed agent ids into those to retain vs drop, by provider error state.
+
+    An agent absent from a fresh snapshot is *retained* when its prior provider
+    is in ``error_by_provider_name`` -- the snapshot omitted it only because
+    that provider's discovery raised this poll, so its state is unknown rather
+    than confirmed gone. Every other removed agent is *dropped*. Shared by all
+    discovery-snapshot consumers so the retention rule has exactly one
+    definition (see :class:`FullDiscoverySnapshotEvent`).
+    """
+    errored_provider_names = {str(name) for name in error_by_provider_name}
+    retained: set[str] = set()
+    dropped: set[str] = set()
+    for agent_id_str in removed_agent_ids:
+        prior_provider_name = provider_name_by_prior_agent_id.get(agent_id_str)
+        if prior_provider_name is not None and prior_provider_name in errored_provider_names:
+            retained.add(agent_id_str)
+        else:
+            dropped.add(agent_id_str)
+    return RemovedAgentPartition(retained=frozenset(retained), dropped=frozenset(dropped))
 
 
 # === Conversion Helpers ===
@@ -1050,10 +1100,11 @@ def run_discovery_stream(
     ``ErrorBehavior.CONTINUE`` so a snapshot is emitted on every poll, even
     when some providers raised. Per-provider failures land in the snapshot's
     ``error_by_provider_name`` field; consumers treat each snapshot as
-    authoritative state and drop previously-known agents/hosts for any
-    provider that errored on this poll. Providers are responsible for retrying
-    their own transient failures before raising -- there is no top-level
-    retry layer here.
+    authoritative only for providers that succeeded, retaining previously-known
+    agents/hosts for any provider that errored on this poll (and surfacing them
+    as unknown/stale) rather than dropping them. Providers are responsible for
+    retrying their own transient failures before raising -- there is no
+    top-level retry layer here.
 
     1. Emit from the latest cached snapshot on disk (instant, if available)
     2. Run a full sync in the background to update the event stream

@@ -134,6 +134,7 @@ from imbue.minds.telegram.setup import TelegramSetupStatus
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import InvalidName
+from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
 
@@ -1549,6 +1550,24 @@ def _handle_telegram_status(
 # -- Providers panel toggle route --
 
 
+def _bounce_latchkey_forward(request: Request) -> None:
+    """Bounce the detached ``mngr latchkey forward`` supervisor's observe child.
+
+    Mirrors :func:`EnvelopeStreamConsumer.bounce_observe` for latchkey: called
+    on the same provider-set changes minds uses to bounce its own observe so
+    latchkey reloads the current provider set without dropping its shared
+    gateway or reverse tunnels. No-op when no supervisor handle is on app.state
+    (e.g. tests). ``bounce()`` starts the supervisor if none is running.
+    """
+    supervisor: LatchkeyForwardSupervisor | None = request.app.state.latchkey_forward_supervisor
+    if supervisor is None:
+        return
+    try:
+        supervisor.bounce()
+    except (OSError, RuntimeError) as e:
+        logger.warning("Failed to bounce mngr latchkey forward: {}", e)
+
+
 async def _handle_provider_toggle(
     provider_name: str,
     request: Request,
@@ -1587,13 +1606,16 @@ async def _handle_provider_toggle(
             media_type="application/json",
         )
     changed = set_provider_is_enabled(provider_name, is_enabled)
-    # Only bounce observe when the settings file actually changed -- a no-op toggle
+    # Only bounce when the settings file actually changed -- a no-op toggle
     # (e.g. user clicking Disable twice) should not trigger a SIGHUP and a full
     # mngr observe restart, since the next discovery snapshot would be identical.
     if changed:
         consumer: EnvelopeStreamConsumer | None = request.app.state.envelope_stream_consumer
         if consumer is not None:
             consumer.bounce_observe()
+        # Keep latchkey's discovery in lockstep with minds' own observe so its
+        # gateway permission / reverse-tunnel setup reflects the new provider set.
+        _bounce_latchkey_forward(request)
     return Response(
         content=json.dumps({"provider_name": provider_name, "is_enabled": is_enabled, "changed": changed}),
         media_type="application/json",
@@ -1931,16 +1953,24 @@ def _build_workspace_list(
 
     Each entry carries a deterministic "accent" CSS color derived from the
     agent id so the chrome and sidebar can render a per-workspace accent
-    without running a digest in JS.
+    without running a digest in JS. Entries whose provider's latest discovery
+    poll errored carry ``is_stale="true"`` so the UI can flag them as
+    retained-but-unverified (they remain fully interactive).
     """
+    errored_provider_names = {str(name) for name in backend_resolver.get_provider_errors()}
     agent_ids = backend_resolver.list_known_workspace_ids()
     workspaces: list[dict[str, str]] = []
     for aid in agent_ids:
+        info = backend_resolver.get_agent_display_info(aid)
         ws_name = backend_resolver.get_workspace_name(aid)
         if not ws_name:
-            info = backend_resolver.get_agent_display_info(aid)
             ws_name = info.agent_name if info else str(aid)
         entry: dict[str, str] = {"id": str(aid), "name": ws_name, "accent": workspace_accent(str(aid))}
+        # Mark the workspace stale when its provider's most recent discovery
+        # poll errored: it was retained from prior state, so its liveness is
+        # unverified rather than confirmed healthy.
+        if info is not None and info.provider_name is not None and info.provider_name in errored_provider_names:
+            entry["is_stale"] = "true"
         if session_store is not None:
             account = session_store.get_account_for_workspace(str(aid))
             if account is not None:
@@ -3224,6 +3254,7 @@ def create_desktop_client(
     mngr_binary: str = "mngr",
     mngr_host_dir: Path | None = None,
     minds_api_key: str | None = None,
+    latchkey_forward_supervisor: LatchkeyForwardSupervisor | None = None,
 ) -> FastAPI:
     """Create the bare-origin minds FastAPI application.
 
@@ -3267,6 +3298,11 @@ def create_desktop_client(
     app.state.auth_store = auth_store
     app.state.backend_resolver = backend_resolver
     app.state.envelope_stream_consumer = envelope_stream_consumer
+    # Handle to the detached ``mngr latchkey forward`` supervisor so the
+    # provider-change request handlers (provider toggle, signin/signout) can
+    # ``bounce()`` it alongside the ``mngr forward`` observe bounce, keeping
+    # latchkey's provider set in lockstep with minds' own. None in tests.
+    app.state.latchkey_forward_supervisor = latchkey_forward_supervisor
     # Placeholder so the lifespan teardown can read this slot
     # unconditionally; ``cli/run.py`` overwrites it with the running
     # consumer right after starting it.
