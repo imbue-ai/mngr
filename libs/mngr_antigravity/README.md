@@ -65,6 +65,10 @@ mngr create my-agent readonly_agy
 - `auto_dismiss_dialogs` (bool, default `false`) -- silently trust the source repo without prompting (see Trust below).
 - `emit_common_transcript` (bool, default `true`) -- start a background worker that streams agy's per-conversation JSONL transcripts into `events/antigravity/common_transcript/events.jsonl`. `mngr transcript <agent>` reads from there.
 
+## Conversation resume
+
+Stopping an antigravity agent and starting it again (`mngr stop` / `mngr start`) resumes the agent's prior agy conversation, keeping its full context rather than starting fresh. This is automatic; there is no flag to set. (*Cloning* an agent does not yet carry the source's conversation forward -- that is a separate follow-up.)
+
 ## Caveats
 
 - **`agy` PATH shadowing**: if the Antigravity 2.0 desktop app is installed, its bundled `agy` shim can shadow the standalone CLI in `PATH`. Remove the desktop app's `bin/agy` or override `command` with an absolute path to the Go binary.
@@ -73,7 +77,7 @@ mngr create my-agent readonly_agy
     - `mngr create --yes` (`mngr_ctx.is_auto_approve`) or `auto_dismiss_dialogs = true`: silent trust.
     - Interactive shell: mngr prompts via `click.confirm` before writing.
     - Non-interactive shell without either opt-in, or a declined prompt: provisioning exits cleanly (`SystemExit`). Re-run with `--yes` or set `auto_dismiss_dialogs = true`.
-- **Hooks (lifecycle marker)**: `mngr_antigravity` writes a per-agent `hooks.json` to `$HOME/.gemini/config/hooks.json` (in the agent's relocated home); agy executes it directly with no trust prompt and no `--add-dir`. A `PreInvocation`/`Stop` pair maintains an `active` marker so the agent reports RUNNING while working and WAITING when idle (agy writes no such marker on its own). Note: the in-TUI `/hooks` command writes to `~/.gemini/antigravity-cli/hooks.json`, which the hook *execution* engine never runs -- that path is loaded only for the TUI's display, while only `~/.gemini/config/hooks.json` and per-workspace `.agents/hooks.json` are actually executed ([antigravity-cli#49](https://github.com/google-antigravity/antigravity-cli/issues/49)).
+- **Hooks (lifecycle marker + conversation capture)**: `mngr_antigravity` writes a per-agent `hooks.json` to `$HOME/.gemini/config/hooks.json` (in the agent's relocated home); agy executes it directly with no trust prompt and no `--add-dir`. A `PreInvocation`/`Stop` pair maintains an `active` marker so the agent reports RUNNING while working and WAITING when idle (agy writes no such marker on its own). A second `PreInvocation` handler records the active conversation ID (which drives conversation resume and transcript scoping; see "Conversation resume" above). agy delivers the hook payload to each handler independently, so the two handlers don't contend for stdin. Note: the in-TUI `/hooks` command writes to `~/.gemini/antigravity-cli/hooks.json`, which the hook *execution* engine never runs -- that path is loaded only for the TUI's display, while only `~/.gemini/config/hooks.json` and per-workspace `.agents/hooks.json` are actually executed ([antigravity-cli#49](https://github.com/google-antigravity/antigravity-cli/issues/49)).
 - **No readiness sentinel**: readiness is signalled purely by polling the rendered TUI banner. agy's hook events are execution-loop events (`PreToolUse`/`PostToolUse`/`PreInvocation`/`PostInvocation`/`Stop`) with no "input prompt ready" analog, so they can't replace the banner poll.
 - **No permission-specific WAITING reason**: agy exposes no permission-dialog hook event, and no hook fires while the agent is blocked at the dialog, so mngr can't currently flag *why* an agent is waiting (as `mngr_claude` does). With `auto_allow_permissions = true` there are no dialogs anyway; surfacing a permission-WAITING reason in supervised mode is left for a follow-up.
 

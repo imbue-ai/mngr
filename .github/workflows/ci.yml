@@ -12,7 +12,7 @@ jobs:
     if: github.ref != 'refs/heads/release'
     runs-on: ubuntu-latest
     # `checks: write` is required by the report-flaky-aware-tests composite
-    # action: both its `mikepenz/action-junit-report@v5` invocations and its
+    # action: both its `mikepenz/action-junit-report@v6` invocations and its
     # `gh api POST /repos/.../check-runs` call need it. `contents: write` is
     # required so offload can `git push` its image-cache git notes back to
     # `refs/notes/offload-images`; without it, every run is a cache miss and
@@ -27,11 +27,25 @@ jobs:
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
 
     steps:
+      # Default shallow single-ref checkout, then deepen only THIS ref's
+      # history in the next step. offload needs the full ancestry of HEAD
+      # (to find its checkpoint commit and thin-diff against it), but not
+      # every other branch -- which `fetch-depth: 0` would also fetch, and on
+      # a repo with many branches that full-history-of-all-branches fetch can
+      # take minutes. The image-cache git notes are fetched separately below.
       - uses: actions/checkout@v6
-        with:
-          # Full history needed for offload's git-notes-backed image-cache
-          # lookup and thin-diff against the checkpoint commit.
-          fetch-depth: 0
+
+      - name: Deepen current-branch history for offload
+        # Deepen ONLY the checked-out commit's ancestry -- all offload needs to
+        # find and thin-diff its checkpoint. Naming the SHA matters: a bare
+        # `git fetch --unshallow origin` uses the broad refspec and pulls every
+        # branch's full history (including a heavy orphan branch), which is most
+        # of the fetch cost. GitHub allows fetching reachable SHAs, and the
+        # image-cache git notes are fetched separately below.
+        run: |
+          if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+            git fetch --no-tags --unshallow origin "$(git rev-parse HEAD)"
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -47,13 +61,13 @@ jobs:
         run: uv sync --all-packages
 
       - name: Install just
-        uses: extractions/setup-just@v2
+        uses: extractions/setup-just@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache offload binary
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -68,7 +82,7 @@ jobs:
           fi
 
       - name: Restore offload test durations from previous run
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: test-results/junit.xml
           key: offload-durations-${{ github.ref }}-${{ github.run_id }}
@@ -88,7 +102,7 @@ jobs:
 
       - name: Save offload test durations for next run
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: test-results/junit.xml
           key: offload-durations-${{ github.ref }}-${{ github.run_id }}
@@ -169,7 +183,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results-offload
           path: test-results/
@@ -224,11 +238,25 @@ jobs:
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
 
     steps:
+      # Default shallow single-ref checkout, then deepen only THIS ref's
+      # history in the next step. offload needs the full ancestry of HEAD
+      # (to find its checkpoint commit and thin-diff against it), but not
+      # every other branch -- which `fetch-depth: 0` would also fetch, and on
+      # a repo with many branches that full-history-of-all-branches fetch can
+      # take minutes. The image-cache git notes are fetched separately below.
       - uses: actions/checkout@v6
-        with:
-          # Full history needed for offload's git-notes-backed image-cache
-          # lookup and thin-diff against the checkpoint commit.
-          fetch-depth: 0
+
+      - name: Deepen current-branch history for offload
+        # Deepen ONLY the checked-out commit's ancestry -- all offload needs to
+        # find and thin-diff its checkpoint. Naming the SHA matters: a bare
+        # `git fetch --unshallow origin` uses the broad refspec and pulls every
+        # branch's full history (including a heavy orphan branch), which is most
+        # of the fetch cost. GitHub allows fetching reachable SHAs, and the
+        # image-cache git notes are fetched separately below.
+        run: |
+          if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+            git fetch --no-tags --unshallow origin "$(git rev-parse HEAD)"
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -244,13 +272,13 @@ jobs:
         run: uv sync --all-packages
 
       - name: Install just
-        uses: extractions/setup-just@v2
+        uses: extractions/setup-just@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache offload binary
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -265,7 +293,7 @@ jobs:
           fi
 
       - name: Restore offload test durations from previous run
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: test-results/junit.xml
           key: offload-acceptance-durations-${{ github.ref }}-${{ github.run_id }}
@@ -285,7 +313,7 @@ jobs:
 
       - name: Save offload test durations for next run
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: test-results/junit.xml
           key: offload-acceptance-durations-${{ github.ref }}-${{ github.run_id }}
@@ -301,7 +329,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results-offload-acceptance
           path: test-results/
@@ -383,7 +411,7 @@ jobs:
           sudo apt-get install -y tmux git openssh-server unison xvfb
 
       - name: Set up Node.js for Electron e2e test
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '24.15.0'
 
@@ -520,7 +548,7 @@ jobs:
 
       - name: Upload test timing data
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-durations-release-${{ matrix.os }}-${{ matrix.group }}
           path: .test_output/test_durations_*.json

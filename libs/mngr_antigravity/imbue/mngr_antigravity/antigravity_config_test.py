@@ -11,6 +11,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_antigravity.antigravity_config import ACTIVE_MARKER_FILENAME
+from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import build_antigravity_hooks_config
 from imbue.mngr_antigravity.antigravity_config import build_isolated_settings
 from imbue.mngr_antigravity.antigravity_config import build_onboarding_seed
@@ -225,8 +226,29 @@ def test_hooks_config_always_emits_active_marker_via_preinvocation_and_stop() ->
     # PreInvocation/Stop use the flat handler-list shape (no matcher wrapper).
     pre = mngr["PreInvocation"]
     stop = mngr["Stop"]
-    assert pre == [{"type": "command", "command": f'touch "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'}]
+    # The active-marker touch is the first PreInvocation handler (a second
+    # handler captures the conversation id; see the test below).
+    assert pre[0] == {"type": "command", "command": f'touch "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'}
     assert stop == [{"type": "command", "command": f'rm -f "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'}]
+
+
+def test_hooks_config_captures_conversation_id_via_second_preinvocation_handler() -> None:
+    """A second PreInvocation handler runs capture_conversation_id.sh.
+
+    agy delivers the hook-payload stdin to each handler independently (verified
+    live against agy 1.0.4), so the capture handler runs alongside the
+    active-marker touch without contending for stdin. The captured id drives
+    both conversation resume (assemble_command) and transcript scoping
+    (stream_transcript.sh).
+    """
+    config = build_antigravity_hooks_config()
+
+    pre = config["mngr"]["PreInvocation"]
+    assert len(pre) == 2
+    assert pre[1] == {
+        "type": "command",
+        "command": f'bash "$MNGR_AGENT_STATE_DIR/commands/{CAPTURE_CONVERSATION_ID_SCRIPT_NAME}"',
+    }
 
 
 def test_hooks_config_never_emits_pretooluse() -> None:

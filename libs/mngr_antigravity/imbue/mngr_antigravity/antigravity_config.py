@@ -258,6 +258,21 @@ _MNGR_HOOK_NAME: str = "mngr"
 # ``"active"`` that ``BaseAgent`` and the provider listing scripts check.
 ACTIVE_MARKER_FILENAME: str = "active"
 
+# Per-agent file (in ``$MNGR_AGENT_STATE_DIR``) recording the agy conversation
+# IDs this agent has worked on, one per line, appended whenever the active
+# conversation changes (see ``capture_conversation_id.sh``). Its last line is
+# the most-recently-active conversation -- ``AntigravityAgent.assemble_command``
+# resumes it via ``agy --conversation`` on restart -- and its unique lines are
+# every conversation this agent touched, which ``stream_transcript.sh`` tails.
+# The shell scripts hardcode this same literal; keep them in sync.
+CONVERSATION_IDS_FILENAME: str = "antigravity_conversation_ids"
+
+# Script (provisioned into ``$MNGR_AGENT_STATE_DIR/commands/``) that the
+# ``PreInvocation`` capture hook runs to extract ``conversationId`` from agy's
+# hook payload and append it to ``CONVERSATION_IDS_FILENAME``. Name kept in
+# sync with the resource file under ``resources/``.
+CAPTURE_CONVERSATION_ID_SCRIPT_NAME: str = "capture_conversation_id.sh"
+
 # ``active`` is touched on every ``PreInvocation`` (the loop is about to call
 # the model, i.e. the agent is working) and removed on ``Stop`` (the execution
 # loop terminated and the agent is back to waiting for input). ``$MNGR_AGENT_STATE_DIR``
@@ -267,15 +282,32 @@ ACTIVE_MARKER_FILENAME: str = "active"
 _SET_ACTIVE_COMMAND: str = f'touch "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'
 _CLEAR_ACTIVE_COMMAND: str = f'rm -f "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'
 
+# Second ``PreInvocation`` handler: records the conversation ID from agy's hook
+# payload (delivered on stdin). agy hands each handler its own copy of the
+# payload stdin (verified live against agy 1.0.4), so this runs independently
+# of the active-marker handler above. ``$MNGR_AGENT_STATE_DIR`` expands in
+# agy's shell at hook-execution time.
+_CAPTURE_CONVERSATION_ID_COMMAND: str = f'bash "$MNGR_AGENT_STATE_DIR/commands/{CAPTURE_CONVERSATION_ID_SCRIPT_NAME}"'
+
 
 @pure
 def build_antigravity_hooks_config() -> dict[str, Any]:
     """Build the per-agent ``hooks.json`` body for the antigravity agent.
 
-    Emits the ``active``-marker hooks: ``PreInvocation`` touches the marker
-    and ``Stop`` removes it. ``BaseAgent.get_lifecycle_state`` reads that
-    marker to report RUNNING while the agent works and WAITING when it's idle;
-    agy maintains no such marker on its own.
+    Emits two ``PreInvocation`` handlers plus a ``Stop`` handler:
+
+    * The ``active``-marker pair: ``PreInvocation`` touches the marker and
+      ``Stop`` removes it. ``BaseAgent.get_lifecycle_state`` reads that marker
+      to report RUNNING while the agent works and WAITING when it's idle; agy
+      maintains no such marker on its own.
+    * The conversation-ID capture handler: a second ``PreInvocation`` handler
+      runs ``capture_conversation_id.sh``, which reads agy's hook payload from
+      stdin and records the active conversation ID (see
+      ``CONVERSATION_IDS_FILENAME``). ``assemble_command`` resumes that
+      conversation on restart and ``stream_transcript.sh`` tails its
+      transcript. agy delivers the payload stdin to each handler independently
+      (verified live against agy 1.0.4), so the two ``PreInvocation`` handlers
+      do not contend for stdin.
 
     Auto-approval of tool permissions is NOT a hook: agy's documented
     ``PreToolUse`` ``{"decision": "allow"}`` output does not actually gate the
@@ -289,7 +321,10 @@ def build_antigravity_hooks_config() -> dict[str, Any]:
     so no merge-with-existing-content logic is needed.
     """
     mngr_hook: dict[str, Any] = {
-        "PreInvocation": [{"type": "command", "command": _SET_ACTIVE_COMMAND}],
+        "PreInvocation": [
+            {"type": "command", "command": _SET_ACTIVE_COMMAND},
+            {"type": "command", "command": _CAPTURE_CONVERSATION_ID_COMMAND},
+        ],
         "Stop": [{"type": "command", "command": _CLEAR_ACTIVE_COMMAND}],
     }
     return {_MNGR_HOOK_NAME: mngr_hook}
