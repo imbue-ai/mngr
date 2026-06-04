@@ -1,4 +1,4 @@
-const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app, session, screen, dialog, clipboard } = require('electron');
+const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app, session, screen, dialog, clipboard, webContents } = require('electron');
 const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
@@ -309,8 +309,16 @@ function createBundleWebContentsViews(win) {
   win.contentView.addChildView(chromeView);
   win.contentView.addChildView(contentView);
 
-  // Auto-open DevTools for dev-time inspection.
+  // Auto-open DevTools for dev-time inspection. Opens panels for both the
+  // chrome (titlebar + sidebar + minds-rendered pages) and the content
+  // (iframe) views so design-system / chrome work can be inspected without
+  // having to manually focus + Cmd-Option-I each one. Sidebar + requests
+  // panels are created lazily; they get the same env-var treatment in
+  // `openSidebar` / `openRequestsPanel`.
   if (process.env.MINDS_OPEN_DEVTOOLS === '1') {
+    chromeView.webContents.once('did-finish-load', () => {
+      chromeView.webContents.openDevTools({ mode: 'detach' });
+    });
     contentView.webContents.once('did-finish-load', () => {
       contentView.webContents.openDevTools({ mode: 'detach' });
     });
@@ -500,9 +508,17 @@ function registerShortcutsFor(bundle, wc) {
       (!isMac && input.control && input.shift && input.code === 'KeyC');
     if (devTools) {
       event.preventDefault();
-      if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-        bundle.contentView.webContents.toggleDevTools();
-      }
+      // Toggle devtools for the view the keystroke originated from -- so
+      // hitting the shortcut while inspecting the chrome titlebar / sidebar
+      // opens devtools for that view rather than for the iframe content.
+      // Falls back to the bundle's content view if `wc` is gone (race with
+      // window teardown).
+      const target = !wc.isDestroyed()
+        ? wc
+        : bundle.contentView && !bundle.contentView.webContents.isDestroyed()
+          ? bundle.contentView.webContents
+          : null;
+      if (target) target.toggleDevTools();
       return;
     }
     // When the app menu is installed, it owns cmd+W / cmd+Q / cmd+N; handling
@@ -1562,9 +1578,18 @@ function installApplicationMenu() {
         {
           label: 'Toggle Developer Tools',
           // role: 'toggleDevTools' targets a BrowserWindow; we use BaseWindow,
-          // so toggle the focused bundle's content view explicitly.
+          // so toggle the focused webContents explicitly. This lets the menu
+          // item open devtools for whichever view has focus (chrome titlebar,
+          // sidebar, requests panel, or the iframe content), not just the
+          // iframe. Falls back to the most recent bundle's content view when
+          // no webContents is focused (e.g. menu invoked via accelerator).
           accelerator: 'Alt+Cmd+I',
           click: () => {
+            const focused = webContents.getFocusedWebContents();
+            if (focused && !focused.isDestroyed()) {
+              focused.toggleDevTools();
+              return;
+            }
             const bundle = getMostRecentWindow();
             if (!bundle || bundle.window.isDestroyed()) return;
             const cv = bundle.contentView;
