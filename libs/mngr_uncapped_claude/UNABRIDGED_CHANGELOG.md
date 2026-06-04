@@ -4,6 +4,18 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-02
+
+`UncappedClaudeError` (the plugin's base error) now inherits from `MngrError` instead of
+`BaseMngrError`, matching the repo-wide consolidation of the error hierarchy under a single
+user-facing parent class. This also removes a prior inconsistency where its subclasses
+(`UnsupportedClaudeFlagError`, `InvalidStreamJsonInputError`, `MissingPromptError`) were already
+`MngrError` instances via `UserInputError` while the base was not. No behavior change.
+
+Updated to the repo-wide error-hierarchy consolidation: `except BaseMngrError` handlers now use
+`except MngrError` (`BaseMngrError` has been removed). No behavior change. The error-hierarchy
+unit test (`errors_test.py`), which only documented the old two-tier distinction, was removed.
+
 ## 2026-05-28
 
 # Dropped redundant per-project ty/ruff ratchet tests
