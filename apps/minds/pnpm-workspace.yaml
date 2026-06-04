@@ -7,3 +7,16 @@ onlyBuiltDependencies:
 # can't be pulled in before being yanked); restore it once the pin-drift
 # / CI churn settles. Tracked TODO for revisit.
 minimumReleaseAge: 0
+
+# ToDesktop builds every platform target from one host, but pnpm (like
+# npm) only installs optional deps matching the build host's
+# OS/arch/libc. Without these knobs, scripts/build.js's `pnpm deploy`
+# would omit the cross-platform native prebuilds (@napi-rs/keyring-*,
+# playwright fsevents, ...) and the shipped resources/latchkey/ would
+# crash on user platforms different from the builder's. Every variant
+# is already resolved in pnpm-lock.yaml, so this only changes WHICH
+# resolved entries get materialized, not which versions are picked.
+supportedArchitectures:
+  os: [current, darwin, linux, win32]
+  cpu: [current, x64, arm64]
+  libc: [current, glibc, musl]
