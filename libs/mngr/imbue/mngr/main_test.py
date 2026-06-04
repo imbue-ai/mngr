@@ -7,12 +7,6 @@ import pytest
 from imbue.mngr.main import create_plugin_manager
 
 
-# Marked flaky as a diagnostic safety net: the underlying cause of the rare CI
-# failure here is not yet understood. find_git_worktree_root now raises loudly
-# instead of swallowing unexpected git failures, so a recurrence should surface
-# git's real error in the offload logs rather than a bare ``assert False``;
-# the retry keeps a rare recurrence from blocking unrelated PRs in the meantime.
-@pytest.mark.flaky
 def test_create_plugin_manager_blocks_disabled_plugins(
     project_config_dir: Path,
     temp_git_repo_cwd: Path,
