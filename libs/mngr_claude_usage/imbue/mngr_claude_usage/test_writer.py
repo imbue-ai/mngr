@@ -6,34 +6,21 @@ properly-shaped JSONL events to the per-agent usage events file.
 
 from __future__ import annotations
 
-import importlib.resources
 import json
 import os
+import re
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
-from imbue.mngr_claude_usage import resources as _resources
-
-WRITER_SCRIPT_NAME = "claude_usage_writer.sh"
-
-
-@pytest.fixture
-def writer_path(tmp_path: Path) -> Path:
-    """Stage the writer script onto disk with execute bit, ready for subprocess."""
-    src = importlib.resources.files(_resources).joinpath(WRITER_SCRIPT_NAME)
-    dst = tmp_path / WRITER_SCRIPT_NAME
-    dst.write_bytes(src.read_bytes())
-    dst.chmod(0o755)
-    return dst
-
-
-@pytest.fixture
-def events_file(tmp_path: Path) -> Path:
-    return tmp_path / "events" / "claude" / "usage" / "events.jsonl"
+# The writer_path / events_file fixtures live in conftest.py (shared across the
+# library's shell-script tests) per the repo convention that fixtures belong in
+# conftest, not in individual test files.
 
 
 def _has_jq() -> bool:
@@ -79,8 +66,16 @@ def test_writer_emits_event_with_rate_limits(writer_path: Path, events_file: Pat
     assert event["source"] == "claude/usage"
     assert event["type"] == "cost_snapshot"
     assert event["event_id"].startswith("evt-")
-    # ISO 8601 timestamps always contain a 'T' separator
-    assert "T" in event["timestamp"]
+    # The event timestamp must be canonical nanosecond-precision UTC ISO 8601
+    # (the writer emits `<date>T<time>.000000000Z`). A bare `"T" in ts` check
+    # would pass on garbage like "garbageT", so validate the full shape and that
+    # the calendar instant actually parses. datetime.fromisoformat rejects the
+    # 9-digit fractional part, so we regex the shape and strptime the
+    # seconds-resolution prefix as UTC.
+    timestamp = event["timestamp"]
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{9}Z", timestamp), timestamp
+    parsed_timestamp = datetime.strptime(timestamp[:19] + "+0000", "%Y-%m-%dT%H:%M:%S%z")
+    assert parsed_timestamp.utcoffset() == timedelta(0)
     # session_id and cost are passed through unchanged. They let downstream
     # consumers correlate a cost reading to the session it accumulated in.
     assert event["session_id"] == "abc"
@@ -202,9 +197,12 @@ def test_writer_handles_concurrent_appends(writer_path: Path, events_file: Path)
             assert r.returncode == 0, r.stderr
     lines = [line for line in events_file.read_text().splitlines() if line.strip()]
     assert len(lines) == 20
-    for line in lines:
-        # All lines must be parseable -- no torn output from the concurrent appends.
-        json.loads(line)
+    # Every distinct submitted event must survive exactly once. Checking only the
+    # line count would miss a bug that duplicated one append while losing another
+    # (count stays 20); reconstructing the set of used_percentage values catches
+    # that. json.loads on each line also fails on any torn/interleaved output.
+    seen_percentages = {json.loads(line)["rate_limits"]["five_hour"]["used_percentage"] for line in lines}
+    assert seen_percentages == {float(i) for i in range(20)}
 
 
 def test_writer_errors_when_no_path_resolution_possible(writer_path: Path, tmp_path: Path) -> None:

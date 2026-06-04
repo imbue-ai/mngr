@@ -3,34 +3,22 @@
 from __future__ import annotations
 
 import json
-import os
-import subprocess
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
-from pydantic import BaseModel
-
+from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr_claude_usage.plugin import _capture_existing_statusline_command
 from imbue.mngr_claude_usage.plugin import _install_settings_local_statusline
 from imbue.mngr_claude_usage.plugin import _provision_statusline_shim
 from imbue.mngr_claude_usage.plugin import _stable_shim_path
 from imbue.mngr_claude_usage.plugin import on_before_provisioning
-
-
-class _StubAgent(BaseModel):
-    """Stub agent for the hookimpl filter test (not a real ClaudeAgent)."""
-
-    id: str
-    agent_type: str
-    work_dir: Path
-
-
-class _StubHost(BaseModel):
-    """Stub host for tests."""
-
-    host_dir: Path
-
 
 # =============================================================================
 # _capture_existing_statusline_command
@@ -222,45 +210,33 @@ def test_provision_preserves_user_cmd_when_only_in_settings_local(local_host: Ho
 
 
 # =============================================================================
-# Shim runtime behavior (sanity-check that the actual shell script implements
-# the contract the docs in plugin.py promise; the python tests above only
-# exercise the provisioner side).
+# on_before_provisioning agent-type filter
 # =============================================================================
 
 
-def test_shim_exits_zero_when_mngr_agent_state_dir_unset(local_host: Host, tmp_path: Path) -> None:
-    """Standalone claude invocation: no MNGR_AGENT_STATE_DIR in env. The shim
-    must exit 0 and emit nothing -- claude renders the statusline every couple
-    of seconds and a non-zero exit would surface as a visible error."""
-    state_dir = local_host.host_dir / "agents" / "agent-noenv"
+def test_hookimpl_skips_non_claude_agent(local_host: Host, temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """The hookimpl filters with isinstance(agent, ClaudeAgent). A real non-Claude
+    agent (a plain BaseAgent of the 'generic' type) must be a no-op -- no host
+    commands dir, no settings.local.json. Using the real local_host means that if
+    the isinstance guard were removed, provisioning would actually run and create
+    those artifacts, so these assertions fail for the right reason rather than on
+    a fake object's missing methods. Real ClaudeAgent provisioning is exercised in
+    mngr_claude's own tests; this test just locks in the filter behavior."""
     work_dir = tmp_path / "work"
     work_dir.mkdir()
-    _provision_statusline_shim(local_host, state_dir, work_dir)
-
-    shim_path = _stable_shim_path(local_host.host_dir)
-    env = {k: v for k, v in os.environ.items() if k != "MNGR_AGENT_STATE_DIR"}
-    result = subprocess.run(
-        ["bash", str(shim_path)],
-        input=b'{"session_id":"abc"}',
-        capture_output=True,
-        env=env,
-        check=False,
-        timeout=5,
+    agent = BaseAgent(
+        id=AgentId.generate(),
+        host_id=local_host.id,
+        name=AgentName("non-claude-agent"),
+        agent_type=AgentTypeName("generic"),
+        agent_config=AgentTypeConfig(),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host=local_host,
+        mngr_ctx=temp_mngr_ctx,
     )
-    assert result.returncode == 0, result.stderr.decode()
-    assert result.stdout == b""
-    assert result.stderr == b""
 
+    on_before_provisioning(agent=agent, host=local_host, mngr_ctx=temp_mngr_ctx)
 
-def test_hookimpl_skips_non_claude_stub(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
-    """The hookimpl filters with isinstance(agent, ClaudeAgent). Stub agents don't
-    pass that check, so the hookimpl is a no-op for them -- no commands dir, no
-    settings.local.json. Real ClaudeAgent integration is exercised in mngr_claude's
-    own provisioning tests; this test just locks in the filter behavior."""
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
-    agent = _StubAgent(id="agent-test", agent_type="opencode", work_dir=work_dir)
-    host = _StubHost(host_dir=tmp_path / "host")
-    on_before_provisioning(agent=agent, host=host, mngr_ctx=temp_mngr_ctx)  # ty: ignore[invalid-argument-type]
-    assert not (tmp_path / "host" / "agents" / "agent-test").exists()
+    assert not (local_host.host_dir / "commands").exists()
     assert not (work_dir / ".claude" / "settings.local.json").exists()
