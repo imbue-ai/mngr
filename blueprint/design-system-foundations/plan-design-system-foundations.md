@@ -6,9 +6,10 @@ I want to formalize a bit of the design system for the minds app. In this PR I w
 
 1. Workspace colors (and this quite literally means the background color for the whole app). By default we'll want to run the app against the black palette color, but the user can opt per workspace to switch the color (we kind of do that now, but only show a little swatch in the title). I want to push this to whole chrome. The colors that are allowed are these: <https://www.figma.com/design/1p1nrkoHia3OxahQOkmHh3/Minds-Early-IA-Explorations?node-id=314-4141&t=D0X7nv6rcuGNEKhz-11> please use their names and values. Do not make up any new ones.
    The way this will work is that based on which color you choose we flip the text and border and siurface colors to be some transparent black or transparent white to blend nicely.
-   * The eleven allowed workspace tokens (Figma node 314:4141) are: `workspace/indifference` `#000000`, `workspace/confusion` `#0B292B`, `workspace/courage` `#492222`, `workspace/envy` `#3C3D06`, `workspace/peace` `#9FBBD3`, `workspace/belonging` `#E8A7A8`, `workspace/energy` `#CECD0C`, `workspace/strength` `#CFC7B3`, `workspace/comfort` `#F5D6A0`, `workspace/inspiration` `#E9ECD9`, `workspace/clarity` `#FCEFD4`.
-   * The default for a new workspace is `workspace/indifference` (#000000); the picker lives on the workspace settings page and persists per-`agent_id` in the minds-side config (no agent-side or `.mngr/` involvement).
-   * Workspaces with `#000000`–`#492222`–`#3C3D06` use the dark theme (white foreground at opacity); workspaces with `#9FBBD3`–`#FCEFD4` use the light theme (black foreground at opacity). This dark/light bucket is a property of the workspace color and is encoded in the same TS/Python catalog as the swatch list.
+   * The eleven Figma palette colors (Figma node 314:4141) are **presets**, not a closed catalog: `workspace/indifference` `#000000`, `workspace/confusion` `#0B292B`, `workspace/courage` `#492222`, `workspace/envy` `#3C3D06`, `workspace/peace` `#9FBBD3`, `workspace/belonging` `#E8A7A8`, `workspace/energy` `#CECD0C`, `workspace/strength` `#CFC7B3`, `workspace/comfort` `#F5D6A0`, `workspace/inspiration` `#E9ECD9`, `workspace/clarity` `#FCEFD4`. The picker surfaces these as suggestions; eventually a freeform color picker will accept any CSS color. For this PR the UI exposes only the 11 presets, but the storage layer + theme-inference pipeline already handle arbitrary color values (so the freeform follow-up is purely UI work).
+   * The default for a *new* workspace is `workspace/indifference` (#000000). The picker lives both on the workspace settings page (a row of 11 swatches) and as a small disclosure menu in the titlebar (quick-flip without leaving the workspace). It persists per-`agent_id` in the minds-side config (no agent-side or `.mngr/` involvement).
+   * *Existing* workspaces (created before this PR lands) inherit their current OKLCH-derived per-agent hue rather than snapping to `indifference`: on first read for an agent without a stored color, the migration step computes `oklch(75% 0.15 <hash-derived-hue>)` and stores that as the agent's workspace color. The lightness bumps from today's 65% to 75% so the result reads as a usable background. The presets are still surfaced in the picker for that workspace; if the user picks one, the OKLCH starting color is replaced.
+   * Theme (dark/light) is inferred from the chosen color's relative luminance, **not** from a static enum-to-theme lookup: luminance > 0.5 → light theme (black foreground at opacity); otherwise → dark theme (white foreground at opacity). This works for both presets and arbitrary OKLCH values. For the 11 presets it lands as: `indifference` / `confusion` / `courage` / `envy` → dark; `peace` / `belonging` / `energy` / `strength` / `comfort` / `inspiration` / `clarity` → light.
 
 2. Then there are semantic colors like these <https://www.figma.com/design/1p1nrkoHia3OxahQOkmHh3/Minds-Early-IA-Explorations?node-id=314-4126&t=D0X7nv6rcuGNEKhz-11> (for now both dark and light version includes the same set, but they might drift and be different for better look, so plan for that)
    * Semantic tokens (Figma node 314:4126): `semantic/important` `#F50D00`, `semantic/success` `#5C8A3C`, `semantic/warning` `#D49A2C`, `semantic/info` `#527EA3`. Today the values are identical in light + dark; in CSS we still split them across `[data-theme]` blocks so the two scopes can drift independently later without a value-site refactor.
@@ -47,20 +48,26 @@ I want to formalize a bit of the design system for the minds app. In this PR I w
 
 ## Overview
 
-- Replace the current OKLCH-hash-derived per-agent accent with an explicit 11-color named palette that the user can pick per workspace, defaulting to `workspace/indifference` (#000000).
+- The current OKLCH-hash-derived per-agent accent is reinterpreted, not deleted: the same hue hash drives the *starting* workspace color (now at L=75% so it reads as a full background, not an accent). The user can override the starting color with one of 11 named presets, or eventually any CSS color. New workspaces default to `workspace/indifference` (#000000).
+- Workspace color is **freeform-capable from day one** at the data layer (a `str` validated as a CSS color), even though the UI only surfaces the 11 presets in this PR. Theme (dark/light) is inferred from the color's relative luminance.
 - The picked color is the actual background for the whole app chrome (titlebar, sidebar, content surface), not just a thin stripe or swatch as today.
 - Surfaces / borders / text are foreground-at-opacity tokens that automatically flip between white-on-dark and black-on-light depending on the picked workspace color.
 - All design tokens (workspace colors, foreground ramps, semantic colors, focus ring, spacing, radii, type ramp) live in one `static/tokens.css`, scoped by `[data-theme="dark"|"light"]` so dark+light can drift independently later without touching call sites.
-- All JinjaX primitive components (`Button`, `TextInput` → `TextField`, plus new `Select`, `Checkbox`, `Toggle`, `MenuItem`, `Skeleton`, `Icon`) consume those tokens via CSS variables, not raw Tailwind colors. The state matrices match the Figma component sets exactly.
+- All JinjaX primitive components (`Button`, `TextInput`, plus new `Select`, `Checkbox`, `Toggle`, `MenuItem`, `Skeleton`, `Icon`) consume those tokens via CSS variables, not raw Tailwind colors. The state matrices match the Figma component sets exactly. (`TextInput` keeps its code name; the Figma component is renamed to match.)
+- The `success` button variant stays in the codebase but is re-grounded on the new `--success` semantic token (Figma `semantic/success` #5C8A3C). Existing call sites are unchanged.
+- Permission / request modal dialogs follow the host workspace's theme rather than staying light always. The dialog surface reads from the same token vars as the host page.
 - Existing chrome / page templates stop using `bg-zinc-900` / `text-zinc-200` / `border-white/10` / etc. and switch to token-backed utility classes. The migration is mechanical but broad — most templates change.
 - A new `Icon` component holds the eight Figma icon paths verbatim; existing chrome icons that happen to map onto one of these names (chevron-right back/forward, etc.) get re-pointed; chrome icons not in the Figma library (titlebar window controls, restart, settings cog, etc.) are out of scope and remain as-is.
-- The dev styleguide page gains a state-matrix grid per stateful component, a workspace-color picker (so reviewers can flip the whole page through the 11 colors), and a theme-flip toggle.
+- The dev styleguide page gains a state-matrix grid per stateful component and a workspace-color picker at the top (all 11 presets) so reviewers can flip the whole page through every color. No standalone light/dark toggle — theme follows whichever color is picked. The production app does not expose any theme override affordance.
 
 ## Expected behavior
 
-- The 11 workspace colors plus their dark/light bucketing are a closed catalog. Code that names a workspace color uses a Python `Enum` (`WorkspaceColor`) or its CSS-class slug (`workspace/indifference` → `ws-indifference`). Strings outside the catalog are rejected at the persistence boundary.
-- Each agent has a chosen workspace color persisted in `~/.minds/config.toml` under `workspaces.<agent_id>.color`. Default for any agent without an entry is `indifference`.
-- The workspace-settings page gets a "Color" section with a row of 11 swatches; clicking persists immediately and reloads the workspace surface in the new color. The selected swatch ring uses `focus/ring`.
+- A workspace color is a CSS-color string (hex, oklch, rgb, …) validated at the persistence boundary. The 11 presets are recognized by their preset slug (`indifference`, `confusion`, etc.); any other value is stored as the literal CSS color string.
+- Each agent has a chosen workspace color persisted in `~/.minds/config.toml` under `workspaces.<agent_id>.color`. The value is either a preset slug or a CSS color literal.
+- Default for a *new* agent without an entry: the preset slug `indifference`. Default for an *existing* agent (one that had a workspace before this PR landed): the deterministic OKLCH starting color `oklch(75% 0.15 <agent-id-hash-hue>)`, materialized into the config on first read (one-time migration step).
+- Theme is inferred from the picked color's relative luminance at read time (`>= 0.5` → light, else dark). No theme is stored alongside the color.
+- The workspace-settings page gets a "Color" section with a row of 11 preset swatches; clicking persists immediately and reloads the workspace surface in the new color. The selected swatch ring uses `focus/ring`. If the agent's currently stored color is *not* one of the presets (e.g. a freeform OKLCH from the migration), a small "current" chip is rendered next to the preset row showing the raw value so it's not invisible to the user.
+- The titlebar gets a small swatch button (left of the workspace title) that opens a flyout with the same 11-preset row plus the current value. Clicking a swatch fires the same POST and updates the chrome live (no full reload — the page swaps its `<html>` `data-ws-color` / `data-theme` attributes from the response).
 - Every workspace-context page (`Chrome`, `Sidebar`, `Landing`, `WorkspaceSettings`, `Sharing`, `Creating`, `Destroying`, permission dialogs) renders with:
   - `<html data-theme="dark|light" data-ws-color="<slug>">` set server-side from the picked color.
   - `<body style="background: var(--ws-<slug>)">` — the workspace color is the page background; the chrome's titlebar matches it (no separate `bg-zinc-900` chrome panel).
@@ -73,30 +80,36 @@ I want to formalize a bit of the design system for the minds app. In this PR I w
 - Selects render the exact Figma `chevron-down` SVG and use `MenuItem` for their dropdown rows.
 - Focus rings on every focusable component are `--focus-ring` (#0A84FFE5) at 2px outline + 2px offset.
 - All eight Figma icons render exactly as their Figma SVG paths (verbatim `d="..."`); the component is `<Icon name="chevron-down" />` and rejects unknown names at template-render time.
-- The styleguide gains: a workspace-color picker that re-renders the entire styleguide in the chosen color; a manual `data-theme` flip toggle; a per-stateful-component grid showing every state under both themes side-by-side.
-- The `templates_test.py` token ratchet keeps cross-checking declared `:root` / `[data-theme=*]` tokens against `data-token` swatches in the styleguide. The current `--workspace-accent` runtime variable is replaced with `--ws-<slug>`; both ratchet sides update together.
-- Pages that today inject `--workspace-accent: oklch(...)` via `body style="..."` instead inject the workspace color slug + theme on `<html>`. The CSS variable then resolves to a named palette value.
+- The styleguide gains: a workspace-color picker at the top of the page (11 preset swatches) that re-renders the styleguide in the chosen color; theme follows the color via the same luminance rule the production app uses, so there is no separate light/dark toggle. A per-stateful-component grid shows every state under whatever the picked color happens to be (reviewers flip through colors to see both themes).
+- The `templates_test.py` token ratchet keeps cross-checking declared `:root` / `[data-theme=*]` tokens against `data-token` swatches in the styleguide. The current `--workspace-accent` runtime variable is replaced with `--workspace-bg` (set per-page from the picked color, regardless of whether the color is a preset or freeform); both ratchet sides update together.
+- Pages that today inject `--workspace-accent: oklch(...)` via `body style="..."` instead inject `--workspace-bg: <picked-color>` plus `data-theme="dark|light"` on `<html>` (theme computed server-side from the color's luminance). The 11 preset CSS variables (`--ws-indifference` etc.) still exist in `tokens.css` for the picker UI to reference, but the active page background reads from `--workspace-bg`, not from a preset var.
 
 ## Implementation plan
 
 ### New data type and persistence
 
 - `apps/minds/imbue/minds/desktop_client/design_tokens.py` — new module.
-  - `WorkspaceColor(StrEnum)`: members `INDIFFERENCE`, `CONFUSION`, `COURAGE`, `ENVY`, `PEACE`, `BELONGING`, `ENERGY`, `STRENGTH`, `COMFORT`, `INSPIRATION`, `CLARITY`. Values are kebab-case slugs (`"indifference"` etc.).
+  - `WorkspacePreset(StrEnum)`: members `INDIFFERENCE`, `CONFUSION`, `COURAGE`, `ENVY`, `PEACE`, `BELONGING`, `ENERGY`, `STRENGTH`, `COMFORT`, `INSPIRATION`, `CLARITY`. Values are kebab-case slugs.
   - `Theme(StrEnum)`: `DARK`, `LIGHT`.
-  - `WORKSPACE_PALETTE: Final[Mapping[WorkspaceColor, tuple[str, Theme]]]` — `(hex_value, theme)` per color. Single source of truth used by Python + the styleguide's "all swatches" rendering.
-  - `DEFAULT_WORKSPACE_COLOR: Final[WorkspaceColor] = WorkspaceColor.INDIFFERENCE`.
-  - `theme_for(color: WorkspaceColor) -> Theme` — pure lookup.
-  - Static check helper: a one-line assertion that every member is present in the palette dict, to catch drift between the enum and the data table at import time.
+  - `WORKSPACE_PRESETS: Final[Mapping[WorkspacePreset, str]]` — `slug → hex value`. Used by Python + the styleguide picker rendering. (Theme is derived, not stored.)
+  - `DEFAULT_WORKSPACE_PRESET: Final[WorkspacePreset] = WorkspacePreset.INDIFFERENCE`.
+  - `WorkspaceColor` is a Pydantic model wrapping a single `str` field, used at the persistence + API boundaries:
+    - Validators accept either a `WorkspacePreset` slug, or a CSS color literal in the form `#RRGGBB` / `#RRGGBBAA` / `oklch(L% C H)` / `rgb(r g b)`. Anything else raises a validation error.
+    - Provides `.resolve_hex() -> str` (resolves preset slugs to their hex; passes literals through as-is) and `.is_preset(slug: WorkspacePreset) -> bool`.
+  - `theme_for(color: WorkspaceColor) -> Theme` — relative-luminance computation per WCAG (sRGB → linear → `0.2126 R + 0.7152 G + 0.4722 B`); luminance `>= 0.5` → `LIGHT`, else `DARK`. Handles hex / oklch / rgb literals via `colour` library (already a transitive dep — verify; fall back to a tiny inline sRGB-only impl if not).
+  - `oklch_starting_color(agent_id: str) -> str` — pure function returning `f"oklch(75% 0.15 {sha256(agent_id)[:4] % 360})"`. Used by the one-time migration to seed existing workspaces. Lightness fixed at 75% (up from today's 65%).
+  - Static check helper at module bottom: assert every `WorkspacePreset` member is present in `WORKSPACE_PRESETS`.
 - `apps/minds/imbue/minds/desktop_client/minds_config.py` — extend `MindsConfig`.
-  - `get_workspace_color(agent_id: AgentId) -> WorkspaceColor` — reads `workspaces.<agent_id>.color`; returns `DEFAULT_WORKSPACE_COLOR` if missing or unparseable (with a warning log on unparseable, not an error: corrupt config should not block UI rendering).
-  - `set_workspace_color(agent_id: AgentId, color: WorkspaceColor) -> None` — writes through the same `_lock` + atomic-rename pattern as the other setters.
+  - `get_workspace_color(agent_id: AgentId) -> WorkspaceColor` — reads `workspaces.<agent_id>.color`; returns the migration result for agents that pre-exist but have no entry (see migration below); returns `DEFAULT_WORKSPACE_PRESET` for genuinely-new agents. Logs a warning and falls back to default on unparseable values.
+  - `set_workspace_color(agent_id: AgentId, color: WorkspaceColor) -> None` — writes through the same `_lock` + atomic-rename pattern as the other setters. The serialized value is the preset slug if the color is a preset, else the raw CSS literal.
   - `remove_workspace_color(agent_id: AgentId) -> None` — called when an agent is destroyed, to keep `config.toml` tidy. Called from the destroy flow's success path; missing entries are a no-op.
+  - **Migration on first read**: `get_workspace_color` checks if the agent existed before the migration boundary (`existed_before_migration: bool` argument, supplied by the caller — typically the route handler that already has the agent in hand from discovery). If true and the config has no entry, the function materializes `oklch_starting_color(agent_id)` into the config (under the same `_lock`) and returns it. This keeps the migration deterministic and side-effect-isolated to first read; no separate migration pass needed. The marker for "existed before" is simply "agent appears in the existing minds discovery cache when the new code is first run" — the route handler treats every agent it sees on the first call as eligible. Alternative simpler approach: always materialize the OKLCH starting color on first read regardless of "when the agent was created", and treat the `indifference` default only for "create flow hasn't completed yet". This is the chosen approach in the plan — it's simpler and harmless because new agents born after this PR also see the OKLCH color first, which is fine (it's still a deterministic, on-palette-feeling color). The `indifference`-as-new-default rule only kicks in at agent-creation time, when the agent creator writes `WorkspacePreset.INDIFFERENCE` explicitly.
 
 ### New token CSS
 
 - `apps/minds/imbue/minds/desktop_client/static/tokens.css` — rewrite to declare every design token. Structure:
-  - `:root` block keeps the existing `--shadow-seam` (carried over verbatim) plus the spacing scale (`--space-4` through `--space-32`), the radius scale (`--radius-sm`, `--radius-md`, `--radius-lg`, `--radius-pill`), and the workspace-color palette (`--ws-indifference: #000000;` ... `--ws-clarity: #FCEFD4;`).
+  - `:root` block keeps the existing `--shadow-seam` (carried over verbatim) plus the spacing scale (`--space-4` through `--space-32`), the radius scale (`--radius-sm`, `--radius-md`, `--radius-lg`, `--radius-pill`), and the **preset** workspace colors (`--ws-indifference: #000000;` ... `--ws-clarity: #FCEFD4;`). The preset vars exist so the picker UI can reference them without each swatch knowing its own hex; the page background does **not** use them directly — see `--workspace-bg` below.
+  - `--workspace-bg` is set per-page via inline style on `<html>`, not at `:root`. Its value can be a preset (`var(--ws-confusion)`) or a freeform CSS color (`oklch(75% 0.15 230)`); pages don't care which.
   - `[data-theme="dark"]` block declares all foreground-at-opacity ramps for dark, semantic colors, focus ring, surface overlay.
   - `[data-theme="light"]` block declares the same set of token names with light values.
   - Type-ramp utility classes: `.type-display-24`, `.type-heading-16`, `.type-label-14`, `.type-body-14`, `.type-menu-13`, `.type-helper-12`, `.type-section-11`, `.type-title-12`, `.type-badge-10`. Each sets `font-size`, `line-height`, and `font-weight` to the Figma values. (Kept as classes rather than custom properties because consumers vary by element type — labels are spans, headings are h1, etc.)
@@ -112,18 +125,19 @@ I want to formalize a bit of the design system for the minds app. In this PR I w
 ### Theme + workspace-color application
 
 - `apps/minds/imbue/minds/desktop_client/templates/Base.jinja` — accept new props.
-  - Add `theme="dark"` and `ws_color="indifference"` props (with sensible defaults so non-workspace pages still render).
-  - Render them on `<html>` as `data-theme="{{ theme }}" data-ws-color="{{ ws_color }}"`.
-  - Drop the `body_class` default that hard-codes `bg-zinc-50 text-zinc-900`; replace with token-backed classes: `class="font-sans antialiased text-token-primary bg-token-ws-color"`. (`bg-token-ws-color` is a tiny utility defined in `tokens.css` that resolves to `background: var(--ws-<slug>)`.)
+  - Add `theme="dark"` and `workspace_bg="#000000"` props (with sensible defaults so non-workspace pages still render). `workspace_bg` is the resolved CSS color (hex or oklch literal), not a slug — the server resolves any preset to its hex before render so the template doesn't have to know about presets.
+  - Render them as `<html data-theme="{{ theme }}" style="--workspace-bg: {{ workspace_bg }};">`.
+  - Drop the `body_class` default that hard-codes `bg-zinc-50 text-zinc-900`; replace with token-backed classes: `class="font-sans antialiased text-token-primary bg-token-workspace"`. (`bg-token-workspace` is a tiny utility defined in `tokens.css` that resolves to `background: var(--workspace-bg)`.)
 - `apps/minds/imbue/minds/desktop_client/templates.py`:
   - Replace the `workspace_accent(agent_id)` function and its `_WORKSPACE_L` / `_WORKSPACE_C` constants with `workspace_color_for(agent_id, *, config) -> WorkspaceColor` that reads from `MindsConfig`.
-  - Replace every render-function call site that today passes `accent=workspace_accent(agent_id)` with two new kwargs: `theme=theme_for(color).value, ws_color=color.value`. Render functions affected: `render_creating_page`, `render_destroying_page`, `render_sharing_editor`, `render_workspace_settings`, `render_landing_page`. Each function takes an injected `MindsConfig` (the route handlers already have one in their FastAPI dependency graph; verify in `request_handler.py` and pass through).
-  - The landing page is **not** workspace-scoped; it always renders with `theme="dark"`, `ws_color="indifference"`. The per-row accent stripes that today use `--workspace-accent` switch to `style="--ws-row: var(--ws-<slug>)"` and the accent stripe element reads `--ws-row` (so the stripe color is the row's workspace color, while the page background stays the default).
+  - Add a small `_render_kwargs_for_workspace(agent_id, *, config) -> dict[str, str]` helper returning `{"theme": ..., "workspace_bg": ...}` so call sites don't repeat the two-step resolve + theme-infer dance.
+  - Replace every render-function call site that today passes `accent=workspace_accent(agent_id)` with the helper above. Render functions affected: `render_creating_page`, `render_destroying_page`, `render_sharing_editor`, `render_workspace_settings`, `render_landing_page`. Each function takes an injected `MindsConfig` (the route handlers already have one in their FastAPI dependency graph; verify in `request_handler.py` and pass through).
+  - The landing page is **not** workspace-scoped; it always renders with `theme="dark"`, `workspace_bg="#000000"` (preset `indifference`). The per-row accent stripes that today use `--workspace-accent` switch to `style="--ws-row: <row's resolved color>;"` and the accent stripe element reads `--ws-row` (so the stripe color is the row's workspace color, while the page background stays the default). Row colors come from the same migration + persistence pipeline.
 - `apps/minds/imbue/minds/desktop_client/static/workspace_accent.js`:
-  - Replaced by `workspace_color.js` (rename): exports `window.mindsWorkspaceColor.set(htmlEl, slug)` and `.get(agentId, callback)`. The deterministic OKLCH derivation is gone; lookup is by `agentId` against a `/api/workspace-color/<agent_id>` GET endpoint, with a `Promise`/callback API matching the current shape so call sites only need to read a slug instead of an OKLCH string.
+  - Replaced by `workspace_color.js` (rename): exports `window.mindsWorkspaceColor.set(htmlEl, color, theme)` and `.get(agentId, callback)`. The deterministic OKLCH derivation moves server-side (in `design_tokens.py`); the JS just fetches `/api/workspace-color/<agent_id>` and updates `<html>`'s `data-theme` + `--workspace-bg` in place. Used by the titlebar quick-flip menu to apply changes without reloading the page.
 - New FastAPI routes in `apps/minds/imbue/minds/desktop_client/api_v1.py` (or wherever the `/api` group lives in this branch — confirm at impl):
-  - `GET /api/workspace-color/{agent_id}` → `{"color": "<slug>"}`. Reads via `MindsConfig.get_workspace_color`.
-  - `POST /api/workspace-color/{agent_id}` body `{"color": "<slug>"}` → 204. Validates via `WorkspaceColor(slug)` (Pydantic, so unknown slugs 422). Writes via `MindsConfig.set_workspace_color`.
+  - `GET /api/workspace-color/{agent_id}` → `{"color": "<value>", "theme": "dark|light", "resolved_hex": "#..."}`. Reads via `MindsConfig.get_workspace_color`, includes both the stored value (slug or literal) and the resolved hex + inferred theme so the JS doesn't repeat the luminance math.
+  - `POST /api/workspace-color/{agent_id}` body `{"color": "<slug-or-literal>"}` → 204. Validates via `WorkspaceColor` Pydantic model (unknown slugs / unparseable literals 422). Writes via `MindsConfig.set_workspace_color`.
 
 ### Chrome / page templates — broad sweep
 
@@ -140,13 +154,13 @@ Token-utility classes added to `tokens.css` (so templates can write `class="text
 - `.focus-ring-token` (utility that sets the `outline` + `outline-offset` via `--focus-ring`)
 
 Templates updated (mechanical sweep):
-- `templates/pages/Chrome.jinja` — titlebar no longer `bg-zinc-900`; uses `bg-token-ws-color` on body and titlebar, `text-token-primary` on the title text, `text-token-tertiary` on the titlebar buttons, `bg-token-fill-hover` on hover. The page-workspace stripe (`.page-workspace::before`) is **removed** — the whole chrome IS the workspace color now, so a separate stripe is redundant.
+- `templates/pages/Chrome.jinja` — titlebar no longer `bg-zinc-900`; uses `bg-token-workspace` on body and titlebar, `text-token-primary` on the title text, `text-token-tertiary` on the titlebar buttons, `bg-token-fill-hover` on hover. The page-workspace stripe (`.page-workspace::before`) is **removed** — the whole chrome IS the workspace color now, so a separate stripe is redundant. **Adds a titlebar workspace-color swatch button** (left of the workspace title) that opens a small flyout containing the 11 preset swatches; clicking a swatch calls the API and applies `data-theme` + `--workspace-bg` live via `workspace_color.js`.
 - `templates/pages/Sidebar.jinja` — same swap; sidebar background follows the workspace color via inheritance, items use `.menu-item` selectors.
 - `templates/pages/Landing.jinja` — rows use the new `.workspace-row` component class. Each row's accent stripe (`.accent-spine` today) is recolored from `--ws-row` set inline per row.
-- `templates/pages/WorkspaceSettings.jinja` — content surfaces flip per theme. **Adds a new "Color" section**: a row of 11 swatches (`<button class="ws-swatch" data-color="indifference" style="background: var(--ws-indifference)">`) above "Sharing". The selected swatch is marked `aria-pressed="true"` and ringed with `--focus-ring`. Click → POST `/api/workspace-color/<agent_id>` → reload.
-- `templates/pages/Sharing.jinja`, `templates/pages/Creating.jinja`, `templates/pages/Destroying.jinja` — same migration: theme + ws_color set, hardcoded colors removed.
-- `templates/pages/Create.jinja`, `templates/pages/Welcome.jinja`, `templates/pages/Landing.jinja` (already noted) — these are pre-workspace; render with the default theme/color.
-- `templates/PermissionsDialog.jinja` — modal backdrop uses `bg-token-surface-overlay`, dialog card uses light theme regardless of host workspace (the dialog reads better as a fixed light-on-dark surface; flagged in Open Questions).
+- `templates/pages/WorkspaceSettings.jinja` — content surfaces flip per theme. **Adds a new "Color" section**: a row of 11 preset swatches (`<button class="ws-swatch" data-color="indifference" style="background: var(--ws-indifference)">`) above "Sharing". The selected swatch is marked `aria-pressed="true"` and ringed with `--focus-ring`. If the agent's stored color is not a preset (e.g. an OKLCH literal from the migration), a small "Current" chip rendered to the right of the preset row shows the raw value. Click → POST `/api/workspace-color/<agent_id>` → reload.
+- `templates/pages/Sharing.jinja`, `templates/pages/Creating.jinja`, `templates/pages/Destroying.jinja` — same migration: theme + workspace_bg set, hardcoded colors removed.
+- `templates/pages/Create.jinja`, `templates/pages/Welcome.jinja`, `templates/pages/Landing.jinja` (already noted) — these are pre-workspace; render with the default theme/color (`dark` / `#000000`).
+- `templates/PermissionsDialog.jinja` — modal backdrop uses `bg-token-surface-overlay`, dialog card **follows the host workspace's theme** rather than staying light always. The dialog reads its theme from the host page's `<html data-theme>`, so a dark-host workspace renders a dark dialog card and a light-host workspace renders a light card. Token classes inside the dialog already auto-flip with the theme.
 - `templates/pages/DevStyleguide.jinja` — see "Styleguide expansion" below.
 
 The remaining auth pages (`auth/SignupSignin`, `auth/CheckEmail`, etc.) render outside any workspace and use the default `dark` + `indifference` theme.
@@ -156,10 +170,10 @@ The remaining auth pages (`auth/SignupSignin`, `auth/CheckEmail`, etc.) render o
 Each component is a single `.jinja` file at the top of `templates/`. State styling lives in `tokens.css` (CSS pseudo-classes), not in Jinja branches.
 
 - `templates/Button.jinja` — already exists; rewritten.
-  - Props: `variant="primary"|"secondary"|"ghost"|"destructive"`, `loading=false`, `disabled=false`, `id=""`, `onclick=""`, `extra=""`, `block=false`. Replaces today's `"primary|secondary|danger|success|ghost"` set (note: `success` is dropped — Figma has no Success button variant; existing usages of `variant="success"` migrate to `primary` or `primary` + a checkmark icon depending on context). `danger` renames to `destructive`.
+  - Props: `variant="primary"|"secondary"|"ghost"|"destructive"|"success"`, `loading=false`, `disabled=false`, `id=""`, `onclick=""`, `extra=""`, `block=false`. Today's `"danger"` renames to `"destructive"` to match Figma; `"success"` stays in the codebase (Figma doesn't have a Success Button variant set, but the `semantic/success` swatch is in the system, so we map `variant="success"` to that token's color). `"danger"` callers migrate to `"destructive"`.
   - When `loading=true` sets `aria-busy="true"`, swaps the slot content for a spinner sized to match the label slot. CSS handles hover/pressed/focused/disabled via `:hover`, `:active`, `:focus-visible`, `[disabled]`, `[aria-busy="true"]`.
 - `templates/ButtonLink.jinja`, `templates/ButtonSubmit.jinja` — updated to the new variant set; share the same CSS classes (the three components rendered as `button`/`a`/`button[type=submit]` only differ in tag, not in styling).
-- `templates/TextField.jinja` — **renamed from `TextInput.jinja`** to match the Figma component name. Same prop shape plus `error=false`, `readonly=false`. Hover/focus/filled/disabled/read-only via CSS state. Error is a prop because it can't be derived from CSS state. Test file picks up the rename.
+- `templates/TextInput.jinja` — kept under its current code name. Same prop shape plus `error=false`, `readonly=false`. Hover/focus/filled/disabled/read-only via CSS state. Error is a prop because it can't be derived from CSS state. **The Figma component is renamed to `TextInput`** via the Figma MCP to match code; this is a side action during Phase 4 (not a separate phase).
 - `templates/Select.jinja` — new. Props: `name`, `value=""`, `options` (sequence of `{value, label}` dicts), `id=""`, `disabled=false`, `extra=""`. Renders a `<select>` with the exact Figma `chevron-down` SVG as a CSS background, hiding the default UA chevron. Dropdown rows are native browser-rendered (we don't reskin the popup); the closed-state trigger matches Figma.
 - `templates/Checkbox.jinja` — new. Props: `name`, `checked=false`, `indeterminate=false`, `disabled=false`, `value=""`, `id=""`. Renders a `<label>` wrapping an `<input type="checkbox">` plus a custom box drawn with `<svg>` (the exact Figma `check` path for the checked state). `indeterminate=true` is set via JS in the host page (HTML attribute is checked-only; JS sets `el.indeterminate = true` on `DOMContentLoaded`); the component emits a `data-indeterminate="true"` hint so the host's script can target it.
 - `templates/Toggle.jinja` — new. Props: `name`, `checked=false`, `disabled=false`, `id=""`. Renders an iOS-style switch using the foreground-at-opacity tokens.
@@ -175,62 +189,74 @@ Stateful CSS for components (added to `tokens.css`):
 .btn[data-variant="secondary"] { background: var(--fill-subtle); color: var(--text-primary); border: 1px solid var(--border-default); }
 .btn[data-variant="ghost"]     { background: transparent; color: var(--text-primary); }
 .btn[data-variant="destructive"] { background: var(--important); color: #fff; }
+.btn[data-variant="success"]   { background: var(--success); color: #fff; }
 .btn:hover                     { background-color: color-mix(in srgb, currentColor 10%, transparent); /* per-variant override below */ }
 .btn:active, .btn[data-pressed="true"] { /* fill/active blend */ }
 .btn:focus-visible             { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .btn[disabled], .btn[aria-disabled="true"] { opacity: .35; cursor: not-allowed; }
 .btn[aria-busy="true"]         { /* dim label, show spinner */ }
-/* similar for .text-field, .select-trigger, .checkbox, .toggle, .menu-item, .skeleton, .titlebar-btn, .workspace-row */
+/* similar for .text-input, .select-trigger, .checkbox, .toggle, .menu-item, .skeleton, .titlebar-btn, .workspace-row */
 ```
 
 ### Styleguide expansion
 
 `templates/pages/DevStyleguide.jinja`:
 
-- Top of page: a workspace-color picker (`<select>` over the 11 colors), wired via JS in `static/dev_styleguide.js` to update `<html>`'s `data-ws-color` + `data-theme`. Replaces the existing OKLCH hue slider entirely.
-- Manual theme override toggle (`Light` / `Dark`) so reviewers can force either theme onto any workspace color (the auto-flip can be overridden for review purposes).
-- New section "Tokens (per theme)": every `:root` and `[data-theme=*]` token gets a swatch with its CSS variable name + resolved value, rendered twice (once per theme) side-by-side. `data-token="--<name>"` carries the cross-check.
-- New section "Stateful components": for each of Button, TextField, Select, Checkbox, Toggle, MenuItem, WorkspaceRow, TitlebarBtn, Skeleton — a grid showing every state under both themes. State is rendered by setting `data-state="..."` on the demo wrapper which the CSS picks up via the same pseudo-class-equivalent attribute selectors.
+- Top of page: a workspace-color picker — a row of 11 preset swatches (the exact same component used in the production picker). Clicking one updates `<html>`'s `style="--workspace-bg: ..."` and `data-theme` (the theme is recomputed client-side from the picked color's luminance, matching the server-side rule). The page's whole surface re-renders in the chosen color. Replaces the existing OKLCH hue slider entirely.
+- **No separate light/dark toggle**: theme follows whichever color is picked. Reviewers see both themes by flipping between dark presets (`indifference`/`confusion`/`courage`/`envy`) and light presets (`peace`+ rest).
+- New section "Tokens (per theme)": every `:root` and `[data-theme=*]` token gets a swatch with its CSS variable name + resolved value, rendered twice (once per theme) side-by-side so the reviewer can compare. `data-token="--<name>"` carries the cross-check.
+- New section "Stateful components": for each of Button, TextInput, Select, Checkbox, Toggle, MenuItem, WorkspaceRow, TitlebarBtn, Skeleton — a grid showing every state under the currently-picked workspace color. State is rendered by setting `data-state="..."` on the demo wrapper which the CSS picks up via the same pseudo-class-equivalent attribute selectors. Reviewers flip workspace color to see both themes; the grid stays in the same layout.
 - Icon catalog: all eight Figma icons rendered at 16/24/32 size.
 - Existing "Patterns" section is trimmed: anything covered by a primitive component above is removed; what remains is page-level patterns (sidebar items, accent stripes, focus rings, shadow seam).
-- Updated `static/dev_styleguide.js` drops the OKLCH hue logic and instead wires the workspace-color `<select>` + theme toggle to the `<html>` data attributes.
+- Updated `static/dev_styleguide.js` drops the OKLCH hue logic and instead wires the 11-swatch picker to the `<html>` `data-theme` + `--workspace-bg`. The luminance-to-theme rule is duplicated client-side in this file so the styleguide can flip themes without a round-trip; the production app sets the theme server-side at render time, so the duplication is reviewer-only.
 
 ### Tests
 
 - `apps/minds/imbue/minds/desktop_client/design_tokens_test.py` — new.
-  - `test_palette_covers_every_workspace_color_enum_value` — `WORKSPACE_PALETTE.keys() == set(WorkspaceColor)`.
-  - `test_theme_for_returns_light_for_pastels_and_dark_for_indifference` — spot-check a handful of mappings.
+  - `test_workspace_preset_palette_covers_every_enum_value` — `WORKSPACE_PRESETS.keys() == set(WorkspacePreset)`.
+  - `test_workspace_color_accepts_preset_slug`, `test_workspace_color_accepts_hex_literal`, `test_workspace_color_accepts_oklch_literal`, `test_workspace_color_rejects_garbage`.
+  - `test_theme_for_dark_preset_returns_dark`, `test_theme_for_light_preset_returns_light` — spot-check each of the 11 presets.
+  - `test_theme_for_oklch_75_returns_correct_theme_per_hue` — verify a handful of OKLCH starting colors (the migration output) land on the expected dark/light side.
+  - `test_oklch_starting_color_deterministic_for_same_agent_id`.
+  - `test_oklch_starting_color_lightness_is_75_percent` — assert the literal string contains `75%`.
 - `apps/minds/imbue/minds/desktop_client/minds_config_test.py` — extend.
-  - `test_get_workspace_color_returns_default_when_unset`.
-  - `test_set_then_get_workspace_color_round_trips`.
-  - `test_get_workspace_color_returns_default_on_unknown_slug` (and logs a warning — assert via `caplog`).
+  - `test_get_workspace_color_materializes_oklch_for_new_read` — verify first read on an unconfigured agent persists the OKLCH starting color and returns it.
+  - `test_set_then_get_workspace_color_round_trips_preset_slug`.
+  - `test_set_then_get_workspace_color_round_trips_hex_literal`.
+  - `test_get_workspace_color_returns_default_on_unparseable_value` (and logs a warning — assert via `caplog`).
   - `test_remove_workspace_color_is_idempotent`.
+  - `test_concurrent_set_workspace_color_is_serialized` — hammer with threads, assert no torn writes.
 - `apps/minds/imbue/minds/desktop_client/templates_test.py` — extend.
-  - `test_render_landing_page_uses_dark_indifference_default_theme` — assert `data-theme="dark"` and `data-ws-color="indifference"` in the rendered HTML.
+  - `test_render_landing_page_uses_dark_indifference_default` — assert `data-theme="dark"` and `--workspace-bg: #000000` in the rendered HTML.
   - `test_render_workspace_settings_renders_color_picker_with_eleven_swatches` — count swatches.
-  - `test_render_workspace_settings_marks_current_color_aria_pressed`.
-  - `test_render_creating_page_propagates_theme_for_picked_workspace_color` — patch `MindsConfig.get_workspace_color` to return `WorkspaceColor.PEACE`; assert `data-theme="light" data-ws-color="peace"` in the rendered HTML.
-  - Update the existing token-ratchet test: instead of cross-checking `--shadow-seam`-style `:root` tokens only, walk both `[data-theme="dark"]` and `[data-theme="light"]` blocks; cross-check the set of declared names matches the set of `data-token="--..."` swatches in the styleguide. The `--workspace-accent` ratchet entry is removed; new entries cover every token added in this PR.
+  - `test_render_workspace_settings_marks_current_preset_aria_pressed`.
+  - `test_render_workspace_settings_shows_current_chip_when_color_is_not_a_preset` — verify the "Current" chip appears for an OKLCH literal.
+  - `test_render_creating_page_propagates_theme_for_picked_light_preset` — patch `MindsConfig.get_workspace_color` to return `WorkspacePreset.PEACE`; assert `data-theme="light"` and `--workspace-bg: #9FBBD3` in the rendered HTML.
+  - `test_render_creating_page_propagates_theme_for_oklch_literal` — patch to return a freeform light-luminance OKLCH; assert `data-theme="light"` and the OKLCH literal echoed into `--workspace-bg`.
+  - Update the existing token-ratchet test: walk both `[data-theme="dark"]` and `[data-theme="light"]` blocks plus the `:root` preset declarations; cross-check the set of declared names matches the set of `data-token="--..."` swatches in the styleguide. The `--workspace-accent` ratchet entry is removed; new entries cover every token added in this PR.
 - `apps/minds/imbue/minds/desktop_client/test_desktop_client.py` — extend.
-  - `test_set_workspace_color_endpoint_persists_and_round_trips_via_get`.
-  - `test_set_workspace_color_rejects_unknown_slug` (422).
+  - `test_set_workspace_color_endpoint_persists_and_round_trips_via_get` (preset slug).
+  - `test_set_workspace_color_endpoint_accepts_hex_literal`.
+  - `test_set_workspace_color_endpoint_rejects_unparseable_value` (422).
+  - `test_get_workspace_color_endpoint_returns_resolved_hex_and_theme`.
 - Component unit tests in `templates_test.py`:
-  - `test_button_renders_each_variant` (primary/secondary/ghost/destructive).
+  - `test_button_renders_each_variant` (primary / secondary / ghost / destructive / success).
+  - `test_button_success_variant_uses_semantic_success_token` — assert class or data attribute references the success token.
   - `test_button_loading_sets_aria_busy`.
-  - `test_text_field_error_sets_data_error_attribute`.
+  - `test_text_input_error_sets_data_error_attribute`.
   - `test_select_renders_chevron_down_icon`.
   - `test_checkbox_indeterminate_emits_data_attribute`.
   - `test_icon_unknown_name_raises` — assert on `TemplateError`.
   - One assertion per icon: `test_icon_<name>_renders_figma_path_verbatim` — pin the SVG `d=` string so future edits stay verbatim.
-- Existing tests that today pass `accent=` kwargs or assert on `oklch(...)` substrings get migrated to the new `theme=` / `ws_color=` shape. The OKLCH-derivation tests are deleted (no derivation left).
+- Existing tests that today pass `accent=` kwargs or assert on `oklch(65%...)` substrings get migrated to the new `theme=` / `workspace_bg=` shape. The OKLCH-derivation tests for the old 65%-lightness function are deleted; new tests cover the 75%-lightness migration helper instead.
 - No new test_ratchets.py entries needed; the token cross-check ratchet is already in place.
 
 ### Files to delete
 
 - `apps/minds/imbue/minds/desktop_client/static/workspace_accent.js` (replaced by `workspace_color.js`).
-- The `workspace_accent` function and its `_WORKSPACE_L` / `_WORKSPACE_C` constants in `templates.py`.
+- The `workspace_accent` function and its `_WORKSPACE_L` / `_WORKSPACE_C` constants in `templates.py`. The OKLCH derivation moves to `design_tokens.oklch_starting_color` with `_WORKSPACE_L` bumped to 75%.
 - The `.page-workspace::before` stripe rule, the `.accent-swatch` rule, the legacy `.accent-spine` (now folded into landing-row CSS) in `tokens.css`.
-- `templates/TextInput.jinja` (renamed to `TextField.jinja`; all consumers updated).
+- (`TextInput.jinja` stays under its current name; the Figma component is renamed to match.)
 
 ### Wheel packaging
 
@@ -250,13 +276,13 @@ Each phase ends with `just test-quick apps/minds` passing. We can stop at the en
 
 ### Phase 2 — Base + workspace-color application
 
-- Update `Base.jinja` to accept `theme` + `ws_color` props and render them on `<html>`.
-- Add `theme_for(workspace_color_for(agent_id, config=...))` to every workspace-scoped render function in `templates.py`.
+- Update `Base.jinja` to accept `theme` + `workspace_bg` props and render them on `<html>` (`data-theme=...`, `style="--workspace-bg: ...;"`).
+- Add the helper `_render_kwargs_for_workspace(agent_id, *, config)` to every workspace-scoped render function in `templates.py`.
 - Add the new FastAPI routes; wire `MindsConfig` through the route handlers.
-- Replace `workspace_accent.js` with `workspace_color.js`.
+- Replace `workspace_accent.js` with `workspace_color.js` (server-side OKLCH derivation, client just applies the response).
 - Migrate `Chrome.jinja` + `Landing.jinja` first as the canary pages — flip them onto the token system end-to-end.
-- Add the workspace-color picker UI to `WorkspaceSettings.jinja` (a temporary location — the picker will move once we have a per-workspace settings overlay, but lives here for now).
-- Outcome: any workspace whose color has been set sees the chosen color across chrome + sidebar + landing row; setting flow works via the picker; everything else still renders today's Tailwind colors.
+- Add the workspace-color picker UI in **two places**: a "Color" section on `WorkspaceSettings.jinja` (the persistent canonical home), and a titlebar swatch + flyout on `Chrome.jinja` (the quick-flip). Both POST to the same `/api/workspace-color/<agent_id>` route; the titlebar flyout applies the change live via the JS, while the settings page does a full reload.
+- Outcome: any workspace whose color has been set sees the chosen color across chrome + sidebar + landing row; setting flow works via both pickers; everything else still renders today's Tailwind colors.
 
 ### Phase 3 — sweep all remaining workspace pages
 
@@ -335,12 +361,20 @@ Each phase ends with `just test-quick apps/minds` passing. We can stop at the en
 
 ## Open questions
 
-- **Picker location.** Phase 2 places the workspace-color picker on the `WorkspaceSettings` page. Alternatively it could live inside the titlebar (a small disclosure menu) so users can flip the color without leaving the workspace. The settings page is the safer first iteration, but the titlebar is the more discoverable home — pick before Phase 2.
-- **Should the picker offer "auto" (today's hash-derived hue)?** Removing OKLCH-derived accents entirely means every existing workspace renders in `indifference` until the user picks. Alternative: on first read for an agent without a stored color, deterministically derive a *palette* color from the agent id (a stable 11-bucket hash). Costs a tiny migration risk if the hash bucket changes later, but means existing workspaces don't all look identical post-merge.
-- **Permission-dialog theming.** The dialog is a modal overlay; its inner card today is white-on-light. Should it follow the host workspace's theme (read better when the host is dark, jarring when host is light) or stay light always (today's behavior, predictable for sensitive flows)? Plan defaults to "stay light always"; flag for confirmation.
-- **`success` button variant removal.** The Figma component set has Primary / Secondary / Ghost / Destructive — no Success. The current minds codebase has a green Success button (used in workspace-association flows). Migrate every `variant="success"` to `variant="primary"`? Or keep a `success` extension variant? Plan removes `success`; flag if the visual loss matters.
-- **TextField rename.** Renaming `TextInput.jinja` → `TextField.jinja` matches Figma but churns every consumer template and test. Worth the churn for naming consistency, or keep `TextInput` and just live with the mismatch? Plan renames; flag for confirmation.
-- **`light`/`dark` mode override on the styleguide.** Phase 6 adds a manual theme toggle so reviewers can flip themes independently of workspace-color. Should the same toggle exist in production (e.g. "always use dark" / "always use light" preference)? Plan keeps it styleguide-only; flag as a follow-up.
-- **Inbox modal screen (Figma 412:4345).** The fourth Figma sample screen shows an inbox / requests modal. This page does not yet exist in minds. Out of scope for this PR (no implementation), but worth opening a separate spec for; flag as follow-up.
-- **`--radius-lg`.** Figma exposes `radius-md = 10` and `radius-pill = 999` directly via `get_variable_defs`; `radius-sm` (6) is referenced but `radius-lg` is not explicitly in the variable response. Confirm the exact value from Figma node 317:4083 ("Radius") at impl time; default plan assumes ~14px to bracket the `md`/`pill` gap.
-- **Light-on-`#CECD0C` (energy) contrast.** Yellow is borderline for black text at standard sizes; double-check WCAG contrast for `Body/14 Regular` (`#000000A6`) on `#CECD0C`. If insufficient, either drop `energy` from the catalog or upgrade `text/secondary` to a darker step for the light theme. Plan keeps the palette as-is; flag for verification during Phase 8 manual review.
+Resolved during Q&A and folded into the plan above:
+
+- ~~**Picker location**~~ → both: settings-page "Color" section + titlebar swatch flyout.
+- ~~**Legacy workspace default**~~ → keep each existing workspace's deterministic OKLCH hue, bumped to L=75%. Presets are suggestions, not a closed catalog; storage accepts arbitrary CSS color literals from day one.
+- ~~**Permission-dialog theming**~~ → follows host workspace's theme.
+- ~~**`success` button variant**~~ → keep, map to `semantic/success` (#5C8A3C).
+- ~~**TextField rename**~~ → keep `TextInput.jinja` code name; rename the Figma component to match via the Figma MCP.
+- ~~**Theme override outside styleguide**~~ → no override affordance in the production app. Styleguide picker shows all 11 workspace colors (theme is implied by luminance), no separate light/dark toggle.
+- ~~**Inbox modal screen**~~ → out of scope; follow-up.
+- ~~**Energy contrast**~~ → keep `#CECD0C`, verify during Phase 8 manual review.
+
+Still open, to resolve before / during implementation:
+
+- **`--radius-lg` exact value.** Figma exposes `radius-md = 10` and `radius-pill = 999` directly via `get_variable_defs`; `radius-sm` (6) is referenced but `radius-lg` is not explicitly in the variable response. Confirm the exact value from Figma node 317:4083 ("Radius") at impl time; default plan assumes ~14px to bracket the `md`/`pill` gap.
+- **Freeform-picker follow-up.** This PR ships only the 11-preset picker UI; the storage + theme-inference already handle arbitrary CSS colors. Should the freeform color picker (eyedropper, hex input, OKLCH sliders) be a follow-up PR, or roll it in here? Plan defers as a follow-up to keep this PR's UI surface manageable; flag if it's expected sooner.
+- **Live application on the settings-page picker.** The plan does a full page reload after the settings-page picker POSTs, while the titlebar flyout applies the change in place. Inconsistent — should the settings-page picker also apply live (and only reload if/when something further down the page depends on the color)? Worth a small UX call.
+- **Migration eligibility.** The plan materializes the OKLCH starting color on first read for *every* agent without a stored color, including agents created after this PR. The alternative is to write `indifference` explicitly at agent-creation time so brand-new agents start as black, and only pre-existing agents get the OKLCH. The plan picks the simpler "always OKLCH first read" approach. Confirm: do we want new agents to be `indifference` from day one, or fine if they get an OKLCH starting color (which the user can then change to `indifference` if they prefer)?
