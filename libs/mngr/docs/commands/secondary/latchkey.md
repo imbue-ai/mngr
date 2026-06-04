@@ -222,6 +222,9 @@ Long-running foreground process that:
    are intentional: any agents still alive when this process exits
    will lose their gateway endpoint until the next ``mngr latchkey
    forward`` is started.
+6. On SIGHUP, bounces only the ``mngr observe`` child (the gateway and
+   every reverse tunnel stay up) so a provider-set change made by an
+   embedder takes effect without a full restart.
 
 No filtering flags: every discovered agent gets a tunnel. The plugin
 emits stderr-only logs; stdout stays empty for the lifetime of the

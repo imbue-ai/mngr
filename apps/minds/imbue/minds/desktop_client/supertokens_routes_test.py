@@ -7,10 +7,15 @@ subprocess. These tests cover that small status registry.
 """
 
 import time
+from pathlib import Path
+from uuid import uuid4
 
 from imbue.minds.desktop_client.supertokens_routes import _OAuthFlowStatus
 from imbue.minds.desktop_client.supertokens_routes import _read_oauth_status
 from imbue.minds.desktop_client.supertokens_routes import _record_oauth_status
+from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
+from imbue.mngr_latchkey.core import LatchkeyError
+from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
 
 def test_record_then_read_returns_same_status() -> None:
@@ -51,3 +56,27 @@ def test_expired_flows_are_pruned_on_next_read() -> None:
     _record_oauth_status("flow-ddd", _OAuthFlowStatus(state="running", deadline=time.monotonic() + 60))
     assert _read_oauth_status("flow-ccc") is None
     assert _read_oauth_status("flow-ddd") is not None
+
+
+def test_bounce_latchkey_forward_supervisor_swallows_latchkey_error(tmp_path: Path) -> None:
+    """A failing supervisor.bounce() (LatchkeyError) must be logged, not propagated.
+
+    bounce() falls back to ensure_running() when no live supervisor is found, and
+    ensure_running() raises LatchkeyError when the mngr binary cannot be spawned.
+    That error must not escape into the request handlers that call this helper.
+    """
+    supervisor = LatchkeyForwardSupervisor(
+        mngr_binary=str(tmp_path / "does-not-exist-mngr"),
+        latchkey_binary="/usr/bin/latchkey-unused",
+        latchkey_directory=tmp_path / f"latchkey-{uuid4().hex}",
+    )
+    # Sanity: a direct bounce() does raise the uncaught-by-(OSError, RuntimeError) error.
+    try:
+        supervisor.bounce()
+        raised = False
+    except LatchkeyError:
+        raised = True
+    assert raised, "expected bounce() to raise LatchkeyError when the mngr binary is missing"
+
+    # The helper must swallow it (no exception propagates).
+    bounce_latchkey_forward_supervisor(supervisor)

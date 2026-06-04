@@ -30,9 +30,9 @@ from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.help_topics import get_all_topics
 from imbue.mngr.cli.output_helpers import AbortError
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import render_format_template
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.completion_writer import write_cli_completions_cache
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
@@ -715,7 +715,13 @@ def _run_list_iteration(params: _ListIterationParams, ctx: click.Context) -> Non
         elif params.output_opts.output_format == OutputFormat.HUMAN:
             write_human_line("No agents found")
         elif params.output_opts.output_format == OutputFormat.JSON:
-            emit_final_json({"agents": [], "errors": result.errors})
+            # Route through `_emit_json_output` so errors get pydantic-dumped to
+            # JSON-friendly dicts; passing raw ErrorInfo objects to
+            # `json.dumps` crashes with "Object of type ProviderErrorInfo is
+            # not JSON serializable", which is what made `mngr list --on-error
+            # continue --format json` hard-fail whenever discovery hit a
+            # broken host.
+            _emit_json_output([], result.errors)
         else:
             # JSONL is handled above with streaming, so this should be unreachable
             raise AssertionError(f"Unexpected output format: {params.output_opts.output_format}")
@@ -748,19 +754,19 @@ def _emit_json_output(agents: list[AgentDetails], errors: list[ErrorInfo]) -> No
         "agents": agents_data,
         "errors": errors_data,
     }
-    emit_final_json(output_data)
+    write_json_line(output_data)
 
 
 def _emit_jsonl_agent(agent: AgentDetails) -> None:
     """Emit a single agent as a JSONL line (streaming callback)."""
     agent_data = agent.model_dump(mode="json")
-    emit_final_json(agent_data)
+    write_json_line(agent_data)
 
 
 def _emit_jsonl_error(error: ErrorInfo) -> None:
     """Emit a single error as a JSONL line (streaming callback)."""
     error_data = {"event": "error", **error.model_dump(mode="json")}
-    emit_final_json(error_data)
+    write_json_line(error_data)
 
 
 def _emit_human_output(

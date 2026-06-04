@@ -1,13 +1,19 @@
 """HTML rendering for the desktop client.
 
-Each ``render_*`` function is a thin wrapper around a Jinja2 template that
-lives under ``templates/`` in this directory. Tests call these functions
-directly; the FastAPI route handlers call them the same way. Keeping the
-public signatures stable lets the unit tests keep working without caring
-that we moved from inline strings to file-based templates.
+Each ``render_*`` function is a thin wrapper around a JinjaX component
+under ``templates/`` in this directory, rendered through the shared
+``CATALOG``. Primitive components (Button, Card, Notice, Spinner,
+TextInput, Opt, ...) and the page layout (``Base``) sit at the top of
+``templates/``; full pages live under ``templates/pages/`` as PascalCase
+``.jinja`` files; auth pages and the OAuth icon component live under
+``templates/auth/``. Tests call these functions directly; the FastAPI
+route handlers call them the same way. The public signatures are stable
+so neither callers nor tests have to know the templates moved from raw
+Jinja2 macros + ``{% extends %}`` to JinjaX components.
 """
 
 import hashlib
+import html
 import os
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -15,13 +21,14 @@ from pathlib import Path
 from typing import Final
 
 from jinja2 import Environment
-from jinja2 import FileSystemLoader
 from jinja2 import select_autoescape
+from jinjax import Catalog
 
 from imbue.imbue_common.pure import pure
 from imbue.minds.bootstrap import DEFAULT_MINDS_ROOT_NAME
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
+from imbue.minds.desktop_client.onboarding import expected_creation_duration_seconds
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupEncryptionMethod
 from imbue.minds.primitives import BackupProvider
@@ -29,13 +36,55 @@ from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.mngr.primitives import AgentId
+from imbue.mngr_forward.loading_page import render_loading_page
 
 TEMPLATE_DIR: Final[Path] = Path(__file__).resolve().parent / "templates"
 
-JINJA_ENV: Final[Environment] = Environment(
-    loader=FileSystemLoader(str(TEMPLATE_DIR)),
-    autoescape=select_autoescape(default_for_string=True, default=True),
+# Shared Tailwind class strings for the three button components
+# (Button.jinja, ButtonLink.jinja, ButtonSubmit.jinja). Exposed as JinjaX
+# Catalog globals so a single edit here updates every button variant; the
+# alternative -- inlining the same class string in three sibling templates
+# -- drifted across files trivially. Surface as uppercase to match the
+# `CATALOG` constant convention and to mark them as Jinja globals (not
+# per-render context).
+_BTN_BASE: Final[str] = (
+    "inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-md "
+    "font-medium text-sm leading-tight transition-colors disabled:opacity-50 "
+    "disabled:cursor-not-allowed cursor-pointer no-underline whitespace-nowrap"
 )
+_BTN_VARIANTS: Final[Mapping[str, str]] = {
+    "primary": "bg-zinc-900 text-zinc-50 border border-transparent hover:bg-zinc-800",
+    "secondary": "bg-zinc-100 text-zinc-900 border border-zinc-200 hover:bg-zinc-200",
+    "danger": "bg-red-50 text-red-600 border border-red-200 hover:bg-red-100",
+    "success": "bg-emerald-800 text-emerald-50 border border-transparent hover:bg-emerald-900",
+    "ghost": "bg-transparent text-zinc-600 border border-transparent hover:bg-zinc-100 hover:text-zinc-900",
+}
+
+
+def _build_catalog() -> Catalog:
+    """Build the JinjaX Catalog used to render every desktop-client template.
+
+    JinjaX builds its own internal Jinja Environment but copies autoescape +
+    filters from any seed env you pass in. We seed with the same autoescape
+    config the old standalone JINJA_ENV used so user-controlled strings (form
+    errors, agent IDs, etc.) stay HTML-escaped exactly as before.
+
+    ``BTN_BASE`` / ``BTN_VARIANTS`` are exposed as Jinja globals so the
+    three button components can share a single source of truth instead of
+    each redeclaring the same class string + variants map.
+    """
+    seed_env = Environment(
+        autoescape=select_autoescape(default_for_string=True, default=True),
+    )
+    catalog = Catalog(
+        jinja_env=seed_env,
+        globals={"BTN_BASE": _BTN_BASE, "BTN_VARIANTS": _BTN_VARIANTS},
+    )
+    catalog.add_folder(str(TEMPLATE_DIR))
+    return catalog
+
+
+CATALOG: Final[Catalog] = _build_catalog()
 
 
 # -- Per-workspace identity color --
@@ -100,8 +149,8 @@ def render_landing_page(
     envelope-stream consumer hasn't completed initial agent discovery yet.
     """
     agent_accents = {str(aid): workspace_accent(str(aid)) for aid in accessible_agent_ids}
-    template = JINJA_ENV.get_template("landing.html")
-    return template.render(
+    return CATALOG.render(
+        "pages.Landing",
         agent_ids=accessible_agent_ids,
         agent_accents=agent_accents,
         mngr_forward_origin=mngr_forward_origin,
@@ -168,7 +217,6 @@ def render_create_form(
     has_saved_backup_password: bool = False,
     accounts: Sequence[object] | None = None,
     default_account_id: str = "",
-    gh_token: str = "",
     anthropic_api_key: str = "",
     error_message: str = "",
 ) -> str:
@@ -176,7 +224,7 @@ def render_create_form(
 
     The compute provider (``launch_mode``), AI provider, and backup provider
     are independent. The compute / AI providers default to ``IMBUE_CLOUD``
-    when an account is selected; without an account they drop to ``DOCKER`` /
+    when an account is selected; without an account they drop to ``LIMA`` /
     ``SUBSCRIPTION``. The backup provider defaults to ``IMBUE_CLOUD`` with an
     account and ``CONFIGURE_LATER`` without one. The backup encryption method
     defaults to ``NO_PASSWORD``.
@@ -196,7 +244,7 @@ def render_create_form(
     effective_branch = branch if branch else _dev_only_workspace_default("MINDS_WORKSPACE_BRANCH", _FALLBACK_BRANCH)
     has_account = bool(default_account_id and accounts)
     effective_launch_mode = (
-        launch_mode if launch_mode is not None else (LaunchMode.IMBUE_CLOUD if has_account else LaunchMode.DOCKER)
+        launch_mode if launch_mode is not None else (LaunchMode.IMBUE_CLOUD if has_account else LaunchMode.LIMA)
     )
     effective_ai_provider = (
         ai_provider
@@ -211,8 +259,8 @@ def render_create_form(
     effective_backup_encryption = (
         backup_encryption_method if backup_encryption_method is not None else BackupEncryptionMethod.NO_PASSWORD
     )
-    template = JINJA_ENV.get_template("create.html")
-    return template.render(
+    return CATALOG.render(
+        "pages.Create",
         git_url=effective_url,
         host_name=effective_name,
         branch=effective_branch,
@@ -228,7 +276,6 @@ def render_create_form(
         has_saved_backup_password=has_saved_backup_password,
         accounts=accounts or [],
         default_account_id=default_account_id,
-        gh_token=gh_token,
         anthropic_api_key=anthropic_api_key,
         error_message=error_message,
     )
@@ -297,58 +344,569 @@ def render_creating_page(
     truth for caption resolution (consistent with the SSE status events).
     """
     status_text = status_text_for(str(info.status), error=info.error, launch_mode=info.launch_mode)
-    template = JINJA_ENV.get_template("creating.html")
-    return template.render(
+    return CATALOG.render(
+        "pages.Creating",
         agent_id=creation_id,
         status_text=status_text,
         accent=workspace_accent(str(creation_id)),
+        # Drives the client-side time-based progress bar on the loading
+        # screen (eases toward ~80% over this duration).
+        expected_duration_seconds=expected_creation_duration_seconds(info.launch_mode),
     )
 
 
 @pure
 def render_welcome_page() -> str:
     """Render the welcome/splash page for first-time users."""
-    return JINJA_ENV.get_template("welcome.html").render()
+    return CATALOG.render("pages.Welcome")
 
 
 @pure
 def render_login_page() -> str:
     """Render the login prompt page for unauthenticated users."""
-    return JINJA_ENV.get_template("login.html").render()
+    return CATALOG.render("pages.Login")
 
 
 @pure
 def render_login_redirect_page(one_time_code: OneTimeCode) -> str:
     """Render the JS redirect page that forwards to /authenticate."""
-    return JINJA_ENV.get_template("login_redirect.html").render(one_time_code=one_time_code)
+    return CATALOG.render("pages.LoginRedirect", one_time_code=one_time_code)
 
 
 @pure
 def render_auth_error_page(message: str) -> str:
     """Render an error page for failed authentication."""
-    return JINJA_ENV.get_template("auth_error.html").render(message=message)
+    return CATALOG.render("pages.AuthError", message=message)
+
+
+def render_request_unavailable_page(message: str) -> str:
+    """Render the page shown when a request is already resolved or missing."""
+    return CATALOG.render("pages.RequestUnavailable", message=message)
+
+
+# CSS for the recovery page's restart controls, appended to the shared
+# ``LOADING_PAGE_CSS``. The card itself, spinner, heading and message all come
+# from the shared loading page, so the recovery page's loading state is
+# byte-identical to the mngr_forward proxy loader.
+_RECOVERY_STYLE: Final[str] = """\
+      .hidden { display: none; }
+
+      /* Keep the whole card within the viewport and lay it out as a vertical
+         stack: the header row and the restart button stay pinned at the top,
+         and only the troubleshooting block scrolls when its disclosures are
+         expanded. Without this the card grows past the viewport as dropdowns
+         open and -- because the body flex-centers it -- the heading and button
+         slide off the top, out of reach of the page scrollbar. This overrides
+         the shared ``.card`` from LOADING_PAGE_CSS (appended after it, so it
+         wins); the proxy loader never pulls in this style, so it is unaffected.
+         The 48px subtracted matches the body's 24px top+bottom padding. */
+      .card {
+        display: flex;
+        flex-direction: column;
+        max-height: calc(100vh - 48px);
+      }
+      .row { flex-shrink: 0; }
+
+      /* Primary action. The restart button is the page's focal point: full
+         width, prominent, directly under the message. Most users only ever
+         need this -- the troubleshooting disclosures below are for the rare
+         deep-debugging case. */
+      #recovery-host-btn {
+        margin-top: 20px;
+        flex-shrink: 0;
+        width: 100%;
+        background: #18181b;
+        color: #fff;
+        border: 0;
+        border-radius: 8px;
+        padding: 12px 16px;
+        font-size: 0.9375rem;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      #recovery-host-btn:hover { background: #3f3f46; }
+      #recovery-host-btn.secondary { background: #6b7280; }
+      #recovery-host-btn.secondary:hover { background: #4b5563; }
+
+      /* Secondary, rarely-needed troubleshooting block: the error and
+         diagnostics disclosures, grouped below a muted label and a thin
+         divider. The whole block self-hides whenever neither disclosure is
+         currently shown (both carry ``.hidden``), so the divider and label
+         never appear over an empty section. */
+      .recovery-troubleshooting {
+        margin-top: 20px;
+        padding-top: 16px;
+        border-top: 1px solid #f4f4f5;
+        /* The block can shrink below its content height (min-height: 0 frees
+           it from the default flex min-content floor) and scrolls internally
+           once the card hits its viewport cap, so expanding many disclosures
+           never pushes the pinned header and button off-screen. */
+        min-height: 0;
+        overflow-y: auto;
+      }
+      .recovery-troubleshooting:not(:has(> details:not(.hidden))) { display: none; }
+      .recovery-troubleshooting-label {
+        font-size: 0.6875rem;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: #a1a1aa;
+        margin: 0 0 6px;
+      }
+      .recovery-troubleshooting > details {
+        margin: 0 0 8px;
+        border: 1px solid #f4f4f5;
+        background: #fff;
+        border-radius: 8px;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+        color: #52525b;
+      }
+      .recovery-troubleshooting > details:last-child { margin-bottom: 0; }
+      .recovery-troubleshooting > details > summary {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        cursor: pointer;
+        padding: 9px 12px;
+        font-weight: 500;
+        font-size: 0.8125rem;
+        color: #52525b;
+        list-style: none;
+      }
+      .recovery-troubleshooting > details > summary::-webkit-details-marker { display: none; }
+      .recovery-troubleshooting > details > summary::after {
+        content: "\\25BE";
+        color: #a1a1aa;
+        font-size: 0.75rem;
+        transition: transform 0.15s;
+      }
+      .recovery-troubleshooting > details[open] > summary::after { transform: rotate(180deg); }
+      .recovery-troubleshooting > details > summary:hover { color: #3f3f46; }
+      .recovery-troubleshooting > details[open] > summary { border-bottom: 1px solid #f4f4f5; }
+      .recovery-troubleshooting > details > :not(summary) { padding: 10px 12px; }
+
+      details pre {
+        margin: 0;
+        padding: 10px 12px;
+        max-height: 240px;
+        overflow-y: auto;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        font-size: 0.75rem;
+        line-height: 1.5;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        background: #fafafa;
+        color: #3f3f46;
+        border-radius: 6px;
+      }
+      .probe-row {
+        margin: 4px 0 0;
+        border: 1px solid #f4f4f5;
+        background: #fff;
+        border-radius: 6px;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+      }
+      .probe-row summary {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 10px;
+        font-size: 0.8125rem;
+        font-weight: 500;
+        cursor: pointer;
+        color: #52525b;
+        list-style: none;
+      }
+      .probe-row summary::-webkit-details-marker { display: none; }
+      .probe-row summary::after {
+        content: "\\25BE";
+        color: #a1a1aa;
+        font-size: 0.75rem;
+        transition: transform 0.15s;
+      }
+      .probe-row[open] summary::after { transform: rotate(180deg); }
+      .probe-row .probe-question { flex: 1; }
+      .probe-glyph {
+        display: inline-block;
+        width: 1em;
+        text-align: center;
+        font-weight: 700;
+      }
+      .probe-glyph-yes { color: #047857; }
+      .probe-glyph-no { color: #b91c1c; }
+      .probe-glyph-unknown { color: #92400e; }
+      #copy-diagnostics-btn,
+      #copy-ssh-btn {
+        margin-top: 8px;
+        background: #fff;
+        color: #52525b;
+        border: 1px solid #d4d4d8;
+        border-radius: 6px;
+        font-size: 0.75rem;
+        font-weight: 500;
+        padding: 6px 12px;
+        cursor: pointer;
+      }
+      #copy-ssh-btn { margin-left: 8px; }
+      #copy-diagnostics-btn:hover,
+      #copy-ssh-btn:hover { background: #f4f4f5; }
+"""
+
+# The recovery page's behavior. It drives the shared loading card (toggling
+# the spinner, heading and message) plus the recovery-only restart button and
+# error <details>. While a restart is in flight it auto-refreshes itself:
+# _handle_recovery_page re-renders from the live tracker state on every GET,
+# so a timed reload is the whole "is it healthy yet?" check.
+_RECOVERY_SCRIPT: Final[str] = """\
+      (function () {
+        var root = document.querySelector('[data-agent-id]');
+        if (!root) return;
+        var agentId = root.dataset.agentId;
+        var returnTo = root.dataset.returnTo || '';
+        var initialStatus = root.dataset.initialStatus || 'stuck';
+
+        var titleEl = document.getElementById('loading-title');
+        var messageEl = document.getElementById('loading-message');
+        var spinnerEl = document.getElementById('loading-spinner');
+        var errorEl = document.getElementById('recovery-error');  // null unless restart_failed
+        var hostBtn = document.getElementById('recovery-host-btn');
+        var debugDetailsEl = document.getElementById('recovery-debug-details');
+        var debugContentEl = document.getElementById('recovery-debug-content');
+        var copyBtn = document.getElementById('copy-diagnostics-btn');
+        // Present only for SSH-reachable hosts (every real workspace). Carries
+        // the prebuilt connection command in its data attribute; absent (and so
+        // null here) when the resolver has no SSH info for the agent.
+        var copySshBtn = document.getElementById('copy-ssh-btn');
+
+        var latestHealth = null;
+
+        // A timed reload restarts the spinner's CSS animation from 0deg, so the
+        // interval must be a whole multiple of the spinner's 1s rotation period
+        // (see LOADING_PAGE_CSS' ``spin`` keyframe) -- otherwise the spinner
+        // visibly jumps back mid-rotation on every refresh. 1000ms also matches
+        // the mngr_forward proxy loader's 1s meta refresh, keeping the two
+        // loading pages a user may see during recovery in lockstep.
+        var REFRESH_INTERVAL_MS = 1000;
+
+        function show(el, visible) {
+          if (el) el.classList.toggle('hidden', !visible);
+        }
+
+        function escapeHtml(s) {
+          if (s === null || s === undefined) return '';
+          return String(s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+        }
+
+        function answerGlyph(answer) {
+          if (answer === 'yes') return '<span class="probe-glyph probe-glyph-yes" aria-label="yes">&#x2713;</span>';
+          if (answer === 'no') return '<span class="probe-glyph probe-glyph-no" aria-label="no">&#x2717;</span>';
+          return '<span class="probe-glyph probe-glyph-unknown" aria-label="unknown">?</span>';
+        }
+
+        function renderDebugMenu(data) {
+          if (!debugContentEl || !debugDetailsEl) return;
+          if (!data || !Array.isArray(data.probes) || data.probes.length === 0) {
+            debugContentEl.innerHTML = '';
+            show(debugDetailsEl, false);
+            return;
+          }
+          // Each probe is one row: glyph + question, with an expander
+          // revealing the command that produced the answer and its raw output.
+          var rows = data.probes.map(function (probe) {
+            var glyph = answerGlyph(probe.answer);
+            var body = '$ ' + probe.command + '\\n\\n' + probe.output;
+            return '<details class="probe-row probe-row-' + escapeHtml(probe.answer || 'unknown') + '">'
+              + '<summary>' + glyph + '<span class="probe-question">'
+              + escapeHtml(probe.question) + '</span></summary>'
+              + '<pre>' + escapeHtml(body) + '</pre>'
+              + '</details>';
+          });
+          debugContentEl.innerHTML = rows.join('');
+          show(debugDetailsEl, true);
+        }
+
+        function copyDiagnostics() {
+          if (!latestHealth) return;
+          try {
+            var text = JSON.stringify(latestHealth, null, 2);
+            if (navigator.clipboard) navigator.clipboard.writeText(text);
+          } catch (e) {
+            /* ignore */
+          }
+        }
+
+        // The poll URL omits intent=restart so that, once the restart is
+        // dispatched, a healthy tracker state 302s the user back to the workspace.
+        function pollUrl() {
+          var u = '/agents/' + encodeURIComponent(agentId) + '/recovery';
+          if (returnTo) u += '?return_to=' + encodeURIComponent(returnTo);
+          return u;
+        }
+        function scheduleRefresh() {
+          setTimeout(function () { window.location.assign(pollUrl()); }, REFRESH_INTERVAL_MS);
+        }
+        // Background convergence poll for the restart_failed state. Unlike
+        // scheduleRefresh (which reloads the whole page), this fetches pollUrl
+        // with manual redirect handling: while the workspace is still down the
+        // server returns the recovery HTML (200), which we discard so the
+        // displayed failure reason + diagnostics stay put and the heavy
+        // host-health probe is not re-run. Once the background probe loop flips
+        // the tracker to HEALTHY the server starts 302ing to return_to, which
+        // surfaces as an opaque-redirect response; we then follow it to send
+        // the user back to the now-recovered workspace.
+        function scheduleHealthyPoll() {
+          setTimeout(function () {
+            fetch(pollUrl(), { credentials: 'same-origin', redirect: 'manual' }).then(function (resp) {
+              if (resp.type === 'opaqueredirect' || (resp.status >= 300 && resp.status < 400)) {
+                window.location.assign(pollUrl());
+                return;
+              }
+              scheduleHealthyPoll();
+            }, function () {
+              scheduleHealthyPoll();
+            });
+          }, REFRESH_INTERVAL_MS);
+        }
+
+        function renderLoading() {
+          titleEl.textContent = 'Loading workspace';
+          messageEl.textContent = '';
+          show(spinnerEl, true);
+          show(errorEl, false);
+          show(hostBtn, false);
+          // A stale diagnostic from the previous tick would be misleading
+          // while we're in flight to a fresh check; hide it and drop the
+          // cached payload so renderDebugMenu starts blank next time.
+          show(debugDetailsEl, false);
+          if (debugContentEl) debugContentEl.innerHTML = '';
+          latestHealth = null;
+        }
+        // The shared "Workspace unresponsive" state -- shown for ambiguous-host
+        // states, after a restart failure, and whenever the container is live
+        // but unreachable (bouncing it would interrupt user agents, so we want
+        // explicit consent before doing so).
+        function renderUnresponsive() {
+          titleEl.textContent = 'Workspace unresponsive';
+          messageEl.textContent =
+            'This workspace needs a restart to recover. In-progress work in all agents will be '
+            + 'interrupted. If the problem persists, contact support.';
+          show(spinnerEl, false);
+          show(errorEl, true);
+          hostBtn.textContent = 'Restart workspace';
+          hostBtn.classList.remove('secondary');
+          show(hostBtn, true);
+        }
+        // New tier: services.toml is missing [services.system_interface]. A
+        // restart cannot recover this; the user has to fix the file. Provide
+        // a secondary "Try restart anyway" affordance for completeness.
+        function renderMisconfigured() {
+          titleEl.textContent = 'Workspace misconfigured';
+          messageEl.textContent =
+            "This workspace's services.toml is missing the [services.system_interface] entry, "
+            + 'so the system interface cannot be started. A restart is unlikely to help -- '
+            + 'fix services.toml first. See the diagnostics below for details.';
+          show(spinnerEl, false);
+          show(errorEl, false);
+          hostBtn.textContent = 'Try restart anyway';
+          hostBtn.classList.add('secondary');
+          show(hostBtn, true);
+        }
+        function renderDispatchError() {
+          titleEl.textContent = 'Workspace unresponsive';
+          messageEl.textContent = 'Could not start the restart. Check your connection and try again.';
+          show(spinnerEl, false);
+          show(errorEl, false);
+          hostBtn.textContent = 'Restart workspace';
+          hostBtn.classList.remove('secondary');
+          show(hostBtn, true);
+        }
+
+        function postRestart(path) {
+          renderLoading();
+          // The endpoint returns 202 once the tracker is RESTARTING; any other
+          // status means the dispatch did not start, so surface an error
+          // instead of refreshing into a re-probe loop.
+          fetch('/api/agents/' + encodeURIComponent(agentId) + path, {
+            method: 'POST',
+            credentials: 'same-origin',
+          }).then(function (resp) {
+            if (resp.ok) { scheduleRefresh(); } else { renderDispatchError(); }
+          }, renderDispatchError);
+        }
+
+        // Fetch the host-health probe and populate the diagnostic. When
+        // ``autoDispatch`` is true (the live stuck/probe entry) we also pick
+        // a restart tier from ``dispatch_tier``; when it's false (the
+        // restart_failed entry) we only render the diagnostic alongside the
+        // existing failure-reason error block, so the user sees both.
+        function runProbe(autoDispatch) {
+          renderLoading();
+          fetch('/api/agents/' + encodeURIComponent(agentId) + '/host-health', {
+            credentials: 'same-origin',
+          }).then(function (resp) {
+            return resp.json();
+          }).then(function (data) {
+            latestHealth = data || null;
+            renderDebugMenu(latestHealth);
+            var tier = data && data.dispatch_tier;
+            // A missing [services.system_interface] block means no restart can
+            // recover the workspace, so honor this tier on every entry path --
+            // including restart_failed, which is exactly the state a
+            // misconfigured workspace lands in once its undeclared interface
+            // fails to come back up. This must precede the no-auto-dispatch
+            // short-circuit below; renderMisconfigured() dispatches nothing (it
+            // only renders, with a "Try restart anyway" affordance), so it is
+            // safe regardless of autoDispatch.
+            if (tier === 'workspace_misconfigured') {
+              renderMisconfigured();
+              return;
+            }
+            if (!autoDispatch) {
+              // restart_failed entry: render unresponsive so the failure
+              // reason and the diagnostics list both stay visible.
+              renderUnresponsive();
+              return;
+            }
+            if (tier === 'host_offline') {
+              // Container fully stopped: nothing live to interrupt, dispatch
+              // unattended. Tell the endpoint the host is already stopped so it
+              // skips the redundant stop step and cold-boots straight away.
+              postRestart('/restart-host?host_already_stopped=1');
+              return;
+            }
+            if (tier === 'interface_unresponsive') {
+              // Container running, exec works: restart the system-services agent in place.
+              postRestart('/restart-system-interface');
+              return;
+            }
+            // 'host_unresponsive' or anything else: require explicit user consent for a host restart.
+            renderUnresponsive();
+          }, function () {
+            renderUnresponsive();
+          });
+        }
+
+        hostBtn.addEventListener('click', function () {
+          postRestart('/restart-host');
+        });
+        if (copyBtn) {
+          copyBtn.addEventListener('click', copyDiagnostics);
+        }
+        if (copySshBtn) {
+          copySshBtn.addEventListener('click', function () {
+            var cmd = copySshBtn.getAttribute('data-ssh-command') || '';
+            try {
+              if (navigator.clipboard) navigator.clipboard.writeText(cmd);
+            } catch (e) {
+              /* ignore */
+            }
+          });
+        }
+
+        if (initialStatus === 'restarting') {
+          renderLoading();
+          scheduleRefresh();
+        } else if (initialStatus === 'restart_failed') {
+          // Show the failure reason AND the diagnostic together: re-run
+          // the probe with auto-dispatch off so the renderUnresponsive path
+          // also has the diagnostics populated.
+          runProbe(false);
+          // A failed restart is not necessarily terminal: the background probe
+          // loop keeps polling the workspace and may recover it on its own
+          // (e.g. a cold container boot that finished just after the restart
+          // worker's bounded wait elapsed). Watch for that recovery so we can
+          // return the user to the workspace without them having to act.
+          scheduleHealthyPoll();
+        } else if (initialStatus === 'healthy') {
+          // Degenerate: rendered HEALTHY with no return_to to 302 to. Offer a
+          // manual restart rather than auto-dispatching one on a healthy page.
+          renderUnresponsive();
+        } else {
+          runProbe(true);
+        }
+      })();
+"""
 
 
 @pure
 def render_recovery_page(
     agent_id: AgentId,
-    ws_name: str,
     return_to: str,
     initial_status: str,
+    initial_error: str,
+    ssh_command: str | None = None,
 ) -> str:
     """Render the workspace-recovery page shown when the system interface is unresponsive.
 
-    ``initial_status`` is one of ``"stuck"``/``"restarting"``/``"healthy"`` and
-    governs the page's initial UI state. ``return_to`` is the URL the page
-    reloads back to once the tracker reports HEALTHY again -- typically the
-    original plugin subdomain URL the user was navigating to.
+    Built on the shared ``render_loading_page`` so the recovery page's loading
+    state is identical to the mngr_forward proxy loader. ``initial_status`` is
+    one of ``"stuck"``/``"restarting"``/``"restart_failed"``/``"healthy"`` and
+    governs the page's initial UI state. ``initial_error`` is the failure
+    reason shown (collapsed) when ``initial_status`` is ``"restart_failed"``.
+    ``return_to`` is the URL the page navigates back to once the workspace is
+    healthy again.
+
+    ``ssh_command`` is the copy-pasteable SSH command for the agent's host. When
+    provided, a "Copy SSH command" button sits beside "Copy diagnostics" in the
+    Diagnostics menu; when ``None`` (no SSH info -- e.g. the brief window before
+    discovery surfaces it) the button is omitted entirely rather than rendered
+    inert.
     """
-    return JINJA_ENV.get_template("recovery.html").render(
-        agent_id=str(agent_id),
-        ws_name=ws_name,
-        return_to=return_to,
-        initial_status=initial_status,
-        accent=workspace_accent(str(agent_id)),
+    error_block = ""
+    if initial_error:
+        error_block = (
+            '        <details id="recovery-error" class="hidden">\n'
+            "          <summary>Error details</summary>\n"
+            f"          <pre>{html.escape(initial_error)}</pre>\n"
+            "        </details>\n"
+        )
+    # Debug details are populated dynamically by the recovery JS once it gets
+    # a host-health response. The block is in the DOM from the start (hidden)
+    # so the JS can fill it in place without re-templating.
+    ssh_button = ""
+    if ssh_command is not None:
+        ssh_button = (
+            '<button type="button" id="copy-ssh-btn" '
+            f'data-ssh-command="{html.escape(ssh_command, quote=True)}">Copy SSH command</button>'
+        )
+    debug_block = (
+        '        <details id="recovery-debug-details" class="hidden">\n'
+        "          <summary>Diagnostics</summary>\n"
+        '          <div id="recovery-debug-content"></div>\n'
+        '          <div class="debug-section">'
+        '<button type="button" id="copy-diagnostics-btn">Copy diagnostics</button>'
+        f"{ssh_button}"
+        "</div>\n"
+        "        </details>\n"
+    )
+    # The restart button is the page's primary action, so it comes first --
+    # directly under the message. The error and diagnostics disclosures are
+    # grouped together below it in the de-emphasized troubleshooting block;
+    # ``_RECOVERY_STYLE`` self-hides that block (divider + label included)
+    # whenever neither disclosure is currently visible.
+    card_extra = (
+        '      <button id="recovery-host-btn" class="hidden">Restart workspace</button>\n'
+        '      <div class="recovery-troubleshooting">\n'
+        '        <p class="recovery-troubleshooting-label">Troubleshooting</p>\n'
+        + error_block
+        + debug_block
+        + "      </div>\n"
+    )
+    card_attrs = (
+        f' data-agent-id="{html.escape(str(agent_id))}"'
+        f' data-return-to="{html.escape(return_to)}"'
+        f' data-initial-status="{html.escape(initial_status)}"'
+    )
+    return render_loading_page(
+        style_extra=_RECOVERY_STYLE,
+        card_attrs=card_attrs,
+        card_extra=card_extra,
+        body_extra="    <script>\n" + _RECOVERY_SCRIPT + "    </script>\n",
     )
 
 
@@ -367,7 +925,8 @@ def render_destroying_page(
     value (``running``/``failed``/``done``) so the page renders correctly
     even before the first poll completes.
     """
-    return JINJA_ENV.get_template("destroying.html").render(
+    return CATALOG.render(
+        "pages.Destroying",
         agent_id=str(agent_id),
         agent_name=agent_name,
         pid=pid,
@@ -398,7 +957,8 @@ def render_chrome_page(
     In Electron mode, the iframe and browser sidebar are hidden via JS; the content
     and sidebar are handled by separate WebContentsViews.
     """
-    return JINJA_ENV.get_template("chrome.html").render(
+    return CATALOG.render(
+        "pages.Chrome",
         is_mac=is_mac,
         is_authenticated=is_authenticated,
         mngr_forward_origin=mngr_forward_origin,
@@ -416,7 +976,8 @@ def render_sidebar_page(mngr_forward_origin: str = "") -> str:
     ``data-mngr-forward-origin`` so sidebar.js can build the cross-origin
     ``/goto/<agent>/`` URL the plugin serves.
     """
-    return JINJA_ENV.get_template("sidebar.html").render(
+    return CATALOG.render(
+        "pages.Sidebar",
         mngr_forward_origin=mngr_forward_origin,
     )
 
@@ -442,7 +1003,8 @@ def render_sharing_editor(
     ``mngr_forward_origin`` is the bare origin of the ``mngr forward`` plugin;
     the workspace link in the page title points at ``{mngr_forward_origin}/goto/<agent>/``.
     """
-    return JINJA_ENV.get_template("sharing.html").render(
+    return CATALOG.render(
+        "pages.Sharing",
         title=title,
         agent_id=agent_id,
         service_name=service_name,
@@ -477,7 +1039,8 @@ def render_workspace_settings(
     Interactivity for the setup flow lives in ``static/workspace_settings.js``,
     which reads the agent id from the page's ``data-agent-id`` attribute.
     """
-    return JINJA_ENV.get_template("workspace_settings.html").render(
+    return CATALOG.render(
+        "pages.WorkspaceSettings",
         agent_id=agent_id,
         ws_name=ws_name,
         current_account=current_account,
@@ -486,6 +1049,23 @@ def render_workspace_settings(
         telegram_state=telegram_state,
         accent=workspace_accent(agent_id),
     )
+
+
+# -- Dev styleguide --
+
+
+@pure
+def render_dev_styleguide_page() -> str:
+    """Render the styleguide page (mounted at ``/_dev/styleguide``).
+
+    The page is a hand-authored catalog of UI patterns and tokens. When a
+    new ``:root`` token is added to ``static/tokens.css``, add a swatch
+    in ``templates/pages/DevStyleguide.jinja`` with
+    ``data-token="--<name>"`` on its wrapper -- the ``templates_test.py``
+    ratchet cross-checks the set of declared ``:root`` tokens against the
+    set of ``data-token`` swatches and fails if either side drifts.
+    """
+    return CATALOG.render("pages.DevStyleguide")
 
 
 @pure
@@ -502,7 +1082,8 @@ def render_accounts_page(
     present (still in sessions.json) but the user disabled the block
     via the providers panel.
     """
-    return JINJA_ENV.get_template("accounts.html").render(
+    return CATALOG.render(
+        "pages.Accounts",
         accounts=accounts,
         default_account_id=default_account_id or "",
         enabled_by_user_id=dict(enabled_by_user_id or {}),

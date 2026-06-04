@@ -4,6 +4,62 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-04
+
+- The `/sync-tutorial-to-e2e-tests` skill's default test-directory argument now points at the new `libs/mngr/imbue/mngr/e2e/tutorial/` subdirectory, so it no longer flags non-tutorial e2e tests as unmatched.
+
+## 2026-06-03
+
+Updated the root `.minds/template/ovh.sh` secret template comment to note that the OVH AK/AS/CK credentials are now pushed to Modal (as the `ovh-<tier>` secret) for the connector's runtime cleanup of released pool hosts, not just read on the operator's machine during deploy/destroy. Also adds the blueprint plan for the leased-host cleanup work.
+
+Fixed stale references in the `minds-dev-workflow` skill and the `minds-start`
+justfile error hints:
+
+- Dev env naming corrected from `<your-user>-dev` to `dev-<your-user>`. The
+  `DevEnvName` validator requires the tier prefix first (`dev-`/`ci-`), so
+  `josh-dev` is invalid while `dev-josh` is valid. Also corrected the derived
+  paths the skill documented (`MINDS_ROOT_NAME=minds-dev-<user>`, env root
+  `~/.minds-dev-<user>/`, container `minds-dev-<user>-mindtest-host`).
+- Worktree base branch example `josh/start-minds` (no longer exists on the FCT
+  remote) replaced with `origin/main` in the skill and in both `just
+  minds-start` error hints.
+- Pool-host baking described as OVH-backed (the imbue_cloud pool's VPS provider)
+  rather than the outdated "Vultr".
+
+`just forward-system-interface` now writes the Cloudflare tunnel token to
+`runtime/secrets/cloudflare_tunnel.env` (one of the per-secret env files in the
+`runtime/secrets/` directory) instead of the old single `runtime/secrets` file,
+matching the directory-based secrets layout the FCT runner and minds now use.
+
+`just minds-start` and `just minds-build` now select the Node version pinned in
+`apps/minds/.nvmrc` (via nvm) before launching, so they no longer fail with
+`ERR_PNPM_UNSUPPORTED_ENGINE` when the shell's default Node has drifted off the
+pin. The selection is a no-op when the active Node already matches and errors
+with an actionable hint when nvm or the pinned version is missing (it never
+auto-installs Node). Shared with `propagate_changes` via the new
+`apps/minds/scripts/select_node_version.sh` helper.
+
+Added `specs/discovery-provider-error-resilience.md` documenting the two remaining discovery-resilience loose threads from the workspace-flicker debugging: (1) retaining known hosts/agents through a transient provider discovery error (drop only on explicit destroy or a successful poll; mark retained items unknown/stale by reusing `error_by_provider_name`), and (2) bouncing/restarting the latchkey forward on the same triggers minds uses to bounce its own observe, so latchkey picks up mid-session provider/config changes.
+
+Removed the `.minds/template/paid-accounts.sh` secret template and folded `MINDS_PAID_ADMIN_KEY` + `MINDS_PAID_LIST_CACHE_TTL_SECONDS` into `.minds/template/supertokens.sh`, reflecting the move of paid-user tracking from a Modal-secret allowlist to database tables. Updated the vault-environments spec's service list. Added the implementation blueprint under `blueprint/paid-user-tables/`.
+
+Added a design blueprint (`blueprint/imbue-cloud-slow-path/`) for the imbue_cloud
+robust fast/slow-path host-leasing change.
+
+## 2026-06-02
+
+Added the design doc for the tiered system-interface restart
+(`blueprint/tiered-restart-v2/plan-tiered-restart-v2.md`), describing the
+two-tier minds workspace recovery flow and the `mngr stop --stop-host`
+flag that backs the host-restart tier.
+
+Added the implementation plan for the error-hierarchy collapse under `blueprint/`. No runtime
+or tooling change.
+
+## 2026-06-01
+
+Tightened the `test_every_project_has_changelog_layout` meta-ratchet to also require a `.gitkeep` inside each project's `changelog/` directory. Previously only the directory's existence was checked, so a newly added project with no `.gitkeep` would pass until a later consolidation run drained its entries and the empty directory silently vanished from git. Requiring the `.gitkeep` upfront catches the omission when the project is first added.
+
 ## 2026-06-01
 
 `markdown-it-py` is now an explicit (rather than only transitive) dependency in the lockfile: mngr uses rich's own CommonMark parser directly to rewrite links when rendering help topics for the terminal.

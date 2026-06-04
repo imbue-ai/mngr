@@ -17,6 +17,8 @@ embedder restarts. The detachment + adoption mechanics mirror what
 side-by-side is intentional.
 """
 
+import os
+import signal
 import threading
 from collections.abc import Mapping
 from datetime import datetime
@@ -309,6 +311,37 @@ class LatchkeyForwardSupervisor(MutableModel):
             return
         logger.info("Stopping detached mngr latchkey forward supervisor (pid={})", info.pid)
         _terminate_pid(info.pid)
+
+    def bounce(self) -> None:
+        """Refresh the supervisor's provider set without dropping the gateway.
+
+        If a live ``mngr latchkey forward`` is running, send it SIGHUP so it
+        bounces only its ``mngr observe`` child (the shared gateway and every
+        reverse tunnel stay up) and reloads the current provider set. If no
+        live supervisor is found -- no record, a dead PID, or a stale record
+        pointing at a stranger -- fall back to :meth:`ensure_running` so the
+        bounce also brings the supervisor up (start-if-down).
+
+        Used by the minds desktop client on every mid-session change to its
+        provider set (provider enable/disable, imbue_cloud account add/remove),
+        mirroring the SIGHUP it already sends its own ``mngr forward`` observe.
+        """
+        plugin_dir = self.plugin_data_dir
+        with self._lock:
+            info = load_forward_info(plugin_dir)
+            live_pid = info.pid if (info is not None and is_forward_info_alive(info)) else None
+        if live_pid is None:
+            logger.info("No live mngr latchkey forward to bounce; ensuring one is running")
+            self.ensure_running()
+            return
+        logger.info("Bouncing mngr latchkey forward observe via SIGHUP (pid={})", live_pid)
+        try:
+            os.kill(live_pid, signal.SIGHUP)
+        except OSError as e:
+            # The supervisor died between the liveness check and the signal.
+            # Bring a fresh one up rather than leaving the provider set stale.
+            logger.warning("Failed to SIGHUP mngr latchkey forward pid {}: {}; ensuring one is running", live_pid, e)
+            self.ensure_running()
 
     def restart(self) -> LatchkeyForwardInfo:
         """Terminate any existing live supervisor and spawn a fresh one.

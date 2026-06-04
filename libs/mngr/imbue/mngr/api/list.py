@@ -30,7 +30,6 @@ from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.api.providers import list_provider_names_to_load
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
-from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderDiscoveryError
 from imbue.mngr.errors import ProviderEmptyError
@@ -725,7 +724,7 @@ def _process_host_with_error_handling(
 
     except Exception as e:
         if params.error_behavior == ErrorBehavior.ABORT:
-            if isinstance(e, (MngrError, BaseMngrError)):
+            if isinstance(e, MngrError):
                 raise
             raise MngrError(str(e)) from e
         logger.opt(exception=e).error("Error processing host {}", host_ref.host_id)

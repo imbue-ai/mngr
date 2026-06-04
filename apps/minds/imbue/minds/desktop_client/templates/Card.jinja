@@ -1,0 +1,10 @@
+{#def extra="" #}
+{#
+  Basic white card with rounded corners and a subtle shadow. Usage:
+    <Card extra="mt-4">
+      <p>card body</p>
+    </Card>
+#}
+<div class="bg-white border border-zinc-200 rounded-xl shadow-sm p-4 {{ extra }}">
+  {{ content }}
+</div>

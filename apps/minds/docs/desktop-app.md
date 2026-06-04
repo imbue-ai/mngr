@@ -41,7 +41,7 @@ Closing an individual window just tears down that window's views -- the backend 
 
 ### Crash recovery
 
-If the backend exits unexpectedly, every open window switches to the error screen (chrome view expanded to fill the window, content/sidebar/requests-panel views torn down) with the last lines from the log file. Clicking "Retry" from any window restarts the backend once; on success every window reloads to its pre-error URL.
+If the backend exits unexpectedly, every open window switches to the error screen (chrome view expanded to fill the window, content/sidebar/requests-panel/modal views torn down) with the last lines from the log file. Clicking "Retry" from any window restarts the backend once; on success every window reloads to its pre-error URL.
 
 ### Keyboard shortcuts
 

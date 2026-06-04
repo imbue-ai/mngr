@@ -268,6 +268,11 @@ electron_start() {
     export MINDS_WORKSPACE_GIT_URL="${TEMPLATE_DIR}"
     export MINDS_WORKSPACE_NAME="${AGENT_NAME}"
 
+    # Select apps/minds's pinned Node (.nvmrc) so the restarted client passes
+    # npm's engine-strict check; the detached Popen below inherits this PATH.
+    # shellcheck disable=SC1091
+    . "${SCRIPT_DIR}/select_node_version.sh" || exit 2
+
     echo "[electron] Starting desktop client (MINDS_WORKSPACE_GIT_URL=${TEMPLATE_DIR})..."
     python3 -c "import subprocess; subprocess.Popen(['bash','-c','cd ${MNGR_REPO_ROOT}/apps/minds && npm start'], start_new_session=True, stdout=open('/tmp/minds-electron.log','a'), stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)"
 }
