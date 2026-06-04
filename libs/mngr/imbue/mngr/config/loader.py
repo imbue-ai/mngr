@@ -260,6 +260,8 @@ def load_config(
         config_dict["prefix"] = config.prefix
     if config.default_host_dir is not None:
         config_dict["default_host_dir"] = config.default_host_dir
+    if config.events_base_dir_override is not None:
+        config_dict["events_base_dir_override"] = config.events_base_dir_override
 
     # Always include agent_types, providers, plugins, commands, and create_templates (they default to empty dicts)
     config_dict["agent_types"] = config.agent_types
@@ -960,6 +962,7 @@ def parse_config(
     kwargs: dict[str, Any] = {}
     kwargs["prefix"] = raw.pop("prefix", None)
     kwargs["default_host_dir"] = raw.pop("default_host_dir", None)
+    kwargs["events_base_dir_override"] = raw.pop("events_base_dir_override", None)
     kwargs["unset_vars"] = raw.pop("unset_vars", None)
     kwargs["pager"] = raw.pop("pager", None)
     kwargs["enabled_backends"] = raw.pop("enabled_backends", None)
