@@ -8,7 +8,7 @@ Plugin that registers the `antigravity` agent type for mngr.
 
 Each agent runs `agy` under its own `$HOME`, so it authenticates independently. If a file token exists at the host user's real `~/.gemini/antigravity-cli/antigravity-oauth-token`, mngr seeds it into each agent's home (symlinked by default, so refreshes propagate) and agents are authenticated with no per-agent login. Otherwise provisioning still succeeds and you simply sign in when `agy` prompts you on first launch — the token is then written into that agent's own home. (This mirrors `mngr_claude`, which skips credential seeding rather than blocking agent creation.)
 
-On Linux (mngr's runtime) a normal `agy` login writes that shared file token, so auth is shared across agents automatically. On macOS `agy` stores credentials in the keychain instead, which mngr's per-agent homes can't read, so you'll sign in the first time you launch each agent (unless you place a token file at the shared path yourself).
+On Linux (mngr's runtime) there is no OS keychain, so a normal `agy` login writes the shared file token and auth is shared across agents deterministically. On macOS `agy` stores the token in the login keychain (shared across your processes, not per-`$HOME`); per-agent agents often authenticate from it automatically after a single normal login, but keychain reachability under a relocated `$HOME` has proven inconsistent, so an agent may occasionally prompt you to sign in on first launch. No manual token handling is required either way.
 
 ## Usage
 
