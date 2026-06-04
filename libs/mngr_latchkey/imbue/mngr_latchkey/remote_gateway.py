@@ -189,6 +189,11 @@ def _default_permissions_json() -> str:
     return config.model_dump_json(indent=2, exclude=exclude)
 
 
+def local_credentials_path(latchkey_directory: Path) -> Path:
+    """Return the path to the local (desktop-side) encrypted latchkey credential store."""
+    return latchkey_directory / _CREDENTIALS_FILENAME
+
+
 def sync_credentials(host: OuterHostInterface, latchkey_directory: Path) -> None:
     """Copy the local encrypted latchkey credentials onto the VPS.
 
@@ -197,7 +202,7 @@ def sync_credentials(host: OuterHostInterface, latchkey_directory: Path) -> None
     VPS so the remote latchkey CLI can decrypt the same credential store.
     Raises :class:`RemoteGatewayError` if the local file is missing or unreadable.
     """
-    local_path = latchkey_directory / _CREDENTIALS_FILENAME
+    local_path = local_credentials_path(latchkey_directory)
     try:
         content = local_path.read_bytes()
     except FileNotFoundError as e:

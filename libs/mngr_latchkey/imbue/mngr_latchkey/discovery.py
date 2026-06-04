@@ -28,6 +28,8 @@ existing tunnel and exit.
 """
 
 import threading
+from pathlib import Path
+from typing import Final
 
 import paramiko
 from loguru import logger
@@ -41,6 +43,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -51,7 +54,36 @@ from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
+from imbue.mngr_latchkey.remote_gateway import RemoteGatewayError
+from imbue.mngr_latchkey.remote_gateway import local_credentials_path
 from imbue.mngr_latchkey.remote_gateway import provision_remote_gateway
+from imbue.mngr_latchkey.remote_gateway import sync_credentials
+from imbue.mngr_latchkey.remote_gateway import sync_permissions
+from imbue.mngr_latchkey.store import permissions_path_for_host
+
+# How often the remote-state sync loop re-checks the local credentials file and
+# each known remote host's permissions file for changes. Credential/permission
+# edits are infrequent and not latency-critical, so a couple of seconds keeps
+# propagation prompt without busy-spinning.
+_REMOTE_STATE_SYNC_POLL_INTERVAL_SECONDS: Final[float] = 2.0
+
+
+def _file_mtime(path: Path) -> float | None:
+    """Return ``path``'s mtime, or ``None`` if it does not exist / can't be stat'd."""
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
+class _RemoteSyncState(MutableModel):
+    """Mutable bookkeeping carried across iterations of the remote-state sync loop."""
+
+    synced_host_ids: set[str] = Field(default_factory=set, description="Hosts that have had their initial full sync")
+    credentials_mtime: float | None = Field(default=None, description="Last-seen mtime of the local credentials file")
+    permissions_mtime_by_host: dict[str, float | None] = Field(
+        default_factory=dict, description="Last-seen mtime of each host's permissions file"
+    )
 
 
 class LatchkeyDiscoveryHandler(MutableModel):
@@ -81,6 +113,12 @@ class LatchkeyDiscoveryHandler(MutableModel):
 
     _pending_remote_agents: set[str] = PrivateAttr(default_factory=set)
     _pending_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    # host_id -> provider_name for every genuinely-remote (VPS) host we have
+    # provisioned a gateway on. Drives the remote-state sync loop.
+    _remote_host_provider_by_id: dict[str, str] = PrivateAttr(default_factory=dict)
+    _remote_hosts_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    # Bookkeeping carried across iterations of the single remote-state sync loop.
+    _remote_sync_state: "_RemoteSyncState" = PrivateAttr(default_factory=lambda: _RemoteSyncState())
 
     def __call__(self, agent_id: AgentId, host_id: HostId, ssh_info: RemoteSSHInfo | None, provider_name: str) -> None:
         try:
@@ -230,6 +268,19 @@ class LatchkeyDiscoveryHandler(MutableModel):
                         host_id,
                     )
                     return
+                if outer.is_local:
+                    # The outer is this very machine (e.g. a local docker daemon),
+                    # not a remote VPS -- nothing to provision and nothing to sync.
+                    logger.debug(
+                        "Outer host for agent {} (host {}) is local; skipping VPS gateway provisioning",
+                        agent_id,
+                        host_id,
+                    )
+                    return
+                # Register the host so the remote-state sync loop keeps its
+                # credentials/permissions in sync from now on.
+                with self._remote_hosts_lock:
+                    self._remote_host_provider_by_id[str(host_id)] = provider_name
                 provision_remote_gateway(
                     outer,
                     host_id=host_id,
@@ -240,6 +291,109 @@ class LatchkeyDiscoveryHandler(MutableModel):
         finally:
             with self._pending_lock:
                 self._pending_remote_agents.discard(str(agent_id))
+
+    # -- Remote credential/permission sync ----------------------------------
+
+    def start_remote_state_sync(self, concurrency_group: ConcurrencyGroup) -> None:
+        """Start a background thread that keeps every known remote host's VPS in sync.
+
+        On startup (and whenever a new remote host is provisioned) it syncs that
+        host's permissions and then credentials to its VPS -- permissions first,
+        which matters. It then watches the local credentials file (pushing
+        credentials to every known remote host on change) and each known host's
+        permissions file (pushing that host's permissions on change). The thread
+        is unchecked so a sync failure never tears down the shared supervisor;
+        the CG's ObservableThread still surfaces any uncaught error.
+        """
+        concurrency_group.start_new_thread(
+            target=self._run_remote_state_sync_loop,
+            args=(concurrency_group,),
+            name="latchkey-remote-state-sync",
+            is_checked=False,
+        )
+
+    def _run_remote_state_sync_loop(self, concurrency_group: ConcurrencyGroup) -> None:
+        """Poll for credential/permission changes and sync them to remote hosts until shutdown."""
+        poll_event = threading.Event()
+        while not concurrency_group.is_shutting_down():
+            try:
+                self._run_remote_state_sync_once()
+            except (OSError, RuntimeError) as e:
+                logger.warning("Latchkey remote-state sync iteration failed: {}", e)
+            poll_event.wait(timeout=_REMOTE_STATE_SYNC_POLL_INTERVAL_SECONDS)
+
+    def _run_remote_state_sync_once(self) -> None:
+        """Run a single sync pass: initial syncs for new hosts, then credential / permission deltas."""
+        state = self._remote_sync_state
+        latchkey_directory = self.latchkey.latchkey_directory
+        data_dir = self.latchkey.plugin_data_dir
+        with self._remote_hosts_lock:
+            remote_hosts = dict(self._remote_host_provider_by_id)
+
+        # Newly-appeared remote hosts get a full initial sync: permissions first,
+        # then credentials. We record the baseline mtimes so the delta checks
+        # below don't immediately re-sync what we just pushed.
+        for host_id_str, provider_name in remote_hosts.items():
+            if host_id_str not in state.synced_host_ids:
+                self._sync_state_to_host(host_id_str, provider_name, do_permissions=True, do_credentials=True)
+                state.synced_host_ids.add(host_id_str)
+                state.permissions_mtime_by_host[host_id_str] = _file_mtime(
+                    permissions_path_for_host(data_dir, HostId(host_id_str))
+                )
+
+        # Local credentials file change -> push credentials to every known remote host.
+        current_credentials_mtime = _file_mtime(local_credentials_path(latchkey_directory))
+        if state.credentials_mtime is None:
+            # First pass: the initial sync above already pushed credentials, so
+            # just establish the baseline rather than re-pushing.
+            state.credentials_mtime = current_credentials_mtime
+        elif current_credentials_mtime != state.credentials_mtime:
+            state.credentials_mtime = current_credentials_mtime
+            for host_id_str, provider_name in remote_hosts.items():
+                self._sync_state_to_host(host_id_str, provider_name, do_permissions=False, do_credentials=True)
+        else:
+            # Credentials unchanged since the last pass; nothing to push.
+            pass
+
+        # Per-host permissions file change -> push that host's permissions.
+        for host_id_str, provider_name in remote_hosts.items():
+            if host_id_str not in state.synced_host_ids:
+                continue
+            permissions_mtime = _file_mtime(permissions_path_for_host(data_dir, HostId(host_id_str)))
+            if permissions_mtime != state.permissions_mtime_by_host.get(host_id_str):
+                state.permissions_mtime_by_host[host_id_str] = permissions_mtime
+                self._sync_state_to_host(host_id_str, provider_name, do_permissions=True, do_credentials=False)
+
+    def _sync_state_to_host(
+        self,
+        host_id_str: str,
+        provider_name: str,
+        *,
+        do_permissions: bool,
+        do_credentials: bool,
+    ) -> None:
+        """Open the host's outer (VPS) and sync the requested state (permissions before credentials).
+
+        A vanished host (``HostNotFoundError``) is dropped from the registry so
+        we stop syncing it; other failures are logged and retried next pass.
+        """
+        host_id = HostId(host_id_str)
+        try:
+            provider = get_provider_instance(ProviderInstanceName(provider_name), self.mngr_ctx)
+            with provider.outer_host_for(host_id) as outer:
+                if outer is None or outer.is_local:
+                    return
+                # Order matters: permissions before credentials.
+                if do_permissions:
+                    sync_permissions(outer, self.latchkey.latchkey_directory, host_id)
+                if do_credentials:
+                    sync_credentials(outer, self.latchkey.latchkey_directory)
+        except HostNotFoundError:
+            with self._remote_hosts_lock:
+                self._remote_host_provider_by_id.pop(host_id_str, None)
+            logger.debug("Remote host {} no longer exists; dropped from latchkey sync", host_id_str)
+        except (RemoteGatewayError, MngrError, OSError, paramiko.SSHException) as e:
+            logger.warning("Failed to sync latchkey state to remote host {}: {}", host_id_str, e)
 
 
 class LatchkeyDestructionHandler(FrozenModel):

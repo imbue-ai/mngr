@@ -543,6 +543,9 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
         concurrency_group=mngr_ctx.concurrency_group,
         mngr_ctx=mngr_ctx,
     )
+    # Keep every remote host's VPS credentials/permissions in sync in the
+    # background for the lifetime of this supervisor.
+    discovery_handler.start_remote_state_sync(mngr_ctx.concurrency_group)
     destruction_handler = LatchkeyDestructionHandler(tunnel_manager=tunnel_manager)
 
     # Isolate latchkey's discovery observer onto a private, per-env event log so its
