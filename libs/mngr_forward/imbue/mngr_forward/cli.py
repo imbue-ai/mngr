@@ -2,6 +2,7 @@
 
 import secrets
 import signal
+import socket
 import subprocess
 import threading
 import time
@@ -17,6 +18,7 @@ from loguru import logger
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.imbue_common.primitives import PositiveInt
+from imbue.mngr.api.discovery_events import get_discovery_events_path
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -52,11 +54,12 @@ class ForwardCliOptions(CommonCliOptions):
     """Options for ``mngr forward``. Backed by the click flags below."""
 
     host: str = _DEFAULT_HOST
-    port: int = _DEFAULT_PORT
+    port: int | None = None
     service: str | None = None
     forward_port: int | None = None
     reverse: tuple[str, ...] = ()
     no_observe: bool = False
+    observe_via_file: bool = False
     agent_include: tuple[str, ...] = ()
     agent_exclude: tuple[str, ...] = ()
     event_include: tuple[str, ...] = ()
@@ -94,9 +97,63 @@ def _resolve_plugin_state_dir(mngr_host_dir: Path) -> Path:
     return mngr_host_dir / "plugin" / "forward"
 
 
+def _bind_listen_socket(host: str, requested_port: int | None) -> socket.socket:
+    """Bind the TCP socket the forward server will listen on.
+
+    ``requested_port`` semantics:
+
+    - ``None`` (``--port`` not supplied): bind ``_DEFAULT_PORT``; if it is
+      already in use, fall back to an OS-assigned ephemeral port.
+    - an explicit value: bind exactly that port. If it is unavailable a
+      ``click.ClickException`` is raised -- a caller that picked a specific
+      port did so deliberately, so silently moving would hide a real conflict.
+
+    The returned socket is bound but not listening; uvicorn calls ``listen()``
+    on it via ``loop.create_server``.
+    """
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    sock = socket.socket(family=family)
+    # Close the socket if anything below fails (the caller only ever gets a
+    # socket back on the success path); ``finally`` covers every exit,
+    # including KeyboardInterrupt, without catching and re-raising.
+    is_bound = False
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if requested_port is None:
+            try:
+                sock.bind((host, _DEFAULT_PORT))
+            except OSError as e:
+                logger.warning(
+                    "Default forward port {} is unavailable ({}); requesting an OS-assigned port instead.",
+                    _DEFAULT_PORT,
+                    e,
+                )
+                sock.bind((host, 0))
+        else:
+            try:
+                sock.bind((host, requested_port))
+            except OSError as e:
+                raise click.ClickException(f"Could not bind requested port {requested_port} on {host}: {e}") from e
+        sock.set_inheritable(True)
+        is_bound = True
+        return sock
+    finally:
+        if not is_bound:
+            sock.close()
+
+
 @click.command(name="forward")
 @click.option("--host", default=_DEFAULT_HOST, show_default=True, help="Bind host")
-@click.option("--port", default=_DEFAULT_PORT, show_default=True, help="Bind port")
+@click.option(
+    "--port",
+    type=int,
+    default=None,
+    help=(
+        f"Bind port. When omitted, the server tries {_DEFAULT_PORT} and falls back to an "
+        "OS-assigned port if it is already in use. When supplied explicitly, the server "
+        "binds exactly that port and fails if it is unavailable."
+    ),
+)
 @click.option("--service", default=None, help="Service name to forward (e.g. 'system_interface')")
 @click.option(
     "--forward-port",
@@ -115,6 +172,14 @@ def _resolve_plugin_state_dir(mngr_host_dir: Path) -> Path:
     is_flag=True,
     default=False,
     help="Do not spawn `mngr observe` / `mngr event`; take a single `mngr list` snapshot instead. Requires --forward-port.",
+)
+@click.option(
+    "--observe-via-file",
+    is_flag=True,
+    default=False,
+    help="Do not spawn `mngr observe`; instead tail the shared discovery events file written by another "
+    "`mngr observe --discovery-only` (e.g. the one `mngr latchkey forward` runs). Per-agent `mngr event` "
+    "streams are still spawned. Mutually exclusive with --no-observe.",
 )
 @click.option(
     "--agent-include",
@@ -174,10 +239,18 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
 
     start_parent_death_watcher(mngr_ctx.concurrency_group)
 
+    # Bind the listen socket up front so the rest of startup (login URL,
+    # app construction, the `listening` envelope) all uses the port the
+    # server actually bound -- which may differ from `--port` when the
+    # default was unavailable. Binding here also fails fast when an
+    # explicitly-requested port is already in use.
+    listen_socket = _bind_listen_socket(host=opts.host, requested_port=opts.port)
+    listen_port = ForwardPort(listen_socket.getsockname()[1])
+
     envelope_writer = EnvelopeWriter()
 
     strategy = _build_strategy(opts)
-    resolver = ForwardResolver(strategy=strategy)
+    resolver = ForwardResolver(strategy=strategy, envelope_writer=envelope_writer)
     tunnel_manager = SSHTunnelManager()
 
     reverse_specs = _parse_reverse_specs(opts.reverse)
@@ -197,6 +270,7 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
         del kept  # used internally by the helper
         stream_manager: ForwardStreamManager | None = None
     else:
+        discovery_events_path = get_discovery_events_path(mngr_ctx.config) if opts.observe_via_file else None
         stream_manager = ForwardStreamManager(
             resolver=resolver,
             envelope_writer=envelope_writer,
@@ -204,6 +278,7 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
             agent_exclude=tuple(opts.agent_exclude),
             event_include=tuple(opts.event_include),
             event_exclude=tuple(opts.event_exclude),
+            discovery_events_path=discovery_events_path,
         )
         if reverse_specs:
             stream_manager.add_on_agent_discovered_callback(reverse_handler)
@@ -218,7 +293,7 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
     one_time_code = OneTimeCode(secrets.token_urlsafe(_OTP_LENGTH))
     auth_store.add_one_time_code(code=one_time_code)
     login_host = "localhost" if opts.host in {"127.0.0.1", "0.0.0.0", "::1", "::"} else opts.host
-    login_url = f"http://{login_host}:{opts.port}/login?one_time_code={one_time_code}"
+    login_url = f"http://{login_host}:{listen_port}/login?one_time_code={one_time_code}"
 
     logger.info("Login URL (one-time use): {}", login_url)
     envelope_writer.emit_login_url(login_url)
@@ -232,8 +307,6 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
         ).start()
 
     _install_sighup_handler(stream_manager, opts, resolver, reverse_handler, mngr_ctx.concurrency_group)
-
-    listen_port = ForwardPort(opts.port)
 
     def _on_listening() -> None:
         envelope_writer.emit_listening(host=opts.host, port=listen_port)
@@ -251,14 +324,13 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
     )
 
     try:
-        uvicorn.run(
-            app,
-            host=opts.host,
-            port=opts.port,
-            timeout_graceful_shutdown=1,
-            log_level="warning",
-        )
+        # Hand uvicorn the socket we already bound rather than a host/port
+        # pair, so there is no window between resolving the port and the
+        # server claiming it (and no chance uvicorn binds a different one).
+        server = uvicorn.Server(uvicorn.Config(app, timeout_graceful_shutdown=1, log_level="warning"))
+        server.run(sockets=[listen_socket])
     finally:
+        listen_socket.close()
         if stream_manager is not None:
             stream_manager.stop()
         tunnel_manager.cleanup()
@@ -275,6 +347,11 @@ def _validate_options(opts: ForwardCliOptions) -> None:
         # consistency with the other mutex checks above.
         raise click.UsageError(
             "--no-observe is only valid with --forward-port REMOTE_PORT (service URLs are not in `mngr list` output)."
+        )
+    if opts.no_observe and opts.observe_via_file:
+        raise click.UsageError(
+            "--no-observe and --observe-via-file are mutually exclusive: one takes a single `mngr list` "
+            "snapshot, the other tails a live discovery events file."
         )
 
 
@@ -453,6 +530,10 @@ signing key is persisted to disk under ``$MNGR_HOST_DIR/plugin/forward/``.""",
     examples=(
         ("Forward system_interface for every workspace agent", "mngr forward --service system_interface"),
         ("Manual mode against a fixed port", "mngr forward --no-observe --forward-port 8080"),
+        (
+            "Tail a shared discovery log instead of spawning observe",
+            "mngr forward --service system_interface --observe-via-file",
+        ),
         ("Set up reverse tunnels", "mngr forward --service system_interface --reverse 8420:8420"),
         (
             "Filter to a single label set",

@@ -1,2 +1,14 @@
 onlyBuiltDependencies:
   - electron
+
+# Supply-chain hardening: refuse to install any version published less than
+# 14 days ago (20160 minutes), including transitive dependencies. A
+# freshly-compromised release therefore cannot be pulled in until it has had
+# time to be noticed and yanked. Only bites during resolution (e.g. `pnpm
+# install` without --frozen-lockfile, `pnpm add`, `pnpm update`); frozen
+# installs replay the existing lockfile unaffected. Available since pnpm
+# 10.16.0 (this app pins 10.33.4).
+minimumReleaseAge: 20160
+minimumReleaseAgeExclude:
+  - latchkey
+  - "@imbue-ai/detent"

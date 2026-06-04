@@ -17,8 +17,13 @@ from typing import Final
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.envs.primitives import VaultReadError
+from imbue.minds.envs.primitives import VaultSecretNotFoundError
 
 VAULT_BINARY: Final[str] = "vault"
+# `vault kv get` exits 2 when the path holds no secret (vs 1 / other for auth,
+# connectivity, permission failures). Callers use this to tell "not found"
+# (safe to treat as absent) from a transient error (must not be swallowed).
+_VAULT_NOT_FOUND_EXIT_CODE: Final[int] = 2
 _DEFAULT_MOUNT: Final[str] = "secrets"
 _KV_PATH_PREFIX: Final[str] = "secrets/"
 _DEFAULT_TIMEOUT_SECONDS: Final[float] = 30.0
@@ -100,6 +105,13 @@ def read_vault_kv(
 
     if result.returncode != 0:
         stderr = result.stderr.strip() or result.stdout.strip()
+        if result.returncode == _VAULT_NOT_FOUND_EXIT_CODE:
+            # The path genuinely has no secret. Distinct error type so callers
+            # can treat "absent" as empty without also swallowing transient /
+            # auth failures (which use other exit codes).
+            raise VaultSecretNotFoundError(
+                f"No secret found at Vault path {path!r} (exit {result.returncode}): {stderr}."
+            )
         raise VaultReadError(
             f"`{vault_binary} kv get {relative}` failed (exit {result.returncode}): {stderr}. "
             f"Check that `vault login` succeeded and that the path exists at mount '{_DEFAULT_MOUNT}/'."

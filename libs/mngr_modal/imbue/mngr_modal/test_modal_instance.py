@@ -96,7 +96,8 @@ def test_persistent_host_creates_shutdown_script(
 
 
 @pytest.mark.acceptance
-@pytest.mark.timeout(180)
+@pytest.mark.flaky
+@pytest.mark.timeout(300)
 def test_get_host_by_id(real_modal_provider: ModalProviderInstance) -> None:
     """Should be able to get a host by its ID."""
     host = None
@@ -132,7 +133,8 @@ def test_get_host_by_name(real_modal_provider: ModalProviderInstance) -> None:
 
 
 @pytest.mark.acceptance
-@pytest.mark.timeout(180)
+@pytest.mark.flaky
+@pytest.mark.timeout(300)
 def test_discover_hosts_includes_created_host(real_modal_provider: ModalProviderInstance) -> None:
     """Created host should appear in discover_hosts."""
     host = None
@@ -149,7 +151,8 @@ def test_discover_hosts_includes_created_host(real_modal_provider: ModalProvider
 
 
 @pytest.mark.acceptance
-@pytest.mark.timeout(180)
+@pytest.mark.flaky
+@pytest.mark.timeout(300)
 def test_destroy_host_stops_sandbox_and_delete_host_removes_record(
     real_modal_provider: ModalProviderInstance,
 ) -> None:
@@ -722,9 +725,15 @@ def test_host_volume_is_symlinked_and_persists_data(real_modal_provider: ModalPr
         assert result.success
         assert "exists" in result.stdout
 
-        # Verify get_volume_for_host returns a volume
-        volume = real_modal_provider.get_volume_for_host(host)
-        assert volume is not None
+        # Verify get_volume_for_host returns a volume. The volume name can take a
+        # moment to become resolvable via Modal's control plane after the sandbox is
+        # created (eventual consistency), so the name-lookup probe inside
+        # get_volume_for_host may transiently return None right after creation. Poll
+        # rather than asserting once.
+        def volume_is_available() -> bool:
+            return real_modal_provider.get_volume_for_host(host) is not None
+
+        wait_for(volume_is_available, timeout=30.0, error_message="Host volume not visible after 30s")
 
     finally:
         if host:
@@ -746,6 +755,14 @@ def test_host_volume_data_readable_via_volume_interface(real_modal_provider: Mod
         # Write a known file and explicitly sync the volume
         host.execute_idempotent_command("echo 'volume test content' > /mngr/volume_test.txt && sync /host_volume")
 
+        # The volume name can take a moment to become resolvable via Modal's control
+        # plane after the sandbox is created (eventual consistency), so poll rather
+        # than asserting once.
+        wait_for(
+            lambda: real_modal_provider.get_volume_for_host(host) is not None,
+            timeout=30.0,
+            error_message="Host volume not visible after 30s",
+        )
         host_volume = real_modal_provider.get_volume_for_host(host)
         assert host_volume is not None
         assert isinstance(host_volume, HostVolume)

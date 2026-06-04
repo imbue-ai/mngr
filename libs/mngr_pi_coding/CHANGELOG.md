@@ -5,3 +5,11 @@ A concise, human-friendly summary of changes to the `mngr_pi_coding` project. En
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
 ## [Unreleased]
+
+## [v0.1.7] - 2026-06-01
+
+## [v0.1.6] - 2026-05-28
+
+### Changed
+
+- Changed: Plugin uses the structured `TmuxWindowTarget` type for tmux pane targeting; `_send_enter_and_validate` now takes `tmux_target: TmuxWindowTarget` instead of a bare string.

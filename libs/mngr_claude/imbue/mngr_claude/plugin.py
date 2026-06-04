@@ -38,6 +38,7 @@ from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_di
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentStartError
@@ -47,6 +48,7 @@ from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import is_macos
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.data_types import FileTransferSpec
@@ -1392,7 +1394,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
             _CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAME: _load_claude_resource_script(_CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAME)
         }
 
-    def _send_enter_and_validate(self, tmux_target: str) -> None:
+    def _send_enter_and_validate(self, tmux_target: TmuxWindowTarget) -> None:
         # Claude wires a UserPromptSubmit hook that fires `tmux wait-for -S`
         # on the per-session channel; wait for it. If the hook misfires
         # (occasionally happens while another message is being processed),
@@ -1434,8 +1436,8 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
 
         When ``use_env_config_dir=True``: resolve to the value of
         ``$CLAUDE_CONFIG_DIR`` (the user's shared config dir), so multiple
-        agents share a single directory. Raises ``UserInputError`` if the env
-        var is unset.
+        agents share a single directory. When the env var is unset, falls
+        back to ``~/.claude/`` so the agent uses claude's own default.
         """
         if self.agent_config.use_env_config_dir:
             return resolve_shared_claude_config_dir()
@@ -1486,7 +1488,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         CostThresholdDialogIndicator(),
     )
 
-    def _preflight_send_message(self, tmux_target: str) -> None:
+    def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
         """Check for blocking dialogs before sending a message.
 
         Checks the permissions_waiting file (set by the PermissionRequest hook)
@@ -1646,9 +1648,9 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         Interactive and auto-approve runs skip these checks because
         provision() will handle them.
 
-        In ``use_env_config_dir`` mode: enforce local-only + require
-        $CLAUDE_CONFIG_DIR to be set, and skip the dialog-dismissal
-        validation entirely (user is responsible for their own config).
+        In ``use_env_config_dir`` mode: enforce local-only, and skip the
+        dialog-dismissal validation entirely (user is responsible for their
+        own config; mngr makes no writes to it).
         """
         config = self.agent_config
 
@@ -1659,9 +1661,6 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
                     "this agent targets a non-local host. Disable use_env_config_dir "
                     "or move the agent to a local host."
                 )
-            # Side-effect: raises if $CLAUDE_CONFIG_DIR is unset, surfacing the
-            # error inside on_before_provisioning's normal error path.
-            resolve_shared_claude_config_dir()
         # Validate dialogs for non-interactive local runs so we fail early with
         # a clear message. Skip when auto_dismiss_dialogs is True because
         # provision() will auto-dismiss all dialogs in that case. Skip entirely
@@ -1754,7 +1753,8 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         settings_path = self.work_dir / settings_relative
 
         # Check gitignore. During create(), preflight_check already verified
-        # this on the source, but this covers other code paths (e.g. mngr provision).
+        # this on the source; this check runs on the destination as a defense
+        # in depth.
         _check_settings_local_gitignored(host, self.work_dir, require_repo_rule=False)
 
         hooks_config = build_readiness_hooks_config()
@@ -2785,18 +2785,23 @@ def register_cli_options(command_name: str) -> Mapping[str, list[OptionStackItem
 
 
 @hookimpl
-def on_before_create(args: OnBeforeCreateArgs) -> OnBeforeCreateArgs | None:
-    """Validate create args when --adopt-session is used: agent type must
-    be claude (or unset), and the option is incompatible with cloning via
-    ``--from <agent>`` (both adopt a session into the new agent).
+def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
+    """Validate create args when --adopt-session is used: the agent type must
+    be claude (or a subtype of claude), and the option is incompatible with
+    cloning via ``--from <agent>`` (both adopt a session into the new agent).
     """
     adopt_session = args.agent_options.plugin_data.get("adopt_session", ())
     if not adopt_session:
         return None
 
-    agent_type = args.agent_options.agent_type
-    if agent_type is not None and str(agent_type) != "claude":
-        raise UserInputError(f"--adopt-session can only be used with the claude agent type, not '{agent_type}'.")
+    # Resolve through the centralized agent-type registry so any subtype of the
+    # claude agent is accepted, not just the literal "claude" type name.
+    resolved = resolve_agent_type(args.agent_options.agent_type, mngr_ctx.config)
+    if not issubclass(resolved.agent_class, ClaudeAgent):
+        raise UserInputError(
+            f"--adopt-session can only be used with a Claude agent type (claude or a subtype of it), "
+            f"not '{args.agent_options.agent_type}'."
+        )
 
     if args.agent_options.source_agent_state_location is not None:
         raise UserInputError(

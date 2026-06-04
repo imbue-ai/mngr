@@ -6,6 +6,7 @@ Exercises the adopt / discard-stale / spawn-fresh state machine of
 argv shape (so the cmdline-based liveness probe accepts it).
 """
 
+import json
 import os
 import threading
 import time
@@ -200,6 +201,25 @@ def test_ensure_running_spawns_when_no_record_exists(tmp_path: Path) -> None:
     finally:
         supervisor.stop()
         assert _wait_for_process_exit(info.pid)
+
+
+def test_bounce_starts_supervisor_when_none_running(tmp_path: Path) -> None:
+    """``bounce()`` with no live supervisor brings one up (start-if-down)."""
+    fake_binary = _make_fake_mngr_binary(tmp_path)
+    supervisor = LatchkeyForwardSupervisor(
+        mngr_binary=str(fake_binary),
+        latchkey_binary="/usr/bin/latchkey-unused",
+        latchkey_directory=tmp_path / f"latchkey-{uuid4().hex}",
+    )
+
+    # No record exists yet, so bounce must spawn rather than no-op.
+    supervisor.bounce()
+    try:
+        persisted = _wait_for_forward_record(supervisor.plugin_data_dir)
+        assert persisted.pid > 0
+        assert _wait_for_process_alive(persisted.pid)
+    finally:
+        supervisor.stop()
 
 
 # A no-double-spawn / adoption-against-live-subprocess test used to live
@@ -439,3 +459,118 @@ def test_ensure_running_replaces_malformed_record(tmp_path: Path) -> None:
     finally:
         supervisor.stop()
         assert _wait_for_process_exit(info.pid)
+
+
+# -- extra_env propagation --------------------------------------------------
+
+
+def _make_env_dumping_mngr_binary(tmp_path: Path) -> Path:
+    """Build a fake ``mngr`` that records selected env vars before idling.
+
+    Behaves like :func:`_make_fake_mngr_binary` (publishes a forward
+    record, idles until SIGTERM) and additionally dumps every env var
+    whose name starts with ``MINDS_API_PROXY_TEST_`` plus the
+    ``LATCHKEY_EXTENSION_MINDS_API_URL`` value to a JSON file at the
+    path given in ``MINDS_API_PROXY_TEST_REPORT``. Used by
+    :func:`test_extra_env_reaches_spawned_forward_subprocess` to
+    verify that ``LatchkeyForwardSupervisor.extra_env`` actually
+    reaches the child's ``os.environ``.
+    """
+    script = tmp_path / "mngr"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, signal, sys\n"
+        "from datetime import datetime, timezone\n"
+        "from pathlib import Path\n"
+        'if sys.argv[1:3] != ["latchkey", "forward"]:\n'
+        "    sys.exit(99)\n"
+        "args = sys.argv[3:]\n"
+        "latchkey_directory = None\n"
+        "for i, arg in enumerate(args):\n"
+        '    if arg == "--latchkey-directory" and i + 1 < len(args):\n'
+        "        latchkey_directory = Path(args[i + 1])\n"
+        "        break\n"
+        "if latchkey_directory is None:\n"
+        "    sys.exit(98)\n"
+        'report_path_str = os.environ.get("MINDS_API_PROXY_TEST_REPORT")\n'
+        "if report_path_str:\n"
+        "    report_payload = {k: v for k, v in os.environ.items() "
+        'if k.startswith("MINDS_API_PROXY_TEST_") or k == "LATCHKEY_EXTENSION_MINDS_API_URL"}\n'
+        "    Path(report_path_str).write_text(json.dumps(report_payload))\n"
+        'record_path = latchkey_directory / "mngr_latchkey" / "latchkey_forward.json"\n'
+        "record_path.parent.mkdir(parents=True, exist_ok=True)\n"
+        "record_path.write_text(json.dumps({\n"
+        '    "pid": os.getpid(),\n'
+        '    "started_at": datetime.now(timezone.utc).isoformat(),\n'
+        '    "gateway_port": None,\n'
+        "}))\n"
+        "def _on_term(*_):\n"
+        "    try:\n"
+        "        record_path.unlink()\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "    sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, _on_term)\n"
+        "signal.pause()\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def _wait_for_report_file(report_path: Path, timeout: float = 5.0) -> dict[str, str]:
+    """Block until the fake mngr binary writes ``report_path``; return parsed JSON."""
+    deadline = time.monotonic() + timeout
+    waiter = threading.Event()
+    while time.monotonic() < deadline:
+        if report_path.is_file():
+            return json.loads(report_path.read_text())
+        waiter.wait(timeout=_POLL_INTERVAL_SECONDS)
+    raise AssertionError(f"env report file never appeared at {report_path} within {timeout}s")
+
+
+def test_extra_env_reaches_spawned_forward_subprocess(tmp_path: Path) -> None:
+    """Values in ``extra_env`` show up in the spawned forward child's ``os.environ``.
+
+    This is the contract that lets minds publish
+    ``LATCHKEY_EXTENSION_MINDS_API_URL`` to the gateway extension on
+    every supervisor restart -- if the env var did not reach the
+    forward child, it would not reach the gateway, and the proxy
+    extension would fall back to its 'not configured' 503.
+    """
+    fake_binary = _make_env_dumping_mngr_binary(tmp_path)
+    report_path = tmp_path / "env_report.json"
+    supervisor = LatchkeyForwardSupervisor(
+        mngr_binary=str(fake_binary),
+        latchkey_binary="/usr/bin/latchkey-unused",
+        latchkey_directory=tmp_path / f"latchkey-{uuid4().hex}",
+        extra_env={
+            "MINDS_API_PROXY_TEST_REPORT": str(report_path),
+            "LATCHKEY_EXTENSION_MINDS_API_URL": "http://127.0.0.1:12345",
+        },
+    )
+    info = supervisor.ensure_running()
+    try:
+        report = _wait_for_report_file(report_path)
+        assert report == {
+            "MINDS_API_PROXY_TEST_REPORT": str(report_path),
+            "LATCHKEY_EXTENSION_MINDS_API_URL": "http://127.0.0.1:12345",
+        }
+    finally:
+        supervisor.stop()
+        assert _wait_for_process_exit(info.pid)
+
+
+def test_extra_env_defaults_to_empty_mapping(tmp_path: Path) -> None:
+    """A supervisor constructed without ``extra_env`` carries an empty mapping.
+
+    Pins the default so callers that do not need extra env vars are
+    not forced to spell out an explicit empty dict, and so the
+    ``Mapping`` field type does not accidentally become ``None`` at
+    runtime (which would crash :func:`spawn_detached_mngr_latchkey_forward`).
+    """
+    supervisor = LatchkeyForwardSupervisor(
+        mngr_binary="/nonexistent-binary",
+        latchkey_binary="/nonexistent-binary",
+        latchkey_directory=tmp_path / f"latchkey-{uuid4().hex}",
+    )
+    assert dict(supervisor.extra_env) == {}

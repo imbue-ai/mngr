@@ -17,10 +17,10 @@ from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.output_helpers import emit_event
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_info
 from imbue.mngr.cli.output_helpers import format_size
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
@@ -222,7 +222,7 @@ def _emit_json_summary(result: GcResult, dry_run: bool) -> None:
         "errors": result.errors,
         "dry_run": dry_run,
     }
-    emit_final_json(output_data)
+    write_json_line(output_data)
 
 
 def _emit_human_summary(result: GcResult, dry_run: bool) -> None:

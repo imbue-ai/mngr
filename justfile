@@ -120,13 +120,47 @@ test-offload-release args="":
         cp test-results/junit.xml "$MAIN_WORKTREE/test-results/junit.xml"
     fi
 
+# Run the minds-snapshot-resume test suite against a pre-built Modal
+# image produced by ``scripts/snapshot_minds_e2e_state.py``.
+# Usage:
+#     just test-offload-minds-snapshot im-01...    # required: snapshot image id
+#     just test-offload-minds-snapshot im-01... '--filter test_foo'
+# The snapshot image already has the entire mngr checkout, the FCT
+# workspace's Docker container (in a stopped state), and dockerd's
+# /var/lib/docker tree baked in -- so offload skips its normal image-
+# setup phase entirely and boots straight from the snapshot via
+# ``--override-image-id`` (offload v0.9.6+).
+test-offload-minds-snapshot snapshot_image_id args="":
+    #!/bin/bash
+    set -ueo pipefail
+    : "${MODAL_TOKEN_ID:?must be set}"
+    : "${MODAL_TOKEN_SECRET:?must be set}"
+    if [ -z "{{snapshot_image_id}}" ]; then
+        echo "Usage: just test-offload-minds-snapshot <snapshot-image-id> [args...]" >&2
+        echo "Generate the image id by running: uv run python scripts/snapshot_minds_e2e_state.py" >&2
+        exit 2
+    fi
+    just _generate-dockerignore
+    trap "rm -f .dockerignore" EXIT
+    offload -c offload-modal-minds-snapshot.toml run --trace \
+        --override-image-id "{{snapshot_image_id}}" \
+        --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
+        --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" {{args}} || [[ $? -eq 2 ]]
+
+    # Copy results to the main worktree so new worktrees inherit baselines via COPY mode.
+    MAIN_WORKTREE=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
+    if [ -f test-results/junit.xml ] && [ -n "$MAIN_WORKTREE" ] && [ "$MAIN_WORKTREE" != "$(pwd)" ]; then
+        mkdir -p "$MAIN_WORKTREE/test-results"
+        cp test-results/junit.xml "$MAIN_WORKTREE/test-results/junit.xml"
+    fi
+
 # Xdist parallelism args for local dev recipes. Kept out of pyproject addopts
 # so they don't leak into offload sandboxes (which run `-p no:xdist`).
 _parallel := "-n 4 --dist=worksteal --max-worker-restart=0"
 # Default mark filter for local unit + integration recipes. Kept out of
 # pyproject addopts because it would collide with offload-modal-acceptance
 # (which runs the opposite filter). A later -m on CLI overrides this.
-_skip_acceptance_and_release := "-m 'not acceptance and not release and not minds_deployment and not minds_services'"
+_skip_acceptance_and_release := "-m 'not acceptance and not release and not minds_deployment and not minds_services and not minds_snapshot_resume'"
 
 test-unit:
   uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --cov-report=html --ignore-glob="**/test_*.py" --cov-fail-under=36
@@ -193,6 +227,14 @@ minds-test-services-against env_name *tests:
 # No shared env stand-up, no mail.tm account -- fast iteration for the deploy tests.
 minds-test-deployment-only *tests:
   uv run python apps/minds/scripts/test_deployments.py deployment-only {{tests}}
+
+# End-to-end acceptance test that drives the real Electron minds app to create
+# a local Docker workspace from forever-claude-template. Wraps the invocation
+# with `xvfb-run` so it works on headless Linux CI runners. macOS users with
+# a real display can run the underlying pytest directly without xvfb-run.
+# Requires apps/minds/node_modules/ to be installed (`cd apps/minds && pnpm install`).
+minds-test-electron *args:
+  xvfb-run -a uv run pytest apps/minds/test_desktop_client_e2e.py::test_create_local_docker_workspace_via_electron -v --no-cov --cov-fail-under=0 {{args}}
 
 # Download the Tailwind Play CDN JS bundle for the minds desktop client.
 # Idempotent and SHA-pinned via apps/minds/scripts/fetch_tailwind.sh -- the
@@ -305,7 +347,7 @@ minds-start agent_name="mindtest" branch="":
     if [ ! -e "$fct_wt/.git" ]; then
         echo "error: no FCT worktree at $fct_wt" >&2
         echo "       run \`git -C ~/project/forever-claude-template worktree add -b <branch> $fct_wt <base>\`" >&2
-        echo "       (e.g. base = josh/start-minds) before re-running minds-start." >&2
+        echo "       (e.g. base = origin/main) before re-running minds-start." >&2
         exit 2
     fi
     vendor_mngr="$fct_wt/vendor/mngr"
@@ -342,7 +384,7 @@ minds-start agent_name="mindtest" branch="":
     if [ ! -e "$fct_wt/.git" ]; then
         echo "error: no FCT worktree at $fct_wt" >&2
         echo "       run \`git -C ~/project/forever-claude-template worktree add -b <branch> $fct_wt <base>\`" >&2
-        echo "       (e.g. base = josh/start-minds) before re-running minds-start." >&2
+        echo "       (e.g. base = origin/main) before re-running minds-start." >&2
         exit 2
     fi
     if [ -f .env ]; then
@@ -385,6 +427,9 @@ minds-start agent_name="mindtest" branch="":
         echo "       Then re-run \`just minds-start\`." >&2
         exit 2
     fi
+    # Put the Node version apps/minds pins (.nvmrc) first on PATH so pnpm's
+    # engine-strict check passes regardless of the shell's default node.
+    . apps/minds/scripts/select_node_version.sh || exit 2
     cd apps/minds && pnpm start
 
 # Stop the minds desktop client started in this worktree by `just minds-start`.
@@ -484,6 +529,10 @@ minds-stop:
 
 # Build the minds desktop client distributable (slow; uses todesktop).
 minds-build:
+    #!/bin/bash
+    set -ueo pipefail
+    # Match apps/minds's pinned Node (.nvmrc) so pnpm's engine-strict passes.
+    . apps/minds/scripts/select_node_version.sh || exit 2
     cd apps/minds && pnpm build
 
 # Sync this repo's mngr changes (and the FCT worktree's template state)
@@ -591,13 +640,14 @@ forward-system-interface agent_name:
     fi
 
     # Inject the token where the agent's cloudflare-tunnel service
-    # (libs/cloudflare_tunnel/.../runner.py) watches for it. Strip any
-    # existing CLOUDFLARE_TUNNEL_TOKEN line first so we don't keep two
-    # copies, then atomic-rename so the watcher never observes a
-    # half-written file. CF tokens are base64url-y, so single-quoting
-    # the value is safe.
+    # (libs/cloudflare_tunnel/.../runner.py) watches for it:
+    # runtime/secrets/cloudflare_tunnel.env, one of the per-secret env files
+    # in the runtime/secrets/ directory. We own that file outright, so just
+    # write it via an atomic rename so the watcher never observes a
+    # half-written file. CF tokens are base64url-y, so single-quoting the
+    # value is safe.
     uv run mngr exec "$AGENT_ID" \
-        "mkdir -p runtime && { [ -f runtime/secrets ] && grep -Ev '^export[[:space:]]+CLOUDFLARE_TUNNEL_TOKEN=' runtime/secrets || true; printf 'export CLOUDFLARE_TUNNEL_TOKEN=%s\n' '$TOKEN'; } > runtime/secrets.tmp && mv runtime/secrets.tmp runtime/secrets"
+        "mkdir -p runtime/secrets && printf 'export CLOUDFLARE_TUNNEL_TOKEN=%s\n' '$TOKEN' > runtime/secrets/cloudflare_tunnel.env.tmp && mv runtime/secrets/cloudflare_tunnel.env.tmp runtime/secrets/cloudflare_tunnel.env"
 
     URL=$(uv run mngr imbue_cloud tunnels services add \
         "$TUNNEL_NAME" system_interface http://localhost:8000 \

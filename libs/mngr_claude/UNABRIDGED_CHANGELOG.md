@@ -1,8 +1,86 @@
 # Unabridged Changelog - mngr_claude
 
-Full, unedited changelog entries consolidated nightly from individual files in the `changelog/mngr_claude/` directory.
+Full, unedited changelog entries consolidated nightly from individual files in `libs/mngr_claude/changelog/`.
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
+
+## 2026-06-02
+
+- pyproject.toml: align `imbue-mngr*==` pin stragglers with the satellites bumped in main's `e22e7010e` release commit. Several `imbue-mngr-*` libs still pinned to older versions even though `libs/mngr` had moved to 0.2.10; building the apps/minds ToDesktop bundle from main today would fail at `uv lock` in `apps/minds/scripts/build.js` because the workspace constraint graph is unsatisfiable. Day-to-day dev hides this because `[tool.uv.sources]` redirects every `imbue-mngr-*` to its workspace path, bypassing the `==` pin.
+
+## 2026-06-01
+
+Fixed `--adopt-session` rejecting valid Claude agent subtypes. It now accepts any agent type that resolves to a Claude agent (including config-defined templates like `write-plus` whose `parent_type` chain reaches `claude`), instead of only the literal `claude` type name. The check routes through the centralized `resolve_agent_type` registry rather than a string comparison.
+
+# Simplify `--adopt-session` agent-type validation
+
+- Now that `CreateAgentOptions.agent_type` is always set (it became a
+  required field), the `--adopt-session` `on_before_create` validation no
+  longer special-cases an unset type: it simply requires the agent type
+  to be `claude`. No behavior change for users, since the CLI already
+  requires a concrete agent type.
+
+Updated the `on_before_create` hook implementation (used for `--adopt-session` validation) to accept the new `mngr_ctx` parameter now passed by mngr.
+
+## 2026-05-28
+
+# Adopt-session test opts into the pytest config guard
+
+`mngr`'s `is_allowed_in_pytest` config field now defaults to `False`, so a
+config loaded during a pytest run must opt in. The `mngr_claude`
+adopt-session tests hand-roll a trusted-subprocess profile and load it, so the
+`trusted_subprocess_env` fixture now writes `is_allowed_in_pytest = true` into
+that profile's settings.local.toml. Test-only change; no user-facing behavior
+change.
+
+# Dropped redundant per-project ty/ruff ratchet tests
+
+Removed this project's `test_no_type_errors` and `test_no_ruff_errors` from its
+`test_ratchets.py`. ty resolves the uv workspace root and ruff (run from the repo
+root) both scan across projects, so the per-project copies just re-ran the same
+checks. The single repo-wide equivalents now live in `test_meta_ratchets.py`
+(`test_no_type_errors` and `test_no_ruff_errors`).
+
+No user-facing behavior change.
+
+## 2026-05-27
+
+# Ratchet count tightening
+
+- Tightened the violation counts recorded in `test_ratchets.py` to their current exact values (via `uv run pytest --inline-snapshot=trim`), locking in previously-unrecorded reductions. No source-code or behavior change.
+
+## 2026-05-26
+
+- Pruned non-notable entries (test-only changes, internal refactors, and doc-only tweaks with no user-facing effect) from this project's CHANGELOG.md, per the new notable-only changelog policy.
+
+- `ClaudeAgentConfig.merge_with` follows mngr's new assign-by-default semantics: an override's `cli_args` replaces the base's (rather than concatenating). To opt back into additive layering, use the `__extend` operator with an explicit list value, e.g. `cli_args__extend = ["--verbose"]`; the string-shorthand form that the bare `cli_args` field accepts (which the validator splits via shlex) is not accepted by the `__extend` resolver. See the `mngr` changelog entry for the full breaking-change writeup.
+
+Update Claude plugin to use the structured `TmuxWindowTarget` type for tmux
+pane targeting. `_send_enter_and_validate` and `_preflight_send_message` now
+take `tmux_target: TmuxWindowTarget` instead of a bare string, matching the
+`BaseAgent` API change in `libs/mngr` that fixes stale `WAITING` lifecycle
+state caused by tmux session-name prefix matching.
+
+Fix `claude_background_tasks.sh` to use the `=` exact-match prefix in its
+`tmux has-session` polling loop. Without `=`, the loop would never exit
+when a Claude agent's session was killed but a sibling session whose name
+shares this name as a prefix was still alive, leaking the transcript
+streamer and common-transcript converter for stopped agents.
+
+## 2026-05-21
+
+Fix the intro in `UNABRIDGED_CHANGELOG.md` so it references the correct entries directory. The path was `changelog/<project>/` (which never existed); the actual layout is `<project_dir>/changelog/`.
+
+`resolve_shared_claude_config_dir()` (used when a claude agent opts into `use_env_config_dir=True`) now falls back to `~/.claude/` when `$CLAUDE_CONFIG_DIR` is unset, instead of raising. The fallback matches claude's own default, so callers can treat that flag as a pure "don't touch the config dir" knob even on machines where the user never sets `CLAUDE_CONFIG_DIR`. Also drops `ORIGINAL_CLAUDE_CONFIG_DIR` from the agent env in the `mngr uncapped-claude` flow so credential sync reads from the live `$CLAUDE_CONFIG_DIR` (matters when uncapped-claude is invoked from inside another mngr claude agent).
+
+## 2026-05-20
+
+Project now participates in the per-project changelog layout: a `changelog/` subdirectory holds per-PR entry files, and `CHANGELOG.md` / `UNABRIDGED_CHANGELOG.md` at the project root hold the consolidated history. See the full rationale in `dev/changelog/mngr-changelog-per-project.md`.
+
+`ClaudeAgent` now satisfies the new `HasTranscriptMixin` and
+`HasCommonTranscriptMixin` mixins on `AgentInterface` (introduced to give every
+agent type a shared transcript-capture contract). The user-visible behavior of
+`mngr transcript <claude-agent>` is unchanged.
 
 ## 2026-05-14
 

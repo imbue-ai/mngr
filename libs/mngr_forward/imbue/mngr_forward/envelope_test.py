@@ -59,6 +59,17 @@ def test_emit_listening(buffer_writer: tuple[EnvelopeWriter, io.StringIO]) -> No
     assert envelope["payload"]["port"] == 8421
 
 
+def test_emit_resolver_snapshot(buffer_writer: tuple[EnvelopeWriter, io.StringIO]) -> None:
+    writer, buf = buffer_writer
+    writer.emit_resolver_snapshot({str(TEST_AGENT_ID_1): {"system_interface": "http://127.0.0.1:9100"}})
+    [envelope] = _read_lines(buf)
+    assert envelope["stream"] == "forward"
+    assert envelope["payload"]["type"] == "resolver_snapshot"
+    assert envelope["payload"]["services_by_agent"] == {
+        str(TEST_AGENT_ID_1): {"system_interface": "http://127.0.0.1:9100"}
+    }
+
+
 def test_emit_reverse_tunnel_established(buffer_writer: tuple[EnvelopeWriter, io.StringIO]) -> None:
     writer, buf = buffer_writer
     writer.emit_reverse_tunnel_established(

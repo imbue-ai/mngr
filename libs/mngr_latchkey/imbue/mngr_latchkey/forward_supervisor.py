@@ -17,7 +17,10 @@ embedder restarts. The detachment + adoption mechanics mirror what
 side-by-side is intentional.
 """
 
+import os
+import signal
 import threading
+from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -170,6 +173,20 @@ class LatchkeyForwardSupervisor(MutableModel):
             "Also used as the location of this supervisor's own on-disk record."
         ),
     )
+    extra_env: Mapping[str, str] = Field(
+        default_factory=dict,
+        frozen=True,
+        description=(
+            "Extra environment variables to set on the spawned ``mngr latchkey forward`` "
+            "process (in addition to the supervisor's own ``os.environ``). The forward "
+            "process inherits these into the ``latchkey gateway`` subprocess it owns and "
+            "from there into any gateway extension's ``process.env``. The minds desktop "
+            "client uses this to publish the current ``LATCHKEY_EXTENSION_MINDS_API_URL`` "
+            "to the bundled ``minds-api-proxy`` extension on every supervisor restart, so "
+            "the proxy always points at the live Minds API port without any cross-process "
+            "port-discovery dance."
+        ),
+    )
 
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     # PID of the forward child we most recently spawned (or adopted) so
@@ -244,6 +261,7 @@ class LatchkeyForwardSupervisor(MutableModel):
                         latchkey_binary=self.latchkey_binary,
                         latchkey_directory=self.latchkey_directory,
                         log_path=log_path,
+                        extra_env=self.extra_env,
                     )
                 except OSError as e:
                     raise LatchkeyError(f"Failed to spawn 'mngr latchkey forward': {e}") from e
@@ -293,6 +311,37 @@ class LatchkeyForwardSupervisor(MutableModel):
             return
         logger.info("Stopping detached mngr latchkey forward supervisor (pid={})", info.pid)
         _terminate_pid(info.pid)
+
+    def bounce(self) -> None:
+        """Refresh the supervisor's provider set without dropping the gateway.
+
+        If a live ``mngr latchkey forward`` is running, send it SIGHUP so it
+        bounces only its ``mngr observe`` child (the shared gateway and every
+        reverse tunnel stay up) and reloads the current provider set. If no
+        live supervisor is found -- no record, a dead PID, or a stale record
+        pointing at a stranger -- fall back to :meth:`ensure_running` so the
+        bounce also brings the supervisor up (start-if-down).
+
+        Used by the minds desktop client on every mid-session change to its
+        provider set (provider enable/disable, imbue_cloud account add/remove),
+        mirroring the SIGHUP it already sends its own ``mngr forward`` observe.
+        """
+        plugin_dir = self.plugin_data_dir
+        with self._lock:
+            info = load_forward_info(plugin_dir)
+            live_pid = info.pid if (info is not None and is_forward_info_alive(info)) else None
+        if live_pid is None:
+            logger.info("No live mngr latchkey forward to bounce; ensuring one is running")
+            self.ensure_running()
+            return
+        logger.info("Bouncing mngr latchkey forward observe via SIGHUP (pid={})", live_pid)
+        try:
+            os.kill(live_pid, signal.SIGHUP)
+        except OSError as e:
+            # The supervisor died between the liveness check and the signal.
+            # Bring a fresh one up rather than leaving the provider set stale.
+            logger.warning("Failed to SIGHUP mngr latchkey forward pid {}: {}; ensuring one is running", live_pid, e)
+            self.ensure_running()
 
     def restart(self) -> LatchkeyForwardInfo:
         """Terminate any existing live supervisor and spawn a fresh one.

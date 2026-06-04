@@ -27,7 +27,7 @@ def test_send_message_raises_dialog_detected_when_dialog_visible(
         )
 
         wait_for(
-            lambda: agent._check_pane_contains(session_name, "Yes, I trust this folder"),
+            lambda: agent._check_pane_contains(agent.tmux_target, "Yes, I trust this folder"),
             timeout=5.0,
             error_message="Dialog text not visible in pane",
         )
@@ -61,7 +61,7 @@ def test_send_message_does_not_raise_dialog_detected_when_no_dialog(
         )
 
         wait_for(
-            lambda: agent._check_pane_contains(session_name, "Normal output here"),
+            lambda: agent._check_pane_contains(agent.tmux_target, "Normal output here"),
             timeout=5.0,
             error_message="Content not visible in pane",
         )

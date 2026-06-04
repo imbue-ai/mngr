@@ -18,8 +18,8 @@ from imbue.mngr_kanpan.data_types import KanpanPluginConfig
 
 
 def test_ci_status_color() -> None:
-    assert CiStatus.PASSING.color == "light green"
-    assert CiStatus.FAILING.color == "light red"
+    assert CiStatus.SUCCESS.color == "light green"
+    assert CiStatus.FAILURE.color == "light red"
     assert CiStatus.PENDING.color == "yellow"
     assert CiStatus.UNKNOWN.color is None
 
@@ -40,9 +40,9 @@ def test_pr_field_display() -> None:
 
 
 def test_ci_field_display() -> None:
-    ci = CiField(status=CiStatus.FAILING, created=datetime(2025, 1, 1, 0, 0, 2, tzinfo=timezone.utc))
+    ci = CiField(status=CiStatus.FAILURE, created=datetime(2025, 1, 1, 0, 0, 2, tzinfo=timezone.utc))
     cell = ci.display()
-    assert cell.text == "failing"
+    assert cell.text == "failure"
     assert cell.color == "light red"
 
 

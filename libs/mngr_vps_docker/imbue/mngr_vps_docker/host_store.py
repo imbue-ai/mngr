@@ -1,26 +1,36 @@
 import json
 import shlex
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 from typing import Final
 
 from loguru import logger
+from pydantic import ConfigDict
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import HostConfig
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import HostId
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
-# State container configuration
-STATE_CONTAINER_IMAGE: Final[str] = "alpine:latest"
-_FILE_SEP: Final[str] = "---MNGR_FILE_SEP---"
-STATE_VOLUME_MOUNT_PATH: Final[str] = "/mngr-state"
-CONTAINER_ENTRYPOINT_CMD: Final[str] = "trap 'exit 0' TERM; tail -f /dev/null & wait"
+# Sentinel marking the start of each agent JSON file in batched-read output.
+# Chosen to be extremely unlikely to appear inside any real agent record:
+# long, all-uppercase, dash-delimited, and namespaced with the project tag.
+# (It is *not* impossible -- the sentinel is plain ASCII and would be valid
+# unescaped inside a JSON string value -- but no realistic agent record
+# contains this exact substring.)
+_AGENT_FILE_SEP: Final[str] = "---MNGR_AGENT_FILE_SEP---"
+
+# Subdirectory inside the unified volume holding one JSON file per persisted
+# agent record (``<agent_id>.json``). Lives next to ``HOST_DIR_SUBPATH`` /
+# ``host_state.json`` -- shared with ``instance.py`` so the on-disk layout has
+# a single source of truth and renaming the directory requires a single edit.
+AGENTS_SUBPATH: Final[str] = "agents"
 
 
 class VpsHostConfig(HostConfig):
@@ -43,7 +53,7 @@ class VpsHostConfig(HostConfig):
 
 
 class VpsDockerHostRecord(FrozenModel):
-    """Host metadata stored on the VPS state volume."""
+    """Host metadata stored on the VPS unified volume."""
 
     certified_host_data: CertifiedHostData = Field(frozen=True, description="The certified host data")
     vps_ip: str | None = Field(default=None, description="Current IP address of the VPS")
@@ -63,294 +73,196 @@ def _run_outer_command(outer: OuterHostInterface, command: str, *, label: str) -
     return result.stdout
 
 
-def _container_is_running(outer: OuterHostInterface, container_name: str) -> bool:
-    """Check whether the named docker container is running on the outer."""
-    result = outer.execute_idempotent_command(
-        f"docker inspect --format '{{{{.State.Running}}}}' {shlex.quote(container_name)}"
-    )
-    if not result.success:
-        return False
-    return result.stdout.strip().lower() == "true"
+def resolve_volume_device(outer: OuterHostInterface, volume_name: str) -> Path:
+    """Return the bind-source path of ``volume_name`` on the outer.
 
-
-def ensure_state_container(
-    outer: OuterHostInterface,
-    prefix: str,
-    user_id: str,
-    provider_name: str,
-) -> str:
-    """Ensure the singleton state container exists and is running on the outer host.
-
-    Creates a Docker named volume and a small Alpine container that mounts it.
-    Returns the container name.
+    The per-host unified volume is created with
+    ``docker volume create --driver=local --opt type=none --opt device=<path> --opt o=bind``,
+    so the real on-disk storage is wherever ``.Options.device`` points -- the
+    docker-managed ``.Mountpoint`` (under ``/var/lib/docker/volumes/<name>/_data``)
+    is an unused placeholder. Reading ``.Options.device`` keeps the docker
+    volume as the single source of truth for the bind-source path.
     """
-    container_name = f"{prefix}docker-state-{user_id}"
-    volume_name = f"{prefix}docker-state-{user_id}"
-
-    logger.info("ensure_state_container: checking for {} on outer {}", container_name, outer.get_name())
-
-    # List all containers on the VPS for diagnostics
-    diag = outer.execute_idempotent_command("docker ps -a --format '{{.Names}} {{.Status}} {{.ID}}'")
-    if diag.success:
-        logger.info("ensure_state_container: existing containers on outer:\n{}", diag.stdout.strip() or "(none)")
-    else:
-        logger.warning("ensure_state_container: failed to list containers: {}", diag.stderr.strip())
-
-    # Check if already running
-    if _container_is_running(outer, container_name):
-        logger.info("ensure_state_container: {} is already running", container_name)
-        return container_name
-
-    # Try to start if it exists but is stopped
-    start_result = outer.execute_idempotent_command(f"docker start {shlex.quote(container_name)}")
-    if start_result.success:
-        logger.info("ensure_state_container: started existing stopped container {}", container_name)
-        return container_name
-    logger.info(
-        "ensure_state_container: {} does not exist yet, will create: {}",
-        container_name,
-        start_result.stderr.strip(),
+    output = _run_outer_command(
+        outer,
+        f"docker volume inspect {shlex.quote(volume_name)} --format '{{{{.Options.device}}}}'",
+        label="docker-volume-inspect",
     )
-
-    # Create the volume and container
-    logger.info(
-        "ensure_state_container: creating volume {} and container {} on outer {}",
-        volume_name,
-        container_name,
-        outer.get_name(),
-    )
-    _run_outer_command(outer, f"docker volume create {shlex.quote(volume_name)}", label="docker-volume-create")
-
-    run_args = [
-        "docker",
-        "run",
-        "-d",
-        "--name",
-        shlex.quote(container_name),
-        "-v",
-        shlex.quote(f"{volume_name}:{STATE_VOLUME_MOUNT_PATH}:rw"),
-        "--label",
-        shlex.quote(f"com.imbue.mngr.provider={provider_name}"),
-        "--label",
-        "com.imbue.mngr.type=state-container",
-        "--restart",
-        "unless-stopped",
-        "--entrypoint",
-        "sh",
-        STATE_CONTAINER_IMAGE,
-        "-c",
-        shlex.quote(CONTAINER_ENTRYPOINT_CMD),
-    ]
-    _run_outer_command(outer, " ".join(run_args), label="docker-run-state")
-    logger.info("ensure_state_container: successfully created {}", container_name)
-    return container_name
+    device = output.strip()
+    if not device:
+        raise MngrError(
+            f"docker volume inspect returned empty Options.device for {volume_name!r}; "
+            "volume may have been created without bind options (--opt type=none --opt device=... --opt o=bind)"
+        )
+    return Path(device)
 
 
-class VpsDockerHostStore:
-    """Host record store backed by a state container on the VPS.
+class VpsDockerHostStore(MutableModel):
+    """Reads/writes one host's metadata directly on its unified Docker volume.
 
-    Mirrors DockerHostStore but operates over an OuterHostInterface (so all
-    docker commands run via SSH on the VPS root account).
+    Each VPS hosts exactly one mngr container (1:1 invariant), so each store
+    instance is bound to a single per-host btrfs subvolume on the outer
+    (``<btrfs_mount_path>/<host_id_hex>``). The docker named volume is created
+    with bind options pointing at that subvolume, so the docker-managed
+    ``Mountpoint`` placeholder under ``/var/lib/docker/volumes`` is never read
+    from -- ``Options.device`` is the real path. File operations go through the
+    outer host's ``read_text_file`` / ``write_text_file`` /
+    ``execute_idempotent_command``.
+
+    Layout inside the subvolume::
+
+        host_state.json
+        agents/<agent_id>.json
+        host_dir/<...agent host data...>
+
+    Construct via :func:`open_host_store`, which resolves the volume's
+    bind-source path via ``docker volume inspect --format '{{.Options.device}}'``.
     """
 
-    def __init__(self, outer: OuterHostInterface, state_container_name: str) -> None:
-        self._outer = outer
-        self._state_container_name = state_container_name
-        self._cache: dict[HostId, VpsDockerHostRecord] = {}
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    def _host_record_path(self, host_id: HostId) -> str:
-        return f"{STATE_VOLUME_MOUNT_PATH}/host_state/{host_id}.json"
+    outer: OuterHostInterface = Field(frozen=True, description="Outer host used to reach the VPS")
+    mountpoint: Path = Field(
+        frozen=True,
+        description=(
+            "Absolute path on the outer of the per-host btrfs subvolume backing this docker volume "
+            "(value of the volume's ``Options.device``)."
+        ),
+    )
 
-    def _agent_data_dir(self, host_id: HostId) -> str:
-        return f"{STATE_VOLUME_MOUNT_PATH}/host_state/{host_id}"
+    @property
+    def _host_state_path(self) -> Path:
+        return self.mountpoint / "host_state.json"
 
-    def _agent_data_path(self, host_id: HostId, agent_id: AgentId) -> str:
-        return f"{STATE_VOLUME_MOUNT_PATH}/host_state/{host_id}/{agent_id}.json"
+    @property
+    def _agents_dir(self) -> Path:
+        return self.mountpoint / AGENTS_SUBPATH
 
-    def _exec_in_state_container(self, command: str) -> str:
-        """Run a shell command inside the state container via the outer host."""
-        full_command = f"docker exec {shlex.quote(self._state_container_name)} sh -c {shlex.quote(command)}"
-        return _run_outer_command(self._outer, full_command, label="state-container-exec")
+    def _agent_data_path(self, agent_id: AgentId) -> Path:
+        return self._agents_dir / f"{agent_id}.json"
 
     def write_host_record(self, host_record: VpsDockerHostRecord) -> None:
-        """Write a host record to the state volume."""
-        host_id = HostId(host_record.certified_host_data.host_id)
-        path = self._host_record_path(host_id)
+        """Write the host record to the unified volume."""
         data = host_record.model_dump_json(indent=2)
-        # Ensure parent directory exists and write atomically
-        parent_dir = path.rsplit("/", 1)[0]
-        self._exec_in_state_container(f"mkdir -p '{parent_dir}' && cat > '{path}' << 'MNGR_EOF'\n{data}\nMNGR_EOF")
-        logger.trace("Wrote host record: {}", path)
-        self._cache[host_id] = host_record
+        self.outer.write_text_file(self._host_state_path, data)
+        logger.trace("Wrote host record at {}", self._host_state_path)
 
-    def read_host_record(self, host_id: HostId, is_cache_enabled: bool = True) -> VpsDockerHostRecord | None:
-        """Read a host record from the state volume. Returns None if not found."""
-        if is_cache_enabled and host_id in self._cache:
-            return self._cache[host_id]
+    def read_host_record(self) -> VpsDockerHostRecord | None:
+        """Read the host record from the unified volume. Returns None if not present.
 
-        path = self._host_record_path(host_id)
-        try:
-            data = self._exec_in_state_container(f"cat '{path}'")
-            host_record = VpsDockerHostRecord.model_validate_json(data)
-            self._cache[host_id] = host_record
-            return host_record
-        except MngrError as e:
-            logger.debug("Host record {} not found on state volume: {}", host_id, e)
+        A *missing* host_state.json (e.g. on a freshly-created volume that
+        hasn't been finalized yet) returns None. Any other failure --
+        transient SSH error, permission problem -- propagates (typically
+        as ``HostConnectionError`` for SSH transport failures, or as
+        another ``MngrError`` for shell-level errors; both are now
+        ``MngrError`` subclasses) so that the outer ``except MngrError``
+        guards in callers like ``_read_records_from_vps`` can log a warning
+        and fall back to cached records instead of letting the host silently
+        disappear from the listing.
+        """
+        path = self._host_state_path
+        if not self.outer.path_exists(path):
             return None
+        try:
+            data = self.outer.read_text_file(path)
+        except OSError as e:
+            # File raced from under us between path_exists and read
+            # (FileNotFoundError) or a local-outer raised some other
+            # OSError. Treat as "missing".
+            logger.debug("Host record at {} not readable: {}", path, e)
+            return None
+        try:
+            return VpsDockerHostRecord.model_validate_json(data)
         except (json.JSONDecodeError, ValueError) as e:
-            logger.warning("Failed to parse host record {}: {}", path, e)
+            logger.warning("Failed to parse host record at {}: {}", path, e)
             return None
 
-    def delete_host_record(self, host_id: HostId) -> None:
-        """Delete a host record and associated agent data."""
-        agent_dir = self._agent_data_dir(host_id)
-        try:
-            self._exec_in_state_container(f"rm -rf '{agent_dir}'")
-        except MngrError as e:
-            logger.trace("No agent data to clean up for {}: {}", host_id, e)
-
-        path = self._host_record_path(host_id)
-        try:
-            self._exec_in_state_container(f"rm -f '{path}'")
-        except MngrError as e:
-            logger.warning("Failed to delete host record {}: {}", host_id, e)
-
-        self._cache.pop(host_id, None)
-
-    def list_all_host_records(self) -> list[VpsDockerHostRecord]:
-        """List all host records stored on the state volume in a single SSH command."""
-        state_dir = f"{STATE_VOLUME_MOUNT_PATH}/host_state"
-        script = (
-            f'for f in \'{state_dir}\'/*.json; do [ -f "$f" ] || continue; echo \'{_FILE_SEP}\'"$f"; cat "$f"; done'
+    def delete_host_record(self) -> None:
+        """Delete the host record and all per-agent metadata on the volume."""
+        # Remove the agents/ directory and the host_state.json file in a single
+        # SSH round-trip. ``-r`` is required because agents/ is a directory;
+        # ``-f`` makes both targets idempotent (no error if either is missing).
+        _run_outer_command(
+            self.outer,
+            f"rm -rf {shlex.quote(str(self._agents_dir))} {shlex.quote(str(self._host_state_path))}",
+            label="delete-host-record",
         )
-        try:
-            output = self._exec_in_state_container(script)
-        except MngrError as e:
-            logger.debug("No host records found on state volume: {}", e)
-            return []
 
-        return self._parse_batched_host_records(output)
-
-    def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
+    def persist_agent_data(self, agent_data: Mapping[str, object]) -> None:
         """Write agent data for offline listing."""
         agent_id_value = agent_data.get("id")
         if not agent_id_value:
             logger.warning("Cannot persist agent data without id field")
             return
 
-        path = self._agent_data_path(host_id, AgentId(str(agent_id_value)))
+        path = self._agent_data_path(AgentId(str(agent_id_value)))
         data = json.dumps(dict(agent_data), indent=2)
-        parent_dir = path.rsplit("/", 1)[0]
-        self._exec_in_state_container(f"mkdir -p '{parent_dir}' && cat > '{path}' << 'MNGR_EOF'\n{data}\nMNGR_EOF")
-        logger.trace("Persisted agent data: {}", path)
+        self.outer.write_text_file(path, data)
+        logger.trace("Persisted agent data at {}", path)
 
-    def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict[str, Any]]:
-        """Read persisted agent data for a host in a single SSH command."""
-        agent_dir = self._agent_data_dir(host_id)
-        script = (
-            f'for f in \'{agent_dir}\'/*.json; do [ -f "$f" ] || continue; echo \'{_FILE_SEP}\'"$f"; cat "$f"; done'
-        )
-        try:
-            output = self._exec_in_state_container(script)
-        except MngrError as e:
-            logger.debug("No agent data found for host {}: {}", host_id, e)
-            return []
+    def list_persisted_agent_data(self) -> list[dict[str, Any]]:
+        """Read all persisted agent records on this volume in a single SSH round-trip.
 
-        return self._parse_batched_json_files(output)
-
-    def remove_persisted_agent_data(self, host_id: HostId, agent_id: AgentId) -> None:
-        """Remove persisted agent data."""
-        path = self._agent_data_path(host_id, agent_id)
-        try:
-            self._exec_in_state_container(f"rm -f '{path}'")
-        except MngrError as e:
-            logger.warning("Failed to remove agent data {}: {}", path, e)
-
-    def list_all_host_records_with_agents(
-        self,
-    ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
-        """Read all host records and their agent data in a single SSH command.
-
-        Returns (host_records, agent_data_by_host_id).
+        The shell script short-circuits with exit 0 + empty stdout when
+        the agents/ directory does not exist yet (brand-new volume that
+        hasn't persisted any agent data). All *other* failures -- permission
+        denied, OOM, malformed shell -- propagate as ``MngrError`` rather
+        than being silently turned into an empty list.
         """
-        state_dir = f"{STATE_VOLUME_MOUNT_PATH}/host_state"
-        # Read all .json files at the top level (host records) and in subdirs (agent data)
+        agents_dir_q = shlex.quote(str(self._agents_dir))
+        # Single shell call: a directory-missing guard up front, then a
+        # loop over agents/*.json. The `[ -f "$f" ] || continue` guard
+        # turns the literal-glob fallback (when no files match) into a
+        # clean exit-0 with empty stdout, without swallowing real errors.
         script = (
-            f"for f in '{state_dir}'/*.json '{state_dir}'/*/*.json; do "
+            f"[ -d {agents_dir_q} ] || exit 0; "
+            f"for f in {agents_dir_q}/*.json; do "
             f'[ -f "$f" ] || continue; '
-            f"echo '{_FILE_SEP}'\"$f\"; "
+            f"echo '{_AGENT_FILE_SEP}'\"$f\"; "
             f'cat "$f"; '
             f"done"
         )
-        try:
-            output = self._exec_in_state_container(script)
-        except MngrError as e:
-            logger.debug("No records found on state volume: {}", e)
-            return [], {}
+        output = _run_outer_command(self.outer, script, label="list-agent-records")
+        return self._parse_batched_agent_records(output)
 
-        host_records = self._parse_batched_host_records(output)
-        agent_data_by_host_id: dict[HostId, list[dict[str, Any]]] = {}
-        # Parse agent data files (those in subdirectories like /host_state/<host-id>/<agent-id>.json)
-        # Agent data lives in subdirectories: /host_state/<host-id>/<agent-id>.json
-        for file_path, content in self._split_batched_output(output):
-            relative = file_path.removeprefix(f"{state_dir}/")
-            parts = relative.split("/")
-            if len(parts) == 2 and parts[1].endswith(".json"):
-                host_id = HostId(parts[0])
-                try:
-                    agent_data = json.loads(content)
-                    agent_data_by_host_id.setdefault(host_id, []).append(agent_data)
-                except json.JSONDecodeError as e:
-                    logger.warning("Skipped invalid agent record {}: {}", file_path, e)
-
-        return host_records, agent_data_by_host_id
-
-    def _split_batched_output(self, output: str) -> list[tuple[str, str]]:
-        """Split batched output into (file_path, content) pairs."""
-        results: list[tuple[str, str]] = []
+    @staticmethod
+    def _parse_batched_agent_records(output: str) -> list[dict[str, Any]]:
+        """Parse the (sentinel, path, content) chunks produced by list_persisted_agent_data."""
         if not output.strip():
-            return results
-
-        parts = output.split(_FILE_SEP)
-        # Skip content before first separator
-        for part in parts[1:]:
-            lines = part.split("\n", 1)
-            if len(lines) < 2:
+            return []
+        agent_records: list[dict[str, Any]] = []
+        # Anything before the first sentinel is ignorable noise (e.g. a stray
+        # ls warning); the [1:] slice drops it.
+        for chunk in output.split(_AGENT_FILE_SEP)[1:]:
+            head, _, content = chunk.partition("\n")
+            file_path = head.strip()
+            if not file_path or not content.strip():
                 continue
-            file_path = lines[0].strip()
-            content = lines[1].strip()
-            if file_path and content:
-                results.append((file_path, content))
-        return results
-
-    def _parse_batched_host_records(self, output: str) -> list[VpsDockerHostRecord]:
-        """Parse host records from batched output."""
-        state_dir = f"{STATE_VOLUME_MOUNT_PATH}/host_state"
-        records: list[VpsDockerHostRecord] = []
-        for file_path, content in self._split_batched_output(output):
-            # Only parse top-level .json files (host records), not agent subdirs
-            relative = file_path.removeprefix(f"{state_dir}/")
-            if "/" in relative:
-                continue
-            if not relative.endswith(".json"):
-                continue
-            host_id_str = relative.removesuffix(".json")
             try:
-                host_record = VpsDockerHostRecord.model_validate_json(content)
-                host_id = HostId(host_id_str)
-                self._cache[host_id] = host_record
-                records.append(host_record)
-            except (json.JSONDecodeError, ValueError) as e:
-                logger.warning("Failed to parse host record {}: {}", file_path, e)
-        return records
+                agent_records.append(json.loads(content))
+            except json.JSONDecodeError as e:
+                logger.warning("Skipped invalid agent record {}: {}", file_path, e)
+        return agent_records
 
-    def _parse_batched_json_files(self, output: str) -> list[dict[str, Any]]:
-        """Parse JSON files from batched output."""
-        results: list[dict[str, Any]] = []
-        for _file_path, content in self._split_batched_output(output):
-            results.append(json.loads(content))
-        return results
+    def remove_persisted_agent_data(self, agent_id: AgentId) -> None:
+        """Remove a single agent's persisted data."""
+        path = self._agent_data_path(agent_id)
+        try:
+            _run_outer_command(self.outer, f"rm -f {shlex.quote(str(path))}", label="remove-agent-data")
+        except MngrError as e:
+            logger.warning("Failed to remove agent data {}: {}", path, e)
 
-    def clear_cache(self) -> None:
-        """Clear the in-memory cache."""
-        self._cache.clear()
+
+def open_host_store(outer: OuterHostInterface, volume_name: str) -> VpsDockerHostStore:
+    """Resolve ``volume_name``'s bind-source path on ``outer`` and bind a store to it.
+
+    The store's underlying directory is the btrfs subvolume the docker volume's
+    ``Options.device`` points at, not the unused docker-managed
+    ``/var/lib/docker/volumes/<name>/_data`` placeholder.
+
+    Raises ``MngrError`` if the volume does not exist on the outer (which
+    means the host was never finalized or has already been destroyed) or
+    does not carry the expected bind options.
+    """
+    device_path = resolve_volume_device(outer, volume_name)
+    return VpsDockerHostStore(outer=outer, mountpoint=device_path)

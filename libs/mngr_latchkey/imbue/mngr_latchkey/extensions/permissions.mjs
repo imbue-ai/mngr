@@ -15,17 +15,23 @@
  *       ``permissionsConfigPath``). Takes no query parameters.
  *   GET    /permissions/available
  *       Return the full permission catalog as a JSON object keyed by
- *       raw service name. Each value has three fields: ``scope`` (the
- *       Detent scope schema name as a string), ``display_name`` (a
- *       human-readable label), and ``permissions`` (an array of Detent
- *       permission-schema names that may be granted under the scope).
+ *       raw service name. Each value is an array of scope entries (a
+ *       single service may expose more than one Detent scope). Each
+ *       entry has four fields: ``scope`` (the Detent scope schema name
+ *       as a string), ``display_name`` (a human-readable label),
+ *       ``description`` (the scope's plain-English summary, from
+ *       Detent's ``$comment``), and ``permissions`` (an array of
+ *       ``{name, description}`` objects -- the Detent permission-schema
+ *       name plus its own plain-English summary -- that may be granted
+ *       under the scope).
  *   GET    /permissions/available/<service_name>
- *       Return the permission catalog entry for ``<service_name>`` (e.g.
- *       ``slack``, ``google-gmail``) using the same value shape as the
- *       collection endpoint. Returns 404 when the service is unknown.
- *       Both endpoints are backed by the ``services.json`` file that
- *       ships alongside this extension, which is keyed by raw service
- *       name.
+ *       Return the permission catalog entries for ``<service_name>``
+ *       (e.g. ``slack``, ``google-gmail``) as an array, using the same
+ *       value shape as the collection endpoint (including the scope and
+ *       per-permission ``description`` fields). Returns 404 when the
+ *       service is unknown. Both endpoints are backed by the
+ *       ``services.json`` file that ships alongside this extension,
+ *       which is keyed by raw service name.
  *   GET    /permissions/rules?path=<path>&rule_key=<key>
  *       Return the rule whose scope key is <key>.
  *   POST   /permissions/rules?path=<path>&rule_key=<key>
@@ -419,10 +425,15 @@ function handleGetCollection(response, filePath) {
  * we surface it as HTTP 500.
  *
  * The file is a JSON object keyed by raw service name (``slack``,
- * ``google-gmail``, ...). Each value is a ``{scope: <schema_name>,
- * display_name: <label>, permissions: [...]}`` object where ``scope``
- * is the Detent scope schema name as a plain string and
- * ``display_name`` is a human-readable label.
+ * ``google-gmail``, ...). Each value is an array of ``{scope:
+ * <schema_name>, display_name: <label>, description: <summary>,
+ * permissions: [{name: <schema_name>, description: <summary>}, ...]}``
+ * objects (a single service may expose more than one scope) where
+ * ``scope`` is the Detent scope schema name as a plain string,
+ * ``display_name`` is a human-readable label, the optional scope-level
+ * ``description`` is the scope's plain-English summary (Detent's
+ * ``$comment``), and each permission carries its own name plus an
+ * optional ``description``.
  */
 function readAvailableServices() {
   let raw;
@@ -444,28 +455,58 @@ function readAvailableServices() {
       'top-level value is not a JSON object keyed by service name',
     );
   }
-  for (const [serviceName, entry] of Object.entries(parsed)) {
-    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+  for (const [serviceName, entries] of Object.entries(parsed)) {
+    if (!Array.isArray(entries)) {
       throw new AvailableServicesUnavailableError(
-        `entry for '${serviceName}' must be a JSON object`,
+        `value for '${serviceName}' must be a JSON array of scope entries`,
       );
     }
-    if (typeof entry.scope !== 'string' || entry.scope.length === 0) {
-      throw new AvailableServicesUnavailableError(
-        `entry for '${serviceName}': 'scope' must be a non-empty string`,
+    entries.forEach((entry, index) => {
+      if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+        throw new AvailableServicesUnavailableError(
+          `entry ${index} for '${serviceName}' must be a JSON object`,
+        );
+      }
+      if (typeof entry.scope !== 'string' || entry.scope.length === 0) {
+        throw new AvailableServicesUnavailableError(
+          `entry ${index} for '${serviceName}': 'scope' must be a non-empty string`,
+        );
+      }
+      if (typeof entry.display_name !== 'string' || entry.display_name.length === 0) {
+        throw new AvailableServicesUnavailableError(
+          `entry ${index} for '${serviceName}': 'display_name' must be a non-empty string`,
+        );
+      }
+      // The scope-level ``description`` is optional but must be a string.
+      if (entry.description !== undefined && typeof entry.description !== 'string') {
+        throw new AvailableServicesUnavailableError(
+          `entry ${index} for '${serviceName}': 'description' must be a string`,
+        );
+      }
+      // Each permission is a ``{name, description?}`` object: ``name`` is a
+      // non-empty string and ``description``, when present, is a string.
+      const permissions = entry.permissions;
+      if (!Array.isArray(permissions)) {
+        throw new AvailableServicesUnavailableError(
+          `entry ${index} for '${serviceName}': 'permissions' must be an array`,
+        );
+      }
+      const isEveryPermissionWellFormed = permissions.every(
+        (item) =>
+          typeof item === 'object' &&
+          item !== null &&
+          !Array.isArray(item) &&
+          typeof item.name === 'string' &&
+          item.name.length > 0 &&
+          (item.description === undefined || typeof item.description === 'string'),
       );
-    }
-    if (typeof entry.display_name !== 'string' || entry.display_name.length === 0) {
-      throw new AvailableServicesUnavailableError(
-        `entry for '${serviceName}': 'display_name' must be a non-empty string`,
-      );
-    }
-    const permissions = entry.permissions;
-    if (!Array.isArray(permissions) || !permissions.every((item) => typeof item === 'string')) {
-      throw new AvailableServicesUnavailableError(
-        `entry for '${serviceName}': 'permissions' must be an array of strings`,
-      );
-    }
+      if (!isEveryPermissionWellFormed) {
+        throw new AvailableServicesUnavailableError(
+          `entry ${index} for '${serviceName}': each 'permissions' item must be ` +
+            `an object with a non-empty string 'name' and optional string 'description'`,
+        );
+      }
+    });
   }
   return parsed;
 }

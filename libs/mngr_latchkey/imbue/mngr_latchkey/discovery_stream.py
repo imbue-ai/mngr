@@ -43,10 +43,11 @@ from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
+from imbue.mngr.api.discovery_events import partition_removed_agents_by_provider_error
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import SSHInfo
-from imbue.mngr_latchkey.ssh_tunnel import RemoteSSHInfo
+from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 # Bare-name default for the ``mngr`` CLI; callers can pass an absolute
 # path via the ``mngr_binary`` field for environments where ``mngr`` is
@@ -111,15 +112,48 @@ class DiscoveryStreamConsumer(MutableModel):
         """Register a callback fired for every agent destruction observed in the stream."""
         self._on_agent_destroyed_callbacks.append(callback)
 
+    def _observe_command(self) -> list[str]:
+        """Build the ``mngr observe`` argv."""
+        return [self.mngr_binary, "observe", "--discovery-only", "--quiet"]
+
     def start(self) -> None:
         """Spawn the ``mngr observe`` subprocess and begin dispatching events."""
         if self._process is not None:
             raise RuntimeError("DiscoveryStreamConsumer.start already called")
         self._process = self.concurrency_group.run_process_in_background(
-            command=[self.mngr_binary, "observe", "--discovery-only", "--quiet"],
+            command=self._observe_command(),
             on_output=self._on_observe_output,
             cwd=Path.home(),
         )
+
+    def bounce_observe(self) -> None:
+        """Terminate and respawn the ``mngr observe`` subprocess only.
+
+        Cached discovery state (known agents, host SSH info, provider names)
+        and registered callbacks all survive, so the shared gateway and any
+        existing reverse tunnels are untouched; the restarted observe re-emits
+        a fresh snapshot that reflects the current provider set. Used by the
+        ``mngr latchkey forward`` SIGHUP handler so mid-session provider
+        changes take effect without restarting the whole supervisor. No-op if
+        the observe subprocess was never started.
+        """
+        if self._process is None:
+            logger.debug("bounce_observe: no observe process running; skipping")
+            return
+        logger.info("Bouncing mngr observe subprocess")
+        try:
+            self._process.terminate()
+        except (OSError, RuntimeError) as e:
+            logger.warning("Failed to terminate observe process during bounce: {}", e)
+        try:
+            self._process = self.concurrency_group.run_process_in_background(
+                command=self._observe_command(),
+                on_output=self._on_observe_output,
+                cwd=Path.home(),
+            )
+        except (OSError, RuntimeError) as e:
+            logger.warning("Failed to respawn observe process during bounce: {}", e)
+            self._process = None
 
     def stop(self) -> None:
         """Terminate the ``mngr observe`` subprocess."""
@@ -173,18 +207,38 @@ class DiscoveryStreamConsumer(MutableModel):
             logger.trace("Ignoring discovery event of type {}", type(event).__name__)
 
     def _handle_full_snapshot(self, event: FullDiscoverySnapshotEvent) -> None:
-        # Snapshots replace the entire known agent set. We fire the
-        # destruction callback for every previously-known agent that
-        # is no longer present, then fire the discovery callback for
-        # every agent in the new snapshot.
+        # Snapshots replace the entire known agent set, but only for providers
+        # that succeeded this poll: an agent absent because its provider errored
+        # is retained (its reverse tunnel stays up) rather than torn down. We
+        # fire the destruction callback only for genuinely-dropped agents, then
+        # fire the discovery callback for every agent in the new snapshot.
         new_agents: dict[str, DiscoveredAgent] = {str(agent.agent_id): agent for agent in event.agents}
         with self._lock:
-            previously_known = set(self._host_id_by_agent_id.keys())
-            self._host_id_by_agent_id = {aid_str: str(agent.host_id) for aid_str, agent in new_agents.items()}
-            self._provider_by_agent_id = {aid_str: str(agent.provider_name) for aid_str, agent in new_agents.items()}
-            removed = previously_known - new_agents.keys()
+            prior_host_id_by_agent_id = dict(self._host_id_by_agent_id)
+            prior_provider_by_agent_id = dict(self._provider_by_agent_id)
+            removed = prior_host_id_by_agent_id.keys() - new_agents.keys()
+            partition = partition_removed_agents_by_provider_error(
+                removed_agent_ids=removed,
+                provider_name_by_prior_agent_id=prior_provider_by_agent_id,
+                error_by_provider_name=event.error_by_provider_name,
+            )
+            new_host_id_by_agent_id = {aid_str: str(agent.host_id) for aid_str, agent in new_agents.items()}
+            new_provider_by_agent_id = {aid_str: str(agent.provider_name) for aid_str, agent in new_agents.items()}
+            # Carry retained agents forward from prior state so they keep their
+            # host/provider mapping and survive the next snapshot's diff too.
+            for aid_str in partition.retained:
+                new_host_id_by_agent_id[aid_str] = prior_host_id_by_agent_id[aid_str]
+                new_provider_by_agent_id[aid_str] = prior_provider_by_agent_id[aid_str]
+            self._host_id_by_agent_id = new_host_id_by_agent_id
+            self._provider_by_agent_id = new_provider_by_agent_id
 
-        for aid_str in removed:
+        if partition.retained:
+            logger.debug(
+                "Retained {} agent(s) through a provider discovery error; keeping their reverse tunnels: {}",
+                len(partition.retained),
+                sorted(partition.retained),
+            )
+        for aid_str in partition.dropped:
             self._safely_call_destroyed(AgentId(aid_str))
 
         for agent in new_agents.values():

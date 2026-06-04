@@ -65,16 +65,27 @@ from imbue.mngr.utils.toml_config import save_config_file
 
 
 def _write_agent_type_command_to_settings(settings_path: Path, type_name: str, command: str) -> None:
-    """Register ``type_name`` with ``command`` in ``settings.toml`` for tests.
+    """Register ``type_name`` with ``command`` in a fresh test ``settings.toml``.
 
-    Inlines the load / setdefault("agent_types") / save dance so tests that
-    declare a lightweight agent type do not need a top-level helper.
+    Every caller passes the settings.toml of a just-created profile
+    (``get_or_create_profile_dir(temp_host_dir)``), which does not exist yet, so
+    we build the document from scratch. We still load first and assert it is
+    empty -- rather than blindly writing -- so that if a future caller hands us a
+    populated settings.toml this fails loudly here instead of silently
+    overwriting their content. ``is_allowed_in_pytest`` opts the config into the
+    pytest run (the field defaults to False, so a loaded config must opt in).
     """
     settings_doc = load_config_file_tomlkit(settings_path)
-    agent_types = settings_doc.setdefault("agent_types", tomlkit.table())
+    assert len(settings_doc) == 0, (
+        f"{settings_path} unexpectedly already has content {dict(settings_doc)!r}. This helper "
+        "writes a fresh profile's settings.toml from scratch; pass a freshly-created profile."
+    )
+    settings_doc["is_allowed_in_pytest"] = True
     type_table = tomlkit.table()
     type_table["command"] = command
+    agent_types = tomlkit.table()
     agent_types[type_name] = type_table
+    settings_doc["agent_types"] = agent_types
     save_config_file(settings_path, settings_doc)
 
 
@@ -1655,6 +1666,51 @@ def test_parse_target_host_non_local_provider_creates_new_host(
 
     assert isinstance(result, NewHostOptions)
     assert result.provider == ProviderInstanceName("modal")
+
+
+def test_parse_target_host_threads_post_host_create_commands(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """--post-host-create-command values land on NewHostOptions.provisioning in order."""
+    address = parse_new_agent_location("foo@.modal")
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(
+            default_create_cli_opts.field_ref().post_host_create_command,
+            ("/usr/local/bin/fct-seed", "echo second"),
+        ),
+    )
+    lifecycle = HostLifecycleOptions()
+
+    result = _parse_target_host(
+        opts=opts,
+        address=address,
+        agent_and_host_loader=lambda: {},
+        lifecycle=lifecycle,
+    )
+
+    assert isinstance(result, NewHostOptions)
+    assert result.provisioning.post_host_create_commands == (
+        CommandString("/usr/local/bin/fct-seed"),
+        CommandString("echo second"),
+    )
+
+
+def test_parse_target_host_empty_post_host_create_commands_is_default(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """When no --post-host-create-command is given, provisioning is the empty default."""
+    address = parse_new_agent_location("foo@.modal")
+    lifecycle = HostLifecycleOptions()
+
+    result = _parse_target_host(
+        opts=default_create_cli_opts,
+        address=address,
+        agent_and_host_loader=lambda: {},
+        lifecycle=lifecycle,
+    )
+
+    assert isinstance(result, NewHostOptions)
+    assert result.provisioning.post_host_create_commands == ()
 
 
 def test_parse_new_agent_location_rejects_multiple_dots() -> None:

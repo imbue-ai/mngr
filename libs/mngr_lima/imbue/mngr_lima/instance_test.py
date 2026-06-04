@@ -10,6 +10,7 @@ from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr_lima.errors import LimaHostRenameError
 from imbue.mngr_lima.host_store import HostRecord
+from imbue.mngr_lima.host_store import LimaHostConfig
 from imbue.mngr_lima.instance import LimaProviderInstance
 from imbue.mngr_lima.instance import _parse_size_to_gb
 
@@ -83,6 +84,35 @@ def test_get_volume_for_existing_host(lima_provider: LimaProviderInstance) -> No
     lima_provider._ensure_host_volume_dir(host_id)
     volume = lima_provider.get_volume_for_host(host_id)
     assert volume is not None
+
+
+def test_get_volume_for_host_returns_none_for_btrfs_mode_record(lima_provider: LimaProviderInstance) -> None:
+    """When the host record locks in is_host_data_volume_exposed=False,
+    get_volume_for_host returns None even if a stray host-side volume dir
+    exists. Callers (events.py, mngr_claude on_before_host_destroy) already
+    handle None by skipping or falling back to online-host SSH."""
+    host_id = HostId.generate()
+    now = datetime.now(timezone.utc)
+    record = HostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=str(host_id),
+            host_name="btrfs-host",
+            user_tags={},
+            snapshots=[],
+            created_at=now,
+            updated_at=now,
+        ),
+        config=LimaHostConfig(
+            instance_name="mngr-btrfs-host",
+            is_host_data_volume_exposed=False,
+            host_data_disk_name="mngr-abc-data",
+        ),
+    )
+    lima_provider._host_store.write_host_record(record)
+    # Even if a host-side volume dir is somehow present, the record's False
+    # flag must short-circuit the result to None.
+    lima_provider._ensure_host_volume_dir(host_id)
+    assert lima_provider.get_volume_for_host(host_id) is None
 
 
 def test_parse_size_to_gb() -> None:

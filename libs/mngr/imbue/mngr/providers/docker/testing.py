@@ -8,7 +8,6 @@ import docker.errors
 import docker.models.containers
 
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.docker.config import DockerProviderConfig
@@ -99,7 +98,11 @@ def remove_all_containers_by_prefix(
 
 
 def make_docker_provider(mngr_ctx: MngrContext, name: str = "test-docker") -> DockerProviderInstance:
-    config = DockerProviderConfig()
+    # Explicitly pin isolate_host_volumes=False so the autouse loguru-warning
+    # guard does not trip on the deprecation warning emitted for the None
+    # (unset) default. Tests that specifically need to exercise None should
+    # construct DockerProviderConfig themselves under capture_loguru().
+    config = DockerProviderConfig(isolate_host_volumes=False)
     return DockerProviderInstance(
         name=ProviderInstanceName(name),
         host_dir=Path("/mngr"),
@@ -113,7 +116,7 @@ def make_offline_docker_provider(mngr_ctx: MngrContext, name: str = "test-docker
 
     Useful for testing graceful degradation when the Docker daemon is unavailable.
     """
-    config = DockerProviderConfig(host="unix:///nonexistent/docker.sock")
+    config = DockerProviderConfig(host="unix:///nonexistent/docker.sock", isolate_host_volumes=False)
     return DockerProviderInstance(
         name=ProviderInstanceName(name),
         host_dir=Path("/mngr"),
@@ -138,10 +141,22 @@ def make_docker_provider_with_local_volume(
 
 def make_docker_provider_with_cleanup(
     mngr_ctx: MngrContext,
+    isolate_host_volumes: bool = False,
 ) -> Generator[DockerProviderInstance, None, None]:
-    """Create a Docker provider with a unique name and clean up all hosts on teardown."""
+    """Create a Docker provider with a unique name and clean up all hosts on teardown.
+
+    ``isolate_host_volumes`` is passed through to the provider config so callers
+    can exercise the isolated (volume-subpath) mount path without having to
+    reimplement the cleanup logic.
+    """
     unique_name = f"docker-test-{get_short_random_string()}"
-    provider = make_docker_provider(mngr_ctx, unique_name)
+    config = DockerProviderConfig(isolate_host_volumes=isolate_host_volumes)
+    provider = DockerProviderInstance(
+        name=ProviderInstanceName(unique_name),
+        host_dir=Path("/mngr"),
+        mngr_ctx=mngr_ctx,
+        config=config,
+    )
     yield provider
 
     try:
@@ -154,7 +169,7 @@ def make_docker_provider_with_cleanup(
                 pass
             try:
                 provider.delete_host(provider.get_host(host.host_id))
-            except (HostNotFoundError, MngrError, docker.errors.DockerException, OSError):
+            except (MngrError, docker.errors.DockerException, OSError):
                 pass
     except (MngrError, docker.errors.DockerException, OSError):
         pass

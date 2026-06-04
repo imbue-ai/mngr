@@ -59,9 +59,14 @@ become Vault entries in step 4.
   modal token set --profile minds-staging
   ```
   Verify a `[minds-staging]` block landed in `~/.modal.toml`. The
-  `MODAL_PROFILE` export in `minds env activate staging` (see step 6)
-  pins every subsequent `modal` shellout to this profile -- the
-  account you're logged into via `active = true` is irrelevant.
+  `MODAL_PROFILE` export in `minds env activate --deploy staging` (see
+  step 6) pins every subsequent `modal` shellout to this profile -- the
+  account you're logged into via `active = true` is irrelevant. The
+  presence of the `[minds-staging]` block is only checked when you pass
+  `--deploy` (which pre-validates `~/.modal.toml` and fails fast with a
+  `modal token set --profile minds-staging` hint if the block is
+  missing). Plain `minds env activate staging` -- use-only activation --
+  does not need the block and never reads `~/.modal.toml`.
 
 - [ ] **Neon project for staging.** Create a single project under your
   Neon org (any name; the staging tier uses `creates_resources=false`
@@ -208,10 +213,6 @@ Modal-pushed entries (consumed by the deployed apps at runtime):
 - [ ] **`secrets/minds/staging/neon`** -- `DATABASE_URL` (pooled DSN
   for the `host_pool` DB).
 
-- [ ] **`secrets/minds/staging/paid-accounts`** --
-  `PAID_ACCOUNT_SUFFIXES` (e.g. `@imbue.com`). Leave empty if you
-  want paid features off in staging.
-
 - [ ] **`secrets/minds/staging/pool-ssh`** -- `POOL_SSH_PRIVATE_KEY`.
   Push via the `@<path>` syntax so the key file never leaves your
   laptop:
@@ -228,7 +229,9 @@ Modal-pushed entries (consumed by the deployed apps at runtime):
   `AUTH_WEBSITE_DOMAIN`
   (`https://minds-staging--rsc-staging-api.modal.run`),
   `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GITHUB_CLIENT_ID`,
-  `GITHUB_CLIENT_SECRET`.
+  `GITHUB_CLIENT_SECRET`, `MINDS_PAID_ADMIN_KEY` (the fixed key for
+  the `/paid/*` admin API; leave empty to disable it),
+  `MINDS_PAID_LIST_CACHE_TTL_SECONDS` (optional; default 60).
 
 Operator-only entries (read by `minds env deploy` on the laptop;
 never pushed to Modal):
@@ -252,21 +255,24 @@ After every push:
 ## 5. Verify Modal CLI talks to `minds-staging`
 
 ```bash
-eval "$(uv run minds env activate staging)"
+eval "$(uv run minds env activate --deploy staging)"
 echo "$MODAL_PROFILE"   # expect: minds-staging
 modal environment list  # should NOT error; no envs needed yet for SHARED tier
 ```
 
 If `modal` complains about missing auth, re-run `modal token set
---profile minds-staging`. The `MODAL_PROFILE` export the activation
-emits is what pins every `modal` shellout below to this workspace.
+--profile minds-staging`. The `MODAL_PROFILE` export the `--deploy`
+activation emits is what pins every `modal` shellout below to this
+workspace. Without `--deploy`, `MODAL_PROFILE` is not exported (and
+plain `activate` actively unsets it) -- that mode is for *using* the
+deployed tier, not deploying it.
 
 ---
 
 ## 6. First-time tier deploy
 
 ```bash
-eval "$(uv run minds env activate staging)"
+eval "$(uv run minds env activate --deploy staging)"
 uv run minds env deploy --yes-i-mean-staging
 ```
 
@@ -292,8 +298,6 @@ Watch the deploy logs. On the first run, expect:
 
 - `WARNING: Vault read for ovh failed ...` if you skipped the OVH
   entry. Safe to ignore.
-- A `paid-accounts` placeholder warning if you left
-  `PAID_ACCOUNT_SUFFIXES` empty. Safe to ignore.
 - Per-app deploy lines ending with
   `https://minds-staging--rsc-staging-api.modal.run` and
   `https://minds-staging--llm-staging-proxy.modal.run`. The deploy
@@ -314,7 +318,7 @@ state.
 ## 7. (Optional) bake one staging pool host
 
 Only needed if you want the staging desktop client to use IMBUE_CLOUD
-launch mode. LOCAL mode (`--template main --template docker`) works
+launch mode. DOCKER mode (`--template main --template docker`) works
 without any pool hosts.
 
 ```bash

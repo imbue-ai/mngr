@@ -114,6 +114,34 @@ class TunnelInfo(FrozenModel):
     services: tuple[str, ...] = ()
 
 
+class R2BucketKeyMaterial(FrozenModel):
+    """A bucket-scoped S3 credential, as emitted by `mngr imbue_cloud bucket ...`.
+
+    Mirror of the plugin's ``R2KeyMaterial`` JSON shape; the secret is
+    revealed once at creation and never persisted by the connector.
+    """
+
+    access_key_id: str
+    secret_access_key: SecretStr
+    s3_endpoint: AnyUrl
+    bucket_name: str
+    access: str
+
+
+class R2BucketInfo(FrozenModel):
+    """Metadata for an R2 bucket, as emitted by `mngr imbue_cloud bucket info`."""
+
+    bucket_name: str
+    s3_endpoint: AnyUrl
+
+
+class R2BucketCreateResult(FrozenModel):
+    """Result of `mngr imbue_cloud bucket create`: the bucket plus its default key."""
+
+    bucket: R2BucketInfo
+    key: R2BucketKeyMaterial
+
+
 class ImbueCloudCli(MutableModel):
     """Run ``mngr imbue_cloud …`` subcommands inside a ConcurrencyGroup.
 
@@ -513,6 +541,60 @@ class ImbueCloudCli(MutableModel):
             if tunnel.tunnel_name.endswith(suffix):
                 return tunnel
         return None
+
+    # ------------------------------------------------------------------
+    # R2 buckets (one per workspace; used to back up the host_dir via restic)
+    # ------------------------------------------------------------------
+
+    def create_bucket(
+        self,
+        *,
+        account: str,
+        name: str,
+        access: str = "readwrite",
+    ) -> R2BucketCreateResult:
+        """Create an R2 bucket and mint its default key.
+
+        ``name`` is the short, user-facing bucket name; the connector
+        prepends the account's user-id prefix to form the full R2 name
+        returned in the result. Raises ``ImbueCloudCliError`` (whose
+        ``stderr`` carries the plugin's structured error) on failure --
+        the caller distinguishes "already exists" from other failures to
+        drive idempotent reuse.
+        """
+        result = self._run(
+            ["bucket", "create", name, "--access", access, "--account", account],
+            cg_name="imbue-cloud-bucket-create",
+            timeout_seconds=_KEY_OP_TIMEOUT_SECONDS,
+        )
+        body = self._expect_success(result, "bucket create")
+        return R2BucketCreateResult.model_validate(body)
+
+    def get_bucket_info(self, account: str, name: str) -> R2BucketInfo:
+        """Return metadata for the bucket ``name`` (short name) under ``account``."""
+        result = self._run(
+            ["bucket", "info", name, "--account", account],
+            cg_name="imbue-cloud-bucket-info",
+            timeout_seconds=_KEY_OP_TIMEOUT_SECONDS,
+        )
+        body = self._expect_success(result, "bucket info")
+        return R2BucketInfo.model_validate(body)
+
+    def create_bucket_key(
+        self,
+        *,
+        account: str,
+        name: str,
+        access: str = "readwrite",
+        alias: str | None = None,
+    ) -> R2BucketKeyMaterial:
+        """Mint an additional scoped key for the bucket ``name`` (short name)."""
+        args: list[str] = ["bucket", "keys", "create", name, "--access", access, "--account", account]
+        if alias is not None:
+            args.extend(["--alias", alias])
+        result = self._run(args, cg_name="imbue-cloud-bucket-keys-create", timeout_seconds=_KEY_OP_TIMEOUT_SECONDS)
+        body = self._expect_success(result, "bucket keys create")
+        return R2BucketKeyMaterial.model_validate(body)
 
 
 def _parse_stdout_json(stdout: str, command_repr: str) -> Any:

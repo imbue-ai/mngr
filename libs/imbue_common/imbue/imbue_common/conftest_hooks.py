@@ -91,7 +91,7 @@ def _cached_entry_points(
     return _entry_points_cache[key]
 
 
-importlib.metadata.entry_points = _cached_entry_points  # type: ignore[assignment]
+importlib.metadata.entry_points = _cached_entry_points  # ty: ignore[invalid-assignment]
 
 
 # Directory for test output files (slow tests, coverage summaries).
@@ -955,6 +955,15 @@ def register_conftest_hooks(namespace: dict) -> None:
     if _registered:
         return
     _registered = True
+
+    # Opt out of Latchkey's daily usage counting for every test in the
+    # monorepo. Setting it here (rather than in CI workflows or individual
+    # tests) means *any* test that ends up spawning a ``latchkey gateway``
+    # subprocess -- directly, through ``mngr latchkey forward``, or
+    # transitively via Electron / minds in the e2e suite -- inherits the
+    # opt-out through ``os.environ``. Test runs are not real usage and
+    # should never bump the public counter.
+    os.environ["LATCHKEY_DISABLE_COUNTING"] = "1"
 
     # Discover and register every resource guard declared via the
     # resource_guards entry point group. This is the single source of
