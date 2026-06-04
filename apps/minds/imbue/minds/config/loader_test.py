@@ -10,6 +10,7 @@ from imbue.minds.config.loader import bundled_client_config_path_or_none
 from imbue.minds.config.loader import load_client_config
 from imbue.minds.config.loader import load_deploy_config
 from imbue.minds.config.loader import repo_tier_client_config_path
+from imbue.minds.envs.per_env_deploy import per_env_secret_services
 
 _VALID_CLIENT_TOML = (
     'connector_url = "https://connector.example.com/"\nlitellm_proxy_url = "https://litellm.example.com/"\n'
@@ -70,6 +71,21 @@ def test_load_deploy_config_ci_tier_round_trip() -> None:
     assert config.vault_path_prefix == "secrets/minds/ci"
     assert "cloudflare" in config.secrets.services
     assert "supertokens" in config.secrets.services
+
+
+@pytest.mark.parametrize("tier", ["dev", "staging", "production", "ci"])
+def test_deploy_config_secrets_match_canonical_per_env_services(tier: str) -> None:
+    """Every tier must push exactly the per-env secrets the deployed apps reference.
+
+    Regression guard: the connector app references each
+    ``<svc>-<tier>-<deploy_id>`` Modal Secret named in
+    ``per_env_secret_services()`` via ``Secret.from_name``, so a tier whose
+    ``[secrets].services`` omits one makes ``modal deploy`` fail with
+    "Secret ... not found in environment". This caught a missing ``ovh`` entry
+    across all tiers after the connector started signing OVH calls at runtime.
+    """
+    config = load_deploy_config(tier)
+    assert set(config.secrets.services) == set(per_env_secret_services())
 
 
 def test_load_deploy_config_unknown_tier_raises() -> None:

@@ -222,3 +222,38 @@ def apply_pool_hosts_migrations(
             _record_applied_version(dsn, migration.name, parent_cg=parent_cg)
             applied.append(migration)
     return tuple(applied)
+
+
+def seed_paid_list_defaults(
+    dsn: SecretStr,
+    *,
+    domains: Sequence[str],
+    emails: Sequence[str],
+    parent_cg: ConcurrencyGroup,
+) -> tuple[str, ...]:
+    """Seed-if-absent default paid domains / emails into the host_pool DB.
+
+    For each value, runs ``INSERT INTO <table> (<col>) VALUES (...) ON CONFLICT
+    (<col>) DO NOTHING`` so the row is created (with the table's ``is_paid=true``
+    default) only when absent -- it sets the tier's initial default but never
+    re-activates an entry an operator soft-removed. Values are lowercased to
+    match the connector's normalized lookups. Returns the lowercased values
+    that were seed-attempted, in ``domains`` then ``emails`` order.
+
+    Must run AFTER :func:`apply_pool_hosts_migrations` (the tables must exist).
+    A no-op when both lists are empty.
+    """
+    seeded: list[str] = []
+    for table, column, values in (("paid_domains", "domain", domains), ("paid_emails", "email", emails)):
+        for index, raw in enumerate(values):
+            value = raw.strip().lower()
+            if not value:
+                continue
+            # ``value`` comes from a committed deploy.toml (operator-controlled),
+            # but escape single quotes defensively -- same approach as
+            # ``_record_applied_version``.
+            safe_value = value.replace("'", "''")
+            sql = f"INSERT INTO {table} ({column}) VALUES ('{safe_value}') ON CONFLICT ({column}) DO NOTHING"
+            _run_psql_command(dsn, sql=sql, parent_cg=parent_cg, cg_name=f"psql-seed-{table}-{index}")
+            seeded.append(value)
+    return tuple(seeded)

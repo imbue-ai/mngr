@@ -1,3 +1,4 @@
 node_modules/
 resources/
 dist/
+.visual-diff/

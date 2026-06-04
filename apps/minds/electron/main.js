@@ -1,4 +1,4 @@
-const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app, session, screen, clipboard } = require('electron');
+const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app, session, screen, dialog, clipboard } = require('electron');
 const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
@@ -26,6 +26,13 @@ let appMenuInstalled = false;
 let backendBaseUrl = null;
 let mngrForwardBaseUrl = null;
 let workspaceList = []; // [{id, name, account}]
+// Persistent set of agent ids we have ever seen in the chrome SSE's
+// ``destroying_agent_ids`` payload. Used to decide whether a workspace
+// disappearing from the workspaces list is an actual user-initiated destroy
+// (navigate the window to landing) or a transient discovery loss (leave the
+// window alone -- the recovery flow kicks in via the system_interface_status
+// event). Never cleared once added; a destroyed workspace's id is dead forever.
+const everSeenDestroying = new Set();
 let isShuttingDown = false;
 let initialBundle = null; // the first window created at startup
 let hasCompletedInitialStart = false;
@@ -281,6 +288,7 @@ function createBundleWebContentsViews(win) {
   });
   const contentView = new WebContentsView({
     webPreferences: {
+      preload: path.join(__dirname, 'content-relay-preload.js'),
       partition: CONTENT_PARTITION,
       contextIsolation: true,
       nodeIntegration: false,
@@ -850,6 +858,7 @@ function prepareAllWindowsForRetry() {
     if (!bundle.contentView) {
       const contentView = new WebContentsView({
         webPreferences: {
+          preload: path.join(__dirname, 'content-relay-preload.js'),
           partition: CONTENT_PARTITION,
           contextIsolation: true,
           nodeIntegration: false,
@@ -1013,29 +1022,40 @@ function handleChromeSSEEvent(evt) {
       account: w.account ? String(w.account) : '',
     }));
     const newIds = new Set(workspaceList.map((w) => w.id));
+    // Anything currently in destroying state stays in the ever-seen set so
+    // we can recognize it as a real destroy once it later disappears from
+    // the workspaces list.
+    if (Array.isArray(evt.destroying_agent_ids)) {
+      for (const aid of evt.destroying_agent_ids) {
+        everSeenDestroying.add(String(aid));
+      }
+    }
 
-    // Handle windows for destroyed workspaces: close them if other
-    // windows exist, otherwise navigate to home so the user isn't left
-    // with nothing.
+    // Handle windows whose workspace disappeared. We ONLY navigate the user
+    // away when we have positive evidence the workspace was destroyed (the
+    // id was in destroying state at some prior tick). Otherwise (a transient
+    // discovery hiccup) we leave the content view alone -- the recovery flow
+    // handles the unresponsive workspace via the system_interface_status SSE
+    // event, no nav required.
     for (const oldId of oldIds) {
-      if (!newIds.has(oldId)) {
-        const affected = [];
-        for (const b of bundles) {
-          if (!b.window.isDestroyed() && b.currentWorkspaceId === oldId) {
-            affected.push(b);
-          }
+      if (newIds.has(oldId)) continue;
+      if (!everSeenDestroying.has(oldId)) continue;
+      const affected = [];
+      for (const b of bundles) {
+        if (!b.window.isDestroyed() && b.currentWorkspaceId === oldId) {
+          affected.push(b);
         }
-        const liveBundleCount = [...bundles].filter((b) => !b.window.isDestroyed()).length;
-        for (const b of affected) {
-          if (liveBundleCount - affected.length >= 1) {
-            b.window.close();
-          } else {
-            b.currentWorkspaceId = null;
-            if (b.contentView && !b.contentView.webContents.isDestroyed() && backendBaseUrl) {
-              b.contentView.webContents.loadURL(backendBaseUrl + '/');
-            }
-            updateOsTitle(b);
+      }
+      const liveBundleCount = [...bundles].filter((b) => !b.window.isDestroyed()).length;
+      for (const b of affected) {
+        if (liveBundleCount - affected.length >= 1) {
+          b.window.close();
+        } else {
+          b.currentWorkspaceId = null;
+          if (b.contentView && !b.contentView.webContents.isDestroyed() && backendBaseUrl) {
+            b.contentView.webContents.loadURL(backendBaseUrl + '/');
           }
+          updateOsTitle(b);
         }
       }
     }
@@ -1185,19 +1205,17 @@ async function runChromeSSELoop() {
   }
 }
 
-// POST the system-interface restart API and resolve once the server has
-// acknowledged that the tmux kill dispatch finished (or the request
-// errors / times out). Callers navigate to the workspace URL afterward;
-// because the endpoint returns 200 only after the system_interface has
-// been killed, the plugin will then serve its 503 loader until the
-// workspace comes back -- giving the user a visible "System interface
-// starting" page instead of a silent reload onto the still-live
-// pre-restart UI.
+// POST a restart endpoint (``restart-system-interface`` or ``restart-host``)
+// and resolve once the server has acknowledged the 202 dispatch (or the
+// request errors / times out). The endpoints return 202 immediately and
+// drive recovery asynchronously; the 202 also means the health tracker is
+// already RESTARTING, so callers navigate to the recovery page afterward,
+// which shows restart progress and returns to the workspace once healthy.
 //
 // Always resolves (never rejects) so callers can chain navigation
 // regardless of network outcome.
 const RESTART_REQUEST_TIMEOUT_MS = 10000;
-function postRestartSystemInterface(agentId) {
+function postRestart(agentId, endpointPath) {
   return new Promise((resolve) => {
     if (!agentId || !backendBaseUrl) {
       resolve();
@@ -1206,7 +1224,7 @@ function postRestartSystemInterface(agentId) {
     let req;
     try {
       req = net.request({
-        url: `${backendBaseUrl}/api/agents/${encodeURIComponent(agentId)}/restart-system-interface`,
+        url: `${backendBaseUrl}/api/agents/${encodeURIComponent(agentId)}/${endpointPath}`,
         method: 'POST',
         useSessionCookies: true,
       });
@@ -1836,6 +1854,18 @@ ipcMain.on('navigate-to-request', (event, _agentId, eventId) => {
   if (sender) openModal(sender, url);
 });
 
+// Open a permission-request modal on behalf of the (otherwise unprivileged)
+// workspace content view. Only content-relay-preload.js can emit this channel
+// -- the page itself never sees ipcRenderer -- and it does so only for an
+// allowlisted `minds:open-request-modal` postMessage. We re-validate the id
+// here (never trust the renderer) before building the `/requests/<id>` URL,
+// then reuse the same modal path as the requests-panel card click above.
+ipcMain.on('open-request-modal', (event, requestId) => {
+  if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
+  const sender = getBundleFromEvent(event);
+  if (sender) openModal(sender, toAbsoluteUrl('/requests/' + requestId));
+});
+
 ipcMain.on('close-modal', (event) => {
   closeModal(getBundleFromEvent(event));
 });
@@ -1857,22 +1887,49 @@ ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
     });
     template.push({ type: 'separator' });
   }
+  const goToRecoveryView = () => {
+    if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
+      // The restart POST has already moved the health tracker to RESTARTING,
+      // so the recovery page renders its "Restarting…" progress state and
+      // auto-refreshes itself until the workspace is healthy again, then
+      // navigates back to ``workspaceUrl``. Reloading the workspace URL directly would
+      // instead race the restart: the container is still up at dispatch
+      // time, so the reload would just show the pre-restart workspace.
+      bundle.contentView.webContents.loadURL(
+        toAbsoluteUrl(
+          '/agents/' + encodeURIComponent(agentId)
+          + '/recovery?return_to=' + encodeURIComponent(workspaceUrl || ''),
+        ),
+      );
+    }
+  };
   template.push({
     label: 'Restart system interface',
     click: async () => {
       // Close the sidebar first so the user gets immediate visual feedback
-      // while we wait for the restart dispatch to ack. The endpoint returns
-      // 200 once `mngr exec` finishes killing the system_interface tmux window;
-      // navigating before that ack would race against a still-live backend
-      // and leave the user looking at the unchanged iframe.
+      // while the restart dispatch is acknowledged.
       closeSidebar(bundle);
-      await postRestartSystemInterface(agentId);
-      if (workspaceUrl && bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-        // The plugin now serves its styled 503 loader (the
-        // "System interface starting" page), which auto-refreshes into the
-        // workspace once the system interface is back.
-        bundle.contentView.webContents.loadURL(workspaceUrl);
-      }
+      await postRestart(agentId, 'restart-system-interface');
+      goToRecoveryView();
+    },
+  });
+  template.push({
+    label: 'Restart workspace…',
+    click: async () => {
+      // A host restart interrupts every agent in the workspace, so confirm
+      // before dispatching it.
+      const { response } = await dialog.showMessageBox(bundle.window, {
+        type: 'warning',
+        buttons: ['Cancel', 'Restart workspace'],
+        defaultId: 0,
+        cancelId: 0,
+        message: 'Restart this workspace?',
+        detail: 'This restarts the whole workspace. In-progress work in all agents will be interrupted.',
+      });
+      if (response !== 1) return;
+      closeSidebar(bundle);
+      await postRestart(agentId, 'restart-host');
+      goToRecoveryView();
     },
   });
   const menu = Menu.buildFromTemplate(template);

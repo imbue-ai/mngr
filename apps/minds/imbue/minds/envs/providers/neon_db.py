@@ -570,18 +570,36 @@ def restore_branch_from_snapshot(
     inspect the broken state later). Pass something descriptive like
     ``pre-rollback-<deploy_id>``.
 
-    Idempotent in the sense that re-running against an already-restored
-    branch is a near-no-op.
+    Idempotent: re-running after a restore that already used this
+    ``preserve_under_name`` is a no-op. Neon names the pre-restore
+    preservation branch ``preserve_under_name``, so a second restore with
+    the same name returns 409 ("branch with that name already exists") --
+    which we treat as "already restored" rather than surfacing as an error.
+    Without this, a recover that failed a *later* step (e.g. the Modal app
+    stop) could never be re-run to completion, wedging its recover-target
+    file in place forever.
     """
-    _neon_request(
-        "POST",
-        f"/projects/{project_id}/branches/{target_branch_id}/restore",
-        api_token=api_token,
-        json_body={
-            "source_branch_id": source_branch_id,
-            "preserve_under_name": preserve_under_name,
-        },
-    )
+    try:
+        _neon_request(
+            "POST",
+            f"/projects/{project_id}/branches/{target_branch_id}/restore",
+            api_token=api_token,
+            json_body={
+                "source_branch_id": source_branch_id,
+                "preserve_under_name": preserve_under_name,
+            },
+        )
+    except NeonProviderError as exc:
+        message = str(exc)
+        if "409" in message and "already exists" in message:
+            logger.info(
+                "Skipped Neon restore of branch {!r}: preserve branch {!r} already exists "
+                "(restore was already applied by a prior run).",
+                target_branch_id,
+                preserve_under_name,
+            )
+            return
+        raise
 
 
 def delete_neon_branch(project_id: str, branch_id: str, *, api_token: SecretStr) -> None:

@@ -72,6 +72,17 @@ ARG CLAUDE_CODE_VERSION="2.1.141"
 RUN curl -fsSL https://claude.ai/install.sh > /tmp/install_claude.sh && ( if [ -n "$CLAUDE_CODE_VERSION" ]; then cat /tmp/install_claude.sh | bash -s "$CLAUDE_CODE_VERSION"; else cat /tmp/install_claude.sh | bash; fi && test -x /root/.local/bin/claude ) || ( cat /tmp/install_claude.sh && exit 1 )
 ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 
+# Node.js, pinned to apps/minds/package.json's engines.node. Required by the
+# mngr_latchkey gateway's .mjs extensions (run under node) and by minds Python
+# tests that evaluate apps/minds/todesktop.js via `node -e`.
+ARG NODE_VERSION="24.15.0"
+RUN ARCH=$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/') && \
+    curl -fsSL --retry 5 --retry-delay 5 --retry-connrefused \
+        "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${ARCH}.tar.gz" \
+        | tar -xz -C /usr/local --strip-components=1 && \
+    test -x /usr/local/bin/node
+ENV NODE_VERSION=${NODE_VERSION}
+
 # without this, there are some annoying bugs on modal's side with snapshotting
 ENV UV_LINK_MODE=copy
 

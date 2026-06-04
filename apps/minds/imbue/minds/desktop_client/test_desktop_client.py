@@ -1,4 +1,5 @@
 import json
+import os
 import queue
 from pathlib import Path
 
@@ -11,16 +12,23 @@ from starlette.testclient import TestClient
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client import recovery_probe as _recovery_probe
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
-from imbue.minds.desktop_client.app import _build_mngr_exec_argv
+from imbue.minds.desktop_client.app import _build_mngr_host_state_argv
+from imbue.minds.desktop_client.app import _build_mngr_start_argv
+from imbue.minds.desktop_client.app import _build_mngr_stop_argv
 from imbue.minds.desktop_client.app import _build_requests_payload
 from imbue.minds.desktop_client.app import _build_workspace_list
+from imbue.minds.desktop_client.app import _destroying_agent_ids
+from imbue.minds.desktop_client.app import _run_restart_sequence
+from imbue.minds.desktop_client.app import _ssh_command_for_agent
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import DEFAULT_SERVICE_NAME
 from imbue.minds.desktop_client.conftest import make_agents_json
@@ -44,7 +52,11 @@ from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.utils.polling import wait_for
+from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 
 def _create_multi_backend_http_client(
@@ -1257,6 +1269,33 @@ def test_chrome_events_sse_returns_workspaces_when_authenticated(tmp_path: Path)
     assert workspaces[0]["id"] == str(agent_id)
 
 
+def test_destroying_agent_ids_returns_ids_with_live_destroy(tmp_path: Path) -> None:
+    """An agent with an alive destroy pid + still in the resolver shows up as running.
+
+    main.js keys its "ok to navigate the user away from this workspace"
+    decision off this list, so the helper must surface every in-flight or
+    failed destroy id whose marker dir exists on disk.
+    """
+    agent_id = AgentId()
+    paths = WorkspacePaths(data_dir=tmp_path)
+    destroying_dir = tmp_path / "destroying" / str(agent_id)
+    destroying_dir.mkdir(parents=True)
+    # The current process pid is alive, so the helper sees the destroy as
+    # RUNNING (rather than DONE/FAILED, which would still be a valid hit but
+    # the running case is the most direct check).
+    (destroying_dir / "pid").write_text(str(os.getpid()))
+    (destroying_dir / "output.log").write_text("destroy in flight...\n")
+
+    ids = _destroying_agent_ids(paths, (agent_id,))
+    assert ids == [str(agent_id)]
+
+
+def test_destroying_agent_ids_returns_empty_when_paths_is_none() -> None:
+    """The test-server helper builds a minimal app without WorkspacePaths;
+    the helper must tolerate that without raising."""
+    assert _destroying_agent_ids(None, ()) == []
+
+
 def test_build_requests_payload_empty_inbox() -> None:
     """An empty inbox yields a zero count and no pending ids."""
     assert _build_requests_payload(None) == {"count": 0, "request_ids": []}
@@ -1485,119 +1524,125 @@ def test_auto_open_toggle(tmp_path: Path) -> None:
     assert config.get_auto_open_requests_panel() is False
 
 
-_TEST_PREAUTH_COOKIE = "test-preauth-cookie-value"
-_TEST_MNGR_FORWARD_PORT = 8421
-
-
-def _build_refresh_test_app(
-    tmp_path: Path,
-    resolver: MngrCliBackendResolver,
-) -> tuple[FastAPI, list[httpx.Request]]:
-    """Wire a desktop client app for refresh-event tests.
-
-    Returns the app and a ``received`` list that captures every
-    ``httpx.Request`` the app's http_client sees. The caller is
-    responsible for entering the TestClient context (or deliberately
-    skipping it to exercise the pre-lifespan code path).
-    """
-    received: list[httpx.Request] = []
-
-    async def _capture(request: httpx.Request) -> httpx.Response:
-        received.append(request)
-        return httpx.Response(200, json={"ok": True})
-
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture))
-
-    app = create_desktop_client(
-        auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
-        backend_resolver=resolver,
-        http_client=http_client,
-        session_store=make_session_store_for_test(tmp_path),
-        minds_config=MindsConfig(data_dir=tmp_path),
-        request_inbox=RequestInbox(),
-        paths=WorkspacePaths(data_dir=tmp_path),
-        mngr_forward_port=_TEST_MNGR_FORWARD_PORT,
-        mngr_forward_preauth_cookie=_TEST_PREAUTH_COOKIE,
-    )
-    return app, received
-
-
-def test_refresh_event_posts_to_system_interface_broadcast(tmp_path: Path) -> None:
-    """A refresh event on the mngr event stream triggers a POST to the
-    plugin's per-agent subdomain so the system interface broadcasts. The URL
-    is on the plugin's port and the request carries the ``mngr_forward_session``
-    cookie (set to the preauth value minds wired in)."""
-    agent_id = AgentId()
-    service_name = "web"
-
-    resolver = make_resolver_with_data(
-        agents_json=make_agents_json(agent_id),
-        service_logs={str(agent_id): make_service_log("system_interface", "http://ws-backend:9000")},
-    )
-    app, received = _build_refresh_test_app(tmp_path, resolver)
-
-    with TestClient(app):
-        raw_line = json.dumps({"source": "refresh", "type": "refresh_service", "service_name": service_name})
-        resolver._fire_on_refresh(str(agent_id), raw_line)
-        wait_for(
-            lambda: len(received) > 0,
-            timeout=2.0,
-            poll_interval=0.02,
-            error_message="refresh broadcast POST never arrived",
-        )
-
-    assert len(received) == 1, f"expected one POST, got {len(received)}: {[str(r.url) for r in received]}"
-    request = received[0]
-    assert request.method == "POST"
-    expected_url = (
-        f"http://{agent_id}.localhost:{_TEST_MNGR_FORWARD_PORT}/api/refresh-service/{service_name}/broadcast"
-    )
-    assert str(request.url) == expected_url
-    cookie_header = request.headers.get("cookie", "")
-    assert f"mngr_forward_session={_TEST_PREAUTH_COOKIE}" in cookie_header
-
-
-def test_refresh_event_before_lifespan_is_dropped_without_raising(tmp_path: Path) -> None:
-    """A refresh event that fires before the app's lifespan has run does not crash.
-
-    Reproduces the startup-ordering race: in production, stream_manager.start()
-    runs before uvicorn.run(app), so refresh events can arrive in the window
-    between create_desktop_client (which registers the callback) and the
-    lifespan startup (which captures the event loop). The callback must drop
-    the event rather than raising AttributeError on app.state.event_loop.
-    """
-    agent_id = AgentId()
-
-    resolver = make_resolver_with_data(
-        agents_json=make_agents_json(agent_id),
-        service_logs={str(agent_id): make_service_log("system_interface", "http://ws-backend:9000")},
-    )
-    _app, received = _build_refresh_test_app(tmp_path, resolver)
-
-    # Deliberately do NOT enter a TestClient context -- the lifespan has never
-    # fired, so app.state.event_loop is still None.
-    raw_line = json.dumps({"source": "refresh", "service_name": "web"})
-    resolver._fire_on_refresh(str(agent_id), raw_line)
-
-    assert received == []
-
-
 # -- system-interface restart + recovery tests --
 
 
-def test_build_mngr_exec_argv_includes_agent_id_and_command() -> None:
+def test_build_mngr_stop_argv_appends_stop_host_only_for_host_restart() -> None:
+    """The host tier adds --stop-host; the surgical tier stops just the agent."""
     aid = AgentId.generate()
-    argv = _build_mngr_exec_argv(
-        mngr_binary="/usr/local/bin/mngr",
-        agent_id=aid,
-        shell_command="echo hello",
+
+    surgical = _build_mngr_stop_argv("/usr/local/bin/mngr", aid, is_host_restart=False)
+    assert surgical[:3] == ["/usr/local/bin/mngr", "stop", str(aid)]
+    assert "--stop-host" not in surgical
+
+    host = _build_mngr_stop_argv("/usr/local/bin/mngr", aid, is_host_restart=True)
+    assert host[:3] == ["/usr/local/bin/mngr", "stop", str(aid)]
+    assert "--stop-host" in host
+
+
+def test_build_mngr_start_argv_targets_the_agent() -> None:
+    aid = AgentId.generate()
+    argv = _build_mngr_start_argv("/usr/local/bin/mngr", aid)
+    assert argv[:3] == ["/usr/local/bin/mngr", "start", str(aid)]
+
+
+def test_build_mngr_host_state_argv_scopes_to_workspace_and_continues_on_error() -> None:
+    """The host-state probe filters to just this workspace's agents and
+    tolerates per-host failures so a broken sibling host doesn't blank
+    out the diagnostic."""
+    agent = AgentId.generate()
+    services = AgentId.generate()
+    argv = _build_mngr_host_state_argv("/usr/local/bin/mngr", agent, services, None)
+    assert argv[:5] == ["/usr/local/bin/mngr", "list", "--format", "json", "--quiet"]
+    # CEL include matches both the chat agent and the system-services agent.
+    assert "--include" in argv
+    include_value = argv[argv.index("--include") + 1]
+    assert f'id == "{agent}"' in include_value
+    assert f'id == "{services}"' in include_value
+    # --on-error continue is required so one broken host does not abort the
+    # listing for the rest.
+    assert argv[argv.index("--on-error") + 1] == "continue"
+    # No provider known -> discovery is not scoped to a provider.
+    assert "--provider" not in argv
+
+
+def test_build_mngr_host_state_argv_omits_services_id_when_unresolved() -> None:
+    """When the services-agent id is unknown, the filter degenerates to just
+    the chat agent's id -- the listing is still scoped, just with one term."""
+    agent = AgentId.generate()
+    argv = _build_mngr_host_state_argv("/usr/local/bin/mngr", agent, None, None)
+    include_value = argv[argv.index("--include") + 1]
+    assert include_value == f'id == "{agent}"'
+
+
+def test_build_mngr_host_state_argv_scopes_discovery_to_provider_when_known() -> None:
+    """When the workspace's provider is known, the probe passes ``--provider`` so
+    discovery only queries that provider.
+
+    ``--provider`` is a discovery fan-out control (unlike the post-discovery CEL
+    ``--include``), so an unrelated provider being unreachable can no longer make
+    this listing exit nonzero and blank out the workspace's own host state.
+    """
+    agent = AgentId.generate()
+    services = AgentId.generate()
+    argv = _build_mngr_host_state_argv("/usr/local/bin/mngr", agent, services, "docker")
+    assert argv[argv.index("--provider") + 1] == "docker"
+
+
+def _classify_host_health_compat(list_json: str | None, agent_id: AgentId) -> dict[str, bool]:
+    """Legacy-shape wrapper around the probe-list response.
+
+    Projects the new "container running?" probe + dispatch_tier classification
+    back onto the prior ``{"reachable": ..., "host_offline": ...}`` contract
+    so the existing host-state classification cases stay covered.
+    """
+    response = _recovery_probe.build_host_health_response(
+        list_json=list_json,
+        agent_id=agent_id,
+        services_agent_id=None,
+        in_container_stdout=None,
+        plugin_resolver_services={},
     )
-    assert argv[0] == "/usr/local/bin/mngr"
-    assert argv[1] == "exec"
-    assert argv[2] == str(aid)
-    assert argv[3] == "echo hello"
-    assert "--timeout" in argv
-    assert "--quiet" in argv
+    for probe in response.probes:
+        if "container running" in probe.question:
+            return {
+                "reachable": probe.answer == _recovery_probe.ProbeAnswer.YES,
+                "host_offline": probe.answer == _recovery_probe.ProbeAnswer.NO,
+            }
+    return {"reachable": False, "host_offline": False}
+
+
+def test_classify_host_health_running_host_is_reachable() -> None:
+    """A RUNNING host classifies as reachable -- the surgical restart applies."""
+    aid = AgentId.generate()
+    list_json = json.dumps({"agents": [{"id": str(aid), "host": {"state": "RUNNING"}}]})
+    assert _classify_host_health_compat(list_json, aid) == {"reachable": True, "host_offline": False}
+
+
+def test_classify_host_health_stopped_host_is_offline() -> None:
+    """A STOPPED (or crashed) host classifies as offline -- safe to auto host-restart."""
+    aid = AgentId.generate()
+    for state in ("STOPPED", "CRASHED", "FAILED", "STOPPING"):
+        list_json = json.dumps({"agents": [{"id": str(aid), "host": {"state": state}}]})
+        assert _classify_host_health_compat(list_json, aid) == {"reachable": False, "host_offline": True}, state
+
+
+def test_classify_host_health_ambiguous_state_is_neither() -> None:
+    """An ambiguous host state (or a missing agent / bad output) is neither.
+
+    The recovery page then falls back to a confirmed manual restart rather
+    than auto-dispatching a potentially destructive host restart.
+    """
+    aid = AgentId.generate()
+    # An ambiguous lifecycle state (host may still be running agents).
+    starting = json.dumps({"agents": [{"id": str(aid), "host": {"state": "STARTING"}}]})
+    assert _classify_host_health_compat(starting, aid) == {"reachable": False, "host_offline": False}
+    # The probed agent is absent from the listing.
+    other = json.dumps({"agents": [{"id": "agent-other", "host": {"state": "STOPPED"}}]})
+    assert _classify_host_health_compat(other, aid) == {"reachable": False, "host_offline": False}
+    # mngr produced no usable output at all.
+    assert _classify_host_health_compat(None, aid) == {"reachable": False, "host_offline": False}
+    assert _classify_host_health_compat("not json", aid) == {"reachable": False, "host_offline": False}
 
 
 def test_recovery_page_requires_authentication(tmp_path: Path) -> None:
@@ -1622,7 +1667,12 @@ def test_recovery_page_renders_for_authenticated_user(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert str(agent_id) in response.text
     assert safe_return_to in response.text
-    assert "Restart system interface" in response.text
+    # The recovery page chrome rendered: the host-restart button (the
+    # surgical tier is auto-dispatched, so it has no button) and the
+    # surgical-restart endpoint the page's JS posts to when the probe
+    # reports the container reachable.
+    assert "Restart workspace" in response.text
+    assert "restart-system-interface" in response.text
 
 
 def test_recovery_page_drops_open_redirect_return_to(tmp_path: Path) -> None:
@@ -1674,6 +1724,53 @@ def test_recovery_page_allows_relative_return_to(tmp_path: Path) -> None:
     )
     assert response.status_code == 200
     assert f"/agents/{agent_id}/" in response.text
+
+
+def test_ssh_command_for_agent_builds_command_from_resolver() -> None:
+    """_ssh_command_for_agent renders the resolver's SSH info as a runnable command."""
+    agent_id = AgentId()
+    resolver = StaticBackendResolver(
+        url_by_agent_and_service={},
+        ssh_info_by_agent_id={
+            str(agent_id): RemoteSSHInfo(user="root", host="127.0.0.1", port=60022, key_path=Path("/home/u/.mngr/key"))
+        },
+    )
+    assert _ssh_command_for_agent(resolver, agent_id) == "ssh -i /home/u/.mngr/key -p 60022 root@127.0.0.1"
+
+
+def test_ssh_command_for_agent_returns_none_without_ssh_info() -> None:
+    """An agent the resolver has no SSH info for yields no command (button is then omitted)."""
+    resolver = StaticBackendResolver(url_by_agent_and_service={})
+    assert _ssh_command_for_agent(resolver, AgentId()) is None
+
+
+def test_recovery_page_renders_copy_ssh_button_from_resolver(tmp_path: Path) -> None:
+    """End-to-end: the recovery handler pulls the host's SSH info from the
+    backend resolver and renders a Copy SSH command button carrying the command.
+    """
+    agent_id = AgentId()
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    tracker = SystemInterfaceHealthTracker()
+    resolver = StaticBackendResolver(
+        url_by_agent_and_service={},
+        ssh_info_by_agent_id={
+            str(agent_id): RemoteSSHInfo(user="root", host="127.0.0.1", port=60022, key_path=Path("/home/u/.mngr/key"))
+        },
+    )
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=resolver,
+        http_client=None,
+        system_interface_health_tracker=tracker,
+    )
+    client = TestClient(app, base_url="http://localhost")
+    _authenticate_client(client=client, auth_store=auth_store)
+    tracker.mark_stuck(agent_id)
+
+    response = client.get(f"/agents/{agent_id}/recovery", follow_redirects=False)
+    assert response.status_code == 200
+    assert 'id="copy-ssh-btn"' in response.text
+    assert 'data-ssh-command="ssh -i /home/u/.mngr/key -p 60022 root@127.0.0.1"' in response.text
 
 
 def test_restart_api_requires_authentication(tmp_path: Path) -> None:
@@ -1762,8 +1859,8 @@ def test_recovery_page_redirects_to_return_to_when_agent_already_healthy(tmp_pat
     chrome JS navigates to /recovery, but the background probe loop flips
     the tracker back to HEALTHY in the brief window before the GET lands.
     Without the redirect, ``initial_status="healthy"`` would render the
-    "System interface not responding" page and the JS would never auto-
-    reload (the SSE doesn't push events for HEALTHY agents).
+    "Workspace unresponsive" page and the JS would never auto-reload
+    (the SSE doesn't push events for HEALTHY agents).
     """
     tracker = SystemInterfaceHealthTracker()
     client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
@@ -1778,6 +1875,31 @@ def test_recovery_page_redirects_to_return_to_when_agent_already_healthy(tmp_pat
 
     assert response.status_code == 302
     assert response.headers["location"] == safe_return_to
+
+
+def test_recovery_page_renders_for_healthy_agent_with_explicit_restart_intent(tmp_path: Path) -> None:
+    """``intent=restart`` makes the page render for a HEALTHY agent instead of 302ing back.
+
+    The home-page restart control navigates here explicitly. Without the
+    intent marker the healthy-redirect guard would bounce the user straight
+    back to ``return_to`` and nothing would happen. With it, the page renders
+    as STUCK so its JS runs the probe and dispatches a restart.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
+    # With no record in the tracker, get_health returns HEALTHY by default.
+    assert tracker.get_health(agent_id) == AgentHealth.HEALTHY
+    safe_return_to = f"http://{agent_id}.localhost:8421/"
+
+    response = client.get(
+        f"/agents/{agent_id}/recovery?return_to={safe_return_to}&intent=restart",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 200
+    # An explicit restart of a healthy workspace renders as STUCK so the page
+    # probes and dispatches rather than sitting idle.
+    assert 'data-initial-status="stuck"' in response.text
 
 
 def test_recovery_page_renders_normally_when_healthy_but_no_return_to(tmp_path: Path) -> None:
@@ -1814,3 +1936,326 @@ def test_recovery_page_does_not_redirect_when_stuck_even_with_return_to(tmp_path
 
     assert response.status_code == 200
     assert 'data-initial-status="stuck"' in response.text
+
+
+def _create_readiness_test_client(
+    tmp_path: Path,
+    edge_response: httpx.Response,
+) -> tuple[TestClient, FileAuthStore, list[httpx.Request]]:
+    """Build a desktop client whose http_client returns ``edge_response`` for any probe.
+
+    Captures every probe request so tests can assert which URL was fetched.
+    """
+    probed: list[httpx.Request] = []
+
+    async def _handle(request: httpx.Request) -> httpx.Response:
+        probed.append(request)
+        return edge_response
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(_handle), follow_redirects=False)
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        http_client=http_client,
+    )
+    return client, auth_store, probed
+
+
+def test_sharing_readiness_returns_ready_when_edge_returns_access_redirect(tmp_path: Path) -> None:
+    """When the probed hostname returns the Cloudflare Access 302, the endpoint reports ready."""
+    edge_response = httpx.Response(
+        302, headers={"location": "https://team.cloudflareaccess.com/cdn-cgi/access/login/x"}
+    )
+    client, auth_store, probed = _create_readiness_test_client(tmp_path, edge_response)
+    _authenticate_client(client, auth_store)
+    agent_id = AgentId()
+
+    share_url = "https://web-abc123.tunnels.example.com"
+    response = client.get(
+        f"/api/sharing-readiness/{agent_id}/web",
+        params={"url": share_url},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ready": True}
+    assert len(probed) == 1
+    assert str(probed[0].url) == share_url
+
+
+def test_sharing_readiness_returns_not_ready_when_edge_not_live(tmp_path: Path) -> None:
+    """A non-redirect edge response (Access not published yet) reports not-ready."""
+    edge_response = httpx.Response(200, text="origin is up but Access is not enforced")
+    client, auth_store, probed = _create_readiness_test_client(tmp_path, edge_response)
+    _authenticate_client(client, auth_store)
+    agent_id = AgentId()
+
+    response = client.get(
+        f"/api/sharing-readiness/{agent_id}/web",
+        params={"url": "https://web-abc123.tunnels.example.com"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ready": False}
+    assert len(probed) == 1
+
+
+def test_sharing_readiness_does_not_probe_non_https_url(tmp_path: Path) -> None:
+    """A non-probeable URL (e.g. http/localhost) reports not-ready without any network probe."""
+    edge_response = httpx.Response(302, headers={"location": "https://team.cloudflareaccess.com/login"})
+    client, auth_store, probed = _create_readiness_test_client(tmp_path, edge_response)
+    _authenticate_client(client, auth_store)
+    agent_id = AgentId()
+
+    response = client.get(
+        f"/api/sharing-readiness/{agent_id}/web",
+        params={"url": "http://web-abc123.tunnels.example.com"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ready": False}
+    assert len(probed) == 0
+
+
+def test_sharing_readiness_requires_authentication(tmp_path: Path) -> None:
+    """The readiness endpoint rejects unauthenticated callers."""
+    edge_response = httpx.Response(302, headers={"location": "https://team.cloudflareaccess.com/login"})
+    client, _, probed = _create_readiness_test_client(tmp_path, edge_response)
+    agent_id = AgentId()
+
+    response = client.get(
+        f"/api/sharing-readiness/{agent_id}/web",
+        params={"url": "https://web-abc123.tunnels.example.com"},
+    )
+
+    assert response.status_code == 403
+    assert len(probed) == 0
+
+
+# -- restart sequence (background worker) tests --
+
+
+def _write_fake_mngr(tmp_path: Path, stop_exit: int = 0, start_exit: int = 0) -> str:
+    """Write an executable stub that stands in for the ``mngr`` binary.
+
+    Exits per-subcommand so a test can simulate a failing stop or start
+    without a real mngr / provider. Every invocation appends its argv to a
+    ``<script>.log`` sibling file so a test can assert which subcommands ran
+    (e.g. that the stop step was skipped).
+    """
+    script = tmp_path / "fake_mngr"
+    script.write_text(
+        "#!/bin/sh\n"
+        'echo "$@" >> "$0.log"\n'
+        f'case "$1" in\n  stop) exit {stop_exit} ;;\n  start) exit {start_exit} ;;\n  *) exit 0 ;;\nesac\n'
+    )
+    script.chmod(0o755)
+    return str(script)
+
+
+def _read_fake_mngr_invocations(mngr_binary: str) -> list[str]:
+    """Return the recorded argv lines for a ``_write_fake_mngr`` stub (empty if never invoked)."""
+    log_path = Path(mngr_binary + ".log")
+    if not log_path.exists():
+        return []
+    return log_path.read_text().splitlines()
+
+
+def _resolver_with_system_services(workspace_agent: AgentId, services_agent: AgentId) -> MngrCliBackendResolver:
+    """Build a resolver where the workspace agent and system-services agent share a host."""
+    host_id = HostId.generate()
+    resolver = MngrCliBackendResolver()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(workspace_agent, services_agent),
+            discovered_agents=(
+                DiscoveredAgent(
+                    host_id=host_id,
+                    agent_id=workspace_agent,
+                    agent_name=AgentName("my-claude-agent"),
+                    provider_name=ProviderInstanceName("docker"),
+                ),
+                DiscoveredAgent(
+                    host_id=host_id,
+                    agent_id=services_agent,
+                    agent_name=AgentName("system-services"),
+                    provider_name=ProviderInstanceName("docker"),
+                ),
+            ),
+        )
+    )
+    return resolver
+
+
+def test_run_restart_sequence_fails_when_system_services_agent_is_unresolved(tmp_path: Path) -> None:
+    """With no system-services agent discovered, the sequence ends in RESTART_FAILED."""
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    tracker.mark_restarting(workspace_agent)
+
+    with ConcurrencyGroup(name="test-restart") as cg:
+        _run_restart_sequence(
+            workspace_agent_id=workspace_agent,
+            is_host_restart=False,
+            tracker=tracker,
+            backend_resolver=MngrCliBackendResolver(),
+            mngr_binary="mngr",
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            mngr_forward_port=0,
+            mngr_forward_preauth_cookie=None,
+        )
+
+    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
+    assert "system-services" in (tracker.get_last_restart_error(workspace_agent) or "")
+
+
+def test_run_restart_sequence_fails_when_stop_command_errors(tmp_path: Path) -> None:
+    """A non-zero ``mngr stop`` ends the sequence in RESTART_FAILED naming the stop step."""
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    tracker.mark_restarting(workspace_agent)
+    resolver = _resolver_with_system_services(workspace_agent, services_agent)
+
+    with ConcurrencyGroup(name="test-restart") as cg:
+        _run_restart_sequence(
+            workspace_agent_id=workspace_agent,
+            is_host_restart=False,
+            tracker=tracker,
+            backend_resolver=resolver,
+            mngr_binary=_write_fake_mngr(tmp_path, stop_exit=1),
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            mngr_forward_port=0,
+            mngr_forward_preauth_cookie=None,
+        )
+
+    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
+    assert "Stop step" in (tracker.get_last_restart_error(workspace_agent) or "")
+
+
+def test_run_restart_sequence_fails_when_stop_command_cannot_launch(tmp_path: Path) -> None:
+    """A launch failure (missing ``mngr`` binary) surfaces as RESTART_FAILED naming the stop step.
+
+    Exercises the path where ``_run_mngr`` wraps the ``OSError`` from the failed
+    fork/exec into a ``MngrCommandError`` and the restart sequence catches that
+    single domain error at the call site.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    tracker.mark_restarting(workspace_agent)
+    resolver = _resolver_with_system_services(workspace_agent, services_agent)
+    missing_binary = str(tmp_path / "definitely_not_a_real_mngr")
+
+    with ConcurrencyGroup(name="test-restart") as cg:
+        _run_restart_sequence(
+            workspace_agent_id=workspace_agent,
+            is_host_restart=False,
+            tracker=tracker,
+            backend_resolver=resolver,
+            mngr_binary=missing_binary,
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            mngr_forward_port=0,
+            mngr_forward_preauth_cookie=None,
+        )
+
+    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
+    assert "Stop step" in (tracker.get_last_restart_error(workspace_agent) or "")
+
+
+def test_run_restart_sequence_recovers_on_clean_dispatch_without_plugin(tmp_path: Path) -> None:
+    """Clean stop+start with no plugin route to probe through recovers the agent to HEALTHY."""
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    tracker.mark_restarting(workspace_agent)
+    resolver = _resolver_with_system_services(workspace_agent, services_agent)
+
+    with ConcurrencyGroup(name="test-restart") as cg:
+        _run_restart_sequence(
+            workspace_agent_id=workspace_agent,
+            is_host_restart=True,
+            tracker=tracker,
+            backend_resolver=resolver,
+            mngr_binary=_write_fake_mngr(tmp_path),
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            mngr_forward_port=0,
+            mngr_forward_preauth_cookie=None,
+        )
+
+    assert tracker.get_health(workspace_agent) == AgentHealth.HEALTHY
+
+
+def test_run_restart_sequence_skips_stop_when_host_already_stopped(tmp_path: Path) -> None:
+    """``skip_stop=True`` on a host restart goes straight to ``mngr start`` (no stop subprocess)."""
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    tracker.mark_restarting(workspace_agent)
+    resolver = _resolver_with_system_services(workspace_agent, services_agent)
+    mngr_binary = _write_fake_mngr(tmp_path)
+
+    with ConcurrencyGroup(name="test-restart") as cg:
+        _run_restart_sequence(
+            workspace_agent_id=workspace_agent,
+            is_host_restart=True,
+            tracker=tracker,
+            backend_resolver=resolver,
+            mngr_binary=mngr_binary,
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            mngr_forward_port=0,
+            mngr_forward_preauth_cookie=None,
+            skip_stop=True,
+        )
+
+    assert tracker.get_health(workspace_agent) == AgentHealth.HEALTHY
+    invocations = _read_fake_mngr_invocations(mngr_binary)
+    assert any(line.startswith("start ") for line in invocations)
+    assert not any(line.startswith("stop ") for line in invocations)
+
+
+def test_run_restart_sequence_stops_before_start_by_default(tmp_path: Path) -> None:
+    """Without ``skip_stop``, a host restart stops the host before starting it."""
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    tracker.mark_restarting(workspace_agent)
+    resolver = _resolver_with_system_services(workspace_agent, services_agent)
+    mngr_binary = _write_fake_mngr(tmp_path)
+
+    with ConcurrencyGroup(name="test-restart") as cg:
+        _run_restart_sequence(
+            workspace_agent_id=workspace_agent,
+            is_host_restart=True,
+            tracker=tracker,
+            backend_resolver=resolver,
+            mngr_binary=mngr_binary,
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            mngr_forward_port=0,
+            mngr_forward_preauth_cookie=None,
+        )
+
+    assert tracker.get_health(workspace_agent) == AgentHealth.HEALTHY
+    invocations = _read_fake_mngr_invocations(mngr_binary)
+    stop_index = next((i for i, line in enumerate(invocations) if line.startswith("stop ")), None)
+    start_index = next((i for i, line in enumerate(invocations) if line.startswith("start ")), None)
+    assert stop_index is not None, invocations
+    assert start_index is not None, invocations
+    assert stop_index < start_index
+
+
+def test_restart_host_api_requires_authentication(tmp_path: Path) -> None:
+    client, _, agent_id = _setup_test_server(tmp_path)
+    response = client.post(f"/api/agents/{agent_id}/restart-host")
+    assert response.status_code == 403
+
+
+def test_host_health_api_requires_authentication(tmp_path: Path) -> None:
+    client, _, agent_id = _setup_test_server(tmp_path)
+    response = client.get(f"/api/agents/{agent_id}/host-health")
+    assert response.status_code == 403

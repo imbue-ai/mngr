@@ -31,9 +31,14 @@ class GitOperationError(MindError):
 
 
 class MngrCommandError(MindError):
-    """Raised when an mngr CLI command fails."""
+    """Raised when an mngr CLI command fails (timed out, exited nonzero, or could not be launched)."""
 
-    ...
+    def __init__(self, message: str, *, error_class: str | None = None) -> None:
+        super().__init__(message)
+        # mngr's exception class name, parsed from a structured JSONL ``error``
+        # event when available (e.g. ``FastPathUnavailableError``). Lets callers
+        # branch on the failure *type* without matching human-formatted text.
+        self.error_class = error_class
 
 
 class MalformedMngrOutputError(MindError, ValueError):

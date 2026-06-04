@@ -54,7 +54,7 @@ from imbue.mngr_modal.constants import MODAL_TEST_APP_PREFIX
 from imbue.mngr_modal.instance import ModalProviderInstance
 from imbue.mngr_modal.testing import make_testing_modal_interface
 from imbue.mngr_modal.testing import make_testing_provider
-from imbue.modal_proxy.testing import TestingModalInterface
+from imbue.modal_proxy.testing import FakeModalInterface
 
 
 def make_modal_provider_real(
@@ -703,20 +703,20 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 # =============================================================================
 # Testing Modal Interface fixtures
 #
-# These fixtures provide a ModalProviderInstance backed by TestingModalInterface
+# These fixtures provide a ModalProviderInstance backed by FakeModalInterface
 # for testing mngr_modal business logic without Modal credentials or SSH.
 # =============================================================================
 
 
 @pytest.fixture
-def testing_modal(tmp_path: Path, cg: ConcurrencyGroup) -> TestingModalInterface:
+def testing_modal(tmp_path: Path, cg: ConcurrencyGroup) -> FakeModalInterface:
     return make_testing_modal_interface(tmp_path, cg)
 
 
 @pytest.fixture
 def testing_provider(
     temp_mngr_ctx: MngrContext,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> Generator[ModalProviderInstance, None, None]:
     provider = make_testing_provider(temp_mngr_ctx, testing_modal)
     yield provider
@@ -726,7 +726,7 @@ def testing_provider(
 @pytest.fixture
 def testing_provider_no_host_volume(
     temp_mngr_ctx: MngrContext,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> Generator[ModalProviderInstance, None, None]:
     provider = make_testing_provider(temp_mngr_ctx, testing_modal, is_host_volume_created=False)
     yield provider

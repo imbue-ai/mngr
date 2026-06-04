@@ -38,6 +38,37 @@ def test_inbox_add_request() -> None:
     assert pending[0].agent_id == "agent-1"
 
 
+def test_is_request_resolved_tracks_responses() -> None:
+    """A request is unresolved until a matching response is recorded.
+
+    The request itself lingers in the append-only log after a grant/deny,
+    so ``get_request_by_id`` still finds it; ``is_request_resolved`` is what
+    distinguishes a still-actionable request from a completed one.
+    """
+    event = create_latchkey_predefined_permission_request_event(
+        agent_id="agent-1",
+        scope="slack-api",
+        rationale="post status updates",
+    )
+    inbox = RequestInbox().add_request(event)
+    assert inbox.is_request_resolved(str(event.event_id)) is False
+    assert inbox.is_request_resolved("never-existed") is False
+
+    resolved = inbox.add_response(
+        create_request_response_event(
+            request_event_id=str(event.event_id),
+            status=RequestStatus.GRANTED,
+            agent_id="agent-1",
+            request_type=event.request_type,
+            scope="slack-api",
+        )
+    )
+    # The request still exists, but is now resolved and no longer pending.
+    assert resolved.get_request_by_id(str(event.event_id)) is not None
+    assert resolved.is_request_resolved(str(event.event_id)) is True
+    assert resolved.get_pending_count() == 0
+
+
 def test_inbox_response_only_affects_matched_request() -> None:
     """A response only removes the request it references, not others."""
     event1 = create_latchkey_predefined_permission_request_event(agent_id="agent-1", scope="slack-api", rationale="r1")

@@ -38,6 +38,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client.backend_resolver import SYSTEM_SERVICES_AGENT_NAME
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import configure_backups_for_host
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
@@ -76,6 +77,13 @@ from imbue.mngr_latchkey.store import LatchkeyStoreError
 # together.
 _MNGR_FORWARD_SESSION_COOKIE_NAME: Final[str] = "mngr_forward_session"
 
+# Path the workspace-readiness / health probes hit through the plugin. We probe
+# ``/`` and treat any 200 as "ready" -- deliberately *not* coupled to any
+# particular application running inside the workspace. The probe only confirms
+# that some web server is up and answering on the inner port; it makes no
+# assumption about which app that is or which routes it implements.
+_WORKSPACE_PROBE_PATH: Final[str] = "/"
+
 
 def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: float) -> httpx.Client:
     """Construct a reusable httpx.Client preconfigured for workspace probes.
@@ -91,8 +99,14 @@ def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: floa
     )
 
 
-def _probe_once(probe_client: httpx.Client, probe_url: str) -> int | None:
+def _probe_once(probe_client: httpx.Client, probe_url: str, host_header: str) -> int | None:
     """Issue a single GET through ``probe_client`` and return the status code.
+
+    ``probe_url`` targets loopback directly; ``host_header`` carries the
+    ``agent-<hex>.localhost`` vhost the plugin routes on. Sending the subdomain
+    as an explicit ``Host`` header rather than in the URL keeps the probe from
+    depending on ``*.localhost`` name resolution, which is not available on a
+    bare Linux host (only loopback ``localhost`` itself reliably resolves).
 
     Returns ``None`` if the probe failed at the transport layer (connect
     error, mid-stream EOF, read timeout). Module-private helper used by
@@ -100,7 +114,7 @@ def _probe_once(probe_client: httpx.Client, probe_url: str) -> int | None:
     project's no-inner-functions ratchet.
     """
     try:
-        response = probe_client.get(probe_url)
+        response = probe_client.get(probe_url, headers={"Host": host_header})
     except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.TimeoutException):
         return None
     return response.status_code
@@ -113,26 +127,28 @@ def probe_workspace_through_plugin(
     probe_timeout_seconds: float,
     client: httpx.Client | None = None,
 ) -> int | None:
-    """Issue a single probe through the plugin to the agent's system_interface.
+    """Issue a single probe through the plugin to the agent's inner web server.
 
-    Returns the HTTP status code observed (any 200 means ready), or ``None``
-    if the probe failed at the transport layer (connect error, mid-stream
-    EOF, read timeout). Shared by ``_wait_for_workspace_ready`` (creation
-    flow) and the system-interface-health tracker's background probe loop
-    so both paths agree on what "ready" means.
+    Probes ``/`` (see ``_WORKSPACE_PROBE_PATH``). Returns the HTTP status code
+    observed (a 200 means some web server is up and answering on the inner
+    port), or ``None`` if the probe failed at the transport layer (connect
+    error, mid-stream EOF, read timeout). Shared by ``_wait_for_workspace_ready``
+    (creation flow) and the system-interface-health tracker's background
+    probe loop so both paths agree on what "ready" means.
 
     Pass a pre-constructed ``client`` (via ``make_workspace_probe_client``)
     to reuse the connection pool across a tight poll loop. When omitted, a
     one-shot client is constructed for this single probe -- fine for
     one-off / sporadic callers but wasteful in a loop.
     """
-    probe_url = f"http://{agent_id}.localhost:{mngr_forward_port}/"
+    probe_url = f"http://127.0.0.1:{mngr_forward_port}{_WORKSPACE_PROBE_PATH}"
+    host_header = f"{agent_id}.localhost"
     if client is not None:
-        return _probe_once(client, probe_url)
+        return _probe_once(client, probe_url, host_header)
     with make_workspace_probe_client(
         preauth_cookie=preauth_cookie, probe_timeout_seconds=probe_timeout_seconds
     ) as one_shot:
-        return _probe_once(one_shot, probe_url)
+        return _probe_once(one_shot, probe_url, host_header)
 
 
 def _make_child_cg(name: str, parent: ConcurrencyGroup | None) -> ConcurrencyGroup:
@@ -315,19 +331,28 @@ def clone_git_repo(
     clone_dir: Path,
     on_output: OutputCallback | None = None,
     *,
-    is_shallow: bool = False,
+    branch: GitBranch | None = None,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> None:
     """Clone a git repository into the specified directory.
 
     The clone_dir must not already exist -- git clone will create it.
-    When is_shallow is True, clones with --depth 1 to skip history.
-    Raises GitCloneError if the clone fails.
+
+    When ``branch`` is given, only that branch is fetched (``--single-branch
+    --branch``), which avoids downloading every other branch's history. This is
+    still a *complete* (non-shallow) clone of that branch -- its full ancestry is
+    present. We deliberately do NOT offer a shallow (``--depth 1``) clone: this
+    clone is the source ``mngr create`` mirror-pushes into the agent container's
+    bare repo, and git rejects pushes from a shallow source with "shallow update
+    not allowed" (the pushed tip's parent is missing from the pack).
+
+    Raises GitCloneError if the clone fails (including when ``branch`` does not
+    exist on the remote).
     """
     logger.debug("Cloning {} to {}", _redact_url_credentials(str(git_url)), clone_dir)
     command = ["git", "clone"]
-    if is_shallow:
-        command.extend(["--depth", "1"])
+    if branch is not None:
+        command.extend(["--single-branch", "--branch", str(branch)])
     command.extend([str(git_url), str(clone_dir)])
 
     # Wrap the caller's on_output so git's per-line stdout/stderr is scrubbed
@@ -406,8 +431,24 @@ def _rsync_worktree_over_clone(
 # Constant agent name for every minds-created agent. Minds runs one agent
 # per host, so the agent name carries no per-workspace information; the
 # workspace is identified by its host name. Kept as a SafeName-typed
-# constant so callers can pass it to ``mngr`` without re-validating.
-_DEFAULT_AGENT_NAME: Final[AgentName] = AgentName("system-services")
+# constant so callers can pass it to ``mngr`` without re-validating. The
+# bare string lives in ``backend_resolver`` (the lower-level module that
+# also needs it, for the recovery flow's system-services lookup).
+_DEFAULT_AGENT_NAME: Final[AgentName] = AgentName(SYSTEM_SERVICES_AGENT_NAME)
+
+# imbue_cloud create-path knobs forwarded as ``-b fast_mode=<value>``. ``require``
+# adopts an exact-attribute pre-baked pool host (fast); ``prevent`` leases any
+# available host and rebuilds it from the FCT Dockerfile (slow).
+_FAST_MODE_REQUIRE: Final[str] = "require"
+_FAST_MODE_PREVENT: Final[str] = "prevent"
+
+# ``error_class`` of the imbue_cloud provider's ``FastPathUnavailableError``,
+# emitted by ``mngr create --format jsonl`` as a structured
+# ``{"event": "error", "error_class": ...}`` line when ``fast_mode=require``
+# finds no exact-attribute pool match. minds matches on this (not on
+# human-formatted error text) to fall back to the slow path. Kept in sync with
+# ``imbue.mngr_imbue_cloud.errors.FastPathUnavailableError``.
+_FAST_PATH_UNAVAILABLE_ERROR_CLASS: Final[str] = "FastPathUnavailableError"
 
 
 def _build_mngr_create_command(
@@ -416,6 +457,7 @@ def _build_mngr_create_command(
     imbue_cloud_account: str | None = None,
     imbue_cloud_repo_url: str | None = None,
     imbue_cloud_branch_or_tag: str | None = None,
+    imbue_cloud_fast_mode: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Build the ``mngr create`` command for a freshly-provisioned workspace.
@@ -560,6 +602,14 @@ def _build_mngr_create_command(
                 mngr_command.extend(["-b", f"repo_url={imbue_cloud_repo_url}"])
             if imbue_cloud_branch_or_tag:
                 mngr_command.extend(["-b", f"repo_branch_or_tag={imbue_cloud_branch_or_tag}"])
+            # ``fast_mode`` selects the imbue_cloud create path: ``require``
+            # adopts an exact-attribute pre-baked pool host (fast); ``prevent``
+            # leases any available host and rebuilds it from the FCT Dockerfile
+            # (slow, but always works). minds tries ``require`` first and falls
+            # back to ``prevent`` on FastPathUnavailableError (see
+            # ``_run_imbue_cloud_create_with_fallback``).
+            if imbue_cloud_fast_mode:
+                mngr_command.extend(["-b", f"fast_mode={imbue_cloud_fast_mode}"])
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -675,6 +725,14 @@ class _CreateEventCapture(MutableModel):
         default=None,
         description="Populated alongside ``canonical_agent_id`` from the same JSONL event",
     )
+    error_class: str | None = Field(
+        default=None,
+        description=(
+            "Populated when a JSONL ``error`` event is seen on stdout. Carries mngr's exception "
+            "class name (e.g. ``FastPathUnavailableError``) so callers can branch on the error "
+            "*type* instead of substring-matching human-formatted text."
+        ),
+    )
 
     def __call__(self, line: str, is_stdout: bool) -> None:
         if self.inner_on_output is not None:
@@ -688,7 +746,15 @@ class _CreateEventCapture(MutableModel):
             event = json.loads(stripped)
         except json.JSONDecodeError:
             return
-        if not isinstance(event, dict) or event.get("event") != "created":
+        if not isinstance(event, dict):
+            return
+        event_type = event.get("event")
+        if event_type == "error":
+            error_class_raw = event.get("error_class")
+            if isinstance(error_class_raw, str) and error_class_raw:
+                self.error_class = error_class_raw
+            return
+        if event_type != "created":
             return
         agent_id_raw = event.get("agent_id")
         if isinstance(agent_id_raw, str) and agent_id_raw:
@@ -706,6 +772,7 @@ def run_mngr_create(
     imbue_cloud_account: str | None = None,
     imbue_cloud_repo_url: str | None = None,
     imbue_cloud_branch_or_tag: str | None = None,
+    imbue_cloud_fast_mode: str | None = None,
     anthropic_api_key: str | None = None,
     anthropic_base_url: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
@@ -741,6 +808,7 @@ def run_mngr_create(
         imbue_cloud_account=imbue_cloud_account,
         imbue_cloud_repo_url=imbue_cloud_repo_url,
         imbue_cloud_branch_or_tag=imbue_cloud_branch_or_tag,
+        imbue_cloud_fast_mode=imbue_cloud_fast_mode,
         latchkey_env=latchkey_env,
     )
 
@@ -775,7 +843,8 @@ def run_mngr_create(
             "mngr create failed (exit code {}):\n{}".format(
                 result.returncode,
                 result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
-            )
+            ),
+            error_class=capture.error_class,
         )
 
     if capture.canonical_agent_id is None or capture.canonical_host_id is None:
@@ -794,6 +863,57 @@ def run_mngr_create(
         raise MngrCommandError(f"mngr create emitted an invalid host_id {capture.canonical_host_id!r}: {e}") from e
 
     return capture.canonical_agent_id, canonical_host_id
+
+
+class _MngrCreateAttemptParams(FrozenModel):
+    """Per-creation inputs shared across a ``fast_mode`` retry loop.
+
+    Bundles everything ``_attempt_mngr_create`` needs except the ``fast_mode``
+    knob, which is the only value that differs between the fast-path and
+    slow-path attempts.
+    """
+
+    launch_mode: LaunchMode
+    workspace_dir: Path | None
+    host_name: HostName
+    on_output: OutputCallback
+    latchkey_env: Mapping[str, str] | None
+    account_email: str | None
+    branch_or_tag: str | None
+    anthropic_api_key: str | None
+    anthropic_base_url: str | None
+    parent_cg: ConcurrencyGroup | None
+
+
+def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams) -> tuple[AgentId, HostId]:
+    """Run a single ``mngr create`` attempt for ``create``'s ``fast_mode`` retry loop.
+
+    ``fast_mode`` is the only knob that varies between the fast-path and
+    slow-path attempts; the imbue_cloud-only inputs are gated on ``launch_mode``
+    exactly as before.
+    """
+    is_imbue_cloud = params.launch_mode is LaunchMode.IMBUE_CLOUD
+    return run_mngr_create(
+        launch_mode=params.launch_mode,
+        workspace_dir=params.workspace_dir,
+        host_name=params.host_name,
+        on_output=params.on_output,
+        latchkey_env=params.latchkey_env,
+        imbue_cloud_account=params.account_email if is_imbue_cloud else None,
+        # Don't constrain the lease on ``repo_url`` here: ``repo_source`` is
+        # whatever the user picked in the UI (often a local FCT clone path),
+        # but pool hosts are operator-baked with whatever ``--attributes`` JSON
+        # the admin chose -- typically ``cpus``/``memory_gb``/
+        # ``repo_branch_or_tag`` and not ``repo_url``. Including ``repo_url``
+        # here would make every lease request fail the JSONB ``@>`` match.
+        # Constraining on ``repo_branch_or_tag`` (when minds knows it) is enough
+        # to pick the right pool generation.
+        imbue_cloud_branch_or_tag=(params.branch_or_tag if is_imbue_cloud and params.branch_or_tag else None),
+        imbue_cloud_fast_mode=fast_mode,
+        anthropic_api_key=params.anthropic_api_key,
+        anthropic_base_url=params.anthropic_base_url,
+        parent_cg=params.parent_cg,
+    )
 
 
 class AgentCreator(MutableModel):
@@ -884,11 +1004,11 @@ class AgentCreator(MutableModel):
         description=(
             "Per-process health tracker shared with the ``mngr forward`` ``system_interface_backend_failure`` "
             "envelope consumer and the background system-interface-health probe loop. ``_wait_for_workspace_ready`` "
-            "calls ``record_success`` on the probe that breaks out of its readiness loop, which cancels "
-            "any pending HEALTHY->STUCK timer the warmup failures have already armed. Without this call, "
-            "every workspace creation that takes >5s for its container's ``system-interface`` to "
-            "bind ``:8000`` (i.e. most of them) trips a spurious STUCK transition and the chrome jumps "
-            "to the recovery page right after the user lands on the workspace."
+            "calls ``record_probe_success`` on the probe that breaks out of its readiness loop, which clears "
+            "the probe-failure run the container's warmup failures have accumulated. Without this call, "
+            "a workspace creation whose ``system-interface`` takes a while to bind ``:8000`` would let the "
+            "background probe loop drive the agent to STUCK and jump the chrome to the recovery page right "
+            "after the user lands on the workspace."
         ),
     )
     workspace_ready_timeout_seconds: float = Field(
@@ -1162,11 +1282,22 @@ class AgentCreator(MutableModel):
                     if clone_target.exists():
                         shutil.rmtree(clone_target)
                     log_queue.put("[minds] Cloning {}...".format(_redact_url_credentials(repo_source)))
+                    # Clone only the requested branch (non-shallow) when one is
+                    # given: cheaper than a full clone, yet keeps the complete
+                    # ancestry that the downstream mirror-push into the agent
+                    # container requires (a shallow clone would be rejected with
+                    # "shallow update not allowed"). Every launch mode reaches
+                    # mngr create's git-mirror push (a cloned-repo source + a
+                    # new host always resolves to TransferMode.GIT_MIRROR), so a
+                    # shallow clone is never safe here regardless of mode. The
+                    # checkout below is then a no-op for this path, but still
+                    # does the work when the source is a pre-existing local
+                    # directory.
                     clone_git_repo(
                         GitUrl(repo_source),
                         clone_target,
                         on_output=emit_log,
-                        is_shallow=True,
+                        branch=GitBranch(branch) if branch else None,
                         parent_cg=self.root_concurrency_group,
                     )
                     workspace_dir = clone_target
@@ -1249,30 +1380,27 @@ class AgentCreator(MutableModel):
 
                 parsed_host = HostName(host_name)
                 log_queue.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))
-                canonical_id, canonical_host_id = run_mngr_create(
+
+                # ``fast_mode`` is the only knob that varies between the fast-
+                # path and slow-path attempts; bundle the rest of the per-
+                # creation inputs so each attempt takes just it.
+                attempt_params = _MngrCreateAttemptParams(
                     launch_mode=launch_mode,
                     workspace_dir=workspace_dir,
                     host_name=parsed_host,
                     on_output=emit_log,
                     latchkey_env=latchkey_setup.env,
-                    imbue_cloud_account=account_email if launch_mode is LaunchMode.IMBUE_CLOUD else None,
-                    # Don't constrain the lease on ``repo_url`` here:
-                    # ``repo_source`` is whatever the user picked in the UI
-                    # (often a local FCT clone path), but pool hosts are
-                    # operator-baked with whatever ``--attributes`` JSON the
-                    # admin chose -- typically ``cpus``/``memory_gb``/
-                    # ``repo_branch_or_tag`` and not ``repo_url``. Including
-                    # ``repo_url`` here would make every lease request fail
-                    # the JSONB ``@>`` match. Constraining on
-                    # ``repo_branch_or_tag`` (when minds knows it) is enough
-                    # to pick the right pool generation.
-                    imbue_cloud_branch_or_tag=(
-                        branch_or_tag if launch_mode is LaunchMode.IMBUE_CLOUD and branch_or_tag else None
-                    ),
+                    account_email=account_email,
+                    branch_or_tag=branch_or_tag,
                     anthropic_api_key=effective_anthropic_api_key,
                     anthropic_base_url=effective_anthropic_base_url,
                     parent_cg=self.root_concurrency_group,
                 )
+
+                if launch_mode is LaunchMode.IMBUE_CLOUD:
+                    canonical_id, canonical_host_id = self._create_imbue_cloud_with_fallback(attempt_params, log_queue)
+                else:
+                    canonical_id, canonical_host_id = _attempt_mngr_create(None, attempt_params)
 
                 # Now that we know the canonical host id, point the
                 # opaque permissions handle (which the JWT references)
@@ -1377,6 +1505,36 @@ class AgentCreator(MutableModel):
         finally:
             log_queue.put(LOG_SENTINEL)
 
+    def _create_imbue_cloud_with_fallback(
+        self,
+        attempt_params: _MngrCreateAttemptParams,
+        log_queue: queue.Queue[str],
+    ) -> tuple[AgentId, HostId]:
+        """Try the fast (adopt) path, then fall back to the slow (rebuild) path.
+
+        The first attempt requests ``fast_mode=require`` -- the imbue_cloud
+        provider adopts a pre-baked pool host whose attributes exactly match.
+        If none is available the provider raises ``FastPathUnavailableError``,
+        which ``mngr create --format jsonl`` surfaces as a structured
+        ``{"event": "error", "error_class": "FastPathUnavailableError"}`` line;
+        minds matches on that ``error_class`` and retries with
+        ``fast_mode=prevent``, which leases any available host and rebuilds it
+        from the FCT Dockerfile (full client-side setup). Any other failure
+        (including a genuinely empty pool) propagates unchanged.
+        """
+        log_queue.put("[minds] Trying fast path (adopt a matching pre-baked pool host)...")
+        try:
+            return _attempt_mngr_create(_FAST_MODE_REQUIRE, attempt_params)
+        except MngrCommandError as exc:
+            if exc.error_class != _FAST_PATH_UNAVAILABLE_ERROR_CLASS:
+                raise
+            logger.info("imbue_cloud fast path unavailable; retrying with the slow path (full rebuild)")
+            log_queue.put(
+                "[minds] No matching pre-baked pool host; falling back to slow path (leasing any host "
+                "and rebuilding it). This is slower but always works when the pool has free hosts..."
+            )
+            return _attempt_mngr_create(_FAST_MODE_PREVENT, attempt_params)
+
     def _prepare_latchkey_or_warn(
         self,
         log_queue: queue.Queue[str],
@@ -1451,8 +1609,9 @@ class AgentCreator(MutableModel):
     def _wait_for_workspace_ready(self, agent_id: AgentId, log_queue: queue.Queue[str]) -> None:
         """Poll the agent's system_interface through the plugin until it responds 200.
 
-        Probes ``http://<agent_id>.localhost:<plugin_port>/`` with the preauth
-        cookie set, treating any 200 as ready. Other status codes (typically
+        Probes the plugin on loopback (with the agent's ``agent-<hex>.localhost``
+        vhost in the ``Host`` header) and the preauth cookie set, treating any
+        200 as ready. Other status codes (typically
         503 from the plugin's auto-refresh page when the system_interface
         isn't yet listening, or 502 when SSH info hasn't propagated) are
         treated as not-yet-ready and re-polled until the timeout elapses.
@@ -1489,20 +1648,14 @@ class AgentCreator(MutableModel):
                     if status == 200:
                         logger.debug("Workspace ready for {} after {} probe(s)", agent_id, attempt)
                         log_queue.put("[minds] System interface is ready.")
-                        # Propagate the success into the shared health tracker.
-                        # Earlier probes in this loop go through ``mngr forward``
-                        # too, and each one's connect-refused failure trips a
-                        # ``system_interface_backend_failure`` envelope that arms
-                        # a 5-second HEALTHY->STUCK timer on the tracker. Without
-                        # this explicit ``record_success`` the timer fires
-                        # *after* we return (because no other success path
-                        # flows back into the tracker until the background
-                        # probe loop next ticks, ~2s later), the chrome jumps
-                        # to the recovery page, and the user sees a "System
-                        # interface not responding" page seconds after their
-                        # freshly-created agent appeared healthy. Idempotent
-                        # if the tracker has no record for this agent.
-                        self.system_interface_health_tracker.record_success(agent_id)
+                        # Propagate the success into the shared health tracker,
+                        # clearing the suspect flag and probe-failure run that
+                        # the warmup failures enrolled, so the chrome does not
+                        # jump to the recovery page right after the user lands on
+                        # their freshly-created workspace. (See the tracker's
+                        # ``system_interface_health_tracker`` field docstring.)
+                        # Idempotent if the tracker has no record for this agent.
+                        self.system_interface_health_tracker.record_probe_success(agent_id)
                         return
                 threading.Event().wait(timeout=self.workspace_ready_poll_interval_seconds)
         logger.warning(
