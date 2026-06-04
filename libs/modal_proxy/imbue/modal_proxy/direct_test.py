@@ -263,8 +263,6 @@ def test_translate_modal_error_maps_each_branch_to_its_proxy_type(
     [
         pytest.param(modal.exception.InternalError("server error"), True, id="internal_error"),
         pytest.param(modal.exception.ResourceExhaustedError("rate limit"), True, id="resource_exhausted"),
-        # Transient connection errors: dropping these from the retry tuple would
-        # silently stop retrying recoverable network failures.
         pytest.param(StreamTerminatedError("stream dropped"), True, id="stream_terminated"),
         pytest.param(ProtocolError("protocol error"), True, id="protocol_error"),
         pytest.param(
