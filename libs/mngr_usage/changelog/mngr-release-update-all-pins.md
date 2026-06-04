@@ -1,0 +1,1 @@
+- Now auto-discovered as a publishable package by the release tooling (it is a standalone `mngr usage` plugin with its own help-topic docs). It will be offered for first publication to PyPI on the next release. Its stale `imbue-mngr==0.2.6` pin is realigned to the current `0.2.10`. No runtime change.

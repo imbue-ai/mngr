@@ -1,0 +1,1 @@
+- Now auto-discovered as a publishable package by the release tooling (it is a standalone `mngr latchkey` plugin). It will be offered for first publication to PyPI on the next release. Its stale `imbue-common==0.1.17` and `concurrency-group==0.1.17` pins are realigned to the current `0.1.18`. No runtime change.

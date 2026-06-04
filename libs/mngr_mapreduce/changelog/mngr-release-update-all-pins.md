@@ -1,0 +1,1 @@
+- Marked unpublished-on-purpose in `UNPUBLISHED_PACKAGES` (it is an internal map-reduce framework library with no CLI of its own, consumed only by recipes like `mngr_tmr`), so the release tooling will not offer it for publication. Its stale `imbue-mngr==0.1.6` pin is realigned to the current `0.2.10` so `uv lock` stays solvable. No runtime change.

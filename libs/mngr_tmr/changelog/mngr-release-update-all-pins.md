@@ -1,0 +1,1 @@
+- Stays unpublished-on-purpose (already in `UNPUBLISHED_PACKAGES`; the canonical mapreduce recipe, internal tooling). Its stale `imbue-mngr==0.1.6` pin is realigned to the current `0.2.10` so `uv lock` stays solvable. No runtime change.

@@ -15,11 +15,28 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.primitives import PluginKind
 from imbue.mngr.primitives import PluginTier
 
-# Packages not yet published on PyPI. Excluded from the install wizard.
-# Remove entries from here as they get published.
+# Workspace packages that are deliberately NOT published to PyPI. This is the
+# single opt-out consulted by two consumers:
+#   - the install wizard (below), which never offers an unpublished package; and
+#   - the release tooling (scripts/utils.py), which auto-discovers every libs/*
+#     package as a publish candidate and subtracts this set. Anything NOT listed
+#     here is treated as publishable and will be offered for release.
+#
+# Some entries are permanently internal (a library with no CLI, an experimental
+# plugin, or a test-only helper); others are simply not ready yet. Remove an
+# entry once the package should start publishing -- the next release run will
+# then offer it (a first publication also needs a PyPI Trusted Publisher
+# registered; see scripts/release.py's new-package flow).
 UNPUBLISHED_PACKAGES: Final[frozenset[str]] = frozenset(
     {
+        # Map-reduce framework library; consumed only by recipes (e.g. tmr), no CLI of its own.
+        "imbue-mngr-mapreduce",
+        # Experimental: reroutes Claude Code subagents; depends on Claude Code internals.
+        "imbue-mngr-claude-subagent-proxy",
+        # Canonical mapreduce recipe (test fan-out); internal tooling, offered nowhere on PyPI.
         "imbue-mngr-tmr",
+        # End-to-end test helper used only by mngr's own test suite (not an mngr plugin).
+        "skitwright",
     }
 )
 
