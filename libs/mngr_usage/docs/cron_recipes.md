@@ -252,3 +252,66 @@ PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/you/.local/bin
 
 */5 * * * * /path/to/your/script.sh
 ```
+
+On macOS, though, prefer a **LaunchAgent** over `cron` for anything that drives
+a `claude` agent -- see the next section for why.
+
+### macOS: run via a LaunchAgent (Keychain-aware)
+
+`cron` jobs on macOS run outside your GUI (Aqua) login session, so they can't
+reach the login Keychain -- and that's where Claude Code keeps its credentials
+(Keychain service `Claude Code-credentials`), not in a file. A cron-launched
+agent therefore comes up unauthenticated: its banner reads
+`API Usage Billing - Not logged in - Run /login`, and it does nothing.
+
+A user **LaunchAgent** loaded into your Aqua session *does* have Keychain
+access, so agents authenticate with your normal Claude login (the banner reads
+e.g. `Claude Max` instead of `Not logged in`) -- no API key on disk. It's the
+macOS-native answer to "my scheduled mngr agents come up not-logged-in".
+
+Drop a plist in `~/Library/LaunchAgents/`. It runs your `.sh` directly (give the
+script a shebang and `chmod +x` it); no wrapper needed:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>                <string>com.you.mngr-dispatch</string>
+  <key>ProgramArguments</key>     <array><string>/path/to/your/script.sh</string></array>
+  <key>EnvironmentVariables</key> <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/you/.local/bin</string></dict>
+  <key>StartInterval</key>        <integer>300</integer>
+  <key>RunAtLoad</key>            <true/>
+  <key>StandardOutPath</key>      <string>/Users/you/Library/Logs/mngr-dispatch.log</string>
+  <key>StandardErrorPath</key>    <string>/Users/you/Library/Logs/mngr-dispatch.log</string>
+</dict>
+</plist>
+```
+
+- `StartInterval` (seconds) is the periodic-run knob -- `300` is the equivalent
+  of cron's `*/5`.
+- `EnvironmentVariables` -> `PATH` carries the same caveat as cron: a bare
+  launchd `PATH` won't find your tools, so include the Homebrew prefix
+  (`/opt/homebrew/bin`, for `tmux` and `node`) and `~/.local/bin` (`mngr`,
+  `claude`, `uv`).
+- `StandardOutPath` / `StandardErrorPath` capture output to a log file.
+  LaunchAgents don't mail their output, so this also avoids cron's "You have new
+  mail" noise.
+- The cwd caveat still applies: the job runs outside your repo, so the script
+  must `cd` into it (or set `MNGR_PROJECT_CONFIG_DIR`) for mngr to pick up the
+  project's `.mngr/settings.toml`.
+
+Load it into your session (and start it running):
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.you.mngr-dispatch.plist
+```
+
+Unload it (by label):
+
+```bash
+launchctl bootout gui/$(id -u)/com.you.mngr-dispatch
+```
+
+Tradeoff vs cron: a LaunchAgent only runs while you're logged in, whereas cron
+runs regardless. On a dev machine that's usually fine -- often what you want.

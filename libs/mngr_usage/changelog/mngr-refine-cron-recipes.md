@@ -11,3 +11,11 @@ Refined the cron automation recipes doc (`docs/cron_recipes.md`):
 - Reworked the Scheduling section: explained the bare-cwd caveat alongside the
   bare-`PATH` one, and added a separate macOS `PATH` example that includes
   `/opt/homebrew/bin` (Apple Silicon Homebrew) in addition to the Linux example.
+- Added a macOS LaunchAgent section as the recommended alternative to `cron` on
+  macOS. cron jobs run outside the GUI (Aqua) login session and so can't reach
+  the login Keychain, where Claude Code stores its credentials -- cron-launched
+  agents come up "Not logged in". A user LaunchAgent loaded into the Aqua
+  session has Keychain access and authenticates normally. Includes a plist
+  skeleton (`StartInterval`, `EnvironmentVariables` PATH, log paths),
+  `launchctl bootstrap`/`bootout` load/unload commands, and the
+  runs-only-while-logged-in tradeoff.
