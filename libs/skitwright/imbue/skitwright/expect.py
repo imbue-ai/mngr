@@ -101,4 +101,6 @@ def expect(value: CommandResult | str) -> ResultExpectation | StringExpectation:
         return ResultExpectation(value)
     if isinstance(value, str):
         return StringExpectation(value)
+    # Unreachable for type-correct callers (value is CommandResult | str); this guard only exists to
+    # give untyped or misusing callers a clear, loud error rather than a confusing failure later.
     raise TypeError(f"expect() does not support {type(value).__name__}")
