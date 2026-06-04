@@ -98,6 +98,7 @@ from imbue.mngr.agents.tui_utils import send_enter_best_effort
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.common import symlink_or_copy_on_host
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
@@ -158,12 +159,6 @@ _AGY_LOG_FILE_RELATIVE_PATH: Final[str] = "logs/agy_cli.log"
 # own config dir). Mirrors mngr_claude's per-agent ``get_claude_config_dir``.
 _AGY_HOME_RELATIVE_PATH: Final[tuple[str, ...]] = ("plugin", "antigravity", "home")
 
-# Markers echoed by the batched oauth-token provisioning command so a single
-# remote round-trip both does the work and reports which branch ran (token
-# seeded vs. no shared token present). See ``_provision_oauth_token``.
-_OAUTH_TOKEN_SEEDED_MARKER: Final[str] = "MNGR_AGY_TOKEN_SEEDED"
-_OAUTH_TOKEN_MISSING_MARKER: Final[str] = "MNGR_AGY_TOKEN_MISSING"
-
 # Parent directory for the per-agent symlinks that work around agy's
 # refusal to treat hidden paths (anything with a dot-prefixed segment, like
 # ``.mngr/...``) as a workspace. agy logs ``Failed to add workspace folder
@@ -181,16 +176,16 @@ _OAUTH_TOKEN_MISSING_MARKER: Final[str] = "MNGR_AGY_TOKEN_MISSING"
 # agy refuses as a *workspace*, even though it accepts a hidden config dir.)
 _AGY_WORKSPACE_SYMLINK_PARENT: Final[str] = "/tmp/mngr_antigravity_workspaces"
 
-# Shell snippet (run on the host, where ``uname``/``$HOME`` are evaluated)
-# resolving the OS-specific ms-playwright-go cache subpath under ``$HOME``.
-# agy downloads heavy playwright + browser binaries there on first real use; a
-# fully isolated per-agent ``$HOME`` would make every agent re-download them, so
-# we symlink each per-agent home's cache to the user's real host cache to share
-# the download. macOS uses ``Library/Caches``, Linux ``.cache``; resolving on
-# the host (not via local ``is_macos()``) keeps it correct for remote hosts.
-_PLAYWRIGHT_CACHE_SUBPATH_ASSIGNMENT: Final[str] = (
-    'PW="$( [ "$(uname -s)" = Darwin ] && echo Library/Caches/ms-playwright-go || echo .cache/ms-playwright-go )"'
-)
+# OS-specific subpath (under ``$HOME``) of agy's ms-playwright-go cache. agy
+# downloads heavy playwright + browser binaries there on first real use; a fully
+# isolated per-agent ``$HOME`` would make every agent re-download them, so each
+# per-agent home's cache is symlinked to the user's real host cache to share the
+# download. macOS uses ``Library/Caches``, Linux ``.cache``; the choice is made
+# from the host's ``uname`` (resolved in ``provision``) so it is correct for
+# remote hosts too.
+_PLAYWRIGHT_CACHE_SUBPATH_MACOS: Final[tuple[str, ...]] = ("Library", "Caches", "ms-playwright-go")
+_PLAYWRIGHT_CACHE_SUBPATH_LINUX: Final[tuple[str, ...]] = (".cache", "ms-playwright-go")
+_DARWIN_UNAME: Final[str] = "Darwin"
 
 
 def _load_antigravity_resource_script(filename: str) -> str:
@@ -366,31 +361,37 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         """
         return self._get_agent_dir().joinpath(*_AGY_HOME_RELATIVE_PATH)
 
-    def _resolve_host_home(self, host: OnlineHostInterface) -> Path:
-        """Resolve the host user's real ``$HOME`` (the copy/auth source).
+    def _resolve_host_home_and_os(self, host: OnlineHostInterface) -> tuple[Path, str]:
+        """Resolve the host user's real ``$HOME`` and ``uname`` in one round-trip.
 
-        Read from the host shell (not local ``Path.home()``) so the source of
-        the user's real ``~/.gemini`` settings/token is correct on remote hosts
-        too.
+        Read from the host shell (not local ``Path.home()`` / ``platform.system()``)
+        so the user's real ``~/.gemini`` (settings/token source) and the OS-specific
+        playwright cache subpath are correct on remote hosts too.
 
-        On the (essentially never) chance ``printf $HOME`` fails, exit cleanly
-        via ``SystemExit`` rather than a plain ``Exception``: provision runs
-        inside ``provision_agent``'s ``ConcurrencyExceptionGroup``, which wraps
+        On the (essentially never) chance the query fails, exit cleanly via
+        ``SystemExit`` rather than a plain ``Exception``: provision runs inside
+        ``provision_agent``'s ``ConcurrencyExceptionGroup``, which wraps
         ``Exception`` subclasses into a noisy auto-diagnostics traceback but
         re-raises ``BaseException`` (``SystemExit``) unwrapped (same reason
         ``_ensure_source_repo_trusted`` uses ``SystemExit``).
         """
-        result = host.execute_idempotent_command('printf %s "$HOME"', timeout_seconds=10.0)
-        home = result.stdout.strip()
-        if not result.success or not home:
+        result = host.execute_idempotent_command('printf \'%s\\n%s\' "$HOME" "$(uname -s)"', timeout_seconds=10.0)
+        lines = result.stdout.splitlines()
+        home = lines[0].strip() if lines else ""
+        host_uname = lines[1].strip() if len(lines) > 1 else ""
+        if not result.success or not home or not host_uname:
             logger.error(
-                "Could not resolve the host's $HOME for antigravity provisioning "
+                "Could not resolve the host's $HOME / uname for antigravity provisioning "
                 "(exit_success={}, stdout={!r}). Cannot build the per-agent home tree.",
                 result.success,
                 result.stdout,
             )
             raise SystemExit(1)
-        return Path(home)
+        return Path(home), host_uname
+
+    def _playwright_cache_subpath(self, host_uname: str) -> tuple[str, ...]:
+        """OS-specific subpath of agy's ms-playwright-go cache, from the host's ``uname``."""
+        return _PLAYWRIGHT_CACHE_SUBPATH_MACOS if host_uname == _DARWIN_UNAME else _PLAYWRIGHT_CACHE_SUBPATH_LINUX
 
     def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
         """Expose the agy --log-file path and the per-agent app-data dir to the streamer.
@@ -425,14 +426,14 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
            agent on untrusted code.
         3. Build the per-agent ``$HOME`` tree (``_provision_agy_home``):
            settings.json (copy of the user's settings + workspace trust +
-           overrides), the onboarding NUX seed, the active-marker hooks, and the
-           oauth token symlink/copy.
+           overrides), the onboarding NUX seed, the active-marker hooks, the
+           oauth token symlink/copy, and the shared playwright-cache symlink.
         4. Install the transcript scripts and the background-tasks supervisor
            under ``$MNGR_AGENT_STATE_DIR/commands/``.
         """
-        host_home = self._resolve_host_home(host)
+        host_home, host_uname = self._resolve_host_home_and_os(host)
         self._ensure_source_repo_trusted(host, host_home, mngr_ctx)
-        self._provision_agy_home(host, host_home)
+        self._provision_agy_home(host, host_home, host_uname)
         with mngr_ctx.concurrency_group.make_concurrency_group("antigravity_provisioning") as concurrency_group:
             provision_raw_transcript_scripts(
                 self,
@@ -453,17 +454,17 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
                 concurrency_group,
             )
 
-    def _provision_agy_home(self, host: OnlineHostInterface, host_home: Path) -> None:
+    def _provision_agy_home(self, host: OnlineHostInterface, host_home: Path, host_uname: str) -> None:
         """Write the mngr-owned per-agent ``$HOME`` tree (idempotent each provision).
 
-        Provisions the oauth token first (it is the one step that can fail on a
-        missing prerequisite, so we surface that before writing anything), then
-        writes settings.json, the onboarding NUX seed, and the active-marker
-        hooks. ``host.write_text_file`` creates intermediate directories. agy-owned
+        Provisions the oauth token, settings.json, the onboarding NUX seed, the
+        active-marker hooks, and the shared playwright-cache symlink.
+        ``host.write_text_file`` creates intermediate directories. agy-owned
         session dirs (brain/, conversations/) are left intact across re-provision.
         """
         agy_home = self._get_agy_home_dir()
         self._provision_oauth_token(host, host_home, agy_home)
+        self._provision_playwright_cache(host, host_home, host_uname, agy_home)
         base_settings: dict[str, Any] = {}
         if self.agent_config.sync_home_settings:
             user_settings_path = get_antigravity_settings_path(host_home)
@@ -512,7 +513,7 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
 
         The shared parent dir is created so the write-through target exists. This
         is the mechanism on both Linux and macOS (it does not depend on the
-        keychain). One remote round-trip.
+        keychain).
 
         **Copy mode** (``symlink_oauth_token=False``, full isolation, no
         propagation): copy the shared token in only if it exists; otherwise skip
@@ -522,33 +523,44 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         """
         source = get_antigravity_oauth_token_path(host_home)
         dest = get_antigravity_oauth_token_path(agy_home)
-        quoted_source = shlex.quote(str(source))
-        quoted_dest = shlex.quote(str(dest))
-        quoted_dest_parent = shlex.quote(str(dest.parent))
-        quoted_source_parent = shlex.quote(str(source.parent))
-        if self.agent_config.symlink_oauth_token:
-            # Always symlink (even when the shared token is absent -> dangling link
-            # that becomes live when an agent logs in and writes through it). Make
-            # both the per-agent and shared parent dirs so the write-through target
-            # resolves. One round-trip.
-            host.execute_idempotent_command(
-                f"mkdir -p {quoted_dest_parent} {quoted_source_parent} && ln -sfn {quoted_source} {quoted_dest}",
-                timeout_seconds=10.0,
-            )
-            return
-        # Copy mode: can only copy a token that exists; otherwise skip (agent logs in on first launch).
-        result = host.execute_idempotent_command(
-            f"if [ -e {quoted_source} ]; then mkdir -p {quoted_dest_parent} && rm -f {quoted_dest} "
-            f"&& cp {quoted_source} {quoted_dest} && chmod 600 {quoted_dest} && echo {_OAUTH_TOKEN_SEEDED_MARKER}; "
-            f"else echo {_OAUTH_TOKEN_MISSING_MARKER}; fi",
-            timeout_seconds=10.0,
+        copied_or_linked = symlink_or_copy_on_host(
+            host,
+            source,
+            dest,
+            symlink=self.agent_config.symlink_oauth_token,
+            # In symlink mode, make the shared (source) parent so a write-through login resolves.
+            ensure_source_parent=self.agent_config.symlink_oauth_token,
         )
-        if _OAUTH_TOKEN_MISSING_MARKER in result.stdout:
+        if not copied_or_linked:
             logger.info(
                 "No shared Antigravity oauth token at {} to copy (symlink_oauth_token=False); the agent "
                 "will run agy's login flow on first launch.",
                 source,
             )
+
+    def _provision_playwright_cache(
+        self, host: OnlineHostInterface, host_home: Path, host_uname: str, agy_home: Path
+    ) -> None:
+        """Symlink the per-agent home's ms-playwright-go cache to the user's real host cache.
+
+        agy downloads heavy playwright + browser binaries into
+        ``$HOME/<os-cache>/ms-playwright-go`` on first real use; a fully isolated
+        per-agent ``$HOME`` would make every agent re-download them. Symlinking the
+        per-agent cache to the user's real host cache shares the download (agy
+        creates/reads it through the symlink, like the oauth token). Done at
+        provision time -- the per-agent ``$HOME`` is durable (under the agent state
+        dir), so unlike the ``/tmp`` workspace symlink this needn't be recreated
+        each launch. The OS-specific subpath comes from the host's ``uname``, so it
+        is correct on remote hosts too.
+        """
+        subpath = self._playwright_cache_subpath(host_uname)
+        symlink_or_copy_on_host(
+            host,
+            host_home.joinpath(*subpath),
+            agy_home.joinpath(*subpath),
+            symlink=True,
+            ensure_source_parent=True,
+        )
 
     def _find_git_source_path(self, concurrency_group: ConcurrencyGroup) -> Path | None:
         """Find the source repo root for this agent's ``work_dir``, if it's inside a git repo.
@@ -721,25 +733,6 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         """
         return f"{_AGY_WORKSPACE_SYMLINK_PARENT}/{self.id}"
 
-    def _build_playwright_cache_symlink_command(self, agy_home: Path) -> str:
-        """Shell snippet symlinking the per-agent home's playwright cache to the user's real cache.
-
-        agy downloads ms-playwright-go (+ browser binaries) into
-        ``$HOME/<cache>/ms-playwright-go`` on first real use; a fully isolated
-        per-agent ``$HOME`` would make every agent re-download them. We share
-        the user's real host cache by symlinking the per-agent home's cache dir
-        to it. The OS-specific subpath (macOS ``Library/Caches`` vs Linux
-        ``.cache``) is resolved on the host shell so it is correct for remote
-        hosts; ``$HOME`` here is still the real host home (the ``env HOME=``
-        override applies only to the agy process, later in the chain).
-        """
-        home_q = shlex.quote(str(agy_home))
-        return (
-            f"{_PLAYWRIGHT_CACHE_SUBPATH_ASSIGNMENT} "
-            f'&& mkdir -p "$HOME/${{PW%/*}}" {home_q}/"${{PW%/*}}" '
-            f'&& ln -sfn "$HOME/$PW" {home_q}/"$PW"'
-        )
-
     def assemble_command(
         self,
         host: OnlineHostInterface,
@@ -760,13 +753,10 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
            non-dotted ``/tmp`` workspace symlink (works around agy's rejection
            of dot-prefixed (hidden) paths as workspaces; see
            ``_AGY_WORKSPACE_SYMLINK_PARENT``).
-        4. ``PW=... && mkdir -p ... && ln -sfn "$HOME/$PW" <home>/$PW`` --
-           share the user's real ms-playwright-go cache with the per-agent home
-           (see ``_build_playwright_cache_symlink_command``).
-        5. ``cd <ws_symlink>`` -- launches agy with cwd set to the workspace
+        4. ``cd <ws_symlink>`` -- launches agy with cwd set to the workspace
            symlink, so agy's "project: using project ..." log line names the
            symlink path (not the resolved dotted target).
-        6. ``env HOME=<home> agy <user_args> --log-file <state>/logs/agy_cli.log
+        5. ``env HOME=<home> agy <user_args> --log-file <state>/logs/agy_cli.log
            [--dangerously-skip-permissions]`` -- foreground process under the
            per-agent ``$HOME``. ``HOME`` is injected only on the agy process
            (the unambiguous ``env`` prefix), so the backgrounded supervisor
@@ -776,9 +766,12 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
 
         Bash precedence note: ``A & B && C && ...`` parses as ``A &`` followed
         by ``B && C && ...``. The supervisor's subshell is therefore scoped to
-        ``&``, while ``mkdir`` / ``ln`` / cache / ``cd`` / ``env ... agy`` form a
+        ``&``, while ``mkdir`` / ``ln`` / ``cd`` / ``env ... agy`` form a
         foreground sequential chain. ``ln -sfn`` is idempotent: re-running on
-        every launch updates the symlinks in place; ``/tmp`` wipes self-repair.
+        every launch updates the symlink in place; ``/tmp`` wipes self-repair.
+        (The per-agent ``$HOME`` tree -- settings, oauth-token symlink, and the
+        playwright-cache symlink -- is durable, so it is built once at
+        ``provision`` time, not here.)
 
         The ``--log-file`` arg pipes agy's internal log to a per-agent path;
         stream_transcript.sh greps it for ``Created conversation <uuid>`` to
@@ -799,12 +792,11 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         symlink_path = self._get_agy_workspace_symlink_path()
         mkdir_cmd = f"mkdir -p {shlex.quote(str(log_file_path.parent))} {shlex.quote(_AGY_WORKSPACE_SYMLINK_PARENT)}"
         ln_cmd = f"ln -sfn {shlex.quote(str(self.work_dir))} {shlex.quote(symlink_path)}"
-        cache_cmd = self._build_playwright_cache_symlink_command(agy_home)
         cd_cmd = f"cd {shlex.quote(symlink_path)}"
         home_prefix = f"env HOME={shlex.quote(str(agy_home))}"
 
         return CommandString(
-            f"{background_cmd} {mkdir_cmd} && {ln_cmd} && {cache_cmd} && {cd_cmd} "
+            f"{background_cmd} {mkdir_cmd} && {ln_cmd} && {cd_cmd} "
             f"&& {home_prefix} {base_command} {' '.join(extra_args)}"
         )
 

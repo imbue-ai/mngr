@@ -13,6 +13,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.common import is_macos
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -312,21 +313,10 @@ def test_assemble_command_adds_dangerously_skip_permissions_when_auto_allow_enab
     assert "--dangerously-skip-permissions" in command
 
 
-def test_assemble_command_symlinks_playwright_cache_to_the_user_cache(antigravity_agent: AntigravityAgent) -> None:
-    """The per-agent home's ms-playwright-go cache is symlinked to the user's real cache.
-
-    A fully isolated $HOME would make each agent re-download the heavy
-    playwright + browser binaries; sharing the user's host cache avoids that.
-    The OS-specific subpath is resolved on the host shell (so it works on remote
-    hosts), and $HOME here is still the real host home (the env HOME override
-    applies only to agy).
-    """
-    agent = antigravity_agent
-    command = str(agent.assemble_command(agent.host, (), command_override=None))
-    assert "ms-playwright-go" in command
-    assert 'ln -sfn "$HOME/$PW"' in command
-    # The cache symlink is set up before agy launches.
-    assert command.index("ms-playwright-go") < command.index(" agy ")
+def test_assemble_command_does_not_symlink_playwright_cache(antigravity_agent: AntigravityAgent) -> None:
+    """The playwright cache symlink is set up at provision time (durable), not in the launch command."""
+    command = str(antigravity_agent.assemble_command(antigravity_agent.host, (), command_override=None))
+    assert "ms-playwright-go" not in command
 
 
 def test_assemble_command_launches_background_tasks_supervisor(antigravity_agent: AntigravityAgent) -> None:
@@ -803,6 +793,24 @@ def test_provision_copy_mode_skips_when_shared_token_absent(
     assert not dest.is_symlink()
     assert not dest.exists()
     assert get_antigravity_settings_path(agent._get_agy_home_dir()).exists()
+
+
+def test_provision_symlinks_playwright_cache_to_shared_host_cache(
+    antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path
+) -> None:
+    """The per-agent home's ms-playwright-go cache is symlinked to the user's real host cache.
+
+    A fully isolated $HOME would make each agent re-download the heavy playwright
+    binaries; sharing the user's host cache avoids that. The OS-specific subpath
+    comes from the host's uname (correct on remote hosts too), and it's set up at
+    provision time because the per-agent home is durable.
+    """
+    agent = antigravity_agent_auto_dismiss
+    _provision(agent)
+    subpath = ("Library", "Caches", "ms-playwright-go") if is_macos() else (".cache", "ms-playwright-go")
+    dest = agent._get_agy_home_dir().joinpath(*subpath)
+    assert dest.is_symlink()
+    assert Path(os.readlink(dest)) == isolated_home.joinpath(*subpath)
 
 
 # =============================================================================
