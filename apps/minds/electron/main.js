@@ -300,7 +300,6 @@ function createBundleWebContentsViews(win) {
   });
   const contentView = new WebContentsView({
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
       partition: CONTENT_PARTITION,
       contextIsolation: true,
       nodeIntegration: false,
@@ -878,7 +877,6 @@ function prepareAllWindowsForRetry() {
     if (!bundle.contentView) {
       const contentView = new WebContentsView({
         webPreferences: {
-          preload: path.join(__dirname, 'preload.js'),
           partition: CONTENT_PARTITION,
           contextIsolation: true,
           nodeIntegration: false,

@@ -4,5 +4,4 @@ Desktop app auto-update and developer-tooling fixes (extracted from the larger m
 - Added a `Check for Updates...` item to the application menu that triggers a check and reports the result (update found / up to date / unavailable / error), with the unavailable message worded for the build type (dev vs unreleased draft).
 - Added a `View` menu with `Toggle Developer Tools` (Alt+Cmd+I), zoom controls, and fullscreen. The default Electron DevTools shortcut crashed because the app uses `BaseWindow` + `WebContentsView` rather than a `BrowserWindow`.
 - `MINDS_OPEN_DEVTOOLS=1` auto-opens detached DevTools on the content view at launch.
-- The workspace content `WebContentsView` now loads `preload.js`, on both its initial and its error-retry rebuild paths.
 - Startup env-setup failures are now logged to the console in addition to being shown in the error window.
