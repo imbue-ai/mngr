@@ -72,9 +72,10 @@ The branch's `libs/mngr_lima/imbue/mngr_lima/limactl.py:155` has `timeout: float
 
 Pilot's `.mngr/settings.toml:235-236` uses `uv tool install -e ...` and `--with-editable` for mngr/mngr_claude/mngr_modal; FCT main uses non-editable `uv tool install ...` and `--with`. Original symptom (commit `3684fa01`): "uv tool install emits 'Requirements contain conflicting URLs for package imbue-mngr'" — diagnosed against `a90c78a2`-era vendor/mngr. Subsequent refreshes (`d0d861ab`, `fb96b1b3`, `749e234d`-merge) may have eliminated the URL-form mismatch. Editable mode is a resolver workaround; nothing imports `mngr_modal` so its `--with-editable` buys nothing functionally.
 
-- **status**: staged (iter 5)
+- **status**: **verified_stale**
 - **test path**: pilot-rc-uv-tool-non-editable → tag `v0.2.36-rc4-uv-tool-non-editable` → launch-to-msg with that template_ref. Provision script runs inside lima at agent-create time, so a real lima create is the only valid verification.
 - **expected blast radius**: high if conflict recurs — provision Phase B fails before `mngr` lands, no agent boots, verify aborts. Zero if conflict has been resolved.
+- **landed**: pilot ff-merged to cb2091cf. Both ci.yml and launch-to-msg verify green (uv tool install inside lima Phase B completed without conflict; subsequent vendor/mngr refreshes did resolve the URL-form mismatch). v0.2.35 tag unchanged.
 
 ### homebrew-path-augmentation (MNGR)
 
@@ -112,4 +113,5 @@ Per-iteration: timestamp, candidate, candidate branch / tag, launch-to-msg run i
 | 3 | restore-stop-hook-enabled-when | pilot-rc-stop-hook / v0.2.36-rc2-stop-hook | 27010826323 success | 27010815083 success | green | ff-merged into pilot (c135679e), v0.2.35 tag unchanged |
 | 4 | lima-2.0.3-to-2.1.1 | (no CI test) | n/a | n/a | still_needed | deep-dive showed 2.1.1 ships the exact regressed gvisor-tap-vsock 0.8.8; #5042 reference was misidentified; #4558 still open |
 | 5 | homebrew-path-augmentation | (no CI test) | n/a | n/a | still_needed | docker on macOS lives at /opt/homebrew/bin/docker or /usr/local/bin/docker; dropping homebrew prepend silently breaks docker users; launch-to-msg only exercises lima so it would not catch the regression |
-| 6 | revert-lima-start-new-default-timeout | mngr-rc-lima-timeout-revert (PR #1938) | 27013465788 success | 27013474227 success | green | cherry-picked to wz/minds_onboard (b7628677f); PR #1938 to close |
+| 6 | revert-lima-start-new-default-timeout | mngr-rc-lima-timeout-revert (PR #1938) | 27013465788 success | 27013474227 success | green | cherry-picked to wz/minds_onboard (b7628677f); PR #1938 closed |
+| 7 | uv-tool-install-editable-mode | pilot-rc-uv-tool-non-editable / v0.2.36-rc4-uv-tool-non-editable | 27014712370 success | 27014677300 success | green | ff-merged into pilot (cb2091cf); v0.2.35 tag unchanged |
