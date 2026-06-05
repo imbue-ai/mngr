@@ -8,12 +8,12 @@
   boxed monospace pill for a file path). When empty, the defaults are
   plain text.
 #}
-<h1 class="text-2xl font-semibold text-zinc-900 leading-tight pr-8">
+<h1 class="text-2xl font-normal text-zinc-900 leading-tight pr-8">
   Permission request:
   {% if header_display_name_html %}
     {{ header_display_name_html }}
   {% else %}
-    {{ display_name }}
+    <span class="font-bold">{{ display_name }}</span>
   {% endif %}
 </h1>
 
