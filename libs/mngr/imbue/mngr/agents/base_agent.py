@@ -261,10 +261,6 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         return stored
 
     @property
-    def session_name(self) -> str:
-        return f"{self.mngr_ctx.config.prefix}{self.name}"
-
-    @property
     def tmux_target(self) -> TmuxWindowTarget:
         """Structured tmux target for the agent's primary window.
 

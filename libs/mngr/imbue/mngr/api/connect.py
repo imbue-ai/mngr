@@ -81,10 +81,10 @@ def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path, attach
     activity_dir = host_dir / "activity"
     activity_file = activity_dir / "ssh"
     signal_file = host_dir / "signals" / session_name
-    # attach_args are tmux client flags and go before the `attach` subcommand.
-    # Fold "tmux" into the join so empty attach_args yields just "tmux" (rather
-    # than a stray double space) and a non-empty one yields e.g. "tmux -CC".
-    attach_command = " ".join(("tmux", *(shlex.quote(arg) for arg in attach_args)))
+    # Render the shared attach argv to a shell-command string. shlex.join quotes
+    # each token (matching TmuxSessionTarget.as_shell_arg for the target), so this
+    # is the same command the local path execs -- just as text for the remote shell.
+    attach_command = shlex.join(build_attach_argv(TmuxSessionTarget(session_name=session_name), attach_args))
     # Use single quotes around most things to avoid shell expansion issues,
     # but the paths need to be interpolated
     return (
@@ -102,7 +102,7 @@ def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path, attach
         # = exact-match prefix and shell-escaping rule are uniform with the rest
         # of the codebase (see TmuxSessionTarget docstring for the prefix-matching
         # bug this guards against).
-        f"{attach_command} attach -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()}; "
+        f"{attach_command}; "
         "kill $MNGR_ACTIVITY_PID 2>/dev/null; "
         # Check for signal files written by tmux key bindings (Ctrl-q writes "destroy", Ctrl-t writes "stop")
         f"SIGNAL_FILE='{signal_file}'; "
@@ -189,16 +189,20 @@ def _determine_post_disconnect_action(
 
 
 @pure
-def build_local_attach_argv(session_name: str, attach_args: tuple[str, ...]) -> list[str]:
-    """Build the argv for a local ``tmux attach`` (to hand to the tmux exec call).
+def build_attach_argv(target: TmuxSessionTarget, attach_args: tuple[str, ...]) -> list[str]:
+    """Build the argv for ``tmux [<attach_args>] attach -t <target>``.
 
-    ``attach_args`` are tmux *client* flags and so are spliced in before the
-    ``attach`` subcommand (e.g. ``-CC`` for iTerm2 control mode yields
-    ``tmux -CC attach -t =<session>``). The leading ``=`` forces tmux's
-    exact-session matching. The session name is passed verbatim (no shell
-    quoting) because argv reaches the exec'd process directly, not via a shell.
+    The single place that knows the shape of the attach command, so no call site
+    can forget to thread the client flags. ``attach_args`` are tmux *client*
+    flags and so are spliced in before the ``attach`` subcommand (e.g. ``-CC``
+    for iTerm2 control mode yields ``tmux -CC attach -t =<session>``).
+
+    For a local attach the list is handed straight to the tmux exec call; for the
+    remote SSH wrapper it is rendered to a shell-command string via ``shlex.join``.
+    The target goes through :class:`TmuxSessionTarget` (its raw ``as_target_arg``,
+    since argv bypasses the shell) so the exact-match ``=`` rule is not hand-rolled.
     """
-    return ["tmux", *attach_args, "attach", "-t", f"={session_name}"]
+    return ["tmux", *attach_args, "attach", "-t", target.as_target_arg()]
 
 
 def resolve_connect_command(
@@ -251,7 +255,8 @@ def connect_to_agent(
     """
     logger.info("Connecting to agent...")
 
-    session_name = f"{mngr_ctx.config.prefix}{agent.name}"
+    session_name = agent.session_name
+    target = TmuxSessionTarget(session_name=session_name)
 
     if host.is_local:
         # Detect nested tmux: if $TMUX is set, we're inside a tmux session
@@ -262,19 +267,11 @@ def connect_to_agent(
             # Copy and remove TMUX so tmux allows the nested attachment
             env = dict(os.environ)
             del env["TMUX"]
-        # Pass the raw `=name` form straight to argv. We deliberately do NOT
-        # route this through TmuxSessionTarget.as_shell_arg() (the helper used
-        # everywhere else in the codebase): as_shell_arg() shlex-quotes the
-        # value for safe interpolation into a shell command string, but argv
-        # to os.execvpe is verbatim, so an extra layer of shell-quoting would
-        # wrong-shape the argument whenever session_name contains a
-        # shell-special character. The leading `=` still forces tmux's
-        # exact-session matching (same rule TmuxSessionTarget encodes).
-        #
-        # attach_args are tmux *client* flags and so go before the `attach`
-        # subcommand (e.g. `-CC` for iTerm2 control mode: `tmux -CC attach ...`).
-        argv = build_local_attach_argv(session_name, mngr_ctx.config.tmux.attach_args)
-        os.execvpe("tmux", argv, env)
+        # build_attach_argv uses target.as_target_arg() (the raw `=name`), not
+        # as_shell_arg(): argv reaches os.execvpe verbatim, so shell-quoting it
+        # would wrong-shape the argument whenever the name has a shell-special
+        # character. The `=` still forces exact-session matching either way.
+        os.execvpe("tmux", build_attach_argv(target, mngr_ctx.config.tmux.attach_args), env)
     else:
         ssh_args = _build_ssh_args(host, connection_opts)
 

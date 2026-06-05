@@ -1454,6 +1454,12 @@ def test_tmux_config_merge_empty_override_is_noop() -> None:
     assert merged == base
 
 
+def test_mngr_config_agent_session_name_is_prefix_plus_name() -> None:
+    """agent_session_name is the single definition of the prefix + name session-name rule."""
+    assert MngrConfig(prefix="mngr-").agent_session_name("my-agent") == "mngr-my-agent"
+    assert MngrConfig(prefix="custom-").agent_session_name("foo") == "custom-foo"
+
+
 # =============================================================================
 # Tests for CreateTemplateName validation
 # =============================================================================

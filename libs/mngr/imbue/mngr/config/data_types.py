@@ -820,6 +820,14 @@ class MngrConfig(FrozenModel):
         ),
     )
 
+    def agent_session_name(self, agent_name: str) -> str:
+        """The tmux session name for an agent: the configured ``prefix`` + the agent name.
+
+        Single source of truth for the ``prefix + name`` rule, so call sites do not
+        hand-roll the f-string (and so cannot drift from one another).
+        """
+        return f"{self.prefix}{agent_name}"
+
     def merge_with(self, override: Self) -> Self:
         """Merge this config with an override config.
 

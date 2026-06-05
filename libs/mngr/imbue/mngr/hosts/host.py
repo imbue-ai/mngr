@@ -2336,8 +2336,8 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             data_path = agent_state_dir / "data.json"
 
             # Rename the tmux session first (idempotent -- no-ops if session doesn't exist with old name)
-            old_session_name = f"{self.mngr_ctx.config.prefix}{old_name}"
-            new_session_name = f"{self.mngr_ctx.config.prefix}{new_name}"
+            old_session_name = self.mngr_ctx.config.agent_session_name(old_name)
+            new_session_name = self.mngr_ctx.config.agent_session_name(new_name)
             old_session_target = TmuxSessionTarget(session_name=old_session_name).as_shell_arg()
             result = self.execute_idempotent_command(
                 f"tmux has-session -t {old_session_target} 2>/dev/null && "
@@ -2554,7 +2554,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     else:
                         onboarding_text = ONBOARDING_TEXT
 
-                session_name = f"{self.mngr_ctx.config.prefix}{agent.name}"
+                session_name = agent.session_name
                 with log_span("Starting agent {} in tmux session {}", agent.name, session_name):
                     # Build and execute a single combined shell command for this agent
                     combined_command = _build_start_agent_shell_command(
@@ -2716,7 +2716,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     continue
 
                 current_agents.append(agent)
-                session_name = f"{self.mngr_ctx.config.prefix}{agent.name}"
+                session_name = agent.session_name
                 all_pids.extend(self._collect_session_pids(session_name))
                 # Also pick up orphans (e.g. children of an OOM-killed claude) that
                 # reparented to PID 1 and so are invisible to the pane-descendant walk.
@@ -2741,7 +2741,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
             # Finally kill the tmux sessions themselves
             for agent in current_agents:
-                session_name = f"{self.mngr_ctx.config.prefix}{agent.name}"
+                session_name = agent.session_name
                 self.execute_idempotent_command(
                     f"tmux kill-session -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()} 2>/dev/null || true"
                 )
