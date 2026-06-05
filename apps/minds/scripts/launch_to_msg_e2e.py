@@ -709,7 +709,13 @@ async def amain() -> int:
         base = await asyncio.get_event_loop().run_in_executor(None, wait_backend_url)
         logger.info("backend up at {}", base)
         code = await asyncio.get_event_loop().run_in_executor(None, mint_one_time_code)
-        origin = await win.evaluate("location.origin")
+        # ``win`` here is ``ctx.pages[0]``, which can be the file:// splash
+        # depending on Electron startup order. ``location.origin`` on the
+        # splash returns ``"file://"``, so navigation to ``origin + "/..."``
+        # would resolve to ``file:///...`` and fail. Use the known backend
+        # base URL instead; ``win.goto`` happily redirects any window
+        # (splash or http-served) to it.
+        origin = base
         await win.goto(origin + "/authenticate?one_time_code=" + code)
         await snap_page(win, "01-after-auth")
 
