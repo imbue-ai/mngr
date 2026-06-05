@@ -3232,7 +3232,7 @@ def _handle_request_event_callback(agent_id_str: str, raw_line: str) -> None:
     After mutating the inbox, fires the resolver's change notification so
     the chrome SSE wakes up and pushes the new ``requests`` payload immediately
     (otherwise it would lag up to 30s for the next poll tick, breaking the
-    requests panel auto-open and badge UX).
+    inbox modal auto-open and badge UX).
 
     ``LATCHKEY_PERMISSION`` events from the JSONL stream are ignored
     here: latchkey 2.9.0 ships a gateway extension that owns the

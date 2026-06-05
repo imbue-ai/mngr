@@ -2,7 +2,7 @@
 
 Provides a thread-safe interface for reading and writing user preferences
 that persist across sessions, such as the default account for new workspaces
-and the auto-open behavior for the requests panel.
+and the auto-open behavior for the inbox modal.
 
 The env-selection URL (``connector_url``, ``litellm_proxy_url``) lives in
 the per-tier ``ClientEnvConfig`` loaded via ``--config-file``; this file is

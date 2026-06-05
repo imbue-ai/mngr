@@ -2,10 +2,10 @@
 {#
   Overlay-style modal: fixed dimming backdrop centering an inner card.
   The dialog is hidden by default (caller toggles ``hidden`` via JS to
-  show/dismiss). Differs from PermissionsDialog -- that one is the
-  permission-request-specific chrome with a close button and submission
-  JS; this is the lighter pattern used for in-page confirmation
-  dialogs.
+  show/dismiss). Lighter pattern used for in-page confirmation dialogs;
+  unrelated to the inbox modal (which is rendered as its own full page
+  inside a transparent desktop-client overlay view, not as a hidden
+  in-page element).
 
   ``id`` -- attached to the outer wrapper so the page's JS can find it
   to toggle visibility.

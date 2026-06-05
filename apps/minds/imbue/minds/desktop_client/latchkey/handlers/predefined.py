@@ -436,7 +436,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         return "permission"
 
     def display_name_for_event(self, req_event: RequestEvent) -> str:
-        """Friendly service name for the requests-panel card.
+        """Friendly service name for the inbox list card.
 
         Falls back to the raw scope schema when no catalog entry matches
         (or when the event is somehow not a latchkey permission request,
@@ -554,7 +554,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
 
         # The grant call may have appended a response event to
         # ~/.minds/events/requests/events.jsonl; mirror it into the
-        # in-memory inbox so the requests panel reflects the resolution
+        # in-memory inbox so the inbox modal reflects the resolution
         # without needing a desktop-client restart. The manual-credentials
         # branch leaves the request pending, so there is nothing to mirror.
         if grant_result.response_event is not None:
@@ -726,11 +726,11 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         """Mirror the on-disk response event into the in-memory inbox.
 
         The on-disk event-sourcing log is the source of truth; this update
-        is just so the requests panel doesn't show the resolved request as
+        is just so the inbox modal doesn't show the resolved request as
         still pending until the next desktop-client restart.
 
         Also wakes the chrome SSE so the new ``requests`` payload is pushed
-        right away -- otherwise the panel would keep showing the resolved
+        right away -- otherwise the inbox would keep showing the resolved
         card for up to 30s while the SSE poll waits for its next tick.
         """
         inbox: RequestInbox | None = request.app.state.request_inbox

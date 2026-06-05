@@ -51,7 +51,7 @@ from imbue.minds.desktop_client.request_events import create_request_response_ev
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.mngr.primitives import AgentId
 
-# Label shown on the requests-panel card (lower-case, short).
+# Label shown on the inbox list card (lower-case, short).
 _KIND_LABEL: Final[str] = "file sharing"
 
 

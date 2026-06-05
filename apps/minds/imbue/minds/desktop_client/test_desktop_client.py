@@ -1720,7 +1720,13 @@ def test_set_default_account(tmp_path: Path) -> None:
 
 
 def test_auto_open_toggle(tmp_path: Path) -> None:
-    """The auto-open requests panel setting can be toggled."""
+    """The inbox auto-open setting can be toggled.
+
+    The on-disk setting key and the toggle route both keep
+    ``requests-panel`` / ``auto_open_requests_panel`` for backward
+    compatibility with existing user configs; "panel" now refers to the
+    inbox modal.
+    """
     client, auth_store = _create_test_client_with_stores(tmp_path)
     _authenticate_client(client, auth_store)
     response = client.post(

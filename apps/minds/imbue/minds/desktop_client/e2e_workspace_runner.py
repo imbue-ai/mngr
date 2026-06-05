@@ -402,7 +402,8 @@ def _pick_content_page(browser: Browser, timeout_seconds: int) -> Page:
     """Return the Electron WebContentsView that serves the main content.
 
     Electron's BaseWindow has multiple WebContentsView's (chrome view,
-    content view, requests panel, sidebar). Each is its own CDP page. The
+    content view, sidebar, and a lazy modal overlay view). Each is its
+    own CDP page. The
     content view is the one whose URL is on the backend origin but is NOT
     rooted at ``/_chrome``. We poll until that page exists because Electron
     spawns the backend asynchronously after launch.
