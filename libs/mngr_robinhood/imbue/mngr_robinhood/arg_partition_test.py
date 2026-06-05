@@ -1,10 +1,10 @@
 import pytest
 
-from imbue.mngr_uncapped_claude.arg_partition import REJECTED_FLAGS
-from imbue.mngr_uncapped_claude.arg_partition import partition_args
-from imbue.mngr_uncapped_claude.data_types import InputFormat
-from imbue.mngr_uncapped_claude.data_types import OutputFormat
-from imbue.mngr_uncapped_claude.errors import UnsupportedClaudeFlagError
+from imbue.mngr_robinhood.arg_partition import REJECTED_FLAGS
+from imbue.mngr_robinhood.arg_partition import partition_args
+from imbue.mngr_robinhood.data_types import InputFormat
+from imbue.mngr_robinhood.data_types import OutputFormat
+from imbue.mngr_robinhood.errors import UnsupportedClaudeFlagError
 
 
 def test_empty_argv() -> None:

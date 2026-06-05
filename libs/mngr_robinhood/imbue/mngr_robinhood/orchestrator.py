@@ -44,18 +44,18 @@ from imbue.mngr.utils.jsonl_warn import split_complete_lines
 from imbue.mngr.utils.name_generator import generate_agent_name
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_claude.plugin import ClaudeAgent
-from imbue.mngr_uncapped_claude.data_types import ArgPartition
-from imbue.mngr_uncapped_claude.data_types import ResultMeta
-from imbue.mngr_uncapped_claude.input_modes import iter_user_prompts
-from imbue.mngr_uncapped_claude.output_modes import StreamingOutputWriter
-from imbue.mngr_uncapped_claude.output_modes import monotonic_ms_since
-from imbue.mngr_uncapped_claude.raw_transcript import RAW_TRANSCRIPT_PATH
-from imbue.mngr_uncapped_claude.raw_transcript import RawTranscriptParser
+from imbue.mngr_robinhood.data_types import ArgPartition
+from imbue.mngr_robinhood.data_types import ResultMeta
+from imbue.mngr_robinhood.input_modes import iter_user_prompts
+from imbue.mngr_robinhood.output_modes import StreamingOutputWriter
+from imbue.mngr_robinhood.output_modes import monotonic_ms_since
+from imbue.mngr_robinhood.raw_transcript import RAW_TRANSCRIPT_PATH
+from imbue.mngr_robinhood.raw_transcript import RawTranscriptParser
 
 # Settings overrides applied to mngr_ctx so the spawned claude agent runs
 # unattended. The two ``settings_overrides`` flags are normally added by
 # ``mngr_claude`` only when ``ProvisioningContext.is_unattended`` is true,
-# which is computed as ``not host.is_local``; uncapped-claude always runs
+# which is computed as ``not host.is_local``; robinhood always runs
 # on the local host, so we set them explicitly to avoid hangs on the
 # "bypass permissions mode" and "skip dangerous mode" prompts.
 _UNATTENDED_SETTINGS: Final[tuple[str, ...]] = (
@@ -122,7 +122,7 @@ _TERMINAL_STOP_REASONS: Final[frozenset[str]] = frozenset({"end_turn", "stop_seq
 # inside a single turn is bounded by the longest tool the agent might run
 # (long bash builds, slow MCP calls), so this needs to be very generous --
 # we'd rather wait than truncate. A user who wants tighter control wraps
-# ``mngr uncapped-claude`` in ``timeout(1)`` per the spec.
+# ``mngr robinhood`` in ``timeout(1)`` per the spec.
 _TURN_END_NO_PROGRESS_TIMEOUT_SECONDS: Final[float] = 600.0
 
 EXIT_SUCCESS: Final[int] = 0
@@ -170,7 +170,7 @@ def _normalize_credentials_env() -> None:
     """Unset ``ORIGINAL_CLAUDE_CONFIG_DIR`` so mngr_claude reads credentials
     from the live ``$CLAUDE_CONFIG_DIR``.
 
-    When ``mngr uncapped-claude`` runs from inside another mngr claude agent,
+    When ``mngr robinhood`` runs from inside another mngr claude agent,
     the parent process has ``ORIGINAL_CLAUDE_CONFIG_DIR=~/.claude`` (set by
     that parent agent's ``modify_env_vars``) and ``CLAUDE_CONFIG_DIR`` set to
     the parent agent's per-agent config dir. mngr_claude's credentials sync
@@ -201,7 +201,7 @@ def run(
     stdout: IO[str],
     is_stdin_a_tty: bool,
 ) -> int:
-    """Drive a single ``mngr uncapped-claude`` invocation end-to-end.
+    """Drive a single ``mngr robinhood`` invocation end-to-end.
 
     Returns the integer exit code the caller should pass to ``ctx.exit()``.
     """
@@ -279,7 +279,7 @@ def _run_with_agent(
         transfer_mode=TransferMode.NONE,
         initial_message=first_prompt,
         agent_args=partition.pass_through_agent_args,
-        label_options=AgentLabelOptions(labels={"created-by": "uncapped-claude"}),
+        label_options=AgentLabelOptions(labels={"created-by": "robinhood"}),
         environment=pass_env_vars,
         ready_timeout_seconds=_AGENT_READY_TIMEOUT_SECONDS,
     )
@@ -386,9 +386,9 @@ def _run_with_agent(
 
 
 def _build_agent_name() -> AgentName:
-    """Auto-generate a name with the ``uncapped-`` prefix."""
+    """Auto-generate a name with the ``robinhood-`` prefix."""
     base = generate_agent_name(AgentNameStyle.COOLNAME)
-    return AgentName(f"uncapped-{base}")
+    return AgentName(f"robinhood-{base}")
 
 
 def _build_pass_env_vars() -> AgentEnvironmentOptions:
