@@ -15,8 +15,7 @@ def test_workspace_paths_workspace_dir_uses_agent_id(tmp_path: Path) -> None:
     agent_id = AgentId()
 
     result = paths.workspace_dir(agent_id)
-    assert result.parent == tmp_path
-    assert str(agent_id) in str(result)
+    assert result == tmp_path / str(agent_id)
 
 
 def test_workspace_paths_auth_dir_is_under_data_dir(tmp_path: Path) -> None:
@@ -54,6 +53,16 @@ def test_parse_agents_from_mngr_output_handles_empty() -> None:
     assert agents == []
 
 
+@pytest.mark.parametrize("stdout", ["", "\n", "   \n\t\n"])
+def test_parse_agents_from_mngr_output_returns_empty_for_blank_stdout(stdout: str) -> None:
+    """Stdout with no non-empty line (the realistic 'mngr printed nothing' case) yields [].
+
+    Exercises the blank-line skip loop and the fallthrough ``return []`` -- distinct
+    from the ``{"agents": []}`` case, which returns via ``data["agents"]``.
+    """
+    assert parse_agents_from_mngr_output(stdout) == []
+
+
 def test_parse_agents_from_mngr_output_raises_on_non_json() -> None:
     """Non-JSON output is treated as a real upstream bug rather than soft-failed."""
     with pytest.raises(MalformedMngrOutputError, match="Expected JSON object"):
@@ -68,8 +77,13 @@ def test_parse_agents_from_mngr_output_raises_on_mixed_output() -> None:
 
 
 def test_parse_agents_from_mngr_output_raises_on_invalid_json_first_line() -> None:
-    """A line that starts with '{' but isn't valid JSON surfaces as JSONDecodeError."""
+    """A line that starts with '{' but isn't valid JSON surfaces as MalformedMngrOutputError.
+
+    Like the other malformed-output cases, an unparseable first line is treated as a
+    broken upstream rather than leaking a raw ``json.JSONDecodeError`` the caller does
+    not catch.
+    """
     valid_json = json.dumps({"agents": [{"id": "agent-abc", "name": "test"}]})
     output = "{invalid json here\n" + valid_json
-    with pytest.raises(json.JSONDecodeError):
+    with pytest.raises(MalformedMngrOutputError, match="unparseable JSON"):
         parse_agents_from_mngr_output(output)

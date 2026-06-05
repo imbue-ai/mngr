@@ -327,9 +327,10 @@ def parse_agents_from_mngr_output(stdout: str) -> list[dict[str, object]]:
     """Extract agent records from the first JSON object line of ``mngr list --format json`` stdout.
 
     Raises ``MalformedMngrOutputError`` when the first non-empty line is not a
-    JSON object. stdout is reserved for JSON data; if log lines or SSH errors
-    are leaking onto it, fix the underlying process rather than papering over
-    it here.
+    JSON object, including when it looks like one (starts with ``{``) but does
+    not parse. stdout is reserved for JSON data; if log lines or SSH errors are
+    leaking onto it, fix the underlying process rather than papering over it
+    here.
     """
     for line in stdout.splitlines():
         stripped = line.strip()
@@ -339,6 +340,11 @@ def parse_agents_from_mngr_output(stdout: str) -> list[dict[str, object]]:
             raise MalformedMngrOutputError(
                 f"Expected JSON object on first non-empty mngr output line, got: {stripped[:200]!r}"
             )
-        data = json.loads(stripped)
+        try:
+            data = json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            raise MalformedMngrOutputError(
+                f"Expected JSON object on first non-empty mngr output line, got unparseable JSON: {stripped[:200]!r}"
+            ) from exc
         return data["agents"]
     return []

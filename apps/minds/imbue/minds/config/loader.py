@@ -52,15 +52,19 @@ def repo_tier_client_config_path(tier: str) -> Path:
     return _ENVS_DIR / tier / _CLIENT_FILENAME
 
 
-def bundled_client_config_path_or_none() -> Path | None:
-    """Return the bundled ``_bundled/client.toml`` if it exists, else None.
+def bundled_client_config_path_or_none(bundled_dir: Path = _BUNDLED_DIR) -> Path | None:
+    """Return the bundled ``<bundled_dir>/client.toml`` if it exists, else None.
 
     Populated at Electron build time by ``apps/minds/scripts/build.js``
     from ``MINDS_CLIENT_CONFIG_BUNDLE=<path>``. Used by the bundled
     Electron startup path to know what to pass as ``--config-file``
     when launching the backend.
+
+    ``bundled_dir`` defaults to the in-package ``_bundled`` directory and
+    is only overridden in tests so both branches can be exercised against
+    a temp directory.
     """
-    bundled = _BUNDLED_DIR / _CLIENT_FILENAME
+    bundled = bundled_dir / _CLIENT_FILENAME
     if bundled.is_file():
         return bundled
     return None
