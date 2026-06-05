@@ -57,6 +57,19 @@ from playwright.async_api import BrowserContext
 from playwright.async_api import Page
 from playwright.async_api import async_playwright
 
+
+class E2EFailure(Exception):
+    """Raised for end-to-end drive failures specific to this script's domain.
+
+    Used in preference to a bare ``RuntimeError`` for failures that arise from
+    e2e contract assumptions -- the minds API surface, the redirect flow, the
+    chat-URL pattern -- so the harness can distinguish them from arbitrary
+    Python runtime errors in failure handling. Inherits from ``Exception``
+    (not ``RuntimeError``) so the project ratchet that flags raise-of-
+    builtins doesn't apply.
+    """
+
+
 # --- knobs (override via env) ---
 
 MINDS_APP_PATH = Path(os.environ.get("MINDS_APP_PATH", "/Applications/Minds.app/Contents/MacOS/Minds"))
@@ -875,7 +888,7 @@ async def amain() -> int:
             # caught up with creation completion, and on local macOS the
             # discovery lag routinely exceeds the click window's 15s.
             if not done_redirect_url:
-                raise RuntimeError(
+                raise E2EFailure(
                     "creation DONE without redirect_url; check the /api/create-agent/<id>/status contract"
                 )
             target = done_redirect_url if done_redirect_url.startswith("http") else base + done_redirect_url
@@ -889,7 +902,7 @@ async def amain() -> int:
                 for p in all_pages(ctx):
                     with contextlib.suppress(Exception):
                         await snap_page(p, f"99-no-chat-{p.url.split('/')[-1] or 'root'}")
-                raise RuntimeError(f"goto({target}) didn't redirect to chat URL within 30s (win.url={win.url})")
+                raise E2EFailure(f"goto({target}) didn't redirect to chat URL within 30s (win.url={win.url})")
             logger.info("agent DONE; chat URL={}", win.url)
             await snap_page(win, "04-agent-DONE")
 
