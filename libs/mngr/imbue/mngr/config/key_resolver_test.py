@@ -156,6 +156,23 @@ def test_resolve_extends_rejects_scalar_for_unset_list_field() -> None:
 # =============================================================================
 
 
+def test_resolve_extends_is_noop_when_no_extend_keys_present() -> None:
+    """With no ``__extend`` keys anywhere, recursion walks the override dict and
+    returns it unchanged (the pure passthrough / no-op case).
+
+    This is the complement to
+    ``test_resolve_extends_resolves_nested_extend_and_preserves_structure``: that
+    one proves extends are resolved; this one proves a bare nested override is
+    left untouched.
+    """
+    base = MngrConfig.model_construct()
+    resolved = resolve_extends(
+        base,
+        {"logging": {"console_level": "TRACE"}},
+    )
+    assert resolved == {"logging": {"console_level": "TRACE"}}
+
+
 def test_resolve_extends_resolves_nested_extend_and_preserves_structure() -> None:
     """Recursion resolves a nested ``__extend`` against the base value at that
     level while leaving a sibling deeper bare structure untouched.
