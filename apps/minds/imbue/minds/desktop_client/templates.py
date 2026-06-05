@@ -55,7 +55,7 @@ TEMPLATE_DIR: Final[Path] = Path(__file__).resolve().parent / "templates"
 # restart / settings icons in the Landing project row).
 _BTN_BASE: Final[str] = (
     "inline-flex items-center justify-center gap-1.5 leading-tight "
-    "transition-colors disabled:opacity-50 disabled:cursor-not-allowed "
+    "transition-colors disabled:opacity-30 disabled:cursor-not-allowed "
     "cursor-pointer no-underline whitespace-nowrap"
 )
 _BTN_SIZES: Final[Mapping[str, str]] = {
