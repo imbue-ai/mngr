@@ -26,16 +26,6 @@ from imbue.minds.envs.primitives import DevEnvNotFoundError
 from imbue.minds.envs.primitives import InvalidDevEnvNameError
 
 
-@pytest.fixture
-def _isolated_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """Redirect ``Path.home()`` to ``tmp_path`` so writes land under tmp."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    # No MINDS_ROOT_NAME -- the dev-env-name path computations don't need it
-    # (env_root_dir derives the path purely from the DevEnvName).
-    monkeypatch.delenv("MINDS_ROOT_NAME", raising=False)
-    return tmp_path
-
-
 def _make_client() -> ClientEnvConfig:
     return ClientEnvConfig(
         connector_url=AnyUrl("https://test-connector.modal.run"),

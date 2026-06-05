@@ -1,4 +1,3 @@
-from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
 
@@ -13,13 +12,7 @@ from imbue.minds.envs.docker_cleanup import state_container_name
 from imbue.minds.envs.docker_cleanup import stop_active_env_state_container
 from imbue.minds.envs.docker_cleanup import stop_state_container
 from imbue.minds.envs.primitives import DevEnvName
-
-
-@pytest.fixture
-def _root_cg() -> Iterator[ConcurrencyGroup]:
-    cg = ConcurrencyGroup(name="docker-cleanup-test-root")
-    with cg:
-        yield cg
+from imbue.mngr.utils.testing import capture_loguru
 
 
 def _write_profile(mngr_host_dir: Path, *, profile_id: str, user_id: str) -> None:
@@ -69,13 +62,20 @@ def test_is_docker_daemon_unavailable_detects_daemon_errors() -> None:
     assert not _is_docker_daemon_unavailable("Error: No such container: minds-staging-docker-state-x")
 
 
-def test_cleanup_env_state_container_skips_when_user_id_unresolved(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _root_cg: ConcurrencyGroup
-) -> None:
-    # No mngr profile under HOME -> user_id can't be resolved -> no-op skip
-    # (never matches a broader target, never raises).
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cleanup_env_state_container(DevEnvName("staging"), parent_concurrency_group=_root_cg)
+def test_cleanup_env_state_container_skips_when_user_id_unresolved(_root_cg: ConcurrencyGroup) -> None:
+    # No mngr profile under the (autouse-isolated) HOME -> user_id can't be
+    # resolved -> the function must take the skip branch and must NOT fall
+    # through to remove_state_container against a broader / None-typed target.
+    #
+    # Assert the *observable effect* of the skip branch -- the warning it logs --
+    # rather than just "did not raise". Without this, deleting the `if user_id is
+    # None: return` guard would still pass: the fall-through computes
+    # `...docker-state-None` and calls remove_state_container, which is a silent
+    # no-op when the container/daemon is absent. The warning only fires on the
+    # skip path, so it fails the test iff the guard is removed.
+    with capture_loguru(level="WARNING") as log_output:
+        cleanup_env_state_container(DevEnvName("staging"), parent_concurrency_group=_root_cg)
+    assert "skipping Docker state-container cleanup" in log_output.getvalue()
 
 
 def test_stop_active_env_state_container_skips_when_user_id_unresolved(
