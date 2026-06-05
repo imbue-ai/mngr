@@ -39,6 +39,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `mngr latchkey forward`'s discovery observer (`mngr observe --discovery-only`) is now the single discovery observer for the host dir and writes to the standard mngr discovery event log. Minds' `mngr forward --observe-via-file` tails the same log instead of running its own observer, removing the multi-observer flicker that earlier required isolating latchkey onto a private per-env event log. Old `discovery-observe/` directories left by prior versions are inert and can be deleted manually.
 - Changed: Latchkey forward's discovery consumer now retains agents whose provider errored on a poll rather than tearing down their reverse tunnels, dropping them only on an explicit destroy or a later successful poll.
 - Changed: Aligned the workspace's `imbue-mngr*==` pin stragglers in `pyproject.toml` with the satellites bumped in main's release commit, so building the `apps/minds` ToDesktop bundle from main no longer fails at `uv lock`.
+- Changed: Added to the release tooling's publish graph (`scripts/utils.py`); will be offered for first publication to PyPI on the next release. Stale `imbue-common==0.1.17` / `concurrency-group==0.1.17` pins in `pyproject.toml` are realigned to the current `0.1.18`. No runtime change.
 
 ### Fixed
 
