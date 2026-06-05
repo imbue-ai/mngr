@@ -41,9 +41,11 @@ def test_register_plugin_config_stores_custom_config() -> None:
 def test_list_registered_plugins_returns_sorted_list() -> None:
     """list_registered_plugins should return the exact registered names, sorted.
 
-    The autouse fixture resets the registry before each test, so the only
-    entries present are the ones this test registers.
+    Reset first so the assertion sees only the names this test registers,
+    independent of any import-time plugin registrations the autouse fixture
+    preserves (it snapshots/restores rather than clearing).
     """
+    reset_plugin_config_registry()
     register_plugin_config("zebra-plugin", PluginConfig)
     register_plugin_config("alpha-plugin", PluginConfig)
 

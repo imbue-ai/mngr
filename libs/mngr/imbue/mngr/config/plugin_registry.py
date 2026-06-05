@@ -35,7 +35,20 @@ def list_registered_plugins() -> list[str]:
 def reset_plugin_config_registry() -> None:
     """Clear all registered plugin config classes.
 
-    Used by the autouse test fixture to isolate the module-global registry
-    between tests, mirroring the agent/backend/provider registry resets.
+    Used by tests that need to assert against a known-empty registry. For
+    general per-test isolation prefer snapshot/restore (see below), which
+    preserves registrations made as an import-time side effect by real plugin
+    modules (e.g. mngr_notifications registers its config at import).
     """
     _plugin_config_registry.clear()
+
+
+def snapshot_plugin_config_registry() -> dict[PluginName, type[PluginConfig]]:
+    """Return a shallow copy of the current registry for save/restore isolation."""
+    return dict(_plugin_config_registry)
+
+
+def restore_plugin_config_registry(snapshot: dict[PluginName, type[PluginConfig]]) -> None:
+    """Replace the registry contents with a previously captured snapshot."""
+    _plugin_config_registry.clear()
+    _plugin_config_registry.update(snapshot)

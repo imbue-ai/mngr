@@ -48,7 +48,7 @@ def _read_cache() -> CompletionCacheData:
         if not (cache_dir / COMPLETION_CACHE_FILENAME).is_file():
             return CompletionCacheData()
         return read_completion_cache(cache_dir)
-    except (json.JSONDecodeError, OSError, ValueError):
+    except (json.JSONDecodeError, OSError):
         return CompletionCacheData()
 
 
