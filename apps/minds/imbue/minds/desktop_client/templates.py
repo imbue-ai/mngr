@@ -379,6 +379,7 @@ def render_auth_error_page(message: str) -> str:
     return CATALOG.render("pages.AuthError", message=message)
 
 
+@pure
 def render_inbox_page(
     cards: Sequence[Mapping[str, str]],
     selected_id: str = "",
@@ -406,6 +407,7 @@ def render_inbox_page(
     )
 
 
+@pure
 def render_inbox_list_fragment(
     cards: Sequence[Mapping[str, str]],
     selected_id: str = "",
@@ -414,6 +416,7 @@ def render_inbox_list_fragment(
     return CATALOG.render("InboxList", cards=cards, selected_id=selected_id)
 
 
+@pure
 def render_inbox_unavailable_fragment(
     message: str = "This permission request is no longer available.",
 ) -> str:
