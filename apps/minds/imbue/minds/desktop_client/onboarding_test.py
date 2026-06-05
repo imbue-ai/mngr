@@ -103,13 +103,12 @@ def _make_applier(
         notification_dispatcher=notification_dispatcher,
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
     )
-    extra_fields = {} if user_name_resolver is None else {"user_name_resolver": user_name_resolver}
     return OnboardingApplier(
         agent_creator=agent_creator,
         paths=paths,
         message_sender=MngrMessageSender(mngr_binary="mngr"),
         root_concurrency_group=root_concurrency_group,
-        **extra_fields,
+        user_name_resolver=user_name_resolver or resolve_local_user_name,
     )
 
 
