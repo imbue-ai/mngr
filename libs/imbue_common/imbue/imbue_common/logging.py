@@ -336,6 +336,11 @@ def make_jsonl_file_sink(
             try:
                 state["size"] = Path(bound_path).stat().st_size
             except OSError:
+                # A logging sink must never raise into the host program. stat
+                # cannot realistically fail right after a successful append-mode
+                # open, but if it does the worst case of defaulting to 0 is a
+                # delayed rotation (the file may grow past max_size before the
+                # next check trips), never lost or corrupted log content.
                 state["size"] = 0
         return state["file"]
 
