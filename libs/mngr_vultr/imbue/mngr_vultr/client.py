@@ -1,5 +1,6 @@
 import base64
 import time
+from collections.abc import Callable
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
@@ -35,6 +36,17 @@ class VultrVpsClient(VpsClientInterface):
     """Vultr API v2 client using raw HTTP calls."""
 
     api_key: SecretStr = Field(frozen=True, description="Vultr API key")
+    # The HTTP transport is injected (defaulting to ``requests.request``) so tests
+    # can supply a real callable that records the outgoing request and returns a
+    # canned ``requests.Response`` -- letting them assert on what the client sends
+    # without ``unittest.mock`` and without making live network calls.
+    request_func: Callable[..., requests.Response] = Field(
+        default=requests.request,
+        frozen=True,
+        exclude=True,
+        repr=False,
+        description="HTTP transport callable, injectable for testing",
+    )
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -54,7 +66,7 @@ class VultrVpsClient(VpsClientInterface):
         logger.trace("Vultr API {} {}", method, path)
 
         try:
-            response = requests.request(
+            response = self.request_func(
                 method=method,
                 url=url,
                 headers=self._headers(),
