@@ -723,6 +723,9 @@ def _on_batch_item_poll(
             else:
                 stderr = result.stderr.strip()
                 results.append(f"{label}: failed ({stderr})")
+        # Broad catch keeps the urwid event loop alive if the background work item
+        # raised (e.g. subprocess timeout); the failure is surfaced to the user in
+        # the batch results summary rather than crashing the board.
         except Exception as e:
             results.append(f"{label}: failed ({e})")
 
@@ -819,6 +822,9 @@ def _on_mute_persist_poll(loop: MainLoop, data: tuple[_KanpanState, Future[bool]
     if future.done():
         try:
             future.result()
+        # Broad catch keeps the urwid event loop alive if persisting the mute failed
+        # (mngr API error); the optimistic UI update is reverted and the failure is
+        # shown to the user rather than crashing the board.
         except Exception as e:
             # Revert the optimistic update
             _update_snapshot_mute(state, agent_name, not expected_muted)
@@ -895,6 +901,9 @@ def _on_custom_command_poll(
             else:
                 stderr = result.stderr.strip()
                 _show_transient_message(state, f"  {cmd.name} failed for {agent_name}: {stderr}")
+        # Broad catch keeps the urwid event loop alive if the custom command raised
+        # (e.g. subprocess timeout); the failure is shown to the user in the footer
+        # rather than crashing the board.
         except Exception as e:
             _show_transient_message(state, f"  {cmd.name} failed for {agent_name}: {e}")
         if cmd.refresh_afterwards:
@@ -1038,8 +1047,14 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
             new_snapshot = _carry_forward_fields(state.snapshot, new_snapshot)
         state.snapshot = new_snapshot
     except Exception as e:
+        # Broad catch is intentional: this runs in an urwid alarm callback, so an
+        # uncaught exception would tear down the whole TUI event loop. fetch_*_snapshot
+        # captures per-source errors internally and returns them in the snapshot, so an
+        # exception escaping to here is genuinely unexpected (a fetch-pipeline bug) -- log
+        # it at warning with the traceback so it is diagnosable, and surface it to the user
+        # via snapshot.errors below.
         failed = True
-        logger.debug("Refresh failed: {}", e)
+        logger.opt(exception=e).warning("Refresh failed unexpectedly: {}", e)
         if state.snapshot is not None:
             state.snapshot = state.snapshot.model_copy_update(
                 to_update(
@@ -1543,6 +1558,11 @@ def _load_user_commands(mngr_ctx: MngrContext) -> dict[str, CustomCommand]:
             result[key] = value
         elif isinstance(value, dict):
             result[key] = CustomCommand(**value)
+        else:
+            # A value that is neither a CustomCommand nor a raw dict cannot be a
+            # valid command config; log so a malformed entry is visible to the
+            # user rather than silently dropped, but don't crash the whole board.
+            logger.warning("Ignoring malformed kanpan command {!r}: unexpected type {}", key, type(value).__name__)
     return result
 
 

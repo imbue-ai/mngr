@@ -38,7 +38,10 @@ def _parse_github_repo_path(remote_url: str) -> str | None:
         path = remote_url[len("git@github.com:") :]
         if path.endswith(".git"):
             path = path[:-4]
-        return path
+        # Require an owner/repo shape; a degenerate remote yielding no "/" is
+        # not a usable repo path, so treat it as "no repo" rather than emitting
+        # an empty/malformed RepoPathField downstream.
+        return path if "/" in path else None
 
     # HTTPS format: https://github.com/owner/repo.git
     parsed = urlparse(remote_url)
@@ -46,7 +49,7 @@ def _parse_github_repo_path(remote_url: str) -> str | None:
         path = parsed.path.lstrip("/")
         if path.endswith(".git"):
             path = path[:-4]
-        return path
+        return path if "/" in path else None
 
     return None
 
