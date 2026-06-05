@@ -30,6 +30,7 @@ from imbue.mngr_kanpan.data_source import BoolField
 from imbue.mngr_kanpan.data_source import FIELD_COMMITS_AHEAD
 from imbue.mngr_kanpan.data_source import FIELD_MUTED
 from imbue.mngr_kanpan.data_source import FIELD_REPO_PATH
+from imbue.mngr_kanpan.data_source import KanpanDataSource
 from imbue.mngr_kanpan.data_sources.git_info import CommitsAheadField
 from imbue.mngr_kanpan.data_sources.git_info import GitInfoDataSource
 from imbue.mngr_kanpan.data_sources.repo_paths import RepoPathField
@@ -44,7 +45,7 @@ from imbue.mngr_kanpan.fetcher import toggle_agent_mute
 from imbue.mngr_kanpan.mock_data_source_test import make_fake_data_source
 
 
-def _fake_remote_data_source() -> object:
+def _fake_remote_data_source() -> KanpanDataSource:
     """A fake remote data source used in fetch_local_snapshot tests.
 
     Its repo_path field carries a sentinel path that must never reach the board,
