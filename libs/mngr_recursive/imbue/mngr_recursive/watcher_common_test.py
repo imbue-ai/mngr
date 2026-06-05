@@ -14,9 +14,11 @@ from watchdog.events import FileDeletedEvent
 from watchdog.events import FileModifiedEvent
 from watchdog.events import FileMovedEvent
 from watchdog.events import FileOpenedEvent
+from watchdog.events import FileSystemEvent
 
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr_recursive.watcher_common import ChangeHandler
+from imbue.mngr_recursive.watcher_common import _unique_parent_dirs
 from imbue.mngr_recursive.watcher_common import load_watchers_section
 from imbue.mngr_recursive.watcher_common import mtime_poll_directories
 from imbue.mngr_recursive.watcher_common import mtime_poll_files
@@ -346,23 +348,28 @@ def test_change_handler_ignores_non_change_events() -> None:
     assert not wake_event.is_set()
 
 
-def test_change_handler_wakes_on_create_delete_move() -> None:
-    for event_cls in (FileCreatedEvent, FileDeletedEvent):
-        wake_event = threading.Event()
-        handler = ChangeHandler(wake_event)
-        handler.on_any_event(event_cls("test.txt"))
-        assert wake_event.is_set(), f"Expected wake for {event_cls.__name__}"
-
+@pytest.mark.parametrize(
+    "event",
+    [
+        pytest.param(FileCreatedEvent("test.txt"), id="created"),
+        pytest.param(FileDeletedEvent("test.txt"), id="deleted"),
+        pytest.param(FileMovedEvent("old.txt", "new.txt"), id="moved"),
+    ],
+)
+def test_change_handler_wakes_on_change_event(event: FileSystemEvent) -> None:
+    """Every change-type event should set the wake event."""
     wake_event = threading.Event()
     handler = ChangeHandler(wake_event)
-    handler.on_any_event(FileMovedEvent("old.txt", "new.txt"))
-    assert wake_event.is_set(), "Expected wake for FileMovedEvent"
+    handler.on_any_event(event)
+    assert wake_event.is_set()
 
 
 # -- setup_watchdog_for_directories tests --
 
 
 def test_setup_watchdog_for_directories_returns_active(tmp_path: Path) -> None:
+    # Cheap smoke check that the observer starts; the real watch behavior is
+    # covered by test_setup_watchdog_for_directories_detects_changes.
     wake_event = threading.Event()
     source_dir = tmp_path / "source"
     source_dir.mkdir()
@@ -395,12 +402,30 @@ def test_setup_watchdog_for_directories_detects_changes(tmp_path: Path) -> None:
 
 
 def test_setup_watchdog_for_files_returns_active(tmp_path: Path) -> None:
+    # Cheap smoke check that the observer starts; the real watch behavior is
+    # covered by test_setup_watchdog_for_files_detects_changes.
     wake_event = threading.Event()
     test_file = tmp_path / "watched.txt"
 
     observer, is_active = setup_watchdog_for_files([test_file], wake_event)
     try:
         assert is_active
+    finally:
+        observer.stop()
+        observer.join(timeout=5)
+
+
+def test_setup_watchdog_for_files_detects_changes(tmp_path: Path) -> None:
+    """Writing a watched file wakes the event (file-mode watches the parent dir)."""
+    wake_event = threading.Event()
+    test_file = tmp_path / "watched.txt"
+
+    observer, is_active = setup_watchdog_for_files([test_file], wake_event)
+    try:
+        assert is_active
+        test_file.write_text("trigger")
+        # Wait for watchdog to detect the change to the watched file.
+        assert wake_event.wait(timeout=5)
     finally:
         observer.stop()
         observer.join(timeout=5)
@@ -419,7 +444,29 @@ def test_setup_watchdog_for_files_creates_parent_directory(tmp_path: Path) -> No
         observer.join(timeout=5)
 
 
-def test_setup_watchdog_for_files_deduplicates_parent_directories(tmp_path: Path) -> None:
+def test_unique_parent_dirs_deduplicates_shared_parent(tmp_path: Path) -> None:
+    """Files sharing a parent directory collapse to a single watched directory.
+
+    This is the dedup logic that setup_watchdog_for_files relies on to schedule
+    one watch per directory rather than one per file. Testing the pure helper
+    catches a removed dedup guard directly, instead of through watchdog's own
+    internal per-(path, recursive) deduplication.
+    """
+    file_a = tmp_path / "dir" / "a.txt"
+    file_b = tmp_path / "dir" / "b.txt"
+    file_c = tmp_path / "other" / "c.txt"
+    assert _unique_parent_dirs([file_a, file_b, file_c]) == [
+        str(tmp_path / "dir"),
+        str(tmp_path / "other"),
+    ]
+
+
+def test_setup_watchdog_for_files_starts_with_shared_parent(tmp_path: Path) -> None:
+    """Smoke check: the observer starts for two files in one directory.
+
+    The real dedup behavior is asserted by test_unique_parent_dirs_deduplicates_shared_parent;
+    this just confirms the observer wires up and starts in that case.
+    """
     wake_event = threading.Event()
     file_a = tmp_path / "dir" / "a.txt"
     file_b = tmp_path / "dir" / "b.txt"
