@@ -1,5 +1,5 @@
 [project]
-name = "imbue-mngr-uncapped-claude"
+name = "imbue-mngr-robinhood"
 version = "0.1.0"
 description = "Drop-in replacement for `claude -p` that runs through mngr create/message/transcript"
 readme = "README.md"
@@ -10,7 +10,7 @@ dependencies = [
 ]
 
 [project.entry-points.mngr]
-uncapped_claude = "imbue.mngr_uncapped_claude.plugin"
+robinhood = "imbue.mngr_robinhood.plugin"
 
 [build-system]
 requires = ["hatchling"]
@@ -35,13 +35,13 @@ timeout_func_only = true
 pythonpath = ["."]
 testpaths = ["."]
 addopts = [
-    "--cov=imbue.mngr_uncapped_claude",
+    "--cov=imbue.mngr_robinhood",
     "--cov-report=term-missing",
     "--timeout=30",
 ]
 
 [tool.coverage.run]
-source = ["imbue.mngr_uncapped_claude"]
+source = ["imbue.mngr_robinhood"]
 omit = [
     "*_test.py",
     "test_*.py",

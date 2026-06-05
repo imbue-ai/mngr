@@ -1,12 +1,12 @@
 <!-- This file is auto-generated. Do not edit directly. -->
 <!-- To modify, edit the command's help metadata and run: uv run python scripts/make_cli_docs.py -->
 
-# mngr uncapped-claude
+# mngr robinhood
 
 **Synopsis:**
 
 ```text
-mngr uncapped-claude [CLAUDE_FLAGS...] [PROMPT]
+mngr robinhood [CLAUDE_FLAGS...] [PROMPT]
 ```
 
 Drop-in `claude -p` replacement backed by `mngr create` / `message` / `transcript`.
@@ -41,7 +41,7 @@ Exit codes:
 **Usage:**
 
 ```text
-mngr uncapped-claude [OPTIONS] [ARGV]...
+mngr robinhood [OPTIONS] [ARGV]...
 ```
 ## Arguments
 
@@ -76,29 +76,29 @@ mngr uncapped-claude [OPTIONS] [ARGV]...
 **Single prompt**
 
 ```bash
-$ mngr uncapped-claude "summarize this repo"
+$ mngr robinhood "summarize this repo"
 ```
 
 **JSON output**
 
 ```bash
-$ mngr uncapped-claude "summarize" --output-format json
+$ mngr robinhood "summarize" --output-format json
 ```
 
 **Stream output**
 
 ```bash
-$ mngr uncapped-claude "explain recursion" --output-format stream-json --verbose
+$ mngr robinhood "explain recursion" --output-format stream-json --verbose
 ```
 
 **Pipe stdin**
 
 ```bash
-$ cat error.log | mngr uncapped-claude "explain this"
+$ cat error.log | mngr robinhood "explain this"
 ```
 
 **Multi-turn via stream-json**
 
 ```bash
-$ printf '%s\n' '{"type":"user","message":{"role":"user","content":"hi"}}' | mngr uncapped-claude --input-format stream-json --output-format stream-json
+$ printf '%s\n' '{"type":"user","message":{"role":"user","content":"hi"}}' | mngr robinhood --input-format stream-json --output-format stream-json
 ```
