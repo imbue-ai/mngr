@@ -44,6 +44,7 @@ def test_local_provider_config_merge_with_overrides_host_dir() -> None:
     base = LocalProviderConfig(host_dir=Path("/base/host/dir"))
     override = LocalProviderConfig(host_dir=Path("/override/host/dir"))
     merged = base.merge_with(override)
+    assert isinstance(merged, LocalProviderConfig)
     assert merged.host_dir == Path("/override/host/dir")
 
 
