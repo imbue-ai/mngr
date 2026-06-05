@@ -28,6 +28,22 @@
       background: rgba(0, 0, 0, 0.06);
       border-left-color: var(--workspace-accent, #94a3b8);
     }
+    /* While a deny POST is in flight (it's fire-and-forget so the user
+       doesn't wait for the mngr message round trip) the card stays in
+       the list until the server appends the response event and the
+       chrome SSE pushes the new pending set. Visually mark it so the
+       user doesn't think the dialog reappeared on its own, and disable
+       hover / clicks so it can't be re-selected. */
+    .inbox-card.is-denying {
+      opacity: 0.6;
+      pointer-events: none;
+    }
+    .inbox-card.is-denying .inbox-card-display::after {
+      content: " (denying...)";
+      color: #94a3b8;
+      font-weight: normal;
+      font-style: italic;
+    }
     .inbox-card-kind {
       font-size: 11px;
       text-transform: uppercase;
@@ -139,20 +155,49 @@
       return card ? card.getAttribute("data-request-id") : null;
     }
 
+    // Ids of cards whose deny POST is in flight. We mark them with
+    // ``is-denying`` so the user can see the action is in progress and
+    // re-clicks can't reopen the dialog. The set is reconciled with the
+    // DOM after every list refresh: ids that no longer appear are
+    // pruned (server processed the deny), and ids whose cards reappear
+    // have the class re-applied (innerHTML swap wiped it).
+    var denyingIds = new Set();
+
+    function isSelectableCard(el) {
+      return !!el
+        && el.classList
+        && el.classList.contains("inbox-card")
+        && !el.classList.contains("is-denying");
+    }
+
+    function syncDenyingClasses() {
+      var pruned = new Set();
+      denyingIds.forEach(function (id) {
+        var card = inboxList.querySelector('.inbox-card[data-request-id="' + id + '"]');
+        if (card) {
+          card.classList.add("is-denying");
+          pruned.add(id);
+        }
+      });
+      denyingIds = pruned;
+    }
+
     function findNextPendingId(resolvedId) {
-      // Pick the next card after the resolved one, falling back to the
-      // previous, falling back to any other pending card. Operates on
-      // the rendered DOM order (most-recent-first, server-determined).
+      // Pick the next selectable card after the resolved one, falling
+      // back to the previous, falling back to any other selectable
+      // card. Operates on the rendered DOM order (most-recent-first,
+      // server-determined). Skips cards that are mid-deny so the user
+      // isn't auto-bounced back into a dialog that's about to vanish.
       var current = inboxList.querySelector('.inbox-card[data-request-id="' + resolvedId + '"]');
       if (!current) {
-        var any = inboxList.querySelector(".inbox-card");
+        var any = inboxList.querySelector(".inbox-card:not(.is-denying)");
         return any ? any.getAttribute("data-request-id") : null;
       }
       var sibling = current.nextElementSibling;
-      while (sibling && !sibling.classList.contains("inbox-card")) sibling = sibling.nextElementSibling;
+      while (sibling && !isSelectableCard(sibling)) sibling = sibling.nextElementSibling;
       if (!sibling) {
         sibling = current.previousElementSibling;
-        while (sibling && !sibling.classList.contains("inbox-card")) sibling = sibling.previousElementSibling;
+        while (sibling && !isSelectableCard(sibling)) sibling = sibling.previousElementSibling;
       }
       return sibling ? sibling.getAttribute("data-request-id") : null;
     }
@@ -162,6 +207,7 @@
       if (!resp.ok) return;
       var html = await resp.text();
       inboxList.innerHTML = html;
+      syncDenyingClasses();
       applyEmptyState();
     }
 
@@ -204,11 +250,14 @@
       await fetchListFragment();
       if (nextId) {
         // The list refetch may have dropped the just-resolved card and
-        // shifted indices; re-resolve the highlight against the fresh
-        // DOM rather than the pre-fetch sibling guess.
-        var stillThere = inboxList.querySelector('.inbox-card[data-request-id="' + nextId + '"]');
-        if (!stillThere) {
-          var fallback = inboxList.querySelector(".inbox-card");
+        // shifted indices; re-resolve against the fresh DOM rather
+        // than the pre-fetch sibling guess. Skip denying cards so we
+        // don't auto-bounce into a dialog that's about to vanish.
+        var stillSelectable = inboxList.querySelector(
+          '.inbox-card[data-request-id="' + nextId + '"]:not(.is-denying)',
+        );
+        if (!stillSelectable) {
+          var fallback = inboxList.querySelector(".inbox-card:not(.is-denying)");
           nextId = fallback ? fallback.getAttribute("data-request-id") : null;
         }
       }
@@ -274,6 +323,15 @@
       var form = document.getElementById("permissions-form");
       if (!form) return;
       var resolvedId = getSelectedId();
+      // Mark the card as denying immediately so the list refresh that
+      // follows -- and any re-render before the server has processed
+      // the deny -- shows it faded with a "(denying...)" label rather
+      // than letting the user click it back into the dialog.
+      if (resolvedId) {
+        denyingIds.add(resolvedId);
+        var card = inboxList.querySelector('.inbox-card[data-request-id="' + resolvedId + '"]');
+        if (card) card.classList.add("is-denying");
+      }
       var approveBtn = document.getElementById("permissions-approve-btn");
       if (approveBtn) approveBtn.disabled = true;
       var denyUrl = form.action.replace(/\/grant\b/, "/deny");
