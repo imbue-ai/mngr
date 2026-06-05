@@ -2701,13 +2701,19 @@ def _build_inbox_cards(request: Request) -> list[Mapping[str, str]]:
         if not ws_name:
             info = backend_resolver.get_agent_display_info(parsed_id)
             ws_name = info.agent_name if info else req.agent_id[:16]
+        # Accent is keyed on ws_name rather than the request's
+        # ``req.agent_id`` so all sibling agents on the same host /
+        # workspace produce the same color in the inbox -- the user
+        # thinks of "permissions for workspace X" rather than
+        # "permissions filed by this specific sub-agent", so the
+        # color tracks the workspace identity instead.
         cards.append(
             {
                 "id": str(req.event_id),
                 "kind_label": kind_label,
                 "ws_name": ws_name,
                 "display_name": display_name,
-                "accent": workspace_accent(req.agent_id),
+                "accent": workspace_accent(ws_name),
             }
         )
     return cards

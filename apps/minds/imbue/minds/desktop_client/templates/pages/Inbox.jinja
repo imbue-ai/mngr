@@ -404,6 +404,7 @@
 {% endset %}
 <Base title="Requests"
       body_class="bg-transparent text-zinc-900 font-sans antialiased"
+      body_style="-webkit-app-region: no-drag;"
       head={{ _head }}
       scripts={{ _scripts }}>
   {# Left-anchored slide-in drawer: full viewport height (including
@@ -413,7 +414,7 @@
      rounded corners so it reads as a top-level panel attached to the
      screen edge. The backdrop dims the workspace strip on the right. #}
   <div id="inbox-backdrop"
-       class="fixed inset-0 bg-black/30 flex justify-start"
+       class="fixed inset-0 bg-black/20 flex justify-start"
        onclick="onBackdropClick(event)">
     <div id="inbox-dialog"
          class="relative w-[90vw] md:w-[70vw] max-w-[1100px] h-full flex flex-col bg-white border-r border-zinc-200 shadow-2xl overflow-hidden">
