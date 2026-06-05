@@ -18,7 +18,6 @@ import pytest
 from imbue.minds.deployment_tests.data_types import FctTemplateRef
 from imbue.minds.deployment_tests.data_types import SharedEnvHandle
 from imbue.minds.deployment_tests.data_types import VerifiedUserHandle
-from imbue.minds.deployment_tests.helpers import wait_for_env_ready
 
 pytestmark = pytest.mark.minds_services
 
@@ -65,6 +64,8 @@ def test_litellm_spend_tracking_via_local_workspace(
     to offload, the future ``offload-modal-minds-services.toml`` will
     enable Docker-in-Docker (mirroring ``offload-modal-acceptance.toml``).
     """
-    wait_for_env_ready(shared_env("default"))
-    _ = (verified_user, fct_template_ref)
-    raise AssertionError("not implemented yet -- see skip reason")
+    # Body intentionally unimplemented (the test is @pytest.mark.skip above);
+    # the docstring is the design record. Fail loudly if the skip is ever
+    # removed before the drivers land.
+    _ = (shared_env, verified_user, fct_template_ref)
+    pytest.fail("not implemented yet -- see skip reason")
