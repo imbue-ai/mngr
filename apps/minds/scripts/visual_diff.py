@@ -366,7 +366,7 @@ def _build_scenarios() -> list[Scenario]:
         Scenario(name="chrome_non_mac_auth", builder=lambda: render_chrome_page(is_mac=False, is_authenticated=True)),
         # -- Sidebar -----------------------------------------------------
         Scenario(name="sidebar", builder=lambda: render_sidebar_page(mngr_forward_origin="http://localhost:8421")),
-        # -- Login / login_redirect / auth_error / request_unavailable ---
+        # -- Login / login_redirect / auth_error / inbox_unavailable / inbox_empty ---
         Scenario(name="login", builder=render_login_page),
         Scenario(
             name="login_redirect",
