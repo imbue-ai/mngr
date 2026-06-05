@@ -615,9 +615,9 @@ def test_notice_renders_each_variant() -> None:
 def test_card_renders_default_slot() -> None:
     html = CATALOG.render("Card", _content="<p>body</p>")
     assert "<p>body</p>" in html
-    # The visual shell (bg/border/rounded/shadow) is in the ``.minds-card``
-    # CSS class in tokens.css; the rendered HTML carries the class name
-    # rather than the underlying Tailwind utilities.
+    # The visual shell (bg/border/rounded; no baseline shadow) is in the
+    # ``.minds-card`` CSS class in tokens.css; the rendered HTML carries
+    # the class name rather than the underlying Tailwind utilities.
     assert "minds-card" in html
     # Default padding is "default" -> p-4.
     assert "p-4" in html
