@@ -433,16 +433,16 @@
         <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Buttons -- link style (via extra=)</div>
         <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-wrap items-center gap-4">
           <Button variant="ghost"
-                  extra="!p-0 !bg-transparent text-blue-600 hover:!bg-transparent hover:underline hover:!text-blue-700">
+                  extra="!p-0 !bg-transparent !text-xs !font-normal !text-blue-600 hover:!bg-transparent hover:underline hover:!text-blue-700">
             Configure&hellip;
           </Button>
           <Button variant="ghost"
-                  extra="!p-0 !bg-transparent text-xs text-zinc-400 hover:!bg-transparent hover:!text-zinc-700 hover:underline">
+                  extra="!p-0 !bg-transparent !text-xs !font-normal !text-zinc-400 hover:!bg-transparent hover:!text-zinc-700 hover:underline">
             Continue without an account
           </Button>
         </div>
         <p class="mt-1 text-[11px] text-zinc-500">
-          For text-link toggles use a ghost Button with ``extra=&quot;!p-0 !bg-transparent text-blue-600 hover:!bg-transparent hover:underline&quot;``. The ``!`` prefix forces those classes over the ghost defaults.
+          For text-link toggles use a ghost Button with ``extra=&quot;!p-0 !bg-transparent !text-xs !font-normal !text-blue-600 hover:!bg-transparent hover:underline hover:!text-blue-700&quot;``. The ``!`` prefix is load-bearing -- without it, the Button's base ``font-medium text-sm`` and the ghost variant's ``text-zinc-700`` win and the toggle reads as a heavy button rather than a link.
         </p>
         <div class="mt-0.5 text-[11px] text-zinc-500 font-mono">Button.jinja :: variant=&quot;ghost&quot; with extra= overrides</div>
       </div>
