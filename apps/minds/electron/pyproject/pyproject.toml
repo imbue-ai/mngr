@@ -27,11 +27,13 @@ dependencies = [
     "modal-proxy>=0.1.0",
 ]
 
-# TEMPORARY: supply-chain cooldown disabled (was a fixed cutoff at
-# 2026-05-23) while we stabilize the CI pipeline. The cutoff was added
-# in PR #1768; restore when the build/CI churn settles. Tracked TODO
-# for revisit.
+# Supply-chain hardening: rolling 14-day cooldown. Refuses any wheel /
+# source-dist resolved with an upload-time newer than `now - 14d`. Mirrors
+# the pnpm-workspace.yaml minimumReleaseAge gate so a freshly-compromised
+# release can't be pulled in before being noticed and yanked. Only bites
+# during resolution (`uv lock`); a frozen install replays the lockfile.
 [tool.uv]
+exclude-newer = "14 days"
 
 [tool.uv.sources]
 minds = { path = "../../../../apps/minds", editable = true }
