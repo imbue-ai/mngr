@@ -169,6 +169,7 @@ def test_returns_none_when_unconfigured() -> None:
             requested_region="US-EAST-VA",
             safety_margin_hours=24,
             max_candidates=10,
+            extra_tags={},
         )
         is None
     )
@@ -188,6 +189,7 @@ def test_returns_none_when_no_candidates() -> None:
             requested_region="US-EAST-VA",
             safety_margin_hours=24,
             max_candidates=10,
+            extra_tags={},
         )
         is None
     )
@@ -210,6 +212,7 @@ def test_recycle_claim_swaps_host_id_but_leaves_vps_cancelled() -> None:
         requested_region="US-EAST-VA",
         safety_margin_hours=24,
         max_candidates=10,
+        extra_tags={},
     )
     assert handle is not None
     assert handle.service_name == "vps-x.vps.ovh.us"
@@ -222,6 +225,33 @@ def test_recycle_claim_swaps_host_id_but_leaves_vps_cancelled() -> None:
     assert tags[MNGR_RECYCLING_LOCK_TAG_KEY] == handle.lock_value
 
 
+def test_recycle_claim_overwrites_extra_tags_for_new_owner() -> None:
+    """A recycled VPS gets the new bake's extra tags, replacing the previous owner's.
+
+    Pool hosts are discovered + torn down per-env via the ``minds_env`` IAM
+    tag, so a VPS recycled from one env to another must end up advertising
+    the *new* env, not the stale one it carried pre-cancellation.
+    """
+    client, fake = _make_fake_client_with_one_candidate()
+    # Simulate a candidate that still carries the previous owner's env tag.
+    fake.iam_payload[0]["tags"]["minds_env"] = "old-env"
+    new_host_id = HostId.generate()
+    handle = try_recycle_cancelled_vps(
+        client=client,
+        provider_name="alice-ovh",
+        new_host_id=new_host_id,
+        requested_plan="vps-2025-model1",
+        requested_region="US-EAST-VA",
+        safety_margin_hours=24,
+        max_candidates=10,
+        extra_tags={"minds_env": "staging"},
+    )
+    assert handle is not None
+    tags = fake.iam_payload[0]["tags"]
+    assert tags["minds_env"] == "staging"
+    assert tags[MNGR_HOST_ID_TAG_KEY] == str(new_host_id)
+
+
 def test_finalize_recycle_un_cancels_and_releases_lock() -> None:
     client, fake = _make_fake_client_with_one_candidate()
     handle = try_recycle_cancelled_vps(
@@ -232,6 +262,7 @@ def test_finalize_recycle_un_cancels_and_releases_lock() -> None:
         requested_region="US-EAST-VA",
         safety_margin_hours=24,
         max_candidates=10,
+        extra_tags={},
     )
     assert handle is not None
     assert finalize_recycle(client, handle) is True
@@ -251,6 +282,7 @@ def test_abort_recycle_leaves_vps_cancelled_and_releases_lock() -> None:
         requested_region="US-EAST-VA",
         safety_margin_hours=24,
         max_candidates=10,
+        extra_tags={},
     )
     assert handle is not None
     abort_recycle(client, handle)
@@ -272,6 +304,7 @@ def test_skips_non_cancelled_candidate() -> None:
         requested_region="US-EAST-VA",
         safety_margin_hours=24,
         max_candidates=10,
+        extra_tags={},
     )
     assert result is None
     # No PUT to serviceInfos should have happened.
@@ -288,6 +321,7 @@ def test_skips_candidate_inside_safety_margin() -> None:
         requested_region="US-EAST-VA",
         safety_margin_hours=24,
         max_candidates=10,
+        extra_tags={},
     )
     assert result is None
 
@@ -302,6 +336,7 @@ def test_skips_candidate_with_plan_mismatch() -> None:
         requested_region="US-EAST-VA",
         safety_margin_hours=24,
         max_candidates=10,
+        extra_tags={},
     )
     assert result is None
 
@@ -316,6 +351,7 @@ def test_skips_candidate_with_region_mismatch() -> None:
         requested_region="US-EAST-VA",
         safety_margin_hours=24,
         max_candidates=10,
+        extra_tags={},
     )
     assert result is None
 
@@ -330,6 +366,7 @@ def test_skips_candidate_in_installing_state() -> None:
         requested_region="US-EAST-VA",
         safety_margin_hours=24,
         max_candidates=10,
+        extra_tags={},
     )
     assert result is None
 
@@ -348,6 +385,7 @@ def test_skips_candidate_already_locked_by_someone_else() -> None:
         requested_region="US-EAST-VA",
         safety_margin_hours=24,
         max_candidates=10,
+        extra_tags={},
     )
     assert result is None
 
@@ -371,6 +409,7 @@ def test_picks_candidate_with_latest_expiration() -> None:
         requested_region="US-EAST-VA",
         safety_margin_hours=24,
         max_candidates=10,
+        extra_tags={},
     )
     assert result is not None
     assert result.service_name == "vps-far.vps.ovh.us"
@@ -391,6 +430,7 @@ def test_caps_candidates_considered() -> None:
         requested_region="US-EAST-VA",
         safety_margin_hours=24,
         max_candidates=3,
+        extra_tags={},
     )
     # Recycle should still succeed, but only the first 3 VPSes are evaluated.
     assert result is not None
@@ -414,6 +454,7 @@ def test_skips_candidate_with_active_engagement() -> None:
         requested_region="US-EAST-VA",
         safety_margin_hours=24,
         max_candidates=10,
+        extra_tags={},
     )
     assert result is None
 
@@ -429,6 +470,7 @@ def test_finalize_uses_read_modify_write() -> None:
         requested_region="US-EAST-VA",
         safety_margin_hours=24,
         max_candidates=10,
+        extra_tags={},
     )
     assert handle is not None
     finalize_recycle(client, handle)
@@ -469,6 +511,7 @@ def test_returns_none_when_host_id_tag_swap_fails() -> None:
         requested_region="US-EAST-VA",
         safety_margin_hours=24,
         max_candidates=10,
+        extra_tags={},
     )
     assert result is None
     # VPS stays cancelled -- defers un-cancel to finalize_recycle, so a
@@ -495,6 +538,7 @@ def test_safety_margin_thresholds(safety_hours: int, days: int, should_recycle: 
         requested_region="US-EAST-VA",
         safety_margin_hours=safety_hours,
         max_candidates=10,
+        extra_tags={},
     )
     if should_recycle:
         assert result is not None

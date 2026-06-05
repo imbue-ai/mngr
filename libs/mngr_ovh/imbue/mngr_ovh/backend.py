@@ -1,5 +1,6 @@
 import os
 import uuid
+from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
@@ -288,6 +289,7 @@ class OvhProvider(VpsDockerProvider):
         new_host_id: HostId,
         requested_plan: str,
         requested_region: str,
+        extra_tags: Mapping[str, str],
     ) -> RecycleHandle | None:
         """Try to lock + re-tag a cancelled VPS; return the recycle handle or None.
 
@@ -309,6 +311,7 @@ class OvhProvider(VpsDockerProvider):
             requested_region=requested_region,
             safety_margin_hours=self.ovh_config.recycle_safety_margin_hours,
             max_candidates=self.ovh_config.recycle_max_candidates_considered,
+            extra_tags=extra_tags,
         )
 
     def _on_host_finalized(self, *, host_id: HostId, vps_ip: str) -> None:
@@ -387,15 +390,14 @@ class OvhProvider(VpsDockerProvider):
         # IAM-key regex + the reserved-key list locally, so a 400 from
         # the IAM tag attach loop -- which would otherwise leak a freshly-
         # ordered month of billing -- cannot happen. (DEPLOY_SAFETY_AUDIT-
-        # style F1; spec required pre-order parsing.) The recycle path
-        # does not apply extra tags (the recycled VPS already carries
-        # whatever tags it had pre-cancellation, plus its mngr-host-id
-        # gets swapped by ``try_recycle_cancelled_vps``), so the parsed
-        # dict is only consumed in the fresh-order branch below. Parsing
-        # at the top still matters for the recycle path: if recycling
-        # falls through, the same provisioning call ends up ordering a
-        # fresh VPS, and we want to have already validated extra tags
-        # by that point.
+        # style F1; spec required pre-order parsing.) Both provisioning
+        # paths consume the parsed dict: the fresh-order branch attaches
+        # it alongside provider/host-id below, and the recycle path passes
+        # it to ``try_recycle_cancelled_vps`` (which (over)writes the tags
+        # so a VPS recycled across envs reflects the new owner's
+        # ``minds_env`` rather than the previous owner's). Parsing up front
+        # still matters either way: if recycling falls through to a fresh
+        # order, the extra tags have already been validated by that point.
         extra_tags = parse_extra_tags_env(os.environ.get("MNGR_VPS_EXTRA_TAGS", ""))
 
         with log_span("OVH provisioning for host {} ({})", name, host_id):
@@ -405,7 +407,7 @@ class OvhProvider(VpsDockerProvider):
             # this bake (no extra round-trip latency in the failure case).
             self._reconcile_pending_orders()
             recycle_handle = self._maybe_claim_recycled_vps(
-                new_host_id=host_id, requested_plan=plan, requested_region=region
+                new_host_id=host_id, requested_plan=plan, requested_region=region, extra_tags=extra_tags
             )
             # If `_provision_vps` raises before returning, the outer
             # cleanup in `_create_host_internal` never sees a vps_instance_id
@@ -470,9 +472,9 @@ class OvhProvider(VpsDockerProvider):
                 # orphan in `mngr list` and the create-cleanup path can
                 # clean it up by service name. The recycle path arrives
                 # already tagged -- `try_recycle_cancelled_vps` swapped
-                # `mngr-host-id` to the new host id under a cooperative
-                # lock -- so we skip the re-tag there to avoid two
-                # redundant POST /tag calls per recycled host.
+                # `mngr-host-id` to the new host id and (over)wrote the
+                # extra tags under a cooperative lock -- so we skip the
+                # re-tag here to avoid redundant POST /tag calls.
                 urn = vps_urn_for(service_name, region_code=iam_region_code_for_endpoint(self.ovh_config.endpoint))
                 if recycle_handle is None:
                     # F1: ``extra_tags`` was parsed at the very top of
