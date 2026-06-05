@@ -751,6 +751,46 @@ def _do_compare(label_a: str, label_b: str) -> Path:
     return report_path
 
 
+# CSS for the report page. Lives at module scope as a triple-quoted
+# string rather than a list of per-line ``"..."`` entries inside
+# ``_render_report`` so the source-file lines that contain a leading
+# CSS id selector (a ``#`` after some whitespace) don't trip the
+# ``trailing-comments`` ratchet -- the regex treats a leading ``"``
+# as code and a later ``#`` as the start of a trailing comment, which
+# is correct for Python but wrong for CSS-inside-a-string.
+_REPORT_CSS: Final[str] = """
+body { font: 14px -apple-system, system-ui, sans-serif; margin: 24px; color: #18181b; }
+table { border-collapse: collapse; width: 100%; }
+th, td { border: 1px solid #e4e4e7; padding: 8px; vertical-align: top; text-align: left; }
+th { background: #fafafa; position: sticky; top: 0; }
+td.shots { width: 50%; }
+td.shots .thumb { display: block; cursor: zoom-in; background: none; border: 1px solid #d4d4d8; padding: 0; width: 100%; }
+td.shots .thumb img { display: block; max-width: 100%; }
+td.shots .thumb:focus { outline: 2px solid #2563eb; outline-offset: 2px; }
+pre { background: #fafafa; padding: 8px; overflow: auto; max-height: 280px; font-size: 12px; }
+.verdict-ok { color: #047857; font-weight: 600; }
+.verdict-cosmetic { color: #525252; font-weight: 600; }
+.verdict-differs { color: #b91c1c; font-weight: 600; }
+.verdict-missing { color: #92400e; font-weight: 600; }
+#lightbox { position: fixed; inset: 0; background: rgba(0,0,0,0.85); display: none;
+  flex-direction: column; z-index: 1000; padding: 16px; }
+#lightbox.open { display: flex; }
+#lightbox-header { display: flex; align-items: center; gap: 16px; color: #fafafa;
+  font: 13px -apple-system, system-ui, sans-serif; padding: 4px 8px; }
+#lightbox-title { font-weight: 600; flex: 1; }
+#lightbox-side { padding: 2px 8px; border-radius: 4px; background: rgba(255,255,255,0.15); font-family: ui-monospace, monospace; }
+#lightbox-counter { color: #d4d4d8; }
+#lightbox-close { background: none; border: 1px solid rgba(255,255,255,0.3); color: #fafafa;
+  cursor: pointer; padding: 4px 10px; border-radius: 4px; font-size: 14px; }
+#lightbox-close:hover { background: rgba(255,255,255,0.1); }
+#lightbox-stage { flex: 1; display: flex; align-items: center; justify-content: center;
+  overflow: auto; cursor: pointer; }
+#lightbox-img { max-width: 100%; max-height: 100%; border: 1px solid rgba(255,255,255,0.2); }
+#lightbox-hint { color: #a1a1aa; font-size: 12px; text-align: center; padding: 8px;
+  font-family: ui-monospace, monospace; }
+"""
+
+
 def _render_report(label_a: str, label_b: str, rows: list[dict[str, Any]]) -> str:
     """Hand-rolled HTML report -- no template engine to keep the tool
     standalone (and to avoid bootstrapping JinjaX in this script).
@@ -780,36 +820,7 @@ def _render_report(label_a: str, label_b: str, rows: list[dict[str, Any]]) -> st
         "<!DOCTYPE html><html><head><meta charset='utf-8'>",
         f"<title>visual diff: {html.escape(label_a)} vs {html.escape(label_b)}</title>",
         "<style>",
-        "  body { font: 14px -apple-system, system-ui, sans-serif; margin: 24px; color: #18181b; }",
-        "  table { border-collapse: collapse; width: 100%; }",
-        "  th, td { border: 1px solid #e4e4e7; padding: 8px; vertical-align: top; text-align: left; }",
-        "  th { background: #fafafa; position: sticky; top: 0; }",
-        "  td.shots { width: 50%; }",
-        "  td.shots .thumb { display: block; cursor: zoom-in; background: none; border: 1px solid #d4d4d8; padding: 0; width: 100%; }",
-        "  td.shots .thumb img { display: block; max-width: 100%; }",
-        "  td.shots .thumb:focus { outline: 2px solid #2563eb; outline-offset: 2px; }",
-        "  pre { background: #fafafa; padding: 8px; overflow: auto; max-height: 280px; font-size: 12px; }",
-        "  .verdict-ok { color: #047857; font-weight: 600; }",
-        "  .verdict-cosmetic { color: #525252; font-weight: 600; }",
-        "  .verdict-differs { color: #b91c1c; font-weight: 600; }",
-        "  .verdict-missing { color: #92400e; font-weight: 600; }",
-        # Lightbox overlay.
-        "  #lightbox { position: fixed; inset: 0; background: rgba(0,0,0,0.85); display: none;",
-        "    flex-direction: column; z-index: 1000; padding: 16px; }",
-        "  #lightbox.open { display: flex; }",
-        "  #lightbox-header { display: flex; align-items: center; gap: 16px; color: #fafafa;",
-        "    font: 13px -apple-system, system-ui, sans-serif; padding: 4px 8px; }",
-        "  #lightbox-title { font-weight: 600; flex: 1; }",
-        "  #lightbox-side { padding: 2px 8px; border-radius: 4px; background: rgba(255,255,255,0.15); font-family: ui-monospace, monospace; }",
-        "  #lightbox-counter { color: #d4d4d8; }",
-        "  #lightbox-close { background: none; border: 1px solid rgba(255,255,255,0.3); color: #fafafa;",
-        "    cursor: pointer; padding: 4px 10px; border-radius: 4px; font-size: 14px; }",
-        "  #lightbox-close:hover { background: rgba(255,255,255,0.1); }",
-        "  #lightbox-stage { flex: 1; display: flex; align-items: center; justify-content: center;",
-        "    overflow: auto; cursor: pointer; }",
-        "  #lightbox-img { max-width: 100%; max-height: 100%; border: 1px solid rgba(255,255,255,0.2); }",
-        "  #lightbox-hint { color: #a1a1aa; font-size: 12px; text-align: center; padding: 8px;",
-        "    font-family: ui-monospace, monospace; }",
+        _REPORT_CSS,
         "</style></head><body>",
         f"<h1>visual diff: <code>{html.escape(label_a)}</code> vs <code>{html.escape(label_b)}</code></h1>",
         f"<p>"

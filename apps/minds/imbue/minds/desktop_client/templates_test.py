@@ -644,7 +644,7 @@ def test_card_tight_padding_uses_px4_py25() -> None:
 
 def test_card_tag_anchor_renders_anchor_with_href() -> None:
     html = CATALOG.render("Card", tag="a", href="/x", _content="body")
-    assert '<a ' in html
+    assert "<a " in html
     assert 'href="/x"' in html
     # Anchors auto-disable underline + inherit text color so a Card anchor
     # doesn't read like a regular hyperlink.
@@ -862,7 +862,7 @@ def test_select_honors_width_prop() -> None:
 
 def test_link_regular_uses_blue_underline_recipe() -> None:
     html = CATALOG.render("Link", href="/x", _content="back").strip()
-    assert '<a ' in html
+    assert "<a " in html
     assert 'href="/x"' in html
     assert "text-blue-600" in html
     assert "hover:underline" in html
