@@ -20,6 +20,31 @@ const base = require('@playwright/test');
 
 const DEFAULT_APP_PATH = '/Applications/Minds.app/Contents/MacOS/Minds';
 
+// Minds' BaseWindow has multiple WebContentsViews; `firstWindow()` returns
+// the chrome view (URL like `http://localhost:<port>/_chrome`) which only
+// renders the title bar. The actual login / projects / chat UI lives on a
+// sibling page on the same localhost origin without the `_chrome` prefix.
+// `_pick_content_page` in e2e_workspace_runner.py is the Python twin.
+const _BACKEND_ORIGIN_RE = /^http:\/\/localhost:\d+(?:\/|$)/;
+const _CHROME_PATH_RE = /^http:\/\/localhost:\d+\/_chrome(?:\/|$|\?)/;
+
+async function pickContentWindow(app, { timeoutMs = 60 * 1000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let last = [];
+  while (Date.now() < deadline) {
+    last = app.windows().map((p) => p.url());
+    const hit = app.windows().find((p) => {
+      const u = p.url();
+      return _BACKEND_ORIGIN_RE.test(u) && !_CHROME_PATH_RE.test(u);
+    });
+    if (hit) return hit;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error(
+    `No content window settled on a backend URL within ${timeoutMs}ms; observed: ${JSON.stringify(last)}`
+  );
+}
+
 const test = base.test.extend({
   mindsApp: async ({}, use, testInfo) => {
     const execPath = process.env.MINDS_APP_PATH || DEFAULT_APP_PATH;
@@ -38,7 +63,7 @@ const test = base.test.extend({
 
     const mainWindow = await app.firstWindow({ timeout: 5 * 60 * 1000 });
 
-    await use({ app, mainWindow });
+    await use({ app, mainWindow, pickContentWindow });
 
     // Save minds.log snapshot on failure for postmortem. Be defensive --
     // the outputDir may not exist if the test failed before any Playwright
