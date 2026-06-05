@@ -13,7 +13,9 @@ This module owns:
 - the cooperative IAM-tag lock that prevents two concurrent ``mngr create``s
   from clobbering each other on the same candidate
 - un-cancelling the chosen VPS via the ``PUT /serviceInfos`` read-modify-write
-- swapping the ``mngr-host-id`` IAM tag to point at the new host
+- swapping the ``mngr-host-id`` IAM tag to point at the new host and
+  (over)writing the new owner's extra IAM tags (e.g. ``minds_env``) so a
+  cross-env recycle reflects the env that now owns the VPS
 
 The caller (``OvhProvider._provision_vps``) is responsible for the
 shared post-selection steps (rebuild, TOFU pin, container setup).
@@ -40,6 +42,7 @@ delivery is still pending now.
 
 import time
 import uuid
+from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 from typing import Final
@@ -54,6 +57,7 @@ from imbue.mngr_ovh.client import RecycleHandle
 from imbue.mngr_ovh.iam_tags import MNGR_HOST_ID_TAG_KEY
 from imbue.mngr_ovh.iam_tags import MNGR_RECYCLING_LOCK_TAG_KEY
 from imbue.mngr_ovh.iam_tags import attach_tag
+from imbue.mngr_ovh.iam_tags import attach_tags
 from imbue.mngr_ovh.iam_tags import delete_tag
 from imbue.mngr_ovh.iam_tags import get_vps_resource
 from imbue.mngr_ovh.iam_tags import list_vps_resources_for_provider
@@ -81,13 +85,21 @@ def try_recycle_cancelled_vps(
     requested_region: str,
     safety_margin_hours: int,
     max_candidates: int,
+    # Owner/env IAM tags (e.g. ``minds_env=staging``) to (over)write onto the
+    # recycled VPS so it reflects the *current* bake's owner, matching what a
+    # fresh order would attach. Reserved keys are already rejected upstream by
+    # ``parse_extra_tags_env``.
+    extra_tags: Mapping[str, str],
 ) -> RecycleHandle | None:
     """Lock a cancelled VPS and re-tag it for ``new_host_id``. Returns a handle, or None.
 
     Side effects on success:
     1. The chosen VPS gets a transient ``mngr-recycling-by`` IAM lock tag.
     2. Its old ``mngr-host-id`` IAM tag is replaced with ``new_host_id``.
-    3. ``deleteAtExpiration`` is **NOT** flipped here; the caller flips it
+    3. Each ``extra_tags`` pair is attached (overwriting any stale value),
+       so a VPS recycled across envs ends up owned by the new env rather
+       than still advertising the previous owner's ``minds_env`` tag.
+    4. ``deleteAtExpiration`` is **NOT** flipped here; the caller flips it
        via ``finalize_recycle`` once the rebuild + container setup + host
        record write have all succeeded.
 
@@ -131,6 +143,7 @@ def try_recycle_cancelled_vps(
             candidate=candidate,
             new_host_id=new_host_id,
             lock_value=lock_value,
+            extra_tags=extra_tags,
         )
         if handle is not None:
             logger.info(
@@ -312,8 +325,13 @@ def _try_recycle_one(
     candidate: _Candidate,
     new_host_id: HostId,
     lock_value: str,
+    extra_tags: Mapping[str, str],
 ) -> RecycleHandle | None:
     """Lock + re-tag a candidate. Returns a handle on success, ``None`` on failure.
+
+    Re-tags the VPS for the new owner: swaps ``mngr-host-id`` and
+    (over)writes ``extra_tags`` (e.g. ``minds_env``) so a VPS recycled from
+    one env to another no longer advertises the previous owner's tags.
 
     Does **not** un-cancel: that step is deferred to ``finalize_recycle``,
     called by the caller after the host record has been written, so a
@@ -340,6 +358,12 @@ def _try_recycle_one(
         _swap_host_id_tag(client, urn, new_host_id)
     except MngrError as e:
         logger.warning("OVH recycle: host-id tag swap failed on {} ({}); aborting", candidate.service_name, e)
+        _release_lock(client, urn, lock_value)
+        return None
+    try:
+        attach_tags(client, urn, extra_tags)
+    except MngrError as e:
+        logger.warning("OVH recycle: extra-tag attach failed on {} ({}); aborting", candidate.service_name, e)
         _release_lock(client, urn, lock_value)
         return None
     return RecycleHandle(urn=urn, service_name=candidate.service_name, lock_value=lock_value)
