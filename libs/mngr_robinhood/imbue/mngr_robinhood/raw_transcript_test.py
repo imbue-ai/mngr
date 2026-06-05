@@ -210,27 +210,19 @@ def test_tool_result_list_content_is_flattened() -> None:
             )
         ]
     )
-    user_with_list_result = json.dumps(
-        {
-            "type": "user",
-            "uuid": "u-list-r",
-            "timestamp": "2026-01-01T00:00:02Z",
-            "isMeta": False,
-            "message": {
-                "role": "user",
+    user_with_list_result = _user_raw(
+        "u-list-r",
+        [
+            {
+                "type": "tool_result",
+                "tool_use_id": "call-L",
                 "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": "call-L",
-                        "content": [
-                            {"type": "text", "text": "line one"},
-                            "line two",
-                            {"type": "image", "data": "ignored"},
-                        ],
-                    }
+                    {"type": "text", "text": "line one"},
+                    "line two",
+                    {"type": "image", "data": "ignored"},
                 ],
-            },
-        }
+            }
+        ],
     )
     events = parser.parse_lines([user_with_list_result])
     tool_result_events = [e for e in events if e["type"] == "tool_result"]
@@ -252,17 +244,9 @@ def test_tool_result_output_is_truncated() -> None:
         ]
     )
     long_output = "y" * 5000
-    user_with_long_result = json.dumps(
-        {
-            "type": "user",
-            "uuid": "u-trunc-r",
-            "timestamp": "2026-01-01T00:00:02Z",
-            "isMeta": False,
-            "message": {
-                "role": "user",
-                "content": [{"type": "tool_result", "tool_use_id": "call-T", "content": long_output}],
-            },
-        }
+    user_with_long_result = _user_raw(
+        "u-trunc-r",
+        [{"type": "tool_result", "tool_use_id": "call-T", "content": long_output}],
     )
     events = parser.parse_lines([user_with_long_result])
     output = [e for e in events if e["type"] == "tool_result"][0]["output"]
@@ -284,20 +268,12 @@ def test_user_message_with_text_and_tool_result_emits_both_events() -> None:
             )
         ]
     )
-    mixed = json.dumps(
-        {
-            "type": "user",
-            "uuid": "u-mix-r",
-            "timestamp": "2026-01-01T00:00:02Z",
-            "isMeta": False,
-            "message": {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "here is some context"},
-                    {"type": "tool_result", "tool_use_id": "call-M", "content": "file body"},
-                ],
-            },
-        }
+    mixed = _user_raw(
+        "u-mix-r",
+        [
+            {"type": "text", "text": "here is some context"},
+            {"type": "tool_result", "tool_use_id": "call-M", "content": "file body"},
+        ],
     )
     events = parser.parse_lines([mixed])
     by_type = {e["type"]: e for e in events}
