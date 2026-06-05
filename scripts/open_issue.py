@@ -10,13 +10,14 @@ for user review before submission.
 
 import argparse
 import webbrowser
+from collections.abc import Callable
 from collections.abc import Sequence
 from pathlib import Path
 
 from imbue.mngr.cli.issue_reporting import build_new_issue_url
 
 
-def main(argv: Sequence[str] | None = None) -> None:
+def main(argv: Sequence[str] | None = None, open_url: Callable[[str], object] = webbrowser.open) -> None:
     parser = argparse.ArgumentParser(description="Open a pre-populated GitHub issue in the browser")
     parser.add_argument("body_file", type=Path, help="Path to a markdown file containing the issue body")
     parser.add_argument("--title", required=True, help="Issue title string")
@@ -26,7 +27,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     body = args.body_file.read_text(encoding="utf-8")
     url = build_new_issue_url(args.title, body)
     print(f"Opening issue in browser: {args.title}")
-    webbrowser.open(url)
+    open_url(url)
 
 
 if __name__ == "__main__":
