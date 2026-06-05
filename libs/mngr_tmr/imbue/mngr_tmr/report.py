@@ -161,6 +161,19 @@ _EXTRACTED_TEST_OUTPUT_DIR = "test_output"
 _TESTING_OUTCOME_CACHE: dict[AgentName, TestResult] = {}
 _INTEGRATOR_OUTCOME_CACHE: dict[AgentName, IntegratorResult] = {}
 
+
+def reset_outcome_caches() -> None:
+    """Clear the process-global outcome caches.
+
+    These caches key parsed outcomes by ``AgentName`` and ignore
+    ``output_dir`` on a hit (safe in production, where one process maps to a
+    single output_dir). Tests reuse agent names across distinct temp dirs, so
+    they must reset the caches between tests to avoid cross-test contamination.
+    """
+    _TESTING_OUTCOME_CACHE.clear()
+    _INTEGRATOR_OUTCOME_CACHE.clear()
+
+
 _SECTION_ORDER: list[ReportSection] = [
     ReportSection.NON_IMPL_FIXES,
     ReportSection.IMPL_FIXES,
