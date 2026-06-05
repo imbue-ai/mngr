@@ -14,7 +14,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `upload_files_in_bulk` (`imbue.mngr.hosts.file_upload`) transfers many files to a host in a single rsync (remote) or direct write (local), backed by a new `copy_local_directory` host primitive. `Host.provision_agent`'s user-upload and agent file-transfer loops route through it instead of one `write_file` per file (a per-file SSH round-trip that did not scale — github issue 1825).
 - Added: `tail_discovery_events_file` helper — a pure consumer that emits the latest cached snapshot then tails the discovery event log without polling providers or writing snapshots. Backs `mngr forward --observe-via-file` and is shared with `run_discovery_stream`.
 - Added: `imbue.mngr.utils.git_utils.find_git_source_path` shared helper for resolving the per-agent source-repo trust path, replacing the byte-for-byte-duplicated logic in the `antigravity` and `claude` plugins.
-- Added: `imbue.mngr.hosts.common.symlink_or_copy_on_host(host, source, dest, *, symlink, ensure_source_parent=...)` — a one-round-trip helper that symlinks (write-through, even to a not-yet-existing source) or copies (only if the source exists) a path on the host, centralizing the symlink-vs-copy credential/cache pattern.
+- Added: `imbue.mngr.hosts.common.symlink_on_host(host, source, dest, *, ensure_source_parent=...)` and `copy_on_host(host, source, dest, *, copy_file_mode=...)` — one-round-trip helpers that respectively symlink (write-through, even to a not-yet-existing source) or copy (only if the source exists) a path on the host, centralizing the symlink-vs-copy credential/cache pattern.
 
 ### Changed
 
