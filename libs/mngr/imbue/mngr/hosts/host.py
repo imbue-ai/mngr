@@ -1197,18 +1197,6 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             base_branch_name = options.git.base_branch
         else:
             head_name = _git_command_stdout(source_host, "git rev-parse --abbrev-ref HEAD", source_path)
-            # ``git rev-parse --abbrev-ref HEAD`` returns the literal "HEAD" when
-            # the source is in detached-HEAD state (e.g. ``git clone --branch
-            # <annotated-tag>`` leaves the worktree detached at the tag's commit).
-            # Passing "HEAD" through as the base would land us at line 1287
-            # below with the target-side error
-            # ``fatal: 'HEAD' is not a commit and a branch '...' cannot be
-            # created from it`` -- the just-initialized bare repo has no HEAD
-            # yet, only the tag refs pushed in. Resolve to the commit SHA so the
-            # checkout finds the actual commit by its sha pushed in via
-            # ``+refs/heads/*:refs/heads/*`` / ``+refs/tags/*:refs/tags/*``.
-            if head_name == "HEAD":
-                head_name = _git_command_stdout(source_host, "git rev-parse HEAD", source_path)
             base_branch_name = head_name or "main"
 
         # Get git author info and origin remote URL from source repo
