@@ -51,10 +51,14 @@ class FakeLatchkeyGatewayClient(LatchkeyGatewayClient):
 
     Behaves like the real client minus the HTTP layer:
 
-    * ``set_permission_rule`` actually mutates the named file on disk
-      via the same :mod:`imbue.mngr_latchkey.store` helpers the real
-      extension uses, so tests that assert on the post-grant
-      permissions file work unchanged.
+    * ``set_permission_rule`` mutates the named file on disk with an
+      inline reimplementation that mirrors the gateway extension's
+      ``{...file, rules}`` merge (replace-in-place per scope, sibling
+      keys preserved) so callers that later read the file back see a
+      realistic shape. This is only a mirror: the authoritative merge
+      lives server-side in ``permissions.mjs`` and is tested in
+      ``libs/mngr_latchkey``, so tests should assert the handler's
+      forwarding via :attr:`set_calls` rather than this file's contents.
     * ``delete_permission_request`` records the deleted ids in memory.
     * ``iter_permission_requests`` raises -- streaming is not modelled
       by this fake; tests that need streaming should use a custom
