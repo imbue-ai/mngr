@@ -1648,6 +1648,26 @@ def test_inbox_detail_fragment_for_unknown_id_returns_unavailable_200(tmp_path: 
     assert "no longer available" in response.text
 
 
+def test_inbox_auto_open_checkbox_reflects_config(tmp_path: Path) -> None:
+    """The header checkbox is pre-checked when the config has auto-open enabled."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    # Default (no config write): auto-open is True, checkbox is checked.
+    response = client.get("/inbox")
+    body = response.text
+    assert 'id="inbox-auto-open"' in body
+    assert "checked" in body[body.find('id="inbox-auto-open"') : body.find(">", body.find('id="inbox-auto-open"'))]
+
+    # Flip the setting to False and confirm the checkbox renders unchecked.
+    config = MindsConfig(data_dir=tmp_path)
+    config.set_auto_open_requests_panel(False)
+    response = client.get("/inbox")
+    body = response.text
+    tag_start = body.find('id="inbox-auto-open"')
+    tag_end = body.find(">", tag_start)
+    assert "checked" not in body[tag_start:tag_end]
+
+
 def test_old_requests_panel_route_removed(tmp_path: Path) -> None:
     """The legacy panel route no longer exists."""
     client, auth_store = _create_test_client_with_stores(tmp_path)

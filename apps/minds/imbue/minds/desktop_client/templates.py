@@ -384,6 +384,7 @@ def render_inbox_page(
     selected_id: str = "",
     detail_html: str = "",
     is_empty: bool = False,
+    auto_open: bool = True,
 ) -> str:
     """Render the full inbox modal page served by ``GET /inbox``.
 
@@ -392,6 +393,8 @@ def render_inbox_page(
     pre-rendered right-pane fragment (handler detail, unavailable
     fragment, or empty). ``is_empty`` is True when there are no
     pending requests and the layout collapses to a centered message.
+    ``auto_open`` is the initial state of the "Auto-open on new
+    request" checkbox in the inbox header.
     """
     return CATALOG.render(
         "pages.Inbox",
@@ -399,6 +402,7 @@ def render_inbox_page(
         selected_id=selected_id,
         detail_html=detail_html,
         is_empty=is_empty,
+        auto_open=auto_open,
     )
 
 

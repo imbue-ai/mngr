@@ -1,4 +1,4 @@
-{#def cards, selected_id="", detail_html="", is_empty=False #}
+{#def cards, selected_id="", detail_html="", is_empty=False, auto_open=True #}
 {#
   Inbox modal page. Hosts:
     - Transparent body + dim backdrop (so the desktop client modal view
@@ -12,7 +12,8 @@
   of the initially-selected card; ``detail_html`` is the pre-rendered
   right-pane HTML (a handler fragment, the "no longer available"
   fragment, or an empty placeholder). ``is_empty`` is True when there
-  are no pending requests and the layout collapses to a centered message.
+  are no pending requests and the layout collapses to a centered
+  message. ``auto_open`` is the initial state of the auto-open checkbox.
 #}
 {% set _head %}
   <style>
@@ -79,6 +80,22 @@
       if (event.target && event.target.id === "inbox-backdrop") closeInbox();
     }
     window.onBackdropClick = onBackdropClick;
+
+    // Auto-open toggle. Fire-and-forget POST: the server reads the value
+    // on the next SSE-driven auto-open decision, so the UI doesn't need
+    // to wait for the response. The Electron main process queries the
+    // setting via the chrome SSE ``auto_open`` field on ``requests``
+    // events, which it polls separately.
+    window.onAutoOpenToggle = function (event) {
+      var enabled = !!(event.target && event.target.checked);
+      fetch("/_chrome/requests-auto-open", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: enabled }),
+        keepalive: true,
+      }).catch(function () {});
+    };
 
     document.addEventListener("keydown", function (e) {
       if (e.key === "Escape") closeInbox();
@@ -294,7 +311,10 @@
         var newIds = Array.isArray(evt.request_ids) ? evt.request_ids.map(String) : [];
         fetchListFragment().then(function () {
           if (currentId && newIds.indexOf(currentId) === -1) {
-            inboxDetail.innerHTML = '<div class="permissions-detail"><h1 class="text-xl font-semibold text-zinc-900 leading-tight">This permission request is no longer available</h1></div>';
+            // The server returns the canonical unavailable fragment for
+            // resolved/unknown ids; let it own the copy rather than
+            // duplicating the message here.
+            fetchDetailFragment(currentId);
             updateUrl(null);
           }
         });
@@ -317,8 +337,14 @@
        onclick="onBackdropClick(event)">
     <div id="inbox-dialog"
          class="relative w-full max-w-[1000px] h-[80vh] flex flex-col bg-white border border-zinc-200 rounded-2xl shadow-xl overflow-hidden">
-      <div class="flex items-center justify-between px-5 py-3 border-b border-zinc-200">
+      <div class="flex items-center justify-between gap-4 px-5 py-3 border-b border-zinc-200">
         <h1 class="text-sm font-semibold text-zinc-800 uppercase tracking-wider">Inbox</h1>
+        <label class="text-xs text-zinc-500 cursor-pointer flex items-center gap-1.5">
+          <input type="checkbox" id="inbox-auto-open"
+                 {% if auto_open %}checked{% endif %}
+                 onchange="onAutoOpenToggle(event)">
+          Auto-open on new request
+        </label>
         <DialogCloseButton id="inbox-close-btn" onclick="closeInbox()" />
       </div>
       <div id="inbox-body" class="flex flex-1 min-h-0 {% if is_empty %}is-empty{% endif %}">

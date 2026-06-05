@@ -2775,12 +2775,15 @@ def _handle_inbox_page(
     cards = _build_inbox_cards(request)
     selected_query = request.query_params.get("selected", "")
     selected_id, detail_html = _resolve_inbox_selection(request, selected_query, backend_resolver)
+    minds_config: MindsConfig | None = request.app.state.minds_config
+    auto_open = minds_config.get_auto_open_requests_panel() if minds_config else True
     return HTMLResponse(
         content=render_inbox_page(
             cards=cards,
             selected_id=selected_id,
             detail_html=detail_html,
             is_empty=len(cards) == 0,
+            auto_open=auto_open,
         )
     )
 
