@@ -191,8 +191,13 @@ def sweep_stale_users(
                 user_info = raw_user.get("user", raw_user)
                 emails: list[str] = user_info.get("emails", [])
                 user_id = user_info.get("id") or user_info.get("recipeUserId")
-                time_joined = user_info.get("timeJoined", 0)
-                if not user_id or not emails or time_joined > cutoff_ms:
+                # A missing timeJoined means we cannot establish the user's age, so we must
+                # NOT delete it: the age cutoff exists precisely to avoid deleting a concurrent
+                # run's freshly-created user. Bias an unknown age toward "too new to delete"
+                # (skip) rather than the old ``get(..., 0)`` which treated it as epoch-old and
+                # would have authorized deletion.
+                time_joined = user_info.get("timeJoined")
+                if not user_id or not emails or time_joined is None or time_joined > cutoff_ms:
                     continue
                 if not any(email_pattern.match(email) for email in emails):
                     continue
