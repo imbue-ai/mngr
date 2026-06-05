@@ -259,7 +259,11 @@ def rotation_lock(directory: Path) -> Iterator[None]:
         acquire_start = time.monotonic()
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+        except BlockingIOError:
+            # The lock is currently held by another process (EWOULDBLOCK/EAGAIN,
+            # which Python surfaces as BlockingIOError). Fall back to a blocking
+            # acquire. Other OSErrors (bad fd, EINTR) are genuine faults and must
+            # propagate rather than be silently treated as contention.
             logger.warning("Waiting for rotation lock at {}", lock_path)
             fcntl.flock(fd, fcntl.LOCK_EX)
             acquire_elapsed = time.monotonic() - acquire_start
