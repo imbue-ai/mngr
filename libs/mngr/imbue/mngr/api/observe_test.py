@@ -51,8 +51,12 @@ from imbue.mngr.utils.testing import make_test_discovered_host
 
 
 def test_get_default_events_base_dir_expands_home(temp_config: MngrConfig) -> None:
-    events_base_dir = get_default_events_base_dir(temp_config)
-    assert events_base_dir == temp_config.default_host_dir.expanduser()
+    # Point default_host_dir at a ~-containing path so we verify the helper
+    # actually expands "~" rather than mirroring a no-op expanduser() call.
+    tilde_config = temp_config.model_copy(update={"default_host_dir": Path("~/.mngr-observe-test")})
+    events_base_dir = get_default_events_base_dir(tilde_config)
+    assert not str(events_base_dir).startswith("~")
+    assert events_base_dir == Path.home() / ".mngr-observe-test"
 
 
 def test_get_observe_events_dir_returns_correct_path(temp_host_dir: Path) -> None:
@@ -504,16 +508,16 @@ def test_agent_observer_emit_agent_state_no_state_change_when_same_state(
     """Verify that no state change event is emitted when the lifecycle state field is the same."""
     observer = _make_observer(temp_mngr_ctx, noop_binary)
     agent = make_test_agent_details(state=AgentLifecycleState.RUNNING)
-
-    # First emit triggers state change (None -> RUNNING)
-    observer._emit_agent_state(agent)
-    # Second emit with same state should not add another state change
-    observer._emit_agent_state(agent)
-
-    # Only the initial state change should be emitted (None -> RUNNING), not a duplicate
     states_path = get_agent_states_events_path(observer.events_base_dir)
-    lines = states_path.read_text().strip().splitlines()
-    assert len(lines) == 1
+
+    # First emit triggers a state change (None -> RUNNING), writing exactly one line.
+    observer._emit_agent_state(agent)
+    assert len(states_path.read_text().strip().splitlines()) == 1
+
+    # Second emit with the same state must be a no-op for the agent_states stream:
+    # the line count stays at 1 rather than growing to 2.
+    observer._emit_agent_state(agent)
+    assert len(states_path.read_text().strip().splitlines()) == 1
 
 
 def test_agent_observer_emit_agent_state_detects_state_transition(

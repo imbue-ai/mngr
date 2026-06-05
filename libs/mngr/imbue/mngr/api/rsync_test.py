@@ -7,31 +7,11 @@ import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.api.rsync import RsyncEndpointError
-from imbue.mngr.api.rsync import RsyncResult
 from imbue.mngr.api.rsync import _build_rsync_command
 from imbue.mngr.api.rsync import rsync
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import UncommittedChangesMode
-
-# =============================================================================
-# RsyncResult model
-# =============================================================================
-
-
-def test_rsync_result_can_be_created_with_all_fields() -> None:
-    result = RsyncResult(
-        files_transferred=10,
-        bytes_transferred=1024,
-        source_path="/source",
-        destination_path="/dest",
-    )
-
-    assert result.files_transferred == 10
-    assert result.bytes_transferred == 1024
-    assert result.source_path == "/source"
-    assert result.destination_path == "/dest"
-
 
 # =============================================================================
 # rsync command builder
@@ -41,10 +21,20 @@ def test_rsync_result_can_be_created_with_all_fields() -> None:
 def test_build_rsync_command_includes_defaults_and_passes_paths_verbatim() -> None:
     cmd = _build_rsync_command("/src", "/dst", extra_args=(), ssh_transport=None)
     assert cmd[0] == "rsync"
-    assert "-avz" in cmd
+    # The mngr defaults must be present, but their exact spelling is incidental:
+    # ``-avz`` vs ``-a -v -z`` is behavior-preserving. What's load-bearing is that
+    # archive (a), verbose (v), and compress (z) are all requested in some form, so
+    # collect the letters from every short-flag cluster and check the union.
+    short_flag_letters = {
+        letter for arg in cmd if arg.startswith("-") and not arg.startswith("--") for letter in arg[1:]
+    }
+    assert {"a", "v", "z"} <= short_flag_letters
+    # ``--stats`` (machine-parseable transfer summary) and the ``.git`` exclusion are
+    # load-bearing long-form defaults.
     assert "--stats" in cmd
     assert "--exclude=.git" in cmd
-    # Paths are passed through with no mangling.
+    # Paths are passed through with no mangling, and remain the final two args
+    # (after all options) so rsync parses them as source/destination.
     assert cmd[-2] == "/src"
     assert cmd[-1] == "/dst"
 

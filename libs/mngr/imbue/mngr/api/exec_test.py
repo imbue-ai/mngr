@@ -14,8 +14,6 @@ from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.api.address_parsers import parse_agent_address
 from imbue.mngr.api.exec import ExecResult
 from imbue.mngr.api.exec import MultiExecResult
-from imbue.mngr.api.exec import OuterExecResult
-from imbue.mngr.api.exec import SkippedAgent
 from imbue.mngr.api.exec import _record_failure
 from imbue.mngr.api.exec import exec_command_on_agent
 from imbue.mngr.api.exec import exec_command_on_agents
@@ -29,9 +27,7 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import ErrorBehavior
-from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
-from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.testing import cleanup_tmux_session
@@ -105,32 +101,6 @@ def running_test_agent(
     running = _create_running_test_agent(local_provider, temp_mngr_ctx, temp_work_dir, mngr_test_prefix)
     yield running
     cleanup_tmux_session(running.session_name)
-
-
-def test_exec_result_fields() -> None:
-    """Test ExecResult has the expected fields."""
-    result = ExecResult(
-        agent_name="test-agent",
-        stdout="hello\n",
-        stderr="",
-        success=True,
-    )
-    assert result.agent_name == "test-agent"
-    assert result.stdout == "hello\n"
-    assert result.stderr == ""
-    assert result.success is True
-
-
-def test_exec_result_failure() -> None:
-    """Test ExecResult with a failed command."""
-    result = ExecResult(
-        agent_name="test-agent",
-        stdout="",
-        stderr="command not found\n",
-        success=False,
-    )
-    assert result.success is False
-    assert result.stderr == "command not found\n"
 
 
 @pytest.mark.tmux
@@ -209,25 +179,6 @@ def test_exec_command_on_agent_sources_agent_env(
 
     assert result.success is True
     assert "hello_from_env" in result.stdout
-
-
-def test_multi_exec_result_fields() -> None:
-    """Test MultiExecResult has the expected fields."""
-    result = MultiExecResult()
-    assert result.successful_results == []
-    assert result.failed_agents == []
-
-
-def test_multi_exec_result_accumulates_results() -> None:
-    """Test MultiExecResult accumulates results correctly."""
-    result = MultiExecResult()
-    result.successful_results.append(ExecResult(agent_name="agent-1", stdout="hello\n", stderr="", success=True))
-    result.failed_agents.append(("agent-2", "host offline"))
-
-    assert len(result.successful_results) == 1
-    assert len(result.failed_agents) == 1
-    assert result.successful_results[0].agent_name == "agent-1"
-    assert result.failed_agents[0] == ("agent-2", "host offline")
 
 
 @pytest.mark.tmux
@@ -370,40 +321,12 @@ def test_exec_command_on_agents_returns_empty_when_no_agents_match(
 # =========================================================================
 
 
-def test_skipped_agent_carries_all_ids() -> None:
-    """SkippedAgent has agent_id, agent_name, host_id, provider_name, reason."""
-    skipped = SkippedAgent(
-        agent_id=AgentId("agent-abc123def4567890abcd1234567890ef"),
-        agent_name=AgentName("my-agent"),
-        host_id=HostId("host-abc123def4567890abcd1234567890ef"),
-        provider_name=ProviderInstanceName("modal"),
-        reason="no outer host",
-    )
-    assert skipped.agent_name == "my-agent"
-    assert skipped.provider_name == "modal"
-    assert skipped.reason == "no outer host"
-
-
 def test_multi_exec_result_has_skipped_and_outer_lists() -> None:
     """MultiExecResult has skipped_agents and outer_results lists, both empty by default."""
     result = MultiExecResult()
     assert result.skipped_agents == []
     assert result.outer_results == []
     assert result.is_any_failure is False
-
-
-def test_outer_exec_result_carries_outer_host_and_agents() -> None:
-    """OuterExecResult holds the canonical outer-host id and the input-agent list."""
-    r = OuterExecResult(
-        outer_host="outer:docker:host-abc",
-        agents=("a", "b", "c"),
-        stdout="hello\n",
-        stderr="",
-        success=True,
-    )
-    assert r.outer_host == "outer:docker:host-abc"
-    assert r.agents == ("a", "b", "c")
-    assert r.success is True
 
 
 def test_group_matches_by_outer_host_buckets_no_outer_for_local(

@@ -18,6 +18,7 @@ from imbue.mngr.api.testing import FakeAgent
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.api.testing import SyncTestContext
 from imbue.mngr.api.testing import has_uncommitted_changes
+from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -178,6 +179,12 @@ def test_rsync_from_remote_stash_leaves_changes_stashed(
     assert (pull_ctx.local_dir / "README.md").read_text() == "Initial content"
     assert (pull_ctx.local_dir / "agent_file.txt").read_text() == "agent content"
 
+    # Confirm the stash holds the right payload (not just that *a* stash exists):
+    # popping it must restore the local modification that was stashed away.
+    run_git_command(pull_ctx.local_dir, "stash", "pop")
+    assert (pull_ctx.local_dir / "README.md").read_text() == "modified content"
+    assert get_stash_count(pull_ctx.local_dir) == initial_stash_count
+
 
 @pytest.mark.rsync
 def test_rsync_from_remote_stash_stashes_untracked_files(
@@ -238,6 +245,11 @@ def test_rsync_from_remote_merge_restores_untracked_files(
 ) -> None:
     (pull_ctx.agent_dir / "agent_file.txt").write_text("agent content")
     (pull_ctx.local_dir / "untracked_file.txt").write_text("untracked content")
+    # Precondition: the untracked file must register as a dirty state so the
+    # MERGE stash/unstash round-trip is actually exercised. Without this guard,
+    # "untracked file survives" would pass trivially if the file were never
+    # stashed in the first place (the stash path never triggering).
+    assert has_uncommitted_changes(pull_ctx.local_dir, cg)
 
     rsync_from_remote(
         remote_host=pull_ctx.host,
@@ -456,13 +468,25 @@ def remote_pull_ctx(tmp_path: Path) -> SyncTestContext:
     )
 
 
-def test_rsync_from_remote_without_ssh_info_raises_assertion(
+def test_rsync_from_remote_without_ssh_info_raises_before_network_call(
     remote_pull_ctx: SyncTestContext,
     cg: ConcurrencyGroup,
 ) -> None:
+    """A non-local host that supplies no SSH connection info must error out.
+
+    The contract under test is "some error is raised, identifying the missing
+    SSH connection info, before any rsync/network call is attempted" -- not the
+    *specific* exception type. Production currently guards this with a bare
+    ``assert ssh_info is not None, "Remote host must provide SSH connection
+    info"`` (api/rsync.py), so this accepts ``AssertionError``. That guard
+    SHOULD be hardened to a typed ``MngrError`` as a follow-up: bare ``assert``
+    statements are stripped under ``python -O``, which would silently let the
+    ``None`` flow through to the SSH transport assembly. Once hardened, this
+    test already accepts ``MngrError`` and needs no change.
+    """
     (remote_pull_ctx.agent_dir / "file.txt").write_text("agent content")
 
-    with pytest.raises(AssertionError, match="SSH connection info"):
+    with pytest.raises((AssertionError, MngrError), match="SSH connection info"):
         rsync_from_remote(
             remote_host=remote_pull_ctx.host,
             remote_path=_agent_src(remote_pull_ctx),
@@ -471,3 +495,31 @@ def test_rsync_from_remote_without_ssh_info_raises_assertion(
             uncommitted_changes=UncommittedChangesMode.CLOBBER,
             cg=cg,
         )
+
+
+# =============================================================================
+# Remote (is_local=False) SSH path: coverage gap
+# =============================================================================
+#
+# Every happy-path test above uses ``FakeHost(is_local=True)``, so ``_do_rsync``
+# always takes its local branch and never exercises the ``is_local=False``
+# remote branch (api/rsync.py). That branch builds the SSH transport via
+# ``build_ssh_transport_command``, assembles the ``user@hostname:path`` remote
+# URI, and swaps source/destination for push vs. pull before invoking rsync
+# through ``cg.run_process_to_completion``. The only remote-branch coverage here
+# is the negative ``ssh_info is None`` test above; a regression in the remote
+# URI/transport assembly would pass this whole module.
+#
+# The pure argv assembly (``-e <ssh_transport>`` placement, verbatim paths) is
+# already unit-tested in ``rsync_test.py``
+# (``test_build_rsync_command_adds_ssh_transport_when_provided`` and siblings),
+# so ``_build_rsync_command`` itself is not the gap. What remains uncovered is
+# the ``_do_rsync`` remote branch's inline URI construction and src/dst swap,
+# which has no seam short of a real rsync-over-SSH invocation: the branch goes
+# straight from ``ssh_info`` to ``cg.run_process_to_completion(rsync_cmd)``,
+# which would shell out to a live ``rsync``/``ssh``. Driving it without a real
+# network would require either a loopback sshd (see ``local_sshd`` in
+# ``utils/testing.py``) or extracting the URI/swap logic into a pure helper.
+# Documenting the gap here rather than adding a real-network test to this
+# (network-free) integration module; remote transport assembly is otherwise
+# expected to be covered by provider-level / SSH integration tests.
