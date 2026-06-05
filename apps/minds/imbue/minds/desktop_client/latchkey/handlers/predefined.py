@@ -203,12 +203,13 @@ def _render_unknown_scope_fragment(request_id: str, scope: str) -> str:
 
     No catalog entry means we have no permissions to offer the user; the
     only action that makes sense from here is Deny. Shaped to share the
-    inbox shell's form-submission JS: the fragment emits a
-    ``#permissions-form`` posting to ``/requests/<id>/grant`` with a
-    single hidden ``permissions=__unknown_scope__`` input plus the
-    Approve/Deny buttons. Approve will 400 server-side (the scope isn't
-    in the catalog); Deny goes through the shell's
-    ``submitPermissionDeny`` and auto-advances.
+    inbox shell's deny submission JS: the fragment emits a
+    ``#permissions-form`` whose ``action`` targets ``/requests/<id>/grant``
+    so the shell's ``submitPermissionDeny`` helper (which rewrites
+    ``/grant`` to ``/deny``) auto-advances the inbox after the user clicks
+    Deny. There is no Approve button and no ``name="permissions"`` input
+    because no permissions are on offer; the form's action URL is only
+    used as the deny URL template.
     """
     escaped_scope = html_module.escape(scope)
     escaped_request_id = html_module.escape(request_id, quote=True)
