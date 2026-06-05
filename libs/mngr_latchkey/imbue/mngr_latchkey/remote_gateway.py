@@ -76,9 +76,13 @@ _REMOTE_COMMAND_TIMEOUT_SECONDS: Final[float] = 15.0
 # 0600 matches the local ``save_permissions`` chmod and keeps secrets private.
 _REMOTE_FILE_MODE: Final[str] = "0600"
 
-# Filename the detached gateway's stdout/stderr is redirected to on the VPS,
-# under the remote ``$HOME/.latchkey`` directory.
+# Filenames (under the remote ``$HOME/.latchkey`` directory) for the detached
+# gateway and reverse-tunnel processes: their stdout/stderr logs and the PID
+# files their idempotency checks read.
 _REMOTE_GATEWAY_LOG_FILENAME: Final[str] = "gateway.log"
+_REMOTE_GATEWAY_PID_FILENAME: Final[str] = "gateway.pid"
+_REMOTE_TUNNEL_LOG_FILENAME: Final[str] = "tunnel.log"
+_REMOTE_TUNNEL_PID_FILENAME: Final[str] = "tunnel.pid"
 
 # Filename of the ad-hoc private key generated on the VPS for the
 # outer-host -> container SSH used by the reverse tunnel. Lives under the
@@ -117,14 +121,6 @@ def _build_ensure_installed_script(latchkey_version: str, node_major_version: st
             "  apt-get update",
             "  apt-get install -y curl",
             "fi",
-            # procps provides pgrep, which the gateway / reverse-tunnel scripts
-            # use for their 'already running?' idempotency check. It ships on
-            # full Debian VPS images, but install it defensively so we never
-            # depend on it being present.
-            "if ! command -v pgrep >/dev/null 2>&1; then",
-            "  apt-get update",
-            "  apt-get install -y procps",
-            "fi",
             # Node.js + npm via NodeSource (Debian's own nodejs is too old).
             "if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then",
             f"  curl -fsSL {nodesource_url} -o /tmp/nodesource_setup.sh",
@@ -142,7 +138,7 @@ def _build_ensure_installed_script(latchkey_version: str, node_major_version: st
 
 
 def _ensure_latchkey_installed(host: OuterHostInterface) -> None:
-    """Ensure curl, procps (pgrep), Node.js, and the pinned latchkey CLI are installed on the VPS.
+    """Ensure curl, Node.js, and the pinned latchkey CLI are installed on the VPS.
 
     Idempotent: each component is installed only when missing (or, for
     latchkey, when the installed version differs from :data:`LATCHKEY_VERSION`).
@@ -252,30 +248,58 @@ def sync_permissions(host: OuterHostInterface, latchkey_directory: Path, host_id
         host.write_file(remote_path, content.encode("utf-8"), mode=_REMOTE_FILE_MODE, is_atomic=True)
 
 
-def _build_gateway_start_script(outer_port: int) -> str:
-    """Build a script that starts a detached ``latchkey gateway`` unless one is already running.
+def _pidfile_guarded_launch_script(pid_filename: str, cmdline_marker: str, launch_command: str) -> str:
+    """Build an idempotent background launch keyed off a PID file under ``$HOME/.latchkey``.
 
-    Exits early (no-op) when a ``latchkey gateway`` process is already present.
-    Otherwise launches it under ``nohup`` with stdio detached so it outlives
-    the SSH session that started it, logging to ``$HOME/.latchkey/gateway.log``.
-    The gateway binds ``outer_port`` on the VPS loopback only -- it is reached
-    from the container via the reverse tunnel, never exposed off-host.
+    Skips the launch when the PID recorded in ``$HOME/.latchkey/<pid_filename>``
+    is still alive *and* its ``/proc/<pid>/cmdline`` contains ``cmdline_marker``
+    (the marker check guards a stale PID file whose number got reused).
+    Otherwise it runs ``launch_command`` in the background and records the new
+    PID via ``$!``.
+
+    A PID file is used deliberately instead of ``pgrep -f``: this script runs as
+    ``sh -c '<the whole script>'`` on the VPS, whose own argv therefore contains
+    ``launch_command``, so a ``pgrep -f`` for the process would match the shell
+    running this very script and wrongly conclude the process is already up.
+    Inspecting one specific PID cannot self-match, and ``kill -0`` / ``/proc``
+    need no ``procps``.
     """
     return "\n".join(
         (
             "set -e",
-            # Already running: leave it be.
-            "if pgrep -f 'latchkey gateway' >/dev/null 2>&1; then",
+            'mkdir -p "$HOME/.latchkey"',
+            f'_pidfile="$HOME/.latchkey/{pid_filename}"',
+            'if [ -f "$_pidfile" ] && _pid="$(cat "$_pidfile" 2>/dev/null)" && [ -n "$_pid" ] && '
+            f'kill -0 "$_pid" 2>/dev/null && grep -qaF {shlex.quote(cmdline_marker)} "/proc/$_pid/cmdline" 2>/dev/null; then',
             "  exit 0",
             "fi",
-            'mkdir -p "$HOME/.latchkey"',
-            # Detach from the SSH session: nohup + closed stdin + redirected
-            # stdio so the channel can close while the gateway keeps running.
-            f"LATCHKEY_GATEWAY_PORT={outer_port} LATCHKEY_GATEWAY_LISTEN_HOST=127.0.0.1 "
-            f"LATCHKEY_DISABLE_COUNTING=1 nohup latchkey gateway "
-            f'</dev/null >"$HOME/.latchkey/{_REMOTE_GATEWAY_LOG_FILENAME}" 2>&1 &',
+            f"{launch_command} &",
+            'echo $! > "$_pidfile"',
             "exit 0",
         )
+    )
+
+
+def _build_gateway_start_script(outer_port: int) -> str:
+    """Build a script that starts a detached ``latchkey gateway`` unless one is already running.
+
+    Launches the gateway under ``nohup`` with stdio detached so it outlives the
+    SSH session that started it, logging to ``$HOME/.latchkey/gateway.log``. The
+    gateway binds ``outer_port`` on the VPS loopback only -- it is reached from
+    the container via the reverse tunnel, never exposed off-host. Idempotency is
+    via a PID file (see :func:`_pidfile_guarded_launch_script`).
+    """
+    # Detach from the SSH session: nohup + closed stdin + redirected stdio so
+    # the channel can close while the gateway keeps running.
+    launch_command = (
+        f"LATCHKEY_GATEWAY_PORT={outer_port} LATCHKEY_GATEWAY_LISTEN_HOST=127.0.0.1 "
+        f"LATCHKEY_DISABLE_COUNTING=1 nohup latchkey gateway "
+        f'</dev/null >"$HOME/.latchkey/{_REMOTE_GATEWAY_LOG_FILENAME}" 2>&1'
+    )
+    return _pidfile_guarded_launch_script(
+        pid_filename=_REMOTE_GATEWAY_PID_FILENAME,
+        cmdline_marker="gateway",
+        launch_command=launch_command,
     )
 
 
@@ -315,30 +339,27 @@ def _build_reverse_tunnel_script(
     ``LATCHKEY_GATEWAY=http://127.0.0.1:<inner_port>`` therefore reaches the
     VPS-resident gateway unchanged.
 
-    Skips when a matching tunnel is already running. The tunnel is detached via
-    ``ssh -f -N``; reconnect/lifecycle handling is intentionally out of scope.
-    Host-key verification is disabled because the target is our own freshly
-    created container reached over VPS loopback (a hardened version would pin
-    the container host key).
+    Skips when a matching tunnel is already running (PID-file guarded, see
+    :func:`_pidfile_guarded_launch_script`). The tunnel is detached via ``nohup``
+    (not ``ssh -f``, whose self-backgrounding fork would leave us no stable PID
+    to track), logging to ``$HOME/.latchkey/tunnel.log``; reconnect/lifecycle
+    handling is intentionally out of scope. Host-key verification is disabled
+    because the target is our own freshly created container reached over VPS
+    loopback (a hardened version would pin the container host key).
     """
     forward_spec = f"127.0.0.1:{inner_port}:127.0.0.1:{outer_port}"
-    ssh_command = (
-        "ssh -f -N "
+    launch_command = (
+        "nohup ssh -N "
         "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
         "-o ExitOnForwardFailure=yes -o ServerAliveInterval=30 "
         f"-i {shlex.quote(str(container_ssh_key_path))} -p {container_ssh_port} "
-        f"-R {forward_spec} {shlex.quote(container_ssh_user)}@127.0.0.1"
+        f"-R {forward_spec} {shlex.quote(container_ssh_user)}@127.0.0.1 "
+        f'</dev/null >"$HOME/.latchkey/{_REMOTE_TUNNEL_LOG_FILENAME}" 2>&1'
     )
-    return "\n".join(
-        (
-            "set -e",
-            # Already tunneled: leave it be.
-            f"if pgrep -f {shlex.quote('-R ' + forward_spec)} >/dev/null 2>&1; then",
-            "  exit 0",
-            "fi",
-            ssh_command,
-            "exit 0",
-        )
+    return _pidfile_guarded_launch_script(
+        pid_filename=_REMOTE_TUNNEL_PID_FILENAME,
+        cmdline_marker=forward_spec,
+        launch_command=launch_command,
     )
 
 

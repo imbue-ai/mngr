@@ -129,10 +129,9 @@ def test_ensure_latchkey_installed_gates_each_component_behind_a_presence_check(
     assert "command -v curl" in command
     assert "command -v node" in command
     assert "command -v npm" in command
-    # procps (pgrep) is installed defensively so the gateway / tunnel idempotency
-    # checks never depend on it pre-existing on the VPS.
-    assert "command -v pgrep" in command
-    assert "apt-get install -y procps" in command
+    # The gateway/tunnel idempotency checks use a PID file + kill -0, not pgrep,
+    # so we no longer install procps.
+    assert "procps" not in command
     # Version-agnostic: the NodeSource setup URL is present (the major version
     # is a tunable constant, so don't pin it here).
     assert "deb.nodesource.com/setup_" in command
@@ -252,8 +251,12 @@ def test_ensure_latchkey_gateway_running_starts_detached_gateway_on_outer_port_l
         f"LATCHKEY_GATEWAY_PORT={OUTER_PORT} LATCHKEY_GATEWAY_LISTEN_HOST=127.0.0.1 "
         "LATCHKEY_DISABLE_COUNTING=1 nohup latchkey gateway"
     ) in command
-    # Skips the launch when a gateway is already running.
-    assert "pgrep -f 'latchkey gateway'" in command
+    # Idempotent via a PID file + kill -0 (not pgrep, which would self-match the
+    # shell running this very script). Records $! after launching.
+    assert "pgrep" not in command
+    assert "$HOME/.latchkey/gateway.pid" in command
+    assert 'kill -0 "$_pid"' in command
+    assert 'echo $! > "$_pidfile"' in command
     # Detached so it outlives the SSH session.
     assert "nohup" in command
     assert "</dev/null" in command
@@ -280,10 +283,14 @@ def test_ensure_latchkey_gateway_reachable_opens_reverse_tunnel_into_container()
     assert "-p 2222" in command
     assert "-i /etc/mngr/container_key" in command
     assert "root@127.0.0.1" in command
-    # Detached, fails loudly if the forward can't bind, and skips if already up.
-    assert "ssh -f -N" in command
+    # Detached via nohup (not ``ssh -f``, whose self-fork would leave no stable
+    # PID), fails to bind loudly, and is idempotent via a PID file (not pgrep).
+    assert "nohup ssh -N" in command
+    assert "ssh -f" not in command
     assert "ExitOnForwardFailure=yes" in command
-    assert f"pgrep -f '-R 127.0.0.1:{INNER_PORT}:127.0.0.1:{OUTER_PORT}'" in command
+    assert "pgrep" not in command
+    assert "$HOME/.latchkey/tunnel.pid" in command
+    assert f'grep -qaF 127.0.0.1:{INNER_PORT}:127.0.0.1:{OUTER_PORT} "/proc/$_pid/cmdline"' in command
 
 
 def test_ensure_latchkey_gateway_reachable_quotes_key_path_with_spaces() -> None:
