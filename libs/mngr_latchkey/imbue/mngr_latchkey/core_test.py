@@ -30,6 +30,7 @@ from imbue.mngr_latchkey.core import LatchkeyVersionError
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.discovery import _LatchkeyStateChangeHandler
+from imbue.mngr_latchkey.remote_gateway import RemoteGatewayError
 from imbue.mngr_latchkey.remote_gateway import local_credentials_path
 from imbue.mngr_latchkey.store import admin_permissions_path
 from imbue.mngr_latchkey.store import default_permissions_path
@@ -984,6 +985,26 @@ def test_remote_state_watch_handler_routes_credential_and_permission_changes(
         # ``TypeError: unhashable type`` here).
         assert hash(event_handler) is not None
         Observer().schedule(event_handler, str(tmp_path), recursive=False)
+
+
+def test_remote_state_watch_sentinel_fails_loudly_when_observer_dies(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _make_sync_recording_handler(tmp_path, temp_mngr_ctx, cg)
+        # A stopped observer that did NOT stop because of shutdown is a watcher
+        # failure -- the sentinel must raise loudly.
+        observer = Observer()
+        observer.start()
+        observer.stop()
+        observer.join()
+        shutdown_event = threading.Event()
+        with pytest.raises(RemoteGatewayError, match="stopped unexpectedly"):
+            handler._fail_loudly_if_observer_dies(observer, shutdown_event)
+
+        # When the observer stops *because* of shutdown, that is expected -- no raise.
+        shutdown_event.set()
+        handler._fail_loudly_if_observer_dies(observer, shutdown_event)
 
 
 def _make_fake_latchkey_binary_with_ensure_browser_counter(tmp_path: Path, counter_path: Path) -> Path:

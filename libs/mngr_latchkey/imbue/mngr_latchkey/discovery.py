@@ -322,7 +322,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
 
     # -- Remote credential/permission sync ----------------------------------
 
-    def start_remote_state_sync(self, concurrency_group: ConcurrencyGroup) -> None:
+    def start_remote_state_sync(self, concurrency_group: ConcurrencyGroup, shutdown_event: threading.Event) -> None:
         """Sync known remote hosts now, then watch for credential/permission changes.
 
         First syncs every currently-known remote host (permissions, then
@@ -330,8 +330,14 @@ class LatchkeyDiscoveryHandler(MutableModel):
         pushes credentials to every known remote host whenever the local
         credentials file changes, and pushes a single host's permissions
         whenever that host's permissions file changes. (Newly-provisioned hosts
-        get their initial sync inline in the provisioning path.) The observer is
-        stopped when ``concurrency_group`` shuts down.
+        get their initial sync inline in the provisioning path.)
+
+        The observer's health is supervised on a *checked* CG strand: if it
+        stops for any reason other than ``shutdown_event`` being set, that is a
+        loud failure (the strand raises, the CG surfaces it, and the supervisor
+        is signalled to shut down) rather than silently leaving remote agents
+        with stale credentials/permissions. The observer is also stopped
+        cleanly when ``shutdown_event`` is set.
         """
         self._sync_all_known_hosts()
 
@@ -353,18 +359,42 @@ class LatchkeyDiscoveryHandler(MutableModel):
         observer.schedule(event_handler, str(watched_hosts_dir), recursive=True)
         observer.daemon = True
         observer.start()
+        # Stop the observer cleanly on shutdown (best-effort, so unchecked).
         concurrency_group.start_new_thread(
             target=self._stop_observer_on_shutdown,
-            args=(observer, concurrency_group),
-            name="latchkey-remote-state-watch",
+            args=(observer, shutdown_event),
+            name="latchkey-remote-state-watch-stopper",
             is_checked=False,
         )
+        # Supervise the observer: an unexpected death is a loud, checked failure
+        # that also wakes the supervisor so it tears down promptly.
+        concurrency_group.start_new_thread(
+            target=self._fail_loudly_if_observer_dies,
+            args=(observer, shutdown_event),
+            name="latchkey-remote-state-watch-sentinel",
+            is_checked=True,
+            on_failure=lambda _exception: shutdown_event.set(),
+        )
 
-    def _stop_observer_on_shutdown(self, observer: BaseObserver, concurrency_group: ConcurrencyGroup) -> None:
-        """Block until the CG shuts down, then stop the watchdog observer."""
-        concurrency_group.shutdown_event.wait()
+    def _stop_observer_on_shutdown(self, observer: BaseObserver, shutdown_event: threading.Event) -> None:
+        """Block until shutdown is signalled, then stop the watchdog observer."""
+        shutdown_event.wait()
         observer.stop()
         observer.join(timeout=_OBSERVER_STOP_TIMEOUT_SECONDS)
+
+    def _fail_loudly_if_observer_dies(self, observer: BaseObserver, shutdown_event: threading.Event) -> None:
+        """Block until the observer stops; raise if it stopped for any reason other than shutdown.
+
+        Run as a checked CG strand: a watchdog observer that dies mid-operation
+        would otherwise leave remote agents silently un-synced, so we surface it
+        loudly instead.
+        """
+        observer.join()
+        if not shutdown_event.is_set():
+            raise RemoteGatewayError(
+                "Latchkey remote-state watcher (watchdog observer) stopped unexpectedly; remote agents' "
+                "credentials and permissions are no longer being synced"
+            )
 
     def _known_remote_host_ids(self) -> frozenset[str]:
         with self._remote_hosts_lock:
