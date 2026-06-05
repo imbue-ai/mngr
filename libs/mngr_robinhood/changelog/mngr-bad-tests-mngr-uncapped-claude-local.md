@@ -15,3 +15,7 @@ changes close gaps where a real regression would have slipped past CI:
   for the inline `--flag=value` form of pass-through claude value flags.
 - Strengthened the `monotonic_ms_since` test to guard the milliseconds scaling, and documented the
   deliberate timing margin in the polling-ticker test.
+- Added a lightweight integration test (`test_cli.py`) that drives the real `mngr robinhood`
+  command through the top-level CLI for the no-spawn failure paths: it asserts the command is
+  registered, that each rejected flag maps to exit code 2, and that a bad `--output-format` value
+  exits 2. This is the first end-to-end coverage of the click wiring and exit-code contract.
