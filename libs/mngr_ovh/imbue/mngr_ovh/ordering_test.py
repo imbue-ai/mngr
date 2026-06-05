@@ -3,27 +3,19 @@
 import threading
 from typing import Any
 from typing import Callable
-from unittest.mock import MagicMock
 from unittest.mock import patch
 
-import ovh
 import pytest
 from ovh.exceptions import APIError
 
 from imbue.mngr.errors import MngrError
-from imbue.mngr_ovh.client import OvhVpsClient
+from imbue.mngr_ovh.mock_ovh_client_test import make_fake_ovh_vps_client
 from imbue.mngr_ovh.ordering import OvhOrderDeliveryTimeoutError
 from imbue.mngr_ovh.ordering import order_and_wait_for_vps
 from imbue.mngr_ovh.ordering import rebuild_vps_with_public_key
 from imbue.mngr_ovh.ordering import try_poll_order_for_delivered_vps
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
-
-
-def _client(call_side_effect: Any) -> OvhVpsClient:
-    m = MagicMock(spec=ovh.Client)
-    m.call = MagicMock(side_effect=call_side_effect)
-    return OvhVpsClient(ovh_client=m, subsidiary="US", task_poll_interval=0.0)
 
 
 def _vps_info_for(
@@ -201,7 +193,7 @@ def test_order_never_configures_a_backup_option() -> None:
             configured_labels_and_values.append((body["label"], body["value"]))
         return happy_path(method, path, body, need_auth)
 
-    client = _client(recording_fake)
+    client = make_fake_ovh_vps_client(recording_fake)
     with patch("imbue.mngr_ovh.ordering._OVH_DELIVERY_POLL_INTERVAL_SECONDS", 0.0):
         order_and_wait_for_vps(
             client,
@@ -223,7 +215,7 @@ def test_order_never_configures_a_backup_option() -> None:
 
 def test_order_and_wait_for_vps_success_polled_path() -> None:
     """Happy path: serviceName arrives via the operations chain after a few polls."""
-    client = _client(_fake_order_router(resource_populated_after_n_polls=2))
+    client = make_fake_ovh_vps_client(_fake_order_router(resource_populated_after_n_polls=2))
     with patch("imbue.mngr_ovh.ordering._OVH_DELIVERY_POLL_INTERVAL_SECONDS", 0.0):
         result = order_and_wait_for_vps(
             client,
@@ -239,7 +231,7 @@ def test_order_and_wait_for_vps_success_polled_path() -> None:
 
 def test_order_and_wait_for_vps_polls_when_order_detail_listing_initially_empty() -> None:
     """OVH may not materialise the order's details immediately. We retry on empty list."""
-    client = _client(_fake_order_router(detail_listing_first_calls_404=3))
+    client = make_fake_ovh_vps_client(_fake_order_router(detail_listing_first_calls_404=3))
     with patch("imbue.mngr_ovh.ordering._OVH_DELIVERY_POLL_INTERVAL_SECONDS", 0.0):
         result = order_and_wait_for_vps(
             client,
@@ -263,7 +255,7 @@ def test_order_and_wait_for_vps_filters_out_os_subresource_detail() -> None:
     we should return after finding it without touching the OS detail's
     operation). This pins the plan-code filter.
     """
-    client = _client(_fake_order_router())
+    client = make_fake_ovh_vps_client(_fake_order_router())
     with patch("imbue.mngr_ovh.ordering._OVH_DELIVERY_POLL_INTERVAL_SECONDS", 0.0):
         result = order_and_wait_for_vps(
             client,
@@ -299,7 +291,7 @@ def test_order_rejects_unavailable_datacenter() -> None:
     def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
         return next(responses)
 
-    client = _client(fake_call)
+    client = make_fake_ovh_vps_client(fake_call)
     with pytest.raises(MngrError, match="not available"):
         order_and_wait_for_vps(
             client,
@@ -329,7 +321,7 @@ def test_order_rejects_unavailable_os() -> None:
     def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
         return next(responses)
 
-    client = _client(fake_call)
+    client = make_fake_ovh_vps_client(fake_call)
     with pytest.raises(MngrError, match="not available"):
         order_and_wait_for_vps(
             client,
@@ -385,7 +377,7 @@ def test_order_raises_when_delivery_times_out() -> None:
             return None
         raise AssertionError(f"unexpected call: {method} {path}")
 
-    client = _client(fake)
+    client = make_fake_ovh_vps_client(fake)
     with patch("imbue.mngr_ovh.ordering._OVH_DELIVERY_POLL_INTERVAL_SECONDS", 0.0):
         with pytest.raises(OvhOrderDeliveryTimeoutError) as exc_info:
             order_and_wait_for_vps(
@@ -427,7 +419,7 @@ def test_try_poll_returns_none_when_order_not_delivered_yet() -> None:
             return {"id": 777, "status": "doing", "resource": {}}
         raise AssertionError(f"unexpected call: {method} {path}")
 
-    client = _client(fake)
+    client = make_fake_ovh_vps_client(fake)
     result = try_poll_order_for_delivered_vps(client, order_id=9999, plan_code="vps-2025-model1")
     assert result is None
 
@@ -454,7 +446,7 @@ def test_try_poll_returns_service_name_when_order_has_delivered() -> None:
             return {"id": 666, "status": "done", "resource": {"name": "vps-late42.vps.ovh.us"}}
         raise AssertionError(f"unexpected call: {method} {path}")
 
-    client = _client(fake)
+    client = make_fake_ovh_vps_client(fake)
     result = try_poll_order_for_delivered_vps(client, order_id=8888, plan_code="vps-2025-model1")
     assert result == "vps-late42.vps.ovh.us"
 
@@ -485,7 +477,7 @@ def test_order_raises_when_checkout_returns_no_order_id() -> None:
             return None
         raise AssertionError(f"unexpected call: {method} {path}")
 
-    client = _client(fake)
+    client = make_fake_ovh_vps_client(fake)
     with pytest.raises(VpsProvisioningError, match="returned no orderId"):
         order_and_wait_for_vps(
             client,
@@ -505,7 +497,7 @@ def test_order_post_hoc_verify_catches_wrong_plan() -> None:
     the post-hoc GET /vps/{name} returns a DIFFERENT plan than what
     was requested -- the verify must catch this.
     """
-    client = _client(
+    client = make_fake_ovh_vps_client(
         _fake_order_router(
             service_name="vps-wrong-plan.vps.ovh.us",
             vps_info={"model": {"name": "vps-2024-larger"}, "zone": "Region OpenStack: os-us-east-va-vps-1"},
@@ -526,7 +518,7 @@ def test_order_post_hoc_verify_catches_wrong_plan() -> None:
 
 def test_order_post_hoc_verify_catches_wrong_region() -> None:
     """The post-hoc verify aborts if OVH gave us the wrong datacenter."""
-    client = _client(
+    client = make_fake_ovh_vps_client(
         _fake_order_router(
             service_name="vps-wrong-zone.vps.ovh.us",
             vps_info={"model": {"name": "vps-2025-model1"}, "zone": "Region OpenStack: os-us-west-or-vps-1"},
@@ -648,7 +640,7 @@ def test_f3_parallel_orders_each_get_their_own_service_name() -> None:
                 return {"model": {"name": "vps-2025-model1"}, "zone": "Region OpenStack: os-us-east-va-vps-1"}
             raise AssertionError(f"unexpected call: {method} {path}")
 
-    client = _client(fake)
+    client = make_fake_ovh_vps_client(fake)
     # The thread body catches exactly the exception types
     # ``order_and_wait_for_vps`` can raise, plus ``AssertionError`` from
     # the fake router's unrecognised-call branch. The narrow tuple form
@@ -708,7 +700,7 @@ def test_rebuild_polls_task_to_completion() -> None:
             return {"id": 555, "state": "todo"}
         return next(task_polls)
 
-    client = _client(fake_call)
+    client = make_fake_ovh_vps_client(fake_call)
     rebuild_vps_with_public_key(
         client,
         service_name="vps-x.vps.ovh.us",
@@ -737,7 +729,7 @@ def test_rebuild_raises_when_task_errors() -> None:
             return {"id": 556, "state": "todo"}
         return {"id": 556, "state": "error", "type": "reinstallVm"}
 
-    client = _client(fake_call)
+    client = make_fake_ovh_vps_client(fake_call)
     with pytest.raises(VpsProvisioningError):
         rebuild_vps_with_public_key(
             client,
@@ -773,7 +765,7 @@ def test_rebuild_waits_when_tasks_still_active() -> None:
             return {"id": 999, "state": "done", "type": "reinstallVm"}
         raise AssertionError(f"Unexpected call: {method} {path}")
 
-    client = _client(fake_call)
+    client = make_fake_ovh_vps_client(fake_call)
     rebuild_vps_with_public_key(
         client,
         service_name="vps-x.vps.ovh.us",
@@ -806,7 +798,7 @@ def test_rebuild_retries_when_ovh_rejects_with_running_tasks_despite_empty_drain
             return {"id": 321, "state": "done", "type": "reinstallVm"}
         raise AssertionError(f"Unexpected call: {method} {path}")
 
-    client = _client(fake_call)
+    client = make_fake_ovh_vps_client(fake_call)
     rebuild_vps_with_public_key(
         client,
         service_name="vps-x.vps.ovh.us",
@@ -829,7 +821,7 @@ def test_rebuild_does_not_retry_non_running_task_api_errors() -> None:
             raise APIError("Bad Request: imageId not found")
         raise AssertionError(f"Unexpected call: {method} {path}")
 
-    client = _client(fake_call)
+    client = make_fake_ovh_vps_client(fake_call)
     with pytest.raises(VpsApiError):
         rebuild_vps_with_public_key(
             client,

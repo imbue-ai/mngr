@@ -1,15 +1,13 @@
 """Tests for the ``mngr ovh`` CLI subcommands."""
 
 from typing import Any
-from unittest.mock import MagicMock
 from unittest.mock import patch
 
-import ovh
 import pytest
 from click.testing import CliRunner
 
 from imbue.mngr_ovh.cli import ovh as ovh_group
-from imbue.mngr_ovh.client import OvhVpsClient
+from imbue.mngr_ovh.mock_ovh_client_test import make_fake_ovh_vps_client
 
 
 @pytest.fixture
@@ -35,16 +33,14 @@ def _patch_build_ovh_client(call_side_effect: Any) -> Any:
     which lets each test script the exact /vps and /v2/iam/resource
     responses it wants without monkeypatching python-ovh itself.
     """
-    raw_client = MagicMock(spec=ovh.Client)
-    raw_client.call = MagicMock(side_effect=call_side_effect)
-    client = OvhVpsClient(ovh_client=raw_client, subsidiary="US", task_poll_interval=0.0)
+    client = make_fake_ovh_vps_client(call_side_effect)
     return patch("imbue.mngr_ovh.cli.build_ovh_client", return_value=client)
 
 
 def test_list_errors_clearly_when_unconfigured(clean_env: None) -> None:
-    raw_client = MagicMock(spec=ovh.Client)
-    raw_client.call = MagicMock(side_effect=AssertionError("no API call should fire when unconfigured"))
-    placeholder = OvhVpsClient(ovh_client=raw_client, subsidiary="US", task_poll_interval=0.0, is_unconfigured=True)
+    placeholder = make_fake_ovh_vps_client(
+        AssertionError("no API call should fire when unconfigured"), is_unconfigured=True
+    )
     with patch("imbue.mngr_ovh.cli.build_ovh_client", return_value=placeholder):
         runner = CliRunner()
         result = runner.invoke(ovh_group, ["list"])

@@ -1,9 +1,7 @@
 """Tests for the OVH VPS client."""
 
 from typing import Any
-from unittest.mock import MagicMock
 
-import ovh
 import pytest
 from ovh.exceptions import APIError
 from ovh.exceptions import BadParametersError
@@ -11,8 +9,8 @@ from ovh.exceptions import HTTPError
 from ovh.exceptions import ResourceNotFoundError
 
 from imbue.mngr.errors import MngrError
-from imbue.mngr_ovh.client import OvhVpsClient
 from imbue.mngr_ovh.client import RecycleHandle
+from imbue.mngr_ovh.mock_ovh_client_test import make_fake_ovh_vps_client
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
@@ -20,42 +18,8 @@ from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
 from imbue.mngr_vps_docker.primitives import VpsSnapshotId
 
 
-def _client_with_call(call_side_effect: Any) -> OvhVpsClient:
-    mock_client = MagicMock(spec=ovh.Client)
-    mock_client.call = MagicMock(side_effect=call_side_effect)
-    return OvhVpsClient(
-        ovh_client=mock_client,
-        subsidiary="US",
-        task_poll_interval=0.0,
-        # Zero retry interval makes the F39 retry tests run in <1s
-        # via dependency injection rather than patching module-level
-        # constants -- the project ratchets forbid runtime attribute
-        # rebinding in tests.
-        set_renew_retry_poll_interval_seconds=0.0,
-        # Default retry budget; the budget-exhausted test overrides
-        # this to a tiny value via a dedicated factory below.
-    )
-
-
-def _client_with_call_and_tiny_retry_budget(call_side_effect: Any) -> OvhVpsClient:
-    """Like :func:`_client_with_call` but with a near-zero retry budget.
-
-    Used by the F39 budget-exhausted test so it can exit quickly when
-    OVH keeps returning ``"subscription is not active yet"``.
-    """
-    mock_client = MagicMock(spec=ovh.Client)
-    mock_client.call = MagicMock(side_effect=call_side_effect)
-    return OvhVpsClient(
-        ovh_client=mock_client,
-        subsidiary="US",
-        task_poll_interval=0.0,
-        set_renew_retry_poll_interval_seconds=0.0,
-        set_renew_retry_timeout_seconds=0.05,
-    )
-
-
 def test_api_error_becomes_vps_api_error() -> None:
-    client = _client_with_call(APIError("nope"))
+    client = make_fake_ovh_vps_client(APIError("nope"))
     with pytest.raises(VpsApiError):
         client.list_instances()
 
@@ -82,7 +46,7 @@ def test_destroy_instance_flips_delete_at_expiration() -> None:
             }
         return None
 
-    client = _client_with_call(fake_call)
+    client = make_fake_ovh_vps_client(fake_call)
     client.destroy_instance(VpsInstanceId("vps-abc.vps.ovh.us"))
     methods_paths = [(m, p) for m, p, _ in captured]
     assert methods_paths == [
@@ -120,7 +84,7 @@ def test_destroy_instance_short_circuits_when_mid_recycle() -> None:
             }
         return None
 
-    client = _client_with_call(fake_call)
+    client = make_fake_ovh_vps_client(fake_call)
     handle = RecycleHandle(
         urn="urn:v1:us:resource:vps:vps-abc.vps.ovh.us",
         service_name="vps-abc.vps.ovh.us",
@@ -154,7 +118,7 @@ def test_destroy_instance_short_circuit_swallows_404_on_lock_release() -> None:
     def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
         raise ResourceNotFoundError("tag gone")
 
-    client = _client_with_call(fake_call)
+    client = make_fake_ovh_vps_client(fake_call)
     client.register_recycle_handle(
         RecycleHandle(
             urn="urn:v1:us:resource:vps:vps-x",
@@ -169,7 +133,7 @@ def test_get_instance_status_active_when_running() -> None:
     def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
         return {"state": "running"}
 
-    client = _client_with_call(fake_call)
+    client = make_fake_ovh_vps_client(fake_call)
     assert client.get_instance_status(VpsInstanceId("vps-x")) == VpsInstanceStatus.ACTIVE
 
 
@@ -177,27 +141,27 @@ def test_get_instance_status_halted_when_stopped() -> None:
     def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
         return {"state": "stopped"}
 
-    client = _client_with_call(fake_call)
+    client = make_fake_ovh_vps_client(fake_call)
     assert client.get_instance_status(VpsInstanceId("vps-x")) == VpsInstanceStatus.HALTED
 
 
 def test_get_instance_status_unknown_on_api_error() -> None:
-    client = _client_with_call(APIError("boom"))
+    client = make_fake_ovh_vps_client(APIError("boom"))
     assert client.get_instance_status(VpsInstanceId("vps-x")) == VpsInstanceStatus.UNKNOWN
 
 
 def test_get_instance_ip_returns_dotted_service_name() -> None:
-    client = _client_with_call(lambda *a, **k: None)
+    client = make_fake_ovh_vps_client(lambda *a, **k: None)
     assert client.get_instance_ip(VpsInstanceId("vps-abc.vps.ovh.us")) == "vps-abc.vps.ovh.us"
 
 
 def test_list_instances_passes_through() -> None:
-    client = _client_with_call(lambda *a, **k: ["vps-a", "vps-b"])
+    client = make_fake_ovh_vps_client(lambda *a, **k: ["vps-a", "vps-b"])
     assert client.list_instances() == ["vps-a", "vps-b"]
 
 
 def test_create_instance_raises_not_implemented() -> None:
-    client = _client_with_call(lambda *a, **k: None)
+    client = make_fake_ovh_vps_client(lambda *a, **k: None)
     with pytest.raises(NotImplementedError):
         client.create_instance(label="x", region="r", plan="p", os_id=0, user_data="", ssh_key_ids=[], tags=[])
 
@@ -213,7 +177,7 @@ def test_wait_for_task_returns_payload_on_done() -> None:
     def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
         return next(responses)
 
-    client = _client_with_call(fake_call)
+    client = make_fake_ovh_vps_client(fake_call)
     result = client.wait_for_task("vps-x", 1, timeout_seconds=5.0)
     assert result["state"] == "done"
 
@@ -222,7 +186,7 @@ def test_wait_for_task_raises_on_error_state() -> None:
     def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
         return {"id": 2, "state": "error", "type": "rebuild"}
 
-    client = _client_with_call(fake_call)
+    client = make_fake_ovh_vps_client(fake_call)
     with pytest.raises(VpsProvisioningError):
         client.wait_for_task("vps-x", 2, timeout_seconds=5.0)
 
@@ -231,7 +195,7 @@ def test_wait_for_task_raises_on_timeout() -> None:
     def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
         return {"id": 3, "state": "doing", "type": "rebuild"}
 
-    client = _client_with_call(fake_call)
+    client = make_fake_ovh_vps_client(fake_call)
     client.task_poll_interval = 0.0
     with pytest.raises(VpsProvisioningError):
         client.wait_for_task("vps-x", 3, timeout_seconds=0.05)
@@ -245,7 +209,7 @@ def test_wait_for_no_active_tasks_returns_immediately_when_idle() -> None:
         calls.append(path)
         return []
 
-    client = _client_with_call(fake_call)
+    client = make_fake_ovh_vps_client(fake_call)
     client.wait_for_no_active_tasks("vps-x", timeout_seconds=5.0)
     assert calls == ["/vps/vps-x/tasks?state=todo", "/vps/vps-x/tasks?state=doing"]
 
@@ -267,7 +231,7 @@ def test_wait_for_no_active_tasks_blocks_then_returns_when_tasks_drain() -> None
             return next(doing_iter)
         raise AssertionError(f"Unexpected path {path}")
 
-    client = _client_with_call(fake_call)
+    client = make_fake_ovh_vps_client(fake_call)
     client.task_poll_interval = 0.0
     client.wait_for_no_active_tasks("vps-x", timeout_seconds=5.0)
 
@@ -276,7 +240,7 @@ def test_wait_for_no_active_tasks_raises_on_timeout() -> None:
     def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
         return [99] if "?state=doing" in path else []
 
-    client = _client_with_call(fake_call)
+    client = make_fake_ovh_vps_client(fake_call)
     client.task_poll_interval = 0.0
     with pytest.raises(VpsProvisioningError, match="still has active tasks"):
         client.wait_for_no_active_tasks("vps-x", timeout_seconds=0.05)
@@ -293,7 +257,7 @@ def test_wait_for_no_active_tasks_distinguishes_api_outage_from_lingering_tasks(
     def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
         raise VpsApiError(503, "OVH tasks API is unavailable")
 
-    client = _client_with_call(fake_call)
+    client = make_fake_ovh_vps_client(fake_call)
     client.task_poll_interval = 0.0
     with pytest.raises(VpsProvisioningError, match="tasks listing never succeeded"):
         client.wait_for_no_active_tasks("vps-x", timeout_seconds=0.05)
@@ -305,7 +269,7 @@ def test_create_snapshot_raises_when_one_already_exists() -> None:
             return {"id": "existing", "description": "old"}
         raise AssertionError(f"Unexpected call {method} {path}")
 
-    client = _client_with_call(fake_call)
+    client = make_fake_ovh_vps_client(fake_call)
     with pytest.raises(MngrError, match="already has a snapshot"):
         client.create_snapshot(VpsInstanceId("vps-x"), "new")
 
@@ -317,7 +281,7 @@ def test_delete_snapshot_deletes_owning_vps_slot() -> None:
         captured.append((method, path))
         return None
 
-    client = _client_with_call(fake_call)
+    client = make_fake_ovh_vps_client(fake_call)
     client.delete_snapshot(VpsSnapshotId("vps-eec8860b.vps.ovh.us"))
     assert captured == [("DELETE", "/vps/vps-eec8860b.vps.ovh.us/snapshot")]
 
@@ -349,7 +313,7 @@ def test_create_snapshot_returns_service_name_for_delete_round_trip() -> None:
             return {"id": 42, "state": "done", "type": "snapshotCreate"}
         raise AssertionError(f"Unexpected call: {method} {path}")
 
-    client = _client_with_call(fake_call)
+    client = make_fake_ovh_vps_client(fake_call)
     client.task_poll_interval = 0.0
     snapshot_id = client.create_snapshot(VpsInstanceId(service_name), "desc")
     assert str(snapshot_id) == service_name
@@ -360,7 +324,7 @@ def test_get_service_info_returns_payload() -> None:
         assert method == "GET" and path == "/vps/vps-x/serviceInfos"
         return {"renew": {"deleteAtExpiration": True}, "expiration": "2026-06-15"}
 
-    client = _client_with_call(fake)
+    client = make_fake_ovh_vps_client(fake)
     info = client.get_service_info("vps-x")
     assert info["renew"]["deleteAtExpiration"] is True
 
@@ -391,7 +355,7 @@ def test_set_renew_at_expiration_false_restores_auto_renewal_fields() -> None:
             return None
         raise AssertionError(f"Unexpected {method} {path}")
 
-    client = _client_with_call(fake)
+    client = make_fake_ovh_vps_client(fake)
     client.set_renew_at_expiration("vps-x", delete_at_expiration=False)
     body = seen["body"]
     assert body["renew"]["deleteAtExpiration"] is False
@@ -425,7 +389,7 @@ def test_set_renew_at_expiration_true_does_not_force_auto_renewal_fields() -> No
             return None
         raise AssertionError(f"Unexpected {method} {path}")
 
-    client = _client_with_call(fake)
+    client = make_fake_ovh_vps_client(fake)
     client.set_renew_at_expiration("vps-x", delete_at_expiration=True)
     body = seen["body"]
     assert body["renew"]["deleteAtExpiration"] is True
@@ -465,7 +429,7 @@ def test_f39_set_renew_at_expiration_retries_on_subscription_not_active_yet() ->
             return None
         raise AssertionError(f"Unexpected {method} {path}")
 
-    client = _client_with_call(fake)
+    client = make_fake_ovh_vps_client(fake)
     # No exception expected -- retry recovers.
     client.set_renew_at_expiration("vps-x", delete_at_expiration=True)
     assert put_attempts["n"] == 3, f"expected 3 PUT attempts, got {put_attempts['n']}"
@@ -495,7 +459,7 @@ def test_set_renew_at_expiration_retries_on_transient_transport_error() -> None:
             return None
         raise AssertionError(f"Unexpected {method} {path}")
 
-    client = _client_with_call(fake)
+    client = make_fake_ovh_vps_client(fake)
     # No exception expected -- the transient transport error is retried.
     client.set_renew_at_expiration("vps-x", delete_at_expiration=True)
     assert put_attempts["n"] == 3, f"expected 3 PUT attempts, got {put_attempts['n']}"
@@ -520,7 +484,7 @@ def test_f39_set_renew_at_expiration_does_not_retry_on_other_400() -> None:
             raise BadParametersError("Invalid renewalType value: 'banana'")
         raise AssertionError(f"Unexpected {method} {path}")
 
-    client = _client_with_call(fake)
+    client = make_fake_ovh_vps_client(fake)
     with pytest.raises(VpsApiError, match="Invalid renewalType"):
         client.set_renew_at_expiration("vps-x", delete_at_expiration=True)
     # Exactly one PUT attempt -- no retry on the unrelated error.
@@ -546,32 +510,32 @@ def test_f39_set_renew_at_expiration_raises_after_retry_budget_exhausted() -> No
             raise BadParametersError("Unable to synchronize l1::Service, subscription is not active yet")
         raise AssertionError(f"Unexpected {method} {path}")
 
-    client = _client_with_call_and_tiny_retry_budget(fake)
+    client = make_fake_ovh_vps_client(fake, set_renew_retry_timeout_seconds=0.05)
     with pytest.raises(VpsApiError, match="subscription is not active yet"):
         client.set_renew_at_expiration("vps-x", delete_at_expiration=True)
 
 
 def test_upload_ssh_key_caches_and_returns_name() -> None:
-    client = _client_with_call(lambda *a, **k: None)
+    client = make_fake_ovh_vps_client(lambda *a, **k: None)
     assert client.upload_ssh_key("mngr-host-1", "ssh-ed25519 AAA") == "mngr-host-1"
     assert client.get_cached_public_key("mngr-host-1") == "ssh-ed25519 AAA"
 
 
 def test_get_cached_public_key_raises_for_unknown_id() -> None:
-    client = _client_with_call(lambda *a, **k: None)
+    client = make_fake_ovh_vps_client(lambda *a, **k: None)
     with pytest.raises(MngrError):
         client.get_cached_public_key("ghost")
 
 
 def test_delete_ssh_key_removes_from_cache() -> None:
-    client = _client_with_call(lambda *a, **k: None)
+    client = make_fake_ovh_vps_client(lambda *a, **k: None)
     client.upload_ssh_key("k1", "ssh-rsa K")
     client.delete_ssh_key("k1")
     assert client.list_ssh_keys() == []
 
 
 def test_list_ssh_keys_reflects_cache() -> None:
-    client = _client_with_call(lambda *a, **k: None)
+    client = make_fake_ovh_vps_client(lambda *a, **k: None)
     client.upload_ssh_key("k1", "ssh-rsa A")
     client.upload_ssh_key("k2", "ssh-rsa B")
     names = {k.name for k in client.list_ssh_keys()}
