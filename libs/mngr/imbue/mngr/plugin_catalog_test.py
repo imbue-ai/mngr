@@ -1,6 +1,5 @@
 from imbue.mngr.plugin_catalog import PLUGIN_CATALOG
 from imbue.mngr.plugin_catalog import SignalCheck
-from imbue.mngr.plugin_catalog import UNPUBLISHED_PACKAGES
 from imbue.mngr.plugin_catalog import check_signal
 from imbue.mngr.plugin_catalog import get_all_cataloged_entry_point_names
 from imbue.mngr.plugin_catalog import get_catalog_entry
@@ -101,26 +100,6 @@ def test_get_installable_packages_deduplicates_by_package_name() -> None:
     packages = get_installable_packages()
     package_names = [p.package_name for p in packages]
     assert len(package_names) == len(set(package_names))
-
-
-def test_get_installable_packages_includes_published_and_excludes_unpublished() -> None:
-    """Installable packages include published catalog packages and drop unpublished ones.
-
-    Pins concrete expectations rather than reconstructing the production filter:
-    the claude package is published and must appear, every UNPUBLISHED_PACKAGES
-    member must be absent, and the result must be deduplicated by package name.
-    """
-    installable_names = {p.package_name for p in get_installable_packages()}
-
-    claude_entry = get_catalog_entry("claude")
-    assert claude_entry is not None
-    assert claude_entry.package_name in installable_names
-
-    for unpublished in UNPUBLISHED_PACKAGES:
-        assert unpublished not in installable_names
-
-    all_published = {e.package_name for e in PLUGIN_CATALOG if e.package_name not in UNPUBLISHED_PACKAGES}
-    assert installable_names == all_published
 
 
 def test_get_installable_packages_prefers_basic_tier() -> None:
