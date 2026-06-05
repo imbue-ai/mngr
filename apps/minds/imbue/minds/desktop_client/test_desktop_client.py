@@ -1633,7 +1633,7 @@ def test_inbox_detail_fragment_returns_just_the_detail(tmp_path: Path) -> None:
     assert "inbox-backdrop" not in body
     # The fragment must not include the shell's permissions-form submit
     # JS or its escape/backdrop handlers; those live in the inbox page.
-    assert "addEventListener(\"keydown\"" not in body
+    assert 'addEventListener("keydown"' not in body
     assert "submitPermissionDeny = function" not in body
 
 
