@@ -167,48 +167,51 @@ Currently we have two separate surfaces the requests panel that pushes the conte
 
 ## Implementation phases
 
-Each phase leaves the system in a working state.
+Single atomic change — there is no intermediate state where the panel and the inbox modal coexist. The list below is the suggested editing order within that one change, not a sequence of separately landable steps. The branch is not green until every section is done.
 
-### Phase 1 — Add fragment renderer alongside the page renderer
+### 1. Strip per-handler dialog chrome
 
-- Add `render_request_detail_fragment` to `RequestEventHandler` as a default-implemented method (initial implementation: call `render_request_page`, strip the chrome). The page route still works.
-- Update `LatchkeyPredefinedPermissionGrantHandler` and `FileSharingGrantHandler` to implement the fragment method natively (delegating shared body rendering).
-- Add unit tests for the fragment shape (no `<html>`, no backdrop id, has the form).
+- Edit `templates/pages/LatchkeyPredefinedPermission.jinja` to remove its `<PermissionsDialog>` wrapper and its inline `showPermissionEditor` `<script>`. The file now renders a bare fragment (header + form + manual creds + error placeholder).
+- Edit `templates/pages/LatchkeyFileSharingPermission.jinja` the same way.
+- Delete `templates/PermissionsDialog.jinja` (chrome lives in the inbox shell from now on).
 
-### Phase 2 — Server: inbox page and fragment routes
+### 2. Add inbox templates
 
-- Add `GET /inbox`, `GET /inbox/list`, `GET /inbox/detail/{id}` routes and the new JinjaX templates.
-- Keep `/_chrome/requests-panel` and `/requests/{id}` GET routes alive in parallel.
-- Verify the inbox page renders standalone in a browser session.
+- Add `templates/pages/Inbox.jinja`: backdrop, dialog card, master/detail layout, empty-state branch, and the inbox shell `<script>`.
+- Add `templates/pages/InboxList.jinja`: the left-list fragment.
+- Add `templates/pages/InboxEmpty.jinja`: the centered "No pending requests" placeholder.
+- Add `templates/pages/InboxUnavailable.jinja`: the right-pane "no longer available" fragment.
 
-### Phase 3 — Frontend: inbox shell JS
+### 3. Refactor handler contract and add inbox routes
 
-- Wire up the inbox shell click handler, right-pane swap, Adjust toggle, Approve/Deny + auto-advance, empty-state transitions, escape/backdrop dismiss.
-- Verify end-to-end in browser mode against a seeded inbox.
+- In `request_handler.py`, replace `render_request_page` with `render_request_detail_fragment(req_event, backend_resolver, mngr_forward_origin) -> str`.
+- Update `latchkey/handlers/predefined.py`, `latchkey/handlers/file_sharing.py`, and the test stub in `permission_routes_test.py` (`class _StubHandler`) to implement the new method and stop returning page-shape responses.
+- Update `latchkey/handlers/templates.py` so the latchkey render functions return fragments (and drop the `extra_scripts` argument plumbing).
+- In `app.py`, add `_handle_inbox_page`, `_handle_inbox_list_fragment`, `_handle_inbox_detail_fragment` and register them at `GET /inbox`, `GET /inbox/list`, `GET /inbox/detail/{id}`.
+- In `app.py`, delete `_handle_requests_panel`, `_handle_request_page`, and the `GET /_chrome/requests-panel` and `GET /requests/{id}` route registrations. Keep the `POST /requests/{id}/grant` and `/deny` routes unchanged.
 
-### Phase 4 — Electron: route through modal
+### 4. Electron main process: swap the surface
 
-- Update `navigate-to-request` and `open-request-modal` to load `/inbox?selected=<id>` in the modal view.
-- Add `toggle-inbox` (or repurpose `toggle-requests-panel`) IPC: titlebar button opens the modal at `/inbox`.
-- SSE auto-open path opens the modal at `/inbox` (still subject to `auto_open_requests_panel`).
-- SSE list-update path posts a `chrome-event` to the modal view to trigger a list re-fetch (50 ms debounce preserved).
-- Old panel surface still exists and works for fallback while validating.
+- In `electron/main.js`:
+  - Delete `REQUESTS_PANEL_WIDTH`, `REQUESTS_PANEL_RELOAD_DEBOUNCE_MS`, `openRequestsPanel`, `closeRequestsPanel`, `toggleRequestsPanel`, `scheduleRequestsPanelReload`. Reintroduce the 50 ms constant under a new name (e.g. `INBOX_LIST_REFRESH_DEBOUNCE_MS`).
+  - Remove `bundle.requestsPanelView`, `bundle.requestsPanelVisible`, `bundle.requestsPanelReloadTimer` from bundle creation, the `close` cleanup, and `updateBundleBounds`. Drop the `rightOffset` calculation so the content view always uses the full width.
+  - Replace the `ipcMain.on('toggle-requests-panel', ...)` and `ipcMain.on('open-requests-panel', ...)` handlers with a single `ipcMain.on('toggle-inbox', ...)` that opens the modal at `/inbox` (or closes it if already showing the inbox).
+  - In `ipcMain.on('navigate-to-request', ...)` (`main.js:1935`) and `ipcMain.on('open-request-modal', ...)` (`main.js:1952`), change the URL to `/inbox?selected=<eventId>`.
+  - In the SSE `requests` handler (`main.js:1086`): keep the existing `idsChanged` / `hasNewRequest` diff. On `idsChanged`, post a `chrome-event` to any open inbox modal view (debounced 50 ms per bundle) so its shell JS re-fetches the list fragment. On `shouldAutoOpen`, call `openModal(bundle, backendBaseUrl + '/inbox')`.
+- In `electron/preload.js`: remove `toggleRequestsPanel` and `openRequestsPanel`; add `toggleInbox` (wired to the new IPC channel).
 
-### Phase 5 — Remove the panel and the standalone request page
+### 5. Titlebar and browser-only fallback
 
-- Delete `requestsPanelView`, `REQUESTS_PANEL_WIDTH`, `openRequestsPanel`, `closeRequestsPanel`, `toggleRequestsPanel`, `scheduleRequestsPanelReload`, `REQUESTS_PANEL_RELOAD_DEBOUNCE_MS` (keep the 50 ms constant under a new name).
-- Remove `bundle.requestsPanelView` from bundle creation, cleanup, and `updateBundleBounds`. Drop the `rightOffset` calculation.
-- Remove the `toggle-requests-panel`, `open-requests-panel` IPC channels and the `window.minds.toggleRequestsPanel` / `openRequestsPanel` preload bindings.
-- Delete `_handle_requests_panel`, `/_chrome/requests-panel` route, and the `PermissionsDialog.jinja` component.
-- Delete `_handle_request_page` and the `GET /requests/{id}` route (the POSTs stay).
-- Drop the page-shape `render_request_page` from `RequestEventHandler`.
+- In `static/chrome.js`:
+  - Point the `requests-toggle` click at `window.minds.toggleInbox()`.
+  - In the browser-mode `window.addEventListener('message', ...)` handler (`chrome.js:215`), navigate the content frame to `/inbox?selected=<id>` instead of `/requests/<id>`.
 
-### Phase 6 — Test sweep and changelog
+### 6. Tests, changelog, and config note
 
-- Replace the panel tests in `test_desktop_client.py` with inbox-page equivalents.
-- Update `permission_routes_test.py` to fetch detail via `/inbox/detail/<id>` instead of `/requests/<id>`.
-- Add new inbox tests (see Testing strategy).
-- Add a changelog entry at `apps/minds/changelog/<branch>.md`.
+- Update `test_desktop_client.py` and `permission_routes_test.py` per the Testing strategy section.
+- Update `latchkey/handlers/predefined_test.py` and `latchkey/handlers/file_sharing_test.py` to assert against the fragment shape.
+- Add `apps/minds/changelog/<branch>.md` describing the user-visible change.
+- Add a docstring note to the `auto_open_requests_panel` config key in `minds_config.py` clarifying that "panel" now means the inbox modal (no rename in this change).
 
 ## Testing strategy
 
