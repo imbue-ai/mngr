@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
+from loguru import logger
 
 from imbue.minds.cli._activated_env import MODAL_PROFILE_ENV_VAR
 from imbue.minds.cli.env import _destroy_agents_and_state_container_for_wipe
@@ -27,32 +28,31 @@ from imbue.minds.cli.env import env
 from imbue.minds.envs.primitives import InvalidDevEnvNameError
 
 
-def test_wipe_teardown_is_noop_without_profile_or_agents(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_wipe_teardown_is_noop_without_profile_or_agents() -> None:
     # With no mngr profile + no agents under the env root, there is nothing to
     # destroy and the state-container cleanup skips on an unresolved user_id --
-    # a pure no-op that does not raise (no Docker daemon is even contacted).
-    monkeypatch.setenv("HOME", str(tmp_path))
-    _destroy_agents_and_state_container_for_wipe("staging")
+    # a pure no-op (no Docker daemon is even contacted). HOME is already
+    # redirected to tmp_path by the autouse isolate_mind_tests fixture.
+    #
+    # The production code logs a "Destroyed N mngr agent(s)" line only when it
+    # actually tears something down, so the absence of any such line is the
+    # observable proof that the teardown was a genuine no-op (rather than, say,
+    # spuriously destroying an agent or contacting Docker). Capture loguru
+    # output via a sink, since loguru does not propagate to pytest's caplog.
+    log_lines: list[str] = []
+    sink_id = logger.add(lambda msg: log_lines.append(msg.record["message"]), level="INFO", format="{message}")
+    try:
+        _destroy_agents_and_state_container_for_wipe("staging")
+    finally:
+        logger.remove(sink_id)
+    assert not any("Destroyed" in line for line in log_lines), log_lines
 
 
-def test_wipe_teardown_raises_on_invalid_env_name(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_wipe_teardown_raises_on_invalid_env_name() -> None:
     # Errors are surfaced, not swallowed: a bad env name must raise so the
     # operator sees the problem rather than silently leaking resources.
-    monkeypatch.setenv("HOME", str(tmp_path))
     with pytest.raises(InvalidDevEnvNameError):
         _destroy_agents_and_state_container_for_wipe("not a valid env name!!")
-
-
-@pytest.fixture
-def _isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """Strip activation env vars; tests opt in to a specific env explicitly."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("MINDS_ROOT_NAME", raising=False)
-    monkeypatch.delenv(MODAL_PROFILE_ENV_VAR, raising=False)
-    # Make sure no inherited MODAL_CONFIG_PATH redirects deploy-mode
-    # validation away from the test's ~/.modal.toml fixture file.
-    monkeypatch.delenv("MODAL_CONFIG_PATH", raising=False)
-    return tmp_path
 
 
 def _write_modal_toml_with_profile(home: Path, workspace: str) -> None:
@@ -63,7 +63,7 @@ def _write_modal_toml_with_profile(home: Path, workspace: str) -> None:
 # -- activate: use-only mode --
 
 
-def test_activate_dev_env_use_only_omits_modal_profile_export(_isolated_env: Path) -> None:
+def test_activate_dev_env_use_only_omits_modal_profile_export(isolated_activation_env: Path) -> None:
     """Plain ``activate --create`` emits no ``export MODAL_PROFILE=`` line."""
     runner = CliRunner()
     result = runner.invoke(env, ["activate", "--create", "dev-foo"])
@@ -76,7 +76,7 @@ def test_activate_dev_env_use_only_omits_modal_profile_export(_isolated_env: Pat
     assert "export MODAL_PROFILE=" not in result.output
 
 
-def test_activate_dev_env_use_only_emits_unset_modal_profile(_isolated_env: Path) -> None:
+def test_activate_dev_env_use_only_emits_unset_modal_profile(isolated_activation_env: Path) -> None:
     """Plain ``activate`` emits ``unset MODAL_PROFILE`` so a deploy-mode shell flips back cleanly."""
     runner = CliRunner()
     result = runner.invoke(env, ["activate", "--create", "dev-foo"])
@@ -84,10 +84,10 @@ def test_activate_dev_env_use_only_emits_unset_modal_profile(_isolated_env: Path
     assert "unset MODAL_PROFILE" in result.output
 
 
-def test_activate_dev_env_use_only_does_not_validate_modal_toml(_isolated_env: Path) -> None:
+def test_activate_dev_env_use_only_does_not_validate_modal_toml(isolated_activation_env: Path) -> None:
     """A missing ``~/.modal.toml`` is fine for use-only activation."""
     runner = CliRunner()
-    assert not (_isolated_env / ".modal.toml").exists()
+    assert not (isolated_activation_env / ".modal.toml").exists()
     result = runner.invoke(env, ["activate", "--create", "dev-foo"])
     assert result.exit_code == 0, result.output
 
@@ -95,9 +95,9 @@ def test_activate_dev_env_use_only_does_not_validate_modal_toml(_isolated_env: P
 # -- activate: deploy mode --
 
 
-def test_activate_dev_env_deploy_mode_exports_modal_profile(_isolated_env: Path) -> None:
+def test_activate_dev_env_deploy_mode_exports_modal_profile(isolated_activation_env: Path) -> None:
     """``--deploy`` exports ``MODAL_PROFILE`` pinned to the dev tier's modal_workspace."""
-    _write_modal_toml_with_profile(_isolated_env, "minds-dev")
+    _write_modal_toml_with_profile(isolated_activation_env, "minds-dev")
     runner = CliRunner()
     result = runner.invoke(env, ["activate", "--create", "--deploy", "dev-foo"])
     assert result.exit_code == 0, result.output
@@ -106,7 +106,7 @@ def test_activate_dev_env_deploy_mode_exports_modal_profile(_isolated_env: Path)
     assert "unset MODAL_PROFILE" not in result.output
 
 
-def test_activate_use_only_header_omits_deploy_flag(_isolated_env: Path) -> None:
+def test_activate_use_only_header_omits_deploy_flag(isolated_activation_env: Path) -> None:
     """The 'Source via:' header should omit --deploy when the user did not pass it."""
     runner = CliRunner()
     result = runner.invoke(env, ["activate", "--create", "dev-foo"])
@@ -115,16 +115,16 @@ def test_activate_use_only_header_omits_deploy_flag(_isolated_env: Path) -> None
     assert "--deploy" not in result.output
 
 
-def test_activate_deploy_mode_header_includes_deploy_flag(_isolated_env: Path) -> None:
+def test_activate_deploy_mode_header_includes_deploy_flag(isolated_activation_env: Path) -> None:
     """The 'Source via:' header should include --deploy so re-sourcing preserves the mode."""
-    _write_modal_toml_with_profile(_isolated_env, "minds-dev")
+    _write_modal_toml_with_profile(isolated_activation_env, "minds-dev")
     runner = CliRunner()
     result = runner.invoke(env, ["activate", "--create", "--deploy", "dev-foo"])
     assert result.exit_code == 0, result.output
     assert 'eval "$(uv run minds env activate --deploy dev-foo)"' in result.output
 
 
-def test_activate_deploy_mode_refuses_when_modal_toml_lacks_profile(_isolated_env: Path) -> None:
+def test_activate_deploy_mode_refuses_when_modal_toml_lacks_profile(isolated_activation_env: Path) -> None:
     """No matching ``~/.modal.toml`` profile = clean refusal with a ``modal token set`` hint."""
     runner = CliRunner()
     result = runner.invoke(env, ["activate", "--create", "--deploy", "dev-foo"])
@@ -132,9 +132,9 @@ def test_activate_deploy_mode_refuses_when_modal_toml_lacks_profile(_isolated_en
     assert "modal token set --profile minds-dev" in result.output
 
 
-def test_activate_deploy_mode_refuses_when_modal_toml_has_wrong_profile(_isolated_env: Path) -> None:
+def test_activate_deploy_mode_refuses_when_modal_toml_has_wrong_profile(isolated_activation_env: Path) -> None:
     """A ``~/.modal.toml`` with a different profile still trips the refusal."""
-    _write_modal_toml_with_profile(_isolated_env, "some-other-workspace")
+    _write_modal_toml_with_profile(isolated_activation_env, "some-other-workspace")
     runner = CliRunner()
     result = runner.invoke(env, ["activate", "--create", "--deploy", "dev-foo"])
     assert result.exit_code != 0, result.output
@@ -145,17 +145,17 @@ def test_activate_deploy_mode_refuses_when_modal_toml_has_wrong_profile(_isolate
 
 
 def test_activate_allows_when_only_this_envs_recover_target_exists(
-    _isolated_env: Path, monkeypatch: pytest.MonkeyPatch
+    isolated_activation_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A pending recover-target for the env being activated must NOT block activation.
 
     Otherwise `minds env recover` (which requires an activated env) could
     never run to clear it -- the activate/recover catch-22.
     """
-    monkeypatch.chdir(_isolated_env)
+    monkeypatch.chdir(isolated_activation_env)
     # monorepo-root marker for find_monorepo_root
-    (_isolated_env / "apps").mkdir()
-    (_isolated_env / ".minds-deploy-recover-target-dev-foo.json").write_text("{}")
+    (isolated_activation_env / "apps").mkdir()
+    (isolated_activation_env / ".minds-deploy-recover-target-dev-foo.json").write_text("{}")
     runner = CliRunner()
     result = runner.invoke(env, ["activate", "--create", "dev-foo"])
     assert result.exit_code == 0, result.output
@@ -163,30 +163,32 @@ def test_activate_allows_when_only_this_envs_recover_target_exists(
 
 
 def test_activate_refuses_when_another_envs_recover_target_exists(
-    _isolated_env: Path, monkeypatch: pytest.MonkeyPatch
+    isolated_activation_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A recover-target for a DIFFERENT env still blocks activating an unaffected env.
 
     This surfaces a forgotten failed deploy rather than letting the operator
     silently proceed past it.
     """
-    monkeypatch.chdir(_isolated_env)
-    (_isolated_env / "apps").mkdir()
-    (_isolated_env / ".minds-deploy-recover-target-dev-other.json").write_text("{}")
+    monkeypatch.chdir(isolated_activation_env)
+    (isolated_activation_env / "apps").mkdir()
+    (isolated_activation_env / ".minds-deploy-recover-target-dev-other.json").write_text("{}")
     runner = CliRunner()
     result = runner.invoke(env, ["activate", "--create", "dev-foo"])
     assert result.exit_code != 0, result.output
     assert "dev-other" in result.output
 
 
-def test_activate_succeeds_when_run_outside_the_monorepo(_isolated_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_activate_succeeds_when_run_outside_the_monorepo(
+    isolated_activation_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Activation works from outside the monorepo: the recover-target guard is
     skipped (no monorepo root means no recover-target file can exist there)
     rather than erroring on NotInMonorepoError.
     """
     # Deliberately do NOT create an `apps/` marker, so find_monorepo_root
     # raises NotInMonorepoError from this cwd and the guard tolerates it.
-    monkeypatch.chdir(_isolated_env)
+    monkeypatch.chdir(isolated_activation_env)
     runner = CliRunner()
     result = runner.invoke(env, ["activate", "--create", "dev-foo"])
     assert result.exit_code == 0, result.output
@@ -194,14 +196,14 @@ def test_activate_succeeds_when_run_outside_the_monorepo(_isolated_env: Path, mo
 
 
 def test_activate_allowed_for_affected_env_even_when_another_target_exists(
-    _isolated_env: Path, monkeypatch: pytest.MonkeyPatch
+    isolated_activation_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Activating an affected env is allowed even when another env also has a
     pending recover-target; the other is surfaced as a warning, not a block."""
-    monkeypatch.chdir(_isolated_env)
-    (_isolated_env / "apps").mkdir()
-    (_isolated_env / ".minds-deploy-recover-target-dev-foo.json").write_text("{}")
-    (_isolated_env / ".minds-deploy-recover-target-dev-other.json").write_text("{}")
+    monkeypatch.chdir(isolated_activation_env)
+    (isolated_activation_env / "apps").mkdir()
+    (isolated_activation_env / ".minds-deploy-recover-target-dev-foo.json").write_text("{}")
+    (isolated_activation_env / ".minds-deploy-recover-target-dev-other.json").write_text("{}")
     runner = CliRunner()
     result = runner.invoke(env, ["activate", "--create", "dev-foo"])
     assert result.exit_code == 0, result.output
@@ -211,7 +213,9 @@ def test_activate_allowed_for_affected_env_even_when_another_target_exists(
 # -- env deploy / destroy gate --
 
 
-def test_env_deploy_refuses_without_deploy_activation(_isolated_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_env_deploy_refuses_without_deploy_activation(
+    isolated_activation_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """``minds env deploy`` requires deploy-mode activation; refuses otherwise."""
     monkeypatch.setenv("MINDS_ROOT_NAME", "minds-dev-foo")
     runner = CliRunner()
@@ -222,7 +226,7 @@ def test_env_deploy_refuses_without_deploy_activation(_isolated_env: Path, monke
 
 
 def test_env_deploy_refuses_with_mismatched_modal_profile(
-    _isolated_env: Path, monkeypatch: pytest.MonkeyPatch
+    isolated_activation_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A ``MODAL_PROFILE`` that does not match the tier is a hard error."""
     monkeypatch.setenv("MINDS_ROOT_NAME", "minds-dev-foo")
@@ -234,7 +238,9 @@ def test_env_deploy_refuses_with_mismatched_modal_profile(
     assert "minds-dev" in result.output
 
 
-def test_env_destroy_refuses_without_deploy_activation(_isolated_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_env_destroy_refuses_without_deploy_activation(
+    isolated_activation_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """``minds env destroy`` shares the same deploy-mode gate as deploy."""
     monkeypatch.setenv("MINDS_ROOT_NAME", "minds-dev-foo")
     runner = CliRunner()
@@ -246,7 +252,7 @@ def test_env_destroy_refuses_without_deploy_activation(_isolated_env: Path, monk
 # -- deactivate --
 
 
-def test_deactivate_unsets_modal_profile(_isolated_env: Path) -> None:
+def test_deactivate_unsets_modal_profile(isolated_activation_env: Path) -> None:
     """A deactivated shell drops every var either activation mode might have exported."""
     runner = CliRunner()
     result = runner.invoke(env, ["deactivate"])

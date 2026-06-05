@@ -15,6 +15,7 @@ from click.testing import CliRunner
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
+from imbue.minds.cli._activated_env import require_activated_env_name
 from imbue.minds.cli.pool import _SECRET_BEARING_FLAGS
 from imbue.minds.cli.pool import build_create_admin_args
 from imbue.minds.cli.pool import build_destroy_admin_args
@@ -24,14 +25,6 @@ from imbue.minds.cli.pool import merge_ovh_env_into_subprocess_env
 from imbue.minds.cli.pool import pool
 from imbue.minds.cli.pool import resolved_management_public_key_path
 from imbue.minds.utils.secret_redaction import redact_secret_flag_values
-
-
-@pytest.fixture
-def _isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """Strip activation env vars by default; tests opt in to a specific env."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("MINDS_ROOT_NAME", raising=False)
-    return tmp_path
 
 
 def test_database_url_is_redacted_from_the_loggable_admin_command() -> None:
@@ -172,10 +165,10 @@ def test_build_destroy_admin_args_skip_vps_cancel() -> None:
     )
 
 
-def test_pool_create_requires_activated_env(_isolated_env: Path) -> None:
+def test_pool_create_requires_activated_env(isolated_activation_env: Path) -> None:
     """With no MINDS_ROOT_NAME set, the click command must refuse early."""
     runner = CliRunner()
-    key_file = _isolated_env / "mgmt.pub"
+    key_file = isolated_activation_env / "mgmt.pub"
     key_file.write_text("ssh-ed25519 AAAA... operator@host\n")
     result = runner.invoke(
         pool,
@@ -188,7 +181,7 @@ def test_pool_create_requires_activated_env(_isolated_env: Path) -> None:
             "--attributes",
             "{}",
             "--workspace-dir",
-            str(_isolated_env),
+            str(isolated_activation_env),
             "--management-public-key-file",
             str(key_file),
             "--database-url",
@@ -200,19 +193,25 @@ def test_pool_create_requires_activated_env(_isolated_env: Path) -> None:
 
 
 def test_pool_create_derives_production_from_default_root_name(
-    _isolated_env: Path,
+    isolated_activation_env: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``MINDS_ROOT_NAME=minds`` resolves to the ``production`` env name in the tag."""
+    """``MINDS_ROOT_NAME=minds`` resolves to the ``production`` env name in the tag.
+
+    Drives the real resolution the click command uses
+    (``require_activated_env_name`` -> ``env_name_from_root_name``) rather than
+    hardcoding the env name, so a regression in that mapping (e.g. ``minds``
+    resolving to anything other than ``production``) is actually caught.
+    """
     monkeypatch.setenv("MINDS_ROOT_NAME", "minds")
-    # Pure-function check: the tag injection logic is the same path the click
-    # command uses, so verifying it here covers the end-to-end behaviour.
+    resolved_env_name = require_activated_env_name()
+    assert resolved_env_name == "production"
     args = build_create_admin_args(
-        env_name="production",
+        env_name=resolved_env_name,
         count=1,
         region="US-EAST-VA",
         attributes_json="{}",
-        workspace_dir=str(_isolated_env),
+        workspace_dir=str(isolated_activation_env),
         management_public_key_file="/k.pub",
         database_url="postgres://example",
         mngr_source=None,
@@ -222,14 +221,14 @@ def test_pool_create_derives_production_from_default_root_name(
     assert args[tag_index + 1] == "minds_env=production"
 
 
-def test_pool_list_requires_activated_env(_isolated_env: Path) -> None:
+def test_pool_list_requires_activated_env(isolated_activation_env: Path) -> None:
     runner = CliRunner()
     result = runner.invoke(pool, ["list", "--database-url", "postgres://example"])
     assert result.exit_code != 0
     assert "No minds env is activated" in result.output
 
 
-def test_pool_destroy_requires_activated_env(_isolated_env: Path) -> None:
+def test_pool_destroy_requires_activated_env(isolated_activation_env: Path) -> None:
     runner = CliRunner()
     result = runner.invoke(pool, ["destroy", "abc-123", "--database-url", "postgres://example"])
     assert result.exit_code != 0
@@ -303,10 +302,17 @@ def test_derive_public_key_from_private_rejects_garbage() -> None:
 
 
 def test_resolved_management_public_key_path_explicit_override_yields_path_unchanged(
-    _isolated_env: Path,
+    isolated_activation_env: Path,
 ) -> None:
-    """Operator override path bypasses Vault entirely and yields the operator's file as-is."""
-    pub_path = _isolated_env / "operator-key.pub"
+    """Operator override path bypasses Vault entirely and yields the operator's file as-is.
+
+    This deliberately only pins the explicit-override (early-return) arm. The
+    Vault-backed default arm -- which derives the key, writes a temp file, and
+    cleans it up on exit -- needs a real Vault and so is not unit-testable here;
+    it currently has no automated coverage (a known gap to fill with an
+    acceptance test).
+    """
+    pub_path = isolated_activation_env / "operator-key.pub"
     pub_path.write_text("ssh-ed25519 AAAA... operator@host\n")
     with resolved_management_public_key_path("dev-x", explicit_path=str(pub_path)) as yielded:
         assert yielded == str(pub_path)
