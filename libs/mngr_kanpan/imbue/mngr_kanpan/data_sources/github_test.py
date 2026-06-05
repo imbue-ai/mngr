@@ -377,7 +377,11 @@ def test_parse_board_response_invalid_json() -> None:
 def test_parse_board_response_pagination_warns() -> None:
     response = _make_board_response(nodes=[_make_pr_node(head_branch="b1", repo="org/r")], has_next_page=True)
     result = _parse_board_response(response, [("org/r", "b1")], unresolved_ignore_user=None)
-    assert any("first: 100" in e or "100" in e for e in result.errors)
+    assert len(result.errors) == 1
+    # Assert on distinctive substrings copied verbatim from the warning in
+    # _parse_board_response, so a reworded/wrong message would fail.
+    assert "too many matching PRs to fit in a single page" in result.errors[0]
+    assert "`first: 100` cap" in result.errors[0]
 
 
 def test_parse_board_response_null_node_skipped() -> None:
@@ -427,6 +431,24 @@ def test_fetch_board_launch_error() -> None:
     assert result.prs == {}
     assert len(result.errors) == 1
     assert "gh api graphql failed" in result.errors[0]
+
+
+def test_fetch_board_nonzero_exit_with_partial_errors_still_parses() -> None:
+    """`gh api graphql` exits non-zero whenever the response carries a GraphQL
+    `errors[]` array, but stdout still holds the full `{data, errors}` JSON.
+    fetch_board must ignore the exit code, parse stdout, surface the errors,
+    AND still return the PR nodes that did come back.
+    """
+    response = _make_board_response(
+        nodes=[_make_pr_node(head_branch="b1", repo="org/r", number=99)],
+        errors=[{"message": "Something went wrong", "type": "INTERNAL"}],
+    )
+    cg = _make_board_cg(response, returncode=1)
+    result = fetch_board(cg, repo_branches=[("org/r", "b1")])
+    # PR still parsed despite the non-zero exit code.
+    assert result.prs[("org/r", "b1")].number == 99
+    # And the GraphQL error is surfaced.
+    assert any("Something went wrong" in e for e in result.errors)
 
 
 def test_fetch_board_passes_unresolved_ignore_user() -> None:
@@ -634,8 +656,16 @@ def test_compute_uses_now_when_labels_carry_remote() -> None:
     }
     fields, _errors = ds.compute(agents=(agent,), cached_fields=cached_fields, mngr_ctx=ctx)
     pr = fields[AgentName("a1")][FIELD_PR]
+    # compute() stamps `created` from now_utc(), which is a module-level helper
+    # with no injection seam on GitHubDataSource -- freezing it would require
+    # monkeypatching the module, which the ratchets forbid. So we can't assert
+    # exact-timestamp equality; instead we assert `created` lands within a small
+    # wall-clock window of "now". The window is intentionally wall-clock pending
+    # a clock seam. It is kept tight (well under the 2h staleness of the cached
+    # repo_path below) so that a regression which stamps `created` from the
+    # stale cached source instead of `now` would still be caught.
     delta = datetime.now(timezone.utc) - pr.created
-    assert delta.total_seconds() < 60
+    assert timedelta(0) <= delta < timedelta(seconds=10)
 
 
 def test_compute_disabled_pr_and_ci() -> None:
