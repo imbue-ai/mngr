@@ -258,13 +258,14 @@ _MNGR_HOOK_NAME: str = "mngr"
 # ``"active"`` that ``BaseAgent`` and the provider listing scripts check.
 ACTIVE_MARKER_FILENAME: str = "active"
 
-# Per-agent file (in ``$MNGR_AGENT_STATE_DIR``) recording the agy conversation
-# IDs this agent has worked on, one per line, appended whenever the active
-# conversation changes (see ``capture_conversation_id.sh``). Its last line is
-# the most-recently-active conversation -- ``AntigravityAgent.assemble_command``
-# resumes it via ``agy --conversation`` on restart -- and its unique lines are
-# every conversation this agent touched, which ``stream_transcript.sh`` tails.
-# The shell scripts hardcode this same literal; keep them in sync.
+# Per-agent file (in ``$MNGR_AGENT_STATE_DIR``) recording every agy conversation
+# ID this agent has touched -- the root agent's and its subagents' -- one per
+# line, appended the first time each is seen (see ``capture_conversation_id.sh``).
+# Its unique lines are the full set ``stream_transcript.sh`` tails. This is the
+# transcript-scoping set only; the agent's *main* conversation for resume is
+# tracked separately in ``ROOT_CONVERSATION_FILENAME`` (the conversation-ids file
+# is unsuitable for resume because subagents also land in it). The capture script
+# hardcodes this same literal; keep them in sync.
 CONVERSATION_IDS_FILENAME: str = "antigravity_conversation_ids"
 
 # Script (provisioned into ``$MNGR_AGENT_STATE_DIR/commands/``) that the
@@ -273,14 +274,41 @@ CONVERSATION_IDS_FILENAME: str = "antigravity_conversation_ids"
 # sync with the resource file under ``resources/``.
 CAPTURE_CONVERSATION_ID_SCRIPT_NAME: str = "capture_conversation_id.sh"
 
-# ``active`` is touched on every ``PreInvocation`` (the loop is about to call
-# the model, i.e. the agent is working) and removed on ``Stop`` (the execution
-# loop terminated and the agent is back to waiting for input). ``$MNGR_AGENT_STATE_DIR``
-# expands in agy's shell at hook-execution time. Both commands intentionally
-# emit no stdout: ``PreInvocation``/``Stop`` treat empty output as "no
-# injected steps" / "allow stop" (verified live against agy 1.0.3).
-_SET_ACTIVE_COMMAND: str = f'touch "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'
-_CLEAR_ACTIVE_COMMAND: str = f'rm -f "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'
+# Per-agent file (in ``$MNGR_AGENT_STATE_DIR``) recording the conversation ID of
+# the *root* agent for the current turn -- the conversation that opened the turn
+# (fired ``PreInvocation`` while ``active`` was absent). Subagents share the same
+# hooks and fire their own Stops, so the clear hook uses this to act only on the
+# root's Stop. Written by ``set_active_marker.sh``; both shell scripts hardcode
+# this same literal, so keep them in sync.
+ROOT_CONVERSATION_FILENAME: str = "root_conversation"
+
+# Script (provisioned into ``$MNGR_AGENT_STATE_DIR/commands/``) that the
+# ``PreInvocation`` hook runs to touch the ``active`` marker and record the
+# turn's root conversation (see ``ROOT_CONVERSATION_FILENAME``). Name kept in
+# sync with the resource file under ``resources/``.
+SET_ACTIVE_MARKER_SCRIPT_NAME: str = "set_active_marker.sh"
+
+# Script (provisioned into ``$MNGR_AGENT_STATE_DIR/commands/``) that the
+# ``Stop`` hook runs to clear the ``active`` marker -- but only on the root
+# agent's fully-idle Stop (``"fullyIdle":true`` for the recorded root
+# conversation). Name kept in sync with the resource file under ``resources/``.
+CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME: str = "clear_active_marker_when_idle.sh"
+
+# ``PreInvocation`` runs ``set_active_marker.sh`` (touch ``active`` + record the
+# turn's root); ``Stop`` runs ``clear_active_marker_when_idle.sh`` (clear
+# ``active`` only on the root's fully-idle Stop). agy runs the Stop hooks each
+# time *any* conversation -- the root agent or a subagent it launched -- goes
+# idle, reporting ``fullyIdle`` (an interim Stop sends ``false``, the final one
+# ``true``; verified live against agy 1.0.5). Subagents fire their own
+# ``fullyIdle:true`` Stop while the root still works, so the clear hook gates on
+# both ``fullyIdle:true`` *and* the root conversation id, keeping the agent
+# RUNNING until the root itself is done. ``$MNGR_AGENT_STATE_DIR`` expands at
+# hook time. Both scripts emit no stdout (agy would treat it as injected steps /
+# a stop-blocking result).
+_SET_ACTIVE_COMMAND: str = f'bash "$MNGR_AGENT_STATE_DIR/commands/{SET_ACTIVE_MARKER_SCRIPT_NAME}"'
+_CLEAR_ACTIVE_WHEN_IDLE_COMMAND: str = (
+    f'bash "$MNGR_AGENT_STATE_DIR/commands/{CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME}"'
+)
 
 # Second ``PreInvocation`` handler: records the conversation ID from agy's hook
 # payload (delivered on stdin). agy hands each handler its own copy of the
@@ -296,18 +324,27 @@ def build_antigravity_hooks_config() -> dict[str, Any]:
 
     Emits two ``PreInvocation`` handlers plus a ``Stop`` handler:
 
-    * The ``active``-marker pair: ``PreInvocation`` touches the marker and
-      ``Stop`` removes it. ``BaseAgent.get_lifecycle_state`` reads that marker
-      to report RUNNING while the agent works and WAITING when it's idle; agy
-      maintains no such marker on its own.
+    * The ``active``-marker pair: ``PreInvocation`` runs
+      ``set_active_marker.sh`` (touch the marker, record the turn's root
+      conversation) and ``Stop`` runs ``clear_active_marker_when_idle.sh``,
+      which removes the marker only on the root agent's fully-idle Stop.
+      ``BaseAgent.get_lifecycle_state`` reads the marker to report RUNNING vs
+      WAITING; agy maintains no such marker on its own. Gating on
+      ``fullyIdle`` + the root conversation keeps the agent RUNNING while work
+      it launched is still in flight (including subagents, which fire their own
+      ``fullyIdle:true`` Stop), instead of flipping to WAITING when the root
+      turn -- or any subagent -- ends.
     * The conversation-ID capture handler: a second ``PreInvocation`` handler
       runs ``capture_conversation_id.sh``, which reads agy's hook payload from
-      stdin and records the active conversation ID (see
-      ``CONVERSATION_IDS_FILENAME``). ``assemble_command`` resumes that
-      conversation on restart and ``stream_transcript.sh`` tails its
-      transcript. agy delivers the payload stdin to each handler independently
-      (verified live against agy 1.0.4), so the two ``PreInvocation`` handlers
-      do not contend for stdin.
+      stdin and records every distinct conversation ID this agent touches --
+      the root agent's and its subagents' -- into ``CONVERSATION_IDS_FILENAME``.
+      That file is the transcript-scoping set: ``stream_transcript.sh`` tails
+      each one's transcript. Resume does NOT read it (subagents land there too);
+      ``assemble_command`` resumes the agent's main conversation from
+      ``root_conversation`` written by ``set_active_marker.sh`` above. agy
+      delivers the payload stdin to each handler independently (verified live
+      against agy 1.0.4), so the two ``PreInvocation`` handlers do not contend
+      for stdin.
 
     Auto-approval of tool permissions is NOT a hook: agy's documented
     ``PreToolUse`` ``{"decision": "allow"}`` output does not actually gate the
@@ -325,7 +362,7 @@ def build_antigravity_hooks_config() -> dict[str, Any]:
             {"type": "command", "command": _SET_ACTIVE_COMMAND},
             {"type": "command", "command": _CAPTURE_CONVERSATION_ID_COMMAND},
         ],
-        "Stop": [{"type": "command", "command": _CLEAR_ACTIVE_COMMAND}],
+        "Stop": [{"type": "command", "command": _CLEAR_ACTIVE_WHEN_IDLE_COMMAND}],
     }
     return {_MNGR_HOOK_NAME: mngr_hook}
 

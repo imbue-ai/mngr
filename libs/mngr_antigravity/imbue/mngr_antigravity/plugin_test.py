@@ -22,6 +22,8 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
+from imbue.mngr_antigravity.antigravity_config import CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME
+from imbue.mngr_antigravity.antigravity_config import SET_ACTIVE_MARKER_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_hooks_config_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_oauth_token_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_onboarding_cache_path
@@ -387,23 +389,27 @@ def test_modify_env_vars_exposes_app_data_dir(antigravity_agent: AntigravityAgen
     assert "ANTIGRAVITY_AGY_LOG_FILE" not in env_vars
 
 
-def test_assemble_command_resumes_last_conversation_via_set_dash_dash(antigravity_agent: AntigravityAgent) -> None:
-    """The launch command resumes the last-recorded conversation, evaluated in the shell.
+def test_assemble_command_resumes_main_conversation_via_set_dash_dash(antigravity_agent: AntigravityAgent) -> None:
+    """The launch command resumes the main (root) conversation, evaluated in the shell.
 
     The stored command is replayed verbatim on every `mngr start`, so the
-    resume decision is shell-evaluated at launch: read the last line of the
-    per-agent conversation-ids file and, when present, pass `--conversation
-    "$id"` via `set --` / "$@" (which avoids unquoted-substitution word
-    splitting so it works in bash and zsh). We do not stat agy's store to
-    pre-check existence -- agy warns and starts fresh on its own for a pruned
-    conversation -- so the command stays decoupled from agy's on-disk layout.
+    resume decision is shell-evaluated at launch: read the root conversation id
+    from the per-agent root_conversation file and, when present, pass
+    `--conversation "$id"` via `set --` / "$@" (which avoids unquoted-substitution
+    word splitting so it works in bash and zsh). The id comes from
+    root_conversation (the root agent's), NOT the conversation-ids file whose
+    last line can be a subagent. We do not stat agy's store to pre-check
+    existence -- agy warns and starts fresh on its own for a pruned conversation
+    -- so the command stays decoupled from agy's on-disk layout.
     """
     command = str(antigravity_agent.assemble_command(antigravity_agent.host, (), command_override=None))
-    ids_file = str(antigravity_agent._get_conversation_ids_file_path())
-    # Reads the last recorded id from the per-agent ids file.
-    assert f"__mngr_cid=$(tail -n 1 {ids_file} 2>/dev/null || true)" in command
+    root_file = str(antigravity_agent._get_root_conversation_file_path())
+    # Reads the root conversation id from the per-agent root_conversation file.
+    assert f"__mngr_cid=$(cat {root_file} 2>/dev/null || true)" in command
     # Passes the flag positionally whenever an id is recorded (no store stat).
     assert 'if [ -n "$__mngr_cid" ]; then set -- --conversation "$__mngr_cid"; fi' in command
+    # Resume must not read the subagent-pollutable conversation-ids file.
+    assert "tail -n 1" not in command
     # No coupling to agy's conversation store path/extension.
     assert ".db" not in command
     assert "conversations/" not in command
@@ -895,12 +901,66 @@ def test_provision_writes_hooks_json_under_per_agent_home_config(
 def test_provision_hooks_json_sets_active_marker_on_preinvocation_and_clears_on_stop(
     antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path
 ) -> None:
-    """The active marker hooks are always present (they drive RUNNING vs WAITING)."""
+    """The active marker hooks are always present (they drive RUNNING vs WAITING).
+
+    PreInvocation runs set_active_marker.sh (touch + record the turn's root);
+    Stop runs the root-gated clear script, which removes the marker only on the
+    root agent's fully-idle Stop.
+    """
     agent = antigravity_agent_auto_dismiss
     _provision(agent)
     mngr = _read_hooks_json(agent)["mngr"]
-    assert mngr["PreInvocation"][0]["command"] == 'touch "$MNGR_AGENT_STATE_DIR/active"'
-    assert mngr["Stop"][0]["command"] == 'rm -f "$MNGR_AGENT_STATE_DIR/active"'
+    assert (
+        mngr["PreInvocation"][0]["command"] == f'bash "$MNGR_AGENT_STATE_DIR/commands/{SET_ACTIVE_MARKER_SCRIPT_NAME}"'
+    )
+    assert (
+        mngr["Stop"][0]["command"]
+        == f'bash "$MNGR_AGENT_STATE_DIR/commands/{CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME}"'
+    )
+
+
+def test_provision_installs_clear_active_marker_when_idle_script(
+    auto_approve_ctx: AntigravityAgent,
+    isolated_home: Path,
+) -> None:
+    """provision() installs clear_active_marker_when_idle.sh into the commands/ dir.
+
+    The Stop hook invokes this script by that path
+    (build_antigravity_hooks_config), so it must be provisioned for the
+    fully-idle-gated WAITING transition to work.
+    """
+    agent = auto_approve_ctx
+    agent.provision(
+        host=agent.host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
+        mngr_ctx=agent.mngr_ctx,
+    )
+    script_path = agent._get_agent_dir() / "commands" / CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME
+    assert script_path.exists()
+    # Sanity-check it's the idle-gate script (keys on the fullyIdle field).
+    assert "fullyIdle" in script_path.read_text()
+
+
+def test_provision_installs_set_active_marker_script(
+    auto_approve_ctx: AntigravityAgent,
+    isolated_home: Path,
+) -> None:
+    """provision() installs set_active_marker.sh into the commands/ dir.
+
+    The PreInvocation hook invokes this script by that path
+    (build_antigravity_hooks_config), so it must be provisioned for the marker
+    to be set and the turn's root recorded.
+    """
+    agent = auto_approve_ctx
+    agent.provision(
+        host=agent.host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
+        mngr_ctx=agent.mngr_ctx,
+    )
+    script_path = agent._get_agent_dir() / "commands" / SET_ACTIVE_MARKER_SCRIPT_NAME
+    assert script_path.exists()
+    # Sanity-check it's the marker/root script (records the root conversation).
+    assert "root_conversation" in script_path.read_text()
 
 
 def test_provision_does_not_write_hooks_into_work_dir(
