@@ -6,7 +6,6 @@ from datetime import timezone
 from pathlib import Path
 
 import pytest
-from inline_snapshot import snapshot
 
 from imbue.mngr.api.events import EventRecord
 from imbue.mngr.api.events import EventSourceInfo
@@ -85,6 +84,30 @@ def events_volume_target(tmp_path: Path, local_provider) -> tuple[EventsTarget, 
     return target, events_dir
 
 
+def _make_event(
+    event_id: str,
+    timestamp: str,
+    source: str = "test",
+    original_source: str | None = None,
+    data: dict[str, object] | None = None,
+) -> EventRecord:
+    """Create a minimal EventRecord for testing.
+
+    ``data`` defaults to a self-describing dict echoing the envelope fields. Pass
+    an explicit ``data`` (and/or ``original_source``) when a test needs to drive
+    source-correction behavior.
+    """
+    event_data: dict[str, object] = {"event_id": event_id, "timestamp": timestamp} if data is None else data
+    return EventRecord(
+        raw_line=json.dumps({"event_id": event_id, "timestamp": timestamp}, separators=(",", ":")),
+        timestamp=timestamp,
+        event_id=event_id,
+        source=source,
+        data=event_data,
+        original_source=original_source,
+    )
+
+
 # =============================================================================
 # read_event_content tests
 # =============================================================================
@@ -96,7 +119,7 @@ def test_read_event_content_returns_file_contents(events_volume_target: tuple[Ev
 
     content = read_event_content(target, "test.log")
 
-    assert content == snapshot("hello world\nsecond line\n")
+    assert content == "hello world\nsecond line\n"
 
 
 def _make_offline_volume_backed_host(local_provider, temp_mngr_ctx: MngrContext) -> OfflineHostWithVolume:
@@ -202,9 +225,14 @@ def test_resolve_events_target_finds_agent(
     target = resolve_events_target(AgentAddress(agent=AgentName("test-resolve-agent")), temp_mngr_ctx)
     assert "test-resolve-agent" in target.display_name
 
+    # The resolved target must point at this agent's own events subpath.
+    assert target.events_subpath == Path("agents") / str(agent_id) / "events"
+    assert target.events_path is not None
+    assert target.events_path == per_host_dir / "agents" / str(agent_id) / "events"
+
     # Should be able to read event files via the online host
     content = read_event_content(target, "output.log")
-    assert "agent log content" in content
+    assert content == "agent log content\n"
 
 
 def test_resolve_events_target_finds_host(
@@ -216,7 +244,12 @@ def test_resolve_events_target_finds_host(
     host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
 
     # Create an agent so the host appears in discover_hosts_and_agents
-    _create_agent_data_json(per_host_dir, "unrelated-agent-47291", "sleep 47291")
+    unrelated_agent_id = _create_agent_data_json(per_host_dir, "unrelated-agent-47291", "sleep 47291")
+
+    # Give the unrelated agent its own event file, scoped under agents/<id>/events.
+    unrelated_agent_events_dir = per_host_dir / "agents" / str(unrelated_agent_id) / "events"
+    unrelated_agent_events_dir.mkdir(parents=True, exist_ok=True)
+    (unrelated_agent_events_dir / "agent-output.log").write_text("agent log content\n")
 
     # Create events directly in the host volume (not under agents/)
     host_events_dir = per_host_dir / "events"
@@ -227,9 +260,19 @@ def test_resolve_events_target_finds_host(
     target = resolve_events_target(HostAddress(host=host.id), temp_mngr_ctx)
     assert "host" in target.display_name
 
-    # Should be able to read event files via the online host
+    # The host target's events directory is the host-level events dir, not any agent's.
+    assert target.events_subpath == Path("events")
+    assert target.events_path is not None
+    assert target.events_path == host_events_dir
+
+    # Should be able to read the host's own event file via the online host.
     content = read_event_content(target, "host-output.log")
-    assert "host log content" in content
+    assert content == "host log content\n"
+
+    # The unrelated agent's events live under agents/<id>/events and must not be
+    # reachable through the host target (its events_path does not cover them).
+    with pytest.raises(MngrError, match="Failed to read event file"):
+        read_event_content(target, "agent-output.log")
 
 
 def test_resolve_events_target_raises_for_unknown_agent(
@@ -253,6 +296,14 @@ def events_host_target(
     """Create an EventsTarget backed by a local online host (no volume).
 
     Returns (target, events_dir) so tests can write files into the events directory.
+
+    This deliberately uses the *real* local online host rather than a fake. The
+    local host's ``execute_idempotent_command`` returns pyinfra's
+    ``CommandOutput.stdout``, which is ``"\\n".join(line.rstrip("\\n") for ...)``.
+    That is exactly the rejoin/strip pipeline the sentinel logic in
+    ``_read_event_content_via_host`` compensates for, so the trailing-newline
+    regression-guard tests below (no-trailing-newline / empty / only-newline)
+    genuinely exercise the documented bug rather than bypassing it.
     """
     events_dir = tmp_path / "host_events"
     events_dir.mkdir()
@@ -400,14 +451,19 @@ def test_parse_event_line_malformed_json_raises() -> None:
 
 
 def test_parse_event_line_empty_string_raises() -> None:
-    """parse_event_line is for individual non-empty lines; the watcher pre-strips empties before calling."""
-    with pytest.raises(json.JSONDecodeError):
+    """parse_event_line is for individual non-empty lines; the watcher pre-strips empties before calling.
+
+    The exact exception subtype (a JSONDecodeError vs MalformedJsonlLineError) is
+    an incidental detail -- the production docstring says empties are handled
+    upstream -- so we only pin that some malformed-line error is raised.
+    """
+    with pytest.raises((json.JSONDecodeError, MalformedJsonlLineError)):
         parse_event_line("", source_hint="fallback")
 
 
 def test_parse_event_line_whitespace_only_raises() -> None:
     """Whitespace-only input is treated identically to empty: not a valid event line."""
-    with pytest.raises(json.JSONDecodeError):
+    with pytest.raises((json.JSONDecodeError, MalformedJsonlLineError)):
         parse_event_line("   \n  ", source_hint="fallback")
 
 
@@ -418,9 +474,9 @@ def test_parse_event_line_whitespace_only_raises() -> None:
 
 def test_sort_events_by_timestamp_orders_chronologically() -> None:
     events = [
-        EventRecord(raw_line="c", timestamp="2026-03-03T00:00:00Z", event_id="c", source="s", data={}),
-        EventRecord(raw_line="a", timestamp="2026-03-01T00:00:00Z", event_id="a", source="s", data={}),
-        EventRecord(raw_line="b", timestamp="2026-03-02T00:00:00Z", event_id="b", source="s", data={}),
+        _make_event("c", "2026-03-03T00:00:00Z", source="s"),
+        _make_event("a", "2026-03-01T00:00:00Z", source="s"),
+        _make_event("b", "2026-03-02T00:00:00Z", source="s"),
     ]
     sorted_events = sort_events_by_timestamp(events)
     assert [e.event_id for e in sorted_events] == ["a", "b", "c"]
@@ -428,8 +484,8 @@ def test_sort_events_by_timestamp_orders_chronologically() -> None:
 
 def test_sort_events_by_timestamp_stable_for_equal_timestamps() -> None:
     events = [
-        EventRecord(raw_line="x", timestamp="2026-03-01T00:00:00Z", event_id="x", source="s", data={}),
-        EventRecord(raw_line="y", timestamp="2026-03-01T00:00:00Z", event_id="y", source="s", data={}),
+        _make_event("x", "2026-03-01T00:00:00Z", source="s"),
+        _make_event("y", "2026-03-01T00:00:00Z", source="s"),
     ]
     sorted_events = sort_events_by_timestamp(events)
     assert [e.event_id for e in sorted_events] == ["x", "y"]
@@ -447,13 +503,11 @@ def test_sort_rotated_files_oldest_first() -> None:
         "events.jsonl.20260415120000000000",
     ]
     result = _sort_rotated_files_oldest_first(files)
-    assert result == snapshot(
-        [
-            "events.jsonl.20260415110000000000",
-            "events.jsonl.20260415120000000000",
-            "events.jsonl.20260415130000000000",
-        ]
-    )
+    assert result == [
+        "events.jsonl.20260415110000000000",
+        "events.jsonl.20260415120000000000",
+        "events.jsonl.20260415130000000000",
+    ]
 
 
 def test_sort_rotated_files_empty_list() -> None:
@@ -463,7 +517,7 @@ def test_sort_rotated_files_empty_list() -> None:
 def test_sort_rotated_files_ignores_non_matching() -> None:
     files = ["events.jsonl.20260415110000000000", "events.jsonl", "other.log"]
     result = _sort_rotated_files_oldest_first(files)
-    assert result == snapshot(["events.jsonl.20260415110000000000"])
+    assert result == ["events.jsonl.20260415110000000000"]
 
 
 # =============================================================================
@@ -850,9 +904,7 @@ def test_stream_all_events_with_source_filters(tmp_path: Path, local_provider) -
         source_filters=["messages", "logs"],
     )
 
-    assert "msg-1" in captured
-    assert "log-1" in captured
-    assert "other-1" not in captured
+    assert captured == ["msg-1", "log-1"]
 
 
 def test_stream_all_events_with_source_filters_and_cel(tmp_path: Path, local_provider) -> None:
@@ -927,21 +979,11 @@ def test_stream_all_events_empty_source_filters_shows_all(tmp_path: Path, local_
 # =============================================================================
 
 
-def test_create_source_mismatch_warning_contains_details() -> None:
-    warning = _create_source_mismatch_warning("wrong_source", "correct_source")
-    assert warning.source == "event_watcher"
-    assert "wrong_source" in warning.raw_line
-    assert "correct_source" in warning.raw_line
-    assert warning.data["type"] == "warn_about_incorrect_source_field"
-
-
 def test_maybe_emit_source_mismatch_warning_emits_once() -> None:
-    event = EventRecord(
-        raw_line="test",
-        timestamp="2026-01-01T00:00:00Z",
-        event_id="e1",
+    event = _make_event(
+        "e1",
+        "2026-01-01T00:00:00Z",
         source="correct",
-        data={},
         original_source="wrong",
     )
     warned: set[str] = set()
@@ -963,9 +1005,9 @@ def test_maybe_emit_source_mismatch_warning_emits_once() -> None:
 
 def test_emit_historical_events_applies_head() -> None:
     events_list = [
-        EventRecord(raw_line="1", timestamp="2026-01-01T00:00:00Z", event_id="e1", source="s", data={}),
-        EventRecord(raw_line="2", timestamp="2026-01-02T00:00:00Z", event_id="e2", source="s", data={}),
-        EventRecord(raw_line="3", timestamp="2026-01-03T00:00:00Z", event_id="e3", source="s", data={}),
+        _make_event("e1", "2026-01-01T00:00:00Z", source="s"),
+        _make_event("e2", "2026-01-02T00:00:00Z", source="s"),
+        _make_event("e3", "2026-01-03T00:00:00Z", source="s"),
     ]
     state = _AllEventsStreamState()
     captured: list[str] = []
@@ -975,9 +1017,9 @@ def test_emit_historical_events_applies_head() -> None:
 
 def test_emit_historical_events_applies_tail() -> None:
     events_list = [
-        EventRecord(raw_line="1", timestamp="2026-01-01T00:00:00Z", event_id="e1", source="s", data={}),
-        EventRecord(raw_line="2", timestamp="2026-01-02T00:00:00Z", event_id="e2", source="s", data={}),
-        EventRecord(raw_line="3", timestamp="2026-01-03T00:00:00Z", event_id="e3", source="s", data={}),
+        _make_event("e1", "2026-01-01T00:00:00Z", source="s"),
+        _make_event("e2", "2026-01-02T00:00:00Z", source="s"),
+        _make_event("e3", "2026-01-03T00:00:00Z", source="s"),
     ]
     state = _AllEventsStreamState()
     captured: list[str] = []
@@ -987,8 +1029,8 @@ def test_emit_historical_events_applies_tail() -> None:
 
 def test_emit_historical_events_deduplicates() -> None:
     events_list = [
-        EventRecord(raw_line="1", timestamp="2026-01-01T00:00:00Z", event_id="e1", source="s", data={}),
-        EventRecord(raw_line="2", timestamp="2026-01-02T00:00:00Z", event_id="e2", source="s", data={}),
+        _make_event("e1", "2026-01-01T00:00:00Z", source="s"),
+        _make_event("e2", "2026-01-02T00:00:00Z", source="s"),
     ]
     state = _AllEventsStreamState()
     state.emitted_event_ids.add("e1")
@@ -999,17 +1041,6 @@ def test_emit_historical_events_deduplicates() -> None:
     assert captured == ["e2"]
 
 
-def _make_event(event_id: str, timestamp: str, source: str = "test") -> EventRecord:
-    """Create a minimal EventRecord for testing."""
-    return EventRecord(
-        raw_line=f'{{"event_id": "{event_id}", "timestamp": "{timestamp}"}}',
-        timestamp=timestamp,
-        event_id=event_id,
-        source=source,
-        data={"event_id": event_id, "timestamp": timestamp},
-    )
-
-
 def test_emit_historical_events_emits_all_when_no_limits() -> None:
     """Without head/tail, all events should be emitted."""
     state = _AllEventsStreamState()
@@ -1017,7 +1048,7 @@ def test_emit_historical_events_emits_all_when_no_limits() -> None:
     emitted: list[EventRecord] = []
     _emit_historical_events(events, state, emitted.append, head_count=None, tail_count=None)
 
-    assert len(emitted) == 3
+    assert [e.event_id for e in emitted] == ["evt-0", "evt-1", "evt-2"]
 
 
 # =============================================================================
@@ -1082,9 +1113,9 @@ def test_stream_all_events_deduplicates(tmp_path: Path, local_provider) -> None:
         is_follow=False,
     )
 
-    # dup1 should appear only once even though it's in both files
-    assert captured.count("dup1") == 1
-    assert "unique1" in captured
+    # dup1 should appear only once even though it's in both files, and ordering
+    # is by timestamp (dup1 at T=1, then unique1 at T=2).
+    assert captured == ["dup1", "unique1"]
 
 
 def test_stream_all_events_empty_events_dir(tmp_path: Path, local_provider) -> None:
@@ -1131,8 +1162,8 @@ def test_resolve_events_target_populates_provider_and_host_id(
     target = resolve_events_target(AgentAddress(agent=AgentName("test-refresh-agent-93718")), temp_mngr_ctx)
 
     assert target.provider is not None
-    assert target.host_id is not None
-    assert target.events_subpath is not None
+    assert target.events_subpath == Path("agents") / str(agent_id) / "events"
+    assert target.host_id == local_provider.get_host(HostName(LOCAL_HOST_NAME)).id
 
 
 # =============================================================================
@@ -1322,16 +1353,35 @@ def test_refresh_events_target_returns_same_when_no_provider() -> None:
     assert refreshed is target
 
 
-def test_refresh_events_target_returns_same_when_no_host_id() -> None:
-    """refresh_events_target returns same target when host_id is None."""
-    target = EventsTarget(display_name="test", host_id=None)
+def test_refresh_events_target_returns_same_when_no_host_id(local_provider) -> None:
+    """refresh_events_target returns same target when only host_id is None.
+
+    The other two short-circuit fields (provider and events_subpath) are set so
+    that the test genuinely isolates the host_id branch rather than passing via
+    the provider-is-None check.
+    """
+    target = EventsTarget(
+        display_name="test",
+        provider=local_provider,
+        host_id=None,
+        events_subpath=Path("events"),
+    )
     result = refresh_events_target(target)
     assert result is target
 
 
-def test_refresh_events_target_returns_same_when_no_events_subpath() -> None:
-    """refresh_events_target returns same target when events_subpath is None."""
-    target = EventsTarget(display_name="test", events_subpath=None)
+def test_refresh_events_target_returns_same_when_no_events_subpath(local_provider) -> None:
+    """refresh_events_target returns same target when only events_subpath is None.
+
+    provider and host_id are set so the test isolates the events_subpath branch
+    rather than passing via the provider-is-None check.
+    """
+    target = EventsTarget(
+        display_name="test",
+        provider=local_provider,
+        host_id=local_provider.get_host(HostName(LOCAL_HOST_NAME)).id,
+        events_subpath=None,
+    )
     result = refresh_events_target(target)
     assert result is target
 
@@ -1341,12 +1391,19 @@ def test_refresh_events_target_returns_same_when_no_events_subpath() -> None:
 # =============================================================================
 
 
+@pytest.mark.timeout(30)
 def test_handle_online_offline_transition_restarts_threads(
     tmp_path: Path,
     temp_mngr_ctx: MngrContext,
     local_provider,
 ) -> None:
-    """Verify _handle_online_offline_transition stops old threads and starts new ones."""
+    """Verify _handle_online_offline_transition stops old threads and starts working new ones.
+
+    Beyond checking that threads exist, this drives an event through a restarted
+    thread: after the offline->online transition we append a line to the source's
+    events.jsonl and prove the restarted thread is live and reading the correct
+    file by observing that event on the queue.
+    """
     per_host_dir = local_provider.host_dir
     agent_id = _create_agent_data_json(per_host_dir, "test-handle-transition-38291", "sleep 38291")
     agent_events_subpath = Path("agents") / str(agent_id) / "events"
@@ -1394,10 +1451,33 @@ def test_handle_online_offline_transition_restarts_threads(
     # New tail threads should have been started for known sources
     assert len(tail_threads) >= 1
 
-    # Clean up
-    stop_event.set()
-    for thread in tail_threads:
-        thread.join(timeout=5.0)
+    try:
+        # Wait for the restarted thread's pygtail offset file to appear, proving
+        # it initialized against the correct source file.
+        offset_file = offset_dir / "src.offset"
+        poll_for_value(
+            producer=lambda: True if offset_file.exists() else None,
+            timeout=5.0,
+            poll_interval=0.2,
+        )
+
+        # Append a new event to the source the restarted thread is tailing.
+        with (agent_events_dir / "events.jsonl").open("a") as f:
+            f.write('{"timestamp":"2026-01-01T00:00:00Z","event_id":"restarted-1","source":"src"}\n')
+            f.flush()
+
+        # The restarted thread must pick it up and push it onto the queue.
+        result, _, _ = poll_for_value(
+            producer=lambda: event_queue.get_nowait() if not event_queue.empty() else None,
+            timeout=15.0,
+            poll_interval=0.5,
+        )
+        assert result is not None
+        assert result.event_id == "restarted-1"
+    finally:
+        stop_event.set()
+        for thread in tail_threads:
+            thread.join(timeout=5.0)
 
 
 def test_handle_online_offline_transition_no_change_when_same_state() -> None:
@@ -1602,6 +1682,9 @@ def test_create_source_mismatch_warning_has_correct_fields() -> None:
     assert warning.event_id.startswith("evt-")
     assert "bad_source" in warning.data["message"]
     assert "good_source" in warning.data["message"]
+    # The serialized raw_line carries both source names too.
+    assert "bad_source" in warning.raw_line
+    assert "good_source" in warning.raw_line
 
 
 def test_maybe_emit_source_mismatch_warning_skips_when_no_mismatch() -> None:
@@ -1609,10 +1692,10 @@ def test_maybe_emit_source_mismatch_warning_skips_when_no_mismatch() -> None:
     emitted: list[EventRecord] = []
     warned: set[str] = set()
 
-    event_no_mismatch = EventRecord(
-        raw_line="{}",
-        timestamp="2025-01-01T00:00:00Z",
-        event_id="evt-1",
+    # original_source defaults to None, so no mismatch is recorded.
+    event_no_mismatch = _make_event(
+        "evt-1",
+        "2025-01-01T00:00:00Z",
         source="messages",
         data={"source": "messages"},
     )

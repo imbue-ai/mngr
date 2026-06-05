@@ -1,24 +1,22 @@
 """Unit tests for ``api/git.py``."""
 
-import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 from typing import cast
 
 import pytest
+from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.api.git import GitSyncError
 from imbue.mngr.api.git import LocalGitContext
 from imbue.mngr.api.git import RemoteGitContext
 from imbue.mngr.api.git import UncommittedChangesError
 from imbue.mngr.api.git import _build_ssh_git_url
-from imbue.mngr.api.git import git_pull
-from imbue.mngr.api.git import git_push
-from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.errors import MngrError
+from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OnlineHostInterface
-from imbue.mngr.utils.testing import init_git_repo
-from imbue.mngr.utils.testing import run_git_command
 
 # =============================================================================
 # Errors
@@ -155,84 +153,163 @@ def test_local_git_context_is_git_repository_returns_false_for_non_git_dir(
 
 
 # =============================================================================
-# RemoteGitContext (using FakeHost with real git repos)
+# RemoteGitContext (asserting command routing via a recording host double)
 # =============================================================================
+#
+# These tests verify that RemoteGitContext dispatches each operation to the
+# correct host method (idempotent vs. stateful), with the expected command
+# string and cwd. We deliberately avoid the shared FakeHost here: FakeHost
+# collapses remote execution to a LOCAL subprocess, so testing against it only
+# re-confirms the local-subprocess shim already covered by the LocalGitContext
+# block above -- it never exercises the remote routing that distinguishes
+# RemoteGitContext from LocalGitContext. The recording double below instead
+# captures (method, command, cwd) without running anything, letting us assert
+# on the routing itself.
 
 
-def test_remote_git_context_has_uncommitted_changes_returns_true_when_changes_exist(
-    temp_git_repo: Path,
-) -> None:
-    (temp_git_repo / "dirty.txt").write_text("dirty")
+class _RecordedCall(MutableModel):
+    """A single command dispatched to the recording host."""
 
-    host = cast(OnlineHostInterface, FakeHost())
-    ctx = RemoteGitContext(host=host)
-    assert ctx.has_uncommitted_changes(temp_git_repo) is True
+    method: str = Field(description="Host method invoked (e.g. 'execute_idempotent_command')")
+    command: str = Field(description="Command string passed to the host")
+    cwd: Path | None = Field(description="Working directory passed to the host")
 
 
-def test_remote_git_context_has_uncommitted_changes_returns_false_when_clean(
-    temp_git_repo: Path,
-) -> None:
-    host = cast(OnlineHostInterface, FakeHost())
-    ctx = RemoteGitContext(host=host)
-    assert ctx.has_uncommitted_changes(temp_git_repo) is False
+class RecordingHost(MutableModel):
+    """Host double that records dispatched commands instead of executing them.
+
+    Each ``execute_*`` method appends a :class:`_RecordedCall` and returns a
+    canned :class:`CommandResult` so callers can assert on routing (which method
+    was used), the command string, and the cwd -- the parts that actually differ
+    between local and remote execution.
+    """
+
+    is_local: bool = Field(default=False, description="Whether this is a local host")
+    calls: list[_RecordedCall] = Field(default_factory=list, description="Recorded calls in dispatch order")
+    response_stdout: str = Field(default="", description="stdout returned for every recorded command")
+    response_success: bool = Field(default=True, description="success flag returned for every recorded command")
+
+    def _record(self, method: str, command: str, cwd: Path | None) -> CommandResult:
+        self.calls.append(_RecordedCall(method=method, command=command, cwd=cwd))
+        return CommandResult(stdout=self.response_stdout, stderr="", success=self.response_success)
+
+    def execute_idempotent_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        return self._record("execute_idempotent_command", command, cwd)
+
+    def execute_stateful_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        return self._record("execute_stateful_command", command, cwd)
 
 
-def test_remote_git_context_git_stash_returns_true_on_success(
-    temp_git_repo: Path,
-) -> None:
-    (temp_git_repo / "README.md").write_text("modified")
+def test_remote_git_context_has_uncommitted_changes_routes_status_to_idempotent_command() -> None:
+    host = RecordingHost(response_stdout=" M dirty.txt\n")
+    ctx = RemoteGitContext(host=cast(OnlineHostInterface, host))
 
-    host = cast(OnlineHostInterface, FakeHost())
-    ctx = RemoteGitContext(host=host)
-    result = ctx.git_stash(temp_git_repo)
-    assert result is True
-
-
-def test_remote_git_context_git_stash_returns_false_when_no_changes_to_save(
-    temp_git_repo: Path,
-) -> None:
-    host = cast(OnlineHostInterface, FakeHost())
-    ctx = RemoteGitContext(host=host)
-    result = ctx.git_stash(temp_git_repo)
-    assert result is False
+    assert ctx.has_uncommitted_changes(Path("/repo")) is True
+    assert host.calls == [
+        _RecordedCall(method="execute_idempotent_command", command="git status --porcelain", cwd=Path("/repo")),
+    ]
 
 
-def test_remote_git_context_git_reset_hard_succeeds(
-    temp_git_repo: Path,
-) -> None:
-    (temp_git_repo / "README.md").write_text("modified")
-    (temp_git_repo / "untracked.txt").write_text("untracked")
+def test_remote_git_context_has_uncommitted_changes_returns_false_on_empty_status() -> None:
+    host = RecordingHost(response_stdout="")
+    ctx = RemoteGitContext(host=cast(OnlineHostInterface, host))
 
-    host = cast(OnlineHostInterface, FakeHost())
-    ctx = RemoteGitContext(host=host)
-    ctx.git_reset_hard(temp_git_repo)
-
-    assert (temp_git_repo / "README.md").read_text() == "Initial content"
-    assert not (temp_git_repo / "untracked.txt").exists()
+    assert ctx.has_uncommitted_changes(Path("/repo")) is False
 
 
-def test_remote_git_context_get_current_branch_returns_branch_name(
-    temp_git_repo: Path,
-) -> None:
-    host = cast(OnlineHostInterface, FakeHost())
-    ctx = RemoteGitContext(host=host)
-    assert ctx.get_current_branch(temp_git_repo) == "main"
+def test_remote_git_context_has_uncommitted_changes_raises_when_status_fails() -> None:
+    host = RecordingHost(response_success=False)
+    ctx = RemoteGitContext(host=cast(OnlineHostInterface, host))
+
+    with pytest.raises(MngrError, match="git status failed"):
+        ctx.has_uncommitted_changes(Path("/repo"))
 
 
-def test_remote_git_context_is_git_repository_returns_true_for_git_repo(
-    temp_git_repo: Path,
-) -> None:
-    host = cast(OnlineHostInterface, FakeHost())
-    ctx = RemoteGitContext(host=host)
-    assert ctx.is_git_repository(temp_git_repo) is True
+def test_remote_git_context_git_stash_routes_to_stateful_command() -> None:
+    host = RecordingHost(response_stdout="Saved working directory")
+    ctx = RemoteGitContext(host=cast(OnlineHostInterface, host))
+
+    assert ctx.git_stash(Path("/repo")) is True
+    assert host.calls == [
+        _RecordedCall(
+            method="execute_stateful_command",
+            command='git stash push -u -m "mngr-sync-stash"',
+            cwd=Path("/repo"),
+        ),
+    ]
 
 
-def test_remote_git_context_is_git_repository_returns_false_for_non_git_dir(
-    tmp_path: Path,
-) -> None:
-    host = cast(OnlineHostInterface, FakeHost())
-    ctx = RemoteGitContext(host=host)
-    assert ctx.is_git_repository(tmp_path) is False
+def test_remote_git_context_git_stash_returns_false_when_no_changes_to_save() -> None:
+    host = RecordingHost(response_stdout="No local changes to save")
+    ctx = RemoteGitContext(host=cast(OnlineHostInterface, host))
+
+    assert ctx.git_stash(Path("/repo")) is False
+
+
+def test_remote_git_context_git_stash_pop_routes_to_stateful_command() -> None:
+    host = RecordingHost()
+    ctx = RemoteGitContext(host=cast(OnlineHostInterface, host))
+
+    ctx.git_stash_pop(Path("/repo"))
+    assert host.calls == [
+        _RecordedCall(method="execute_stateful_command", command="git stash pop", cwd=Path("/repo")),
+    ]
+
+
+def test_remote_git_context_git_reset_hard_routes_reset_and_clean_to_idempotent_command() -> None:
+    host = RecordingHost()
+    ctx = RemoteGitContext(host=cast(OnlineHostInterface, host))
+
+    ctx.git_reset_hard(Path("/repo"))
+    assert host.calls == [
+        _RecordedCall(method="execute_idempotent_command", command="git reset --hard HEAD", cwd=Path("/repo")),
+        _RecordedCall(method="execute_idempotent_command", command="git clean -fd", cwd=Path("/repo")),
+    ]
+
+
+def test_remote_git_context_get_current_branch_routes_to_idempotent_command_and_strips_output() -> None:
+    host = RecordingHost(response_stdout="main\n")
+    ctx = RemoteGitContext(host=cast(OnlineHostInterface, host))
+
+    assert ctx.get_current_branch(Path("/repo")) == "main"
+    assert host.calls == [
+        _RecordedCall(
+            method="execute_idempotent_command",
+            command="git rev-parse --abbrev-ref HEAD",
+            cwd=Path("/repo"),
+        ),
+    ]
+
+
+def test_remote_git_context_is_git_repository_returns_true_on_success() -> None:
+    host = RecordingHost(response_success=True)
+    ctx = RemoteGitContext(host=cast(OnlineHostInterface, host))
+
+    assert ctx.is_git_repository(Path("/repo")) is True
+    assert host.calls == [
+        _RecordedCall(method="execute_idempotent_command", command="git rev-parse --git-dir", cwd=Path("/repo")),
+    ]
+
+
+def test_remote_git_context_is_git_repository_returns_false_on_failure() -> None:
+    host = RecordingHost(response_success=False)
+    ctx = RemoteGitContext(host=cast(OnlineHostInterface, host))
+
+    assert ctx.is_git_repository(Path("/repo")) is False
 
 
 # =============================================================================
@@ -244,66 +321,3 @@ def test_build_ssh_git_url_produces_correct_url() -> None:
     ssh_info = ("root", "example.com", 2222, Path("/tmp/key"))
     result = _build_ssh_git_url(ssh_info, Path("/home/user/project"))
     assert result == "ssh://root@example.com:2222/home/user/project/.git"
-
-
-# =============================================================================
-# git_push / git_pull end-to-end (local host)
-# =============================================================================
-
-
-def test_git_pull_transfers_commit_from_remote_to_local(
-    tmp_path: Path,
-    cg: ConcurrencyGroup,
-) -> None:
-    """git_pull pulls a new commit from a remote (here: local FakeHost) into the local repo."""
-    local_dir = tmp_path / "local"
-    agent_dir = tmp_path / "agent"
-
-    init_git_repo(local_dir)
-    subprocess.run(["git", "clone", str(local_dir), str(agent_dir)], capture_output=True, check=True)
-    run_git_command(agent_dir, "config", "user.email", "test@example.com")
-    run_git_command(agent_dir, "config", "user.name", "Test User")
-
-    (agent_dir / "agent_file.txt").write_text("agent content")
-    run_git_command(agent_dir, "add", "agent_file.txt")
-    run_git_command(agent_dir, "commit", "-m", "Agent commit")
-
-    host = cast(OnlineHostInterface, FakeHost(is_local=True))
-    git_pull(
-        local_path=local_dir,
-        remote_host=host,
-        remote_path=agent_dir,
-        extra_args=("main", "--no-edit"),
-        cg=cg,
-    )
-
-    assert (local_dir / "agent_file.txt").read_text() == "agent content"
-
-
-def test_git_push_transfers_commit_from_local_to_remote(
-    tmp_path: Path,
-    cg: ConcurrencyGroup,
-) -> None:
-    """git_push pushes a new commit from local to the remote (here: local FakeHost)."""
-    local_dir = tmp_path / "local"
-    agent_dir = tmp_path / "agent"
-
-    init_git_repo(agent_dir)
-    subprocess.run(["git", "clone", str(agent_dir), str(local_dir)], capture_output=True, check=True)
-    run_git_command(local_dir, "config", "user.email", "test@example.com")
-    run_git_command(local_dir, "config", "user.name", "Test User")
-
-    (local_dir / "local_file.txt").write_text("local content")
-    run_git_command(local_dir, "add", "local_file.txt")
-    run_git_command(local_dir, "commit", "-m", "Local commit")
-
-    host = cast(OnlineHostInterface, FakeHost(is_local=True))
-    git_push(
-        local_path=local_dir,
-        remote_host=host,
-        remote_path=agent_dir,
-        extra_args=("main",),
-        cg=cg,
-    )
-
-    assert (agent_dir / "local_file.txt").read_text() == "local content"

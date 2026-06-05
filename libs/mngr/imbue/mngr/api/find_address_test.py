@@ -316,9 +316,11 @@ def test_stop_accepts_address_syntax(
 ) -> None:
     """Commands using the shared find_all_agents accept address syntax.
 
-    Using 'stop' as a representative: passing NAME@HOST should not crash with a
-    parsing error. It will fail with 'agent not found' (expected) rather than a
-    syntax error, proving the address is parsed correctly.
+    Using 'stop' as a representative: passing NAME@HOST is parsed successfully
+    and reaches the lookup, which then fails with the AgentNotFoundError
+    'Agent not found' message -- not a parse/usage error. This distinguishes
+    correct address parsing from a parsing regression (which would surface as a
+    Click usage error instead; see test_stop_rejects_malformed_address).
     """
     result = cli_runner.invoke(
         stop,
@@ -327,10 +329,14 @@ def test_stop_accepts_address_syntax(
         catch_exceptions=True,
     )
 
-    # The address should be parsed without error. The command fails because no
-    # agent named "nonexistent" exists, not because the address syntax is invalid.
+    # The address parsed; the failure is "agent not found" (the AgentNotFoundError
+    # message is "Agent not found: ..."), proving we got past the parser.
     assert result.exit_code != 0
+    assert "not found" in result.output.lower()
     assert "nonexistent" in result.output
+    # A parse failure would render as a Click usage error ("Invalid value" /
+    # "Usage:"); the not-found path must not.
+    assert "Invalid value" not in result.output
 
 
 def test_stop_accepts_plain_name_unchanged(
@@ -338,7 +344,11 @@ def test_stop_accepts_plain_name_unchanged(
     temp_work_dir: Path,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Plain agent names (no @) still work as before with the address-aware code path."""
+    """Plain agent names (no @) still work as before with the address-aware code path.
+
+    The plain name parses cleanly and reaches the lookup, which fails with the
+    not-found message rather than a parse/usage error.
+    """
     result = cli_runner.invoke(
         stop,
         ["nonexistent-agent"],
@@ -347,4 +357,37 @@ def test_stop_accepts_plain_name_unchanged(
     )
 
     assert result.exit_code != 0
+    assert "not found" in result.output.lower()
     assert "nonexistent-agent" in result.output
+    assert "Invalid value" not in result.output
+
+
+def test_stop_rejects_malformed_address(
+    cli_runner: CliRunner,
+    temp_work_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """A genuinely malformed address fails parsing with a distinct usage error.
+
+    'a@b@c' splits as name 'a' with host part 'b@c', and 'b@c' is not a valid
+    host name (it contains an '@'). parse_agent_addresses_or_raise turns the
+    resulting UserInputError into a Click BadParameter, so the command exits with
+    a usage error ("Invalid value") *before* any agent lookup -- it never reports
+    "agent not found". Asserting the two paths differ guards against an address
+    parsing regression that would otherwise let the not-found tests pass
+    vacuously (click.BadParameter embeds the raw input, so a bare "a@b@c"
+    substring check would not distinguish the cases).
+    """
+    result = cli_runner.invoke(
+        stop,
+        ["a@b@c"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+
+    assert result.exit_code != 0
+    # Distinct parse/usage error, not the not-found path.
+    assert "Invalid value" in result.output
+    assert "not found" not in result.output.lower()
+    # The specific parse failure is about the invalid host component.
+    assert "host name or ID" in result.output

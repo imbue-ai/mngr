@@ -1,12 +1,15 @@
 from collections.abc import Generator
+from collections.abc import Mapping
+from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr import hookimpl
-from imbue.mngr.api.create import _create_new_host
 from imbue.mngr.api.create import _generate_unique_host_name
 from imbue.mngr.api.create import _run_post_host_create_commands
 from imbue.mngr.api.create import _write_host_env_vars
@@ -19,6 +22,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
@@ -26,20 +30,117 @@ from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
-from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostNameStyle
+from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.plugin_testing import PLACEHOLDER_AGENT_TYPE
 from imbue.mngr.utils.testing import make_ctx_with_plugins
+
+
+class _ScriptedProvider(LocalProviderInstance):
+    """A LocalProviderInstance whose name-generation and create behavior are scripted.
+
+    This exists so the host-name-uniqueness and conflict-retry logic in
+    ``create.py`` can be exercised with deterministic, controlled inputs rather
+    than relying on the local provider's fixed "localhost" semantics. It returns
+    real local ``Host`` objects from ``create_host`` (so the result is a genuine
+    ``OnlineHostInterface``), but lets the test dictate the candidate names, the
+    set of "already existing" hosts, and how many times ``create_host`` raises
+    ``HostNameConflictError`` before succeeding.
+    """
+
+    # Names that ``get_host_name`` hands out, one per call, in order.
+    scripted_host_names: list[HostName] = Field(default_factory=list)
+    # Names reported by ``discover_hosts`` as already taken.
+    existing_host_names: list[HostName] = Field(default_factory=list)
+    # Number of leading ``create_host`` calls that should raise a conflict.
+    conflicts_before_success: int = Field(default=0)
+    # Records every name passed to ``create_host`` (in call order).
+    create_host_calls: list[HostName] = Field(default_factory=list)
+    _get_host_name_index: int = 0
+
+    def get_host_name(self, style: HostNameStyle) -> HostName:
+        name = self.scripted_host_names[self._get_host_name_index]
+        self._get_host_name_index += 1
+        return name
+
+    def discover_hosts(
+        self,
+        cg: ConcurrencyGroup,
+        include_destroyed: bool = False,
+    ) -> list[DiscoveredHost]:
+        return [
+            DiscoveredHost(
+                host_id=HostId.generate(),
+                host_name=name,
+                provider_name=self.name,
+                host_state=None,
+            )
+            for name in self.existing_host_names
+        ]
+
+    def create_host(
+        self,
+        name: HostName,
+        image: ImageReference | None = None,
+        tags: Mapping[str, str] | None = None,
+        build_args: Sequence[str] | None = None,
+        start_args: Sequence[str] | None = None,
+        lifecycle: HostLifecycleOptions | None = None,
+        known_hosts: Sequence[str] | None = None,
+        authorized_keys: Sequence[str] | None = None,
+        snapshot: SnapshotName | None = None,
+    ) -> Host:
+        self.create_host_calls.append(name)
+        if len(self.create_host_calls) <= self.conflicts_before_success:
+            raise HostNameConflictError(self.name, name)
+        # Return a genuine local Host. The local provider only knows how to make
+        # the "localhost" host, and the scripted name is irrelevant to what we
+        # assert, so delegate with LOCAL_HOST_NAME to get a real OnlineHostInterface.
+        return super().create_host(HostName(LOCAL_HOST_NAME))
+
+
+def _make_scripted_provider(
+    local_provider: LocalProviderInstance,
+    scripted_host_names: list[HostName] | None = None,
+    existing_host_names: list[HostName] | None = None,
+    conflicts_before_success: int = 0,
+) -> _ScriptedProvider:
+    return _ScriptedProvider(
+        name=local_provider.name,
+        host_dir=local_provider.host_dir,
+        mngr_ctx=local_provider.mngr_ctx,
+        scripted_host_names=scripted_host_names if scripted_host_names is not None else [],
+        existing_host_names=existing_host_names if existing_host_names is not None else [],
+        conflicts_before_success=conflicts_before_success,
+    )
+
+
+@contextmanager
+def _inject_provider(provider: _ScriptedProvider, mngr_ctx: MngrContext) -> Generator[None, None, None]:
+    """Make ``get_provider_instance`` (and thus ``resolve_target_host``) return ``provider``.
+
+    ``resolve_target_host`` resolves the provider for a ``NewHostOptions`` via the
+    shared provider-instance cache, so seeding the cache is the only way to make
+    it use our scripted provider without editing shared code.
+    """
+    cache_key = (provider.name, id(mngr_ctx))
+    _instance_cache[cache_key] = provider
+    try:
+        yield
+    finally:
+        _instance_cache.pop(cache_key, None)
 
 
 def test_write_host_env_vars_writes_explicit_env_vars(
@@ -188,17 +289,25 @@ def test_resolve_target_host_with_existing_host(
 # =============================================================================
 
 
-def test_generate_unique_host_name_avoids_existing_names(
+def test_generate_unique_host_name_skips_names_already_taken(
     local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """_generate_unique_host_name produces a name not already used by existing hosts.
+    """_generate_unique_host_name skips candidates that collide with existing hosts.
 
-    The local provider generates "localhost" every time and has one host named
-    "localhost", so every attempt collides. This test uses the real COOLNAME
-    style with a non-local-provider name generator that produces random names
-    from a large pool, so collisions are effectively impossible.
+    The scripted provider reports two existing hosts and hands out candidate
+    names such that the first two collide with those existing names and the
+    third is free. The function must skip the colliding candidates and return
+    the first free one.
     """
+    taken_one = HostName(f"taken-{uuid4().hex}")
+    taken_two = HostName(f"taken-{uuid4().hex}")
+    free_name = HostName(f"free-{uuid4().hex}")
+    provider = _make_scripted_provider(
+        local_provider,
+        existing_host_names=[taken_one, taken_two],
+        scripted_host_names=[taken_one, taken_two, free_name],
+    )
     target = NewHostOptions(
         provider=ProviderInstanceName("local"),
         name=None,
@@ -206,24 +315,10 @@ def test_generate_unique_host_name_avoids_existing_names(
         tags={},
     )
 
-    # The local provider discovers one host ("localhost") and get_host_name
-    # returns "localhost" every time (guaranteed collision). Override
-    # get_host_name by using the base class implementation which generates
-    # random names from a large pool -- no collision with "localhost".
-    original_get_host_name = ProviderInstanceInterface.get_host_name
-    test_provider_cls = type(
-        "_TestProvider",
-        (LocalProviderInstance,),
-        {"get_host_name": lambda self, style: original_get_host_name(self, style)},
-    )
-    provider = test_provider_cls(
-        name=local_provider.name,
-        host_dir=local_provider.host_dir,
-        mngr_ctx=local_provider.mngr_ctx,
-    )
     result = _generate_unique_host_name(provider, target, temp_mngr_ctx)
 
-    assert result != HostName("localhost")
+    assert result == free_name
+    assert result not in {taken_one, taken_two}
 
 
 def test_generate_unique_host_name_raises_after_exhausting_attempts(
@@ -246,39 +341,26 @@ def test_generate_unique_host_name_raises_after_exhausting_attempts(
         _generate_unique_host_name(local_provider, target, temp_mngr_ctx)
 
 
-def test_create_new_host_retries_on_name_conflict(
+@pytest.mark.allow_warnings(match="conflicted, regenerating")
+def test_resolve_target_host_retries_auto_named_host_on_name_conflict(
     local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """resolve_target_host retries with a new name when create_host raises HostNameConflictError.
+    """resolve_target_host regenerates the name and retries when create_host conflicts.
 
-    Uses a provider subclass that raises HostNameConflictError on the first
-    call then succeeds, to verify the retry loop in resolve_target_host.
+    Exercises the real retry loop in resolve_target_host: with an auto-named
+    NewHostOptions (name=None), the first create_host raises
+    HostNameConflictError, so the loop must regenerate a fresh name and call
+    create_host again, ultimately returning a host. We assert create_host was
+    invoked exactly twice and that the second call used a freshly generated name.
     """
-    create_count = 0
-    original_create_host = LocalProviderInstance.create_host
-
-    def create_host_that_conflicts_once(self: LocalProviderInstance, name: HostName, **kwargs: object) -> Host:
-        nonlocal create_count
-        create_count += 1
-        if create_count == 1:
-            raise HostNameConflictError(self.name, name)
-        return original_create_host(self, name=name, **kwargs)
-
-    test_provider_cls = type(
-        "_ConflictTestProvider",
-        (LocalProviderInstance,),
-        {
-            "get_host_name": lambda self, style: HostName("localhost"),
-            "create_host": create_host_that_conflicts_once,
-        },
+    first_name = HostName(f"first-{uuid4().hex}")
+    second_name = HostName(f"second-{uuid4().hex}")
+    provider = _make_scripted_provider(
+        local_provider,
+        scripted_host_names=[first_name, second_name],
+        conflicts_before_success=1,
     )
-    provider = test_provider_cls(
-        name=local_provider.name,
-        host_dir=local_provider.host_dir,
-        mngr_ctx=local_provider.mngr_ctx,
-    )
-
     target = NewHostOptions(
         provider=ProviderInstanceName("local"),
         name=None,
@@ -286,16 +368,45 @@ def test_create_new_host_retries_on_name_conflict(
         tags={},
     )
 
-    # First call should raise HostNameConflictError
-    with pytest.raises(HostNameConflictError):
-        _create_new_host(provider, HostName("localhost"), target, temp_mngr_ctx)
-    assert create_count == 1
+    with _inject_provider(provider, temp_mngr_ctx):
+        result = resolve_target_host(target, temp_mngr_ctx)
 
-    # Second call should succeed (the retry logic in resolve_target_host
-    # would call _create_new_host again with a new name)
-    result = _create_new_host(provider, HostName("localhost"), target, temp_mngr_ctx)
-    assert create_count == 2
     assert isinstance(result, OnlineHostInterface)
+    # One conflicting call plus one successful call, each with a distinct name.
+    assert provider.create_host_calls == [first_name, second_name]
+
+
+def test_resolve_target_host_does_not_retry_user_specified_name_on_conflict(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """resolve_target_host re-raises a conflict for a user-specified name without retrying.
+
+    When the user supplies an explicit host name (name is not None),
+    max_attempts is 1, so a HostNameConflictError from create_host must
+    propagate immediately rather than triggering name regeneration. We assert
+    create_host was called exactly once and the error surfaced.
+    """
+    user_name = HostName(f"user-chosen-{uuid4().hex}")
+    provider = _make_scripted_provider(
+        local_provider,
+        # get_host_name must not be consulted for a user-specified name; leave it
+        # empty so any unexpected call would fail loudly.
+        scripted_host_names=[],
+        conflicts_before_success=99,
+    )
+    target = NewHostOptions(
+        provider=ProviderInstanceName("local"),
+        name=user_name,
+        name_style=HostNameStyle.COOLNAME,
+        tags={},
+    )
+
+    with _inject_provider(provider, temp_mngr_ctx):
+        with pytest.raises(HostNameConflictError):
+            resolve_target_host(target, temp_mngr_ctx)
+
+    assert provider.create_host_calls == [user_name]
 
 
 def test_write_host_env_vars_later_env_file_overrides_earlier(
@@ -372,11 +483,23 @@ def test_destroy_new_host_on_create_failure_is_noop_on_success(
     assert provider.destroyed_host_ids == []
 
 
-def test_destroy_new_host_on_create_failure_does_not_destroy_existing_host(local_host: Host) -> None:
-    """provider=None means the caller already owned the host; never tear it down (just re-raise)."""
-    with pytest.raises(ValueError):
+def test_destroy_new_host_on_create_failure_with_none_provider_only_reraises(local_host: Host) -> None:
+    """An existing host (provider=None) is never torn down; the guard only re-raises.
+
+    For an existing host the caller already owned, ``provider`` is ``None``, so
+    the guard has no provider to destroy through -- it must simply let the
+    original failure propagate. The no-destroy behavior here is structural (there
+    is no provider to call ``destroy_host`` on), so the only observable effect is
+    that the *exact* original exception propagates unchanged. The companion test
+    ``..._destroys_failed_new_host`` covers the observable destroy path for the
+    new-host case where a provider *is* present.
+    """
+    original_error = ValueError(f"boom-{uuid4().hex}")
+    with pytest.raises(ValueError) as exc_info:
         with destroy_new_host_on_create_failure(local_host, None):
-            raise ValueError("boom")
+            raise original_error
+    # The guard must re-raise the original exception untouched (not wrap or swallow it).
+    assert exc_info.value is original_error
 
 
 def test_destroy_new_host_on_create_failure_retains_host_when_debug_flag_set(
