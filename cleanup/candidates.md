@@ -17,9 +17,10 @@ Bundles two pilot-side dead-code deletions into one CI cycle.
 
 FCT main already removed both in `c90b1dfb` ("Replace permissions.deny and PreToolUse hooks with --disallowed-tools") with rationale that `permissions.deny` never fires under `--dangerously-skip-permissions`. Pilot's `cli_args` already contains `--disallowed-tools ...,TodoWrite,...`, so functional coverage is intact.
 
-- **status**: pending
+- **status**: **verified_stale**
 - **test path**: pilot test branch → tag `v0.2.36-rc1-todowrite-cleanup` → launch-to-msg with that template_ref
 - **expected blast radius**: zero (both items are dead/no-op today)
+- **landed**: pilot `749e234d` (fast-forward of fb96b1b3 -> 749e234d). v0.2.35 tag unchanged at fb96b1b3.
 
 ### restore-supply-chain-cooldowns (MNGR)
 
@@ -85,3 +86,4 @@ Per-iteration: timestamp, candidate, candidate branch / tag, launch-to-msg run i
 
 | # | candidate | branch / tag | launch-to-msg | ci.yml | outcome | action |
 |---|---|---|---|---|---|---|
+| 1 | todowrite-cleanup-pilot | pilot-rc-todowrite-cleanup / v0.2.36-rc1-todowrite-cleanup | 27006016613 success | 27005966487 success | green | ff-merged into pilot (749e234d), v0.2.35 tag unchanged |
