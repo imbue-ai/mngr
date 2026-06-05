@@ -13,10 +13,10 @@ from imbue.mngr_latchkey.remote_gateway import INNER_PORT
 from imbue.mngr_latchkey.remote_gateway import LATCHKEY_VERSION
 from imbue.mngr_latchkey.remote_gateway import OUTER_PORT
 from imbue.mngr_latchkey.remote_gateway import RemoteGatewayError
-from imbue.mngr_latchkey.remote_gateway import ensure_container_tunnel_keypair
-from imbue.mngr_latchkey.remote_gateway import ensure_latchkey_gateway_reachable_from_container
-from imbue.mngr_latchkey.remote_gateway import ensure_latchkey_gateway_running
-from imbue.mngr_latchkey.remote_gateway import ensure_latchkey_installed
+from imbue.mngr_latchkey.remote_gateway import _ensure_container_tunnel_keypair
+from imbue.mngr_latchkey.remote_gateway import _ensure_latchkey_gateway_reachable_from_container
+from imbue.mngr_latchkey.remote_gateway import _ensure_latchkey_gateway_running
+from imbue.mngr_latchkey.remote_gateway import _ensure_latchkey_installed
 from imbue.mngr_latchkey.remote_gateway import provision_remote_gateway
 from imbue.mngr_latchkey.remote_gateway import sync_credentials
 from imbue.mngr_latchkey.remote_gateway import sync_permissions
@@ -108,13 +108,13 @@ def _stub(outer: OuterHostInterface) -> _StubOuter:
 
 def test_ensure_latchkey_installed_issues_single_idempotent_command() -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
-    ensure_latchkey_installed(outer)
+    _ensure_latchkey_installed(outer)
     assert len(_stub(outer).recorded) == 1
 
 
 def test_ensure_latchkey_installed_pins_the_version_in_the_npm_install() -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
-    ensure_latchkey_installed(outer)
+    _ensure_latchkey_installed(outer)
     command = _stub(outer).recorded[0].command
     assert f"npm install -g latchkey@{LATCHKEY_VERSION}" in command
     # Reinstall is gated behind a version mismatch check, not unconditional.
@@ -123,7 +123,7 @@ def test_ensure_latchkey_installed_pins_the_version_in_the_npm_install() -> None
 
 def test_ensure_latchkey_installed_gates_each_component_behind_a_presence_check() -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
-    ensure_latchkey_installed(outer)
+    _ensure_latchkey_installed(outer)
     command = _stub(outer).recorded[0].command
     assert "command -v curl" in command
     assert "command -v node" in command
@@ -143,20 +143,20 @@ def test_ensure_latchkey_installed_gates_each_component_behind_a_presence_check(
 
 def test_ensure_latchkey_installed_uses_generous_install_timeout() -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
-    ensure_latchkey_installed(outer)
+    _ensure_latchkey_installed(outer)
     assert _stub(outer).recorded[0].timeout_seconds == 300.0
 
 
 def test_ensure_latchkey_installed_raises_on_failure_with_stderr_in_message() -> None:
     outer = _outer(CommandResult(stdout="", stderr="E: Unable to locate package nodejs", success=False))
     with pytest.raises(RemoteGatewayError, match="Unable to locate package nodejs"):
-        ensure_latchkey_installed(outer)
+        _ensure_latchkey_installed(outer)
 
 
 def test_ensure_latchkey_installed_falls_back_to_stdout_when_stderr_empty() -> None:
     outer = _outer(CommandResult(stdout="npm ERR! network timeout", stderr="", success=False))
     with pytest.raises(RemoteGatewayError, match="npm ERR! network timeout"):
-        ensure_latchkey_installed(outer)
+        _ensure_latchkey_installed(outer)
 
 
 def test_sync_credentials_copies_local_file_to_remote_latchkey_dir(tmp_path: Path) -> None:
@@ -239,7 +239,7 @@ def test_ports_are_integers() -> None:
 
 def test_ensure_latchkey_gateway_running_starts_detached_gateway_on_outer_port_loopback() -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
-    ensure_latchkey_gateway_running(outer)
+    _ensure_latchkey_gateway_running(outer)
     assert len(_stub(outer).recorded) == 1
     command = _stub(outer).recorded[0].command
     # Gateway binds OUTER_PORT on loopback, with counting disabled.
@@ -257,12 +257,12 @@ def test_ensure_latchkey_gateway_running_starts_detached_gateway_on_outer_port_l
 def test_ensure_latchkey_gateway_running_raises_on_failure() -> None:
     outer = _outer(CommandResult(stdout="", stderr="latchkey: command not found", success=False))
     with pytest.raises(RemoteGatewayError, match="command not found"):
-        ensure_latchkey_gateway_running(outer)
+        _ensure_latchkey_gateway_running(outer)
 
 
 def test_ensure_latchkey_gateway_reachable_opens_reverse_tunnel_into_container() -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
-    ensure_latchkey_gateway_reachable_from_container(
+    _ensure_latchkey_gateway_reachable_from_container(
         outer,
         container_ssh_user="root",
         container_ssh_port=2222,
@@ -283,7 +283,7 @@ def test_ensure_latchkey_gateway_reachable_opens_reverse_tunnel_into_container()
 
 def test_ensure_latchkey_gateway_reachable_quotes_key_path_with_spaces() -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
-    ensure_latchkey_gateway_reachable_from_container(
+    _ensure_latchkey_gateway_reachable_from_container(
         outer,
         container_ssh_user="root",
         container_ssh_port=2222,
@@ -298,7 +298,7 @@ def test_ensure_latchkey_gateway_reachable_raises_on_failure() -> None:
         CommandResult(stdout="", stderr="ssh: connect to host port 2222: Connection refused", success=False)
     )
     with pytest.raises(RemoteGatewayError, match="Connection refused"):
-        ensure_latchkey_gateway_reachable_from_container(
+        _ensure_latchkey_gateway_reachable_from_container(
             outer,
             container_ssh_user="root",
             container_ssh_port=2222,
@@ -308,7 +308,7 @@ def test_ensure_latchkey_gateway_reachable_raises_on_failure() -> None:
 
 def test_ensure_container_tunnel_keypair_generates_key_and_authorizes_in_container() -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
-    key_path = ensure_container_tunnel_keypair(outer, container_name="mngr-ws", container_ssh_user="root")
+    key_path = _ensure_container_tunnel_keypair(outer, container_name="mngr-ws", container_ssh_user="root")
     # Private key lands under the resolved remote latchkey dir.
     assert key_path == Path("/root/.latchkey/container_tunnel_key")
     script = _stub(outer).recorded[-1].command
@@ -327,7 +327,7 @@ def test_ensure_container_tunnel_keypair_generates_key_and_authorizes_in_contain
 
 def test_ensure_container_tunnel_keypair_returns_path_under_resolved_home() -> None:
     outer = cast(OuterHostInterface, _StubOuter(home="/home/agent"))
-    key_path = ensure_container_tunnel_keypair(outer, container_name="mngr-ws", container_ssh_user="agent")
+    key_path = _ensure_container_tunnel_keypair(outer, container_name="mngr-ws", container_ssh_user="agent")
     assert key_path == Path("/home/agent/.latchkey/container_tunnel_key")
     assert "docker exec -u agent" in _stub(outer).recorded[-1].command
 
@@ -335,7 +335,7 @@ def test_ensure_container_tunnel_keypair_returns_path_under_resolved_home() -> N
 def test_ensure_container_tunnel_keypair_raises_on_failure() -> None:
     outer = _outer(CommandResult(stdout="", stderr="Error: No such container: mngr-ws", success=False))
     with pytest.raises(RemoteGatewayError, match="No such container"):
-        ensure_container_tunnel_keypair(outer, container_name="mngr-ws", container_ssh_user="root")
+        _ensure_container_tunnel_keypair(outer, container_name="mngr-ws", container_ssh_user="root")
 
 
 def test_provision_remote_gateway_runs_full_sequence_on_the_outer_host() -> None:

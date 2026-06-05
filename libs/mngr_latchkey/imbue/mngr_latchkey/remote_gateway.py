@@ -141,7 +141,7 @@ def _build_ensure_installed_script(latchkey_version: str, node_major_version: st
     )
 
 
-def ensure_latchkey_installed(host: OuterHostInterface) -> None:
+def _ensure_latchkey_installed(host: OuterHostInterface) -> None:
     """Ensure curl, procps (pgrep), Node.js, and the pinned latchkey CLI are installed on the VPS.
 
     Idempotent: each component is installed only when missing (or, for
@@ -274,7 +274,7 @@ def _build_gateway_start_script(outer_port: int) -> str:
     )
 
 
-def ensure_latchkey_gateway_running(host: OuterHostInterface) -> None:
+def _ensure_latchkey_gateway_running(host: OuterHostInterface) -> None:
     """Start ``latchkey gateway`` on the VPS unless it is already running.
 
     Launches ``LATCHKEY_GATEWAY_PORT=<OUTER_PORT> latchkey gateway`` bound to the
@@ -337,7 +337,7 @@ def _build_reverse_tunnel_script(
     )
 
 
-def ensure_latchkey_gateway_reachable_from_container(
+def _ensure_latchkey_gateway_reachable_from_container(
     host: OuterHostInterface,
     container_ssh_user: str,
     container_ssh_port: int,
@@ -346,7 +346,7 @@ def ensure_latchkey_gateway_reachable_from_container(
     """Open a reverse SSH tunnel from the VPS into the container so the agent can reach the gateway.
 
     Binds the container's ``127.0.0.1:INNER_PORT`` and forwards it to the VPS's
-    ``127.0.0.1:OUTER_PORT`` (where :func:`ensure_latchkey_gateway_running`
+    ``127.0.0.1:OUTER_PORT`` (where :func:`_ensure_latchkey_gateway_running`
     started the gateway), so the agent's ``LATCHKEY_GATEWAY=http://127.0.0.1:INNER_PORT``
     reaches the VPS-resident gateway with no change to how the agent env is
     injected.
@@ -421,7 +421,7 @@ def _build_container_tunnel_keypair_script(
     )
 
 
-def ensure_container_tunnel_keypair(
+def _ensure_container_tunnel_keypair(
     host: OuterHostInterface,
     container_name: str,
     container_ssh_user: str,
@@ -432,7 +432,7 @@ def ensure_container_tunnel_keypair(
     installs its public key into the container ssh user's ``authorized_keys``
     via ``docker exec``. Returns the path to the private key on the VPS,
     suitable for passing as ``container_ssh_key_path`` to
-    :func:`ensure_latchkey_gateway_reachable_from_container`.
+    :func:`_ensure_latchkey_gateway_reachable_from_container`.
 
     Idempotent: the keypair is generated only when absent and re-authorizing is
     a no-op. Raises :class:`RemoteGatewayError` if key generation or
@@ -510,13 +510,13 @@ def provision_remote_gateway(
             host.get_name(),
         )
         return
-    ensure_latchkey_installed(host)
-    ensure_latchkey_gateway_running(host)
+    _ensure_latchkey_installed(host)
+    _ensure_latchkey_gateway_running(host)
     container_name = _resolve_container_name_for_host(host, host_id)
-    container_ssh_key_path = ensure_container_tunnel_keypair(
+    container_ssh_key_path = _ensure_container_tunnel_keypair(
         host, container_name=container_name, container_ssh_user=container_ssh_user
     )
-    ensure_latchkey_gateway_reachable_from_container(
+    _ensure_latchkey_gateway_reachable_from_container(
         host,
         container_ssh_user=container_ssh_user,
         container_ssh_port=container_ssh_port,
