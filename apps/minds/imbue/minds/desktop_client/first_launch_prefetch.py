@@ -8,9 +8,10 @@ both off as soon as the desktop client backend is up, so by the time
 the user signs in + fills the form they're already cached.
 
 Idempotent: a check for the artifact's existence + minimum-size sanity
-check is the gate. No sentinel file. A user who manually nukes
-``~/Library/Caches/lima`` or the template cache will see a fresh
-prefetch on the next launch, which is the right behaviour.
+check is the gate. No sentinel file. A user who manually nukes Lima's
+image cache (``~/Library/Caches/lima`` on macOS, ``~/.cache/lima`` on
+Linux) or the template cache will see a fresh prefetch on the next
+launch, which is the right behaviour.
 
 Runs on a background thread off the root concurrency group; failures
 are logged at WARNING and never propagate. The fallback path (lazy
@@ -18,9 +19,11 @@ download at create-agent time) keeps working unchanged.
 """
 
 import hashlib
+import os
 import platform
 import shutil
 import subprocess
+import sys
 import time
 import urllib.request
 from email.utils import formatdate
@@ -46,10 +49,23 @@ _FCT_CACHE_SUBDIR: str = "template-cache/forever-claude-template"
 _MIN_BYTES_VALID_CLOUDIMG: int = 100 * 1024 * 1024
 
 
+def _lima_cache_root() -> Path:
+    """Per-platform Lima image cache root.
+
+    macOS: ``~/Library/Caches/lima``. Linux: XDG (``$XDG_CACHE_HOME/lima``
+    or ``~/.cache/lima``). Writing to the wrong root on Linux silently
+    misses Lima's lookup and the lazy download fires anyway at create
+    time -- so the prefetch is wasted but not broken.
+    """
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Caches" / "lima"
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    return Path(xdg) / "lima" if xdg else Path.home() / ".cache" / "lima"
+
+
 def _lima_cache_dir_for_url(url: str) -> Path:
-    """Lima 1.x: ``~/Library/Caches/lima/download/by-url-sha256/<sha256(url)>/``"""
     url_sha = hashlib.sha256(url.encode("utf-8")).hexdigest()
-    return Path.home() / "Library" / "Caches" / "lima" / "download" / "by-url-sha256" / url_sha
+    return _lima_cache_root() / "download" / "by-url-sha256" / url_sha
 
 
 def _is_lima_image_cached(url: str) -> bool:

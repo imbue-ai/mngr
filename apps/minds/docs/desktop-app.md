@@ -210,7 +210,7 @@ pnpm build                        # Prepare resources
 pnpm exec todesktop build         # Upload to ToDesktop for native builds
 ```
 
-ToDesktop builds native installers (.dmg for macOS, .AppImage for Linux), handles code signing, notarization, and auto-update infrastructure.
+ToDesktop builds the macOS arm64 native installer (.zip / .dmg), handles code signing, notarization, and auto-update infrastructure. Linux + Windows targets are not currently wired up: `todesktop.js` ships only a `mac:` block, and the release pipeline (`minds-launch-to-msg.yml`) builds and verifies macOS only. The host scripts (`download-binaries.js`, `build.js`) have skeletons for Linux x86_64 and a few Linux native modules ship prebuilds via pnpm, but a packaged Linux install would still need a `linux:` ToDesktop block and a properly bundled git layout (the current `cp $(which git)` skips `libexec/git-core/`).
 
 The build script (`scripts/build.js`) builds a wheel for every workspace package into `resources/wheels/`, rewrites `[tool.uv.sources]` in the staged `resources/pyproject/pyproject.toml` to point each workspace package at its bundled wheel, then runs `uv lock` in-place to regenerate `resources/pyproject/uv.lock` against the rewritten pyproject. The regenerated lockfile is what ships in the app bundle; the dev-time `electron/pyproject/uv.lock` is not committed.
 

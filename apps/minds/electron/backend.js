@@ -223,10 +223,12 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           ...configFileArgs,
         ];
         cwd = pyprojectDir;
-        // LaunchServices-started apps inherit a minimal PATH without
-        // /opt/homebrew/bin or /usr/local/bin. Prepend the bundled lima
-        // bin dir and the common macOS Homebrew bin dirs so user-installed
-        // tools (and the bundled limactl) are reachable.
+        // LaunchServices-started apps on macOS inherit a minimal PATH
+        // without /opt/homebrew/bin or /usr/local/bin. Append both so
+        // user-installed tools (`docker` from Docker Desktop, etc.) are
+        // reachable. Bundled uv/git/lima are prepended via their own
+        // absolute paths above. On Linux these dirs are also conventional
+        // (`/usr/local/bin` is std) and the append is harmless either way.
         const systemPath = process.env.PATH || '';
         const homebrewPaths = ['/opt/homebrew/bin', '/usr/local/bin'].filter(
           (p) => !systemPath.split(':').includes(p)
