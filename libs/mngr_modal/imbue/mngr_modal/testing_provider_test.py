@@ -14,6 +14,7 @@ from datetime import datetime
 from datetime import timezone
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -82,6 +83,7 @@ from imbue.mngr_modal.volume import _proxy_file_entry_type_to_volume_file_type
 from imbue.modal_proxy.data_types import FileEntry
 from imbue.modal_proxy.data_types import FileEntryType as ProxyFileEntryType
 from imbue.modal_proxy.errors import ModalProxyError
+from imbue.modal_proxy.errors import ModalProxyInvalidError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.errors import ModalProxyRateLimitError
 from imbue.modal_proxy.interface import AppInterface
@@ -1369,6 +1371,31 @@ def test_create_host_raises_on_ssh_setup_failure(
     """
     with pytest.raises((MngrError, OSError, ExceptionGroup)):
         testing_provider.create_host(HostName("will-fail"))
+
+
+def test_create_host_wraps_invalid_argument_error_as_clean_mngr_error(
+    testing_provider: ModalProviderInstance,
+    testing_modal: FakeModalInterface,
+) -> None:
+    """An invalid Modal argument (e.g. a non-existent --snapshot image id) is
+    surfaced as a clean MngrError, not a raw ModalProxyInvalidError.
+
+    Modal validates the snapshot/image lazily, so a bad ``--snapshot`` id only
+    fails when the sandbox is created. ``create_host`` must translate that into
+    a user-facing MngrError (which the CLI renders as a single-line message)
+    rather than letting the ModalProxyInvalidError escape as a raw traceback.
+    """
+    # FakeModalInterface is a pydantic model, so patch the method on the class
+    # (instance-level patching is rejected by pydantic).
+    with patch.object(
+        type(testing_modal),
+        "sandbox_create",
+        side_effect=ModalProxyInvalidError("'snap-123abc' is not a valid Image ID."),
+    ):
+        with pytest.raises(MngrError) as exc_info:
+            testing_provider.create_host(HostName("bad-snapshot"), snapshot=SnapshotName("snap-123abc"))
+    # The original modal error message is preserved for the user.
+    assert "snap-123abc" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------
