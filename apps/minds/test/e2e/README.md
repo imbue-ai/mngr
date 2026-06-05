@@ -2,18 +2,12 @@
 
 UI-driven E2E tests that launch a packaged `minds.app` Electron build and drive its chat panel through Playwright over CDP. Replaces the brittle HTTP+CLI `scripts/first-message-verify.sh` path with the actual user UI surface.
 
-## Specs
+## What runs in CI
 
-| Spec | What it asserts | Needs lima? | Runs in |
+| Driver | What it asserts | Needs lima? | Runs in |
 |---|---|---|---|
-| `macos-launch.spec.js` | App launches; chrome window renders; Python backend binds; Create/Log-in landing visible. Catches the `_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS` class of regression that Tart used to catch by hand. | no | `minds-macos-launch.yml` on `macos-latest`, every push + PR. ~5 min. |
-| `chat-roundtrip.spec.js` | Create LIMA workspace, type a prompt, assert a nonce-verified reply. | yes (nested virt) | `minds-launch-to-msg.yml`'s `verify` job on the self-hosted `minds-runner` MacBook. |
-| `drive-slack.js` (slack permission flow) | Agent receives slack-read prompt → calls latchkey gateway → permission dialog fires → Playwright clicks Approve → mock Slack returns canned body → assistant reply contains the canned substring. | yes | same self-hosted job |
-| `headed-demo.spec.js` | Create form fills cleanly (mostly for visual diffing during dev). | no | not in CI; run locally with `--headed` |
-
-Future:
-- `gmail-tool.spec.js` — drive latchkey OAuth approval + Gmail tool call
-- `auto-update.spec.js` — `--runtime-simulate-updates=update-available` and assert the install-and-restart dialog appears
+| `macos-launch.spec.js` (Playwright) | App launches; chrome window renders; Python backend binds; Create/Log-in landing visible. Catches the `_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS` class of regression that Tart used to catch by hand. | no | `minds-macos-launch.yml` on `macos-latest`, every push + PR. ~5 min. |
+| `scripts/launch_to_msg_e2e.py` (Python over CDP) | Drives the full Electron flow: launch → auth → create LIMA workspace → first agent message → assert nonce-verified reply. Also runs the slack-permission-flow sub-scenario (mock Slack via /etc/hosts + cert + socat, see below). | yes (nested virt) | `minds-launch-to-msg.yml` `verify` job on the self-hosted `minds-runner` MacBook. |
 
 ## Running locally
 

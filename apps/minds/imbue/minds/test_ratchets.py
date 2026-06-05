@@ -56,11 +56,7 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    # +5 for scripts/integ_check.py: the integ-test driver's UX is its
-    # stdout PASS/FAIL lines + final RESULT; using logger here would
-    # fight the ratchet's formatting and also send output to stderr by
-    # default, which breaks invoke-and-grep usage.
-    rc.check_bare_print(_DIR, snapshot(18))
+    rc.check_bare_print(_DIR, snapshot(13))
 
 
 # --- Exception handling ---
@@ -117,15 +113,13 @@ def test_prevent_setattr() -> None:
 
 
 def test_prevent_asyncio_import() -> None:
-    # Four: app.py uses ``asyncio.get_running_loop()`` and
+    # app.py uses ``asyncio.get_running_loop()`` and
     # ``asyncio.run_coroutine_threadsafe`` for HTTP route handlers; the two
     # sibling permission handlers under ``latchkey/handlers/`` (``predefined.py``
     # and ``file_sharing.py``) both use ``run_in_executor`` to run the blocking
-    # grant/deny path off the event loop -- all three intrinsic to FastAPI
-    # integration. The fourth is scripts/integ_check.py: Chrome DevTools
-    # Protocol over websockets is inherently async; the script drives multiple
-    # CDP sessions concurrently.
-    rc.check_asyncio_import(_DIR, snapshot(5))
+    # grant/deny path off the event loop -- all intrinsic to FastAPI
+    # integration.
+    rc.check_asyncio_import(_DIR, snapshot(4))
 
 
 def test_prevent_pandas_import() -> None:
