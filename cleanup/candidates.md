@@ -90,9 +90,10 @@ Pilot's `.mngr/settings.toml:235-236` uses `uv tool install -e ...` and `--with-
 
 `apps/minds/imbue/minds/cli/run.py:157-163` raises `click.UsageError("--port must be > 0")` as the first statement of `minds run`. mngr_forward already raises a near-identical `click.UsageError("--reverse local port must be > 0, ...")` at the boundary that consumes the value. Neither Electron's backend.js nor any CI/dev script ever passes `--port 0`, so the guard never fires for any real caller. Has its own unit test `test_run_rejects_port_zero` which becomes vestigial.
 
-- **status**: in_flight (iter 7)
+- **status**: **verified_stale**
 - **test path**: mngr-rc-drop-port-zero-guard (PR #1939) → ci.yml + launch-to-msg with template_ref=v0.2.35
 - **expected blast radius**: zero in production
+- **landed**: cherry-picked to wz/minds_onboard (82b125d72). Both ci.yml and launch-to-msg verify green first try. 22 lines removed (guard + test + unused imports).
 
 ### stale-do-something-new-paragraph (PILOT)
 
@@ -141,4 +142,32 @@ Per-iteration: timestamp, candidate, candidate branch / tag, launch-to-msg run i
 | 6 | revert-lima-start-new-default-timeout | mngr-rc-lima-timeout-revert (PR #1938) | 27013465788 success | 27013474227 success | green | cherry-picked to wz/minds_onboard (b7628677f); PR #1938 closed |
 | 7 | uv-tool-install-editable-mode | pilot-rc-uv-tool-non-editable / v0.2.36-rc4-uv-tool-non-editable | 27014712370 success | 27014677300 success | green | ff-merged into pilot (cb2091cf); v0.2.35 tag unchanged |
 | 8 | dead-web-view-script | pilot-rc-dead-code / v0.2.36-rc5-dead-web-view | 27016379803 success | n/a (pilot-only) | green | ff-merged into pilot (cad14a24); 283 lines deleted |
-| 9 | duplicate-port-zero-guard | mngr-rc-drop-port-zero-guard (PR #1939) | 27017785672 in flight | 27016476580 success | in_flight | iter 7 |
+| 9 | duplicate-port-zero-guard | mngr-rc-drop-port-zero-guard (PR #1939) | 27017785672 success | 27016476580 success | green | cherry-picked to wz/minds_onboard (82b125d72); PR #1939 closed |
+
+## Sweep summary (2026-06-05)
+
+Worked through three inventory passes (six subagents in pass 1, two each in passes 2-3) and seven CI-validated test iterations. Mac runner was strictly serial; ci.yml ran in parallel via candidate PRs.
+
+**Landed (7 candidates, ~410 net LoC removed)**:
+- pilot todowrite-cleanup (2 files, 17 lines) — pilot 749e234d
+- mngr restore-supply-chain-cooldowns — wz c930b05ed
+- pilot stop-hook enabled_when restored — pilot c135679e
+- mngr dead lima default-timeout reverted (+ 1 stale changelog deleted) — wz b7628677f
+- pilot uv-tool-install non-editable form — pilot cb2091cf
+- pilot dead web_view.py + test deleted (283 LoC) — pilot cad14a24
+- mngr duplicate port<=0 guard + test deleted (22 LoC) — wz 82b125d72
+
+**Verified still-needed via analysis (no CI burned)**:
+- lima 2.0.3 pin (subagent confirmed 2.1.x ships the same regressed gvisor-tap-vsock)
+- homebrew PATH augmentation (docker users on macOS would silently break; launch-to-msg doesn't exercise docker)
+- LAPTOP-AGENT-TYPES-SEED (still load-bearing per pass 1 slice 3)
+- CREATE-AGENT-API-409-DUPLICATE-NAME-GUARD (cross-host check stricter than mngr's per-host check)
+
+**Deferred (no automated verifier, needs human read)**:
+- `.agents/skills/do-something-new/SKILL.md` 8-line block possibly obsoleted by main's restructured Step 5/6
+
+**Failure modes encountered**:
+- Iter 2 verify failed first try on `limactl start exit -15` (~10min into CREATING_WORKSPACE). Cooldown change can't cause this; rerun greened. Documented as lima boot flake.
+- Iter 5 fired with wrong commit_sha (FCT pilot HEAD passed instead of mngr HEAD because cwd was FCT). Caught + cancelled + re-fired.
+- Pre-commit hook reformatted iter 7's first commit; retried per project convention.
+
