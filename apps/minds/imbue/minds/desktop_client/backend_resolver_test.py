@@ -159,8 +159,8 @@ def test_parse_agent_ids_from_json_parses_valid_output() -> None:
     json_output = make_agents_json(_AGENT_A, _AGENT_B)
     ids = parse_agent_ids_from_json(json_output)
 
-    assert _AGENT_A in ids
-    assert _AGENT_B in ids
+    # parse preserves the input order, so the result is exactly this tuple.
+    assert ids == (_AGENT_A, _AGENT_B)
 
 
 def test_parse_agent_ids_from_json_returns_empty_for_none() -> None:
@@ -230,8 +230,8 @@ def test_mngr_cli_resolver_lists_known_agents() -> None:
         agents_json=make_agents_json(_AGENT_A, _AGENT_B),
     )
     ids = resolver.list_known_agent_ids()
-    assert _AGENT_A in ids
-    assert _AGENT_B in ids
+    # The resolver preserves discovery order, so the result is exactly this tuple.
+    assert ids == (_AGENT_A, _AGENT_B)
 
 
 def test_mngr_cli_resolver_returns_empty_when_no_agents() -> None:
@@ -662,8 +662,8 @@ def test_parse_agents_from_json_extracts_agent_ids() -> None:
         (str(_AGENT_B), None),
     )
     result = parse_agents_from_json(json_str)
-    assert _AGENT_A in result.agent_ids
-    assert _AGENT_B in result.agent_ids
+    # parse preserves the input order, so the result is exactly this tuple.
+    assert result.agent_ids == (_AGENT_A, _AGENT_B)
 
 
 def test_parse_agents_from_json_extracts_ssh_info() -> None:

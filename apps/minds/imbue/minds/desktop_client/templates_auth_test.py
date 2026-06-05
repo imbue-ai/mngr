@@ -1,3 +1,5 @@
+import re
+
 from imbue.minds.desktop_client.templates_auth import render_auth_page
 from imbue.minds.desktop_client.templates_auth import render_check_email_page
 from imbue.minds.desktop_client.templates_auth import render_forgot_password_page
@@ -5,18 +7,35 @@ from imbue.minds.desktop_client.templates_auth import render_oauth_close_page
 from imbue.minds.desktop_client.templates_auth import render_settings_page
 
 
+def _tab_classes(html: str, tab_id: str) -> str:
+    """Return the class attribute of the panel div with the given id.
+
+    The signup/signin panels are sibling ``<div id="...-tab" class="...">``
+    elements; whichever panel is *not* the default carries the ``hidden``
+    class. This lets the tests assert on the active-tab marker rather than
+    mere presence (both panels are always present in the DOM).
+    """
+    match = re.search(rf'<div id="{re.escape(tab_id)}" class="([^"]*)"', html)
+    assert match is not None, f"no panel div with id={tab_id!r} in rendered auth page"
+    return match.group(1)
+
+
 def test_render_auth_page_defaults_to_signup() -> None:
     html = render_auth_page(default_to_signup=True)
     assert "Create account" in html
     assert "signup-form" in html
-    # Sign-in tab should be hidden
-    assert 'id="signin-tab"' in html
+    # Defaulting to signup means the signup panel is visible and the signin
+    # panel is the one hidden.
+    assert "hidden" not in _tab_classes(html, "signup-tab")
+    assert "hidden" in _tab_classes(html, "signin-tab")
 
 
 def test_render_auth_page_defaults_to_signin() -> None:
     html = render_auth_page(default_to_signup=False)
     assert "Sign in" in html
-    assert 'id="signin-tab"' in html
+    # Defaulting to signin flips which panel is hidden.
+    assert "hidden" not in _tab_classes(html, "signin-tab")
+    assert "hidden" in _tab_classes(html, "signup-tab")
 
 
 def test_render_auth_page_includes_message() -> None:

@@ -101,20 +101,32 @@ def test_inbox_get_request_by_id() -> None:
 
 
 def test_write_and_load_response_events(tmp_path: Path) -> None:
-    """Response events can be written and loaded from disk."""
-    response = create_request_response_event(
+    """Response events are written and loaded back in append order, each preserved distinctly."""
+    first = create_request_response_event(
         request_event_id="evt-abc123",
         status=RequestStatus.GRANTED,
         agent_id="agent-1",
         request_type=str(RequestType.LATCHKEY_PERMISSION),
         scope="slack-api",
     )
-    append_response_event(tmp_path, response)
-    append_response_event(tmp_path, response)
+    second = create_request_response_event(
+        request_event_id="evt-def456",
+        status=RequestStatus.DENIED,
+        agent_id="agent-2",
+        request_type=str(RequestType.LATCHKEY_PERMISSION),
+        scope="github-rest-api",
+    )
+    append_response_event(tmp_path, first)
+    append_response_event(tmp_path, second)
 
     loaded = load_response_events(tmp_path)
     assert len(loaded) == 2
     assert loaded[0].request_event_id == "evt-abc123"
+    assert loaded[0].status == str(RequestStatus.GRANTED)
+    assert loaded[0].agent_id == "agent-1"
+    assert loaded[1].request_event_id == "evt-def456"
+    assert loaded[1].status == str(RequestStatus.DENIED)
+    assert loaded[1].agent_id == "agent-2"
 
 
 def test_write_request_event_to_file(tmp_path: Path) -> None:
@@ -185,7 +197,7 @@ def test_create_latchkey_predefined_permission_request_event_populates_all_field
 
     assert event.agent_id == "agent-abc"
     assert event.scope == "slack-api"
-    assert event.rationale.startswith("I need to read")
+    assert event.rationale == "I need to read the team channel to summarize today's discussion."
     assert event.request_type == str(RequestType.LATCHKEY_PERMISSION)
     assert str(event.event_id).startswith("evt-")
     assert str(event.source) == "requests"

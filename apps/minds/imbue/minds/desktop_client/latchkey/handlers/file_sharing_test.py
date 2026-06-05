@@ -211,7 +211,8 @@ def test_render_request_detail_fragment_marks_write_grants_distinctly(tmp_path: 
         backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
         mngr_forward_origin="",
     )
-    assert "read &amp; write" in body or "read & write" in body
+    # Jinja autoescaping turns the ``&`` in "read & write" into ``&amp;``.
+    assert "read &amp; write" in body
     # The read-only label must not appear when WRITE access is being
     # requested, otherwise the fragment would be misleading.
     assert "read-only" not in body

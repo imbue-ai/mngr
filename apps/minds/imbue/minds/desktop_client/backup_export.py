@@ -5,7 +5,7 @@ zip of the latest snapshot from the minds machine -- without the workspace
 being reachable -- by restoring the snapshot to a temporary directory and
 zipping it. (``restic restore`` downloads in parallel and is ~50x faster than
 ``restic dump --archive zip``, which fetches blobs sequentially.) The zip is
-written to a ``/tmp`` path keyed by host id, so repeated exports overwrite the
+written to a temp-dir path keyed by host id, so repeated exports overwrite the
 previous file rather than accumulating.
 """
 
@@ -26,7 +26,6 @@ from imbue.minds.desktop_client.backup_env_store import read_canonical_env
 from imbue.minds.errors import BackupProvisioningError
 from imbue.mngr.primitives import AgentId
 
-_EXPORT_DIR = Path("/tmp")
 _EXPORT_FILENAME_PREFIX = "minds-backup-export-"
 _RESTORE_DIR_PREFIX = "minds-backup-restore-"
 # Fast zip: the restored files aren't pre-compressed, but download convenience
@@ -43,8 +42,8 @@ class BackupExportError(BackupProvisioningError):
 
 
 def export_zip_path_for_host(host_id: str) -> Path:
-    """Return the /tmp path the export zip is written to (keyed by host id)."""
-    return _EXPORT_DIR / f"{_EXPORT_FILENAME_PREFIX}{host_id}.zip"
+    """Return the temp-dir path the export zip is written to (keyed by host id)."""
+    return Path(tempfile.gettempdir()) / f"{_EXPORT_FILENAME_PREFIX}{host_id}.zip"
 
 
 def _zip_date_time(mtime: float) -> tuple[int, int, int, int, int, int]:
@@ -108,7 +107,7 @@ def export_latest_snapshot_zip(
     backend_env = {key: value for key, value in env.items() if key not in ("RESTIC_REPOSITORY", "RESTIC_PASSWORD")}
 
     zip_path = export_zip_path_for_host(host_id)
-    restore_dir = Path(tempfile.mkdtemp(prefix=f"{_RESTORE_DIR_PREFIX}{host_id}-", dir=_EXPORT_DIR))
+    restore_dir = Path(tempfile.mkdtemp(prefix=f"{_RESTORE_DIR_PREFIX}{host_id}-"))
     try:
         restic_cli.restore_snapshot(
             repository=repository,

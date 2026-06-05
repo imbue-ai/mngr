@@ -9,6 +9,7 @@ table without any live mngr state.
 
 import os
 import shutil
+import signal
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -77,14 +78,56 @@ def _path_with_fake_mngr(fake_bin: Path) -> dict[str, str]:
     return env
 
 
+# A globally-unique, effectively-infinite sleep duration for the "still RUNNING"
+# sentinel. Making it unique (rather than e.g. `sleep 300`) avoids collisions
+# with any unrelated sleeper a concurrent test might spawn, so cleanup checks can
+# unambiguously target *our* process. The test reliably kills it in teardown.
+_SENTINEL_SLEEP_SECONDS: int = 928371
+
+
+def _make_blocking_mngr(tmp_path: Path) -> Path:
+    """Write a fake ``mngr`` that blocks until killed, so RUNNING never races a quick exit.
+
+    ``exec sleep`` replaces the bash wrapper with the sleeper, so the recorded
+    pid (the bash wrapper) *is* the sleeper -- killing the process group reaps it
+    cleanly. The duration is effectively infinite; teardown always kills it.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    fake = bin_dir / "mngr"
+    fake.write_text(f"#!/bin/bash\nexec sleep {_SENTINEL_SLEEP_SECONDS}\n")
+    fake.chmod(0o755)
+    return fake
+
+
+def _kill_process_group(pid: int) -> None:
+    """SIGTERM the whole process group for ``pid``, guarded for already-dead pids.
+
+    ``start_new_session=True`` makes each spawned destroy its own process-group
+    leader, so killing the group (rather than just the recorded pid) also reaps
+    any detached children. Only the specific recorded pid's group is targeted.
+    """
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
 def test_build_destroy_command_with_host_id_does_fanout() -> None:
     agent_id = AgentId.generate()
     command = _build_destroy_command(agent_id, host_id="host-abc123")
     assert command[0] == "bash"
     assert command[1] == "-c"
-    # Pipe-fanout shape: list ... | destroy -f -
-    assert 'host.id == "host-abc123"' in command[2]
-    assert "destroy -f -" in command[2]
+    shell_command = command[2]
+    # Pipe-fanout shape: `mngr list ... --ids | mngr destroy -f -`. Assert the
+    # ordered pipeline so a garbled command (e.g. destroy before list, or a
+    # missing pipe) can't pass.
+    assert 'host.id == "host-abc123"' in shell_command
+    assert " | " in shell_command
+    list_index = shell_command.index("list")
+    destroy_index = shell_command.index("destroy -f -")
+    pipe_index = shell_command.index(" | ")
+    assert list_index < pipe_index < destroy_index
 
 
 def test_build_destroy_command_without_host_id_falls_back_to_single() -> None:
@@ -112,11 +155,8 @@ def test_start_destroy_writes_pid_file_and_log(tmp_path: Path) -> None:
 def test_read_destroying_status_running_when_pid_alive(tmp_path: Path) -> None:
     paths = WorkspacePaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
-    # Sleep long enough for the next read but not so long that the test gets slow.
-    sleeper = tmp_path / "bin" / "mngr"
-    sleeper.parent.mkdir(exist_ok=True)
-    sleeper.write_text("#!/bin/bash\nsleep 2\n")
-    sleeper.chmod(0o755)
+    # Block until the test kills it so the RUNNING assertion never races a quick exit.
+    sleeper = _make_blocking_mngr(tmp_path)
     record = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(sleeper))
     try:
         seen = read_destroying(agent_id, paths, agent_in_resolver=True)
@@ -124,11 +164,7 @@ def test_read_destroying_status_running_when_pid_alive(tmp_path: Path) -> None:
         assert seen.status == DestroyingStatus.RUNNING
         assert seen.pid_alive is True
     finally:
-        # Best-effort cleanup so the test process doesn't leave a sleeper running.
-        try:
-            os.kill(record.pid, 15)
-        except ProcessLookupError:
-            pass
+        _kill_process_group(record.pid)
         _wait_for_pid_exit(record.pid)
 
 
@@ -163,20 +199,14 @@ def test_read_destroying_returns_none_when_no_directory(tmp_path: Path) -> None:
 def test_start_destroy_is_idempotent_while_running(tmp_path: Path) -> None:
     paths = WorkspacePaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
-    sleeper = tmp_path / "bin" / "mngr"
-    sleeper.parent.mkdir(exist_ok=True)
-    sleeper.write_text("#!/bin/bash\nsleep 2\n")
-    sleeper.chmod(0o755)
+    sleeper = _make_blocking_mngr(tmp_path)
     first = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(sleeper))
     try:
         second = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(sleeper))
         assert second.pid == first.pid
         assert second.status == DestroyingStatus.RUNNING
     finally:
-        try:
-            os.kill(first.pid, 15)
-        except ProcessLookupError:
-            pass
+        _kill_process_group(first.pid)
         _wait_for_pid_exit(first.pid)
 
 
@@ -249,8 +279,22 @@ def test_idempotent_after_failure_overwrites_log(tmp_path: Path) -> None:
 
 @pytest.fixture(autouse=True)
 def _cleanup_tmp_destroying(tmp_path: Path) -> Iterator[None]:
-    """Best-effort tmp dir cleanup after tests that may leave background pids."""
+    """Reap any still-running destroy subprocesses, then remove the tmp dir.
+
+    Every destroy this test spawned writes its wrapper pid to
+    ``<tmp_path>/destroying/<agent_id>/pid``. We read exactly those pid files
+    (so only pids *this* test recorded are touched -- never broad patterns) and
+    SIGTERM each one's process group before rmtree-ing the dir, so a sentinel
+    sleeper or any detached child can't outlive the test.
+    """
     yield
     destroy_root = tmp_path / "destroying"
-    if destroy_root.exists():
+    if destroy_root.is_dir():
+        for pid_file in destroy_root.glob("*/pid"):
+            try:
+                pid = int(pid_file.read_text().strip())
+            except (ValueError, OSError):
+                continue
+            _kill_process_group(pid)
+            _wait_for_pid_exit(pid)
         shutil.rmtree(destroy_root, ignore_errors=True)

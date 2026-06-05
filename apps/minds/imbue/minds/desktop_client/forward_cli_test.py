@@ -616,10 +616,10 @@ def test_terminate_is_no_op_when_no_process_attached(consumer: EnvelopeStreamCon
 class _RecordingNotificationDispatcher(NotificationDispatcher):
     """Test-only NotificationDispatcher that records dispatch calls instead of dispatching.
 
-    Records into the ``recorded`` list passed at construction time. We cannot
-    use a Pydantic ``PrivateAttr`` because the parent class is a ``FrozenModel``
-    and we want to keep the test fixture self-contained; the list is held via
-    a closure on the subclass-defined ``dispatch`` override below.
+    The recorded calls are held in a ``PrivateAttr`` list (``_recorded``) and
+    exposed through the read-only ``recorded`` property; the ``dispatch``
+    override below appends each ``(request, agent_display_name)`` pair instead
+    of actually dispatching.
     """
 
     _recorded: list[tuple[NotificationRequest, str]] = PrivateAttr(default_factory=list)

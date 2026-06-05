@@ -16,6 +16,7 @@ from imbue.minds.desktop_client.latchkey.gateway_client import AvailableServiceE
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
+from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientNotInitializedError
 from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
 
 
@@ -527,18 +528,26 @@ def test_one_shot_methods_invalidate_on_connect_level_errors(transport_error: ht
     cached the previous one).
     """
 
+    call_count = {"value": 0}
+
     def _handler(request: httpx.Request) -> httpx.Response:
         del request
+        call_count["value"] += 1
         raise transport_error
 
     client = _build_client(_handler)
     with pytest.raises(LatchkeyGatewayClientError):
         client.get_available_services()
-    # ``_require_base_url`` now raises ``LatchkeyGatewayClientNotInitializedError``
-    # (a subclass of ``LatchkeyGatewayClientError``) because the cache
-    # was cleared by the connect-error handler.
-    with pytest.raises(LatchkeyGatewayClientError):
+    # The connect-error handler cleared the cached ``base_url``, so the
+    # second call fails fast in ``ensure_initialized`` /
+    # ``_require_base_url`` with the *specific*
+    # ``LatchkeyGatewayClientNotInitializedError`` -- never reaching the
+    # transport. Asserting the concrete subclass (and that the transport
+    # was hit exactly once) is what distinguishes a real invalidation
+    # from a transport that simply always raises ``ConnectError``.
+    with pytest.raises(LatchkeyGatewayClientNotInitializedError):
         client.get_available_services()
+    assert call_count["value"] == 1
 
 
 def test_non_connect_transport_errors_do_not_invalidate() -> None:
@@ -578,13 +587,23 @@ def test_iter_permission_requests_invalidates_on_connect_error() -> None:
     from the supervisor record instead of pounding the stale port.
     """
 
+    call_count = {"value": 0}
+
     def _handler(request: httpx.Request) -> httpx.Response:
         del request
+        call_count["value"] += 1
         raise httpx.ConnectError("connection refused")
 
     client = _build_client(_handler)
     with pytest.raises(LatchkeyGatewayClientError):
         list(client.iter_permission_requests())
-    # State cleared -- next call cannot build a URL.
-    with pytest.raises(LatchkeyGatewayClientError):
+    # State cleared by the connect-error handler -- the next call cannot
+    # build a URL and fails fast with the specific
+    # ``LatchkeyGatewayClientNotInitializedError`` before ever touching
+    # the transport again. This is the distinction that proves
+    # invalidation ran (a transport that always raises ``ConnectError``
+    # would otherwise make a weaker ``LatchkeyGatewayClientError``
+    # assertion pass regardless).
+    with pytest.raises(LatchkeyGatewayClientNotInitializedError):
         list(client.iter_permission_requests())
+    assert call_count["value"] == 1

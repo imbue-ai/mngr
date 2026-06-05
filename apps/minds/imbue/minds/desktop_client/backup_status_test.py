@@ -5,8 +5,6 @@ images), so the integration test runs unconditionally and FAILs -- not
 skips -- if the ``restic`` binary is missing.
 """
 
-import os
-import subprocess
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -19,6 +17,7 @@ from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.backup_status import BackupStatusState
 from imbue.minds.desktop_client.backup_status import compute_backup_status_for_workspace
 from imbue.minds.desktop_client.backup_status import compute_backup_status_for_workspaces
+from imbue.minds.desktop_client.testing import restic_backup_a_file
 from imbue.mngr.primitives import AgentId
 
 
@@ -60,20 +59,6 @@ def test_compute_for_workspaces_includes_not_configured(tmp_path: Path) -> None:
 # --- local restic integration ---
 
 
-def _backup_a_file(repo: str, password: str, source: Path) -> None:
-    env = dict(os.environ)
-    env.update({"RESTIC_REPOSITORY": repo, "RESTIC_PASSWORD": password})
-    result = subprocess.run(
-        ["restic", "backup", str(source)],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-        timeout=120.0,
-    )
-    assert result.returncode == 0, result.stderr
-
-
 @pytest.mark.timeout(60)
 def test_status_never_then_backed_up_against_local_repo(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
@@ -91,7 +76,7 @@ def test_status_never_then_backed_up_against_local_repo(tmp_path: Path) -> None:
     # After a successful backup -> BACKED_UP with a timestamp.
     source = tmp_path / "data.txt"
     source.write_text("hello")
-    _backup_a_file(repo, password, source)
+    restic_backup_a_file(repo, password, source)
     after = compute_backup_status_for_workspace(paths, agent_id, now=_now())
     assert after.state is BackupStatusState.BACKED_UP
     assert after.last_success_at is not None

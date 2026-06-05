@@ -17,6 +17,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthAccount
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.supertokens_routes import _oauth_flows
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -78,6 +79,23 @@ def make_fake_imbue_cloud_cli() -> FakeImbueCloudCli:
 def make_session_store_for_test(data_dir: Path, cli: ImbueCloudCli | None = None) -> MultiAccountSessionStore:
     """Build a :class:`MultiAccountSessionStore` with a fake CLI by default."""
     return MultiAccountSessionStore(data_dir=data_dir, cli=cli or make_fake_imbue_cloud_cli())
+
+
+@pytest.fixture(autouse=True)
+def clear_oauth_flows() -> Iterator[None]:
+    """Reset the process-global OAuth flow registry around every test.
+
+    ``supertokens_routes._oauth_flows`` is module-level mutable state shared
+    across the whole process. Without resetting it, flow ids recorded by one
+    test leak into the next, making the supertokens_routes tests order-
+    dependent. Clear it before and after each test so every test starts from
+    an empty registry.
+    """
+    _oauth_flows.clear()
+    try:
+        yield
+    finally:
+        _oauth_flows.clear()
 
 
 @pytest.fixture

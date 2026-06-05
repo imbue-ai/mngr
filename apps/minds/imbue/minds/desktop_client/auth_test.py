@@ -16,7 +16,11 @@ def _make_auth_store(tmp_path: Path) -> FileAuthStore:
 def test_get_signing_key_generates_key_on_first_access(tmp_path: Path) -> None:
     store = _make_auth_store(tmp_path)
     key = store.get_signing_key()
-    assert len(key.get_secret_value()) > 32
+    # token_urlsafe(64) encodes 64 random bytes as base64url, yielding 86 chars.
+    assert len(key.get_secret_value()) >= 86
+    # The freshly generated key must be persisted so it survives restarts.
+    on_disk_key = (tmp_path / "auth" / "signing_key").read_text().strip()
+    assert on_disk_key == key.get_secret_value()
 
 
 def test_get_signing_key_returns_same_key_on_subsequent_access(tmp_path: Path) -> None:

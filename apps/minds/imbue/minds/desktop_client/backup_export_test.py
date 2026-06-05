@@ -4,6 +4,7 @@ restic is a required dependency of the minds app, so the integration test runs
 unconditionally and FAILS (not skips) if ``restic`` is missing.
 """
 
+import tempfile
 import zipfile
 from pathlib import Path
 from uuid import uuid4
@@ -29,7 +30,14 @@ def _fresh_agent_id() -> AgentId:
 
 
 def test_export_zip_path_for_host_is_keyed_and_in_tmp() -> None:
-    assert export_zip_path_for_host("host-abc123") == Path("/tmp/minds-backup-export-host-abc123.zip")
+    path_a = export_zip_path_for_host("a")
+    path_b = export_zip_path_for_host("b")
+
+    # Distinct hosts get distinct files so concurrent exports don't collide.
+    assert path_a != path_b
+    # The host id is embedded in the filename, and the file lands in the temp dir.
+    assert path_a.name == "minds-backup-export-a.zip"
+    assert path_a.parent == Path(tempfile.gettempdir())
 
 
 # --- error paths (no restic needed: they fail before invoking it) ---
