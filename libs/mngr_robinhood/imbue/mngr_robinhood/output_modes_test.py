@@ -1,12 +1,12 @@
 import io
 import json
 
-from imbue.mngr_uncapped_claude.data_types import OutputFormat
-from imbue.mngr_uncapped_claude.data_types import ResultMeta
-from imbue.mngr_uncapped_claude.output_modes import StreamingOutputWriter
-from imbue.mngr_uncapped_claude.output_modes import build_result_envelope
-from imbue.mngr_uncapped_claude.output_modes import build_system_init_envelope
-from imbue.mngr_uncapped_claude.output_modes import transcript_event_to_stream_json
+from imbue.mngr_robinhood.data_types import OutputFormat
+from imbue.mngr_robinhood.data_types import ResultMeta
+from imbue.mngr_robinhood.output_modes import StreamingOutputWriter
+from imbue.mngr_robinhood.output_modes import build_result_envelope
+from imbue.mngr_robinhood.output_modes import build_system_init_envelope
+from imbue.mngr_robinhood.output_modes import transcript_event_to_stream_json
 
 
 def _assistant_event(text: str) -> dict[str, object]:

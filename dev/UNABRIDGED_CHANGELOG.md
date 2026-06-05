@@ -367,7 +367,7 @@ opt-in `--deploy` mode. Fixes the spurious Modal-discovery warnings and
 Latchkey breakage hit by users who activated `staging` only to *use* the
 deployed tier but had no Modal token for the `minds-staging` workspace.
 
-Root-level surface changes for the `mngr_uncapped_claude` plugin: README updated to advertise the new `uncapped-claude` command and link to the new sub-project, and the auto-generated CLI docs gained an entry at `libs/mngr/docs/commands/secondary/uncapped-claude.md` so `mngr ask` and `mngr --help` know about the command.
+Root-level surface changes for the `mngr_robinhood` plugin: README updated to advertise the new `robinhood` command and link to the new sub-project, and the auto-generated CLI docs gained an entry at `libs/mngr/docs/commands/secondary/robinhood.md` so `mngr ask` and `mngr --help` know about the command.
 
 ## 2026-05-20
 
