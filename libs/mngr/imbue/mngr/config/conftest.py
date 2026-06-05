@@ -1,11 +1,8 @@
-import json
 from pathlib import Path
 
 import pluggy
 import pytest
 
-from imbue.mngr.config.completion_cache import COMPLETION_CACHE_FILENAME
-from imbue.mngr.config.completion_cache import CompletionCacheData
 from imbue.mngr.plugins import hookspecs
 from imbue.mngr.providers.registry import load_all_registries
 
@@ -15,17 +12,6 @@ def completion_cache_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pat
     """Set MNGR_COMPLETION_CACHE_DIR to a temporary directory."""
     monkeypatch.setenv("MNGR_COMPLETION_CACHE_DIR", str(tmp_path))
     return tmp_path
-
-
-def read_completion_cache(cache_dir: Path) -> CompletionCacheData:
-    """Read the completion cache JSON from ``cache_dir`` as typed CompletionCacheData.
-
-    Unknown keys are dropped so the helper stays robust to additive schema
-    changes in the on-disk format. Shared by the unit and integration completion
-    tests so both read the cache through one typed accessor.
-    """
-    data = json.loads((cache_dir / COMPLETION_CACHE_FILENAME).read_text())
-    return CompletionCacheData(**{k: v for k, v in data.items() if k in CompletionCacheData._fields})
 
 
 @pytest.fixture

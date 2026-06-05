@@ -8,13 +8,13 @@ import pytest
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.config.completion_cache import COMPLETION_CACHE_FILENAME
 from imbue.mngr.config.completion_cache import get_completion_cache_dir
+from imbue.mngr.config.completion_cache import read_completion_cache
 from imbue.mngr.config.completion_writer import _EXCLUDED_CONFIG_KEY_PREFIXES
 from imbue.mngr.config.completion_writer import _POSITIONAL_COMPLETION_SPEC
 from imbue.mngr.config.completion_writer import _extract_config_value_choices
 from imbue.mngr.config.completion_writer import _is_excluded_config_key
 from imbue.mngr.config.completion_writer import flatten_dict_keys
 from imbue.mngr.config.completion_writer import write_cli_completions_cache
-from imbue.mngr.config.conftest import read_completion_cache
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext

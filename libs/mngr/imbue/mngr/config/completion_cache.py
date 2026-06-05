@@ -5,6 +5,7 @@ it can be imported by both the cache writer (completion_writer.py, heavy
 imports) and the cache reader (cli/complete.py, no heavy imports).
 """
 
+import json
 import os
 from pathlib import Path
 from typing import Final
@@ -65,3 +66,18 @@ class CompletionCacheData(NamedTuple):
     # Candidates for the `mngr help` positional arg: every top-level command name
     # plus every registered help topic key.
     help_targets: list[str] = []
+
+
+def read_completion_cache(cache_dir: Path) -> CompletionCacheData:
+    """Read and parse the completion cache JSON from ``cache_dir``.
+
+    Unknown keys are ignored so the reader tolerates additive schema changes to
+    the on-disk format. Raises ``OSError`` if the file is missing/unreadable,
+    ``json.JSONDecodeError`` if it is malformed, or ``ValueError`` if the JSON
+    top level is not an object. Callers that must never fail (e.g. the
+    tab-completion path) should catch these and fall back to defaults.
+    """
+    data = json.loads((cache_dir / COMPLETION_CACHE_FILENAME).read_text())
+    if not isinstance(data, dict):
+        raise ValueError(f"completion cache at {cache_dir} is not a JSON object")
+    return CompletionCacheData(**{k: v for k, v in data.items() if k in CompletionCacheData._fields})

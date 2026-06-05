@@ -12,8 +12,8 @@ import click
 
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.cli.help_topics import get_all_topics
+from imbue.mngr.config.completion_cache import read_completion_cache
 from imbue.mngr.config.completion_writer import write_cli_completions_cache
-from imbue.mngr.config.conftest import read_completion_cache
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.main import cli
 

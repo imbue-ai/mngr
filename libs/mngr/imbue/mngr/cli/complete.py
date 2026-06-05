@@ -19,6 +19,7 @@ from imbue.mngr.cli.complete_names import resolve_names_from_discovery_stream
 from imbue.mngr.config.completion_cache import COMPLETION_CACHE_FILENAME
 from imbue.mngr.config.completion_cache import CompletionCacheData
 from imbue.mngr.config.completion_cache import get_completion_cache_dir
+from imbue.mngr.config.completion_cache import read_completion_cache
 
 
 class _CompletionContext(NamedTuple):
@@ -36,17 +37,19 @@ class _CompletionContext(NamedTuple):
 
 
 def _read_cache() -> CompletionCacheData:
-    """Read the command completions cache file. Returns defaults on any error."""
+    """Read the command completions cache file. Returns defaults on any error.
+
+    Tab completion must never crash, so any read/parse failure falls back to an
+    empty CompletionCacheData. The parsing itself is shared with the cache
+    writer's tests via ``read_completion_cache``.
+    """
     try:
-        path = get_completion_cache_dir() / COMPLETION_CACHE_FILENAME
-        if not path.is_file():
+        cache_dir = get_completion_cache_dir()
+        if not (cache_dir / COMPLETION_CACHE_FILENAME).is_file():
             return CompletionCacheData()
-        data = json.loads(path.read_text())
-        if isinstance(data, dict):
-            return CompletionCacheData(**{k: v for k, v in data.items() if k in CompletionCacheData._fields})
-    except (json.JSONDecodeError, OSError):
-        pass
-    return CompletionCacheData()
+        return read_completion_cache(cache_dir)
+    except (json.JSONDecodeError, OSError, ValueError):
+        return CompletionCacheData()
 
 
 def _read_host_names() -> list[str]:
