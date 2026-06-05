@@ -63,9 +63,10 @@ Bump `LIMA_VERSION` in `apps/minds/scripts/build.js` from `2.0.3` to `2.1.1` (ma
 
 The branch's `libs/mngr_lima/imbue/mngr_lima/limactl.py:155` has `timeout: float = 1800.0`; main is at `600.0`. The only caller (`instance.py:467-473`) passes `timeout=self.config.vm_start_timeout_seconds` explicitly, so the function default is dead code. `f794b3e98` ("Revert all libs/ changes; keep branch scoped to apps/minds") missed this one line.
 
-- **status**: in_flight (iter 4)
+- **status**: **verified_stale**
 - **test path**: mngr-rc-lima-timeout-revert (PR #1938) → launch-to-msg with template_ref=v0.2.35 + ci.yml
 - **expected blast radius**: zero (dead default)
+- **landed**: cherry-picked to wz/minds_onboard (b7628677f). Both launch-to-msg verify and ci.yml green first try. Also removed `libs/mngr_lima/changelog/wz-minds_onboard.md` since the entry no longer describes a branch-only change.
 
 ### uv-tool-install-editable-mode (PILOT, found 2nd pass)
 
@@ -111,3 +112,4 @@ Per-iteration: timestamp, candidate, candidate branch / tag, launch-to-msg run i
 | 3 | restore-stop-hook-enabled-when | pilot-rc-stop-hook / v0.2.36-rc2-stop-hook | 27010826323 success | 27010815083 success | green | ff-merged into pilot (c135679e), v0.2.35 tag unchanged |
 | 4 | lima-2.0.3-to-2.1.1 | (no CI test) | n/a | n/a | still_needed | deep-dive showed 2.1.1 ships the exact regressed gvisor-tap-vsock 0.8.8; #5042 reference was misidentified; #4558 still open |
 | 5 | homebrew-path-augmentation | (no CI test) | n/a | n/a | still_needed | docker on macOS lives at /opt/homebrew/bin/docker or /usr/local/bin/docker; dropping homebrew prepend silently breaks docker users; launch-to-msg only exercises lima so it would not catch the regression |
+| 6 | revert-lima-start-new-default-timeout | mngr-rc-lima-timeout-revert (PR #1938) | 27013465788 success | 27013474227 success | green | cherry-picked to wz/minds_onboard (b7628677f); PR #1938 to close |
