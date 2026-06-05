@@ -273,24 +273,38 @@ CONVERSATION_IDS_FILENAME: str = "antigravity_conversation_ids"
 # sync with the resource file under ``resources/``.
 CAPTURE_CONVERSATION_ID_SCRIPT_NAME: str = "capture_conversation_id.sh"
 
+# Per-agent file (in ``$MNGR_AGENT_STATE_DIR``) recording the conversation ID of
+# the *root* agent for the current turn -- the conversation that opened the turn
+# (fired ``PreInvocation`` while ``active`` was absent). Subagents share the same
+# hooks and fire their own Stops, so the clear hook uses this to act only on the
+# root's Stop. Written by ``set_active_marker.sh``; both shell scripts hardcode
+# this same literal, so keep them in sync.
+ROOT_CONVERSATION_FILENAME: str = "root_conversation"
+
 # Script (provisioned into ``$MNGR_AGENT_STATE_DIR/commands/``) that the
-# ``Stop`` hook runs to clear the ``active`` marker -- but only when agy's
-# Stop-hook payload reports ``"fullyIdle":true`` (the root agent and every
-# subagent / background task it launched have all finished). Name kept in sync
-# with the resource file under ``resources/``.
+# ``PreInvocation`` hook runs to touch the ``active`` marker and record the
+# turn's root conversation (see ``ROOT_CONVERSATION_FILENAME``). Name kept in
+# sync with the resource file under ``resources/``.
+SET_ACTIVE_MARKER_SCRIPT_NAME: str = "set_active_marker.sh"
+
+# Script (provisioned into ``$MNGR_AGENT_STATE_DIR/commands/``) that the
+# ``Stop`` hook runs to clear the ``active`` marker -- but only on the root
+# agent's fully-idle Stop (``"fullyIdle":true`` for the recorded root
+# conversation). Name kept in sync with the resource file under ``resources/``.
 CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME: str = "clear_active_marker_when_idle.sh"
 
-# ``PreInvocation`` touches ``active`` (agent is working); ``Stop`` removes it
-# *only when fully idle*. agy runs the Stop hooks each time the root agent goes
-# idle and reports ``fullyIdle`` -- true only once every subagent / background
-# task it launched has also finished -- so a turn that backgrounds work yields
-# an interim ``"fullyIdle":false`` Stop then a final ``"fullyIdle":true`` Stop
-# (verified live against agy 1.0.5). ``clear_active_marker_when_idle.sh`` clears
-# the marker only on the fully-idle Stop, keeping the agent RUNNING until the
-# work completes. ``$MNGR_AGENT_STATE_DIR`` expands at hook time. Both the touch
-# and the clear script emit no stdout (agy would treat it as injected steps / a
-# stop-blocking result).
-_SET_ACTIVE_COMMAND: str = f'touch "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'
+# ``PreInvocation`` runs ``set_active_marker.sh`` (touch ``active`` + record the
+# turn's root); ``Stop`` runs ``clear_active_marker_when_idle.sh`` (clear
+# ``active`` only on the root's fully-idle Stop). agy runs the Stop hooks each
+# time *any* conversation -- the root agent or a subagent it launched -- goes
+# idle, reporting ``fullyIdle`` (an interim Stop sends ``false``, the final one
+# ``true``; verified live against agy 1.0.5). Subagents fire their own
+# ``fullyIdle:true`` Stop while the root still works, so the clear hook gates on
+# both ``fullyIdle:true`` *and* the root conversation id, keeping the agent
+# RUNNING until the root itself is done. ``$MNGR_AGENT_STATE_DIR`` expands at
+# hook time. Both scripts emit no stdout (agy would treat it as injected steps /
+# a stop-blocking result).
+_SET_ACTIVE_COMMAND: str = f'bash "$MNGR_AGENT_STATE_DIR/commands/{SET_ACTIVE_MARKER_SCRIPT_NAME}"'
 _CLEAR_ACTIVE_WHEN_IDLE_COMMAND: str = (
     f'bash "$MNGR_AGENT_STATE_DIR/commands/{CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME}"'
 )
@@ -309,13 +323,16 @@ def build_antigravity_hooks_config() -> dict[str, Any]:
 
     Emits two ``PreInvocation`` handlers plus a ``Stop`` handler:
 
-    * The ``active``-marker pair: ``PreInvocation`` touches the marker and
-      ``Stop`` runs ``clear_active_marker_when_idle.sh``, which removes it only
-      when agy's Stop payload reports ``fullyIdle`` (no subagent or background
-      task still running). ``BaseAgent.get_lifecycle_state`` reads the marker to
-      report RUNNING vs WAITING; agy maintains no such marker on its own. Gating
-      on ``fullyIdle`` keeps the agent RUNNING while work it launched is still in
-      flight, instead of flipping to WAITING when the root turn ends.
+    * The ``active``-marker pair: ``PreInvocation`` runs
+      ``set_active_marker.sh`` (touch the marker, record the turn's root
+      conversation) and ``Stop`` runs ``clear_active_marker_when_idle.sh``,
+      which removes the marker only on the root agent's fully-idle Stop.
+      ``BaseAgent.get_lifecycle_state`` reads the marker to report RUNNING vs
+      WAITING; agy maintains no such marker on its own. Gating on
+      ``fullyIdle`` + the root conversation keeps the agent RUNNING while work
+      it launched is still in flight (including subagents, which fire their own
+      ``fullyIdle:true`` Stop), instead of flipping to WAITING when the root
+      turn -- or any subagent -- ends.
     * The conversation-ID capture handler: a second ``PreInvocation`` handler
       runs ``capture_conversation_id.sh``, which reads agy's hook payload from
       stdin and records the active conversation ID (see

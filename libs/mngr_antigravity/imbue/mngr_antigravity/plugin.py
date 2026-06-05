@@ -112,6 +112,7 @@ from imbue.mngr_antigravity import resources as _antigravity_resources
 from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import CONVERSATION_IDS_FILENAME
+from imbue.mngr_antigravity.antigravity_config import SET_ACTIVE_MARKER_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import TRUSTED_WORKSPACES_KEY
 from imbue.mngr_antigravity.antigravity_config import build_antigravity_hooks_config
 from imbue.mngr_antigravity.antigravity_config import build_isolated_settings
@@ -471,6 +472,10 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
                 self._get_agent_dir(),
                 {
                     _BACKGROUND_TASKS_SCRIPT_NAME: _load_antigravity_resource_script(_BACKGROUND_TASKS_SCRIPT_NAME),
+                    # Run by the PreInvocation hook to touch the active marker and
+                    # record the turn's root conversation (see
+                    # build_antigravity_hooks_config).
+                    SET_ACTIVE_MARKER_SCRIPT_NAME: _load_antigravity_resource_script(SET_ACTIVE_MARKER_SCRIPT_NAME),
                     # Run by the PreInvocation capture hook to record the active
                     # conversation ID (see build_antigravity_hooks_config).
                     CAPTURE_CONVERSATION_ID_SCRIPT_NAME: _load_antigravity_resource_script(

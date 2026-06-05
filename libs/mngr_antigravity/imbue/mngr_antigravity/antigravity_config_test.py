@@ -10,9 +10,9 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
-from imbue.mngr_antigravity.antigravity_config import ACTIVE_MARKER_FILENAME
 from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME
+from imbue.mngr_antigravity.antigravity_config import SET_ACTIVE_MARKER_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import build_antigravity_hooks_config
 from imbue.mngr_antigravity.antigravity_config import build_isolated_settings
 from imbue.mngr_antigravity.antigravity_config import build_onboarding_seed
@@ -214,15 +214,16 @@ def test_read_antigravity_settings_returns_parsed_dict(
 
 
 def test_hooks_config_always_emits_active_marker_via_preinvocation_and_stop() -> None:
-    """PreInvocation touches the active marker; Stop clears it only when fully idle.
+    """PreInvocation sets the marker (+ root); Stop clears it only on the root's fully-idle.
 
-    The active marker drives BaseAgent's RUNNING/WAITING detection. agy fires
-    PreInvocation before each model call (agent working) and runs Stop hooks
-    when an execution goes idle. The Stop handler runs
-    clear_active_marker_when_idle.sh, which removes the marker only on a
-    fully-idle Stop, so the pair flips the marker at the right boundaries even
-    when the agent goes idle while subagents / background tasks are still
-    running.
+    The active marker drives BaseAgent's RUNNING/WAITING detection. agy runs
+    PreInvocation before each model call (agent working) and the Stop hooks each
+    time any conversation -- the root agent or a subagent -- goes idle. The first
+    PreInvocation handler runs set_active_marker.sh (touch + record the turn's
+    root) and the Stop handler runs clear_active_marker_when_idle.sh, which
+    removes the marker only on the root's fully-idle Stop, so the pair flips the
+    marker at the right boundaries even when subagents / background tasks finish
+    first.
     """
     config = build_antigravity_hooks_config()
 
@@ -230,11 +231,14 @@ def test_hooks_config_always_emits_active_marker_via_preinvocation_and_stop() ->
     # PreInvocation/Stop use the flat handler-list shape (no matcher wrapper).
     pre = mngr["PreInvocation"]
     stop = mngr["Stop"]
-    # The active-marker touch is the first PreInvocation handler (a second
-    # handler captures the conversation id; see the test below).
-    assert pre[0] == {"type": "command", "command": f'touch "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'}
-    # Stop runs the idle-gated clear script (not a bare `rm`), so the marker is
-    # removed only when the payload reports fullyIdle.
+    # The marker/root script is the first PreInvocation handler (a second handler
+    # captures the conversation id; see the test below).
+    assert pre[0] == {
+        "type": "command",
+        "command": f'bash "$MNGR_AGENT_STATE_DIR/commands/{SET_ACTIVE_MARKER_SCRIPT_NAME}"',
+    }
+    # Stop runs the root-gated clear script (not a bare `rm`), so the marker is
+    # removed only on the root agent's fully-idle Stop.
     assert stop == [
         {
             "type": "command",

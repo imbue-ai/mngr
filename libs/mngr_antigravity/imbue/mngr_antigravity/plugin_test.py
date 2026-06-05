@@ -23,6 +23,7 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME
+from imbue.mngr_antigravity.antigravity_config import SET_ACTIVE_MARKER_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_hooks_config_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_oauth_token_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_onboarding_cache_path
@@ -898,13 +899,16 @@ def test_provision_hooks_json_sets_active_marker_on_preinvocation_and_clears_on_
 ) -> None:
     """The active marker hooks are always present (they drive RUNNING vs WAITING).
 
-    PreInvocation touches the marker; Stop runs the idle-gated clear script,
-    which removes it only when agy reports the conversation is fully idle.
+    PreInvocation runs set_active_marker.sh (touch + record the turn's root);
+    Stop runs the root-gated clear script, which removes the marker only on the
+    root agent's fully-idle Stop.
     """
     agent = antigravity_agent_auto_dismiss
     _provision(agent)
     mngr = _read_hooks_json(agent)["mngr"]
-    assert mngr["PreInvocation"][0]["command"] == 'touch "$MNGR_AGENT_STATE_DIR/active"'
+    assert (
+        mngr["PreInvocation"][0]["command"] == f'bash "$MNGR_AGENT_STATE_DIR/commands/{SET_ACTIVE_MARKER_SCRIPT_NAME}"'
+    )
     assert (
         mngr["Stop"][0]["command"]
         == f'bash "$MNGR_AGENT_STATE_DIR/commands/{CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME}"'
@@ -931,6 +935,28 @@ def test_provision_installs_clear_active_marker_when_idle_script(
     assert script_path.exists()
     # Sanity-check it's the idle-gate script (keys on the fullyIdle field).
     assert "fullyIdle" in script_path.read_text()
+
+
+def test_provision_installs_set_active_marker_script(
+    auto_approve_ctx: AntigravityAgent,
+    isolated_home: Path,
+) -> None:
+    """provision() installs set_active_marker.sh into the commands/ dir.
+
+    The PreInvocation hook invokes this script by that path
+    (build_antigravity_hooks_config), so it must be provisioned for the marker
+    to be set and the turn's root recorded.
+    """
+    agent = auto_approve_ctx
+    agent.provision(
+        host=agent.host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
+        mngr_ctx=agent.mngr_ctx,
+    )
+    script_path = agent._get_agent_dir() / "commands" / SET_ACTIVE_MARKER_SCRIPT_NAME
+    assert script_path.exists()
+    # Sanity-check it's the marker/root script (records the root conversation).
+    assert "root_conversation" in script_path.read_text()
 
 
 def test_provision_does_not_write_hooks_into_work_dir(
