@@ -4,6 +4,16 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-04
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.
+
+## 2026-06-02
+
+Collapsed a redundant `except` clause: `except (LimaCommandError, MngrError, OSError)` is now
+`except (MngrError, OSError)` (since `LimaCommandError` is already a `MngrError` subclass). No
+behavior change.
+
 ## 2026-05-29
 
 Added an opt-in btrfs host-data volume mode to the Lima provider. The

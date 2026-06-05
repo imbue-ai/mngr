@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-04
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.
+
 ## 2026-05-28
 
 # Dropped redundant per-project ty/ruff ratchet tests
@@ -31,7 +35,7 @@ changes in this project; the adopting test starts at a baseline of zero violatio
 
 Fix the intro in `UNABRIDGED_CHANGELOG.md` so it references the correct entries directory. The path was `changelog/<project>/` (which never existed); the actual layout is `<project_dir>/changelog/`.
 
-Statusline shim refactor that fixes an infinite-recursion bug when running successive claude agents in the same work_dir (as `mngr uncapped-claude` always does). The shim and writer scripts now live at host-stable paths (`<host_dir>/commands/claude_statusline.sh` and `<host_dir>/commands/claude_usage_writer.sh`), so the work_dir's `settings.local.json`'s `statusLine.command` stays valid across agent lifecycles. The runtime sidecar (captured user `statusLine.command`) remains per-agent at `$MNGR_AGENT_STATE_DIR/commands/user_statusline_cmd`. The shim exits 0 silently when `MNGR_AGENT_STATE_DIR` is unset (standalone `claude` invocations outside mngr), and legacy per-agent shim paths still in existing `settings.local.json` files are detected and overwritten with the stable path on the next provision pass.
+Statusline shim refactor that fixes an infinite-recursion bug when running successive claude agents in the same work_dir (as `mngr robinhood` always does). The shim and writer scripts now live at host-stable paths (`<host_dir>/commands/claude_statusline.sh` and `<host_dir>/commands/claude_usage_writer.sh`), so the work_dir's `settings.local.json`'s `statusLine.command` stays valid across agent lifecycles. The runtime sidecar (captured user `statusLine.command`) remains per-agent at `$MNGR_AGENT_STATE_DIR/commands/user_statusline_cmd`. The shim exits 0 silently when `MNGR_AGENT_STATE_DIR` is unset (standalone `claude` invocations outside mngr), and legacy per-agent shim paths still in existing `settings.local.json` files are detected and overwritten with the stable path on the next provision pass.
 
 ## 2026-05-20
 

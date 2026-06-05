@@ -133,6 +133,16 @@ class BackendResolverInterface(MutableModel, ABC):
         """
         return True
 
+    def get_provider_errors(self) -> dict[ProviderInstanceName, DiscoveryError]:
+        """Return errored providers keyed by name from the latest discovery snapshot.
+
+        Default implementation returns an empty mapping (resolvers without
+        provider state never report errors); ``MngrCliBackendResolver``
+        overrides it. The workspace list uses this to mark a retained-but-
+        unverified workspace stale when its provider's last poll errored.
+        """
+        return {}
+
 
 class StaticBackendResolver(BackendResolverInterface):
     """Resolves backend URLs from a static mapping provided at construction time.

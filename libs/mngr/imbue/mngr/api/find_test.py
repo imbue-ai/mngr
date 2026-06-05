@@ -488,8 +488,8 @@ def test_determine_resolved_path_uses_agent_work_dir_when_no_parsed_path() -> No
     assert result == Path("/agent/work/dir")
 
 
-def test_determine_resolved_path_prefers_parsed_path_over_agent_work_dir() -> None:
-    """determine_resolved_path should prefer parsed path even when agent work dir available."""
+def test_determine_resolved_path_keeps_absolute_parsed_path_over_agent_work_dir() -> None:
+    """An absolute parsed path is honored verbatim even when an agent work dir is available."""
     agent_ref = DiscoveredAgent(
         host_id=HostId.generate(),
         agent_id=AgentId.generate(),
@@ -502,6 +502,32 @@ def test_determine_resolved_path_prefers_parsed_path_over_agent_work_dir() -> No
         agent_work_dir_if_available=Path("/agent/work/dir"),
     )
     assert result == Path("/explicit/path")
+
+
+def test_determine_resolved_path_joins_relative_parsed_path_onto_agent_work_dir() -> None:
+    """A relative parsed path next to an agent resolves against that agent's work dir."""
+    agent_ref = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("test"),
+        provider_name=ProviderInstanceName("local"),
+    )
+    result = determine_resolved_path(
+        parsed_path=Path("runtime/reports"),
+        resolved_agent=agent_ref,
+        agent_work_dir_if_available=Path("/agent/work/dir"),
+    )
+    assert result == Path("/agent/work/dir/runtime/reports")
+
+
+def test_determine_resolved_path_keeps_relative_parsed_path_without_agent() -> None:
+    """A relative parsed path with no agent is returned verbatim (resolved by the caller's cwd)."""
+    result = determine_resolved_path(
+        parsed_path=Path("runtime/reports"),
+        resolved_agent=None,
+        agent_work_dir_if_available=None,
+    )
+    assert result == Path("runtime/reports")
 
 
 def test_determine_resolved_path_raises_when_agent_but_no_work_dir() -> None:

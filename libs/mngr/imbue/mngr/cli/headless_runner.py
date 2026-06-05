@@ -9,7 +9,6 @@ from typing import assert_never
 from loguru import logger
 
 from imbue.mngr.api.create import create as api_create
-from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import MngrConfig
@@ -23,10 +22,7 @@ from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
-from imbue.mngr.primitives import HostName
-from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import OutputFormat
-from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 
 
 def is_streaming_headless_agent_type(agent_type: str, config: MngrConfig) -> bool:
@@ -52,15 +48,6 @@ def check_streaming_headless_agent_type(agent_type: str, config: MngrConfig) -> 
             f"The '{agent_type}' agent type does not support streaming headless output. "
             f"Only agent types implementing StreamingHeadlessAgentMixin can be used."
         )
-
-
-def get_local_host(mngr_ctx: MngrContext) -> OnlineHostInterface:
-    """Resolve the local host as an OnlineHostInterface."""
-    provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
-    host_interface = provider.get_host(HostName(LOCAL_HOST_NAME))
-    if not isinstance(host_interface, OnlineHostInterface):
-        raise MngrError("Local host is not online")
-    return host_interface
 
 
 def create_work_dir_on_host(host: OnlineHostInterface) -> Path:

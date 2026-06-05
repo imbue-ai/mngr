@@ -4,6 +4,27 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-04
+
+Added an acceptance test (`test_upload_deploy_files_handles_large_set_on_modal`) that uploads a large (600-file) deploy set to a real Modal host and verifies every file lands. This is the regression guard for github issue 1825, where `mngr create` on Modal failed during provisioning (`Error reading SSH protocol banner`) because deploy files were uploaded one SFTP channel at a time; the fix transfers them with a single rsync.
+
+Updated references to the renamed `modal_proxy` test doubles: `TestingModalInterface`
+is now `FakeModalInterface` (and the rest of the `Testing*` Modal family is now
+`Fake*`). Affects the `make_testing_provider`/`testing_modal` test helpers and
+fixtures, which now reference `FakeModalInterface`. No behavior change.
+
+## 2026-06-04
+
+- Three modal acceptance tests (`test_get_host_by_id`, `test_discover_hosts_includes_created_host`, `test_destroy_host_stops_sandbox_and_delete_host_removes_record`) had their `pytest.mark.timeout` bumped from 180s to 300s and a `pytest.mark.flaky` mark added. They all hit `sandbox.tunnels()` while waiting for SSH on a fresh Modal sandbox, which intermittently brushes the 180s ceiling under load -- the bump matches the longer-running peers in the same file (e.g. `test_persistent_host_creates_shutdown_script` already used 300s) and `flaky` lets offload retry on the rare residual timeout.
+
+## 2026-06-02
+
+Preserved connection-error handling in the Modal provider's optimized listing now that
+`HostConnectionError` is a `MngrError` subclass. `get_host_and_agent_details` now re-raises
+`HostConnectionError` from the inner SSH-collection guard so it still reaches the outer
+handler that clears the per-host connection cache and falls back to the default listing,
+instead of being swallowed by the inner `except MngrError`.
+
 ## 2026-06-01
 
 Fixed flakiness in two `mngr_modal` host-volume acceptance tests by polling `get_volume_for_host` with `wait_for` instead of asserting once, to absorb the brief Modal control-plane lag before a freshly-created volume becomes resolvable by name.
