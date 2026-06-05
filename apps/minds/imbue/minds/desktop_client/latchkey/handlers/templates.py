@@ -69,6 +69,39 @@ def render_predefined_permission_dialog(
 
 
 @pure
+def render_predefined_permission_fragment(
+    agent_id: str,
+    request_id: str,
+    ws_name: str,
+    rationale: str,
+    service: ServicePermissionInfo,
+    checked_permissions: Sequence[str],
+    will_open_browser: bool,
+) -> str:
+    """Render the predefined-permission dialog body, without the outer chrome.
+
+    The fragment is the same content that lives inside the standalone
+    ``pages.LatchkeyPredefinedPermission`` page, minus the
+    ``<PermissionsDialog>`` wrapper (no Base, no backdrop, no shared
+    submit/Escape JS). It is intended to be injected into the inbox
+    modal's detail pane, whose host page owns the wrapper chrome and JS.
+    """
+    return CATALOG.render(
+        "LatchkeyPredefinedPermissionBody",
+        agent_id=agent_id,
+        request_id=request_id,
+        ws_name=ws_name,
+        rationale=rationale,
+        display_name=service.display_name,
+        scope=service.scope,
+        permission_schemas=service.permission_schemas,
+        description_by_permission_name=service.description_by_permission_name,
+        checked_permissions=set(checked_permissions),
+        will_open_browser=will_open_browser,
+    )
+
+
+@pure
 def render_file_sharing_permission_dialog(
     agent_id: str,
     request_id: str,
@@ -107,4 +140,34 @@ def render_file_sharing_permission_dialog(
         display_name=file_path,
         accent=workspace_accent(agent_id),
         mngr_forward_origin=mngr_forward_origin,
+    )
+
+
+@pure
+def render_file_sharing_permission_fragment(
+    agent_id: str,
+    request_id: str,
+    ws_name: str,
+    rationale: str,
+    file_path: str,
+    access: str,
+    access_human_label: str,
+) -> str:
+    """Render the file-sharing dialog body, without the outer chrome.
+
+    The fragment is the same content that lives inside the standalone
+    ``pages.LatchkeyFileSharingPermission`` page, minus the
+    ``<PermissionsDialog>`` wrapper. The inbox modal's host page owns
+    the surrounding chrome and the shared submit/Escape JS.
+    """
+    return CATALOG.render(
+        "LatchkeyFileSharingPermissionBody",
+        agent_id=agent_id,
+        request_id=request_id,
+        ws_name=ws_name,
+        rationale=rationale,
+        file_path=file_path,
+        access=access,
+        access_human_label=access_human_label,
+        display_name=file_path,
     )

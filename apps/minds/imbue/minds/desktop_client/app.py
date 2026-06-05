@@ -8,6 +8,7 @@ import threading
 import time
 from collections.abc import AsyncGenerator
 from collections.abc import Mapping
+from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -80,6 +81,7 @@ from imbue.minds.desktop_client.onboarding import OnboardingApplier
 from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
 from imbue.minds.desktop_client.recovery_probe import build_host_health_response
 from imbue.minds.desktop_client.recovery_probe import build_probe_argv
+from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import parse_request_event
@@ -110,8 +112,8 @@ from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_recovery_page
 from imbue.minds.desktop_client.templates import render_request_unavailable_page
+from imbue.minds.desktop_client.templates import render_requests_inbox_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
-from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates import status_text_for
@@ -1612,30 +1614,23 @@ def _handle_chrome_page(
     auth_store: AuthStoreDep,
     backend_resolver: BackendResolverDep,
 ) -> Response:
-    """Serve the persistent chrome page (title bar + sidebar + content iframe).
+    """Serve the persistent chrome page (title bar + content iframe).
 
-    This route is unauthenticated -- the chrome renders for all users. The sidebar
-    shows an empty state for unauthenticated users; the SSE stream populates it
-    after authentication.
+    This route is unauthenticated -- the chrome renders for all users. The
+    workspace list lives on the landing page (``/``), reached via the Home
+    button.
     """
+    del backend_resolver
     user_agent = request.headers.get("user-agent", "")
     is_mac = "Macintosh" in user_agent or "Mac OS" in user_agent
 
     authenticated = _is_authenticated(cookies=request.cookies, auth_store=auth_store)
-    initial_workspaces = _build_workspace_list(backend_resolver) if authenticated else []
 
     html = render_chrome_page(
         is_mac=is_mac,
         is_authenticated=authenticated,
         mngr_forward_origin=_get_mngr_forward_origin(request),
-        initial_workspaces=initial_workspaces,
     )
-    return HTMLResponse(content=html)
-
-
-def _handle_chrome_sidebar(request: Request) -> Response:
-    """Serve the standalone sidebar page for the Electron sidebar WebContentsView."""
-    html = render_sidebar_page(mngr_forward_origin=_get_mngr_forward_origin(request))
     return HTMLResponse(content=html)
 
 
@@ -1974,10 +1969,26 @@ def _build_requests_payload(inbox: RequestInbox | None) -> dict[str, Any]:
     ids (in a deterministic order) alongside the count. Consumers diff
     ``request_ids`` to decide whether to refresh the panel and which ids are
     newly arrived (for auto-open); the count remains for the badge.
+
+    ``force_open_event_id`` is the event id of the most-recent pending
+    ``is_user_requested`` event, or ``None``. The chrome interprets it as
+    "open the inbox modal and auto-select this request, regardless of the
+    user's auto-open setting" -- so user-initiated flows (e.g. clicking
+    something in a workspace that requires auth) still surface
+    immediately. Plain agent-initiated requests do not set this field.
     """
     pending = inbox.get_pending_requests() if inbox else []
     request_ids = [str(req.event_id) for req in pending]
-    return {"count": len(request_ids), "request_ids": request_ids}
+    force_open_event_id: str | None = None
+    for req in pending:
+        if req.is_user_requested:
+            force_open_event_id = str(req.event_id)
+            break
+    return {
+        "count": len(request_ids),
+        "request_ids": request_ids,
+        "force_open_event_id": force_open_event_id,
+    }
 
 
 # -- System-interface recovery / restart --
@@ -2667,88 +2678,177 @@ async def _handle_workspace_disassociate(
     return Response(status_code=303, headers={"Location": f"/workspace/{agent_id}/settings"})
 
 
-# -- Requests panel routes --
+# -- Requests inbox routes --
 
 
-def _handle_requests_panel(
-    request: Request,
-    auth_store: AuthStoreDep,
-) -> Response:
-    """Render the right-side requests inbox panel."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return HTMLResponse(content="<p>Not authenticated</p>")
-    inbox: RequestInbox | None = request.app.state.request_inbox
-    pending = inbox.get_pending_requests() if inbox else []
-    minds_config: MindsConfig | None = request.app.state.minds_config
-    auto_open = minds_config.get_auto_open_requests_panel() if minds_config else True
+def _resolve_ws_name(
+    backend_resolver: BackendResolverInterface,
+    agent_id_str: str,
+) -> str:
+    """Best-effort workspace display name; falls back to a truncated agent id."""
+    parsed_id = AgentId(agent_id_str)
+    ws_name = backend_resolver.get_workspace_name(parsed_id) or ""
+    if ws_name:
+        return ws_name
+    info = backend_resolver.get_agent_display_info(parsed_id)
+    return info.agent_name if info else agent_id_str[:16]
 
-    cards = []
-    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
-    handlers: tuple[RequestEventHandler, ...] = request.app.state.request_event_handlers
+
+def _render_inbox_list_html(
+    pending: Sequence[RequestEvent],
+    handlers: Sequence[RequestEventHandler],
+    backend_resolver: BackendResolverInterface,
+) -> str:
+    """Render the inbox list-pane HTML.
+
+    Returns one selectable card per pending request, or an empty-state
+    when there are none. Cards carry ``data-event-id`` / ``data-agent-id``
+    so the inbox client JS can wire selection + workspace navigation.
+    """
+    if not pending:
+        return (
+            '<div class="text-zinc-400 text-sm text-center px-4 py-8">'
+            "No pending requests."
+            "</div>"
+        )
+    items: list[str] = []
     for req in pending:
         handler = find_handler_for_event(handlers, req)
         if handler is not None:
             kind_label = handler.kind_label()
             display_label = handler.display_name_for_event(req)
         else:
-            # Fall through: unknown request type. Should never happen in
-            # practice -- a request without a registered handler can't be
-            # rendered or resolved -- but we still surface it in the
-            # panel so the user sees something is wrong.
+            # A request without a registered handler can't be rendered or
+            # resolved -- but we still surface it so the user can see
+            # that something is wrong.
             kind_label = "request"
             display_label = ""
-        parsed_id = AgentId(req.agent_id)
-        ws_name = backend_resolver.get_workspace_name(parsed_id) or ""
-        if not ws_name:
-            info = backend_resolver.get_agent_display_info(parsed_id)
-            ws_name = info.agent_name if info else req.agent_id[:16]
+        ws_name = _resolve_ws_name(backend_resolver, req.agent_id)
         event_id = str(req.event_id)
-        # Encode as JSON for safe embedding in the JS call, then HTML-escape
-        # the result so it is also safe inside the double-quoted onclick
-        # attribute. This is defense-in-depth: req.agent_id is validated as
-        # an AgentId above, but req.event_id is only required to be a
-        # non-empty string by its type, and relying on upstream validation
-        # at each interpolation site is fragile.
-        event_id_attr = html.escape(json.dumps(event_id), quote=True)
-        agent_id_attr = html.escape(json.dumps(req.agent_id), quote=True)
-        cards.append(
-            f'<div class="req-card" onclick="navigateToRequest({event_id_attr}, {agent_id_attr})">'
-            f'<div style="font-size:13px;color:#e2e8f0;font-weight:500;">{kind_label}: {ws_name}</div>'
-            f'<div style="font-size:12px;color:#64748b;margin-top:2px;">{display_label}</div></div>'
+        items.append(
+            '<div class="block px-3 py-2.5 my-1 rounded-md border border-transparent '
+            'hover:bg-zinc-100 cursor-pointer transition-colors" '
+            f'data-event-id="{html.escape(event_id, quote=True)}" '
+            f'data-agent-id="{html.escape(req.agent_id, quote=True)}">'
+            f'<div class="text-sm font-medium text-zinc-900 truncate">'
+            f"{html.escape(kind_label)}: {html.escape(ws_name)}</div>"
+            f'<div class="text-xs text-zinc-500 mt-0.5 truncate">{html.escape(display_label)}</div>'
+            "</div>"
         )
+    return "".join(items)
 
-    html_content = (
-        '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Requests</title>'
-        "<style>body{font-family:-apple-system,sans-serif;background:#0f172a;color:#cbd5e1;"
-        "margin:0;padding:0;overflow-y:auto;height:100vh;}"
-        "h2{font-size:15px;color:#e2e8f0;padding:12px;margin:0;border-bottom:1px solid #334155;}"
-        ".req-card{padding:10px 12px;margin:2px 0;cursor:pointer;border-radius:6px;transition:background 100ms;}"
-        ".req-card:hover{background:rgba(255,255,255,0.06);}"
-        "</style></head>"
-        f"<body>"
-        f"<script>"
-        f"function navigateToRequest(eventId, agentId) {{"
-        f"  if (window.minds && window.minds.navigateToRequest) {{"
-        f"    window.minds.navigateToRequest(agentId, eventId);"
-        f"  }} else if (window.minds) {{"
-        f'    window.minds.navigateContent("/requests/" + eventId);'
-        f"  }} else {{"
-        f'    window.top.location = "/requests/" + eventId;'
-        f"  }}"
-        f"}}"
-        f"</script>"
-        f"<h2>Requests ({len(pending)})</h2>"
-        f"<div>{''.join(cards) if cards else '<p style=padding:12px;color:#64748b;>No pending requests.</p>'}</div>"
-        f'<div style="position:fixed;bottom:0;left:0;right:0;padding:12px;border-top:1px solid #334155;'
-        f'background:#0f172a;">'
-        f'<label style="font-size:12px;color:#94a3b8;cursor:pointer;">'
-        f'<input type="checkbox" {"checked" if auto_open else ""} '
-        f"onchange=\"fetch('/_chrome/requests-auto-open',{{method:'POST',headers:{{'Content-Type':"
-        f"'application/json'}},body:JSON.stringify({{enabled:this.checked}})}})\"> "
-        f"Auto-open on new request</label></div>"
-        "</body></html>"
+
+def _handle_requests_inbox_page(
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Render the full requests-inbox modal page.
+
+    The Electron modal overlay loads this URL; the page draws the
+    backdrop, list pane, and detail pane. ``event_id`` query parameter
+    (optional) pre-selects a request -- used by the auto-open path so
+    the modal paints with the new request already in view.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content="Not authenticated")
+    inbox: RequestInbox | None = request.app.state.request_inbox
+    pending = inbox.get_pending_requests() if inbox else []
+    minds_config: MindsConfig | None = request.app.state.minds_config
+    auto_open = minds_config.get_auto_open_requests_panel() if minds_config else True
+    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    handlers: tuple[RequestEventHandler, ...] = request.app.state.request_event_handlers
+
+    list_html = _render_inbox_list_html(pending, handlers, backend_resolver)
+    initial_event_id = str(request.query_params.get("event_id") or "")
+
+    # Pre-render the detail fragment server-side when the URL names a
+    # known pending request; this avoids one client round-trip on the
+    # auto-open path. Otherwise the detail pane starts as a placeholder
+    # and the client only fetches when the user clicks a row.
+    initial_detail_html = '<div class="text-zinc-400 text-sm flex items-center justify-center h-full">Select a request from the list.</div>'
+    initial_detail_event_id = ""
+    if initial_event_id and inbox is not None:
+        req_event = inbox.get_request_by_id(initial_event_id)
+        if (
+            req_event is not None
+            and not inbox.is_request_resolved(initial_event_id)
+        ):
+            handler = find_handler_for_event(handlers, req_event)
+            if handler is not None:
+                detail_resp = handler.render_request_fragment(
+                    req_event=req_event,
+                    backend_resolver=backend_resolver,
+                )
+                if isinstance(detail_resp, HTMLResponse):
+                    body = detail_resp.body
+                    initial_detail_html = body.decode() if isinstance(body, bytes | bytearray) else str(body)
+                    initial_detail_event_id = initial_event_id
+
+    return HTMLResponse(
+        content=render_requests_inbox_page(
+            auto_open=auto_open,
+            initial_event_id=initial_event_id,
+            initial_list_html=list_html,
+            initial_detail_html=initial_detail_html,
+            initial_detail_event_id=initial_detail_event_id,
+        ),
     )
-    return HTMLResponse(content=html_content)
+
+
+def _handle_requests_inbox_list(
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Return the inbox list-pane HTML fragment. Refreshed on SSE updates."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content="Not authenticated")
+    inbox: RequestInbox | None = request.app.state.request_inbox
+    pending = inbox.get_pending_requests() if inbox else []
+    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    handlers: tuple[RequestEventHandler, ...] = request.app.state.request_event_handlers
+    return HTMLResponse(content=_render_inbox_list_html(pending, handlers, backend_resolver))
+
+
+def _handle_requests_inbox_detail(
+    event_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+    backend_resolver: BackendResolverDep,
+) -> Response:
+    """Return the detail-pane HTML fragment for one request.
+
+    Mirrors :func:`_handle_request_page` but invokes
+    :meth:`RequestEventHandler.render_request_fragment` so the response
+    is just the inner body markup. Designed for ``innerHTML``-style
+    injection in the inbox client JS.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content="Not authenticated")
+    inbox: RequestInbox | None = request.app.state.request_inbox
+    if inbox is None:
+        return HTMLResponse(content="<p>Request inbox not available</p>", status_code=500)
+    req_event = inbox.get_request_by_id(event_id)
+    if req_event is None:
+        return HTMLResponse(
+            content='<div class="text-zinc-500 text-sm">Request no longer available.</div>',
+            status_code=404,
+        )
+    if inbox.is_request_resolved(event_id):
+        return HTMLResponse(
+            content='<div class="text-zinc-500 text-sm">This request has already been processed.</div>',
+            status_code=200,
+        )
+    handlers: tuple[RequestEventHandler, ...] = request.app.state.request_event_handlers
+    handler = find_handler_for_event(handlers, req_event)
+    if handler is None:
+        return HTMLResponse(
+            content=f'<div class="text-rose-600 text-sm">No handler registered for request type {html.escape(req_event.request_type)!r}.</div>',
+            status_code=500,
+        )
+    return handler.render_request_fragment(
+        req_event=req_event,
+        backend_resolver=backend_resolver,
+    )
 
 
 async def _handle_requests_auto_open(
@@ -3378,7 +3478,6 @@ def create_desktop_client(
 
     # Chrome (persistent shell) routes
     app.get("/_chrome")(_handle_chrome_page)
-    app.get("/_chrome/sidebar")(_handle_chrome_sidebar)
     app.get("/_chrome/events")(_handle_chrome_events)
 
     app.get("/_dev/styleguide")(_handle_dev_styleguide)
@@ -3400,7 +3499,9 @@ def create_desktop_client(
     app.post("/workspace/{agent_id}/disassociate")(_handle_workspace_disassociate)
 
     # Request inbox routes
-    app.get("/_chrome/requests-panel")(_handle_requests_panel)
+    app.get("/_chrome/requests-inbox")(_handle_requests_inbox_page)
+    app.get("/_chrome/requests-inbox/list")(_handle_requests_inbox_list)
+    app.get("/_chrome/requests-inbox/detail/{event_id}")(_handle_requests_inbox_detail)
     app.post("/_chrome/requests-auto-open")(_handle_requests_auto_open)
     app.get("/requests/{request_id}")(_handle_request_page)
     app.post("/requests/{request_id}/grant")(_handle_request_grant)

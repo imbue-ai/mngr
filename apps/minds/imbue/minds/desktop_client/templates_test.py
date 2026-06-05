@@ -14,7 +14,6 @@ from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_recovery_page
-from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
@@ -203,10 +202,12 @@ def test_render_login_page_shows_prompt() -> None:
 def test_render_chrome_page_contains_titlebar() -> None:
     html = render_chrome_page()
     assert "minds-titlebar" in html
-    assert "sidebar-toggle" in html
     assert "home-btn" in html
     assert "back-btn" in html
     assert "content-frame" in html
+    # The sidebar surface has been removed; the home page covers it.
+    assert "sidebar-toggle" not in html
+    assert "sidebar-panel" not in html
 
 
 def test_render_chrome_page_hides_window_controls_on_mac() -> None:
@@ -225,14 +226,6 @@ def test_render_chrome_page_shows_window_controls_on_non_mac() -> None:
     assert "min-btn" in html
     assert "max-btn" in html
     assert "close-btn" in html
-
-
-def test_render_sidebar_page_contains_workspace_list() -> None:
-    html = render_sidebar_page()
-    assert "sidebar-workspaces" in html
-    # The interactivity (including the SSE EventSource fallback) now lives
-    # in the external /_static/sidebar.js file; the template should pull it in.
-    assert "/_static/sidebar.js" in html
 
 
 def test_render_recovery_page_includes_agent_id_and_return_to() -> None:
@@ -451,7 +444,6 @@ def test_render_dev_styleguide_page_surfaces_tokens_and_component_widgets() -> N
     for header in (
         "Titlebar buttons",
         "Window controls",
-        "Sidebar items",
         "Accent spine",
         "Spinner",
         "Buttons",

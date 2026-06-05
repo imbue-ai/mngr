@@ -76,7 +76,6 @@ from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_request_unavailable_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
-from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates_auth import render_auth_page
@@ -363,8 +362,6 @@ def _build_scenarios() -> list[Scenario]:
         Scenario(name="chrome_mac_unauth", builder=lambda: render_chrome_page(is_mac=True, is_authenticated=False)),
         Scenario(name="chrome_mac_auth", builder=lambda: render_chrome_page(is_mac=True, is_authenticated=True)),
         Scenario(name="chrome_non_mac_auth", builder=lambda: render_chrome_page(is_mac=False, is_authenticated=True)),
-        # -- Sidebar -----------------------------------------------------
-        Scenario(name="sidebar", builder=lambda: render_sidebar_page(mngr_forward_origin="http://localhost:8421")),
         # -- Login / login_redirect / auth_error / request_unavailable ---
         Scenario(name="login", builder=render_login_page),
         Scenario(

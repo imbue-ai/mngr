@@ -57,6 +57,40 @@
         + '/recovery?return_to=' + encodeURIComponent(ret) + '&intent=restart';
     };
 
+    // The landing page lives in the content iframe (browser mode) or
+    // inside the Electron content view, which uses the sandboxed
+    // content-relay-preload (no window.minds). We forward both the "open
+    // in new window" click and the row-level right-click to the chrome
+    // via postMessage; the relay preload allowlists those two message
+    // types and turns them into IPCs. In browser mode (no Electron) we
+    // no-op the new-window button and let the browser show its default
+    // context menu.
+    var isInElectron = window.navigator.userAgent.indexOf('Electron') !== -1;
+    function postToChrome(payload) {
+      window.postMessage(payload, window.location.origin);
+    }
+
+    window.landingOpenNewWindowClick = function (button) {
+      var row = button.closest('[data-agent-id]');
+      if (!row) return;
+      var agentId = row.dataset.agentId;
+      if (!isInElectron) return;
+      postToChrome({ type: 'minds:open-workspace-new-window', agentId: agentId });
+    };
+
+    window.landingRowContextMenu = function (event, row) {
+      var agentId = row && row.dataset && row.dataset.agentId;
+      if (!agentId || !isInElectron) return true;
+      event.preventDefault();
+      postToChrome({
+        type: 'minds:show-workspace-context-menu',
+        agentId: agentId,
+        x: event.clientX,
+        y: event.clientY,
+      });
+      return false;
+    };
+
     var pendingToggleClickedAtByProvider = {};
     var lastEventAt = null;
     var lastFullSnapshotAt = null;
@@ -405,11 +439,21 @@
                  style="--workspace-accent: {{ agent_accents.get(agent_id | string, 'oklch(65% 0.15 230)') }};"
                  data-agent-id="{{ agent_id }}"
                  data-default-href="{{ mngr_forward_origin }}/goto/{{ agent_id }}/"
-                 onclick="window.landingRowClick(this)">
+                 onclick="window.landingRowClick(this)"
+                 oncontextmenu="return window.landingRowContextMenu(event, this)">
               <span class="flex-1 font-medium text-zinc-900 pl-1">{{ agent_names.get(agent_id | string, agent_id) }}</span>
               <span class="landing-backup-badge hidden inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"></span>
               <a class="landing-backup-download hidden text-xs text-blue-600 hover:underline cursor-pointer" href="#">download</a>
               <span class="landing-health-badge hidden inline-flex items-center px-2 py-0.5 rounded text-sm font-medium"></span>
+              <button class="bg-transparent border border-transparent rounded-md cursor-pointer p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 flex items-center justify-center"
+                      onclick="event.stopPropagation(); window.landingOpenNewWindowClick(this)"
+                      title="Open in new window"
+                      aria-label="Open in new window">
+                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M14 3h7v7"/><path d="M10 14L21 3"/>
+                  <path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/>
+                </svg>
+              </button>
               <button class="bg-transparent border border-transparent rounded-md cursor-pointer p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 flex items-center justify-center"
                       onclick="event.stopPropagation(); window.landingRestartClick(this)"
                       title="Restart workspace"

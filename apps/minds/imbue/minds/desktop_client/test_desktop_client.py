@@ -1224,24 +1224,22 @@ def test_chrome_page_renders_without_auth(tmp_path: Path) -> None:
     assert "content-frame" in response.text
 
 
-def test_chrome_page_includes_sidebar_toggle(tmp_path: Path) -> None:
+def test_chrome_page_no_sidebar(tmp_path: Path) -> None:
+    """The sidebar surface has been removed; the home page covers it instead."""
     client, _, _ = _setup_test_server(tmp_path)
 
     response = client.get("/_chrome")
     assert response.status_code == 200
-    assert "sidebar-toggle" in response.text
-    assert "sidebar-panel" in response.text
+    assert "sidebar-toggle" not in response.text
+    assert "sidebar-panel" not in response.text
 
 
-def test_chrome_sidebar_page_renders(tmp_path: Path) -> None:
-    """The /_chrome/sidebar route returns the standalone sidebar HTML."""
+def test_chrome_sidebar_route_is_gone(tmp_path: Path) -> None:
+    """The standalone /_chrome/sidebar route has been removed."""
     client, _, _ = _setup_test_server(tmp_path)
 
     response = client.get("/_chrome/sidebar")
-    assert response.status_code == 200
-    assert "sidebar-workspaces" in response.text
-    # Interactivity including the SSE fallback has moved to the external JS.
-    assert "/_static/sidebar.js" in response.text
+    assert response.status_code == 404
 
 
 def test_chrome_events_sse_returns_auth_required_when_unauthenticated(tmp_path: Path) -> None:
@@ -1298,8 +1296,16 @@ def test_destroying_agent_ids_returns_empty_when_paths_is_none() -> None:
 
 def test_build_requests_payload_empty_inbox() -> None:
     """An empty inbox yields a zero count and no pending ids."""
-    assert _build_requests_payload(None) == {"count": 0, "request_ids": []}
-    assert _build_requests_payload(RequestInbox()) == {"count": 0, "request_ids": []}
+    assert _build_requests_payload(None) == {
+        "count": 0,
+        "request_ids": [],
+        "force_open_event_id": None,
+    }
+    assert _build_requests_payload(RequestInbox()) == {
+        "count": 0,
+        "request_ids": [],
+        "force_open_event_id": None,
+    }
 
 
 def test_build_requests_payload_carries_pending_ids() -> None:
@@ -1309,7 +1315,34 @@ def test_build_requests_payload_carries_pending_ids() -> None:
         agent_id=agent_id, scope="slack-api", rationale="post updates"
     )
     payload = _build_requests_payload(RequestInbox().add_request(event))
-    assert payload == {"count": 1, "request_ids": [str(event.event_id)]}
+    assert payload == {
+        "count": 1,
+        "request_ids": [str(event.event_id)],
+        "force_open_event_id": None,
+    }
+
+
+def test_build_requests_payload_surfaces_user_requested_id() -> None:
+    """A pending ``is_user_requested`` event sets ``force_open_event_id``.
+
+    Plain agent-initiated events leave ``force_open_event_id`` as None;
+    a user-initiated one (e.g. clicking something in a workspace that
+    requires auth) sets it so the chrome auto-opens the inbox with that
+    request selected regardless of the user's auto-open preference.
+    """
+    agent_id = str(AgentId())
+    plain = create_latchkey_predefined_permission_request_event(
+        agent_id=agent_id, scope="slack-api", rationale="background"
+    )
+    user_requested = create_latchkey_predefined_permission_request_event(
+        agent_id=agent_id,
+        scope="github-api",
+        rationale="user clicked sign in",
+        is_user_requested=True,
+    )
+    inbox = RequestInbox().add_request(plain).add_request(user_requested)
+    payload = _build_requests_payload(inbox)
+    assert payload["force_open_event_id"] == str(user_requested.event_id)
 
 
 def test_build_requests_payload_distinguishes_equal_count_different_contents() -> None:
@@ -1423,29 +1456,29 @@ def test_workspace_settings_shows_unassociated_workspace(tmp_path: Path) -> None
     assert "associated with an account" in response.text.lower()
 
 
-def test_requests_panel_requires_auth(tmp_path: Path) -> None:
-    """The requests panel requires authentication."""
+def test_requests_inbox_requires_auth(tmp_path: Path) -> None:
+    """The requests-inbox page requires authentication."""
     client, _ = _create_test_client_with_stores(tmp_path)
-    response = client.get("/_chrome/requests-panel")
-    assert response.status_code == 200
-    assert "Not authenticated" in response.text
+    response = client.get("/_chrome/requests-inbox")
+    assert response.status_code == 403
 
 
-def test_requests_panel_shows_empty_inbox(tmp_path: Path) -> None:
-    """The requests panel shows no pending requests when inbox is empty."""
+def test_requests_inbox_shows_empty_state(tmp_path: Path) -> None:
+    """The requests-inbox page renders an empty-state when the inbox is empty."""
     client, auth_store = _create_test_client_with_stores(tmp_path)
     _authenticate_client(client, auth_store)
-    response = client.get("/_chrome/requests-panel")
+    response = client.get("/_chrome/requests-inbox")
     assert response.status_code == 200
-    assert "Requests (0)" in response.text
+    assert "No pending requests" in response.text
+    # The shell pieces (list pane, detail pane, auto-open checkbox) are
+    # rendered server-side even when the inbox is empty.
+    assert "requests-inbox-list" in response.text
+    assert "requests-inbox-detail" in response.text
+    assert "Auto-open on new request" in response.text
 
 
-def test_requests_panel_card_routes_via_minds_bridge(tmp_path: Path) -> None:
-    """A pending request renders a card whose onclick calls navigateToRequest
-    with both event_id and agent_id, and the inline script prefers the
-    window.minds.navigateToRequest bridge when available."""
-    # Build the app inline so we can seed the inbox before creating the
-    # TestClient and still have a concretely-typed handle to app.state.
+def test_requests_inbox_card_carries_event_and_agent_ids(tmp_path: Path) -> None:
+    """A pending request renders a list-pane card carrying both ids in data attrs."""
     agent_id = str(AgentId())
     event = create_latchkey_predefined_permission_request_event(
         agent_id=agent_id, scope="slack-api", rationale="Need to post status updates"
@@ -1467,24 +1500,11 @@ def test_requests_panel_card_routes_via_minds_bridge(tmp_path: Path) -> None:
     client = TestClient(app, base_url="http://localhost")
     _authenticate_client(client, auth_store)
 
-    response = client.get("/_chrome/requests-panel")
+    response = client.get("/_chrome/requests-inbox/list")
     assert response.status_code == 200
     body = response.text
-
-    # The rendered card must reference both ids in its onclick.
-    assert "navigateToRequest" in body
-    assert str(event.event_id) in body
-    assert agent_id in body
-    # Defense-in-depth escaping: ids are embedded via JSON/HTML-escaped quotes
-    # rather than raw single quotes, so &quot; must appear in place of ".
-    assert f"&quot;{event.event_id}&quot;" in body
-    assert f"&quot;{agent_id}&quot;" in body
-
-    # The script must prefer the IPC bridge when present, and keep the
-    # in-window and top-level fallbacks.
-    assert "window.minds.navigateToRequest" in body
-    assert "window.minds.navigateContent" in body
-    assert "window.top.location" in body
+    assert f'data-event-id="{event.event_id}"' in body
+    assert f'data-agent-id="{agent_id}"' in body
 
 
 def test_request_page_not_found(tmp_path: Path) -> None:

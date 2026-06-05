@@ -1,6 +1,6 @@
-// Persistent chrome (titlebar + sidebar + iframe). Shared between browser
-// mode (this iframe-based layout) and Electron (where the content + sidebar
-// are separate WebContentsViews and window.minds exposes IPC adapters).
+// Persistent chrome (titlebar + iframe). Shared between browser mode (this
+// iframe-based layout) and Electron (where the content is a separate
+// WebContentsView and window.minds exposes IPC adapters).
 (function () {
   var isElectron = !!window.minds;
 
@@ -12,8 +12,6 @@
   //
   // The shared `window.mindsAccent.get(agentId, cb)` helper (loaded from
   // /_static/workspace_accent.js) mirrors workspace_accent() in templates.py.
-  // The server also attaches `accent` to each workspace dict over SSE so the
-  // client doesn't need to compute in the common case.
   function getAccent(agentId, cb) { window.mindsAccent.get(agentId, cb); }
 
   // -- Navigation adapter ---------------------------------------------------
@@ -28,30 +26,6 @@
   function goForward() {
     if (isElectron) window.minds.contentGoForward();
     else { try { document.getElementById('content-frame').contentWindow.history.forward(); } catch (e) {} }
-  }
-
-  // -- Sidebar toggle -------------------------------------------------------
-  var sidebarOpen = false;
-  function toggleSidebar() {
-    if (isElectron) {
-      window.minds.toggleSidebar();
-      sidebarOpen = !sidebarOpen;
-    } else {
-      var panel = document.getElementById('sidebar-panel');
-      sidebarOpen = !sidebarOpen;
-      if (sidebarOpen) panel.classList.remove('-translate-x-full');
-      else panel.classList.add('-translate-x-full');
-    }
-  }
-
-  function selectWorkspace(agentId) {
-    navigateContent(mngrForwardOrigin + '/goto/' + agentId + '/');
-    if (isElectron) {
-      sidebarOpen = false;
-    } else {
-      sidebarOpen = false;
-      document.getElementById('sidebar-panel').classList.add('-translate-x-full');
-    }
   }
 
   // -- Titlebar per-project swatch ------------------------------------------
@@ -123,7 +97,6 @@
   }
 
   // -- Button wiring --------------------------------------------------------
-  document.getElementById('sidebar-toggle').onclick = toggleSidebar;
   document.getElementById('home-btn').onclick = function () { navigateContent('/'); };
   document.getElementById('back-btn').onclick = goBack;
   document.getElementById('forward-btn').onclick = goForward;
@@ -133,7 +106,11 @@
     document.getElementById('max-btn').onclick = function () { window.minds.maximize(); };
     document.getElementById('close-btn').onclick = function () { window.minds.close(); };
     document.getElementById('content-frame').style.display = 'none';
-    document.getElementById('sidebar-panel').style.display = 'none';
+    // Electron drives the inbox via its modal WebContentsView; the
+    // browser-mode iframe host is never used. Drop it from the DOM so it
+    // can't be accidentally raised by a stray show().
+    var inboxHost = document.getElementById('requests-inbox-host');
+    if (inboxHost) inboxHost.remove();
   }
 
   // -- Title + URL tracking -------------------------------------------------
@@ -197,84 +174,84 @@
     else navigateContent('/auth/login');
   };
 
+  // -- Browser-mode inbox modal host ---------------------------------------
+  //
+  // The inbox page is the same in Electron (loaded into a transparent
+  // WebContentsView overlay) and in browser mode (loaded into an
+  // iframe layered over the content). In browser mode chrome.js owns
+  // showing / hiding the iframe; the inbox page drives everything else,
+  // and posts ``minds:close-requests-inbox`` here on close.
+  function browserInboxHost() { return document.getElementById('requests-inbox-host'); }
+  function browserInboxFrame() { return document.getElementById('requests-inbox-iframe'); }
+
+  function showBrowserInbox(eventId) {
+    var host = browserInboxHost();
+    var frame = browserInboxFrame();
+    if (!host || !frame) return;
+    var url = '/_chrome/requests-inbox';
+    if (eventId) url += '?event_id=' + encodeURIComponent(eventId);
+    // Always reset src so the inbox page picks up the latest event_id
+    // and re-fetches the list. The page's own JS handles staleness via
+    // SSE, but the URL is the canonical source for the auto-selected
+    // event on open.
+    frame.src = url;
+    host.classList.remove('hidden');
+    host.dataset.state = 'open';
+  }
+
+  function hideBrowserInbox() {
+    var host = browserInboxHost();
+    var frame = browserInboxFrame();
+    if (!host || !frame) return;
+    host.classList.add('hidden');
+    host.dataset.state = 'closed';
+    // Blank out the iframe so its SSE subscription, timers, and any
+    // in-flight form submissions are released. Next open re-loads.
+    frame.src = 'about:blank';
+  }
+
+  function isBrowserInboxOpen() {
+    var host = browserInboxHost();
+    return !!host && host.dataset.state === 'open';
+  }
+
+  function toggleBrowserInbox() {
+    if (isBrowserInboxOpen()) hideBrowserInbox();
+    else showBrowserInbox(null);
+  }
+
   document.getElementById('requests-toggle').onclick = function () {
-    if (isElectron) window.minds.toggleRequestsPanel();
+    if (isElectron && window.minds.toggleRequestsPanel) {
+      window.minds.toggleRequestsPanel();
+    } else {
+      toggleBrowserInbox();
+    }
   };
 
-  // -- Open a permission request from workspace content (browser mode) -------
-  //
-  // The workspace (the cross-origin content iframe) can ask the shell to show
-  // a permission request by posting `{type:'minds:open-request-modal',
-  // requestId}` to `window.parent`. In Electron this is handled by the content
-  // view's relay preload + main process (which opens a modal overlay); in
-  // browser mode there is no overlay, so we navigate the content iframe to the
-  // request page instead. Only honour messages from the content iframe itself,
-  // and only well-formed server-issued ids (`evt-<uuid hex>`), so arbitrary
-  // pages cannot drive navigation.
-  if (!isElectron) {
-    window.addEventListener('message', function (e) {
-      var frame = document.getElementById('content-frame');
+  // The inbox page (whether loaded in the Electron modal view or in the
+  // browser iframe) posts back to its parent when the user closes the
+  // modal. Electron has its own IPC-based path; the parent message is
+  // browser-only.
+  window.addEventListener('message', function (e) {
+    var data = e.data;
+    if (!data || typeof data !== 'object') return;
+    var frame = browserInboxFrame();
+    if (data.type === 'minds:close-requests-inbox') {
       if (!frame || e.source !== frame.contentWindow) return;
-      var data = e.data;
-      if (!data || typeof data !== 'object') return;
-      if (data.type !== 'minds:open-request-modal') return;
-      var requestId = data.requestId;
-      if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
-      navigateContent('/requests/' + requestId);
-    });
-  }
-
-  // -- SSE-driven sidebar (browser mode only) -------------------------------
-  function renderWorkspaces(workspaces) {
-    var container = document.getElementById('sidebar-workspaces');
-    container.textContent = '';
-    if (!workspaces || workspaces.length === 0) {
-      var empty = document.createElement('div');
-      empty.className = 'px-4 py-6 text-sm text-zinc-400 text-center';
-      empty.textContent = 'No projects';
-      container.appendChild(empty);
+      hideBrowserInbox();
       return;
     }
-    var groups = {};
-    workspaces.forEach(function (w) {
-      var key = w.account || 'Private';
-      if (!groups[key]) groups[key] = [];
-      groups[key].push(w);
-    });
-    var keys = Object.keys(groups).sort(function (a, b) {
-      if (a === 'Private') return -1;
-      if (b === 'Private') return 1;
-      return a.localeCompare(b);
-    });
-    keys.forEach(function (key) {
-      var header = document.createElement('div');
-      header.className = 'px-3 pt-2 pb-0.5 text-[11px] text-zinc-400 tracking-wider';
-      header.textContent = key === 'Private' ? 'PRIVATE' : key;
-      container.appendChild(header);
-      groups[key].forEach(function (w) {
-        var row = document.createElement('div');
-        row.className = 'sidebar-item cursor-pointer text-sm font-medium text-zinc-200 rounded-md mx-1.5 my-0.5 py-2.5 pl-4 pr-3 transition-colors hover:bg-white/5';
-        row.textContent = w.name || w.id;
-        row.setAttribute('data-agent-id', w.id);
-        // Retained-but-unverified workspace (its provider's last discovery poll
-        // errored): append an amber dot. The row stays fully clickable.
-        if (w.is_stale) {
-          row.classList.add('is-stale');
-          var staleDot = document.createElement('span');
-          staleDot.className = 'sidebar-stale-dot inline-block w-1.5 h-1.5 ml-1.5 rounded-full bg-amber-400/80 align-middle';
-          staleDot.title = "This workspace's provider had a discovery error; its status is unverified (still usable).";
-          row.appendChild(staleDot);
-        }
-        if (typeof w.accent === 'string') {
-          row.style.setProperty('--workspace-accent', w.accent);
-        } else {
-          getAccent(w.id, function (c) { row.style.setProperty('--workspace-accent', c); });
-        }
-        row.addEventListener('click', function () { selectWorkspace(w.id); });
-        container.appendChild(row);
-      });
-    });
-  }
+    // Open-request relay from the (cross-origin) workspace content
+    // iframe. In Electron this is handled by the content view's preload
+    // + main process; in browser mode the chrome owns it.
+    if (!isElectron && data.type === 'minds:open-request-modal') {
+      var contentFrame = document.getElementById('content-frame');
+      if (!contentFrame || e.source !== contentFrame.contentWindow) return;
+      var requestId = data.requestId;
+      if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
+      showBrowserInbox(requestId);
+    }
+  });
 
   function updateRequestsBadge(count) {
     var badge = document.getElementById('requests-badge');
@@ -283,13 +260,31 @@
     else badge.classList.add('hidden');
   }
 
+  // Track the previously-seen pending request ids so browser-mode can
+  // mirror Electron's auto-open / force-open behavior.
+  var prevRequestIds = [];
+
   function handleChromeEvent(data) {
     try {
-      if (data.type === 'workspaces') renderWorkspaces(data.workspaces);
       if (data.type === 'auth_status') updateAuthUI(data);
-      if (data.type === 'requests') updateRequestsBadge(data.count);
+      if (data.type === 'requests') {
+        updateRequestsBadge(data.count);
+        if (!isElectron) handleBrowserInboxAutoOpen(data);
+      }
       if (data.type === 'system_interface_status') handleSystemInterfaceStatus(data.agent_id, data.status);
     } catch (e) {}
+  }
+
+  function handleBrowserInboxAutoOpen(data) {
+    var newIds = Array.isArray(data.request_ids) ? data.request_ids.map(String) : [];
+    var prevSet = new Set(prevRequestIds);
+    var hasNewRequest = newIds.some(function (id) { return !prevSet.has(id); });
+    var autoOpen = data.auto_open !== false;
+    var forceOpenEventId = typeof data.force_open_event_id === 'string' ? data.force_open_event_id : null;
+    prevRequestIds = newIds;
+    if (isBrowserInboxOpen()) return;
+    var shouldAutoOpen = (autoOpen && hasNewRequest) || forceOpenEventId !== null;
+    if (shouldAutoOpen) showBrowserInbox(forceOpenEventId);
   }
 
   if (isElectron && window.minds.onChromeEvent) {

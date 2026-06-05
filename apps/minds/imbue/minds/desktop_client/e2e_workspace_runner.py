@@ -50,9 +50,9 @@ _FCT_EXTERNAL_WORKTREE: Final[Path] = _REPO_ROOT / ".external_worktrees" / "fore
 _FCT_REMOTE: Final[str] = "https://github.com/imbue-ai/forever-claude-template.git"
 _FCT_FALLBACK_BRANCH: Final[str] = "main"
 
-# The contentView page URL contains ``/_chrome`` only for the chrome
-# (sidebar/title-bar) view; the main content view never does. We match the
-# pure-localhost backend pages, not the ``agent-<id>.localhost`` proxy.
+# The chrome view's page URL is the only one rooted at ``/_chrome``; the
+# main content view's URL never is. We match the pure-localhost backend
+# pages, not the ``agent-<id>.localhost`` proxy.
 # The capturing group exposes the bare origin (``http://localhost:<port>``)
 # so :func:`_backend_origin_from_page` can reuse the same pattern instead of
 # re-encoding the localhost-origin contract a second time.
@@ -402,10 +402,10 @@ def _pick_content_page(browser: Browser, timeout_seconds: int) -> Page:
     """Return the Electron WebContentsView that serves the main content.
 
     Electron's BaseWindow has multiple WebContentsView's (chrome view,
-    content view, requests panel, sidebar). Each is its own CDP page. The
-    content view is the one whose URL is on the backend origin but is NOT
-    rooted at ``/_chrome``. We poll until that page exists because Electron
-    spawns the backend asynchronously after launch.
+    content view, requests panel, modal overlay). Each is its own CDP
+    page. The content view is the one whose URL is on the backend origin
+    but is NOT rooted at ``/_chrome``. We poll until that page exists
+    because Electron spawns the backend asynchronously after launch.
     """
     deadline = time.monotonic() + timeout_seconds
     last_observed: list[str] = []

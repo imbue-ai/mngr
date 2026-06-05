@@ -41,11 +41,11 @@ class RequestEventHandler(MutableModel, ABC):
 
     @abstractmethod
     def kind_label(self) -> str:
-        """Short, lower-case label shown on requests-panel cards (e.g. ``"sharing"``)."""
+        """Short, lower-case label shown on inbox cards (e.g. ``"sharing"``)."""
 
     @abstractmethod
     def display_name_for_event(self, req_event: RequestEvent) -> str:
-        """Human-readable secondary label for the requests-panel card.
+        """Human-readable secondary label for the inbox card.
 
         Typically the friendly service name (e.g. ``"Slack"`` rather than
         ``"slack"``). Falls back to whatever raw identifier the event
@@ -69,6 +69,25 @@ class RequestEventHandler(MutableModel, ABC):
         ``mngr forward`` plugin (e.g. ``"http://localhost:8421"``);
         handlers thread it into rendered templates so workspace links
         target the plugin's ``/goto/<agent>/`` route rather than minds.
+        """
+
+    @abstractmethod
+    def render_request_fragment(
+        self,
+        req_event: RequestEvent,
+        backend_resolver: BackendResolverInterface,
+    ) -> Response:
+        """Render the request-detail body fragment for the inbox modal.
+
+        Like :meth:`render_request_page` but returns just the inner body
+        HTML (header + form + manual creds + error slots), without an
+        outer ``<html>`` / ``<body>`` wrapper, without the dialog
+        backdrop, and without the shared submit/Escape JS. The inbox
+        modal's host page owns the chrome and the JS; this method only
+        owns the per-request form content.
+
+        Implementations must produce HTML that is safe to inject into
+        the inbox modal's detail pane via ``.innerHTML =``.
         """
 
     @abstractmethod

@@ -22,6 +22,7 @@ from typing import Final
 
 from jinja2 import Environment
 from jinja2 import select_autoescape
+from markupsafe import Markup
 from jinjax import Catalog
 
 from imbue.imbue_common.pure import pure
@@ -89,7 +90,7 @@ CATALOG: Final[Catalog] = _build_catalog()
 
 # -- Per-workspace identity color --
 # See docs on workspace_accent() for why OKLCH + fixed L/C + SHA-256-derived
-# hue. Mirrored on the JS side (static/chrome.js, static/sidebar.js).
+# hue. Mirrored on the JS side (static/workspace_accent.js).
 
 # Lightness percent and chroma for the OKLCH workspace accent. Fixed across
 # all workspaces so the only axis of variation is the hue.
@@ -943,9 +944,8 @@ def render_chrome_page(
     is_mac: bool = False,
     is_authenticated: bool = False,
     mngr_forward_origin: str = "",
-    initial_workspaces: Sequence[dict[str, str]] | None = None,
 ) -> str:
-    """Render the persistent chrome page (title bar + sidebar + content iframe).
+    """Render the persistent chrome page (title bar + content iframe).
 
     is_mac controls whether macOS-specific styling is applied (traffic light padding,
     hidden window controls).
@@ -954,31 +954,43 @@ def render_chrome_page(
     ``data-mngr-forward-origin`` attribute on the body so chrome.js can build
     workspace links that target the plugin's port directly.
 
-    In Electron mode, the iframe and browser sidebar are hidden via JS; the content
-    and sidebar are handled by separate WebContentsViews.
+    In Electron mode, the iframe is hidden via JS; the content is handled by a
+    separate WebContentsView.
     """
     return CATALOG.render(
         "pages.Chrome",
         is_mac=is_mac,
         is_authenticated=is_authenticated,
         mngr_forward_origin=mngr_forward_origin,
-        initial_workspaces=initial_workspaces or [],
     )
 
 
 @pure
-def render_sidebar_page(mngr_forward_origin: str = "") -> str:
-    """Render the standalone sidebar page for the Electron sidebar WebContentsView.
+def render_requests_inbox_page(
+    auto_open: bool,
+    initial_event_id: str = "",
+    initial_list_html: str = "",
+    initial_detail_html: str = "",
+    initial_detail_event_id: str = "",
+) -> str:
+    """Render the full requests-inbox modal page.
 
-    This page shows the workspace list and subscribes to SSE updates. In Electron,
-    clicking a workspace sends an IPC message via the preload bridge to navigate
-    the content WebContentsView. ``mngr_forward_origin`` is exposed via
-    ``data-mngr-forward-origin`` so sidebar.js can build the cross-origin
-    ``/goto/<agent>/`` URL the plugin serves.
+    ``initial_list_html`` and ``initial_detail_html`` are pre-rendered
+    Markup strings inlined into the page; the client JS upgrades them
+    incrementally as the user selects requests or SSE delivers updates.
+    ``initial_detail_event_id`` reflects whether the detail HTML
+    corresponds to a specific request (so the JS can wire its form)
+    versus a placeholder. ``initial_event_id`` is the auto-open target
+    even when the server didn't pre-render a detail for it (e.g. the
+    event was just resolved between SSE delivery and click).
     """
     return CATALOG.render(
-        "pages.Sidebar",
-        mngr_forward_origin=mngr_forward_origin,
+        "pages.RequestsInbox",
+        auto_open=auto_open,
+        initial_event_id=initial_event_id,
+        initial_list_html=Markup(initial_list_html),
+        initial_detail_html=Markup(initial_detail_html),
+        initial_detail_event_id=initial_detail_event_id,
     )
 
 

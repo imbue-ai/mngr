@@ -10,8 +10,8 @@
  * focus:ring-blue-600/15, ...) directly. The only token consumed by
  * non-styleguide code is --shadow-seam (titlebar drop shadow, templates/pages/Chrome.jinja)
  * and the implicit --workspace-accent (set per-workspace via inline
- * style, consumed by the .page-workspace / .accent-spine / .sidebar-item
- * / .accent-swatch rules below).
+ * style, consumed by the .page-workspace / .accent-spine / .accent-swatch
+ * rules below).
  */
 
 :root {
@@ -47,26 +47,6 @@ html {
   bottom: 0;
   width: 3px;
   background: var(--workspace-accent, oklch(65% 0.15 230));
-}
-
-.sidebar-item {
-  position: relative;
-}
-.sidebar-item::before {
-  content: '';
-  position: absolute;
-  left: 4px;
-  top: 8px;
-  bottom: 8px;
-  width: 3px;
-  border-radius: 2px;
-  background: var(--workspace-accent, oklch(65% 0.15 230));
-  opacity: 0.55;
-  transition: opacity 100ms;
-}
-.sidebar-item:hover::before,
-.sidebar-item.is-current::before {
-  opacity: 1;
 }
 
 .accent-swatch {

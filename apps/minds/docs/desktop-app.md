@@ -41,7 +41,7 @@ Closing an individual window just tears down that window's views -- the backend 
 
 ### Crash recovery
 
-If the backend exits unexpectedly, every open window switches to the error screen (chrome view expanded to fill the window, content/sidebar/requests-panel/modal views torn down) with the last lines from the log file. Clicking "Retry" from any window restarts the backend once; on success every window reloads to its pre-error URL.
+If the backend exits unexpectedly, every open window switches to the error screen (chrome view expanded to fill the window, content/requests-panel/modal views torn down) with the last lines from the log file. Clicking "Retry" from any window restarts the backend once; on success every window reloads to its pre-error URL.
 
 ### Keyboard shortcuts
 
@@ -54,9 +54,9 @@ If the backend exits unexpectedly, every open window switches to the error scree
 
 Each workspace (`/forwarding/{agent-id}/...`) can live in its own window. Uniqueness is enforced across the app: at most one window per workspace.
 
-- **Open in a new window** (from the sidebar): right-click a workspace entry for a native `Open in new window` context menu, or click the hover-revealed icon on the right of the row. Both are suppressed on the entry matching the window's current workspace.
+- **Open in a new window** (from the home page): right-click a workspace row for a native `Open in new window` context menu, or click the always-visible icon on the right of the row. Both are suppressed on the entry matching the window's current workspace.
 - **Open a blank window**: cmd+N / ctrl+N, `File > New Window`, or the macOS dock menu. Opens a window on the backend's home page (`/`).
-- **Plain sidebar click**: navigates the current window to that workspace -- unless some other window is already on it, in which case that window is focused and the sender is untouched.
+- **Home-page row click**: navigates the current window to that workspace -- unless some other window is already on it, in which case that window is focused and the sender is untouched.
 - **Notifications** pointing at `/forwarding/{X}/...` focus the existing window for workspace `X`, or open a new one. Non-workspace notification URLs and `auth_required` events navigate the most-recently-focused window.
 - **Session restore**: on quit, every open window's content URL is recorded to `~/.<MINDS_ROOT_NAME>/window-state.json`. On next launch (after the backend is ready) one window is reopened per recorded URL. URLs pointing at workspaces that no longer exist are silently dropped.
 

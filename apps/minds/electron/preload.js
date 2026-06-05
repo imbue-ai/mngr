@@ -32,12 +32,10 @@ contextBridge.exposeInMainWorld('minds', {
     ipcRenderer.on('chrome-event', (_event, data) => callback(data));
   },
 
-  // Sidebar
-  toggleSidebar: () => ipcRenderer.send('toggle-sidebar'),
-
-  // Requests panel
+  // Requests inbox modal. The legacy channel name 'toggle-requests-panel'
+  // is kept on the wire to avoid an unrelated preload bump; the main-
+  // process handler now opens the inbox modal instead.
   toggleRequestsPanel: () => ipcRenderer.send('toggle-requests-panel'),
-  openRequestsPanel: () => ipcRenderer.send('open-requests-panel'),
 
   // Modal overlay (e.g. permission request dialogs)
   closeModal: () => ipcRenderer.send('close-modal'),
@@ -45,8 +43,6 @@ contextBridge.exposeInMainWorld('minds', {
   // Multi-window workspace actions
   openWorkspaceInNewWindow: (agentId) =>
     ipcRenderer.send('open-workspace-in-new-window', agentId),
-  navigateToRequest: (agentId, eventId) =>
-    ipcRenderer.send('navigate-to-request', agentId, eventId),
   showWorkspaceContextMenu: (agentId, x, y) =>
     ipcRenderer.send('show-workspace-context-menu', agentId, x, y),
   onCurrentWorkspaceChanged: (callback) => {

@@ -1,0 +1,57 @@
+{#def auto_open, initial_event_id, initial_list_html, initial_detail_html, initial_detail_event_id #}
+{#
+  Requests inbox modal. Two-pane layout (list + detail), 80% of the
+  window width with a max cap, full-height. Loaded into the Electron
+  modal overlay WebContentsView (transparent body so the dim backdrop
+  reveals whatever workspace is behind it). Also reachable in a plain
+  browser at /_chrome/requests-inbox.
+
+  ``initial_event_id``: if non-empty, the page auto-selects this request
+  on load (auto-open path); ``initial_list_html`` / ``initial_detail_html``
+  are pre-rendered fragment HTML the server inlines so the modal paints
+  immediately instead of after one round-trip per pane.
+#}
+{% set _body_style = "" %}
+{% set _scripts %}
+<script src="/_static/requests_inbox.js" defer></script>
+{% endset %}
+<Base title="Requests"
+      body_class="bg-transparent text-zinc-900 font-sans antialiased"
+      scripts={{ _scripts }}>
+  <div id="requests-inbox-backdrop"
+       class="fixed inset-0 bg-black/40 flex items-center justify-center"
+       data-auto-open="{{ 'true' if auto_open else 'false' }}"
+       data-initial-event-id="{{ initial_event_id }}"
+       data-initial-detail-event-id="{{ initial_detail_event_id }}"
+       onclick="window.onRequestsBackdropClick(event)">
+    <div id="requests-inbox-panel"
+         class="relative w-[80vw] max-w-[1280px] h-full flex bg-white border border-zinc-200 rounded-2xl shadow-xl overflow-hidden">
+      {# List pane #}
+      <div id="requests-inbox-list-pane"
+           class="w-[320px] shrink-0 flex flex-col border-r border-zinc-200 bg-zinc-50 min-h-0">
+        <div class="flex items-center justify-between px-4 py-3 border-b border-zinc-200">
+          <h2 class="text-sm font-semibold text-zinc-700">Requests</h2>
+          <DialogCloseButton id="requests-inbox-close-btn"
+                             onclick="window.closeRequestsInbox()" />
+        </div>
+        <div id="requests-inbox-list" class="flex-1 overflow-y-auto min-h-0 p-2">
+          {{ initial_list_html }}
+        </div>
+        <div class="px-4 py-3 border-t border-zinc-200 bg-white">
+          <label class="flex items-center gap-2 text-xs text-zinc-600 cursor-pointer">
+            <input type="checkbox"
+                   id="requests-inbox-auto-open-checkbox"
+                   {% if auto_open %}checked{% endif %}>
+            Auto-open on new request
+          </label>
+        </div>
+      </div>
+      {# Detail pane #}
+      <div id="requests-inbox-detail-pane" class="flex-1 min-w-0 flex flex-col bg-white">
+        <div id="requests-inbox-detail" class="flex-1 overflow-y-auto min-h-0 p-6 sm:p-7">
+          {{ initial_detail_html }}
+        </div>
+      </div>
+    </div>
+  </div>
+</Base>

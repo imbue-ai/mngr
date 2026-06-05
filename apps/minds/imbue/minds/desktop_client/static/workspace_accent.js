@@ -1,10 +1,9 @@
 // Per-agent accent color helper. Mirrors workspace_accent() in
 // templates.py: SHA-256 over the agent id, first four bytes mod 360 picks
-// the OKLCH hue, fixed L/C match server. Loaded by both
-// templates/pages/Chrome.jinja and templates/pages/Sidebar.jinja (and
-// any other page that needs a client-side accent
-// fallback) so the logic lives in one place rather than being copy-pasted
-// into every per-page script.
+// the OKLCH hue, fixed L/C match server. Loaded by
+// templates/pages/Chrome.jinja (and any other page that needs a
+// client-side accent fallback) so the logic lives in one place rather
+// than being copy-pasted into every per-page script.
 //
 // Usage:
 //   window.mindsAccent.get(agentId, function (color) { ... });

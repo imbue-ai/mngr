@@ -41,6 +41,7 @@ from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayCl
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.templates import render_file_sharing_permission_dialog
+from imbue.minds.desktop_client.latchkey.handlers.templates import render_file_sharing_permission_fragment
 from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -52,7 +53,7 @@ from imbue.minds.desktop_client.request_events import create_request_response_ev
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.mngr.primitives import AgentId
 
-# Label shown on the requests-panel card (lower-case, short).
+# Label shown on the inbox card (lower-case, short).
 _KIND_LABEL: Final[str] = "file sharing"
 
 
@@ -158,6 +159,26 @@ class FileSharingGrantHandler(RequestEventHandler):
             access=req_event.access,
             access_human_label=_access_human_label(req_event.access),
             mngr_forward_origin=mngr_forward_origin,
+        )
+        return HTMLResponse(content=rendered)
+
+    def render_request_fragment(
+        self,
+        req_event: RequestEvent,
+        backend_resolver: BackendResolverInterface,
+    ) -> Response:
+        if not isinstance(req_event, LatchkeyFileSharingPermissionRequestEvent):
+            return HTMLResponse(content="<p>Unsupported request type</p>", status_code=500)
+        parsed_agent_id = AgentId(req_event.agent_id)
+        ws_name = _resolve_workspace_name(backend_resolver, parsed_agent_id, fallback=req_event.agent_id)
+        rendered = render_file_sharing_permission_fragment(
+            agent_id=req_event.agent_id,
+            request_id=str(req_event.event_id),
+            ws_name=ws_name,
+            rationale=req_event.rationale,
+            file_path=req_event.path,
+            access=req_event.access,
+            access_human_label=_access_human_label(req_event.access),
         )
         return HTMLResponse(content=rendered)
 

@@ -45,6 +45,7 @@ from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayCl
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.templates import render_predefined_permission_dialog
+from imbue.minds.desktop_client.latchkey.handlers.templates import render_predefined_permission_fragment
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
@@ -197,6 +198,32 @@ def _resolve_host_id(
             agent_id,
         )
         return None
+
+
+def _render_unknown_scope_fragment(request_id: str, scope: str) -> Response:
+    """Render a deny-only body fragment when the requested scope isn't in the catalog.
+
+    The fragment counterpart to :func:`_render_unknown_scope_page`, for
+    embedding in the inbox modal's detail pane. No outer chrome, no
+    backdrop. The deny button posts via the inbox modal's host JS (the
+    button is just markup with a data attribute).
+    """
+    escaped_scope = html_module.escape(scope)
+    escaped_request_id = html_module.escape(request_id, quote=True)
+    body = (
+        '<div class="bg-amber-50 border border-amber-200 rounded-xl p-4">'
+        "<h2 class=\"text-base font-semibold text-amber-900 mb-2\">Unknown scope</h2>"
+        f"<p class=\"text-sm text-amber-800\">The agent requested permissions under scope "
+        f"<code class=\"bg-amber-100 px-1 rounded\">{escaped_scope}</code>, but this scope is "
+        "not in the latchkey gateway's permission catalog. The request can only be denied "
+        "from here.</p>"
+        "<div class=\"flex justify-end mt-3\">"
+        f'<button type="button" data-deny-request-id="{escaped_request_id}" '
+        'class="px-3 py-1.5 text-sm font-medium rounded-md bg-rose-100 text-rose-700 '
+        'border border-rose-200 hover:bg-rose-200 cursor-pointer">Deny</button>'
+        "</div></div>"
+    )
+    return HTMLResponse(content=body, status_code=200)
 
 
 def _render_unknown_scope_page(request_id: str, scope: str) -> Response:
@@ -450,7 +477,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         return "permission"
 
     def display_name_for_event(self, req_event: RequestEvent) -> str:
-        """Friendly service name for the requests-panel card.
+        """Friendly service name for the inbox card.
 
         Falls back to the raw scope schema when no catalog entry matches
         (or when the event is somehow not a latchkey permission request,
@@ -509,6 +536,41 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             checked_permissions=pre_checked,
             will_open_browser=will_open_browser,
             mngr_forward_origin=mngr_forward_origin,
+        )
+        return HTMLResponse(content=rendered)
+
+    def render_request_fragment(
+        self,
+        req_event: RequestEvent,
+        backend_resolver: BackendResolverInterface,
+    ) -> Response:
+        if not isinstance(req_event, LatchkeyPredefinedPermissionRequestEvent):
+            return HTMLResponse(content="<p>Unsupported request type</p>", status_code=500)
+        service_info = self.services_catalog.get_by_scope(req_event.scope)
+        if service_info is None:
+            return _render_unknown_scope_fragment(
+                request_id=str(req_event.event_id),
+                scope=req_event.scope,
+            )
+
+        parsed_id = AgentId(req_event.agent_id)
+        ws_name = _resolve_workspace_name(backend_resolver, parsed_id, fallback=req_event.agent_id)
+        host_id = _resolve_host_id(backend_resolver, parsed_id)
+        pre_checked = self._initial_checked_permissions(host_id, service_info, req_event.permissions)
+        latchkey_service_info = self.latchkey.services_info(service_info.name)
+        will_open_browser = latchkey_service_info.credential_status != CredentialStatus.VALID and (
+            LATCHKEY_AUTH_OPTION_BROWSER in latchkey_service_info.auth_options
+            or not latchkey_service_info.auth_options
+        )
+
+        rendered = render_predefined_permission_fragment(
+            agent_id=req_event.agent_id,
+            request_id=str(req_event.event_id),
+            ws_name=ws_name,
+            rationale=req_event.rationale,
+            service=service_info,
+            checked_permissions=pre_checked,
+            will_open_browser=will_open_browser,
         )
         return HTMLResponse(content=rendered)
 

@@ -349,6 +349,83 @@ def test_get_permission_request_page_renders_as_modal(tmp_path: Path) -> None:
     assert "overflow-y-auto" in body
 
 
+def test_get_requests_inbox_detail_returns_body_fragment(tmp_path: Path) -> None:
+    """``/_chrome/requests-inbox/detail/<id>`` returns the inner body fragment.
+
+    The fragment is what the inbox modal's detail pane injects via
+    ``innerHTML``; it must therefore omit the outer ``<html>`` / ``<body>``
+    wrapper and the dialog backdrop -- the inbox host page already owns
+    those. It must still include the per-request ``permissions-form`` so
+    the inbox JS can wire submit / deny handlers.
+    """
+    agent_id = AgentId()
+    request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        permissions=("slack-read-all",),
+        rationale="reason",
+    )
+    inbox = RequestInbox().add_request(request)
+    handler = _make_recording_handler(tmp_path)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    response = client.get(f"/_chrome/requests-inbox/detail/{request.event_id}")
+
+    assert response.status_code == 200
+    body = response.text
+    assert "<html" not in body.lower()
+    assert "<body" not in body.lower()
+    # The dialog backdrop lives in the host page; the fragment must not
+    # carry its own.
+    assert 'id="permissions-backdrop"' not in body
+    # The per-request form is still present (so the inbox modal JS can
+    # wire submit / deny on it).
+    assert 'id="permissions-form"' in body
+    assert "Slack" in body
+    assert f"/requests/{request.event_id}/grant" in body
+
+
+def test_get_requests_inbox_detail_returns_404_for_unknown_event(tmp_path: Path) -> None:
+    """Unknown request ids return 404 with a fragment-shaped placeholder body."""
+    handler = _make_recording_handler(tmp_path)
+    client = _build_authenticated_client(tmp_path, handler, RequestInbox())
+
+    response = client.get("/_chrome/requests-inbox/detail/evt-does-not-exist")
+
+    assert response.status_code == 404
+    assert "<html" not in response.text.lower()
+
+
+def test_get_requests_inbox_detail_returns_resolved_placeholder(tmp_path: Path) -> None:
+    """A resolved request returns a fragment placeholder, not the form."""
+    agent_id = AgentId()
+    request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        rationale="reason",
+    )
+    response_event = create_request_response_event(
+        request_event_id=str(request.event_id),
+        status=RequestStatus.GRANTED,
+        agent_id=str(agent_id),
+        request_type=request.request_type,
+        scope="slack-api",
+    )
+    inbox = RequestInbox().add_request(request).add_response(response_event)
+    handler = _make_recording_handler(tmp_path)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    response = client.get(f"/_chrome/requests-inbox/detail/{request.event_id}")
+
+    assert response.status_code == 200
+    body = response.text
+    assert "<html" not in body.lower()
+    assert "already been processed" in body
+    # The form must not be present -- the user can't act on a resolved
+    # request.
+    assert 'id="permissions-form"' not in body
+
+
 def test_get_permission_request_page_shows_descriptions_when_present(tmp_path: Path) -> None:
     """detent's per-permission descriptions are rendered next to each permission when present."""
     agent_id = AgentId()
@@ -807,6 +884,13 @@ class _StubOtherHandler(RequestEventHandler):
         mngr_forward_origin: str,
     ) -> Response:
         return Response(content="ok", status_code=200)
+
+    def render_request_fragment(
+        self,
+        req_event: RequestEvent,
+        backend_resolver: BackendResolverInterface,
+    ) -> Response:
+        return Response(content="ok-fragment", status_code=200)
 
     async def apply_grant_request(self, request: Request, req_event: RequestEvent) -> Response:
         self.grant_event_ids.append(str(req_event.event_id))
