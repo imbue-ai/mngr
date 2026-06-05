@@ -1332,6 +1332,16 @@ def _get_current_git_branch(source_location: HostLocation) -> str | None:
     """Return the current git branch at the source location, or None if unavailable.
 
     Runs via the host interface so it works for both local and remote sources.
+
+    Resolves to the commit SHA when the source is in detached-HEAD state
+    (e.g. ``git clone --branch <annotated-tag>`` leaves the worktree detached
+    at the tag's commit; ``git rev-parse --abbrev-ref HEAD`` then returns the
+    literal string ``"HEAD"``). Passing ``"HEAD"`` downstream as a base branch
+    name lands at ``_transfer_git_repo``'s target-side ``git checkout -B
+    <new> HEAD`` with ``fatal: 'HEAD' is not a commit`` -- the just-bare-
+    inited target has no HEAD yet, only the refs that the mirror push fed
+    in. The commit SHA, by contrast, is reachable via the pushed
+    ``refs/tags/*`` so the checkout finds it.
     """
     result = source_location.host.execute_idempotent_command(
         "git rev-parse --abbrev-ref HEAD",
@@ -1339,7 +1349,15 @@ def _get_current_git_branch(source_location: HostLocation) -> str | None:
     )
     if not result.success:
         return None
-    return result.stdout.strip() or None
+    branch = result.stdout.strip() or None
+    if branch == "HEAD":
+        sha_result = source_location.host.execute_idempotent_command(
+            "git rev-parse HEAD",
+            cwd=source_location.path,
+        )
+        if sha_result.success:
+            return sha_result.stdout.strip() or None
+    return branch
 
 
 def _is_git_repo(path: Path, cg: ConcurrencyGroup) -> bool:
