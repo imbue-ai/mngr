@@ -3,23 +3,24 @@
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
-from unittest.mock import MagicMock
+from typing import Any
 
 import pytest
 
+from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import HostDetails
-from imbue.mngr.interfaces.host import HostInterface
-from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.mock_agent_test import MockAgent
+from imbue.mngr.interfaces.mock_host_test import MockOnlineHost
 from imbue.mngr.interfaces.provider_instance import _discover_agents_on_host
 from imbue.mngr.interfaces.provider_instance import build_agent_details_from_offline_ref
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
@@ -65,24 +66,34 @@ def _make_offline_host(host_id: HostId, provider: MockProviderInstance, mngr_ctx
     )
 
 
-def _make_mock_online_host(host_id: HostId) -> MagicMock:
-    """Create a MagicMock that passes isinstance(host, OnlineHostInterface) checks.
+def _make_mock_online_host(host_id: HostId, *, host_name: str = "test-host", **kwargs: Any) -> MockOnlineHost:
+    """Build a concrete online host whose behavior is set via fields.
 
-    Sets up the minimum return values needed by _build_host_details_from_host.
+    Pass ``agents=`` / ``discovered_agents=`` for the happy path or
+    ``raise_connection_error_on_get_agents=True`` /
+    ``raise_connection_error_on_discover_agents=True`` to simulate a host whose
+    sshd dies after discovery.
     """
-    host = MagicMock(spec=OnlineHostInterface)
-    host.id = host_id
-    host.get_name.return_value = "test-host"
-    host.get_state.return_value = HostState.RUNNING
-    host.get_ssh_connection_info.return_value = None
-    host.get_boot_time.return_value = None
-    host.get_uptime_seconds.return_value = 0.0
-    host.get_provider_resources.return_value = None
-    host.is_lock_held.return_value = False
-    host.get_certified_data.return_value = _make_certified_data(host_id)
-    host.get_snapshots.return_value = []
-    host.get_reported_activity_time.return_value = None
-    return host
+    return MockOnlineHost(
+        id=host_id,
+        host_name=HostName(host_name),
+        certified_data=_make_certified_data(host_id),
+        **kwargs,
+    )
+
+
+def _make_mock_agent(agent_id: AgentId, host_id: HostId, mngr_ctx: MngrContext, **kwargs: Any) -> MockAgent:
+    return MockAgent(
+        id=agent_id,
+        name=AgentName("test-agent"),
+        agent_type=AgentTypeName("generic"),
+        work_dir=Path("/tmp/test"),
+        create_time=datetime.now(timezone.utc),
+        host_id=host_id,
+        mngr_ctx=mngr_ctx,
+        agent_config=AgentTypeConfig(),
+        **kwargs,
+    )
 
 
 @pytest.fixture
@@ -103,9 +114,7 @@ def test_get_host_and_agent_details_disconnects_host(
     host_id: HostId, provider: MockProviderInstance, temp_mngr_ctx: MngrContext
 ) -> None:
     """get_host_and_agent_details disconnects the host after collecting details."""
-    online_host = _make_mock_online_host(host_id)
-    online_host.get_agents.return_value = []
-
+    online_host = _make_mock_online_host(host_id, agents=[])
     provider.mock_hosts = [online_host]
 
     host_ref = DiscoveredHost(
@@ -113,20 +122,21 @@ def test_get_host_and_agent_details_disconnects_host(
         host_name=HostName("test-host"),
         provider_name=provider.name,
     )
-    agent_id = AgentId.generate()
-    agent_ref = _make_agent_ref(host_id, agent_id, provider.name)
+    agent_ref = _make_agent_ref(host_id, AgentId.generate(), provider.name)
 
-    provider.get_host_and_agent_details(host_ref, [agent_ref])
+    host_details, agent_details_list = provider.get_host_and_agent_details(host_ref, [agent_ref])
 
-    online_host.disconnect.assert_called_once()
+    assert online_host.disconnect_count == 1
+    # The collected details still come back (the disconnect happens in a finally).
+    assert host_details.name == "test-host"
+    assert len(agent_details_list) == 1
 
 
 def test_get_host_and_agent_details_disconnects_on_connection_error(
     host_id: HostId, provider: MockProviderInstance, temp_mngr_ctx: MngrContext
 ) -> None:
     """get_host_and_agent_details disconnects the host even when HostConnectionError occurs."""
-    online_host = _make_mock_online_host(host_id)
-    online_host.get_agents.side_effect = HostConnectionError("SSH error")
+    online_host = _make_mock_online_host(host_id, raise_connection_error_on_get_agents=True)
 
     offline_host = _make_offline_host(host_id, provider, temp_mngr_ctx)
     provider.mock_hosts = [online_host, offline_host]
@@ -137,20 +147,24 @@ def test_get_host_and_agent_details_disconnects_on_connection_error(
         host_name=HostName("test-host"),
         provider_name=provider.name,
     )
-    agent_id = AgentId.generate()
-    agent_ref = _make_agent_ref(host_id, agent_id, provider.name)
+    agent_ref = _make_agent_ref(host_id, AgentId.generate(), provider.name)
 
-    provider.get_host_and_agent_details(host_ref, [agent_ref])
+    _host_details, agent_details_list = provider.get_host_and_agent_details(host_ref, [agent_ref])
 
-    online_host.disconnect.assert_called_once()
+    # The connection is released even on the error path...
+    assert online_host.disconnect_count == 1
+    # ...and the cleanup is tied to actual recovery: the agent comes back via the
+    # offline fallback and the per-host connection cache is cleared.
+    assert len(agent_details_list) == 1
+    assert agent_details_list[0].state == AgentLifecycleState.STOPPED
+    assert provider.connection_errors_cleared == [host_id]
 
 
 def test_connection_error_during_get_agents_falls_back_to_offline(
     host_id: HostId, provider: MockProviderInstance, temp_mngr_ctx: MngrContext
 ) -> None:
     """HostConnectionError during host.get_agents() should fall back to offline data."""
-    online_host = _make_mock_online_host(host_id)
-    online_host.get_agents.side_effect = HostConnectionError("SSH error (Error reading SSH protocol banner)")
+    online_host = _make_mock_online_host(host_id, raise_connection_error_on_get_agents=True)
 
     offline_host = _make_offline_host(host_id, provider, temp_mngr_ctx)
     provider.mock_hosts = [online_host, offline_host]
@@ -161,39 +175,34 @@ def test_connection_error_during_get_agents_falls_back_to_offline(
         host_name=HostName("test-host"),
         provider_name=provider.name,
     )
-    agent_id = AgentId.generate()
-    agent_ref = _make_agent_ref(host_id, agent_id, provider.name)
+    agent_ref = _make_agent_ref(host_id, AgentId.generate(), provider.name)
 
-    # This should NOT raise -- it should fall back to offline data
+    # This should NOT raise -- it should fall back to offline data.
     host_details, agent_details_list = provider.get_host_and_agent_details(host_ref, [agent_ref])
 
     assert len(agent_details_list) == 1
     assert agent_details_list[0].name == "test-agent"
     assert agent_details_list[0].state == AgentLifecycleState.STOPPED
+    # The offline branch leaves idle_mode unset (distinct from a live agent).
+    assert agent_details_list[0].idle_mode is None
 
 
 def test_connection_error_during_agent_detail_building_falls_back_to_offline(
     host_id: HostId, provider: MockProviderInstance, temp_mngr_ctx: MngrContext
 ) -> None:
-    """HostConnectionError during _build_agent_details_from_online_agent should fall back to offline data."""
+    """HostConnectionError raised mid-way through _build_agent_details_from_online_agent falls back to offline.
+
+    The live agent is enumerated successfully (get_agents returns it) and its
+    early getters (get_command, get_lifecycle_state, ...) all succeed; only
+    get_reported_url raises. So if the production code stopped calling
+    get_reported_url, the build would complete online and the agent would be
+    RUNNING -- this test would then fail on the STOPPED assertion, which is
+    exactly the regression protection a bare MagicMock could not provide.
+    """
     agent_id = AgentId.generate()
+    mock_agent = _make_mock_agent(agent_id, host_id, temp_mngr_ctx, raise_connection_error_on_reported_url=True)
 
-    # Create a mock agent that raises HostConnectionError when get_reported_url is called.
-    # Earlier methods (get_reported_activity_time, get_command, etc.) must succeed
-    # so the error occurs mid-way through _build_agent_details_from_online_agent.
-    mock_agent = MagicMock()
-    mock_agent.id = agent_id
-    mock_agent.name = AgentName("test-agent")
-    mock_agent.get_reported_activity_time.return_value = None
-    mock_agent.get_reported_url.side_effect = HostConnectionError("SSH connection dropped")
-
-    online_host = _make_mock_online_host(host_id)
-    online_host.get_agents.return_value = [mock_agent]
-    online_host.get_activity_config.return_value = MagicMock(
-        idle_mode=MagicMock(value="ssh"),
-        idle_timeout_seconds=3600,
-        activity_sources=(ActivitySource.SSH,),
-    )
+    online_host = _make_mock_online_host(host_id, agents=[mock_agent])
 
     offline_host = _make_offline_host(host_id, provider, temp_mngr_ctx)
     provider.mock_hosts = [online_host, offline_host]
@@ -206,20 +215,24 @@ def test_connection_error_during_agent_detail_building_falls_back_to_offline(
     )
     agent_ref = _make_agent_ref(host_id, agent_id, provider.name)
 
-    # This should NOT raise -- it should fall back to offline data
-    host_details, agent_details_list = provider.get_host_and_agent_details(host_ref, [agent_ref])
+    # This should NOT raise -- it should fall back to offline data.
+    _host_details, agent_details_list = provider.get_host_and_agent_details(host_ref, [agent_ref])
 
     assert len(agent_details_list) == 1
     assert agent_details_list[0].name == "test-agent"
+    # Offline-derived values prove we abandoned the half-built online details
+    # rather than surfacing a partially-populated (or live) agent.
     assert agent_details_list[0].state == AgentLifecycleState.STOPPED
+    assert agent_details_list[0].idle_mode is None
+    assert agent_details_list[0].url is None
+    assert online_host.disconnect_count == 1
 
 
 def test_offline_field_generators_populate_plugin_data_via_get_host_and_agent_details(
     host_id: HostId, provider: MockProviderInstance, temp_mngr_ctx: MngrContext
 ) -> None:
     """When a host falls back to offline data, offline_field_generators populate plugin fields."""
-    online_host = _make_mock_online_host(host_id)
-    online_host.get_agents.side_effect = HostConnectionError("SSH error")
+    online_host = _make_mock_online_host(host_id, raise_connection_error_on_get_agents=True)
 
     offline_host = _make_offline_host(host_id, provider, temp_mngr_ctx)
     provider.mock_hosts = [online_host, offline_host]
@@ -248,34 +261,25 @@ def test_offline_field_generators_populate_plugin_data_via_get_host_and_agent_de
 
 def test_discover_agents_on_host_disconnects(host_id: HostId, provider: MockProviderInstance) -> None:
     """_discover_agents_on_host calls discover_agents then disconnect."""
-    mock_host = MagicMock(spec=HostInterface)
-    mock_host.id = host_id
-    mock_host.get_name.return_value = HostName("test-host")
-    mock_host.discover_agents.return_value = []
-
+    mock_host = _make_mock_online_host(host_id, discovered_agents=[])
     provider.mock_hosts = [mock_host]
 
     result = _discover_agents_on_host(provider, host_id)
 
     assert result == []
-    mock_host.disconnect.assert_called_once()
+    assert mock_host.disconnect_count == 1
 
 
 def test_discover_hosts_and_agents_disconnects_hosts(
     host_id: HostId, provider: MockProviderInstance, temp_mngr_ctx: MngrContext
 ) -> None:
     """discover_hosts_and_agents disconnects each host after fetching agents."""
-    mock_host = MagicMock(spec=HostInterface)
-    mock_host.id = host_id
-    mock_host.get_name.return_value = HostName("test-host")
-    mock_host.get_state.return_value = HostState.RUNNING
-    mock_host.discover_agents.return_value = []
-
+    mock_host = _make_mock_online_host(host_id, discovered_agents=[])
     provider.mock_hosts = [mock_host]
 
     provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
 
-    mock_host.disconnect.assert_called_once()
+    assert mock_host.disconnect_count == 1
 
 
 # =============================================================================
@@ -362,17 +366,12 @@ def test_discover_hosts_and_agents_tolerates_per_host_connection_error(
     healthy_agent_id = AgentId.generate()
     healthy_agent_ref = _make_agent_ref(healthy_host_id, healthy_agent_id, provider.name)
 
-    healthy_host = MagicMock(spec=HostInterface)
-    healthy_host.id = healthy_host_id
-    healthy_host.get_name.return_value = HostName("healthy-host")
-    healthy_host.get_state.return_value = HostState.RUNNING
-    healthy_host.discover_agents.return_value = [healthy_agent_ref]
-
-    broken_host = MagicMock(spec=HostInterface)
-    broken_host.id = broken_host_id
-    broken_host.get_name.return_value = HostName("broken-host")
-    broken_host.get_state.return_value = HostState.RUNNING
-    broken_host.discover_agents.side_effect = HostConnectionError("SSH error (Error reading SSH protocol banner)")
+    healthy_host = _make_mock_online_host(
+        healthy_host_id, host_name="healthy-host", discovered_agents=[healthy_agent_ref]
+    )
+    broken_host = _make_mock_online_host(
+        broken_host_id, host_name="broken-host", raise_connection_error_on_discover_agents=True
+    )
 
     provider.mock_hosts = [healthy_host, broken_host]
     # The broken host has an offline view (mock_agent_data is empty, so it
@@ -390,8 +389,8 @@ def test_discover_hosts_and_agents_tolerates_per_host_connection_error(
 
     # The connected_host context manager's finally must still run on the
     # failure path, so both hosts had disconnect() called.
-    healthy_host.disconnect.assert_called_once()
-    broken_host.disconnect.assert_called_once()
+    assert healthy_host.disconnect_count == 1
+    assert broken_host.disconnect_count == 1
 
     # The cache-invalidation hook must fire for the broken host so providers
     # that cache per-host state (docker/modal/lima/vps_docker) drop the
@@ -411,11 +410,9 @@ def test_discover_hosts_and_agents_falls_back_to_offline_on_connection_error(
     host_id = HostId.generate()
     agent_id = AgentId.generate()
 
-    broken_host = MagicMock(spec=HostInterface)
-    broken_host.id = host_id
-    broken_host.get_name.return_value = HostName("ssh-dead-host")
-    broken_host.get_state.return_value = HostState.RUNNING
-    broken_host.discover_agents.side_effect = HostConnectionError("Error reading SSH protocol banner")
+    broken_host = _make_mock_online_host(
+        host_id, host_name="ssh-dead-host", raise_connection_error_on_discover_agents=True
+    )
 
     offline_host = _make_offline_host(host_id, provider, temp_mngr_ctx)
     provider.mock_hosts = [broken_host]
@@ -441,5 +438,5 @@ def test_discover_hosts_and_agents_falls_back_to_offline_on_connection_error(
     assert offline_agents[0].labels == {"workspace": "ws-42", "is_primary": "true"}
 
     # The connected_host cleanup and on_connection_error hook still run.
-    broken_host.disconnect.assert_called_once()
+    assert broken_host.disconnect_count == 1
     assert provider.connection_errors_cleared == [host_id]
