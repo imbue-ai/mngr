@@ -44,9 +44,10 @@ Restore `.reviewer/settings.json`'s `enabled_when` from `""` (always-disabled) t
 
 Original disable rationale (commit `654ccc8a` 2026-04-28) cited two root causes: (a) `.reviewer/logs/` not gitignored, causing the stop-hook's "repo must be clean" precondition to fail on its own log file and trigger a 16-min commit/gitignore loop; (b) general orchestrator latency in the imbue-code-guardian plugin. Main fixed (a) ~7h later in `4bcf74ca` ("Prevent silly files"); (b) is in plugin scope and can't be verified from FCT alone.
 
-- **status**: pending
+- **status**: **verified_stale**
 - **test path**: pilot test branch → tag `v0.2.36-rc2-stop-hook` → launch-to-msg with that template_ref
 - **expected blast radius**: if (b) is still live, first-message latency spikes back to ~16 minutes. launch-to-msg's end-to-end timing will surface it.
+- **landed**: pilot ff-merged to c135679e. v0.2.35 tag unchanged. Both ci.yml and launch-to-msg verify green first try.
 
 ## Tier 3 — low-confidence (defer; revisit if Tier 1+2 leave runner time)
 
@@ -88,4 +89,5 @@ Per-iteration: timestamp, candidate, candidate branch / tag, launch-to-msg run i
 | # | candidate | branch / tag | launch-to-msg | ci.yml | outcome | action |
 |---|---|---|---|---|---|---|
 | 1 | todowrite-cleanup-pilot | pilot-rc-todowrite-cleanup / v0.2.36-rc1-todowrite-cleanup | 27006016613 success | 27005966487 success | green | ff-merged into pilot (749e234d), v0.2.35 tag unchanged |
-| 2 | restore-supply-chain-cooldowns | mngr-rc-restore-cooldowns (PR #1936) | 27007931011 success (rerun after lima -15 flake) | 27007963943 success | green | cherry-picked to wz/minds_onboard (c930b05ed); PR #1936 to close |
+| 2 | restore-supply-chain-cooldowns | mngr-rc-restore-cooldowns (PR #1936) | 27007931011 success (rerun after lima -15 flake) | 27007963943 success | green | cherry-picked to wz/minds_onboard (c930b05ed); PR #1936 closed |
+| 3 | restore-stop-hook-enabled-when | pilot-rc-stop-hook / v0.2.36-rc2-stop-hook | 27010826323 success | 27010815083 success | green | ff-merged into pilot (c135679e), v0.2.35 tag unchanged |
