@@ -12,13 +12,26 @@
 
 const { test, expect } = require('./fixtures');
 
-test('main window launches to a usable state (Create or Log in)', async ({ mindsApp }) => {
+test('main window launches to a usable state (Create or Log in)', async ({ mindsApp }, testInfo) => {
   const { mainWindow } = mindsApp;
   // Either auth path is fine -- racing both with `.or()` so we don't
   // burn a full timeout per state if the runner happens to be in the
   // logged-in one.
   const createLink = mainWindow.getByRole('link', { name: /^create$/i });
   const loginBtn = mainWindow.getByRole('button', { name: /^log in$/i });
-  await expect(createLink.or(loginBtn).first())
-    .toBeVisible({ timeout: 2 * 60 * 1000 });
+  try {
+    await expect(createLink.or(loginBtn).first())
+      .toBeVisible({ timeout: 2 * 60 * 1000 });
+  } finally {
+    // Always attach a final main-window screenshot. The shared
+    // playwright config defaults `screenshot: only-on-failure`, so a
+    // passing run otherwise leaves nothing visual to inspect; a failing
+    // run produces test-failed-*.png buried in test-results. `finally`
+    // gives us both at zero extra branching, surfaced inline in the
+    // html report.
+    const buf = await mainWindow.screenshot({ fullPage: true }).catch(() => null);
+    if (buf) {
+      await testInfo.attach('main-window-final', { body: buf, contentType: 'image/png' });
+    }
+  }
 });
