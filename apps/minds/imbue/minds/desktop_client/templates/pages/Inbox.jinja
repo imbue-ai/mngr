@@ -49,8 +49,7 @@
     /* When the body has no cards, the left column expands to fill the
        dialog and the right pane is hidden so the empty state reads as
        a single centered message rather than a half-empty split. The
-       auto-open footer centers itself in this state (versus its
-       default left alignment when the list has cards). */
+       auto-open footer stays left-aligned in both states. */
     #inbox-body.is-empty #inbox-detail { display: none; }
     #inbox-body.is-empty #inbox-left-column {
       flex: 1 1 auto;
@@ -62,7 +61,6 @@
       align-items: center;
       justify-content: center;
     }
-    #inbox-body.is-empty #inbox-list-footer { justify-content: center; }
   </style>
 {% endset %}
 {% set _scripts %}
