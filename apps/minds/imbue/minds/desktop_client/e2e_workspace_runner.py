@@ -176,11 +176,31 @@ def _fct_remote_has_branch(branch: str) -> bool:
 
 
 def _shallow_clone_fct(branch: str, destination: Path) -> Path:
-    """Shallow-clone ``branch`` of the FCT public remote into ``destination``."""
+    """Shallow-clone ``branch`` of the FCT public remote into ``destination``.
+
+    Also fetches any release tags into the clone. The minds create form's
+    default branch field (see ``_FALLBACK_BRANCH`` in templates.py) pins
+    to an annotated FCT tag (e.g. ``v0.2.35``); without this extra fetch,
+    a depth-1 clone of an unrelated branch does not have the tag's commit,
+    and the downstream ``mngr create`` clone of the form's branch field
+    would fail with ``Remote branch v0.2.35 not found``. Cheap (a handful
+    of extra refs) and keeps test create flows aligned with production.
+    """
     destination.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         ["git", "clone", "--depth", "1", "--branch", branch, _FCT_REMOTE, str(destination)],
         check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    # ``--depth 1`` would only fetch the tag's tip, but ``--tags`` already
+    # implies fetching all tag-pointed commits at shallow depth; combine
+    # so each tag's target commit is reachable without filling out full
+    # branch history.
+    subprocess.run(
+        ["git", "-C", str(destination), "fetch", "--depth", "1", "--tags", "origin"],
+        check=False,
         capture_output=True,
         text=True,
         timeout=120,
