@@ -1599,13 +1599,20 @@ function installApplicationMenu() {
           // view if it exists. Equivalent to setting
           // MINDS_OPEN_DEVTOOLS=1 at startup but on-demand. No
           // accelerator -- it's a dev-time affordance.
+          //
+          // ``toggleDevTools()`` ignores its options argument, so to
+          // get the detached window we explicitly open / close.
           click: () => {
             const bundle = getMostRecentWindow();
             if (!bundle || bundle.window.isDestroyed()) return;
             for (const view of [bundle.chromeView, bundle.contentView, bundle.modalView]) {
               if (!view) continue;
               if (view.webContents.isDestroyed()) continue;
-              view.webContents.toggleDevTools({ mode: 'detach' });
+              if (view.webContents.isDevToolsOpened()) {
+                view.webContents.closeDevTools();
+              } else {
+                view.webContents.openDevTools({ mode: 'detach' });
+              }
             }
           },
         },
