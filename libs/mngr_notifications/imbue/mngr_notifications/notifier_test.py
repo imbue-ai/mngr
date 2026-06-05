@@ -8,7 +8,6 @@ from imbue.mngr_notifications.notifier import LinuxNotifier
 from imbue.mngr_notifications.notifier import MacOSNotifier
 from imbue.mngr_notifications.notifier import build_execute_command
 from imbue.mngr_notifications.notifier import get_notifier
-from imbue.mngr_notifications.testing import patch_platform
 
 
 def _config(
@@ -104,24 +103,21 @@ def test_build_execute_command_unsupported_terminal() -> None:
 # --- get_notifier ---
 
 
-def test_get_notifier_macos(monkeypatch: pytest.MonkeyPatch) -> None:
-    patch_platform(monkeypatch, "Darwin")
-    assert isinstance(get_notifier(), MacOSNotifier)
+def test_get_notifier_macos() -> None:
+    assert isinstance(get_notifier("Darwin"), MacOSNotifier)
 
 
-def test_get_notifier_linux(monkeypatch: pytest.MonkeyPatch) -> None:
-    patch_platform(monkeypatch, "Linux")
-    assert isinstance(get_notifier(), LinuxNotifier)
+def test_get_notifier_linux() -> None:
+    assert isinstance(get_notifier("Linux"), LinuxNotifier)
 
 
-def test_get_notifier_unsupported(monkeypatch: pytest.MonkeyPatch) -> None:
-    patch_platform(monkeypatch, "Windows")
-    assert get_notifier() is None
+def test_get_notifier_unsupported() -> None:
+    assert get_notifier("Windows") is None
 
 
 # --- LinuxNotifier ---
 
 
 def test_linux_notifier_rejects_execute_command(notification_cg: ConcurrencyGroup) -> None:
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(NotImplementedError, match="does not support click actions"):
         LinuxNotifier().notify("Title", "Message", "some-command", notification_cg)
