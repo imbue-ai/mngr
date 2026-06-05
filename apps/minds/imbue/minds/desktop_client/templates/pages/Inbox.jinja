@@ -264,8 +264,11 @@
       if (nextId) {
         await selectItem(nextId);
       } else {
-        inboxDetail.innerHTML = "";
-        updateUrl(null);
+        // The user just resolved the last pending request -- nothing
+        // left for them to act on, so dismiss the modal. ``is-denying``
+        // cards still in the list will resolve in the background via
+        // their keepalive POST + the next SSE update.
+        closeInbox();
       }
     }
 
