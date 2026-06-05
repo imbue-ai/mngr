@@ -5,7 +5,6 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI
-from fastapi import Request
 from fastapi import Request as FastAPIRequest
 from fastapi.responses import HTMLResponse
 from fastapi.responses import JSONResponse
@@ -1481,10 +1480,10 @@ class _InboxStubLatchkeyHandler(RequestEventHandler):
             return ""
         return f'<div class="permissions-detail">{req_event.rationale}</div>'
 
-    async def apply_grant_request(self, request: Request, req_event: RequestEvent) -> Response:
+    async def apply_grant_request(self, request: FastAPIRequest, req_event: RequestEvent) -> Response:
         return Response(content='{"outcome": "GRANTED"}', media_type="application/json")
 
-    async def apply_deny_request(self, request: Request, req_event: RequestEvent) -> Response:
+    async def apply_deny_request(self, request: FastAPIRequest, req_event: RequestEvent) -> Response:
         return Response(content='{"outcome": "DENIED"}', media_type="application/json")
 
 
