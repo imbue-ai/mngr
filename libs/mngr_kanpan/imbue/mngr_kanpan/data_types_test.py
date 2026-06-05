@@ -2,133 +2,58 @@ from datetime import datetime
 from datetime import timezone
 
 import pytest
-from pydantic import ValidationError
 
+from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_kanpan.data_sources.github import CiField
 from imbue.mngr_kanpan.data_sources.github import CiStatus
-from imbue.mngr_kanpan.data_sources.github import PrField
-from imbue.mngr_kanpan.data_sources.github import PrState
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
-from imbue.mngr_kanpan.data_types import BoardSnapshot
+from imbue.mngr_kanpan.data_types import CustomCommand
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
-
-
-def test_ci_status_color() -> None:
-    assert CiStatus.SUCCESS.color == "light green"
-    assert CiStatus.FAILURE.color == "light red"
-    assert CiStatus.PENDING.color == "yellow"
-    assert CiStatus.UNKNOWN.color is None
+from imbue.mngr_kanpan.fetcher import compute_section
+from imbue.mngr_kanpan.testing import make_pr_field
 
 
 def test_pr_field_display() -> None:
-    pr = PrField(
-        number=42,
-        title="Add feature X",
-        state=PrState.OPEN,
-        url="https://github.com/org/repo/pull/42",
-        head_branch="mngr/my-agent",
-        is_draft=False,
-        created=datetime(2025, 1, 1, 0, 0, 1, tzinfo=timezone.utc),
-    )
+    pr = make_pr_field(number=42, created=datetime(2025, 1, 1, 0, 0, 1, tzinfo=timezone.utc))
     cell = pr.display()
     assert cell.text == "#42"
     assert cell.url == "https://github.com/org/repo/pull/42"
 
 
-def test_ci_field_display() -> None:
-    ci = CiField(status=CiStatus.FAILURE, created=datetime(2025, 1, 1, 0, 0, 2, tzinfo=timezone.utc))
+@pytest.mark.parametrize(
+    ("status", "expected_text", "expected_color"),
+    [
+        (CiStatus.SUCCESS, "success", "light green"),
+        (CiStatus.FAILURE, "failure", "light red"),
+        (CiStatus.PENDING, "pending", "yellow"),
+        (CiStatus.UNKNOWN, "", None),
+    ],
+)
+def test_ci_field_display(status: CiStatus, expected_text: str, expected_color: str | None) -> None:
+    ci = CiField(status=status, created=datetime(2025, 1, 1, 0, 0, 2, tzinfo=timezone.utc))
     cell = ci.display()
-    assert cell.text == "failure"
-    assert cell.color == "light red"
+    assert cell.text == expected_text
+    assert cell.color == expected_color
 
 
-def test_ci_field_display_unknown() -> None:
-    ci = CiField(status=CiStatus.UNKNOWN, created=datetime(2025, 1, 1, 0, 0, 3, tzinfo=timezone.utc))
-    cell = ci.display()
-    assert cell.text == ""
-
-
-def test_pr_field_is_frozen() -> None:
-    pr = PrField(
-        number=42,
-        title="Add feature X",
-        state=PrState.OPEN,
-        url="https://github.com/org/repo/pull/42",
-        head_branch="mngr/my-agent",
-        is_draft=False,
-        created=datetime(2025, 1, 1, 0, 0, 4, tzinfo=timezone.utc),
-    )
-    with pytest.raises(ValidationError):
-        pr.number = 99
-
-
-def test_agent_board_entry_construction() -> None:
+def test_agent_board_entry_default_section_is_still_cooking() -> None:
+    # An entry with no fields has no PR data; its default section must match
+    # what compute_section() assigns to a fields-less agent, so a freshly
+    # constructed entry lands under STILL_COOKING during board grouping.
     entry = AgentBoardEntry(
         name=AgentName("my-agent"),
         state=AgentLifecycleState.RUNNING,
         provider_name=ProviderInstanceName("local"),
     )
-    assert entry.name == AgentName("my-agent")
-    assert entry.state == AgentLifecycleState.RUNNING
-    assert entry.provider_name == ProviderInstanceName("local")
-    assert entry.branch is None
-    assert entry.fields == {}
-    assert entry.cells == {}
+    assert entry.section == BoardSection.STILL_COOKING
+    assert compute_section(entry.fields) == BoardSection.STILL_COOKING
 
 
-def test_agent_board_entry_with_fields() -> None:
-    pr = PrField(
-        number=10,
-        title="Fix bug",
-        state=PrState.MERGED,
-        url="https://github.com/org/repo/pull/10",
-        head_branch="mngr/my-agent",
-        is_draft=False,
-        created=datetime(2025, 1, 1, 0, 0, 5, tzinfo=timezone.utc),
-    )
-    entry = AgentBoardEntry(
-        name=AgentName("my-agent"),
-        state=AgentLifecycleState.DONE,
-        provider_name=ProviderInstanceName("local"),
-        branch="mngr/my-agent",
-        fields={"pr": pr},
-    )
-    assert entry.branch == "mngr/my-agent"
-    assert "pr" in entry.fields
-
-
-def test_board_snapshot_construction() -> None:
-    entry = AgentBoardEntry(
-        name=AgentName("agent-1"),
-        state=AgentLifecycleState.RUNNING,
-        provider_name=ProviderInstanceName("local"),
-    )
-    snapshot = BoardSnapshot(
-        entries=(entry,),
-        fetch_time_seconds=1.5,
-    )
-    assert len(snapshot.entries) == 1
-    assert snapshot.entries[0].name == AgentName("agent-1")
-    assert snapshot.errors == ()
-    assert snapshot.fetch_time_seconds == 1.5
-
-
-def test_board_snapshot_with_errors() -> None:
-    snapshot = BoardSnapshot(
-        entries=(),
-        errors=("Connection failed", "Timeout"),
-        fetch_time_seconds=0.3,
-    )
-    assert len(snapshot.entries) == 0
-    assert len(snapshot.errors) == 2
-    assert snapshot.errors[0] == "Connection failed"
-
-
-def test_kanpan_plugin_config_merge_with_column_order() -> None:
+def test_kanpan_plugin_config_merge_with_column_order_override_wins() -> None:
     base = KanpanPluginConfig(column_order=["name", "state", "ci"])
     override = KanpanPluginConfig(column_order=["name", "ci"])
     merged = base.merge_with(override)
@@ -142,7 +67,7 @@ def test_kanpan_plugin_config_merge_with_column_order_none_keeps_base() -> None:
     assert merged.column_order == ["name", "state", "ci"]
 
 
-def test_kanpan_plugin_config_merge_with_section_order() -> None:
+def test_kanpan_plugin_config_merge_with_section_order_override_wins() -> None:
     base = KanpanPluginConfig(section_order=[BoardSection.PR_MERGED, BoardSection.MUTED])
     override = KanpanPluginConfig(section_order=[BoardSection.STILL_COOKING, BoardSection.PR_MERGED])
     merged = base.merge_with(override)
@@ -156,31 +81,68 @@ def test_kanpan_plugin_config_merge_with_section_order_none_keeps_base() -> None
     assert merged.section_order == [BoardSection.PR_MERGED, BoardSection.MUTED]
 
 
-def test_kanpan_config_merge_with_data_sources() -> None:
-    base = KanpanPluginConfig(
-        data_sources={"github": {"enabled": True}},
-    )
-    override = KanpanPluginConfig(
-        data_sources={"github": {"enabled": False}},
-    )
+@pytest.mark.parametrize(
+    ("base_field", "override_field"),
+    [
+        ({"github": {"enabled": True}}, {"repo_paths": {"enabled": False}}),
+        ({"slack": {"name": "Slack"}}, {"jira": {"name": "Jira"}}),
+        ({"col_a": {"header": "A"}}, {"col_b": {"header": "B"}}),
+    ],
+)
+def test_kanpan_plugin_config_merge_with_raw_dict_field_unions_disjoint_keys(
+    base_field: dict[str, dict[str, object]],
+    override_field: dict[str, dict[str, object]],
+) -> None:
+    # data_sources / shell_commands / columns all merge via {**self, **override}.
+    base = KanpanPluginConfig(data_sources=base_field, shell_commands=base_field, columns=base_field)
+    override = KanpanPluginConfig(data_sources=override_field, shell_commands=override_field, columns=override_field)
     merged = base.merge_with(override)
-    assert merged.data_sources["github"]["enabled"] is False
+    expected_keys = set(base_field) | set(override_field)
+    assert set(merged.data_sources) == expected_keys
+    assert set(merged.shell_commands) == expected_keys
+    assert set(merged.columns) == expected_keys
 
 
-def test_kanpan_config_merge_with_shell_commands() -> None:
-    base = KanpanPluginConfig(
-        shell_commands={
-            "slack": {"name": "Slack", "header": "SLACK", "command": "find-slack"},
-        },
-    )
-    override = KanpanPluginConfig(
-        shell_commands={
-            "jira": {"name": "Jira", "header": "JIRA", "command": "find-jira"},
-        },
-    )
+def test_kanpan_plugin_config_merge_with_data_sources_override_wins_on_collision() -> None:
+    base = KanpanPluginConfig(data_sources={"github": {"enabled": True}})
+    override = KanpanPluginConfig(data_sources={"github": {"enabled": False}})
     merged = base.merge_with(override)
-    assert "slack" in merged.shell_commands
-    assert "jira" in merged.shell_commands
+    assert merged.data_sources == {"github": {"enabled": False}}
+
+
+def test_kanpan_plugin_config_merge_with_commands_unions_disjoint_keys() -> None:
+    base = KanpanPluginConfig(commands={"a": CustomCommand(name="A", command="echo a")})
+    override = KanpanPluginConfig(commands={"b": CustomCommand(name="B", command="echo b")})
+    merged = base.merge_with(override)
+    assert set(merged.commands) == {"a", "b"}
+
+
+def test_kanpan_plugin_config_merge_with_commands_override_wins_on_collision() -> None:
+    base = KanpanPluginConfig(commands={"x": CustomCommand(name="Base", command="echo base")})
+    override = KanpanPluginConfig(commands={"x": CustomCommand(name="Override", command="echo override")})
+    merged = base.merge_with(override)
+    assert merged.commands == {"x": CustomCommand(name="Override", command="echo override")}
+
+
+def test_kanpan_plugin_config_merge_with_hooks_union() -> None:
+    base = KanpanPluginConfig(on_before_refresh={"a": 1}, on_after_refresh={"x": 1})
+    override = KanpanPluginConfig(on_before_refresh={"b": 2}, on_after_refresh={"y": 2})
+    merged = base.merge_with(override)
+    assert merged.on_before_refresh == {"a": 1, "b": 2}
+    assert merged.on_after_refresh == {"x": 1, "y": 2}
+
+
+def test_kanpan_plugin_config_merge_with_enabled_override_wins() -> None:
+    base = KanpanPluginConfig(enabled=True)
+    override = KanpanPluginConfig(enabled=False)
+    merged = base.merge_with(override)
+    assert merged.enabled is False
+
+
+def test_kanpan_plugin_config_merge_with_non_kanpan_override_returns_self() -> None:
+    base = KanpanPluginConfig(column_order=["name", "ci"], enabled=False)
+    merged = base.merge_with(PluginConfig(enabled=True))
+    assert merged is base
 
 
 def test_kanpan_plugin_config_staleness_threshold_default_unset() -> None:
