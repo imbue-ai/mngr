@@ -31,9 +31,10 @@ Two sibling reverts:
 
 Cited blocker `modal 1.4.3` published 2026-05-18 — now 17 days old, comfortably outside the 14-day cooldown. Both gates were disabled "temporarily while CI churns"; that period is over.
 
-- **status**: pending
+- **status**: **verified_stale**
 - **test path**: mngr candidate branch → launch-to-msg with template_ref=v0.2.35 + ci.yml on the candidate SHA
 - **expected blast radius**: ToDesktop `pnpm install` + `uv lock` regeneration both re-enforce cooldowns. If any transitive PyPI dep has only published a >cutoff release with no older one, build breaks. Mitigation: pick a recent fixed `exclude-newer` and audit if it fails.
+- **landed**: cherry-picked to wz/minds_onboard (c930b05ed). First launch-to-msg verify hit a Lima boot SIGTERM flake (`limactl start failed exit code -15` at ~10min in `CREATING_WORKSPACE`); rerun greened. ci.yml green on both attempts. Cooldowns are no-op under --frozen-lockfile so they couldn't have caused lima boot failures.
 
 ## Tier 2 — medium-confidence (test after Tier 1)
 
@@ -87,3 +88,4 @@ Per-iteration: timestamp, candidate, candidate branch / tag, launch-to-msg run i
 | # | candidate | branch / tag | launch-to-msg | ci.yml | outcome | action |
 |---|---|---|---|---|---|---|
 | 1 | todowrite-cleanup-pilot | pilot-rc-todowrite-cleanup / v0.2.36-rc1-todowrite-cleanup | 27006016613 success | 27005966487 success | green | ff-merged into pilot (749e234d), v0.2.35 tag unchanged |
+| 2 | restore-supply-chain-cooldowns | mngr-rc-restore-cooldowns (PR #1936) | 27007931011 success (rerun after lima -15 flake) | 27007963943 success | green | cherry-picked to wz/minds_onboard (c930b05ed); PR #1936 to close |
