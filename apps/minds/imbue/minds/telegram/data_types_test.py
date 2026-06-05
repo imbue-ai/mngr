@@ -24,6 +24,8 @@ def test_telegram_bot_credentials_hides_token_in_repr() -> None:
         bot_token=SecretStr("123456:ABC-DEF"),
         bot_username="test_bot",
     )
+    # Guards that bot_token stays typed as SecretStr: a plain-str field would
+    # leak the token into repr()/logs.
     repr_str = repr(creds)
     assert "123456:ABC-DEF" not in repr_str
     assert creds.bot_token.get_secret_value() == "123456:ABC-DEF"

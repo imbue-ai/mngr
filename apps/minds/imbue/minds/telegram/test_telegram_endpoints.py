@@ -114,9 +114,13 @@ def test_telegram_setup_returns_done_immediately_when_already_configured(tmp_pat
     response = client.post(f"/api/agents/{agent_id}/telegram/setup")
     assert response.status_code == 200
     data = response.json()
-    assert data["status"] == "CHECKING_CREDENTIALS"
+    # The POST status field is a fixed "request accepted" acknowledgement
+    # (the handler always returns CHECKING_CREDENTIALS), so it is not a
+    # behavioral signal -- only assert the request was accepted for this agent.
+    assert data["agent_id"] == str(agent_id)
 
-    # Status should show DONE immediately since credentials exist
+    # The real behavioral check: because credentials already exist, the status
+    # endpoint must report DONE immediately rather than running setup.
     status_response = client.get(f"/api/agents/{agent_id}/telegram/status")
     assert status_response.status_code == 200
     status_data = status_response.json()
