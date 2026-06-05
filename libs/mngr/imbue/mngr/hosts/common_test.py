@@ -17,11 +17,12 @@ from imbue.mngr.hosts.common import add_safe_directory_on_remote
 from imbue.mngr.hosts.common import build_ssh_transport_command
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
+from imbue.mngr.hosts.common import copy_on_host
 from imbue.mngr.hosts.common import determine_lifecycle_state
 from imbue.mngr.hosts.common import get_descendant_process_names
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
 from imbue.mngr.hosts.common import resolve_expected_process_name
-from imbue.mngr.hosts.common import symlink_or_copy_on_host
+from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.hosts.common import timestamp_to_datetime
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentLifecycleState
@@ -314,20 +315,17 @@ def test_add_safe_directory_on_remote_is_noop_for_local_host(setup_git_config: N
 
 
 # =========================================================================
-# symlink_or_copy_on_host tests
+# symlink_on_host / copy_on_host tests
 # =========================================================================
 
 
-def test_symlink_or_copy_on_host_symlinks_even_when_source_absent(
-    local_host: OnlineHostInterface, tmp_path: Path
-) -> None:
-    """Symlink mode creates a (dangling) symlink to a not-yet-existing source, and a write goes through it."""
+def test_symlink_on_host_symlinks_even_when_source_absent(local_host: OnlineHostInterface, tmp_path: Path) -> None:
+    """symlink_on_host creates a (dangling) symlink to a not-yet-existing source, and a write goes through it."""
     source = tmp_path / "real" / "tok"
     dest = tmp_path / "agent" / "tok"
 
-    result = symlink_or_copy_on_host(local_host, source, dest, symlink=True, ensure_source_parent=True)
+    symlink_on_host(local_host, source, dest, ensure_source_parent=True)
 
-    assert result is True
     assert dest.is_symlink()
     assert Path(os.readlink(dest)) == source
     # Dangling: source not created yet; ensure_source_parent created the shared parent dir.
@@ -338,13 +336,13 @@ def test_symlink_or_copy_on_host_symlinks_even_when_source_absent(
     assert source.read_text() == "tok-data"
 
 
-def test_symlink_or_copy_on_host_copy_copies_existing_source(local_host: OnlineHostInterface, tmp_path: Path) -> None:
+def test_copy_on_host_copies_existing_source(local_host: OnlineHostInterface, tmp_path: Path) -> None:
     source = tmp_path / "real" / "tok"
     source.parent.mkdir(parents=True)
     source.write_text("secret")
     dest = tmp_path / "agent" / "tok"
 
-    result = symlink_or_copy_on_host(local_host, source, dest, symlink=False)
+    result = copy_on_host(local_host, source, dest)
 
     assert result is True
     assert not dest.is_symlink()
@@ -352,13 +350,11 @@ def test_symlink_or_copy_on_host_copy_copies_existing_source(local_host: OnlineH
     assert (dest.stat().st_mode & 0o777) == 0o600
 
 
-def test_symlink_or_copy_on_host_copy_skips_when_source_absent(
-    local_host: OnlineHostInterface, tmp_path: Path
-) -> None:
+def test_copy_on_host_skips_when_source_absent(local_host: OnlineHostInterface, tmp_path: Path) -> None:
     source = tmp_path / "real" / "missing"
     dest = tmp_path / "agent" / "tok"
 
-    result = symlink_or_copy_on_host(local_host, source, dest, symlink=False)
+    result = copy_on_host(local_host, source, dest)
 
     assert result is False
     assert not dest.exists()

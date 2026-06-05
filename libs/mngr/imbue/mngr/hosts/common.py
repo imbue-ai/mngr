@@ -95,44 +95,57 @@ def is_macos() -> bool:
     return platform.system() == "Darwin"
 
 
-def symlink_or_copy_on_host(
+def symlink_on_host(
     host: OnlineHostInterface,
     source: Path,
     dest: Path,
     *,
-    symlink: bool,
     ensure_source_parent: bool = False,
+    timeout_seconds: float = 10.0,
+) -> None:
+    """Create ``dest`` as a symlink to ``source`` on the host, idempotently, in one round-trip.
+
+    Always creates the symlink (``ln -sfn``), even if ``source`` does not exist yet -- a
+    dangling symlink that becomes live when ``source`` is later created (e.g. a tool that
+    writes the token/cache *through* it). ``dest``'s parent dir (and, when
+    ``ensure_source_parent`` is True, ``source``'s parent dir) is created so the link --
+    and any write-through -- resolves.
+
+    Mirrors the symlink credential pattern used across plugins (e.g. agy's oauth token and
+    playwright cache, and ``mngr_claude``'s credentials), so the shell-building and quoting
+    live in one place. See also ``copy_on_host`` for the full-isolation copy variant.
+    """
+    quoted_source = shlex.quote(str(source))
+    quoted_dest = shlex.quote(str(dest))
+    mkdir_targets = shlex.quote(str(dest.parent))
+    if ensure_source_parent:
+        mkdir_targets += f" {shlex.quote(str(source.parent))}"
+    host.execute_idempotent_command(
+        f"mkdir -p {mkdir_targets} && ln -sfn {quoted_source} {quoted_dest}",
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def copy_on_host(
+    host: OnlineHostInterface,
+    source: Path,
+    dest: Path,
+    *,
     copy_file_mode: str = "600",
     timeout_seconds: float = 10.0,
 ) -> bool:
-    """Symlink or copy ``source`` to ``dest`` on the host, idempotently, in one round-trip.
+    """Copy ``source`` to ``dest`` on the host, idempotently, in one round-trip.
 
-    ``symlink=True``: always create ``dest`` as a symlink to ``source`` (``ln -sfn``),
-    even if ``source`` does not exist yet -- a dangling symlink that becomes live when
-    ``source`` is later created (e.g. a tool that writes the token/cache *through* it).
-    ``dest``'s parent dir (and, when ``ensure_source_parent`` is True, ``source``'s
-    parent dir) is created so the link -- and any write-through -- resolves. Returns True.
+    Copies ``source`` to ``dest`` (and ``chmod``s it to ``copy_file_mode``) only if
+    ``source`` exists; ``dest``'s parent is created first. Returns True if it copied,
+    False if it skipped because ``source`` was absent.
 
-    ``symlink=False``: copy ``source`` to ``dest`` (and ``chmod`` it to ``copy_file_mode``)
-    only if ``source`` exists; ``dest``'s parent is created first. Returns True if it
-    copied, False if it skipped because ``source`` was absent.
-
-    Mirrors the symlink-vs-copy credential pattern used across plugins (e.g. agy's
-    oauth token and playwright cache, and ``mngr_claude``'s credentials), so the
-    shell-building and quoting live in one place.
+    The full-isolation counterpart to ``symlink_on_host``: a copy is independent of the
+    source (no write-through, no propagation of later changes).
     """
     quoted_source = shlex.quote(str(source))
     quoted_dest = shlex.quote(str(dest))
     quoted_dest_parent = shlex.quote(str(dest.parent))
-    if symlink:
-        mkdir_targets = quoted_dest_parent
-        if ensure_source_parent:
-            mkdir_targets += f" {shlex.quote(str(source.parent))}"
-        host.execute_idempotent_command(
-            f"mkdir -p {mkdir_targets} && ln -sfn {quoted_source} {quoted_dest}",
-            timeout_seconds=timeout_seconds,
-        )
-        return True
     copied_marker = "__MNGR_COPIED__"
     result = host.execute_idempotent_command(
         f"if [ -e {quoted_source} ]; then mkdir -p {quoted_dest_parent} && rm -f {quoted_dest} "

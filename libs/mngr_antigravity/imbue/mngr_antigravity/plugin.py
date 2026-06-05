@@ -100,7 +100,8 @@ from imbue.mngr.agents.tui_utils import send_enter_best_effort
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
-from imbue.mngr.hosts.common import symlink_or_copy_on_host
+from imbue.mngr.hosts.common import copy_on_host
+from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
@@ -548,15 +549,11 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         """
         source = get_antigravity_oauth_token_path(host_home)
         dest = get_antigravity_oauth_token_path(agy_home)
-        copied_or_linked = symlink_or_copy_on_host(
-            host,
-            source,
-            dest,
-            symlink=self.agent_config.symlink_oauth_token,
-            # In symlink mode, make the shared (source) parent so a write-through login resolves.
-            ensure_source_parent=self.agent_config.symlink_oauth_token,
-        )
-        if not copied_or_linked:
+        if self.agent_config.symlink_oauth_token:
+            # Make the shared (source) parent so a write-through login resolves.
+            symlink_on_host(host, source, dest, ensure_source_parent=True)
+            return
+        if not copy_on_host(host, source, dest):
             logger.info(
                 "No shared Antigravity oauth token at {} to copy (symlink_oauth_token=False); the agent "
                 "will run agy's login flow on first launch.",
@@ -579,11 +576,10 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         is correct on remote hosts too.
         """
         subpath = self._playwright_cache_subpath(host_uname)
-        symlink_or_copy_on_host(
+        symlink_on_host(
             host,
             host_home.joinpath(*subpath),
             agy_home.joinpath(*subpath),
-            symlink=True,
             ensure_source_parent=True,
         )
 
