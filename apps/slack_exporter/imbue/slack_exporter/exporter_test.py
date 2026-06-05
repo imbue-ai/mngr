@@ -169,6 +169,11 @@ def test_run_export_changed_channels_go_to_updated_stream(default_settings: Expo
     output_dir = default_settings.output_dir
     updated_lines = (output_dir / "channel" / "updated" / "events.jsonl").read_text().strip().splitlines()
     assert len(updated_lines) == 2
+    # The first updated record is the initial export (no topic); the second reflects the change.
+    first_record = json.loads(updated_lines[0])
+    second_record = json.loads(updated_lines[1])
+    assert "topic" not in first_record["raw"]
+    assert second_record["raw"]["topic"] == "new topic"
 
 
 def test_run_export_incremental_resumes_from_latest(default_settings: ExporterSettings) -> None:
@@ -652,6 +657,35 @@ def test_run_export_detects_relevant_threads(default_settings: ExporterSettings)
     assert "participated" in record["relevance_reasons"]
 
 
+def test_run_export_detects_relevant_threads_via_mention(default_settings: ExporterSettings) -> None:
+    """A thread where another user mentions the authenticated user (but the user never replied)
+    is detected as relevant via the 'mentioned' reason, not 'participated'."""
+    threaded_message = {"ts": "1700000000.000001", "text": "parent", "reply_count": 1}
+    caller, _ = _tracking_api_caller(
+        message_data=[threaded_message],
+        reply_data=[
+            {"ts": "1700000000.000001", "thread_ts": "1700000000.000001", "text": "parent", "user": "U999"},
+            {
+                "ts": "1700000000.000002",
+                "thread_ts": "1700000000.000001",
+                "text": "hey <@U001> take a look",
+                "user": "U999",
+            },
+        ],
+    )
+    run_export(default_settings, api_caller=caller)
+
+    rt_path = default_settings.output_dir / "relevant_thread" / "created" / "events.jsonl"
+    assert rt_path.exists()
+    lines = rt_path.read_text().strip().splitlines()
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["thread_ts"] == "1700000000.000001"
+    assert "mentioned" in record["relevance_reasons"]
+    # The user never authored a reply, so 'participated' must be absent.
+    assert "participated" not in record["relevance_reasons"]
+
+
 def test_run_export_saves_relevant_thread_replies_for_newly_relevant_thread(
     default_settings: ExporterSettings,
 ) -> None:
@@ -853,17 +887,25 @@ def test_run_export_recently_active_channels_selects_top_n(temp_output_dir: Path
         max_recent_threads_for_reactions=0,
         cache_ttl_seconds=0,
     )
-    caller2, counts2 = _tracking_api_caller(
+    base_caller, _ = _tracking_api_caller(
         channel_data=[
             {"id": "C1", "name": "old-channel", "is_member": True},
             {"id": "C2", "name": "new-channel", "is_member": True},
             {"id": "C3", "name": "mid-channel", "is_member": True},
         ],
     )
+    history_channels: list[str] = []
+
+    def caller2(method: str, query_params: dict[str, str] | None = None) -> dict[str, Any]:
+        if method == "conversations.history" and query_params is not None:
+            history_channels.append(query_params["channel"])
+        return base_caller(method, query_params)
+
     run_export(settings_active, api_caller=caller2)
 
-    # Should have fetched messages for only 2 channels (the most recently active)
-    assert counts2.get("conversations.history", 0) == 2
+    # Should have fetched messages for exactly the two most recently active channels
+    # (new-channel C2 and mid-channel C3), explicitly excluding the oldest (old-channel C1).
+    assert set(history_channels) == {"C2", "C3"}
 
 
 def test_run_export_cached_channels_filtered_by_membership(temp_output_dir: Path) -> None:
