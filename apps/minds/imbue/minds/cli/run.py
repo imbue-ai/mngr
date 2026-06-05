@@ -154,13 +154,6 @@ def run(
     config_file: Path | None,
 ) -> None:
     """Run the minds bare-origin server with `mngr forward` as a subprocess."""
-    # The bare-origin port is reused as the local end of the plugin's
-    # ``--reverse 0:<port>`` SSH-tunnel spec, which mngr_forward requires
-    # to be > 0. Auto-allocation (--port 0) is rejected here so the failure
-    # is fast and clearly attributable to the caller, instead of the
-    # subprocess crashing later with a less obvious "local port must be > 0".
-    if port <= 0:
-        raise click.UsageError(f"--port must be > 0, got {port}")
     if config_file is None:
         raise click.ClickException(
             "No client config file is set. Activate an env first: "
