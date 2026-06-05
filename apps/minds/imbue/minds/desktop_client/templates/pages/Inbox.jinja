@@ -424,14 +424,13 @@
          so the two headers line up visually when the drawer sits
          beside the workspace's titlebar strip.
 
-         ``-webkit-app-region: no-drag`` on the close button: with
-         titleBarStyle: 'hiddenInset' on macOS, the OS treats the top
-         strip of the window as a drag handle by default, which eats
-         click events. The chrome titlebar already opts its own
-         buttons out via #minds-titlebar button { app-region: no-drag }
-         in Chrome.jinja; the inbox modal lives in its own WebContents
-         and needs the same opt-out here. #}
-      <div class="grid grid-cols-3 items-center px-5 h-[38px] border-b border-zinc-200">
+         The header is opted INTO ``-webkit-app-region: drag`` so the
+         user can grab it to drag the window (the chrome titlebar
+         beneath is no-drag while the modal is open). The close button
+         is opted back out via inline no-drag so its click is not
+         eaten by the drag handler. #}
+      <div class="grid grid-cols-3 items-center px-5 h-[38px] border-b border-zinc-200"
+           style="-webkit-app-region: drag;">
         <div></div>
         <h1 class="text-sm font-semibold text-zinc-800 uppercase tracking-wider leading-none text-center">Requests</h1>
         <button type="button" aria-label="Close"
@@ -468,5 +467,14 @@
         </div>
       </div>
     </div>
+    {# Drag strip in the backdrop to the right of the drawer. ``flex-1
+       h-[38px] self-start`` makes it sit at the top of the remaining
+       flex row width and only 38px tall, matching the chrome titlebar
+       height. With ``app-region: drag`` the OS uses this area as a
+       window-drag handle. The OS swallows mousedown for dragging, so
+       the backdrop's click-to-dismiss isn't triggered from here -- the
+       rest of the backdrop below the strip remains click-to-dismiss. #}
+    <div class="flex-1 h-[38px] self-start"
+         style="-webkit-app-region: drag;"></div>
   </div>
 </Base>

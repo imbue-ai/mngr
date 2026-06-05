@@ -31,6 +31,9 @@ contextBridge.exposeInMainWorld('minds', {
   onChromeEvent: (callback) => {
     ipcRenderer.on('chrome-event', (_event, data) => callback(data));
   },
+  onModalStateChanged: (callback) => {
+    ipcRenderer.on('modal-state-changed', (_event, data) => callback(data));
+  },
 
   // Sidebar
   toggleSidebar: () => ipcRenderer.send('toggle-sidebar'),

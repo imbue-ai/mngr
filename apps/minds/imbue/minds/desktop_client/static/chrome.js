@@ -295,6 +295,18 @@
 
   if (isElectron && window.minds.onChromeEvent) {
     window.minds.onChromeEvent(handleChromeEvent);
+    // Toggle a ``modal-open`` class on the body when the inbox modal
+    // (or any modal hosted in the main process's modalView) opens or
+    // closes. The chrome titlebar's CSS keys ``app-region: no-drag``
+    // off this class so the OS drag region doesn't intercept clicks
+    // intended for the modal's interior in the y=0..TITLEBAR strip.
+    if (window.minds.onModalStateChanged) {
+      window.minds.onModalStateChanged(function (data) {
+        if (!data) return;
+        if (data.open) document.body.classList.add('modal-open');
+        else document.body.classList.remove('modal-open');
+      });
+    }
   } else {
     var evtSource = null;
     function connectSSE() {

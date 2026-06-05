@@ -699,6 +699,16 @@ function openModal(bundle, url) {
   }
   bundle.modalVisible = true;
   bundle.modalUrl = url;
+  // Notify the chrome view that the modal is open so it can drop the
+  // ``-webkit-app-region: drag`` on #minds-titlebar. macOS unions drag
+  // regions across all visible views in a window, so the chrome
+  // titlebar's drag rule otherwise wins over the modal's no-drag in
+  // the y=0..TITLEBAR strip and intercepts clicks (e.g. the inbox X).
+  if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+    try {
+      bundle.chromeView.webContents.send('modal-state-changed', { open: true });
+    } catch { /* noop */ }
+  }
   if (!bundle.modalView.webContents.isDestroyed()) {
     bundle.modalView.webContents.loadURL(url);
   }
@@ -711,6 +721,12 @@ function closeModal(bundle) {
   bundle.modalView.setVisible(false);
   bundle.modalVisible = false;
   bundle.modalUrl = null;
+  // Restore the chrome titlebar's drag region.
+  if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+    try {
+      bundle.chromeView.webContents.send('modal-state-changed', { open: false });
+    } catch { /* noop */ }
+  }
   // Drop the page so its websockets/timers stop and a stale dialog isn't
   // briefly visible the next time the modal opens.
   if (!bundle.modalView.webContents.isDestroyed()) {
