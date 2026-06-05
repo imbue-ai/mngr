@@ -422,7 +422,7 @@
               <span class="landing-backup-badge hidden inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"></span>
               <a class="landing-backup-download hidden text-xs text-blue-600 hover:underline cursor-pointer" href="#">download</a>
               <span class="landing-health-badge hidden inline-flex items-center px-2 py-0.5 rounded text-sm font-medium"></span>
-              <button class="bg-transparent border border-transparent rounded-md cursor-pointer p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 flex items-center justify-center"
+              <Button variant="ghost" size="icon"
                       onclick="event.stopPropagation(); window.landingRestartClick(this)"
                       title="Restart workspace"
                       aria-label="Restart workspace">
@@ -430,8 +430,8 @@
                   <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
                   <path d="M21 3v6h-6"/>
                 </svg>
-              </button>
-              <button class="bg-transparent border border-transparent rounded-md cursor-pointer p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 flex items-center justify-center"
+              </Button>
+              <Button variant="ghost" size="icon"
                       onclick="event.stopPropagation(); window.location='/workspace/{{ agent_id }}/settings'"
                       title="Settings"
                       aria-label="Workspace settings">
@@ -439,7 +439,7 @@
                   <circle cx="12" cy="12" r="3"/>
                   <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
                 </svg>
-              </button>
+              </Button>
             </Card>
           {% endif %}
         {% endfor %}

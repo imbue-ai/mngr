@@ -496,7 +496,10 @@ def test_dev_styleguide_token_swatches_enumerate_root_declarations() -> None:
 
 def test_button_link_renders_anchor_with_href() -> None:
     html = CATALOG.render("ButtonLink", href="/create", _content="Create")
-    assert '<a href="/create"' in html
+    # attrs.render() sorts attributes alphabetically, so href ends up after
+    # class. Assert presence rather than ordering.
+    assert html.startswith("<a ")
+    assert 'href="/create"' in html
     assert ">Create</a>" in html
 
 
@@ -518,6 +521,82 @@ def test_button_submit_has_form_attribute_when_passed() -> None:
     html = CATALOG.render("ButtonSubmit", form="my-form", _content="Save")
     assert 'type="submit"' in html
     assert 'form="my-form"' in html
+
+
+def test_button_default_size_uses_md_geometry() -> None:
+    html = CATALOG.render("Button", variant="primary", _content="X")
+    # md size = px-3.5 py-2 rounded-md font-medium text-sm
+    assert "px-3.5" in html
+    assert "py-2" in html
+    assert "rounded-md" in html
+    assert "font-medium" in html
+    assert "text-sm" in html
+    # Should not pick up lg-specific classes
+    assert "py-3" not in html
+    assert "rounded-lg" not in html
+    assert "font-semibold" not in html
+
+
+def test_button_size_lg_uses_block_cta_geometry() -> None:
+    html = CATALOG.render("Button", variant="primary", size="lg", block=True, _content="Sign in")
+    assert "py-3" in html
+    assert "rounded-lg" in html
+    assert "font-semibold" in html
+    assert "text-base" in html
+    assert "w-full" in html
+
+
+def test_button_size_icon_uses_square_padding() -> None:
+    html = CATALOG.render("Button", variant="ghost", size="icon", _content="<svg/>")
+    assert "p-1.5" in html
+    # No horizontal/vertical padding mismatch (only one padding utility)
+    assert "px-3.5" not in html
+    assert "py-2 " not in html and not html.rstrip().endswith("py-2")
+
+
+def test_button_passes_through_arbitrary_attrs() -> None:
+    # JinjaX attrs.render() flows through undeclared HTML attributes like
+    # title, aria-label, and data-*, so callers don't have to enumerate
+    # them as props on the component.
+    html = CATALOG.render(
+        "Button",
+        variant="ghost",
+        size="icon",
+        _content="<svg/>",
+        _attrs={"title": "Restart", "aria-label": "Restart workspace", "data-x": "y"},
+    )
+    assert 'title="Restart"' in html
+    assert 'aria-label="Restart workspace"' in html
+    assert 'data-x="y"' in html
+
+
+def test_titlebar_button_default_is_nav_variant() -> None:
+    html = CATALOG.render("TitlebarButton", _content="<svg/>")
+    # nav variant => w-8 h-7 rounded active:bg-white/10
+    assert "w-8" in html
+    assert "h-7" in html
+    assert "active:bg-white/10" in html
+    # default tone => hover lifts to white/5 + zinc-200 text
+    assert "hover:bg-white/5" in html
+    assert "hover:text-zinc-200" in html
+    # Window-control geometry should NOT bleed into nav
+    assert "w-9" not in html
+    assert "h-[38px]" not in html
+
+
+def test_titlebar_button_control_variant_renders_window_control_geometry() -> None:
+    html = CATALOG.render("TitlebarButton", variant="control", _content="<svg/>")
+    assert "w-9" in html
+    assert "h-[38px]" in html
+    assert "rounded-none" in html
+
+
+def test_titlebar_button_danger_tone_applies_red_hover() -> None:
+    html = CATALOG.render("TitlebarButton", variant="control", tone="danger", _content="<svg/>")
+    assert "hover:bg-red-600" in html
+    assert "hover:text-white" in html
+    # The default tone's hover should be replaced, not merged.
+    assert "hover:bg-white/5" not in html
 
 
 def test_notice_renders_each_variant() -> None:

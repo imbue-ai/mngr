@@ -47,11 +47,22 @@ TEMPLATE_DIR: Final[Path] = Path(__file__).resolve().parent / "templates"
 # -- drifted across files trivially. Surface as uppercase to match the
 # `CATALOG` constant convention and to mark them as Jinja globals (not
 # per-render context).
+#
+# Size axis is independent of variant -- size dictates geometry (padding,
+# radius, font weight, text size), variant dictates color. ``md`` is the
+# default in-flow button; ``lg`` is the prominent block CTA used on the
+# auth flow; ``icon`` is a square padding for icon-only buttons (e.g. the
+# restart / settings icons in the Landing project row).
 _BTN_BASE: Final[str] = (
-    "inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-md "
-    "font-medium text-sm leading-tight transition-colors disabled:opacity-50 "
-    "disabled:cursor-not-allowed cursor-pointer no-underline whitespace-nowrap"
+    "inline-flex items-center justify-center gap-1.5 leading-tight "
+    "transition-colors disabled:opacity-50 disabled:cursor-not-allowed "
+    "cursor-pointer no-underline whitespace-nowrap"
 )
+_BTN_SIZES: Final[Mapping[str, str]] = {
+    "md": "px-3.5 py-2 rounded-md font-medium text-sm",
+    "lg": "px-4 py-3 rounded-lg font-semibold text-base",
+    "icon": "p-1.5 rounded-md font-medium text-sm",
+}
 _BTN_VARIANTS: Final[Mapping[str, str]] = {
     "primary": "bg-zinc-900 text-zinc-50 border border-transparent hover:bg-zinc-800",
     "secondary": "bg-zinc-100 text-zinc-900 border border-zinc-200 hover:bg-zinc-200",
@@ -78,7 +89,7 @@ def _build_catalog() -> Catalog:
     )
     catalog = Catalog(
         jinja_env=seed_env,
-        globals={"BTN_BASE": _BTN_BASE, "BTN_VARIANTS": _BTN_VARIANTS},
+        globals={"BTN_BASE": _BTN_BASE, "BTN_SIZES": _BTN_SIZES, "BTN_VARIANTS": _BTN_VARIANTS},
     )
     catalog.add_folder(str(TEMPLATE_DIR))
     return catalog
