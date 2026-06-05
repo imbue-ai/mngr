@@ -533,9 +533,21 @@ def _screenshot_all(scenarios: list[Scenario], png_dir: Path, port: int) -> None
                 target = f"http://127.0.0.1:{port}/html/{sc.name}.html"
                 try:
                     page.goto(target, wait_until="networkidle", timeout=15000)
-                    # Tailwind Play CDN generates the utility styles at
-                    # runtime; give it a beat to settle before snapshotting.
-                    page.wait_for_timeout(400)
+                    # Tailwind Play CDN generates utility styles at runtime
+                    # by injecting a large ``<style>`` element into the
+                    # document head once it has parsed every class name on
+                    # the page. ``networkidle`` doesn't guarantee that has
+                    # happened: the script tag is requested, but the script
+                    # itself still runs asynchronously after the network
+                    # settles. Wait for the generated stylesheet to be
+                    # present (and non-trivial in size) before snapping --
+                    # otherwise we screenshot the unstyled "ASCII-art"
+                    # version of the page.
+                    page.wait_for_function(
+                        "() => Array.from(document.head.querySelectorAll('style'))"
+                        "  .some(s => s.textContent.length > 1000)",
+                        timeout=10000,
+                    )
                     for action in sc.interactions:
                         action(page)
                     page.screenshot(path=str(png_dir / f"{sc.name}.png"), full_page=True)
