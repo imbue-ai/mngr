@@ -2814,10 +2814,11 @@ def _handle_inbox_detail_fragment(
         return HTMLResponse(content="<p>Not authenticated</p>")
     inbox: RequestInbox | None = request.app.state.request_inbox
     if inbox is None:
-        return HTMLResponse(
-            content=render_inbox_unavailable_fragment(message="Inbox not available."),
-            status_code=200,
-        )
+        # The InboxUnavailable heading reads "This permission request is no
+        # longer available", which makes no sense when the issue is that there
+        # is no inbox at all. Drop the supporting message so only the heading
+        # shows; the template treats an empty message as the no-extra-copy case.
+        return HTMLResponse(content=render_inbox_unavailable_fragment())
     req_event = inbox.get_request_by_id(request_id)
     if req_event is None:
         return HTMLResponse(
