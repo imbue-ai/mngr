@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 import imbue.mngr.resources as mngr_resources
+from imbue.mngr.providers.ssh_host_setup import REQUIRED_HOST_PACKAGES
 from imbue.mngr.providers.ssh_host_setup import RequiredHostPackage
 from imbue.mngr.providers.ssh_host_setup import WARNING_PREFIX
 from imbue.mngr.providers.ssh_host_setup import _build_package_check_snippet
@@ -38,10 +39,16 @@ def test_regular_user() -> None:
 
 
 def test_valid_shell_command() -> None:
-    """The command should be a valid shell command string."""
+    """The command should check each required package and create the host dir."""
     cmd = build_check_and_install_packages_command("/mngr/hosts/test")
-    assert isinstance(cmd, str)
-    assert len(cmd) > 0
+    # Each required package must be checked for and queued for install on miss.
+    for pkg in REQUIRED_HOST_PACKAGES:
+        assert f'PKGS_TO_INSTALL="$PKGS_TO_INSTALL {pkg.package}"' in cmd
+    # Missing packages are installed in a single apt-get call.
+    assert "apt-get install -y -qq $PKGS_TO_INSTALL" in cmd
+    # The sshd run directory and the host directory are created.
+    assert "mkdir -p /run/sshd" in cmd
+    assert "mkdir -p /mngr/hosts/test" in cmd
 
 
 def test_build_package_check_snippet_default_check() -> None:
@@ -64,15 +71,25 @@ def test_build_package_check_snippet_custom_check() -> None:
 
 
 def test_valid_configure_ssh_command() -> None:
-    """The command should be a valid shell command string."""
+    """The command should authorize the client key and install the host key with correct perms."""
+    client_key = "ssh-ed25519 AAAA... user@host"
     cmd = build_configure_ssh_command(
         user="root",
-        client_public_key="ssh-ed25519 AAAA... user@host",
+        client_public_key=client_key,
         host_private_key="-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----",
         host_public_key="ssh-ed25519 BBBB... hostkey",
     )
-    assert isinstance(cmd, str)
-    assert len(cmd) > 0
+    # The client public key is written into authorized_keys.
+    assert f"printf '%s\\n' '{client_key}' > '/root/.ssh/authorized_keys'" in cmd
+    # The host private key is installed at the canonical ed25519 path.
+    assert "/etc/ssh/ssh_host_ed25519_key" in cmd
+    # Any pre-existing host keys are removed *before* the new private key is written.
+    assert "rm -f /etc/ssh/ssh_host_*" in cmd
+    assert cmd.index("rm -f /etc/ssh/ssh_host_*") < cmd.index("> /etc/ssh/ssh_host_ed25519_key")
+    # authorized_keys and the host private key are chmod 600; the host public key is 644.
+    assert "chmod 600 '/root/.ssh/authorized_keys'" in cmd
+    assert "chmod 600 /etc/ssh/ssh_host_ed25519_key" in cmd
+    assert "chmod 644 /etc/ssh/ssh_host_ed25519_key.pub" in cmd
 
 
 def test_extracts_warnings() -> None:
@@ -120,10 +137,10 @@ def test_skips_empty_warnings() -> None:
 def test_load_resource_script_loads_activity_watcher() -> None:
     """Should load the activity watcher script from resources."""
     script = load_resource_script("activity_watcher.sh")
-    assert isinstance(script, str)
-    assert len(script) > 0
     assert "#!/usr/bin/env bash" in script
-    assert "activity_watcher" in script.lower() or "HOST_DATA_DIR" in script
+    # A function name unique to activity_watcher.sh, so this fails if a different
+    # (or empty) script were loaded under this name.
+    assert "has_running_agent_sessions()" in script
 
 
 def test_build_start_activity_watcher_command() -> None:
@@ -138,14 +155,25 @@ def test_build_start_activity_watcher_command() -> None:
 
 
 def test_build_start_activity_watcher_command_escapes_quotes() -> None:
-    """Should properly escape single quotes in the script content."""
+    """Single quotes in the embedded script content should be shell-escaped."""
     cmd = build_start_activity_watcher_command("/mngr/hosts/test")
-    # The command should contain the script content with proper escaping
-    assert isinstance(cmd, str)
-    # Single quotes in the script should be escaped as '\"'\"'
-    # Since the script contains single quotes in strings like 'MNGR_HOST_DIR'
-    # they should be properly escaped
-    assert cmd.count("printf") >= 1
+    # activity_watcher.sh / mngr_log.sh contain literal single quotes, which must
+    # be emitted as the '"'"' shell-escape sequence so the surrounding single
+    # quoting of the printf payload is not broken.
+    assert "'\"'\"'" in cmd
+
+
+def test_build_configure_ssh_command_escapes_quotes() -> None:
+    """Single quotes in the client public key should be shell-escaped."""
+    cmd = build_configure_ssh_command(
+        user="root",
+        client_public_key="ssh-ed25519 AAAA key'with'quote",
+        host_private_key="private",
+        host_public_key="public",
+    )
+    # A single quote in the key must be emitted as the '"'"' escape sequence so a
+    # malicious or malformed key cannot break out of the single-quoted printf arg.
+    assert "key'\"'\"'with'\"'\"'quote" in cmd
 
 
 def test_build_check_command_creates_symlink_when_volume_provided() -> None:
@@ -214,7 +242,7 @@ def test_build_add_known_hosts_command_regular_user() -> None:
     cmd = build_add_known_hosts_command("alice", (entry,))
     assert cmd is not None
     assert "/home/alice/.ssh" in cmd
-    assert "/root" not in cmd
+    assert "/root/.ssh" not in cmd
 
 
 def test_build_add_known_hosts_command_escapes_quotes() -> None:
@@ -243,7 +271,7 @@ def test_build_add_authorized_keys_command_regular_user() -> None:
     cmd = build_add_authorized_keys_command("bob", (entry,))
     assert cmd is not None
     assert "/home/bob/.ssh" in cmd
-    assert "/root" not in cmd
+    assert "/root/.ssh" not in cmd
 
 
 # =============================================================================
