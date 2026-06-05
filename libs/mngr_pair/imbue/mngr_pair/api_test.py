@@ -16,7 +16,12 @@ from imbue.mngr_pair.api import determine_git_sync_actions
 
 
 def test_unison_syncer_builds_basic_command(tmp_path: Path, cg: ConcurrencyGroup) -> None:
-    """Test that UnisonSyncer builds a valid unison command."""
+    """Test that UnisonSyncer builds a valid unison command for the default mode.
+
+    Asserts the exact command prefix (program, both paths, and the standard
+    watch/auto/batch/git-ignore flags in order) so a regression in any flag,
+    value, or its position is caught -- not just that tokens appear somewhere.
+    """
     source = tmp_path / "source"
     target = tmp_path / "target"
     source.mkdir()
@@ -32,13 +37,21 @@ def test_unison_syncer_builds_basic_command(tmp_path: Path, cg: ConcurrencyGroup
 
     cmd = syncer._build_unison_command()
 
-    assert "unison" in cmd
-    assert str(source) in cmd
-    assert str(target) in cmd
-    assert "-repeat" in cmd
-    assert "watch" in cmd
-    assert "-auto" in cmd
-    assert "-batch" in cmd
+    # NEWER conflict mode appends ["-prefer", "newer"]; BOTH direction adds no
+    # force flag, so this is the complete command for the default configuration.
+    assert cmd == [
+        "unison",
+        str(source),
+        str(target),
+        "-repeat",
+        "watch",
+        "-auto",
+        "-batch",
+        "-ignore",
+        "Name .git",
+        "-prefer",
+        "newer",
+    ]
 
 
 def test_unison_syncer_builds_command_with_forward_direction(tmp_path: Path, cg: ConcurrencyGroup) -> None:
@@ -103,10 +116,10 @@ def test_unison_syncer_builds_command_with_exclude_patterns(tmp_path: Path, cg: 
 
     cmd = syncer._build_unison_command()
 
-    # Check that exclude patterns are added
-    cmd_str = " ".join(cmd)
-    assert "*.pyc" in cmd_str
-    assert "__pycache__" in cmd_str
+    # Each exclude pattern must appear as a distinct ["-ignore", "Name <pattern>"] pair.
+    ignore_values = [cmd[i + 1] for i, arg in enumerate(cmd[:-1]) if arg == "-ignore"]
+    assert "Name *.pyc" in ignore_values
+    assert "Name __pycache__" in ignore_values
 
 
 def test_unison_syncer_always_excludes_git_directory(tmp_path: Path, cg: ConcurrencyGroup) -> None:
@@ -125,9 +138,11 @@ def test_unison_syncer_always_excludes_git_directory(tmp_path: Path, cg: Concurr
     )
 
     cmd = syncer._build_unison_command()
-    cmd_str = " ".join(cmd)
 
-    assert ".git" in cmd_str
+    # The .git directory must be excluded via the exact ["-ignore", "Name .git"] pair,
+    # not merely have ".git" appear somewhere (which any path component could supply).
+    ignore_values = [cmd[i + 1] for i, arg in enumerate(cmd[:-1]) if arg == "-ignore"]
+    assert "Name .git" in ignore_values
 
 
 def test_unison_syncer_is_not_running_initially(tmp_path: Path, cg: ConcurrencyGroup) -> None:
@@ -365,8 +380,14 @@ def test_unison_syncer_stop_is_noop_when_not_started(tmp_path: Path, cg: Concurr
     syncer.stop()
 
 
-def test_git_sync_action_default_values() -> None:
-    """Test that GitSyncAction has correct default values."""
+def test_git_sync_action_defaults_to_no_side_ahead() -> None:
+    """A GitSyncAction built with only branch names defaults to neither side ahead.
+
+    This default is what ``determine_git_sync_actions`` relies on for the
+    "no divergence" cases, so it is pinned here. The branch-name fields are not
+    asserted because echoing back a value just passed to the constructor is
+    tautological.
+    """
     action = GitSyncAction(
         agent_branch="main",
         local_branch="main",
@@ -374,5 +395,3 @@ def test_git_sync_action_default_values() -> None:
 
     assert action.agent_is_ahead is False
     assert action.local_is_ahead is False
-    assert action.agent_branch == "main"
-    assert action.local_branch == "main"
