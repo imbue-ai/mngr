@@ -274,6 +274,22 @@
 
     // -- Approve / Deny submission --
 
+    // Bring a just-revealed notification (progress / error / manual
+     // credentials box) into view at the bottom of the detail pane.
+     // Required because the form sits at the top of the right pane and
+     // the notice that's shown after Approve lives below it -- on a
+     // tall request fragment the notice would otherwise be scrolled
+     // off-screen.
+    function scrollDetailIntoView(el) {
+      if (!el) return;
+      try {
+        el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      } catch (e) {
+        // Older browsers without smooth/block options.
+        inboxDetail.scrollTop = inboxDetail.scrollHeight;
+      }
+    }
+
     async function submitGrant(form, resolvedId) {
       var approveBtn = document.getElementById("permissions-approve-btn");
       var errorBox = document.getElementById("permissions-error");
@@ -283,7 +299,10 @@
       if (approveBtn) approveBtn.disabled = true;
       if (errorBox) errorBox.classList.add("hidden");
       if (manualBox) manualBox.classList.add("hidden");
-      if (progress) progress.classList.remove("hidden");
+      if (progress) {
+        progress.classList.remove("hidden");
+        scrollDetailIntoView(progress);
+      }
 
       var formData = new FormData(form);
       try {
@@ -307,17 +326,26 @@
           var msgEl = document.getElementById("permissions-manual-credentials-message");
           if (cmdEl) cmdEl.textContent = data.set_credentials_example || "";
           if (msgEl) msgEl.textContent = data.message || "";
-          if (manualBox) manualBox.classList.remove("hidden");
+          if (manualBox) {
+            manualBox.classList.remove("hidden");
+            scrollDetailIntoView(manualBox);
+          }
           updateApproveState();
           return;
         }
         if (errorMsg) errorMsg.textContent = data.message || "Authorization failed.";
-        if (errorBox) errorBox.classList.remove("hidden");
+        if (errorBox) {
+          errorBox.classList.remove("hidden");
+          scrollDetailIntoView(errorBox);
+        }
         if (approveBtn) approveBtn.disabled = false;
       } catch (err) {
         if (progress) progress.classList.add("hidden");
         if (errorMsg) errorMsg.textContent = err && err.message ? err.message : String(err);
-        if (errorBox) errorBox.classList.remove("hidden");
+        if (errorBox) {
+          errorBox.classList.remove("hidden");
+          scrollDetailIntoView(errorBox);
+        }
         if (approveBtn) approveBtn.disabled = false;
       }
     }
