@@ -189,26 +189,16 @@
         <div class="rounded-lg overflow-hidden border border-zinc-200 bg-zinc-900">
           <div class="h-[38px] flex items-center select-none border-b border-white/10 px-1">
             <div class="flex gap-0.5">
-              <TitlebarButton title="Projects">
-                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
-              </TitlebarButton>
-              <TitlebarButton title="Home">
-                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12L12 3l9 9"/><path d="M5 10v10a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V10"/></svg>
-              </TitlebarButton>
-              <TitlebarButton title="Back">
-                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
-              </TitlebarButton>
-              <TitlebarButton title="Forward">
-                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg>
-              </TitlebarButton>
+              <TitlebarButton title="Projects"><Icon24 name="sidebar" /></TitlebarButton>
+              <TitlebarButton title="Home"><Icon24 name="home" /></TitlebarButton>
+              <TitlebarButton title="Back"><Icon24 name="back" /></TitlebarButton>
+              <TitlebarButton title="Forward"><Icon24 name="forward" /></TitlebarButton>
             </div>
             <div class="flex-1 flex items-center justify-center gap-2 px-2 min-w-0">
               <span class="accent-swatch w-2.5 h-2.5 rounded-sm shrink-0"></span>
               <span class="text-zinc-200 text-xs whitespace-nowrap overflow-hidden text-ellipsis">my-workspace</span>
             </div>
-            <TitlebarButton title="Requests" extra="relative">
-              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-            </TitlebarButton>
+            <TitlebarButton title="Requests" extra="relative"><Icon24 name="messages" /></TitlebarButton>
           </div>
         </div>
         <div class="mt-1 text-[11px] text-zinc-500 font-mono">TitlebarButton.jinja (variant="nav")</div>
@@ -220,7 +210,7 @@
         <div class="rounded-lg overflow-hidden border border-zinc-200 bg-zinc-900">
           <div class="h-[38px] flex items-center justify-end px-1">
             <TitlebarButton title="Requests" extra="relative">
-              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+              <Icon24 name="messages" />
               <span class="absolute top-0.5 right-0.5 w-2 h-2 rounded-full bg-red-500"></span>
             </TitlebarButton>
           </div>
@@ -233,15 +223,9 @@
         <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Window controls</div>
         <div class="rounded-lg overflow-hidden border border-zinc-200 bg-zinc-900">
           <div class="h-[38px] flex items-center justify-end">
-            <TitlebarButton variant="control" title="Minimize">
-              <svg viewBox="0 0 12 12" class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="6" x2="10" y2="6"/></svg>
-            </TitlebarButton>
-            <TitlebarButton variant="control" title="Maximize">
-              <svg viewBox="0 0 12 12" class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="8" height="8" rx="0.5"/></svg>
-            </TitlebarButton>
-            <TitlebarButton variant="control" tone="danger" title="Close">
-              <svg viewBox="0 0 12 12" class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="2" x2="10" y2="10"/><line x1="10" y1="2" x2="2" y2="10"/></svg>
-            </TitlebarButton>
+            <TitlebarButton variant="control" title="Minimize"><Icon12 name="minimize" /></TitlebarButton>
+            <TitlebarButton variant="control" title="Maximize"><Icon12 name="maximize" /></TitlebarButton>
+            <TitlebarButton variant="control" tone="danger" title="Close"><Icon12 name="close" /></TitlebarButton>
           </div>
         </div>
         <p class="mt-1 text-[11px] text-zinc-500">
@@ -326,6 +310,74 @@
         <div class="mt-1 text-[11px] text-zinc-500 font-mono">tokens.css :: .spinner (+ .spinner-accent) + Spinner.jinja</div>
       </div>
 
+      {# Icons -- 24x24 lucide-style stroke icons + 12x12 chrome glyphs.
+         Brand marks (Google / GitHub) live in auth/OauthIcon.jinja
+         because they are multi-color and don't share the stroke shell.
+         The 20x20 filled icons (DialogCloseButton X, Latchkey check)
+         stay inline next to their use sites. #}
+      <div class="mb-6">
+        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Icons -- 24x24 (Icon24)</div>
+        <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-wrap items-center gap-4 text-zinc-700">
+          <div class="flex flex-col items-center gap-1 w-16">
+            <Icon24 name="sidebar" />
+            <code class="text-[11px] font-mono text-zinc-500">sidebar</code>
+          </div>
+          <div class="flex flex-col items-center gap-1 w-16">
+            <Icon24 name="home" />
+            <code class="text-[11px] font-mono text-zinc-500">home</code>
+          </div>
+          <div class="flex flex-col items-center gap-1 w-16">
+            <Icon24 name="back" />
+            <code class="text-[11px] font-mono text-zinc-500">back</code>
+          </div>
+          <div class="flex flex-col items-center gap-1 w-16">
+            <Icon24 name="forward" />
+            <code class="text-[11px] font-mono text-zinc-500">forward</code>
+          </div>
+          <div class="flex flex-col items-center gap-1 w-16">
+            <Icon24 name="messages" />
+            <code class="text-[11px] font-mono text-zinc-500">messages</code>
+          </div>
+          <div class="flex flex-col items-center gap-1 w-16">
+            <Icon24 name="restart" />
+            <code class="text-[11px] font-mono text-zinc-500">restart</code>
+          </div>
+          <div class="flex flex-col items-center gap-1 w-16">
+            <Icon24 name="settings" />
+            <code class="text-[11px] font-mono text-zinc-500">settings</code>
+          </div>
+          <div class="flex flex-col items-center gap-1 w-16">
+            <Icon24 name="external" />
+            <code class="text-[11px] font-mono text-zinc-500">external</code>
+          </div>
+        </div>
+        <p class="mt-1 text-[11px] text-zinc-500">
+          Stroke icons inherit color from the parent via
+          ``currentColor``. Sizes: ``sm`` (w-3.5), ``md`` (w-4, default),
+          ``lg`` (w-5).
+        </p>
+        <div class="mt-0.5 text-[11px] text-zinc-500 font-mono">Icon24.jinja :: ICONS_24 in templates.py</div>
+      </div>
+
+      <div class="mb-6">
+        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Icons -- 12x12 chrome glyphs (Icon12)</div>
+        <div class="bg-zinc-900 border border-zinc-200 rounded-lg p-4 flex items-center gap-4 text-zinc-200">
+          <div class="flex flex-col items-center gap-1 w-16">
+            <Icon12 name="minimize" />
+            <code class="text-[11px] font-mono text-zinc-400">minimize</code>
+          </div>
+          <div class="flex flex-col items-center gap-1 w-16">
+            <Icon12 name="maximize" />
+            <code class="text-[11px] font-mono text-zinc-400">maximize</code>
+          </div>
+          <div class="flex flex-col items-center gap-1 w-16">
+            <Icon12 name="close" />
+            <code class="text-[11px] font-mono text-zinc-400">close</code>
+          </div>
+        </div>
+        <div class="mt-1 text-[11px] text-zinc-500 font-mono">Icon12.jinja :: ICONS_12 in templates.py (used only inside TitlebarButton variant="control")</div>
+      </div>
+
       {# Buttons #}
       <div class="mb-6">
         <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Buttons -- variants</div>
@@ -346,12 +398,7 @@
           <div class="flex flex-wrap items-center gap-2">
             <Button variant="primary" size="md">Default (md)</Button>
             <Button variant="primary" size="lg">Large (lg, prominent CTA)</Button>
-            <Button variant="ghost" size="icon" title="Settings" aria-label="Settings">
-              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="12" r="3"/>
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-              </svg>
-            </Button>
+            <Button variant="ghost" size="icon" title="Settings" aria-label="Settings"><Icon24 name="settings" /></Button>
           </div>
           <Button variant="primary" size="lg" block>Block (w-full, used for auth CTAs)</Button>
         </div>

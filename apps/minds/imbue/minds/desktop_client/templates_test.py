@@ -660,6 +660,36 @@ def test_card_interactive_adds_hover_classes() -> None:
     assert "cursor-pointer" in interactive
 
 
+def test_icon24_renders_with_stroke_shell_and_default_size() -> None:
+    # ``home`` is one of the icons in the ICONS_24 catalog global.
+    html = CATALOG.render("Icon24", name="home")
+    # Stroke-based shell attrs applied uniformly.
+    assert 'viewBox="0 0 24 24"' in html
+    assert 'fill="none"' in html
+    assert 'stroke="currentColor"' in html
+    assert 'stroke-width="2"' in html
+    assert 'aria-hidden="true"' in html
+    # Default size = md = w-4 h-4.
+    assert "w-4 h-4" in html
+    # Path data from the catalog flows through unescaped.
+    assert '<path d="M3 12L12 3l9 9"/>' in html
+
+
+def test_icon24_size_axis() -> None:
+    for size, css_class in (("sm", "w-3.5 h-3.5"), ("md", "w-4 h-4"), ("lg", "w-5 h-5")):
+        html = CATALOG.render("Icon24", name="home", size=size)
+        assert css_class in html
+
+
+def test_icon12_renders_with_w3_h3_size_and_12_viewbox() -> None:
+    html = CATALOG.render("Icon12", name="close")
+    assert 'viewBox="0 0 12 12"' in html
+    assert "w-3 h-3" in html
+    # Two lines forming the X.
+    assert '<line x1="2" y1="2" x2="10" y2="10"/>' in html
+    assert '<line x1="10" y1="2" x2="2" y2="10"/>' in html
+
+
 def test_spinner_renders_for_each_size() -> None:
     for size, css_class in (("sm", "w-3.5"), ("md", "w-[18px]"), ("lg", "w-8")):
         html = CATALOG.render("Spinner", size=size)
