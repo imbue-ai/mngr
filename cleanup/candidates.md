@@ -1,0 +1,87 @@
+# wz/minds_onboard cleanup tracker
+
+Baseline (rollback point): mngr `1b91eb590` × FCT v0.2.35 = pilot `fb96b1b3` × ToDesktop `260605t4i0qqmlg`. ci.yml + launch-to-msg both verified green; users have the shipped 0.2.35 binary.
+
+Inventory produced by six parallel read-only subagents on 2026-06-05. Reports were narrower than expected because `f794b3e9` (revert libs/ changes) and `a28f5a14` (drop PR #1869 cred-bridge) already removed two large classes of branch-only hacks earlier in the iteration.
+
+Green gate per candidate = launch-to-msg.yml + ci.yml both green.
+
+## Tier 1 — high-confidence (test first)
+
+### todowrite-cleanup-pilot (PILOT)
+
+Bundles two pilot-side dead-code deletions into one CI cycle.
+
+- Delete `scripts/claude_block_todowrite.sh` (17-line PreToolUse hook, not referenced anywhere — `grep -rn "claude_block_todowrite"` only matches itself).
+- Drop `permissions.deny: ["TodoWrite"]` block from `.claude/settings.json` (no-op under `--dangerously-skip-permissions`, which `.mngr/settings.toml:54` sets).
+
+FCT main already removed both in `c90b1dfb` ("Replace permissions.deny and PreToolUse hooks with --disallowed-tools") with rationale that `permissions.deny` never fires under `--dangerously-skip-permissions`. Pilot's `cli_args` already contains `--disallowed-tools ...,TodoWrite,...`, so functional coverage is intact.
+
+- **status**: pending
+- **test path**: pilot test branch → tag `v0.2.36-rc1-todowrite-cleanup` → launch-to-msg with that template_ref
+- **expected blast radius**: zero (both items are dead/no-op today)
+
+### restore-supply-chain-cooldowns (MNGR)
+
+Two sibling reverts:
+
+- Restore `apps/minds/pnpm-workspace.yaml`'s `minimumReleaseAge: 20160` and `minimumReleaseAgeExclude: [latchkey, "@imbue-ai/detent"]` (main's targeted exempt-list shape, not pre-disable wholesale).
+- Restore `apps/minds/electron/pyproject/pyproject.toml`'s `[tool.uv] exclude-newer = "2026-05-23T00:00:00Z"` (or a more recent fixed timestamp).
+
+Cited blocker `modal 1.4.3` published 2026-05-18 — now 17 days old, comfortably outside the 14-day cooldown. Both gates were disabled "temporarily while CI churns"; that period is over.
+
+- **status**: pending
+- **test path**: mngr candidate branch → launch-to-msg with template_ref=v0.2.35 + ci.yml on the candidate SHA
+- **expected blast radius**: ToDesktop `pnpm install` + `uv lock` regeneration both re-enforce cooldowns. If any transitive PyPI dep has only published a >cutoff release with no older one, build breaks. Mitigation: pick a recent fixed `exclude-newer` and audit if it fails.
+
+## Tier 2 — medium-confidence (test after Tier 1)
+
+### restore-stop-hook-enabled-when (PILOT)
+
+Restore `.reviewer/settings.json`'s `enabled_when` from `""` (always-disabled) to main's `test -n "${MNGR_AGENT_STATE_DIR:-}" || test -n "${SCULPTOR_API_PORT:-}"`.
+
+Original disable rationale (commit `654ccc8a` 2026-04-28) cited two root causes: (a) `.reviewer/logs/` not gitignored, causing the stop-hook's "repo must be clean" precondition to fail on its own log file and trigger a 16-min commit/gitignore loop; (b) general orchestrator latency in the imbue-code-guardian plugin. Main fixed (a) ~7h later in `4bcf74ca` ("Prevent silly files"); (b) is in plugin scope and can't be verified from FCT alone.
+
+- **status**: pending
+- **test path**: pilot test branch → tag `v0.2.36-rc2-stop-hook` → launch-to-msg with that template_ref
+- **expected blast radius**: if (b) is still live, first-message latency spikes back to ~16 minutes. launch-to-msg's end-to-end timing will surface it.
+
+## Tier 3 — low-confidence (defer; revisit if Tier 1+2 leave runner time)
+
+### bundled-lima-pinned-at-2.0.3 (MNGR)
+
+Bump `LIMA_VERSION` in `apps/minds/scripts/build.js` from `2.0.3` to `2.1.1` (main's value). Upstream issue `lima-vm/lima#5042` is closed but `#4558` (umbrella) still open. Need to verify the 2.1.x changelog confirms the gvisor-tap-vsock fix landed before bumping.
+
+- **status**: pending (defer pending changelog read)
+- **test path**: mngr candidate branch → launch-to-msg with template_ref=v0.2.35 (lima boot is full end-to-end)
+
+### homebrew-path-augmentation (MNGR)
+
+Drop the explicit `homebrewPaths` prepend in `apps/minds/electron/backend.js:228-242`. Lima is bundled now, so the original symptom (Homebrew limactl lookup) is gone. Risk: lima provider may shell out to other CLIs (`ssh`, etc.) that rely on Homebrew PATH on some hosts.
+
+- **status**: pending (audit other CLI lookups first)
+- **test path**: mngr candidate branch → launch-to-msg + ci.yml
+
+### laptop-agent-types-seed (MNGR)
+
+Per slice 3, still load-bearing — no main-side fix for the cross-config `[agent_types.main]` mapping. Skip.
+
+- **status**: still_needed (no action)
+
+### create-agent-api-409-duplicate-name-guard (MNGR)
+
+Per slice 3, branch's cross-host check is stricter than main's per-host check. Still meaningful at the API boundary while minds uses the hardcoded `system-services` agent name. Skip.
+
+- **status**: still_needed (no action)
+
+## Out-of-scope but flagged
+
+- `libs/mngr_claude/changelog/wz-fix-claude-credentials-symlink.md` describes the now-removed PR #1869 bridge. Hygiene cleanup; not a test candidate.
+- The base64-encoded Phase D cred-bridge mentioned in slice 3 lives in an out-of-date external worktree (`6917c024`), not pilot `fb96b1b3`. Already removed from pilot proper in `b506918`.
+
+## Loop log
+
+Per-iteration: timestamp, candidate, candidate branch / tag, launch-to-msg run id, ci.yml run id, outcome, action taken.
+
+| # | candidate | branch / tag | launch-to-msg | ci.yml | outcome | action |
+|---|---|---|---|---|---|---|
