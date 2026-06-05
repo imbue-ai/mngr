@@ -660,6 +660,52 @@ def test_card_interactive_adds_hover_classes() -> None:
     assert "cursor-pointer" in interactive
 
 
+def test_form_label_default_is_block_with_mb_1_5() -> None:
+    # The prop is ``target`` rather than ``for`` because JinjaX parses
+    # the prop declaration block as a Python function signature, and
+    # ``for`` is a reserved keyword. The rendered HTML still uses the
+    # standard HTML ``for`` attribute.
+    html = CATALOG.render("FormLabel", target="email", _content="Email")
+    assert 'for="email"' in html
+    assert "block" in html
+    assert "mb-1.5" in html
+    assert "text-sm" in html
+    assert "font-medium" in html
+    assert "text-zinc-900" in html
+
+
+def test_form_label_inline_drops_block_and_mb() -> None:
+    html = CATALOG.render("FormLabel", target="x", inline=True, _content="Provider")
+    # Inline layout: no block / mb classes (the parent flex row handles
+    # spacing), but the shared color and weight tokens remain.
+    assert "block" not in html
+    assert "mb-1.5" not in html
+    assert "text-sm" in html
+    assert "font-medium" in html
+
+
+def test_oauth_button_renders_google_label_and_brand_icon_with_hook_class() -> None:
+    html = CATALOG.render("auth.OauthButton", provider="google")
+    # The .oauth-btn hook is load-bearing -- static/auth.js queries for
+    # it to enable/disable all OAuth buttons as a group.
+    assert "oauth-btn" in html
+    # Label text + data-oauth provider attr.
+    assert "Continue with Google" in html
+    assert 'data-oauth="google"' in html
+    # Brand glyph from auth.OauthIcon is composed inline. The path
+    # fragment is one of the four <path d="..."> values unique to
+    # Google's blue triangle.
+    assert "M22.56 12.25" in html
+
+
+def test_oauth_button_github_uses_github_label_and_glyph() -> None:
+    html = CATALOG.render("auth.OauthButton", provider="github")
+    assert "Continue with GitHub" in html
+    assert 'data-oauth="github"' in html
+    # Path fragment that opens GitHub's mark glyph.
+    assert "M12 0C5.37 0 0 5.37" in html
+
+
 def test_card_page_default_padding_and_max_width() -> None:
     html = CATALOG.render("CardPage", title="x", _content="<p>body</p>")
     # Card surface: bg/border/rounded/shadow + p-10 + max-w-[420px] + w-full.

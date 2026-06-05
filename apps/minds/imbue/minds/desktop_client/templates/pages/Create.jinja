@@ -191,7 +191,7 @@
 
         <div>
           <div class="flex items-center justify-between gap-3">
-            <label for="launch_mode" class="text-sm text-zinc-900 font-medium">Compute provider</label>
+            <FormLabel target="launch_mode" inline>Compute provider</FormLabel>
             <Select id="launch_mode" name="launch_mode" width="w-48">
               {% for mode in launch_modes %}
                 <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}
@@ -204,7 +204,7 @@
 
         <div>
           <div class="flex items-center justify-between gap-3">
-            <label for="ai_provider" class="text-sm text-zinc-900 font-medium">AI provider</label>
+            <FormLabel target="ai_provider" inline>AI provider</FormLabel>
             <Select id="ai_provider" name="ai_provider" width="w-48">
               {% for provider in ai_providers %}
                 <option value="{{ provider.value }}"{% if provider.value == selected_ai_provider %} selected{% endif %}
@@ -214,14 +214,14 @@
           </div>
           <p id="ai-provider-account-error" class="hidden mt-1 text-xs text-amber-600 text-right">imbue_cloud requires a selected account.</p>
           <div id="api-key-row" class="mt-2 hidden">
-            <label for="anthropic_api_key" class="text-sm text-zinc-900 font-medium block mb-1">Anthropic API key</label>
+            <FormLabel target="anthropic_api_key">Anthropic API key</FormLabel>
             <TextInput name="anthropic_api_key" :value="anthropic_api_key" placeholder="sk-ant-..." id="anthropic_api_key" type="password" />
           </div>
         </div>
 
         <div>
           <div class="flex items-center justify-between gap-3">
-            <label for="backup_provider" class="text-sm text-zinc-900 font-medium">Backup provider</label>
+            <FormLabel target="backup_provider" inline>Backup provider</FormLabel>
             <Select id="backup_provider" name="backup_provider" width="w-48">
               {% for provider in backup_providers %}
                 <option value="{{ provider.value }}"{% if provider.value == selected_backup_provider %} selected{% endif %}
@@ -232,7 +232,7 @@
           <p id="backup-provider-account-error" class="hidden mt-1 text-xs text-amber-600 text-right">imbue_cloud requires a selected account.</p>
 
           <div id="backup-api-key-row" class="mt-2 hidden">
-            <label for="backup_api_key_env" class="text-sm text-zinc-900 font-medium block mb-1">restic environment</label>
+            <FormLabel target="backup_api_key_env">restic environment</FormLabel>
             <p class="mb-1 text-xs text-zinc-400">
               Written verbatim to <code>restic.env</code>. Don't set <code>RESTIC_PASSWORD</code> -- minds assigns each
               workspace its own. See the
@@ -245,7 +245,7 @@
 
           <div id="backup-encryption-row" class="mt-2 hidden">
             <div class="flex items-center justify-between gap-3">
-              <label for="backup_encryption_method" class="text-sm text-zinc-900 font-medium">Backup encryption method</label>
+              <FormLabel target="backup_encryption_method" inline>Backup encryption method</FormLabel>
               <Select id="backup_encryption_method" name="backup_encryption_method" width="w-48">
                 {% for method in backup_encryption_methods %}
                   <option value="{{ method.value }}"{% if method.value == selected_backup_encryption_method %} selected{% endif %}>{{ method.value | lower }}</option>
@@ -255,7 +255,7 @@
           </div>
 
           <div id="backup-master-password-row" class="mt-2 hidden">
-            <label for="backup_master_password" class="text-sm text-zinc-900 font-medium block mb-1">Backup master password</label>
+            <FormLabel target="backup_master_password">Backup master password</FormLabel>
             {% if has_saved_backup_password %}
               <p class="text-xs text-zinc-500">A saved backup password will be used for this workspace.</p>
             {% else %}
@@ -276,12 +276,12 @@
 
         <div id="advanced-options" class="hidden flex flex-col gap-4">
           <div>
-            <label for="git_url" class="text-sm text-zinc-900 font-medium block mb-1">Repository</label>
+            <FormLabel target="git_url">Repository</FormLabel>
             <p class="mb-1 text-xs text-zinc-400">Git URL or local path</p>
             <TextInput name="git_url" :value="git_url" placeholder="https://github.com/user/repo.git" id="git_url" required />
           </div>
           <div>
-            <label for="branch" class="text-sm text-zinc-900 font-medium block mb-1">Branch</label>
+            <FormLabel target="branch">Branch</FormLabel>
             <p class="mb-1 text-xs text-zinc-400">Leave empty for latest version</p>
             <TextInput name="branch" :value="branch" placeholder="latest tag" id="branch" />
           </div>

@@ -92,6 +92,23 @@ html {
 }
 
 /*
+ * Inline ``<code>`` pill: light-gray rounded chip for service names,
+ * file paths, etc. inline inside prose. The pill style is used by
+ * Sharing.jinja's heading + sharing.js (which rebuilds that heading
+ * via DOM methods after toggling the share state), so factoring the
+ * recipe into one CSS class keeps the two sides from drifting.
+ * Tailwind equivalents:
+ *   bg-zinc-100 rounded-md px-1.5 py-0.5 font-mono text-[0.95em]
+ */
+.code-pill {
+  background: #f4f4f5;
+  border-radius: 0.375rem;
+  padding: 0.125rem 0.375rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.95em;
+}
+
+/*
  * Onboarding option cards (creating-page question flow). Selection state
  * and the editable-textarea reveal are driven by the `.opt-selected` class
  * (toggled by static/creating.js); kept here rather than as Tailwind

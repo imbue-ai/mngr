@@ -19,11 +19,11 @@
     <Notice variant="error" id="signup-error" class="hidden"></Notice>
     <form id="signup-form">
       <div class="mb-4">
-        <label for="signup-email" class="block text-sm font-medium text-zinc-900 mb-1.5">Email</label>
+        <FormLabel target="signup-email">Email</FormLabel>
         <TextInput type="email" name="email" id="signup-email" required radius="lg" autocomplete="email" />
       </div>
       <div class="mb-4">
-        <label for="signup-password" class="block text-sm font-medium text-zinc-900 mb-1.5">Password</label>
+        <FormLabel target="signup-password">Password</FormLabel>
         <TextInput type="password" name="password" id="signup-password" required radius="lg" autocomplete="new-password" minlength={{ 8 }} />
       </div>
       <ButtonSubmit variant="primary" size="lg" block id="signup-btn">Create account</ButtonSubmit>
@@ -33,14 +33,8 @@
       <span class="px-3">or</span>
       <span class="flex-1 border-b border-zinc-200"></span>
     </div>
-    <button data-oauth="google"
-            class="oauth-btn w-full py-2.5 px-3 bg-white border border-zinc-200 rounded-lg text-sm cursor-pointer flex items-center justify-center gap-2 text-zinc-900 hover:bg-zinc-50 mb-2">
-      <auth.OauthIcon provider="google" /> Continue with Google
-    </button>
-    <button data-oauth="github"
-            class="oauth-btn w-full py-2.5 px-3 bg-white border border-zinc-200 rounded-lg text-sm cursor-pointer flex items-center justify-center gap-2 text-zinc-900 hover:bg-zinc-50">
-      <auth.OauthIcon provider="github" /> Continue with GitHub
-    </button>
+    <auth.OauthButton provider="google" extra="mb-2" />
+    <auth.OauthButton provider="github" />
     <div class="text-center mt-5 text-sm text-zinc-500">
       Already have an account? <Link href="#" weight="medium" data-show-tab="signin">Sign in</Link>
     </div>
@@ -52,11 +46,11 @@
     <Notice variant="error" id="signin-error" class="hidden"></Notice>
     <form id="signin-form">
       <div class="mb-4">
-        <label for="signin-email" class="block text-sm font-medium text-zinc-900 mb-1.5">Email</label>
+        <FormLabel target="signin-email">Email</FormLabel>
         <TextInput type="email" name="email" id="signin-email" required radius="lg" autocomplete="email" />
       </div>
       <div class="mb-4">
-        <label for="signin-password" class="block text-sm font-medium text-zinc-900 mb-1.5">Password</label>
+        <FormLabel target="signin-password">Password</FormLabel>
         <TextInput type="password" name="password" id="signin-password" required radius="lg" autocomplete="current-password" />
       </div>
       <div class="text-right -mt-2 mb-4"><Link href="/auth/forgot-password" extra="text-xs">Forgot password?</Link></div>
@@ -67,14 +61,8 @@
       <span class="px-3">or</span>
       <span class="flex-1 border-b border-zinc-200"></span>
     </div>
-    <button data-oauth="google"
-            class="oauth-btn w-full py-2.5 px-3 bg-white border border-zinc-200 rounded-lg text-sm cursor-pointer flex items-center justify-center gap-2 text-zinc-900 hover:bg-zinc-50 mb-2">
-      <auth.OauthIcon provider="google" /> Continue with Google
-    </button>
-    <button data-oauth="github"
-            class="oauth-btn w-full py-2.5 px-3 bg-white border border-zinc-200 rounded-lg text-sm cursor-pointer flex items-center justify-center gap-2 text-zinc-900 hover:bg-zinc-50">
-      <auth.OauthIcon provider="github" /> Continue with GitHub
-    </button>
+    <auth.OauthButton provider="google" extra="mb-2" />
+    <auth.OauthButton provider="github" />
     <div class="text-center mt-5 text-sm text-zinc-500">
       Don't have an account? <Link href="#" weight="medium" data-show-tab="signup">Create one</Link>
     </div>
