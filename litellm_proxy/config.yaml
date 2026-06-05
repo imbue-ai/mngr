@@ -1,28 +1,112 @@
+# Local-dev litellm proxy config (consumed directly by the `litellm` CLI via
+# litellm_proxy/start.sh). The model_list MUST stay in sync with
+# apps/modal_litellm/app.py's LITELLM_CONFIG -- apps/modal_litellm/config_drift_test.py
+# enforces this. Pricing is registered inline (mirrored from litellm's
+# model_prices_and_context_window map) so cost tracking is correct even on
+# litellm versions whose bundled price map predates a model.
 model_list:
+  # Current Opus line.
+  - model_name: claude-opus-4-8
+    litellm_params:
+      model: anthropic/claude-opus-4-8
+      api_key: os.environ/ANTHROPIC_API_KEY
+      input_cost_per_token: 0.000005
+      output_cost_per_token: 0.000025
+      cache_creation_input_token_cost: 0.00000625
+      cache_read_input_token_cost: 0.0000005
+
   - model_name: claude-opus-4-7
     litellm_params:
       model: anthropic/claude-opus-4-7
       api_key: os.environ/ANTHROPIC_API_KEY
+      input_cost_per_token: 0.000005
+      output_cost_per_token: 0.000025
+      cache_creation_input_token_cost: 0.00000625
+      cache_read_input_token_cost: 0.0000005
 
-  - model_name: claude-sonnet-4-6
+  - model_name: claude-opus-4-6
     litellm_params:
-      model: anthropic/claude-sonnet-4-6
+      model: anthropic/claude-opus-4-6
       api_key: os.environ/ANTHROPIC_API_KEY
+      input_cost_per_token: 0.000005
+      output_cost_per_token: 0.000025
+      cache_creation_input_token_cost: 0.00000625
+      cache_read_input_token_cost: 0.0000005
 
-  - model_name: claude-sonnet-4-20250514
+  - model_name: claude-opus-4-5
     litellm_params:
-      model: anthropic/claude-sonnet-4-20250514
+      model: anthropic/claude-opus-4-5
       api_key: os.environ/ANTHROPIC_API_KEY
+      input_cost_per_token: 0.000005
+      output_cost_per_token: 0.000025
+      cache_creation_input_token_cost: 0.00000625
+      cache_read_input_token_cost: 0.0000005
+
+  # Older Opus (higher price tier), still active on the Anthropic API.
+  - model_name: claude-opus-4-1
+    litellm_params:
+      model: anthropic/claude-opus-4-1
+      api_key: os.environ/ANTHROPIC_API_KEY
+      input_cost_per_token: 0.000015
+      output_cost_per_token: 0.000075
+      cache_creation_input_token_cost: 0.00001875
+      cache_read_input_token_cost: 0.0000015
 
   - model_name: claude-opus-4-20250514
     litellm_params:
       model: anthropic/claude-opus-4-20250514
       api_key: os.environ/ANTHROPIC_API_KEY
+      input_cost_per_token: 0.000015
+      output_cost_per_token: 0.000075
+      cache_creation_input_token_cost: 0.00001875
+      cache_read_input_token_cost: 0.0000015
+
+  # Sonnet line.
+  - model_name: claude-sonnet-4-6
+    litellm_params:
+      model: anthropic/claude-sonnet-4-6
+      api_key: os.environ/ANTHROPIC_API_KEY
+      input_cost_per_token: 0.000003
+      output_cost_per_token: 0.000015
+      cache_creation_input_token_cost: 0.00000375
+      cache_read_input_token_cost: 0.0000003
+
+  - model_name: claude-sonnet-4-5
+    litellm_params:
+      model: anthropic/claude-sonnet-4-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+      input_cost_per_token: 0.000003
+      output_cost_per_token: 0.000015
+      cache_creation_input_token_cost: 0.00000375
+      cache_read_input_token_cost: 0.0000003
+
+  - model_name: claude-sonnet-4-20250514
+    litellm_params:
+      model: anthropic/claude-sonnet-4-20250514
+      api_key: os.environ/ANTHROPIC_API_KEY
+      input_cost_per_token: 0.000003
+      output_cost_per_token: 0.000015
+      cache_creation_input_token_cost: 0.00000375
+      cache_read_input_token_cost: 0.0000003
+
+  # Haiku line (bare alias + dated id both routable).
+  - model_name: claude-haiku-4-5
+    litellm_params:
+      model: anthropic/claude-haiku-4-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+      input_cost_per_token: 0.000001
+      output_cost_per_token: 0.000005
+      cache_creation_input_token_cost: 0.00000125
+      cache_read_input_token_cost: 0.0000001
 
   - model_name: claude-haiku-4-5-20251001
     litellm_params:
       model: anthropic/claude-haiku-4-5-20251001
       api_key: os.environ/ANTHROPIC_API_KEY
+      input_cost_per_token: 0.000001
+      output_cost_per_token: 0.000005
+      cache_creation_input_token_cost: 0.00000125
+      cache_read_input_token_cost: 0.0000001
 
 general_settings:
   database_url: os.environ/LITELLM_DB_DIRECT
