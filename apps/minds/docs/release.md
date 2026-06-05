@@ -4,7 +4,7 @@ A release ships three pinned artifacts together:
 
 | Artifact | Pinned where |
 |---|---|
-| mngr code | a SHA on the release branch (default `wz/minds_onboard`) |
+| mngr code | a SHA on the release branch (`main`, or a release/* branch if cutting from a divergent state) |
 | FCT template | the `v<version>` annotated tag on the `pilot` branch of `forever-claude-template` |
 | Built `.app` bundle | a ToDesktop build keyed by that mngr SHA |
 

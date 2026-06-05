@@ -6,15 +6,14 @@ name: minds macOS launch
 # UI-renders-cleanly path that previously could only be checked by Tart
 # under manual operation.
 #
-# Triggers on push and PR to wz/minds_onboard, plus workflow_dispatch.
+# Triggers on push to main and any PR, plus workflow_dispatch.
 # For workflow_dispatch, an optional app_zip_url input lets us point at
 # a specific pre-release build instead of the auto-updater's latest.
 
 on:
   push:
-    branches: [wz/minds_onboard]
+    branches: [main]
   pull_request:
-    branches: [wz/minds_onboard, main]
   workflow_dispatch:
     inputs:
       app_zip_url:

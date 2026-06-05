@@ -12,7 +12,7 @@ slack-permission-flow scenario in CI, driven by Playwright clicks.
   - `macos-launch.spec.js` — `/Applications/Minds.app` launches, Create
     link visible, projects landing renders.
   - `headed-demo.spec.js` (sans `--headed`) — Create form fills cleanly.
-- Triggers: every push to `wz/minds_onboard` (and PRs).
+- Triggers: every push to `main` and every PR.
 - Provides cold-launch coverage on a vanilla macOS image. Catches the
   `_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS` class of regression (Tart
   caught the 5s-deadline bug for us; this workflow replaces Tart-as-CI
