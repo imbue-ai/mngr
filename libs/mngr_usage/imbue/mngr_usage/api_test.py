@@ -337,6 +337,29 @@ def test_wait_for_usage_multi_source_any_match_wins() -> None:
     assert result.matched_source == "claude"
 
 
+def test_wait_for_usage_returns_first_source_when_multiple_match() -> None:
+    """When more than one source satisfies the predicate, the first in poll order
+    wins (``_match_first_source`` returns on the first pass). Both sources are below
+    the threshold here, so a non-deterministic or last-wins implementation would
+    return ``claude`` instead of the leading ``opencode``."""
+    snapshots = [
+        _make_snapshot("opencode", used=10.0, resets_at=2000),
+        _make_snapshot("claude", used=20.0, resets_at=2000),
+    ]
+    clock = _FakeClock()
+    result = wait_for_usage(
+        poll_fn=lambda: snapshots,
+        until_filters=_compile_until(["five_hour.used_percentage < 50"]),
+        timeout_seconds=None,
+        interval_seconds=30.0,
+        now_fn=lambda: 1000,
+        monotonic_fn=clock.monotonic,
+        sleep_fn=clock.sleep,
+    )
+    assert result.is_matched is True
+    assert result.matched_source == "opencode"
+
+
 def test_wait_for_usage_no_snapshots_keeps_polling_until_timeout() -> None:
     """No data yet -> not a match; loop times out rather than crashes."""
     clock = _FakeClock()

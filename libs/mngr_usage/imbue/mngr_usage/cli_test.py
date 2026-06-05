@@ -25,6 +25,7 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr_usage.api import aggregate_events_to_snapshots
+from imbue.mngr_usage.api import build_source_cel_context
 from imbue.mngr_usage.api import parse_events_from_content
 from imbue.mngr_usage.cli import _build_render_model
 from imbue.mngr_usage.cli import _flatten_primary_for_template
@@ -34,6 +35,7 @@ from imbue.mngr_usage.cli import _format_human_line
 from imbue.mngr_usage.cli import _format_reset_phrase
 from imbue.mngr_usage.cli import _format_session_detail_line
 from imbue.mngr_usage.cli import _parse_optional_duration
+from imbue.mngr_usage.cli import _render_one_source_for_json
 from imbue.mngr_usage.cli import _session_mode_tag
 from imbue.mngr_usage.cli import usage
 from imbue.mngr_usage.data_types import CostMode
@@ -48,6 +50,19 @@ def _write_event(events_file: Path, event: dict[str, Any]) -> None:
     events_file.parent.mkdir(parents=True, exist_ok=True)
     with events_file.open("a") as f:
         f.write(json.dumps(event) + "\n")
+
+
+def _try_parse_json_object(line: str) -> dict[str, Any] | None:
+    """Parse ``line`` as a JSON object, or return None if it isn't one.
+
+    Lets a test pick the structured record out of mixed CLI stdout (the wait
+    command may interleave human/log lines around its JSON payload).
+    """
+    try:
+        parsed = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _make_event(
@@ -77,14 +92,20 @@ def _make_event(
 # =============================================================================
 
 
-def test_parse_optional_duration_accepts_units() -> None:
-    assert _parse_optional_duration("300") == 300
-    assert _parse_optional_duration("60s") == 60
-    assert _parse_optional_duration("5m") == 300
-    assert _parse_optional_duration("2h") == 7200
-    assert _parse_optional_duration("1d") == 86400
-    assert _parse_optional_duration(None) is None
-    assert _parse_optional_duration("") is None
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("300", 300),
+        ("60s", 60),
+        ("5m", 300),
+        ("2h", 7200),
+        ("1d", 86400),
+        (None, None),
+        ("", None),
+    ],
+)
+def test_parse_optional_duration_accepts_units(value: str | None, expected: int | None) -> None:
+    assert _parse_optional_duration(value) == expected
 
 
 def test_parse_optional_duration_rejects_bad_input() -> None:
@@ -92,23 +113,35 @@ def test_parse_optional_duration_rejects_bad_input() -> None:
         _parse_optional_duration("forever")
 
 
-def test_format_duration_hits_each_branch() -> None:
-    assert _format_duration(0) == "now"
-    assert _format_duration(-1) == "now"
-    assert _format_duration(45) == "45s"
-    assert _format_duration(60) == "1m"
-    assert _format_duration(125) == "2m 5s"
-    assert _format_duration(3600) == "1h"
-    assert _format_duration(7325) == "2h 2m"
-    assert _format_duration(86400) == "1d"
-    assert _format_duration(360000) == "4d 4h"
+@pytest.mark.parametrize(
+    ("seconds", "expected"),
+    [
+        (0, "now"),
+        (-1, "now"),
+        (45, "45s"),
+        (60, "1m"),
+        (125, "2m 5s"),
+        (3600, "1h"),
+        (7325, "2h 2m"),
+        (86400, "1d"),
+        (360000, "4d 4h"),
+    ],
+)
+def test_format_duration_renders_each_case(seconds: int, expected: str) -> None:
+    assert _format_duration(seconds) == expected
 
 
-def test_format_reset_phrase_handles_past_present_future() -> None:
-    assert _format_reset_phrase(resets_at=1500, now=1000) == "resets in 8m 20s"
-    assert _format_reset_phrase(resets_at=1000, now=1000) == "just reset"
-    assert _format_reset_phrase(resets_at=970, now=1000) == "reset 30s ago"
-    assert _format_reset_phrase(resets_at=400, now=1000) == "reset 10m ago"
+@pytest.mark.parametrize(
+    ("resets_at", "now", "expected"),
+    [
+        (1500, 1000, "resets in 8m 20s"),
+        (1000, 1000, "just reset"),
+        (970, 1000, "reset 30s ago"),
+        (400, 1000, "reset 10m ago"),
+    ],
+)
+def test_format_reset_phrase_handles_past_present_future(resets_at: int, now: int, expected: str) -> None:
+    assert _format_reset_phrase(resets_at=resets_at, now=now) == expected
 
 
 def test_format_human_line_uses_past_tense_after_reset() -> None:
@@ -119,6 +152,14 @@ def test_format_human_line_uses_past_tense_after_reset() -> None:
 def test_format_human_line_no_data_drops_reset_suffix() -> None:
     snap = WindowSnapshot(used_percentage=None, resets_at=1000)
     assert _format_human_line("5h", snap, now=1000) == "5h: no data"
+
+
+def test_format_human_line_uses_unknown_suffix_when_reset_time_missing() -> None:
+    """used_percentage present but resets_at absent -> the line still renders the
+    usage but falls back to 'reset time unknown' (the writer emitted a window with
+    a percentage but no reset timestamp)."""
+    snap = WindowSnapshot(used_percentage=11.0, resets_at=None)
+    assert _format_human_line("5h", snap, now=1000) == "5h: 11% used, reset time unknown"
 
 
 def test_format_cost_line_returns_none_when_aggregate_has_no_cost() -> None:
@@ -285,8 +326,22 @@ def _cost_event(
 
 
 def test_aggregate_drops_source_with_no_renderable_content() -> None:
-    """A source whose events have no timestamp field yields no snapshot."""
-    events = [{"source": "claude/usage", "type": "cost_snapshot"}]
+    """A source whose only event lacks a parseable timestamp yields no snapshot.
+
+    The event carries a valid session_id and cost so the *only* reason it's
+    unrenderable is the missing timestamp -- this isolates the no-timestamp
+    drop path in ``_walk_agent_events`` (which skips timestamp-less events
+    before they can contribute windows/cost), rather than letting a separate
+    missing-session_id drop mask it.
+    """
+    events = [
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "session_id": "no-timestamp-session",
+            "cost": {"total_cost_usd": 1.0},
+        }
+    ]
     snapshots = aggregate_events_to_snapshots({"claude": {"agent-x": events}}, since_seconds=86400, now=1_700_001_000)
     assert snapshots == []
 
@@ -783,6 +838,47 @@ def test_flatten_for_template_emits_only_present_windows() -> None:
     assert "seven_day.used_percentage" not in flat
 
 
+def test_cel_context_keys_mirror_detail_json_source_keys() -> None:
+    """The wait CEL context (``build_source_cel_context``) and the ``--format json
+    --detail`` per-source dict (``_render_one_source_for_json``) are built by separate
+    code paths but are documented to mirror each other (minus the CLI-only staleness
+    flag), since users prototype ``--until`` predicates against the JSON output. This
+    pins that key-parity so the two surfaces can't silently drift -- e.g. a field
+    renamed/added on one side only would fail here. The same snapshot exercises both
+    windows and both cost modes so every key family is represented.
+    """
+    snapshot = UsageSnapshot(
+        source_name="claude",
+        updated_at=2000,
+        windows={"five_hour": WindowSnapshot(used_percentage=42.0, resets_at=15400, window_seconds=18000)},
+        sessions=(
+            SessionCostRecord(
+                session_id="sub-x",
+                cost=CostSnapshot(total_cost_usd=0.10),
+                cost_mode=CostMode.SUBSCRIPTION,
+                first_event_at=1800,
+                last_event_at=2000,
+            ),
+            SessionCostRecord(
+                session_id="api-x",
+                cost=CostSnapshot(total_cost_usd=1.0),
+                cost_mode=CostMode.API_KEY,
+                first_event_at=1500,
+                last_event_at=1900,
+            ),
+        ),
+        since_seconds=86400,
+    )
+    cel_keys = set(build_source_cel_context(snapshot, now=2000))
+    json_keys = set(
+        _render_one_source_for_json(_build_render_model(snapshot, max_age=300, now=2000), now=2000, detail=True)
+    )
+    # The JSON surface carries one extra CLI-only key (the staleness flag); every
+    # other key -- including the window key and ``sessions`` -- must match exactly.
+    assert json_keys - cel_keys == {"is_stale"}
+    assert cel_keys - json_keys == set()
+
+
 # =============================================================================
 # CLI integration: plant events.jsonl files under the test's host_dir
 # =============================================================================
@@ -1214,7 +1310,66 @@ def test_usage_wait_matches_when_predicate_already_true(
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
-    assert "Matched on source" in result.output or "matched" in result.output.lower()
+    # The matched source is named explicitly in the success line, so assert the
+    # exact form (a regression that matched the wrong source or dropped the name
+    # would slip past a bare "matched" substring check).
+    assert "Matched on source 'claude'" in result.output
+
+
+@pytest.mark.tmux
+def test_usage_wait_json_output_emits_result_payload_on_match(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_host: Host,
+    cli_test_agent: AgentInterface,
+    cli_profile_dir: Path,
+) -> None:
+    """`mngr usage wait --format json` emits the final result record (the JSON render
+    path is separate from the human one and was otherwise untested). On a match the
+    payload carries is_matched, the matched source, the sources list, and a numeric
+    elapsed_seconds."""
+    _plant_event_for_agent(
+        local_host,
+        cli_test_agent,
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-1",
+            "timestamp": "2056-05-08T10:00:00.000000000Z",
+            "session_id": "wait-json-session",
+            "rate_limits": {
+                "five_hour": {"used_percentage": 12.0, "resets_at": 9_999_999_999_999, "window_seconds": 18000},
+            },
+        },
+    )
+    result = cli_runner.invoke(
+        usage,
+        [
+            "wait",
+            "--format",
+            "json",
+            "--until",
+            "five_hour.used_percentage < 50",
+            "--interval",
+            "1s",
+            "--timeout",
+            "5s",
+        ],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    # The final result record is the one JSON object on stdout carrying is_matched.
+    payload = next(
+        obj
+        for line in result.output.splitlines()
+        if (obj := _try_parse_json_object(line)) is not None and "is_matched" in obj
+    )
+    assert payload["is_matched"] is True
+    assert payload["is_timed_out"] is False
+    assert payload["matched_source"] == "claude"
+    assert payload["sources"] == ["claude"]
+    assert isinstance(payload["elapsed_seconds"], (int, float))
 
 
 @pytest.mark.tmux
@@ -1305,8 +1460,13 @@ def test_usage_wait_accepts_subcommand_level_options(
         catch_exceptions=False,
     )
     # `--until 'true'` would normally match instantly, but with no agents present
-    # there are no snapshots to evaluate against, so the wait times out (exit 2).
-    assert result.exit_code in (0, 2), result.output
+    # there are no snapshots to evaluate against, so the wait must time out (exit 2).
+    # Asserting exactly 2 (not `in (0, 2)`) keeps the test able to catch a regression
+    # where wait spuriously matches against an empty snapshot list.
+    assert result.exit_code == 2, result.output
+    # And confirm the flag was genuinely accepted -- i.e. the misplaced-group-option
+    # rejection (which raises before the wait body) did NOT fire.
+    assert "are not supported on" not in result.output
 
 
 def test_usage_wait_rejects_invalid_cel(
@@ -1322,9 +1482,9 @@ def test_usage_wait_rejects_invalid_cel(
         catch_exceptions=False,
     )
     # MngrError bubbles up as a non-zero exit; the user-visible signal is the
-    # "Invalid include filter" message.
+    # exact "Invalid include filter expression" message from compile_cel_filters.
     assert result.exit_code != 0
-    assert "Invalid" in result.output or "invalid" in result.output.lower()
+    assert "Invalid include filter expression" in result.output
 
 
 @pytest.mark.tmux
