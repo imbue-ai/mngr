@@ -29,6 +29,8 @@
 # wiring bug, not a tolerable runtime case. Fail loudly (to stderr, never
 # stdout -- agy treats PreInvocation stdout as injected steps) rather than
 # silently writing the ids file to the filesystem root.
+set -euo pipefail
+
 if [ -z "${MNGR_AGENT_STATE_DIR:-}" ]; then
     echo "capture_conversation_id.sh: MNGR_AGENT_STATE_DIR is not set" >&2
     exit 1

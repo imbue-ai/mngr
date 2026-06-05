@@ -84,7 +84,7 @@ def _repo_settings_opted_into_pytest() -> Iterator[None]:
     if current is not False:
         raise AssertionError(
             f"{settings_path} has is_allowed_in_pytest={current!r}; this test expects "
-            "the repo-wide explicit `false` it has carried since the mng->mngr rename. "
+            "the repo-wide explicit `false` it has carried since the rename. "
             "If the policy changed, update this fixture."
         )
     doc["is_allowed_in_pytest"] = True
