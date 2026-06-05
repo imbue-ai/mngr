@@ -2849,7 +2849,12 @@ async def _handle_requests_auto_open(
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """Toggle the auto-open setting for the requests panel."""
+    """Toggle the auto-open setting for the inbox modal.
+
+    The route URL and on-disk setting key keep ``requests-panel`` /
+    ``auto_open_requests_panel`` for backward compatibility (see
+    :class:`MindsConfig`); "panel" here now refers to the inbox modal.
+    """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
     minds_config: MindsConfig | None = request.app.state.minds_config
