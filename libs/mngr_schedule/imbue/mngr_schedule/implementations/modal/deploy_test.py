@@ -1,5 +1,7 @@
 """Unit tests for deploy.py and verification.py pure functions."""
 
+import importlib.metadata
+import importlib.resources
 import json
 import subprocess
 import tarfile
@@ -12,6 +14,7 @@ import pytest
 from dotenv import dotenv_values
 from loguru import logger
 
+import imbue.mngr.resources as mngr_resources
 from imbue.mngr import hookimpl
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.providers.deploy_utils import MngrInstallMode
@@ -58,18 +61,23 @@ def test_forward_output_writes_stderr_to_stderr(capsys: pytest.CaptureFixture[st
 
 
 def test_forward_output_logs_stdout_via_loguru() -> None:
-    """_forward_output should log stdout lines via loguru at BUILD level."""
-    captured: list[str] = []
+    """_forward_output should log stdout lines via loguru at the BUILD level."""
+    captured_records: list[Any] = []
 
     def sink(message: Any) -> None:
-        captured.append(message.record["message"])
+        captured_records.append(message.record)
 
     handler_id = logger.add(sink, level=0, format="{message}")
     try:
         _forward_output("build output line\n", is_stdout=True)
     finally:
         logger.remove(handler_id)
-    assert any("build output line" in msg for msg in captured)
+
+    matching_records = [r for r in captured_records if "build output line" in r["message"]]
+    assert len(matching_records) == 1
+    # The line must be emitted at the custom BUILD level, not at a generic
+    # default level -- this is the contract _forward_output documents.
+    assert matching_records[0]["level"].name == "BUILD"
 
 
 def test_detect_local_timezone_returns_string() -> None:
@@ -89,7 +97,10 @@ def test_get_repo_root_returns_path_in_git_repo(
     subprocess.run(["git", "init", str(repo_dir)], check=True, capture_output=True)
     monkeypatch.chdir(repo_dir)
     result = get_repo_root()
-    assert result.is_dir()
+    # The returned path must be the actual git repo root (the directory
+    # containing the .git dir), not merely some directory.
+    assert result == repo_dir.resolve()
+    assert (result / ".git").exists()
 
 
 def test_get_repo_root_raises_outside_git_repo(
@@ -237,16 +248,6 @@ def test_build_full_commandline_shell_escapes_spaces_in_arguments() -> None:
     assert result == "mngr schedule add --args 'hello world'"
 
 
-# =============================================================================
-# Shared test helpers
-# =============================================================================
-
-
-# =============================================================================
-# stage_deploy_files Tests
-# =============================================================================
-
-
 @pytest.fixture()
 def run_staging(
     tmp_path: Path,
@@ -372,14 +373,8 @@ def test_stage_deploy_files_stages_project_files(
     assert staged_file.read_text() == "[settings]\nkey = 1\n"
 
 
-# =============================================================================
-# _collect_deploy_files validation Tests
-# =============================================================================
-
-
 def _make_mngr_ctx_with_hook_returning(
     plugin_manager: pluggy.PluginManager,
-    tmp_path: Path,
     files: dict[Path, Path | str],
     temp_mngr_ctx: MngrContext,
 ) -> MngrContext:
@@ -403,7 +398,6 @@ def test_collect_deploy_files_accepts_relative_path(
     """_collect_deploy_files should accept relative paths as project files."""
     mngr_ctx = _make_mngr_ctx_with_hook_returning(
         plugin_manager,
-        tmp_path,
         {Path("relative/config.toml"): "content"},
         temp_mngr_ctx,
     )
@@ -420,7 +414,6 @@ def test_collect_deploy_files_rejects_absolute_path(
     """_collect_deploy_files should raise ScheduleDeployError for absolute paths."""
     mngr_ctx = _make_mngr_ctx_with_hook_returning(
         plugin_manager,
-        tmp_path,
         {Path("/etc/config.toml"): "content"},
         temp_mngr_ctx,
     )
@@ -434,7 +427,14 @@ def test_collect_deploy_files_resolves_collision(
     tmp_path: Path,
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """_collect_deploy_files should resolve collisions when two plugins register the same path."""
+    """When two plugins register the same dest path, _collect_deploy_files collapses
+    them to a single entry whose value is the one from the earlier-registered plugin.
+
+    Mechanism: pluggy invokes hooks in LIFO order (last-registered runs first), so the
+    hook results list is [PluginB, PluginA]. collect_deploy_files merges that list in
+    order, so PluginA's value (iterated last) overwrites PluginB's. The earlier-registered
+    plugin therefore wins, and a collision warning is logged for the overwrite.
+    """
 
     class _PluginA:
         @staticmethod
@@ -454,13 +454,11 @@ def test_collect_deploy_files_resolves_collision(
     mngr_ctx = temp_mngr_ctx
     result = _collect_deploy_files(mngr_ctx, repo_root=tmp_path)
 
-    # Should still succeed, with one entry (last one wins)
-    assert Path("~/.config/test.toml") in result
-
-
-# =============================================================================
-# parse_upload_spec Tests
-# =============================================================================
+    # Exactly one entry survives for the colliding path, and it is the value from
+    # the earlier-registered plugin (_PluginA), per the LIFO merge order above.
+    colliding_dest = Path("~/.config/test.toml")
+    assert result[colliding_dest] == "content-a"
+    assert sum(1 for dest in result if dest == colliding_dest) == 1
 
 
 def test_parse_upload_spec_valid_file(tmp_path: Path) -> None:
@@ -500,11 +498,6 @@ def test_parse_upload_spec_rejects_absolute_dest(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="must be relative or start with '~'"):
         parse_upload_spec(f"{source}:/absolute/path")
-
-
-# =============================================================================
-# _stage_consolidated_env Tests
-# =============================================================================
 
 
 def test_stage_consolidated_env_includes_env_files(
@@ -575,16 +568,28 @@ def test_stage_consolidated_env_skips_missing_pass_env(
     monkeypatch: pytest.MonkeyPatch,
     bare_temp_mngr_ctx: MngrContext,
 ) -> None:
-    """_stage_consolidated_env should skip pass-env vars not in the environment."""
+    """_stage_consolidated_env should skip pass-env vars that are absent from the
+    environment while still passing through those that are present.
+
+    A second, present var is requested alongside the missing one so the function is
+    forced to write a .env file. That lets the assertions distinguish "missing var was
+    actively filtered out" from "the function did nothing at all" -- the empty no-op
+    case is covered separately by test_stage_consolidated_env_creates_no_file_when_empty.
+    """
     monkeypatch.delenv("NONEXISTENT_VAR", raising=False)
+    monkeypatch.setenv("PRESENT_VAR", "present_value")
 
     output_dir = tmp_path / "secrets"
     output_dir.mkdir()
     mngr_ctx = bare_temp_mngr_ctx
-    _stage_consolidated_env(output_dir, mngr_ctx=mngr_ctx, pass_env=["NONEXISTENT_VAR"])
+    _stage_consolidated_env(output_dir, mngr_ctx=mngr_ctx, pass_env=["NONEXISTENT_VAR", "PRESENT_VAR"])
 
-    # No .env file should be created since no env vars were found and no plugins registered
-    assert not (output_dir / ".env").exists()
+    # The present var must be staged; the missing var must be silently dropped.
+    env_file = output_dir / ".env"
+    assert env_file.exists()
+    parsed = dotenv_values(env_file)
+    assert parsed == {"PRESENT_VAR": "present_value"}
+    assert "NONEXISTENT_VAR" not in env_file.read_text()
 
 
 def test_stage_consolidated_env_creates_no_file_when_empty(
@@ -616,11 +621,6 @@ def test_stage_consolidated_env_preserves_values_with_hash(
     # Verify the written .env file can be parsed back correctly
     parsed = dotenv_values(output_dir / ".env")
     assert parsed["PASSWORD"] == "abc # def"
-
-
-# =============================================================================
-# modify_env_vars_for_deploy hook Tests
-# =============================================================================
 
 
 def test_modify_env_vars_for_deploy_plugin_adds_vars(
@@ -701,11 +701,6 @@ def test_modify_env_vars_for_deploy_plugins_see_each_others_changes(
     assert env_vars["SAW_A"] == "true"
 
 
-# =============================================================================
-# _stage_consolidated_env with plugin env vars Tests
-# =============================================================================
-
-
 def test_stage_consolidated_env_includes_plugin_env_vars(
     tmp_path: Path,
     plugin_manager: pluggy.PluginManager,
@@ -738,7 +733,14 @@ def test_stage_consolidated_env_plugin_can_remove_env_vars(
     temp_mngr_ctx: MngrContext,
     set_test_api_key: None,
 ) -> None:
-    """_stage_consolidated_env should remove env vars when plugin deletes keys."""
+    """_stage_consolidated_env should drop env vars that a plugin pops from the dict
+    while leaving the rest of the vars intact.
+
+    A second pass-env var (KEEP_ME) is staged that the plugin does not touch. This
+    guarantees a .env file is written, so the assertions can prove that removal
+    actively happened -- distinguishing it from the degenerate case where the file is
+    simply never written and REMOVE_ME's absence is vacuously satisfied.
+    """
 
     class _RemovalPlugin:
         @staticmethod
@@ -748,16 +750,20 @@ def test_stage_consolidated_env_plugin_can_remove_env_vars(
 
     plugin_manager.register(_RemovalPlugin())
     monkeypatch.setenv("REMOVE_ME", "should_be_removed")
+    monkeypatch.setenv("KEEP_ME", "should_survive")
 
     mngr_ctx = temp_mngr_ctx
     output_dir = tmp_path / "secrets"
     output_dir.mkdir()
-    _stage_consolidated_env(output_dir, mngr_ctx=mngr_ctx, pass_env=["REMOVE_ME"])
+    _stage_consolidated_env(output_dir, mngr_ctx=mngr_ctx, pass_env=["REMOVE_ME", "KEEP_ME"])
 
-    # The .env file may or may not exist depending on whether other plugins
-    # contribute env vars. If it exists, REMOVE_ME must not be in it.
+    # The file must exist (KEEP_ME forces it), the surviving var must be present with
+    # its value, and the popped var must be gone.
     env_file_path = output_dir / ".env"
-    assert not env_file_path.exists() or "REMOVE_ME" not in env_file_path.read_text()
+    assert env_file_path.exists()
+    contents = env_file_path.read_text()
+    assert 'KEEP_ME="should_survive"' in contents
+    assert "REMOVE_ME" not in contents
 
 
 def test_stage_consolidated_env_plugin_overrides_have_highest_precedence(
@@ -795,11 +801,6 @@ def test_stage_consolidated_env_plugin_overrides_have_highest_precedence(
     assert 'MY_VAR="from_plugin"' in result
     # Should only appear once (plugin value replaces env/file values)
     assert result.count("MY_VAR=") == 1
-
-
-# =============================================================================
-# stage_deploy_files with uploads Tests
-# =============================================================================
 
 
 def test_stage_deploy_files_stages_upload_file(
@@ -920,15 +921,30 @@ def test_stage_deploy_files_with_exclude_user_settings(
     assert (home_dir / ".claude.json").exists()
 
 
-# =============================================================================
-# mngr install mode Tests
-# =============================================================================
+def _expected_install_mode_from_metadata() -> MngrInstallMode:
+    """Independently derive the expected install mode for imbue-mngr-schedule.
+
+    Reads the package's PEP 610 direct_url.json the same way the production code's
+    source of truth does, but via a separate code path, so the test pins detection to
+    the concrete ground truth of *this* environment (EDITABLE in an editable checkout,
+    PACKAGE when installed from a wheel) rather than merely asserting the result is one
+    of the two enum members.
+    """
+    dist = importlib.metadata.distribution("imbue-mngr-schedule")
+    direct_url_text = dist.read_text("direct_url.json")
+    if direct_url_text is None:
+        return MngrInstallMode.PACKAGE
+    direct_url = json.loads(direct_url_text)
+    if direct_url.get("dir_info", {}).get("editable", False):
+        return MngrInstallMode.EDITABLE
+    return MngrInstallMode.PACKAGE
 
 
-def test_detect_mngr_install_mode_returns_valid_mode() -> None:
-    """detect_mngr_install_mode should return either PACKAGE or EDITABLE."""
-    result = detect_mngr_install_mode()
-    assert result in (MngrInstallMode.PACKAGE, MngrInstallMode.EDITABLE)
+def test_detect_mngr_install_mode_matches_package_metadata() -> None:
+    """detect_mngr_install_mode should report the concrete mode implied by the
+    installed package's direct_url.json (EDITABLE here in the editable checkout)."""
+    expected = _expected_install_mode_from_metadata()
+    assert detect_mngr_install_mode() == expected
 
 
 def test_resolve_mngr_install_mode_passes_through_concrete_modes() -> None:
@@ -937,10 +953,12 @@ def test_resolve_mngr_install_mode_passes_through_concrete_modes() -> None:
     assert resolve_mngr_install_mode(MngrInstallMode.PACKAGE) == MngrInstallMode.PACKAGE
 
 
-def test_resolve_mngr_install_mode_resolves_auto() -> None:
-    """resolve_mngr_install_mode should resolve AUTO to a concrete mode."""
+def test_resolve_mngr_install_mode_resolves_auto_to_detected_mode() -> None:
+    """resolve_mngr_install_mode(AUTO) should resolve to exactly the mode detection
+    reports for this environment, not merely some concrete mode."""
     result = resolve_mngr_install_mode(MngrInstallMode.AUTO)
-    assert result in (MngrInstallMode.PACKAGE, MngrInstallMode.EDITABLE)
+    assert result == detect_mngr_install_mode()
+    assert result == _expected_install_mode_from_metadata()
 
 
 def test_get_mngr_schedule_source_dir_returns_dir_with_pyproject() -> None:
@@ -982,11 +1000,6 @@ def test_stage_deploy_files_does_not_stage_mngr_source(
     assert not (staging_dir / "mngr_schedule_src").exists()
 
 
-# =============================================================================
-# get_mngr_dockerfile_path Tests
-# =============================================================================
-
-
 def test_get_mngr_dockerfile_path_editable_returns_resources_dockerfile() -> None:
     """get_mngr_dockerfile_path returns the mngr resources Dockerfile for EDITABLE mode."""
     result = get_mngr_dockerfile_path(MngrInstallMode.EDITABLE)
@@ -996,10 +1009,23 @@ def test_get_mngr_dockerfile_path_editable_returns_resources_dockerfile() -> Non
 
 
 def test_get_mngr_dockerfile_path_package_returns_resources_dockerfile() -> None:
-    """get_mngr_dockerfile_path returns the mngr resources Dockerfile for PACKAGE mode."""
+    """get_mngr_dockerfile_path for PACKAGE mode returns the Dockerfile shipped inside
+    the installed mngr package's resources directory (via importlib.resources).
+
+    The expected path is recomputed independently from the mngr.resources package so the
+    assertion pins down *which* Dockerfile is returned, not merely that some file named
+    'Dockerfile' exists. In an editable checkout the installed resources directory is the
+    same on-disk location the EDITABLE branch navigates to, so the two modes resolve to
+    the same path here; that equivalence is asserted explicitly rather than asserting a
+    (here-impossible) distinctness.
+    """
+    expected = Path(str(importlib.resources.files(mngr_resources) / "Dockerfile"))
     result = get_mngr_dockerfile_path(MngrInstallMode.PACKAGE)
+    assert result == expected
     assert result.exists()
     assert result.name == "Dockerfile"
+    # The path must come from the installed mngr/resources location.
+    assert result.parent.name == "resources"
 
 
 def test_get_mngr_dockerfile_path_skip_returns_editable_dockerfile() -> None:
@@ -1013,11 +1039,6 @@ def test_get_mngr_dockerfile_path_auto_raises() -> None:
     """get_mngr_dockerfile_path raises for AUTO mode."""
     with pytest.raises(ScheduleDeployError, match="AUTO mode must be resolved"):
         get_mngr_dockerfile_path(MngrInstallMode.AUTO)
-
-
-# =============================================================================
-# _build_package_mode_dockerfile Tests
-# =============================================================================
 
 
 def test_build_package_mode_dockerfile_replaces_monorepo_install() -> None:
@@ -1122,11 +1143,6 @@ def test_build_package_mode_dockerfile_works_with_real_dockerfile() -> None:
     assert "apt-get" in result
 
 
-# =============================================================================
-# resolve_commit_hash_for_deploy Tests
-# =============================================================================
-
-
 def test_resolve_commit_hash_reads_cached_file(tmp_path: Path) -> None:
     """resolve_commit_hash_for_deploy returns the cached hash when the file exists."""
     commit_hash_file = tmp_path / "commit_hash"
@@ -1144,11 +1160,6 @@ def test_resolve_commit_hash_ignores_empty_cached_file(tmp_path: Path) -> None:
     # Will fail because tmp_path is not a git repo, proving it tried to resolve fresh
     with pytest.raises(ScheduleDeployError):
         resolve_commit_hash_for_deploy(commit_hash_file, repo_root=tmp_path)
-
-
-# =============================================================================
-# try_get_repo_root Tests
-# =============================================================================
 
 
 def test_try_get_repo_root_returns_path_in_git_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1169,11 +1180,6 @@ def test_try_get_repo_root_returns_none_outside_git_repo(tmp_path: Path, monkeyp
     monkeypatch.chdir(tmp_path)
     result = try_get_repo_root()
     assert result is None
-
-
-# =============================================================================
-# package_directory_as_tarball Tests
-# =============================================================================
 
 
 def test_package_directory_as_tarball_creates_tarball(tmp_path: Path) -> None:
@@ -1229,11 +1235,6 @@ def test_package_directory_as_tarball_creates_dest_dir(tmp_path: Path) -> None:
 
     assert dest_dir.exists()
     assert (dest_dir / "current.tar.gz").exists()
-
-
-# =============================================================================
-# unpack_current_tarball_in_place Tests
-# =============================================================================
 
 
 def test_unpack_current_tarball_in_place_extracts_and_cleans_up(tmp_path: Path) -> None:

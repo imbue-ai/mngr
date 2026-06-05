@@ -6,6 +6,7 @@ from datetime import timezone
 from pathlib import Path
 
 import pytest
+from inline_snapshot import snapshot
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_schedule.data_types import ScheduleCreationRecord
@@ -23,36 +24,10 @@ from imbue.mngr_schedule.implementations.local.deploy import list_local_schedule
 TriggerFactory = Callable[..., ScheduleTriggerDefinition]
 
 
-# =============================================================================
 # build_wrapper_script tests
-# =============================================================================
 
 
-def test_build_wrapper_script_contains_path(make_test_trigger: TriggerFactory) -> None:
-    trigger = make_test_trigger()
-    script = build_wrapper_script(
-        trigger=trigger,
-        working_directory="/home/user/project",
-        path_value="/usr/local/bin:/usr/bin",
-        env_file_path=None,
-    )
-    assert "export PATH=" in script
-    assert "/usr/local/bin:/usr/bin" in script
-
-
-def test_build_wrapper_script_contains_cd_to_working_dir(make_test_trigger: TriggerFactory) -> None:
-    trigger = make_test_trigger()
-    script = build_wrapper_script(
-        trigger=trigger,
-        working_directory="/home/user/project",
-        path_value="/usr/bin",
-        env_file_path=None,
-    )
-    assert "cd " in script
-    assert "/home/user/project" in script
-
-
-def test_build_wrapper_script_contains_mngr_command_and_args() -> None:
+def test_build_wrapper_script_without_env_file_renders_full_script() -> None:
     trigger = ScheduleTriggerDefinition(
         name="test",
         command=ScheduledMngrCommand.CREATE,
@@ -62,60 +37,59 @@ def test_build_wrapper_script_contains_mngr_command_and_args() -> None:
     )
     script = build_wrapper_script(
         trigger=trigger,
-        working_directory="/tmp",
-        path_value="/usr/bin",
+        working_directory="/home/user/project",
+        path_value="/usr/local/bin:/usr/bin",
         env_file_path=None,
     )
-    assert "uv run mngr create" in script
-    assert "do work" in script
+    assert script == snapshot(
+        """\
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PATH=/usr/local/bin:/usr/bin
+
+cd /home/user/project
+
+exec uv run mngr create --type claude --message 'do work'
+"""
+    )
 
 
-def test_build_wrapper_script_includes_env_sourcing(make_test_trigger: TriggerFactory) -> None:
-    trigger = make_test_trigger()
+def test_build_wrapper_script_with_env_file_sources_it_under_guard() -> None:
+    trigger = ScheduleTriggerDefinition(
+        name="test",
+        command=ScheduledMngrCommand.CREATE,
+        args="--type claude --message 'do work'",
+        schedule_cron="0 2 * * *",
+        provider="local",
+    )
     script = build_wrapper_script(
         trigger=trigger,
-        working_directory="/tmp",
-        path_value="/usr/bin",
+        working_directory="/home/user/project",
+        path_value="/usr/local/bin:/usr/bin",
         env_file_path=Path("/home/user/.mngr/schedule/test/.env"),
     )
-    assert "source" in script
-    assert ".env" in script
+    assert script == snapshot(
+        """\
+#!/usr/bin/env bash
+set -euo pipefail
 
+export PATH=/usr/local/bin:/usr/bin
 
-def test_build_wrapper_script_omits_env_when_none(make_test_trigger: TriggerFactory) -> None:
-    trigger = make_test_trigger()
-    script = build_wrapper_script(
-        trigger=trigger,
-        working_directory="/tmp",
-        path_value="/usr/bin",
-        env_file_path=None,
+if [ -f /home/user/.mngr/schedule/test/.env ]; then
+    set -a
+    source /home/user/.mngr/schedule/test/.env
+    set +a
+fi
+
+cd /home/user/project
+
+exec uv run mngr create --type claude --message 'do work'
+"""
     )
-    assert "source" not in script
 
 
-def test_build_wrapper_script_starts_with_shebang(make_test_trigger: TriggerFactory) -> None:
-    trigger = make_test_trigger()
-    script = build_wrapper_script(
-        trigger=trigger,
-        working_directory="/tmp",
-        path_value="/usr/bin",
-        env_file_path=None,
-    )
-    assert script.startswith("#!/usr/bin/env bash\n")
-
-
-def test_build_wrapper_script_uses_exec(make_test_trigger: TriggerFactory) -> None:
-    trigger = make_test_trigger()
-    script = build_wrapper_script(
-        trigger=trigger,
-        working_directory="/tmp",
-        path_value="/usr/bin",
-        env_file_path=None,
-    )
-    assert "exec uv run mngr" in script
-
-
-def test_build_wrapper_script_empty_args() -> None:
+def test_build_wrapper_script_empty_args_omits_trailing_args() -> None:
     trigger = ScheduleTriggerDefinition(
         name="test",
         command=ScheduledMngrCommand.EXEC,
@@ -129,12 +103,21 @@ def test_build_wrapper_script_empty_args() -> None:
         path_value="/usr/bin",
         env_file_path=None,
     )
-    assert "exec uv run mngr exec" in script
+    assert script == snapshot(
+        """\
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PATH=/usr/bin
+
+cd /tmp
+
+exec uv run mngr exec
+"""
+    )
 
 
-# =============================================================================
 # _stage_env_file tests
-# =============================================================================
 
 
 def test_stage_env_file_returns_none_when_no_vars(tmp_path: Path) -> None:
@@ -172,9 +155,7 @@ def test_stage_env_file_skips_missing_env_vars(
     assert result is None
 
 
-# =============================================================================
-# deploy_local_schedule integration tests (with injected crontab/git stubs)
-# =============================================================================
+# deploy_local_schedule tests (with injected crontab/git stubs)
 
 
 def test_deploy_local_schedule_creates_files_and_record(
@@ -244,15 +225,20 @@ def test_deploy_local_schedule_with_env_vars(
 def test_deploy_local_schedule_update_replaces_crontab_entry(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """Test that deploying the same trigger name replaces the crontab entry."""
-    captured_crontab: list[str] = []
-    call_count = {"read": 0}
+    """Test that deploying the same trigger name replaces the crontab entry.
+
+    The crontab is modeled as a persistent store with last-write-wins
+    semantics: the reader always returns the latest written content and the
+    writer overwrites it. The assertions check the final crontab content,
+    independent of how many times the reader is invoked.
+    """
+    current_crontab: list[str] = [""]
 
     def crontab_reader() -> str:
-        call_count["read"] += 1
-        if call_count["read"] == 1:
-            return ""
-        return captured_crontab[-1] if captured_crontab else ""
+        return current_crontab[0]
+
+    def crontab_writer(content: str) -> None:
+        current_crontab[0] = content
 
     # Deploy first time
     trigger1 = ScheduleTriggerDefinition(
@@ -266,7 +252,7 @@ def test_deploy_local_schedule_update_replaces_crontab_entry(
         trigger1,
         temp_mngr_ctx,
         crontab_reader=crontab_reader,
-        crontab_writer=captured_crontab.append,
+        crontab_writer=crontab_writer,
         git_hash_resolver=lambda: "fakehash",
     )
 
@@ -282,19 +268,18 @@ def test_deploy_local_schedule_update_replaces_crontab_entry(
         trigger2,
         temp_mngr_ctx,
         crontab_reader=crontab_reader,
-        crontab_writer=captured_crontab.append,
+        crontab_writer=crontab_writer,
         git_hash_resolver=lambda: "fakehash",
     )
 
-    # Only the latest schedule should be in crontab
-    final_crontab = captured_crontab[-1]
+    # The old entry should be replaced by the new one (last-write-wins).
+    final_crontab = current_crontab[0]
     assert final_crontab.count("schedule:my-trigger") == 1
     assert "0 3 * * *" in final_crontab
+    assert "0 1 * * *" not in final_crontab
 
 
-# =============================================================================
 # list_local_schedule_creation_records tests
-# =============================================================================
 
 
 def test_list_local_schedule_creation_records_empty(
@@ -365,9 +350,7 @@ def test_list_local_schedule_creation_records_skips_invalid_json(
     assert records == []
 
 
-# =============================================================================
-# Integration test: deploy then list round-trip
-# =============================================================================
+# deploy then list round-trip tests
 
 
 def test_deploy_then_list_round_trip_preserves_all_fields(
@@ -409,9 +392,7 @@ def test_deploy_then_list_round_trip_preserves_all_fields(
     assert "uv run mngr schedule add" in record.full_commandline
 
 
-# =============================================================================
 # list_local_schedule_creation_records edge cases
-# =============================================================================
 
 
 def test_list_local_schedule_creation_records_skips_non_json_files(
@@ -441,7 +422,15 @@ def test_list_local_schedule_creation_records_skips_unreadable_files(
     temp_mngr_ctx: MngrContext,
     make_test_trigger: TriggerFactory,
 ) -> None:
-    """list_local_schedule_creation_records should skip files that cannot be read."""
+    """list_local_schedule_creation_records should skip records that raise OSError on read.
+
+    A directory whose name ends in ``.json`` passes the name filter but makes
+    ``read_bytes()`` raise ``IsADirectoryError`` (an ``OSError``) regardless of
+    the running uid -- so this exercises the OSError skip branch even when the
+    test runs as root, where permission bits would be bypassed. A sibling valid
+    record must still be returned, so the test fails loudly if that branch ever
+    stops skipping.
+    """
     trigger = make_test_trigger("readable-trigger")
     deploy_local_schedule(
         trigger,
@@ -452,20 +441,15 @@ def test_list_local_schedule_creation_records_skips_unreadable_files(
     )
 
     records_dir = temp_mngr_ctx.config.default_host_dir.expanduser() / "schedule" / "records"
-    unreadable = records_dir / "unreadable.json"
-    unreadable.write_text("will be unreadable")
-    unreadable.chmod(0o000)
+    # A directory named like a record: read_bytes() raises IsADirectoryError.
+    (records_dir / "unreadable.json").mkdir()
 
     records = list_local_schedule_creation_records(temp_mngr_ctx)
     assert len(records) == 1
     assert records[0].trigger.name == "readable-trigger"
 
-    unreadable.chmod(0o644)
 
-
-# =============================================================================
 # get_local_schedule_creation_record tests
-# =============================================================================
 
 
 def test_get_local_schedule_creation_record_found(
@@ -510,9 +494,7 @@ def test_get_local_schedule_creation_record_invalid_json(
     assert record is None
 
 
-# =============================================================================
 # get_local_trigger_run_script tests
-# =============================================================================
 
 
 def test_get_local_trigger_run_script_returns_correct_path(
