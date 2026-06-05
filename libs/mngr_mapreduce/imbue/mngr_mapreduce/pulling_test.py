@@ -104,6 +104,7 @@ def test_pull_agent_outputs_extracts_archive_contents_under_agent_name(
         destination_dir=tmp_path,
     )
 
+    assert result is not None
     assert result == tmp_path / "mapper-7"
     assert (result / "summary.md").read_bytes() == b"all good"
     assert (result / "nested" / "data.txt").read_bytes() == b"42"
