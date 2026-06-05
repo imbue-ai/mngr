@@ -8,6 +8,18 @@ message/content-block type shapes, the session functions (`list_sessions`,
 `get_session_info`, `get_session_messages`, `rename_session`, `tag_session`), and documented
 `FileNotFoundError` error paths.
 
+The suite was then expanded with ~100 additional tests covering: field-level message contracts
+(`SystemMessage` init data, `ResultMessage` usage/cost/duration/model-usage, `AssistantMessage`
+metadata, `StreamEvent`); built-in tool use end-to-end (Bash/Read/Write/Edit/Glob/Grep, tool
+use/result id correlation, failing-command `is_error`); more `ClaudeAgentOptions` behavior
+(`env`, `allowed_tools`/`disallowed_tools`, `permission_mode` bypass/accept/plan, pinned
+`model`, `system_prompt` string and preset, `add_dirs`, `cwd`); `ClaudeSDKClient` introspection
+(`get_server_info`, `get_mcp_status`) and streaming input / partial messages; advanced
+permission and hook behavior (`can_use_tool` input rewriting and deny semantics, `PreToolUse`/
+`PostToolUse`/`UserPromptSubmit` hooks and matchers); and session continuation (`resume`,
+`fork_session`, `continue_conversation`) plus `SDKSessionInfo`/`SessionMessage` field contracts
+and `list_sessions` paging.
+
 These tests make real, paid API calls and are excluded from all CI runs via the new `sdk_live`
 marker; they only run when `RUN_SDK_LIVE_TESTS=1` and `ANTHROPIC_API_KEY` are both set (run them
 with `just test-sdk-live`). Added `claude-agent-sdk` as a dependency and `pytest-asyncio` as a

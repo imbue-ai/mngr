@@ -44,6 +44,14 @@ def _tool_result_blocks(messages: list[object]) -> list[ToolResultBlock]:
     ]
 
 
+def _tool_result_text(messages: list[object]) -> str:
+    """Concatenate the textual content of every tool result (handling str or block-list content)."""
+    parts: list[str] = []
+    for block in _tool_result_blocks(messages):
+        parts.append(block.content if isinstance(block.content, str) else str(block.content))
+    return "".join(parts)
+
+
 async def test_bash_tool_creates_a_file(sdk_live_model: str, sdk_cwd: Path) -> None:
     target = sdk_cwd / "created.txt"
     messages = await _run_tool_turn(
@@ -95,13 +103,7 @@ async def test_tool_use_and_result_ids_correlate(sdk_live_model: str, sdk_cwd: P
 
 async def test_tool_result_content_contains_command_output(sdk_live_model: str, sdk_cwd: Path) -> None:
     messages = await _run_tool_turn(sdk_live_model, sdk_cwd, "Use the Bash tool to run exactly: echo OUTPUTTOKEN_9001")
-    combined = ""
-    for block in _tool_result_blocks(messages):
-        if isinstance(block.content, str):
-            combined += block.content
-        elif isinstance(block.content, list):
-            combined += str(block.content)
-    assert "OUTPUTTOKEN_9001" in combined
+    assert "OUTPUTTOKEN_9001" in _tool_result_text(messages)
 
 
 async def test_multiple_tool_calls_in_one_task(sdk_live_model: str, sdk_cwd: Path) -> None:
@@ -126,13 +128,7 @@ async def test_bash_tool_use_input_has_command_field(sdk_live_model: str, sdk_cw
 
 async def test_bash_pwd_reflects_configured_cwd(sdk_live_model: str, sdk_cwd: Path) -> None:
     messages = await _run_tool_turn(sdk_live_model, sdk_cwd, "Use the Bash tool to run exactly: pwd")
-    combined = ""
-    for block in _tool_result_blocks(messages):
-        if isinstance(block.content, str):
-            combined += block.content
-        elif isinstance(block.content, list):
-            combined += str(block.content)
-    assert sdk_cwd.name in combined
+    assert sdk_cwd.name in _tool_result_text(messages)
 
 
 async def test_agent_lists_directory_contents(sdk_live_model: str, sdk_cwd: Path) -> None:

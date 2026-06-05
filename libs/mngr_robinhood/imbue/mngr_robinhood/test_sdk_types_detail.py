@@ -11,6 +11,7 @@ import pytest
 from claude_agent_sdk import AssistantMessage
 from claude_agent_sdk import SystemMessage
 from claude_agent_sdk import TextBlock
+from claude_agent_sdk import ToolUseBlock
 
 from imbue.mngr_robinhood.testing import collect_assistant_text
 from imbue.mngr_robinhood.testing import collect_query_messages
@@ -79,7 +80,7 @@ async def test_result_durations_are_positive(sdk_live_model: str, sdk_cwd: Path)
     assert result.duration_api_ms > 0
 
 
-async def test_result_num_turns_at_least_one(sdk_live_model: str, sdk_cwd: Path) -> None:
+async def test_result_turn_count_is_at_least_one(sdk_live_model: str, sdk_cwd: Path) -> None:
     messages = await collect_query_messages("Say hi.", make_sdk_options(sdk_live_model, sdk_cwd))
     result = find_result_message(messages)
     assert result.num_turns >= 1
@@ -133,13 +134,15 @@ async def test_assistant_message_parent_tool_use_id_none_at_top_level(sdk_live_m
     assert all(m.parent_tool_use_id is None for m in assistant_messages)
 
 
-async def test_text_reply_contains_only_text_blocks(sdk_live_model: str, sdk_cwd: Path) -> None:
+async def test_text_reply_includes_text_blocks_and_no_tool_use(sdk_live_model: str, sdk_cwd: Path) -> None:
     messages = await collect_query_messages(
         "Reply with one short sentence and do not use any tools.", make_sdk_options(sdk_live_model, sdk_cwd)
     )
     assistant_blocks = [b for m in messages if isinstance(m, AssistantMessage) for b in m.content]
-    assert len(assistant_blocks) >= 1
-    assert all(isinstance(b, TextBlock) for b in assistant_blocks)
+    # A plain text reply must produce at least one TextBlock (it may also contain a ThinkingBlock)
+    # and must not invoke any tools.
+    assert any(isinstance(b, TextBlock) for b in assistant_blocks)
+    assert not any(isinstance(b, ToolUseBlock) for b in assistant_blocks)
 
 
 async def test_text_block_has_no_type_attribute(sdk_live_model: str, sdk_cwd: Path) -> None:

@@ -79,9 +79,12 @@ async def test_can_use_tool_receives_command_input_and_context(sdk_live_model: s
         seen_context_types.append(isinstance(context, ToolPermissionContext))
         return PermissionResultAllow(behavior="allow")
 
+    # A file-writing command requires permission, so the callback is consulted (a bare side-effect-free
+    # echo would be auto-approved and never reach can_use_tool).
     options = make_sdk_options(sdk_live_model, sdk_cwd, permission_mode="default", can_use_tool=can_use_tool)
-    await _run_client(options, "Use the Bash tool to run exactly: echo CONTEXTCHECK")
+    await _run_client(options, f"Use the Bash tool to run exactly: echo CONTEXTCHECK > {sdk_cwd / 'ctx.txt'}")
 
+    assert len(seen_inputs) >= 1
     assert any("command" in tool_input for tool_input in seen_inputs)
     assert all(seen_context_types)
 
@@ -97,7 +100,7 @@ async def test_can_use_tool_consulted_once_for_single_command(sdk_live_model: st
         return PermissionResultAllow(behavior="allow")
 
     options = make_sdk_options(sdk_live_model, sdk_cwd, permission_mode="default", can_use_tool=can_use_tool)
-    await _run_client(options, "Use the Bash tool exactly once to run: echo ONCE")
+    await _run_client(options, f"Use the Bash tool exactly once to run: echo ONCE > {sdk_cwd / 'once.txt'}")
 
     assert len(bash_calls) == 1
 
@@ -268,7 +271,9 @@ async def test_can_use_tool_deny_records_permission_denial(sdk_live_model: str, 
         return PermissionResultDeny(behavior="deny", message="denied", interrupt=False)
 
     options = make_sdk_options(sdk_live_model, sdk_cwd, permission_mode="default", can_use_tool=can_use_tool)
-    messages = await _run_client(options, "Use the Bash tool to run exactly: echo DENYRECORD")
+    messages = await _run_client(
+        options, f"Use the Bash tool to run exactly: echo DENYRECORD > {sdk_cwd / 'deny.txt'}"
+    )
     result = find_result_message(messages)
     assert result.permission_denials is not None
     assert any(denial.get("tool_name") == "Bash" for denial in result.permission_denials)
