@@ -1668,6 +1668,27 @@ def test_inbox_auto_open_checkbox_reflects_config(tmp_path: Path) -> None:
     assert "checked" not in body[tag_start:tag_end]
 
 
+def test_inbox_shell_reapplies_selection_after_list_refresh(tmp_path: Path) -> None:
+    """The inbox shell JS re-applies the highlight after an SSE-driven list refresh.
+
+    Regression guard: ``/inbox/list`` is selection-agnostic and always
+    renders with ``selected_id=""``. When an SSE ``requests`` event arrives
+    and ``fetchListFragment()`` rebuilds the list innerHTML, the previously
+    highlighted card loses its ``.is-selected`` class. If the selection is
+    still in the new pending set, the shell must call
+    ``setSelectedCard(currentId)`` to restore the highlight; otherwise the
+    user sees their selection visibly disappear despite not changing it.
+    """
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.get("/inbox")
+    assert response.status_code == 200
+    body = response.text
+    # The SSE handler must call setSelectedCard(currentId) in the
+    # "selection still pending" branch.
+    assert "setSelectedCard(currentId)" in body
+
+
 def test_old_requests_panel_route_removed(tmp_path: Path) -> None:
     """The legacy panel route no longer exists."""
     client, auth_store = _create_test_client_with_stores(tmp_path)

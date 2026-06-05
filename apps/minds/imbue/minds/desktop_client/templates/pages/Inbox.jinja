@@ -310,12 +310,19 @@
         var currentId = getSelectedId();
         var newIds = Array.isArray(evt.request_ids) ? evt.request_ids.map(String) : [];
         fetchListFragment().then(function () {
-          if (currentId && newIds.indexOf(currentId) === -1) {
+          if (!currentId) return;
+          if (newIds.indexOf(currentId) === -1) {
             // The server returns the canonical unavailable fragment for
             // resolved/unknown ids; let it own the copy rather than
             // duplicating the message here.
             fetchDetailFragment(currentId);
             updateUrl(null);
+          } else {
+            // The selection is still pending, but fetchListFragment
+            // rebuilt the list innerHTML with no card highlighted (the
+            // /inbox/list endpoint is selection-agnostic). Re-apply the
+            // highlight so the user's selection survives the refresh.
+            setSelectedCard(currentId);
           }
         });
       });
