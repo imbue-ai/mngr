@@ -22,6 +22,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
+from imbue.mngr_antigravity.antigravity_config import CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_hooks_config_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_oauth_token_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_onboarding_cache_path
@@ -895,12 +896,41 @@ def test_provision_writes_hooks_json_under_per_agent_home_config(
 def test_provision_hooks_json_sets_active_marker_on_preinvocation_and_clears_on_stop(
     antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path
 ) -> None:
-    """The active marker hooks are always present (they drive RUNNING vs WAITING)."""
+    """The active marker hooks are always present (they drive RUNNING vs WAITING).
+
+    PreInvocation touches the marker; Stop runs the idle-gated clear script,
+    which removes it only when agy reports the conversation is fully idle.
+    """
     agent = antigravity_agent_auto_dismiss
     _provision(agent)
     mngr = _read_hooks_json(agent)["mngr"]
     assert mngr["PreInvocation"][0]["command"] == 'touch "$MNGR_AGENT_STATE_DIR/active"'
-    assert mngr["Stop"][0]["command"] == 'rm -f "$MNGR_AGENT_STATE_DIR/active"'
+    assert (
+        mngr["Stop"][0]["command"]
+        == f'bash "$MNGR_AGENT_STATE_DIR/commands/{CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME}"'
+    )
+
+
+def test_provision_installs_clear_active_marker_when_idle_script(
+    auto_approve_ctx: AntigravityAgent,
+    isolated_home: Path,
+) -> None:
+    """provision() installs clear_active_marker_when_idle.sh into the commands/ dir.
+
+    The Stop hook invokes this script by that path
+    (build_antigravity_hooks_config), so it must be provisioned for the
+    fully-idle-gated WAITING transition to work.
+    """
+    agent = auto_approve_ctx
+    agent.provision(
+        host=agent.host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
+        mngr_ctx=agent.mngr_ctx,
+    )
+    script_path = agent._get_agent_dir() / "commands" / CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME
+    assert script_path.exists()
+    # Sanity-check it's the idle-gate script (keys on the fullyIdle field).
+    assert "fullyIdle" in script_path.read_text()
 
 
 def test_provision_does_not_write_hooks_into_work_dir(

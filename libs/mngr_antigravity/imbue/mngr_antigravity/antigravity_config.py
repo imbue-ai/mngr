@@ -273,14 +273,30 @@ CONVERSATION_IDS_FILENAME: str = "antigravity_conversation_ids"
 # sync with the resource file under ``resources/``.
 CAPTURE_CONVERSATION_ID_SCRIPT_NAME: str = "capture_conversation_id.sh"
 
+# Script (provisioned into ``$MNGR_AGENT_STATE_DIR/commands/``) that the
+# ``Stop`` hook runs to clear the ``active`` marker -- but only when agy's
+# Stop-hook payload reports ``"fullyIdle":true`` (the root agent and every
+# subagent / background task it launched have all finished). Name kept in sync
+# with the resource file under ``resources/``.
+CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME: str = "clear_active_marker_when_idle.sh"
+
 # ``active`` is touched on every ``PreInvocation`` (the loop is about to call
-# the model, i.e. the agent is working) and removed on ``Stop`` (the execution
-# loop terminated and the agent is back to waiting for input). ``$MNGR_AGENT_STATE_DIR``
-# expands in agy's shell at hook-execution time. Both commands intentionally
-# emit no stdout: ``PreInvocation``/``Stop`` treat empty output as "no
-# injected steps" / "allow stop" (verified live against agy 1.0.3).
+# the model, i.e. the agent is working). It is removed on ``Stop`` *only when
+# fully idle*: agy runs Stop hooks once per execution (the payload carries an
+# ``executionNum``) and reports ``fullyIdle`` -- true only when no subagent or
+# background task is still running. ``clear_active_marker_when_idle.sh`` reads
+# that field from stdin and removes the marker just on the fully-idle Stop, so
+# an agent that goes idle while async work continues keeps reporting RUNNING
+# until that work also completes (agy then fires a final Stop with
+# ``fullyIdle:true``). ``$MNGR_AGENT_STATE_DIR`` expands in agy's shell at
+# hook-execution time. The touch intentionally emits no stdout (``PreInvocation``
+# treats empty output as "no injected steps"; verified live against agy 1.0.3),
+# and the clear script likewise stays silent (agy treats Stop-hook stdout as a
+# structured result that can block the stop).
 _SET_ACTIVE_COMMAND: str = f'touch "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'
-_CLEAR_ACTIVE_COMMAND: str = f'rm -f "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'
+_CLEAR_ACTIVE_WHEN_IDLE_COMMAND: str = (
+    f'bash "$MNGR_AGENT_STATE_DIR/commands/{CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME}"'
+)
 
 # Second ``PreInvocation`` handler: records the conversation ID from agy's hook
 # payload (delivered on stdin). agy hands each handler its own copy of the
@@ -297,9 +313,14 @@ def build_antigravity_hooks_config() -> dict[str, Any]:
     Emits two ``PreInvocation`` handlers plus a ``Stop`` handler:
 
     * The ``active``-marker pair: ``PreInvocation`` touches the marker and
-      ``Stop`` removes it. ``BaseAgent.get_lifecycle_state`` reads that marker
-      to report RUNNING while the agent works and WAITING when it's idle; agy
-      maintains no such marker on its own.
+      ``Stop`` runs ``clear_active_marker_when_idle.sh``, which removes the
+      marker *only* when agy's Stop payload reports ``fullyIdle`` (no subagent
+      or background task is still running). ``BaseAgent.get_lifecycle_state``
+      reads that marker to report RUNNING while the agent works and WAITING
+      when it's idle; agy maintains no such marker on its own. Gating the clear
+      on ``fullyIdle`` keeps an agent RUNNING while async work it launched is
+      still in flight, rather than flipping to WAITING the moment the root
+      agent's turn ends.
     * The conversation-ID capture handler: a second ``PreInvocation`` handler
       runs ``capture_conversation_id.sh``, which reads agy's hook payload from
       stdin and records the active conversation ID (see
@@ -325,7 +346,7 @@ def build_antigravity_hooks_config() -> dict[str, Any]:
             {"type": "command", "command": _SET_ACTIVE_COMMAND},
             {"type": "command", "command": _CAPTURE_CONVERSATION_ID_COMMAND},
         ],
-        "Stop": [{"type": "command", "command": _CLEAR_ACTIVE_COMMAND}],
+        "Stop": [{"type": "command", "command": _CLEAR_ACTIVE_WHEN_IDLE_COMMAND}],
     }
     return {_MNGR_HOOK_NAME: mngr_hook}
 

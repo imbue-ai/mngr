@@ -110,6 +110,7 @@ from imbue.mngr.primitives import CommandString
 from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr_antigravity import resources as _antigravity_resources
 from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
+from imbue.mngr_antigravity.antigravity_config import CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import CONVERSATION_IDS_FILENAME
 from imbue.mngr_antigravity.antigravity_config import TRUSTED_WORKSPACES_KEY
 from imbue.mngr_antigravity.antigravity_config import build_antigravity_hooks_config
@@ -474,6 +475,12 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
                     # conversation ID (see build_antigravity_hooks_config).
                     CAPTURE_CONVERSATION_ID_SCRIPT_NAME: _load_antigravity_resource_script(
                         CAPTURE_CONVERSATION_ID_SCRIPT_NAME
+                    ),
+                    # Run by the Stop hook to clear the active marker only when
+                    # agy reports the conversation is fully idle (see
+                    # build_antigravity_hooks_config).
+                    CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME: _load_antigravity_resource_script(
+                        CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME
                     ),
                 },
                 concurrency_group,

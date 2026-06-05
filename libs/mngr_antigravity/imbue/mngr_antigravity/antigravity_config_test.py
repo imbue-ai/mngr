@@ -12,6 +12,7 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_antigravity.antigravity_config import ACTIVE_MARKER_FILENAME
 from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
+from imbue.mngr_antigravity.antigravity_config import CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import build_antigravity_hooks_config
 from imbue.mngr_antigravity.antigravity_config import build_isolated_settings
 from imbue.mngr_antigravity.antigravity_config import build_onboarding_seed
@@ -213,12 +214,15 @@ def test_read_antigravity_settings_returns_parsed_dict(
 
 
 def test_hooks_config_always_emits_active_marker_via_preinvocation_and_stop() -> None:
-    """PreInvocation touches the active marker; Stop removes it.
+    """PreInvocation touches the active marker; Stop clears it only when fully idle.
 
     The active marker drives BaseAgent's RUNNING/WAITING detection. agy fires
-    PreInvocation before each model call (agent working) and Stop when the
-    loop terminates (agent idle), so this pair flips the marker at the right
-    boundaries.
+    PreInvocation before each model call (agent working) and runs Stop hooks
+    when an execution goes idle. The Stop handler runs
+    clear_active_marker_when_idle.sh, which removes the marker only on a
+    fully-idle Stop, so the pair flips the marker at the right boundaries even
+    when the agent goes idle while subagents / background tasks are still
+    running.
     """
     config = build_antigravity_hooks_config()
 
@@ -229,7 +233,14 @@ def test_hooks_config_always_emits_active_marker_via_preinvocation_and_stop() ->
     # The active-marker touch is the first PreInvocation handler (a second
     # handler captures the conversation id; see the test below).
     assert pre[0] == {"type": "command", "command": f'touch "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'}
-    assert stop == [{"type": "command", "command": f'rm -f "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'}]
+    # Stop runs the idle-gated clear script (not a bare `rm`), so the marker is
+    # removed only when the payload reports fullyIdle.
+    assert stop == [
+        {
+            "type": "command",
+            "command": f'bash "$MNGR_AGENT_STATE_DIR/commands/{CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME}"',
+        }
+    ]
 
 
 def test_hooks_config_captures_conversation_id_via_second_preinvocation_handler() -> None:
