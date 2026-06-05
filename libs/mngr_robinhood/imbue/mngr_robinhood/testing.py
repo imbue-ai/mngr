@@ -12,7 +12,10 @@ from typing import Any
 
 from claude_agent_sdk import AssistantMessage
 from claude_agent_sdk import ClaudeAgentOptions
+from claude_agent_sdk import ClaudeSDKClient
+from claude_agent_sdk import ResultMessage
 from claude_agent_sdk import TextBlock
+from claude_agent_sdk import query
 
 
 def make_sdk_options(model: str, cwd: Path, **overrides: Any) -> ClaudeAgentOptions:
@@ -38,3 +41,20 @@ def collect_assistant_text(messages: Iterable[object]) -> str:
                 if isinstance(block, TextBlock):
                     texts.append(block.text)
     return "\n".join(texts)
+
+
+async def collect_query_messages(prompt: str, options: ClaudeAgentOptions) -> list[object]:
+    """Run ``query()`` to completion and return every message it yields."""
+    return [message async for message in query(prompt=prompt, options=options)]
+
+
+async def drain_response(client: ClaudeSDKClient) -> list[object]:
+    """Consume one ``receive_response()`` turn and return every message it yields."""
+    return [message async for message in client.receive_response()]
+
+
+def find_result_message(messages: Iterable[object]) -> ResultMessage:
+    """Return the single terminal ResultMessage from a message stream."""
+    results = [message for message in messages if isinstance(message, ResultMessage)]
+    assert len(results) == 1
+    return results[0]
