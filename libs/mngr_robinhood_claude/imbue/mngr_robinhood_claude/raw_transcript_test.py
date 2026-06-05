@@ -1,7 +1,7 @@
 import json
 
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
-from imbue.mngr_uncapped_claude.raw_transcript import RawTranscriptParser
+from imbue.mngr_robinhood_claude.raw_transcript import RawTranscriptParser
 
 
 def _make_parser() -> RawTranscriptParser:

@@ -13,7 +13,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Fixed
 
-- Fixed: Infinite-recursion bug when running successive claude agents in the same `work_dir` (as `mngr uncapped-claude` always does).
+- Fixed: Infinite-recursion bug when running successive claude agents in the same `work_dir` (as `mngr robinhood-claude` always does).
 
 ## [v0.2.8] - 2026-05-13
 

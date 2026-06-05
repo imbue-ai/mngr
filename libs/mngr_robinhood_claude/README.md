@@ -1,8 +1,8 @@
-# imbue-mngr-uncapped-claude
+# imbue-mngr-robinhood-claude
 
 Drop-in replacement for `claude -p` that's implemented on top of `mngr`.
 
-The `mngr uncapped-claude` command takes the same arguments as the regular
+The `mngr robinhood-claude` command takes the same arguments as the regular
 `claude` CLI, always behaves as if `-p`/`--print` was passed, and routes
 the prompt through a fresh, ephemeral `mngr` claude agent. The agent runs
 in-place in the current directory, processes the prompt (or stream of
@@ -11,29 +11,29 @@ prompts), and is destroyed when the command exits.
 ## Install
 
 ```bash
-uv tool install imbue-mngr-uncapped-claude
+uv tool install imbue-mngr-robinhood-claude
 ```
 
 ## Usage
 
 ```bash
 # Single prompt, text output
-mngr uncapped-claude "summarize this repo"
+mngr robinhood-claude "summarize this repo"
 
 # Pipe stdin in
-cat error.log | mngr uncapped-claude "explain this"
+cat error.log | mngr robinhood-claude "explain this"
 
 # Structured JSON output (claude-native shape; cost/usage fields zeroed)
-mngr uncapped-claude "summarize this repo" --output-format json
+mngr robinhood-claude "summarize this repo" --output-format json
 
 # Live event stream
-mngr uncapped-claude "explain recursion" --output-format stream-json --verbose
+mngr robinhood-claude "explain recursion" --output-format stream-json --verbose
 
 # Multi-turn via stream-json input
 printf '%s\n%s\n' \
   '{"type":"user","message":{"role":"user","content":"hi"}}' \
   '{"type":"user","message":{"role":"user","content":"and again"}}' \
-  | mngr uncapped-claude --input-format stream-json --output-format stream-json
+  | mngr robinhood-claude --input-format stream-json --output-format stream-json
 ```
 
 ## Flags not supported in v1

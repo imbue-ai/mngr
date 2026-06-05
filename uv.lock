@@ -38,7 +38,7 @@ members = [
     "imbue-mngr-tmr",
     "imbue-mngr-ttyd",
     "imbue-mngr-tutor",
-    "imbue-mngr-uncapped-claude",
+    "imbue-mngr-robinhood-claude",
     "imbue-mngr-usage",
     "imbue-mngr-vps-docker",
     "imbue-mngr-vultr",
@@ -2174,9 +2174,9 @@ requires-dist = [
 ]
 
 [[package]]
-name = "imbue-mngr-uncapped-claude"
+name = "imbue-mngr-robinhood-claude"
 version = "0.1.0"
-source = { editable = "libs/mngr_uncapped_claude" }
+source = { editable = "libs/mngr_robinhood_claude" }
 dependencies = [
     { name = "imbue-mngr" },
     { name = "imbue-mngr-claude" },

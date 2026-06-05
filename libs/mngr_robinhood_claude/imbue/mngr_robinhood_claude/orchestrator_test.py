@@ -8,21 +8,21 @@ from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
-from imbue.mngr_uncapped_claude.data_types import OutputFormat
-from imbue.mngr_uncapped_claude.orchestrator import _TranscriptReadFailureWarner
-from imbue.mngr_uncapped_claude.orchestrator import _TurnEndTicker
-from imbue.mngr_uncapped_claude.orchestrator import _build_agent_name
-from imbue.mngr_uncapped_claude.orchestrator import _build_pass_env_vars
-from imbue.mngr_uncapped_claude.orchestrator import _build_result_meta
-from imbue.mngr_uncapped_claude.orchestrator import monotonic_ms_since
-from imbue.mngr_uncapped_claude.output_modes import StreamingOutputWriter
-from imbue.mngr_uncapped_claude.raw_transcript import RawTranscriptParser
+from imbue.mngr_robinhood_claude.data_types import OutputFormat
+from imbue.mngr_robinhood_claude.orchestrator import _TranscriptReadFailureWarner
+from imbue.mngr_robinhood_claude.orchestrator import _TurnEndTicker
+from imbue.mngr_robinhood_claude.orchestrator import _build_agent_name
+from imbue.mngr_robinhood_claude.orchestrator import _build_pass_env_vars
+from imbue.mngr_robinhood_claude.orchestrator import _build_result_meta
+from imbue.mngr_robinhood_claude.orchestrator import monotonic_ms_since
+from imbue.mngr_robinhood_claude.output_modes import StreamingOutputWriter
+from imbue.mngr_robinhood_claude.raw_transcript import RawTranscriptParser
 
 
-def test_build_agent_name_has_uncapped_prefix() -> None:
+def test_build_agent_name_has_robinhood_prefix() -> None:
     name = _build_agent_name()
-    assert str(name).startswith("uncapped-")
-    assert len(str(name)) > len("uncapped-")
+    assert str(name).startswith("robinhood-")
+    assert len(str(name)) > len("robinhood-")
 
 
 def test_build_pass_env_vars_is_populated() -> None:

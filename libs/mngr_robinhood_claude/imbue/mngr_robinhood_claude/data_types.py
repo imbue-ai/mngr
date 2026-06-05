@@ -22,7 +22,7 @@ class OutputFormat(UpperCaseStrEnum):
 
 
 class ArgPartition(FrozenModel):
-    """Result of splitting the raw argv that follows `mngr uncapped-claude`."""
+    """Result of splitting the raw argv that follows `mngr robinhood-claude`."""
 
     input_format: InputFormat = Field(description="Resolved --input-format")
     output_format: OutputFormat = Field(description="Resolved --output-format")

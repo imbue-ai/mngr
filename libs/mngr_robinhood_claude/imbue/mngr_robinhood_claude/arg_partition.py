@@ -2,24 +2,24 @@ from collections.abc import Mapping
 from typing import Final
 
 from imbue.imbue_common.pure import pure
-from imbue.mngr_uncapped_claude.data_types import ArgPartition
-from imbue.mngr_uncapped_claude.data_types import InputFormat
-from imbue.mngr_uncapped_claude.data_types import OutputFormat
-from imbue.mngr_uncapped_claude.errors import UnsupportedClaudeFlagError
+from imbue.mngr_robinhood_claude.data_types import ArgPartition
+from imbue.mngr_robinhood_claude.data_types import InputFormat
+from imbue.mngr_robinhood_claude.data_types import OutputFormat
+from imbue.mngr_robinhood_claude.errors import UnsupportedClaudeFlagError
 
 # Flags that look like top-level claude flags but in v1 we explicitly do not
 # support. Value is the user-facing reason shown when one is encountered.
 REJECTED_FLAGS: Final[Mapping[str, str]] = {
-    "--fallback-model": "--fallback-model is not supported by mngr uncapped-claude in v1",
-    "--max-budget-usd": "--max-budget-usd is not supported by mngr uncapped-claude in v1",
-    "--no-session-persistence": "--no-session-persistence is not supported by mngr uncapped-claude in v1",
-    "--include-hook-events": "--include-hook-events is not supported by mngr uncapped-claude in v1",
-    "--include-partial-messages": "--include-partial-messages is not supported by mngr uncapped-claude in v1",
-    "-c": "-c / --continue is not supported by mngr uncapped-claude in v1",
-    "--continue": "-c / --continue is not supported by mngr uncapped-claude in v1",
-    "-r": "-r / --resume is not supported by mngr uncapped-claude in v1",
-    "--resume": "-r / --resume is not supported by mngr uncapped-claude in v1",
-    "--session-id": "--session-id is not supported by mngr uncapped-claude in v1",
+    "--fallback-model": "--fallback-model is not supported by mngr robinhood-claude in v1",
+    "--max-budget-usd": "--max-budget-usd is not supported by mngr robinhood-claude in v1",
+    "--no-session-persistence": "--no-session-persistence is not supported by mngr robinhood-claude in v1",
+    "--include-hook-events": "--include-hook-events is not supported by mngr robinhood-claude in v1",
+    "--include-partial-messages": "--include-partial-messages is not supported by mngr robinhood-claude in v1",
+    "-c": "-c / --continue is not supported by mngr robinhood-claude in v1",
+    "--continue": "-c / --continue is not supported by mngr robinhood-claude in v1",
+    "-r": "-r / --resume is not supported by mngr robinhood-claude in v1",
+    "--resume": "-r / --resume is not supported by mngr robinhood-claude in v1",
+    "--session-id": "--session-id is not supported by mngr robinhood-claude in v1",
 }
 
 # Simulated flags that take a separate value token (``--flag value`` form).

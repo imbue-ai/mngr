@@ -2,17 +2,17 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 
 
-class UncappedClaudeError(MngrError):
-    """Base exception for the mngr_uncapped_claude plugin."""
+class RobinhoodClaudeError(MngrError):
+    """Base exception for the mngr_robinhood_claude plugin."""
 
 
-class UnsupportedClaudeFlagError(UncappedClaudeError, UserInputError):
+class UnsupportedClaudeFlagError(RobinhoodClaudeError, UserInputError):
     """Raised when the user passes a claude flag that v1 does not support."""
 
 
-class InvalidStreamJsonInputError(UncappedClaudeError, UserInputError):
+class InvalidStreamJsonInputError(RobinhoodClaudeError, UserInputError):
     """Raised when a stream-json input line does not match the supported shape."""
 
 
-class MissingPromptError(UncappedClaudeError, UserInputError):
+class MissingPromptError(RobinhoodClaudeError, UserInputError):
     """Raised when neither a positional prompt nor stdin content is provided."""
