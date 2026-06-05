@@ -12,7 +12,6 @@ from imbue.mngr.plugin_catalog import OpenCodeSignalCheck
 from imbue.mngr.plugin_catalog import SignalCheck
 from imbue.mngr.primitives import PluginTier
 
-_SIGNAL_A = SignalCheck(command=("signal-a",))
 _CLAUDE_SIGNAL = ClaudeSignalCheck()
 _OPENCODE_SIGNAL = OpenCodeSignalCheck()
 
@@ -21,55 +20,14 @@ _OPENCODE_SIGNAL = OpenCodeSignalCheck()
 # =============================================================================
 
 
-def test_should_preselect_basic_with_passing_signal() -> None:
-    """BASIC tier with a signal that resolves True should be preselected.
-
-    We inject a signal-resolution function rather than running a real
-    subprocess so the test asserts only the delegation behavior of
-    _should_preselect_basic.
-    """
-    entry = CatalogEntry(
-        entry_point_name="test",
-        package_name="test",
-        description="test",
-        tier=PluginTier.INDEPENDENT,
-        signal=_SIGNAL_A,
-    )
-    received: list[SignalCheck] = []
-
-    def fake_check_signal(signal: SignalCheck) -> bool:
-        received.append(signal)
-        return True
-
-    assert _should_preselect_basic(entry, check_signal_fn=fake_check_signal) is True
-    # The entry's signal must be the one passed through to the check.
-    assert received == [_SIGNAL_A]
-
-
-def test_should_preselect_basic_with_failing_signal() -> None:
-    """BASIC tier with a signal that resolves False should not be preselected."""
-    entry = CatalogEntry(
-        entry_point_name="test",
-        package_name="test",
-        description="test",
-        tier=PluginTier.INDEPENDENT,
-        signal=_SIGNAL_A,
-    )
-    received: list[SignalCheck] = []
-
-    def fake_check_signal(signal: SignalCheck) -> bool:
-        received.append(signal)
-        return False
-
-    assert _should_preselect_basic(entry, check_signal_fn=fake_check_signal) is False
-    assert received == [_SIGNAL_A]
-
-
 def test_should_preselect_basic_no_signal() -> None:
-    """BASIC tier with no signal should always be preselected without any check.
+    """A BASIC-tier entry with no signal is always preselected.
 
-    This is the genuinely interesting branch: with signal=None the function must
-    short-circuit to True and never invoke the signal check at all.
+    The signal=None short-circuit is the only logic unique to this helper; the
+    signal-present branch is a straight delegation to ``check_signal``, whose
+    pass/fail/missing-binary behavior is covered directly in
+    ``plugin_catalog_test.py``. Testing that delegation here would duplicate
+    those tests, so we only pin the short-circuit.
     """
     entry = CatalogEntry(
         entry_point_name="test",
@@ -79,10 +37,7 @@ def test_should_preselect_basic_no_signal() -> None:
         signal=None,
     )
 
-    def exploding_check_signal(signal: SignalCheck) -> bool:
-        raise AssertionError("check_signal must not be called when signal is None")
-
-    assert _should_preselect_basic(entry, check_signal_fn=exploding_check_signal) is True
+    assert _should_preselect_basic(entry) is True
 
 
 # =============================================================================

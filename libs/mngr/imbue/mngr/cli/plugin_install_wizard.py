@@ -5,7 +5,6 @@ which ones to install.  Selected plugins are installed in a single
 ``uv tool install`` invocation.
 """
 
-from collections.abc import Callable
 from typing import Any
 from typing import Final
 
@@ -99,21 +98,14 @@ def _filter_already_installed(
     return tuple(p for p in plugins if p.package_name not in installed_names)
 
 
-def _should_preselect_basic(
-    entry: CatalogEntry,
-    check_signal_fn: Callable[[SignalCheck], bool] = check_signal,
-) -> bool:
+def _should_preselect_basic(entry: CatalogEntry) -> bool:
     """Determine if a BASIC-tier entry should be preselected in phase 1.
 
     Preselected if there is no signal, or if the signal check passes.
-
-    ``check_signal_fn`` is injectable so callers (and unit tests) can supply a
-    signal-resolution strategy without running real subprocesses; it defaults
-    to the real ``check_signal``.
     """
     if entry.signal is None:
         return True
-    return check_signal_fn(entry.signal)
+    return check_signal(entry.signal)
 
 
 def _run_selection_screen(
