@@ -8,6 +8,7 @@ credentials, network, or SSH. Project-wide hooks come from the parent
 """
 
 from collections.abc import Callable
+from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
 
@@ -24,7 +25,7 @@ from imbue.mngr_ovh.config import OvhProviderConfig
 
 
 @pytest.fixture
-def ovh_provider_factory(tmp_path: Path) -> Callable[..., OvhProvider]:
+def ovh_provider_factory(tmp_path: Path) -> Iterator[Callable[..., OvhProvider]]:
     """Return a factory that builds an ``OvhProvider`` wired to ``ovh_client``.
 
     The returned provider is fully constructed against a temp profile dir

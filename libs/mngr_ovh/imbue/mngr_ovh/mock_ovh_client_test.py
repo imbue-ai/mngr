@@ -13,7 +13,6 @@ re-hand-rolled in every ``*_test.py``. Tests import
 :func:`make_fake_ovh_vps_client` directly (this is not a fixture).
 """
 
-from collections.abc import Callable
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -21,12 +20,9 @@ import ovh
 
 from imbue.mngr_ovh.client import OvhVpsClient
 
-# A test-supplied router with the python-ovh ``Client.call`` signature.
-OvhCallRouter = Callable[..., Any]
-
 
 def make_fake_ovh_vps_client(
-    call_router: OvhCallRouter,
+    call_router: Any,
     *,
     is_unconfigured: bool = False,
     task_poll_interval: float = 0.0,
@@ -35,9 +31,12 @@ def make_fake_ovh_vps_client(
 ) -> OvhVpsClient:
     """Build an ``OvhVpsClient`` whose transport is driven by ``call_router``.
 
-    ``call_router`` is invoked as ``call_router(method, path, body, need_auth)``
-    for every OVH API call the client makes; its return value is what the
-    SDK would have returned, and raising from it simulates an API error.
+    ``call_router`` is the ``MagicMock.side_effect`` for the fake transport:
+    usually a callable invoked as ``call_router(method, path, body, need_auth)``
+    whose return value is what the SDK would have returned, but (per
+    ``MagicMock`` semantics) it may also be an exception instance/class to
+    raise on every call, or an iterable of per-call results. Typed ``Any``
+    for that reason.
 
     The retry/poll intervals default to ``0.0`` so retry-path tests run in
     well under a second without sleeping (the production client uses
