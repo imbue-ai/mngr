@@ -251,16 +251,20 @@ function updateBundleBounds(bundle) {
       height: height - TITLEBAR_HEIGHT,
     });
   }
-  // The modal overlays the entire content area (everything below the title
-  // bar, including the sidebar). The title bar stays uncovered so window
-  // controls and the drag handle remain usable. The view is transparent,
-  // so the dialog's own dim backdrop shows the workspace behind it.
+  // The modal overlays the entire window (including the title bar) so
+  // the inbox drawer reads as a top-level panel rather than something
+  // nested under the chrome. On macOS the OS-level traffic-light
+  // buttons stay visible (they're floating overlays the system draws);
+  // the in-content window controls used on Windows/Linux are hidden
+  // while the modal is open and reappear on close. The view is
+  // transparent, so the dialog's own dim backdrop shows the workspace
+  // behind it.
   if (bundle.modalView && !bundle.modalView.webContents.isDestroyed()) {
     bundle.modalView.setBounds({
       x: 0,
-      y: TITLEBAR_HEIGHT,
+      y: 0,
       width,
-      height: height - TITLEBAR_HEIGHT,
+      height,
     });
   }
 }
