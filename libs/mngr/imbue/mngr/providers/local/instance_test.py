@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
+import psutil
 import pytest
 
 from imbue.mngr.config.consts import PROFILES_DIRNAME
@@ -35,10 +36,14 @@ def test_local_provider_name(local_provider: LocalProviderInstance) -> None:
 
 
 def test_local_provider_does_not_support_snapshots(local_provider: LocalProviderInstance) -> None:
+    # Pins the capability contract; the raising behavior is covered by
+    # test_create_snapshot_raises_error / test_delete_snapshot_raises_error.
     assert local_provider.supports_snapshots is False
 
 
 def test_local_provider_supports_mutable_tags(local_provider: LocalProviderInstance) -> None:
+    # Pins the capability contract; the read/write behavior is covered by the
+    # tag tests (test_set_host_tags, test_add_tags_to_host, etc.).
     assert local_provider.supports_mutable_tags is True
 
 
@@ -179,10 +184,7 @@ def test_set_host_tags(local_provider: LocalProviderInstance) -> None:
 
     local_provider.set_host_tags(host, tags)
 
-    retrieved_tags = local_provider.get_host_tags(host)
-    assert len(retrieved_tags) == 2
-    assert retrieved_tags["env"] == "test"
-    assert retrieved_tags["team"] == "backend"
+    assert local_provider.get_host_tags(host) == {"env": "test", "team": "backend"}
 
 
 def test_add_tags_to_host(local_provider: LocalProviderInstance) -> None:
@@ -191,10 +193,7 @@ def test_add_tags_to_host(local_provider: LocalProviderInstance) -> None:
 
     local_provider.add_tags_to_host(host, {"team": "backend"})
 
-    tags = local_provider.get_host_tags(host)
-    assert len(tags) == 2
-    assert tags["env"] == "test"
-    assert tags["team"] == "backend"
+    assert local_provider.get_host_tags(host) == {"env": "test", "team": "backend"}
 
 
 def test_add_tags_updates_existing_tag(local_provider: LocalProviderInstance) -> None:
@@ -214,9 +213,7 @@ def test_remove_tags_from_host(local_provider: LocalProviderInstance) -> None:
 
     local_provider.remove_tags_from_host(host, ["env"])
 
-    tags = local_provider.get_host_tags(host)
-    assert len(tags) == 1
-    assert tags["team"] == "backend"
+    assert local_provider.get_host_tags(host) == {"team": "backend"}
 
 
 def test_tags_persist_to_file(temp_host_dir: Path, temp_config: MngrConfig) -> None:
@@ -241,9 +238,7 @@ def test_tags_persist_to_file(temp_host_dir: Path, temp_config: MngrConfig) -> N
 def test_create_host_with_tags(local_provider: LocalProviderInstance) -> None:
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME), tags={"env": "test"})
 
-    retrieved_tags = local_provider.get_host_tags(host)
-    assert len(retrieved_tags) == 1
-    assert retrieved_tags["env"] == "test"
+    assert local_provider.get_host_tags(host) == {"env": "test"}
 
 
 def test_rename_host_returns_host_with_same_id(local_provider: LocalProviderInstance) -> None:
@@ -264,8 +259,12 @@ def test_get_host_resources_returns_valid_resources(local_provider: LocalProvide
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     resources = local_provider.get_host_resources(host)
 
-    assert resources.cpu.count >= 1
-    assert resources.memory_gb >= 0
+    # Mirror exactly what production reads (psutil), so a regression to a
+    # constant would fail rather than silently pass.
+    expected_cpu_count = psutil.cpu_count(logical=True) or 1
+    expected_memory_gb = psutil.virtual_memory().total / (1024**3)
+    assert resources.cpu.count == expected_cpu_count
+    assert resources.memory_gb == pytest.approx(expected_memory_gb, rel=0.01)
 
 
 def test_host_has_local_connector(local_provider: LocalProviderInstance) -> None:
@@ -280,6 +279,8 @@ def test_list_volumes_returns_empty_for_fresh_setup(local_provider: LocalProvide
 
 
 def test_supports_volumes(local_provider: LocalProviderInstance) -> None:
+    # Pins the capability contract; volume read/write is covered by
+    # test_get_volume_for_host_* and the volume list/delete tests.
     assert local_provider.supports_volumes is True
 
 
@@ -290,6 +291,10 @@ def test_get_volume_for_host_returns_host_volume(local_provider: LocalProviderIn
     assert host_volume is not None
     assert isinstance(host_volume, HostVolume)
     assert isinstance(host_volume.volume, LocalVolume)
+    # The volume must be rooted at the host's data dir so reads/writes land there.
+    assert host_volume.volume.root_path == local_provider.host_dir
+    host_volume.volume.write_files({"probe.txt": b"x"})
+    assert (local_provider.host_dir / "probe.txt").read_bytes() == b"x"
 
 
 def test_get_volume_for_host_data_persists(local_provider: LocalProviderInstance) -> None:
@@ -309,19 +314,21 @@ def test_list_volumes_finds_legacy_host_directories(local_provider: LocalProvide
     """list_volumes discovers host directories under hosts/."""
     # Simulate legacy data by creating a directory under hosts/
     hosts_dir = local_provider.mngr_ctx.config.default_host_dir.expanduser() / "hosts"
-    legacy_dir = hosts_dir / "host-abc123"
+    legacy_name = f"host-{uuid4().hex}"
+    legacy_dir = hosts_dir / legacy_name
     legacy_dir.mkdir(parents=True)
 
     volumes = local_provider.list_volumes()
     assert len(volumes) == 1
-    assert volumes[0].name == "host-abc123"
+    assert volumes[0].name == legacy_name
 
 
 def test_delete_volume_removes_directory(local_provider: LocalProviderInstance) -> None:
     """delete_volume removes a volume directory under hosts/."""
     # Simulate legacy data by creating a directory under hosts/
     hosts_dir = local_provider.mngr_ctx.config.default_host_dir.expanduser() / "hosts"
-    legacy_dir = hosts_dir / "host-abc123"
+    legacy_name = f"host-{uuid4().hex}"
+    legacy_dir = hosts_dir / legacy_name
     legacy_dir.mkdir(parents=True)
     (legacy_dir / "test.txt").write_text("data")
 

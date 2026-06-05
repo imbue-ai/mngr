@@ -42,16 +42,22 @@ def test_ssh_provider_name(temp_mngr_ctx: MngrContext) -> None:
 
 def test_ssh_provider_does_not_support_snapshots(temp_mngr_ctx: MngrContext) -> None:
     provider = make_ssh_provider(temp_mngr_ctx)
+    # Pins the capability contract; the raising behavior is covered by
+    # test_create_snapshot_raises_error / test_delete_snapshot_raises_error.
     assert provider.supports_snapshots is False
 
 
 def test_ssh_provider_does_not_support_volumes(temp_mngr_ctx: MngrContext) -> None:
     provider = make_ssh_provider(temp_mngr_ctx)
+    # Pins the capability contract; the raising behavior is covered by
+    # test_delete_volume_raises_not_implemented.
     assert provider.supports_volumes is False
 
 
 def test_ssh_provider_does_not_support_mutable_tags(temp_mngr_ctx: MngrContext) -> None:
     provider = make_ssh_provider(temp_mngr_ctx)
+    # Pins the capability contract; the raising behavior is covered by
+    # test_set_host_tags_raises_not_implemented and friends.
     assert provider.supports_mutable_tags is False
 
 
@@ -110,7 +116,8 @@ def test_discover_hosts_returns_empty_when_no_hosts_configured(temp_mngr_ctx: Mn
 def test_get_host_by_name(temp_mngr_ctx: MngrContext) -> None:
     provider = make_ssh_provider(temp_mngr_ctx)
     host = provider.get_host(HostName("test-host"))
-    assert host is not None
+    assert host.host_name == HostName("test-host")
+    assert host.id == provider._host_id_for_name("test-host")
 
 
 def test_get_host_not_found_for_unknown_id(temp_mngr_ctx: MngrContext) -> None:
@@ -184,23 +191,25 @@ def test_host_dir_is_set_correctly(temp_mngr_ctx: MngrContext) -> None:
 
 
 def test_get_host_resources_returns_defaults(temp_mngr_ctx: MngrContext) -> None:
-    """get_host_resources should return sensible defaults."""
+    """get_host_resources should return the SSH provider's hard-coded defaults."""
     provider = make_ssh_provider(temp_mngr_ctx)
+    host = provider.get_host(HostName("test-host"))
 
-    # Create a mock host interface-like object with just an id
-    class MockHost:
-        id = HostId.generate()
-
-    resources = provider.get_host_resources(MockHost())  # ty: ignore[invalid-argument-type]
-    assert resources.cpu.count >= 1
-    assert resources.memory_gb >= 0
+    resources = provider.get_host_resources(host)
+    assert resources.cpu.count == 1
+    assert resources.cpu.frequency_ghz is None
+    assert resources.memory_gb == 1.0
+    assert resources.disk_gb is None
+    assert resources.gpu is None
 
 
 def test_close_is_noop(temp_mngr_ctx: MngrContext) -> None:
-    """close should be a no-op for SSH provider."""
+    """close should be a no-op: the provider remains usable afterwards."""
     provider = make_ssh_provider(temp_mngr_ctx)
-    # Should not raise
     provider.close()
+
+    host = provider.get_host(HostName("test-host"))
+    assert host.host_name == HostName("test-host")
 
 
 def test_host_id_is_deterministic(temp_mngr_ctx: MngrContext) -> None:

@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+from inline_snapshot import snapshot
+
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.loader import parse_config
 from imbue.mngr.primitives import HostName
@@ -20,19 +22,20 @@ def test_backend_name() -> None:
 
 
 def test_backend_description() -> None:
-    assert "ssh" in SSHProviderBackend.get_description().lower()
+    assert SSHProviderBackend.get_description() == snapshot(
+        "Connects to pre-configured hosts via SSH (static host pool)"
+    )
 
 
 def test_backend_build_args_help() -> None:
     help_text = SSHProviderBackend.get_build_args_help()
-    assert isinstance(help_text, str)
-    assert len(help_text) > 0
+    # The build help shows an example ssh provider config block.
+    assert 'backend = "ssh"' in help_text
 
 
 def test_backend_start_args_help() -> None:
     help_text = SSHProviderBackend.get_start_args_help()
-    assert isinstance(help_text, str)
-    assert len(help_text) > 0
+    assert help_text == snapshot("No start arguments are supported for the SSH provider.")
 
 
 def test_backend_get_config_class() -> None:
@@ -133,15 +136,14 @@ def test_build_provider_instance_parses_hosts(temp_mngr_ctx: MngrContext) -> Non
     assert instance.hosts["server2"].user == "root"
 
 
-def test_build_provider_instance_with_key_file(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
-    key_path = tmp_path / "test.key"
-    key_path.write_text("fake-key")
-
+def test_build_provider_instance_expands_key_file(temp_mngr_ctx: MngrContext) -> None:
+    # Use a ~-relative path so that expanduser() is actually exercised (an
+    # absolute path would make the expansion a silent no-op).
     config = SSHProviderConfig(
         hosts={
             "server1": SSHHostConfig(
                 address="localhost",
-                key_file=key_path,
+                key_file=Path("~/somekey"),
             ),
         },
     )
@@ -151,7 +153,10 @@ def test_build_provider_instance_with_key_file(tmp_path: Path, temp_mngr_ctx: Mn
         mngr_ctx=temp_mngr_ctx,
     )
     assert isinstance(instance, SSHProviderInstance)
-    assert instance.hosts["server1"].key_file == key_path
+    expanded = instance.hosts["server1"].key_file
+    assert expanded == Path("~/somekey").expanduser()
+    assert expanded is not None
+    assert expanded.is_absolute()
 
 
 def test_build_provider_instance_preserves_known_hosts_file_with_key_file(temp_mngr_ctx: MngrContext) -> None:

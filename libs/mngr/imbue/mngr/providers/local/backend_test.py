@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 import pluggy
+from inline_snapshot import snapshot
 
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -23,19 +24,19 @@ def test_backend_name() -> None:
 
 
 def test_backend_description() -> None:
-    assert "local" in LocalProviderBackend.get_description().lower()
+    assert LocalProviderBackend.get_description() == snapshot(
+        "Runs agents directly on your local machine with no isolation"
+    )
 
 
 def test_backend_build_args_help() -> None:
     help_text = LocalProviderBackend.get_build_args_help()
-    assert isinstance(help_text, str)
-    assert len(help_text) > 0
+    assert help_text == snapshot("No build arguments are supported for the local provider.")
 
 
 def test_backend_start_args_help() -> None:
     help_text = LocalProviderBackend.get_start_args_help()
-    assert isinstance(help_text, str)
-    assert len(help_text) > 0
+    assert help_text == snapshot("No start arguments are supported for the local provider.")
 
 
 def test_backend_get_config_class() -> None:
@@ -78,17 +79,6 @@ def test_build_provider_instance_uses_default_host_dir(temp_mngr_ctx: MngrContex
     assert instance.host_dir == expanded_default
 
 
-def test_build_provider_instance_uses_config_default_host_dir(temp_mngr_ctx: MngrContext) -> None:
-    config = LocalProviderConfig()
-    instance = LocalProviderBackend.build_provider_instance(
-        name=ProviderInstanceName("test"),
-        config=config,
-        mngr_ctx=temp_mngr_ctx,
-    )
-    # host_dir should equal the expanded default_host_dir
-    assert instance.host_dir == temp_mngr_ctx.config.default_host_dir.expanduser()
-
-
 def test_build_provider_instance_uses_name(temp_mngr_ctx: MngrContext) -> None:
     config = LocalProviderConfig()
     instance = LocalProviderBackend.build_provider_instance(
@@ -110,8 +100,9 @@ def test_built_instance_can_create_host(tmp_path: Path, temp_mngr_ctx: MngrConte
     )
 
     host = instance.create_host(HostName(LOCAL_HOST_NAME))
-    assert host is not None
-    assert host.id is not None
+    assert host.get_name() == HostName(LOCAL_HOST_NAME)
+    # The created host's id must be the stable local host id, retrievable by name.
+    assert host.id == instance.get_host(HostName(LOCAL_HOST_NAME)).id
 
 
 def test_multiple_instances_with_different_names(
