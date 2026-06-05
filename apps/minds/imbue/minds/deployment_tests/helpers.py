@@ -188,6 +188,12 @@ def sweep_stale_users(
             resp.raise_for_status()
             data = resp.json()
             for raw_user in data.get("users", []):
+                # SuperTokens' list-users response shape varies across CDI versions: newer cores
+                # wrap each entry as ``{"recipeId": ..., "user": {...}}`` while older ones return
+                # the user dict bare. Accept either. Likewise the user id is ``id`` on the
+                # emailpassword user object but ``recipeUserId`` on some account-linking shapes.
+                # This sweep is best-effort cleanup, so tolerating both shapes is preferable to
+                # crashing the session-autouse fixture on a version we did not anticipate.
                 user_info = raw_user.get("user", raw_user)
                 emails: list[str] = user_info.get("emails", [])
                 user_id = user_info.get("id") or user_info.get("recipeUserId")
