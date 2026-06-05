@@ -10,6 +10,7 @@ from datetime import timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from pydantic import TypeAdapter
@@ -186,19 +187,17 @@ def _make_state(
 # =============================================================================
 
 
-def test_get_state_attr_running() -> None:
-    entry = _make_entry(state=AgentLifecycleState.RUNNING)
-    assert _get_state_attr(entry) == "state_running"
-
-
-def test_get_state_attr_waiting() -> None:
-    entry = _make_entry(state=AgentLifecycleState.WAITING)
-    assert _get_state_attr(entry) == "state_attention"
-
-
-def test_get_state_attr_done() -> None:
-    entry = _make_entry(state=AgentLifecycleState.DONE)
-    assert _get_state_attr(entry) == ""
+@pytest.mark.parametrize("state", list(AgentLifecycleState))
+def test_get_state_attr_only_running_and_waiting_are_colored(state: AgentLifecycleState) -> None:
+    """Only RUNNING and WAITING get a non-empty color attr; every other state falls through to ''."""
+    entry = _make_entry(state=state)
+    attr = _get_state_attr(entry)
+    if state == AgentLifecycleState.RUNNING:
+        assert attr == "state_running"
+    elif state == AgentLifecycleState.WAITING:
+        assert attr == "state_attention"
+    else:
+        assert attr == ""
 
 
 def test_get_name_cell_markup_no_mark() -> None:
@@ -247,13 +246,21 @@ def test_build_board_widgets_empty_entries() -> None:
     snapshot = make_board_snapshot(entries=())
     walker, idx_map = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS)
     assert idx_map == {}
+    texts = [w.get_text()[0] for w in walker if isinstance(w, Text)]
+    assert "No agents found." in texts
 
 
 def test_build_board_widgets_one_entry() -> None:
-    entry = _make_entry(section=BoardSection.STILL_COOKING)
+    entry = _make_entry(name="solo-agent", section=BoardSection.STILL_COOKING)
     snapshot = make_board_snapshot(entries=(entry,))
     walker, idx_map = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS)
     assert len(idx_map) == 1
+    idx = next(iter(idx_map))
+    text, _attribs = _name_cell_text_and_attrs(walker, idx)
+    assert text == "  solo-agent"
+    headings = _extract_section_headings(walker)
+    assert len(headings) == 1
+    assert "In progress" in headings[0]
 
 
 def test_build_board_widgets_errors_displayed() -> None:
@@ -264,12 +271,33 @@ def test_build_board_widgets_errors_displayed() -> None:
     assert found_error
 
 
+def _section_heading_index(walker: Any, predicate: Any) -> int:
+    """Return the walker index of the first section-heading Text matching predicate."""
+    for idx, widget in enumerate(walker):
+        if isinstance(widget, Text):
+            text = widget.get_text()[0]
+            if " (" in text and predicate(text):
+                return idx
+    raise AssertionError("no matching section heading found")
+
+
 def test_build_board_widgets_groups_by_section() -> None:
-    e1 = _make_entry(name="a", section=BoardSection.STILL_COOKING)
-    e2 = _make_entry(name="b", section=BoardSection.PR_MERGED)
+    e1 = _make_entry(name="cooking-agent", section=BoardSection.STILL_COOKING)
+    e2 = _make_entry(name="merged-agent", section=BoardSection.PR_MERGED)
     snapshot = make_board_snapshot(entries=(e1, e2))
     walker, idx_map = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS)
     assert len(idx_map) == 2
+    # Display order is most-mature first: PR_MERGED ("Done") then STILL_COOKING ("In progress").
+    done_idx = _section_heading_index(walker, lambda t: "Done" in t)
+    progress_idx = _section_heading_index(walker, lambda t: "In progress" in t)
+    assert done_idx < progress_idx
+    # Each entry's name cell must land under the heading for its section.
+    merged_walker_idx = next(i for i, e in idx_map.items() if e.name == AgentName("merged-agent"))
+    cooking_walker_idx = next(i for i, e in idx_map.items() if e.name == AgentName("cooking-agent"))
+    assert done_idx < merged_walker_idx < progress_idx
+    assert progress_idx < cooking_walker_idx
+    assert _name_cell_text_and_attrs(walker, merged_walker_idx)[0] == "  merged-agent"
+    assert _name_cell_text_and_attrs(walker, cooking_walker_idx)[0] == "  cooking-agent"
 
 
 # =============================================================================
@@ -639,6 +667,28 @@ def _ci_widget_attr(row: Any) -> str | None:
     return None
 
 
+def _row_at(walker: Any, idx: int) -> Any:
+    """Return the `_SelectableRow` at the given walker index (unwrapping AttrMap)."""
+    widget = walker[idx]
+    return widget.original_widget if isinstance(widget, AttrMap) else widget
+
+
+def _name_cell_text_and_attrs(walker: Any, idx: int) -> tuple[str, list[tuple[Any, int]]]:
+    """Return (plain text, run-length attribs) of the name cell at the given walker index.
+
+    The name cell is always the first column of a row built by `_build_agent_row`.
+    """
+    name_widget = _row_at(walker, idx).contents[0][0]
+    text, attribs = name_widget.get_text()
+    return text, attribs
+
+
+def _name_cell_attr_names(walker: Any, idx: int) -> set[str]:
+    """Return the set of attribute names applied to the name cell at the given index."""
+    _, attribs = _name_cell_text_and_attrs(walker, idx)
+    return {attr for attr, _length in attribs if attr is not None}
+
+
 def test_build_agent_row_stale_field_uses_stale_attr() -> None:
     now = datetime(2027, 1, 1, 0, 0, 4, tzinfo=timezone.utc)
     ci = CiField(status=CiStatus.FAILURE, created=now - timedelta(seconds=3600))
@@ -828,8 +878,14 @@ def test_build_board_widgets_with_marks() -> None:
     entry = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     snapshot = make_board_snapshot(entries=(entry,))
     marks = {AgentName("agent-a"): "d"}
-    walker, idx_map = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS, marks=marks)
+    walker, idx_map = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS, marks=marks, mark_attr_names=("mark_d",))
     assert len(idx_map) == 1
+    idx = next(iter(idx_map))
+    # The mark glyph "d" renders in the name cell with the "mark_d" attribute,
+    # followed by the agent name with a single leading space.
+    text, _attribs = _name_cell_text_and_attrs(walker, idx)
+    assert text == "d agent-a"
+    assert "mark_d" in _name_cell_attr_names(walker, idx)
 
 
 def test_build_board_widgets_muted_entry() -> None:
@@ -837,15 +893,26 @@ def test_build_board_widgets_muted_entry() -> None:
     snapshot = make_board_snapshot(entries=(entry,))
     walker, idx_map = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS)
     assert len(idx_map) == 1
+    idx = next(iter(idx_map))
+    text, _attribs = _name_cell_text_and_attrs(walker, idx)
+    assert text == "  muted-agent"
+    assert _name_cell_attr_names(walker, idx) == {"muted"}
 
 
 def test_build_board_widgets_multiple_sections() -> None:
-    e1 = _make_entry(name="a", section=BoardSection.STILL_COOKING)
-    e2 = _make_entry(name="b", section=BoardSection.PR_BEING_REVIEWED)
-    e3 = _make_entry(name="c", section=BoardSection.PRS_FAILED)
+    e1 = _make_entry(name="cooking-agent", section=BoardSection.STILL_COOKING)
+    e2 = _make_entry(name="review-agent", section=BoardSection.PR_BEING_REVIEWED)
+    e3 = _make_entry(name="failed-agent", section=BoardSection.PRS_FAILED)
     snapshot = make_board_snapshot(entries=(e1, e2, e3))
     walker, idx_map = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS)
     assert len(idx_map) == 3
+    # PR_BEING_REVIEWED ("In review") is more mature than the two "In progress"
+    # sections (PRS_FAILED and STILL_COOKING share the "In progress" prefix).
+    headings = _extract_section_headings(walker)
+    assert headings[0].startswith("In review")
+    assert all("In progress" in h for h in headings[1:])
+    review_idx = next(i for i, e in idx_map.items() if e.name == AgentName("review-agent"))
+    assert _name_cell_text_and_attrs(walker, review_idx)[0] == "  review-agent"
 
 
 # =============================================================================
@@ -855,8 +922,10 @@ def test_build_board_widgets_multiple_sections() -> None:
 
 def test_update_row_mark_no_walker() -> None:
     state = _make_state()
-    # Should not raise even with no walker
-    _update_row_mark(state, 0, "d")
+    state.marks = {AgentName("agent-a"): "d"}
+    # With no walker this is an early-return guard: state must be unchanged.
+    _update_row_mark(state, 0, "p")
+    assert state.marks == {AgentName("agent-a"): "d"}
 
 
 def test_update_row_mark_no_entry_at_index() -> None:
@@ -867,8 +936,13 @@ def test_update_row_mark_no_entry_at_index() -> None:
     walker, idx_map = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS)
     state.list_walker = walker
     state.index_to_entry = idx_map
-    # Index 0 is the header row, not an agent entry; should not raise
+    # Index 0 is the header row, not an agent entry: the guard returns early and
+    # leaves the actual agent row's name cell untouched.
+    agent_idx = next(k for k, v in idx_map.items() if v.name == AgentName("agent-a"))
+    before, _ = _name_cell_text_and_attrs(walker, agent_idx)
     _update_row_mark(state, 0, "d")
+    after, _ = _name_cell_text_and_attrs(walker, agent_idx)
+    assert before == after == "  agent-a"
 
 
 # =============================================================================
@@ -899,6 +973,12 @@ def test_toggle_mark_adds_mark() -> None:
     _toggle_mark(state, "d")
     assert AgentName("agent-a") in state.marks
     assert state.marks[AgentName("agent-a")] == "d"
+    # The focused row's name cell renders the mark glyph with the mark_d attribute.
+    text, _attribs = _name_cell_text_and_attrs(state.list_walker, agent_idx)
+    assert text == "d agent-a"
+    assert "mark_d" in _name_cell_attr_names(state.list_walker, agent_idx)
+    # The footer reflects the single delete mark.
+    assert state.footer_left_text.text == "  Marked: 1 delete  (x to execute, U to unmark all)"
 
 
 def test_toggle_mark_removes_existing_mark() -> None:
@@ -912,9 +992,10 @@ def test_toggle_mark_removes_existing_mark() -> None:
 
 
 def test_toggle_mark_no_walker() -> None:
-    # No walker means no-op; should not raise
+    # No walker means the early-return guard fires: marks must stay empty.
     state = _make_state()
     _toggle_mark(state, "d")
+    assert state.marks == {}
 
 
 # =============================================================================
@@ -937,7 +1018,11 @@ def test_unmark_focused_no_mark_is_noop() -> None:
     state = _make_state_with_walker((entry,))
     agent_idx = next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-a"))
     state.list_walker.set_focus(agent_idx)
+    state.marks = {AgentName("other"): "d"}
     _unmark_focused(state)
+    # The focused agent had no mark, so the unrelated mark is left intact.
+    assert state.marks == {AgentName("other"): "d"}
+    assert "mark_d" not in _name_cell_attr_names(state.list_walker, agent_idx)
 
 
 # =============================================================================
@@ -955,7 +1040,11 @@ def test_unmark_all_clears_marks() -> None:
 
 def test_unmark_all_empty_marks_noop() -> None:
     state = _make_state()
+    state.steady_footer_text = "  Steady"
     _unmark_all(state)
+    # Early return on empty marks: the footer is not touched (no "Marked:" text).
+    assert state.marks == {}
+    assert state.footer_left_text.text == "  Loading..."
 
 
 # =============================================================================
@@ -968,7 +1057,7 @@ def test_update_mark_count_footer_with_marks() -> None:
     state = _make_state(commands=commands)
     state.marks = {AgentName("agent-a"): "d", AgentName("agent-b"): "d"}
     _update_mark_count_footer(state)
-    assert "delete" in state.footer_left_text.text or "d" in state.footer_left_text.text
+    assert state.footer_left_text.text == "  Marked: 2 delete  (x to execute, U to unmark all)"
 
 
 def test_update_mark_count_footer_no_marks_restores_footer() -> None:
@@ -988,13 +1077,23 @@ def test_execute_marks_no_marks_does_nothing() -> None:
     state = _make_state()
     state.marks = {}
     _execute_marks(state)
+    # With no marks, no batch is started: no executor is created and we stay idle.
+    assert state.executing is False
+    assert state.executor is None
 
 
 def test_execute_marks_already_executing_does_nothing() -> None:
     state = _make_state()
     state.marks = {AgentName("a"): "d"}
     state.executing = True
+    existing_executor = ThreadPoolExecutor(max_workers=1)
+    state.executor = existing_executor
     _execute_marks(state)
+    # A batch is already running, so no new batch is started: the executor that
+    # was already attached is left untouched.
+    assert state.executor is existing_executor
+    assert state.executing is True
+    existing_executor.shutdown(wait=False)
 
 
 # =============================================================================
@@ -1027,6 +1126,8 @@ def test_dispatch_command_markable_key_toggles_mark() -> None:
     state.list_walker.set_focus(agent_idx)
     _dispatch_command(state, "d", commands["d"])
     assert AgentName("agent-a") in state.marks
+    assert "mark_d" in _name_cell_attr_names(state.list_walker, agent_idx)
+    assert state.footer_left_text.text == "  Marked: 1 delete  (x to execute, U to unmark all)"
 
 
 def test_dispatch_command_unmark_key_removes_mark() -> None:
@@ -1089,16 +1190,24 @@ def test_refresh_display_updates_walker() -> None:
     _refresh_display(state)
     assert state.list_walker is not None
     assert len(state.index_to_entry) == 1
+    idx = next(iter(state.index_to_entry))
+    assert _name_cell_text_and_attrs(state.list_walker, idx)[0] == "  agent-a"
 
 
 def test_refresh_display_restores_focus() -> None:
-    entry = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
-    snapshot = make_board_snapshot(entries=(entry,))
+    # Build a multi-entry board, focus a non-first agent, refresh, and assert the
+    # focus lands back on that same agent (exercising the focus-restoration loop).
+    entries = (
+        _make_entry(name="first-agent", section=BoardSection.STILL_COOKING),
+        _make_entry(name="second-agent", section=BoardSection.STILL_COOKING),
+    )
+    snapshot = make_board_snapshot(entries=entries)
     state = _make_state(snapshot=snapshot)
-    state.focused_agent_name = AgentName("agent-a")
+    state.focused_agent_name = AgentName("second-agent")
     _refresh_display(state)
-    # Focus should be on the entry if it's still present
     assert state.list_walker is not None
+    _focused_widget, focus_idx = state.list_walker.get_focus()
+    assert state.index_to_entry[focus_idx].name == AgentName("second-agent")
 
 
 def test_refresh_display_none_snapshot() -> None:
@@ -1106,6 +1215,8 @@ def test_refresh_display_none_snapshot() -> None:
     state.snapshot = None
     _refresh_display(state)
     assert state.list_walker is not None
+    texts = [w.get_text()[0] for w in state.list_walker if isinstance(w, Text)]
+    assert texts == ["Loading..."]
 
 
 # =============================================================================
@@ -1120,13 +1231,6 @@ def test_load_user_commands_from_custom_command_instance() -> None:
     result = _load_user_commands(ctx)
     assert "c" in result
     assert result["c"].name == "my-cmd"
-
-
-def test_load_user_commands_from_dict() -> None:
-    config = KanpanPluginConfig(commands={"c": CustomCommand(name="my-cmd", command="echo hi")})
-    ctx = make_mngr_ctx_with_config(config)
-    result = _load_user_commands(ctx)
-    assert "c" in result
 
 
 def test_load_user_commands_from_raw_dict_via_model_construct() -> None:
@@ -1188,10 +1292,11 @@ def test_build_command_map_excludes_disabled() -> None:
 
 
 def test_update_snapshot_mute_none_snapshot() -> None:
-    # When snapshot is None, function should return without error
+    # When snapshot is None, the early-return guard leaves it None.
     state = _make_state()
     state.snapshot = None
     _update_snapshot_mute(state, AgentName("agent"), True)
+    assert state.snapshot is None
 
 
 # =============================================================================
@@ -1229,6 +1334,8 @@ def test_input_handler_command_key_dispatches() -> None:
     result = handler("d")
     assert result is True
     assert AgentName("agent-a") in state.marks
+    assert "mark_d" in _name_cell_attr_names(state.list_walker, agent_idx)
+    assert state.footer_left_text.text == "  Marked: 1 delete  (x to execute, U to unmark all)"
 
 
 def test_input_handler_up_key_not_first_passes_through() -> None:
@@ -1331,6 +1438,11 @@ def test_update_row_mark_muted_entry() -> None:
     state.index_to_entry = idx_map
     agent_idx = next(k for k, v in idx_map.items() if v.name == AgentName("muted-agent"))
     _update_row_mark(state, agent_idx, "d")
+    # A muted row stays uniformly grey: the mark is flattened into the "muted"
+    # attr rather than rendered as a colored "mark_d" glyph.
+    text, _attribs = _name_cell_text_and_attrs(walker, agent_idx)
+    assert text == "d muted-agent"
+    assert _name_cell_attr_names(walker, agent_idx) == {"muted"}
 
 
 # =============================================================================
@@ -1365,7 +1477,7 @@ def test_finish_batch_execution_all_ok() -> None:
     state.executing = True
     _finish_batch_execution(state, ["op1: ok", "op2: ok"])
     assert state.executing is False
-    assert "2" in state.footer_left_text.text
+    assert state.footer_left_text.text == "  Executed 2 operation(s) successfully"
 
 
 def test_finish_batch_execution_with_failures() -> None:
@@ -1373,7 +1485,7 @@ def test_finish_batch_execution_with_failures() -> None:
     state.executing = True
     _finish_batch_execution(state, ["op1: ok", "op2: failed (err)"])
     assert state.executing is False
-    assert "failed" in state.footer_left_text.text or "1 failed" in state.footer_left_text.text
+    assert state.footer_left_text.text == "  Executed: 1 ok, 1 failed"
 
 
 def test_finish_batch_execution_empty_results() -> None:
@@ -1542,15 +1654,21 @@ def test_submit_batch_item_no_command_returns_none() -> None:
 # =============================================================================
 
 
-def test_run_shell_command_submits_future() -> None:
+def test_run_shell_command_submits_future(tmp_path: Path) -> None:
     entry = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     state = _make_state_with_walker((entry,))
     a_idx = next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-a"))
     state.list_walker.set_focus(a_idx)
-    cmd = CustomCommand(name="say-hi", command="true")
+    # The command touches a unique marker file; after the executor drains we
+    # assert the file exists, proving the command actually ran (not merely that
+    # an executor was attached).
+    marker = tmp_path / f"ran-{uuid4().hex}"
+    assert not marker.exists()
+    cmd = CustomCommand(name="say-hi", command=f"touch {marker}")
     _run_shell_command(state, cmd)
     assert state.executor is not None
     state.executor.shutdown(wait=True)
+    assert marker.exists()
 
 
 # =============================================================================
