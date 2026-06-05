@@ -30,3 +30,12 @@ def get_plugin_config_class(plugin_name: str) -> type[PluginConfig]:
 def list_registered_plugins() -> list[str]:
     """List all registered plugin names."""
     return sorted(str(k) for k in _plugin_config_registry.keys())
+
+
+def reset_plugin_config_registry() -> None:
+    """Clear all registered plugin config classes.
+
+    Used by the autouse test fixture to isolate the module-global registry
+    between tests, mirroring the agent/backend/provider registry resets.
+    """
+    _plugin_config_registry.clear()
