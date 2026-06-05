@@ -718,6 +718,58 @@ def test_text_input_omits_autocomplete_and_minlength_when_unset() -> None:
     assert "minlength=" not in html
 
 
+def test_text_input_passes_through_arbitrary_attrs() -> None:
+    # attrs.render() flows undeclared HTML attributes (readonly, onkeydown,
+    # data-*) so callers don't enumerate each as a prop.
+    html = CATALOG.render(
+        "TextInput",
+        name="email",
+        _attrs={"id": "new-email", "onkeydown": "addEmail()", "data-x": "y"},
+    )
+    assert 'id="new-email"' in html
+    assert 'onkeydown="addEmail()"' in html
+    assert 'data-x="y"' in html
+
+
+def test_select_renders_with_option_children_and_focus_ring() -> None:
+    html = CATALOG.render(
+        "Select",
+        name="launch_mode",
+        _content='<option value="LIMA">lima</option>',
+    )
+    assert "<select" in html
+    assert 'name="launch_mode"' in html
+    assert '<option value="LIMA">lima</option>' in html
+    # Inherits the shared INPUT_BASE focus ring.
+    assert "focus:border-blue-600" in html
+    assert "focus:ring-2" in html
+    # Default width is w-full.
+    assert "w-full" in html
+
+
+def test_select_honors_width_prop() -> None:
+    html = CATALOG.render("Select", name="x", width="w-48", _content="")
+    assert "w-48" in html
+    # Default w-full should be replaced, not added alongside.
+    assert " w-full " not in html
+
+
+def test_textarea_renders_value_in_content_with_shared_shell() -> None:
+    html = CATALOG.render(
+        "Textarea",
+        name="env",
+        value="line1\nline2",
+        rows=6,
+        extra="font-mono",
+    )
+    assert "<textarea" in html
+    assert 'name="env"' in html
+    assert 'rows="6"' in html
+    assert "line1\nline2" in html
+    assert "font-mono" in html
+    assert "focus:border-blue-600" in html
+
+
 def test_section_header_plain_has_no_divider_classes() -> None:
     html = CATALOG.render("SectionHeader", _content="Account")
     assert "Account" in html

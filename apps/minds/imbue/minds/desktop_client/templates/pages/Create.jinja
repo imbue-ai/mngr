@@ -195,13 +195,12 @@
         <div>
           <div class="flex items-center justify-between gap-3">
             <label for="launch_mode" class="text-sm text-zinc-900 font-medium">Compute provider</label>
-            <select id="launch_mode" name="launch_mode"
-                    class="w-48 px-3 py-2 text-sm rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
+            <Select id="launch_mode" name="launch_mode" width="w-48">
               {% for mode in launch_modes %}
                 <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}
                         {% if mode.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{{ mode.value | lower }}</option>
               {% endfor %}
-            </select>
+            </Select>
           </div>
           <p id="launch-mode-account-error" class="hidden mt-1 text-xs text-amber-600 text-right">imbue_cloud requires a selected account.</p>
         </div>
@@ -209,13 +208,12 @@
         <div>
           <div class="flex items-center justify-between gap-3">
             <label for="ai_provider" class="text-sm text-zinc-900 font-medium">AI provider</label>
-            <select id="ai_provider" name="ai_provider"
-                    class="w-48 px-3 py-2 text-sm rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
+            <Select id="ai_provider" name="ai_provider" width="w-48">
               {% for provider in ai_providers %}
                 <option value="{{ provider.value }}"{% if provider.value == selected_ai_provider %} selected{% endif %}
                         {% if provider.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{{ provider.value | lower }}</option>
               {% endfor %}
-            </select>
+            </Select>
           </div>
           <p id="ai-provider-account-error" class="hidden mt-1 text-xs text-amber-600 text-right">imbue_cloud requires a selected account.</p>
           <div id="api-key-row" class="mt-2 hidden">
@@ -227,13 +225,12 @@
         <div>
           <div class="flex items-center justify-between gap-3">
             <label for="backup_provider" class="text-sm text-zinc-900 font-medium">Backup provider</label>
-            <select id="backup_provider" name="backup_provider"
-                    class="w-48 px-3 py-2 text-sm rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
+            <Select id="backup_provider" name="backup_provider" width="w-48">
               {% for provider in backup_providers %}
                 <option value="{{ provider.value }}"{% if provider.value == selected_backup_provider %} selected{% endif %}
                         {% if provider.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{% if provider.value == 'API_KEY' %}manual{% else %}{{ provider.value | lower }}{% endif %}</option>
               {% endfor %}
-            </select>
+            </Select>
           </div>
           <p id="backup-provider-account-error" class="hidden mt-1 text-xs text-amber-600 text-right">imbue_cloud requires a selected account.</p>
 
@@ -245,19 +242,18 @@
               <a href="https://restic.readthedocs.io/en/stable/040_backup.html#environment-variables"
                  target="_blank" rel="noopener" class="text-blue-600 hover:underline">restic docs</a>.
             </p>
-            <textarea id="backup_api_key_env" name="backup_api_key_env" rows="6"
-                      class="w-full px-3 py-2.5 text-sm font-mono rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">{{ backup_api_key_env if backup_api_key_env else _default_restic_env }}</textarea>
+            <Textarea id="backup_api_key_env" name="backup_api_key_env" rows="6" extra="font-mono"
+                      :value="backup_api_key_env if backup_api_key_env else _default_restic_env" />
           </div>
 
           <div id="backup-encryption-row" class="mt-2 hidden">
             <div class="flex items-center justify-between gap-3">
               <label for="backup_encryption_method" class="text-sm text-zinc-900 font-medium">Backup encryption method</label>
-              <select id="backup_encryption_method" name="backup_encryption_method"
-                      class="w-48 px-3 py-2 text-sm rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
+              <Select id="backup_encryption_method" name="backup_encryption_method" width="w-48">
                 {% for method in backup_encryption_methods %}
                   <option value="{{ method.value }}"{% if method.value == selected_backup_encryption_method %} selected{% endif %}>{{ method.value | lower }}</option>
                 {% endfor %}
-              </select>
+              </Select>
             </div>
           </div>
 

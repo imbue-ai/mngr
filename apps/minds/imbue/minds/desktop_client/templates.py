@@ -71,6 +71,16 @@ _BTN_VARIANTS: Final[Mapping[str, str]] = {
     "ghost": "bg-transparent text-zinc-600 border border-transparent hover:bg-zinc-100 hover:text-zinc-900",
 }
 
+# Shared Tailwind class string for the three form-control components
+# (TextInput.jinja, Select.jinja, Textarea.jinja). Exposed as a Catalog
+# global so the focus-ring token, border, padding and text size live in
+# exactly one place. Width and border-radius vary per-component so they
+# are NOT included here -- each component sets its own.
+_INPUT_BASE: Final[str] = (
+    "px-3 py-2.5 text-sm border border-zinc-200 bg-white text-zinc-900 "
+    "outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15"
+)
+
 
 def _build_catalog() -> Catalog:
     """Build the JinjaX Catalog used to render every desktop-client template.
@@ -89,7 +99,12 @@ def _build_catalog() -> Catalog:
     )
     catalog = Catalog(
         jinja_env=seed_env,
-        globals={"BTN_BASE": _BTN_BASE, "BTN_SIZES": _BTN_SIZES, "BTN_VARIANTS": _BTN_VARIANTS},
+        globals={
+            "BTN_BASE": _BTN_BASE,
+            "BTN_SIZES": _BTN_SIZES,
+            "BTN_VARIANTS": _BTN_VARIANTS,
+            "INPUT_BASE": _INPUT_BASE,
+        },
     )
     catalog.add_folder(str(TEMPLATE_DIR))
     return catalog

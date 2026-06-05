@@ -165,13 +165,22 @@
         <div class="mt-1 text-[11px] text-zinc-500 font-mono">templates/pages/Landing.jinja, templates/pages/Destroying.jinja :: .accent-spine from tokens.css</div>
       </div>
 
-      {# Focus ring #}
+      {# Focus ring -- shared by TextInput, Select, Textarea via INPUT_BASE #}
       <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Focus ring</div>
-        <div class="bg-white border border-zinc-200 rounded-lg p-4">
-          <TextInput name="styleguide-focus-ring-input" placeholder="Click to focus" />
+        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Form controls (TextInput / Select / Textarea)</div>
+        <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-col gap-3">
+          <TextInput name="styleguide-focus-ring-input" placeholder="TextInput -- click to focus" />
+          <div class="flex items-center gap-2">
+            <Select name="styleguide-select" width="w-48">
+              <option>Option A</option>
+              <option>Option B</option>
+              <option>Option C</option>
+            </Select>
+            <span class="text-xs text-zinc-500">Select width="w-48"</span>
+          </div>
+          <Textarea name="styleguide-textarea" rows="3" extra="font-mono" :value="'shared focus ring\\nshared border\\nshared px-3 py-2.5'" />
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">TextInput.jinja (focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15)</div>
+        <div class="mt-1 text-[11px] text-zinc-500 font-mono">TextInput.jinja / Select.jinja / Textarea.jinja :: INPUT_BASE (focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15)</div>
       </div>
 
       {# Shadow seam #}
