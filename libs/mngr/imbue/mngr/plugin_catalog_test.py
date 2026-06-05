@@ -13,20 +13,18 @@ from imbue.mngr.primitives import PluginTier
 
 
 def test_catalog_has_entries() -> None:
-    assert len(PLUGIN_CATALOG) > 0
+    """The catalog ships the core independent agent-type plugins.
+
+    These three are the floor the rest of mngr relies on (default agent types
+    and the install wizard); the catalog must never regress below them.
+    """
+    entry_point_names = {e.entry_point_name for e in PLUGIN_CATALOG}
+    assert {"claude", "opencode", "tutor"} <= entry_point_names
 
 
 def test_catalog_entry_point_names_are_unique() -> None:
     names = [e.entry_point_name for e in PLUGIN_CATALOG]
     assert len(names) == len(set(names))
-
-
-def test_catalog_signals_are_signal_check_instances() -> None:
-    for entry in PLUGIN_CATALOG:
-        if entry.signal is not None:
-            assert isinstance(entry.signal, SignalCheck), (
-                f"Entry {entry.entry_point_name} signal is {type(entry.signal)}, expected SignalCheck"
-            )
 
 
 def test_catalog_contains_expected_basic_entry_points() -> None:
@@ -115,11 +113,24 @@ def test_get_installable_packages_deduplicates_by_package_name() -> None:
     assert len(package_names) == len(set(package_names))
 
 
-def test_get_installable_packages_covers_all_published_packages() -> None:
-    packages = get_installable_packages()
-    installable_names = {p.package_name for p in packages}
-    published_package_names = {e.package_name for e in PLUGIN_CATALOG} - UNPUBLISHED_PACKAGES
-    assert installable_names == published_package_names
+def test_get_installable_packages_includes_published_and_excludes_unpublished() -> None:
+    """Installable packages include published catalog packages and drop unpublished ones.
+
+    Pins concrete expectations rather than reconstructing the production filter:
+    the claude package is published and must appear, every UNPUBLISHED_PACKAGES
+    member must be absent, and the result must be deduplicated by package name.
+    """
+    installable_names = {p.package_name for p in get_installable_packages()}
+
+    claude_entry = get_catalog_entry("claude")
+    assert claude_entry is not None
+    assert claude_entry.package_name in installable_names
+
+    for unpublished in UNPUBLISHED_PACKAGES:
+        assert unpublished not in installable_names
+
+    all_published = {e.package_name for e in PLUGIN_CATALOG if e.package_name not in UNPUBLISHED_PACKAGES}
+    assert installable_names == all_published
 
 
 def test_get_installable_packages_prefers_basic_tier() -> None:

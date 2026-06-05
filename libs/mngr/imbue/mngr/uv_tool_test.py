@@ -22,39 +22,11 @@ from imbue.mngr.uv_tool import read_receipt
 from imbue.mngr.uv_tool import require_uv_tool_receipt
 
 # =============================================================================
-# Tests for ToolRequirement
-# =============================================================================
-
-
-def test_tool_requirement_minimal() -> None:
-    """ToolRequirement should create with just a name."""
-    requirement = ToolRequirement(name="imbue-mngr")
-    assert requirement.name == "imbue-mngr"
-    assert requirement.specifier is None
-    assert requirement.editable is None
-    assert requirement.git is None
-
-
-def test_tool_requirement_with_specifier() -> None:
-    """ToolRequirement should store version specifiers."""
-    requirement = ToolRequirement(name="imbue-mngr", specifier=">=0.1.0")
-    assert requirement.specifier == ">=0.1.0"
-
-
-def test_tool_requirement_with_editable() -> None:
-    """ToolRequirement should store editable paths."""
-    requirement = ToolRequirement(name="my-plugin", editable="/path/to/plugin")
-    assert requirement.editable == "/path/to/plugin"
-
-
-def test_tool_requirement_with_git() -> None:
-    """ToolRequirement should store git URLs."""
-    requirement = ToolRequirement(name="my-plugin", git="https://github.com/user/repo.git")
-    assert requirement.git == "https://github.com/user/repo.git"
-
-
-# =============================================================================
 # Tests for _requirement_to_with_arg
+#
+# These exercise how each ToolRequirement field (specifier, editable, directory,
+# git) flows into a uv command -- the observable behavior. Plain constructor
+# field-storage is guaranteed by pydantic and is not tested separately.
 # =============================================================================
 
 
