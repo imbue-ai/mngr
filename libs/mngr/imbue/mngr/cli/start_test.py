@@ -6,10 +6,14 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
+from pathlib import Path
+
 from imbue.mngr.cli.start import StartCliOptions
 from imbue.mngr.cli.start import _output_result
 from imbue.mngr.cli.start import start
+from imbue.mngr.cli.testing import create_test_agent_state
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.hosts.host import Host
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import OutputFormat
@@ -24,6 +28,7 @@ def test_start_cli_options_fields() -> None:
         connect_command=None,
         restart=False,
         no_resume=False,
+        dry_run=False,
         host=(),
         output_format="human",
         quiet=False,
@@ -118,3 +123,34 @@ def test_output_result_format_template(capsys: pytest.CaptureFixture[str]) -> No
     _output_result(["my-agent"], output_opts)
     captured = capsys.readouterr()
     assert "my-agent" in captured.out
+
+
+# =============================================================================
+# Dry-run tests
+# =============================================================================
+
+
+def test_start_dry_run_reports_plan_without_touching_host(
+    local_host: Host,
+    temp_work_dir: Path,
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--dry-run prints which agents would be started and returns without starting them.
+
+    The agent exists only as persisted state (no live tmux session), so if the
+    dry-run actually tried to start it the call would fail. Reaching the
+    "Would be started" output proves the dry-run short-circuits before any host op.
+    """
+    create_test_agent_state(local_host, temp_work_dir, "dry-run-agent")
+
+    result = cli_runner.invoke(
+        start,
+        ["dry-run-agent", "--dry-run"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "Would be started" in result.output
+    assert "dry-run-agent" in result.output
