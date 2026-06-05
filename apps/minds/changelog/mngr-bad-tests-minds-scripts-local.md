@@ -1,0 +1,1 @@
+- `scripts/build_test.py`: the bundled-limactl entitlement guard now skips (instead of failing with an opaque `AssertionError`) when the `node` toolchain is absent, and surfaces node's stderr when `todesktop.js` fails to evaluate so a broken config is diagnosable.
