@@ -128,6 +128,10 @@ def test_ensure_latchkey_installed_gates_each_component_behind_a_presence_check(
     assert "command -v curl" in command
     assert "command -v node" in command
     assert "command -v npm" in command
+    # procps (pgrep) is installed defensively so the gateway / tunnel idempotency
+    # checks never depend on it pre-existing on the VPS.
+    assert "command -v pgrep" in command
+    assert "apt-get install -y procps" in command
     # Version-agnostic: the NodeSource setup URL is present (the major version
     # is a tunable constant, so don't pin it here).
     assert "deb.nodesource.com/setup_" in command

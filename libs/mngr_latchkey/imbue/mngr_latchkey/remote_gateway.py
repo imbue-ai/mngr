@@ -22,9 +22,7 @@ from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 
-# Version of the upstream ``latchkey`` CLI to install on the VPS. Pinned so
-# every remote gateway runs a known-good release rather than whatever
-# ``npm install -g latchkey`` happens to resolve to at install time.
+# Version of the upstream ``latchkey`` CLI to install on the VPS.
 LATCHKEY_VERSION: Final[str] = "2.15.1"
 
 # Port inside the container on which the VPS-resident gateway is reachable (the
@@ -114,9 +112,18 @@ def _build_ensure_installed_script(latchkey_version: str, node_major_version: st
             "set -e",
             "export DEBIAN_FRONTEND=noninteractive",
             # curl is needed to fetch the NodeSource setup script below.
+            # (And also for well-functioning latchkey itself.)
             "if ! command -v curl >/dev/null 2>&1; then",
             "  apt-get update",
             "  apt-get install -y curl",
+            "fi",
+            # procps provides pgrep, which the gateway / reverse-tunnel scripts
+            # use for their 'already running?' idempotency check. It ships on
+            # full Debian VPS images, but install it defensively so we never
+            # depend on it being present.
+            "if ! command -v pgrep >/dev/null 2>&1; then",
+            "  apt-get update",
+            "  apt-get install -y procps",
             "fi",
             # Node.js + npm via NodeSource (Debian's own nodejs is too old).
             "if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then",
@@ -135,7 +142,7 @@ def _build_ensure_installed_script(latchkey_version: str, node_major_version: st
 
 
 def ensure_latchkey_installed(host: OuterHostInterface) -> None:
-    """Ensure curl, Node.js, and the pinned latchkey CLI are installed on the VPS.
+    """Ensure curl, procps (pgrep), Node.js, and the pinned latchkey CLI are installed on the VPS.
 
     Idempotent: each component is installed only when missing (or, for
     latchkey, when the installed version differs from :data:`LATCHKEY_VERSION`).
