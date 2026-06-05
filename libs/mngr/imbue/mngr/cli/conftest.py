@@ -128,6 +128,7 @@ def default_connect_cli_opts() -> ConnectCliOptions:
         start=True,
         reconnect=True,
         session_command=None,
+        connect_command=None,
         allow_unknown_host=False,
     )
 

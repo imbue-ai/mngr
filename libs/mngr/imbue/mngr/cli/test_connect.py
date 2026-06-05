@@ -12,6 +12,7 @@ from urwid.widget.listbox import SimpleFocusListWalker
 from urwid.widget.text import Text
 from urwid.widget.wimp import SelectableIcon
 
+from imbue.mngr.api.connect import CONNECT_COMMAND_ACTIVE_ENV_VAR
 from imbue.mngr.cli.agent_selector import AgentSelectorState
 from imbue.mngr.cli.agent_selector import SelectorInputHandler
 from imbue.mngr.cli.agent_selector import _create_selectable_agent_item
@@ -79,6 +80,62 @@ def test_connect_cli_invokes_tmux_attach_for_named_agent(
     assert result.exit_code == 0, f"Connect failed with output: {result.output}"
 
     # Verify the CLI resolved the agent and called tmux attach with the right session
+    assert len(intercepted_execvp_calls) == 1
+    assert intercepted_execvp_calls[0] == ("tmux", ["tmux", "attach", "-t", f"={session_name}"])
+
+
+@pytest.mark.tmux
+def test_connect_cli_runs_custom_connect_command(
+    cli_runner: CliRunner,
+    create_test_agent,
+    plugin_manager: pluggy.PluginManager,
+    intercepted_execvp_calls: list[tuple[str, list[str]]],
+) -> None:
+    """A custom --connect-command replaces the builtin tmux attach (like create/start)."""
+    agent_name = f"test-connect-custom-{int(time.time())}"
+    create_test_agent(agent_name, "sleep 493828")
+
+    custom_command = "echo connecting-via-custom-command"
+    result = cli_runner.invoke(
+        connect,
+        [agent_name, "--connect-command", custom_command],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, f"Connect failed with output: {result.output}"
+
+    # The custom command is run via `sh -c`, not the builtin tmux attach.
+    assert len(intercepted_execvp_calls) == 1
+    assert intercepted_execvp_calls[0] == ("sh", ["sh", "-c", custom_command])
+
+
+@pytest.mark.tmux
+def test_connect_cli_ignores_connect_command_when_already_active(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_runner: CliRunner,
+    create_test_agent,
+    plugin_manager: pluggy.PluginManager,
+    intercepted_execvp_calls: list[tuple[str, list[str]]],
+) -> None:
+    """When already inside a connect command, connect falls back to the builtin attach.
+
+    This guards against infinite recursion when a custom connect command itself
+    invokes `mngr connect` (as the e2e recorder does).
+    """
+    agent_name = f"test-connect-reentrant-{int(time.time())}"
+    session_name = create_test_agent(agent_name, "sleep 493829")
+
+    monkeypatch.setenv(CONNECT_COMMAND_ACTIVE_ENV_VAR, "1")
+    result = cli_runner.invoke(
+        connect,
+        [agent_name, "--connect-command", "echo should-be-ignored"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, f"Connect failed with output: {result.output}"
+
+    # Despite the explicit --connect-command, the re-entrancy guard forces the
+    # builtin tmux attach.
     assert len(intercepted_execvp_calls) == 1
     assert intercepted_execvp_calls[0] == ("tmux", ["tmux", "attach", "-t", f"={session_name}"])
 
