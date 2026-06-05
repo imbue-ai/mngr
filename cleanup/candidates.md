@@ -77,6 +77,30 @@ Pilot's `.mngr/settings.toml:235-236` uses `uv tool install -e ...` and `--with-
 - **expected blast radius**: high if conflict recurs — provision Phase B fails before `mngr` lands, no agent boots, verify aborts. Zero if conflict has been resolved.
 - **landed**: pilot ff-merged to cb2091cf. Both ci.yml and launch-to-msg verify green (uv tool install inside lima Phase B completed without conflict; subsequent vendor/mngr refreshes did resolve the URL-form mismatch). v0.2.35 tag unchanged.
 
+### dead-web-view-script (PILOT, found 3rd pass)
+
+`scripts/web_view.py` + `scripts/web_view_test.py` (283 lines) are superseded by `scripts/layout.py`. Replacement is PR #73 (commit `ed6b1a3b`); `blueprint/agent-layout-ops/plan-agent-layout-ops.md` literally documents the intended rename. The merge in `c2f1b829` brought `layout.py` in but never deleted `web_view.py`. Verification: `grep -rn web_view` across pilot (excluding vendor) finds only the file itself, its test, and the stale plan doc — zero call sites in `.toml`/`.json`/`.sh`/SKILL.md. The workspace-server endpoints `web_view` targeted were also atomically replaced.
+
+- **status**: in_flight (iter 6)
+- **test path**: pilot-rc-dead-code / v0.2.36-rc5-dead-web-view → launch-to-msg with that template_ref
+- **expected blast radius**: nil (no callers; replacement covers all functions)
+
+### duplicate-port-zero-guard (MNGR, found 3rd pass)
+
+`apps/minds/imbue/minds/cli/run.py:157-163` raises `click.UsageError("--port must be > 0")` as the first statement of `minds run`. mngr_forward already raises a near-identical `click.UsageError("--reverse local port must be > 0, ...")` at the boundary that consumes the value. Neither Electron's backend.js nor any CI/dev script ever passes `--port 0`, so the guard never fires for any real caller. Has its own unit test `test_run_rejects_port_zero` which becomes vestigial.
+
+- **status**: in_flight (iter 7)
+- **test path**: mngr-rc-drop-port-zero-guard (PR #1939) → ci.yml + launch-to-msg with template_ref=v0.2.35
+- **expected blast radius**: zero in production
+
+### stale-do-something-new-paragraph (PILOT)
+
+`.agents/skills/do-something-new/SKILL.md:103-110` — 8-line block inserted before main's restructured Step 5/6. Main has since substantially restructured the skill (`e63ab69d`, `9b9a05ed`); the paragraph either restates or contradicts main's now-canonical framing.
+
+- **status**: **deferred** (medium confidence; skill semantics have no automated verifier)
+- **test path**: no CI test possible; needs human read-through against main's restructured steps
+- **recommendation**: drop into a follow-up review pass after the human reads main's Step 5/6
+
 ### homebrew-path-augmentation (MNGR)
 
 Drop the explicit `homebrewPaths` prepend in `apps/minds/electron/backend.js:228-242`. Lima is bundled now, so the original symptom (Homebrew limactl lookup) is gone. Risk: lima provider may shell out to other CLIs (`ssh`, etc.) that rely on Homebrew PATH on some hosts.
