@@ -1,3 +1,4 @@
+import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import cast
@@ -9,6 +10,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.encryption_key import encryption_key_path
 from imbue.mngr_latchkey.remote_gateway import INNER_PORT
 from imbue.mngr_latchkey.remote_gateway import LATCHKEY_VERSION
 from imbue.mngr_latchkey.remote_gateway import OUTER_PORT
@@ -241,16 +243,18 @@ def test_ports_are_integers() -> None:
     assert isinstance(OUTER_PORT, int)
 
 
-def test_ensure_latchkey_gateway_running_starts_detached_gateway_on_outer_port_loopback() -> None:
+def test_ensure_latchkey_gateway_running_starts_detached_gateway_on_outer_port_loopback(tmp_path: Path) -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
-    _ensure_latchkey_gateway_running(outer)
+    _ensure_latchkey_gateway_running(outer, tmp_path)
     assert len(_stub(outer).recorded) == 1
     command = _stub(outer).recorded[0].command
-    # Gateway binds OUTER_PORT on loopback, with counting disabled.
-    assert (
-        f"LATCHKEY_GATEWAY_PORT={OUTER_PORT} LATCHKEY_GATEWAY_LISTEN_HOST=127.0.0.1 "
-        "LATCHKEY_DISABLE_COUNTING=1 nohup latchkey gateway"
-    ) in command
+    # Gateway binds OUTER_PORT on loopback, with counting disabled, and the
+    # encryption key injected so it can decrypt the synced credentials.
+    assert f"LATCHKEY_GATEWAY_PORT={OUTER_PORT}" in command
+    assert "LATCHKEY_GATEWAY_LISTEN_HOST=127.0.0.1" in command
+    assert "LATCHKEY_DISABLE_COUNTING=1" in command
+    assert "LATCHKEY_ENCRYPTION_KEY=" in command
+    assert "nohup latchkey gateway" in command
     # Idempotent via a PID file + kill -0 (not pgrep, which would self-match the
     # shell running this very script). Records $! after launching.
     assert "pgrep" not in command
@@ -262,10 +266,25 @@ def test_ensure_latchkey_gateway_running_starts_detached_gateway_on_outer_port_l
     assert "</dev/null" in command
 
 
-def test_ensure_latchkey_gateway_running_raises_on_failure() -> None:
+def test_ensure_latchkey_gateway_running_injects_local_encryption_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Pin the local key (and clear any operator override) so the exact value is
+    # interpolated into LATCHKEY_ENCRYPTION_KEY.
+    monkeypatch.delenv("LATCHKEY_ENCRYPTION_KEY", raising=False)
+    key_path = encryption_key_path(tmp_path)
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    key_path.write_text("my-test-key-abc123")
+    os.chmod(key_path, 0o600)
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+    _ensure_latchkey_gateway_running(outer, tmp_path)
+    assert "LATCHKEY_ENCRYPTION_KEY=my-test-key-abc123" in _stub(outer).recorded[0].command
+
+
+def test_ensure_latchkey_gateway_running_raises_on_failure(tmp_path: Path) -> None:
     outer = _outer(CommandResult(stdout="", stderr="latchkey: command not found", success=False))
     with pytest.raises(RemoteGatewayError, match="command not found"):
-        _ensure_latchkey_gateway_running(outer)
+        _ensure_latchkey_gateway_running(outer, tmp_path)
 
 
 def test_ensure_latchkey_gateway_reachable_opens_reverse_tunnel_into_container() -> None:
@@ -350,9 +369,11 @@ def test_ensure_container_tunnel_keypair_raises_on_failure() -> None:
         _ensure_container_tunnel_keypair(outer, container_name="mngr-ws", container_ssh_user="root")
 
 
-def test_provision_remote_gateway_runs_full_sequence_on_the_outer_host() -> None:
+def test_provision_remote_gateway_runs_full_sequence_on_the_outer_host(tmp_path: Path) -> None:
     outer = cast(OuterHostInterface, _StubOuter(container_name="mngr-ws-1"))
-    provision_remote_gateway(outer, host_id=HostId(), container_ssh_user="root", container_ssh_port=2222)
+    provision_remote_gateway(
+        outer, host_id=HostId(), container_ssh_user="root", container_ssh_port=2222, latchkey_directory=tmp_path
+    )
     commands = "\n\n".join(r.command for r in _stub(outer).recorded)
     # Install latchkey, run the gateway, find the container, mint+authorize a
     # key, and reverse-tunnel the gateway into the container.
@@ -366,15 +387,19 @@ def test_provision_remote_gateway_runs_full_sequence_on_the_outer_host() -> None
     assert "-R 127.0.0.1:" in commands
 
 
-def test_provision_remote_gateway_raises_when_container_not_found() -> None:
+def test_provision_remote_gateway_raises_when_container_not_found(tmp_path: Path) -> None:
     outer = cast(OuterHostInterface, _StubOuter(container_name=""))
     with pytest.raises(RemoteGatewayError, match="No container labeled"):
-        provision_remote_gateway(outer, host_id=HostId(), container_ssh_user="root", container_ssh_port=2222)
+        provision_remote_gateway(
+            outer, host_id=HostId(), container_ssh_user="root", container_ssh_port=2222, latchkey_directory=tmp_path
+        )
 
 
-def test_provision_remote_gateway_is_noop_on_local_outer_host() -> None:
+def test_provision_remote_gateway_is_noop_on_local_outer_host(tmp_path: Path) -> None:
     # A local outer (e.g. the local docker daemon's machine) must never be
     # provisioned -- we don't apt/npm-install latchkey on the user's computer.
     outer = cast(OuterHostInterface, _StubOuter(is_local=True))
-    provision_remote_gateway(outer, host_id=HostId(), container_ssh_user="root", container_ssh_port=2222)
+    provision_remote_gateway(
+        outer, host_id=HostId(), container_ssh_user="root", container_ssh_port=2222, latchkey_directory=tmp_path
+    )
     assert _stub(outer).recorded == []

@@ -18,6 +18,8 @@ from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import LatchkeyError
+from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
+from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
@@ -280,7 +282,7 @@ def _pidfile_guarded_launch_script(pid_filename: str, cmdline_marker: str, launc
     )
 
 
-def _build_gateway_start_script(outer_port: int) -> str:
+def _build_gateway_start_script(outer_port: int, encryption_key: str) -> str:
     """Build a script that starts a detached ``latchkey gateway`` unless one is already running.
 
     Launches the gateway under ``nohup`` with stdio detached so it outlives the
@@ -288,12 +290,17 @@ def _build_gateway_start_script(outer_port: int) -> str:
     gateway binds ``outer_port`` on the VPS loopback only -- it is reached from
     the container via the reverse tunnel, never exposed off-host. Idempotency is
     via a PID file (see :func:`_pidfile_guarded_launch_script`).
+
+    ``encryption_key`` is interpolated as ``LATCHKEY_ENCRYPTION_KEY`` so the
+    gateway can decrypt the synced ``credentials.json.enc`` (it must be the same
+    key the desktop gateway uses).
     """
     # Detach from the SSH session: nohup + closed stdin + redirected stdio so
     # the channel can close while the gateway keeps running.
     launch_command = (
         f"LATCHKEY_GATEWAY_PORT={outer_port} LATCHKEY_GATEWAY_LISTEN_HOST=127.0.0.1 "
-        f"LATCHKEY_DISABLE_COUNTING=1 nohup latchkey gateway "
+        f"LATCHKEY_DISABLE_COUNTING=1 LATCHKEY_ENCRYPTION_KEY={shlex.quote(encryption_key)} "
+        f"nohup latchkey gateway "
         f'</dev/null >"$HOME/.latchkey/{_REMOTE_GATEWAY_LOG_FILENAME}" 2>&1'
     )
     return _pidfile_guarded_launch_script(
@@ -303,15 +310,21 @@ def _build_gateway_start_script(outer_port: int) -> str:
     )
 
 
-def _ensure_latchkey_gateway_running(host: OuterHostInterface) -> None:
+def _ensure_latchkey_gateway_running(host: OuterHostInterface, latchkey_directory: Path) -> None:
     """Start ``latchkey gateway`` on the VPS unless it is already running.
 
     Launches ``LATCHKEY_GATEWAY_PORT=<OUTER_PORT> latchkey gateway`` bound to the
-    VPS loopback, detached so it survives the SSH session. Idempotent: a no-op
-    when a gateway process is already present. Raises :class:`RemoteGatewayError`
-    if the launch command fails.
+    VPS loopback, detached so it survives the SSH session, with the local
+    latchkey encryption key (from ``<latchkey_directory>/encryption_key``)
+    injected as ``LATCHKEY_ENCRYPTION_KEY`` so it can decrypt the synced
+    credentials. Idempotent: a no-op when a gateway process is already present.
+    Raises :class:`RemoteGatewayError` if loading the key or the launch fails.
     """
-    script = _build_gateway_start_script(OUTER_PORT)
+    try:
+        encryption_key = load_or_create_encryption_key(latchkey_directory).get_secret_value()
+    except LatchkeyEncryptionKeyPermissionError as e:
+        raise RemoteGatewayError(str(e)) from e
+    script = _build_gateway_start_script(OUTER_PORT, encryption_key)
     host_name = host.get_name()
     with log_span("Ensuring latchkey gateway is running on VPS {} (port {})", host_name, OUTER_PORT):
         result = host.execute_idempotent_command(script, timeout_seconds=_REMOTE_COMMAND_TIMEOUT_SECONDS)
@@ -515,15 +528,18 @@ def provision_remote_gateway(
     host_id: HostId,
     container_ssh_user: str,
     container_ssh_port: int,
+    latchkey_directory: Path,
 ) -> None:
     """Stand up a VPS-resident latchkey gateway and tunnel it into the agent's container.
 
     Runs the full remote-gateway sequence on the agent's outer host (the VPS):
-    install the latchkey CLI, start the gateway on the VPS loopback, mint an
-    ad-hoc VPS->container keypair, and reverse-tunnel the gateway into the
-    container so the agent's ``LATCHKEY_GATEWAY=http://127.0.0.1:INNER_PORT``
-    reaches it. The container's ssh user/port come from the inner host's SSH
-    info; the container itself is located on the VPS by its host-id label.
+    install the latchkey CLI, start the gateway on the VPS loopback (with the
+    local encryption key from ``latchkey_directory`` so it can decrypt synced
+    credentials), mint an ad-hoc VPS->container keypair, and reverse-tunnel the
+    gateway into the container so the agent's
+    ``LATCHKEY_GATEWAY=http://127.0.0.1:INNER_PORT`` reaches it. The container's
+    ssh user/port come from the inner host's SSH info; the container itself is
+    located on the VPS by its host-id label.
 
     Only genuinely-remote outer hosts are provisioned: when ``host`` is the
     local machine (e.g. the outer of a local docker daemon) this is a no-op, so
@@ -537,7 +553,7 @@ def provision_remote_gateway(
         )
         return
     _ensure_latchkey_installed(host)
-    _ensure_latchkey_gateway_running(host)
+    _ensure_latchkey_gateway_running(host, latchkey_directory)
     container_name = _resolve_container_name_for_host(host, host_id)
     container_ssh_key_path = _ensure_container_tunnel_keypair(
         host, container_name=container_name, container_ssh_user=container_ssh_user
