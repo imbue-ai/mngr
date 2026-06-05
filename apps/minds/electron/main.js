@@ -673,6 +673,16 @@ function openModal(bundle, url) {
         closeModal(bundle);
       }
     });
+    // Auto-open DevTools for dev-time inspection. Matches the
+    // contentView behavior in createBundleWebContentsViews; gated on
+    // the same env var so a single switch covers both surfaces.
+    if (process.env.MINDS_OPEN_DEVTOOLS === '1') {
+      modal.webContents.once('did-finish-load', () => {
+        if (!modal.webContents.isDestroyed()) {
+          modal.webContents.openDevTools({ mode: 'detach' });
+        }
+      });
+    }
   } else {
     // Re-add to the parent to raise to the top of z-order, then make visible.
     bundle.window.contentView.removeChildView(bundle.modalView);
