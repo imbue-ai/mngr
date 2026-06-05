@@ -1591,17 +1591,21 @@ function installApplicationMenu() {
           },
         },
         {
-          label: 'Toggle Chrome Developer Tools',
-          // Opens DevTools for the chrome view (titlebar + sidebar shell).
-          // No accelerator for now -- mostly a dev-time affordance for
-          // poking at the chrome's drag regions, SSE listeners, and the
-          // inbox modal-state class toggle.
+          label: 'Toggle Outer Developer Tools',
+          // Opens DevTools (in detached windows so the small surfaces
+          // aren't constrained to an embedded panel) for all of the
+          // bundle's WebContentsViews -- the chrome view (titlebar +
+          // sidebar shell), the workspace content view, and the modal
+          // view if it exists. Equivalent to setting
+          // MINDS_OPEN_DEVTOOLS=1 at startup but on-demand. No
+          // accelerator -- it's a dev-time affordance.
           click: () => {
             const bundle = getMostRecentWindow();
             if (!bundle || bundle.window.isDestroyed()) return;
-            const cv = bundle.chromeView;
-            if (cv && !cv.webContents.isDestroyed()) {
-              cv.webContents.toggleDevTools({ mode: 'detach' });
+            for (const view of [bundle.chromeView, bundle.contentView, bundle.modalView]) {
+              if (!view) continue;
+              if (view.webContents.isDestroyed()) continue;
+              view.webContents.toggleDevTools({ mode: 'detach' });
             }
           },
         },
