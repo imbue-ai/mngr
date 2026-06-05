@@ -536,7 +536,49 @@ def test_notice_renders_each_variant() -> None:
 def test_card_renders_default_slot() -> None:
     html = CATALOG.render("Card", _content="<p>body</p>")
     assert "<p>body</p>" in html
-    assert "border-zinc-200" in html
+    # The visual shell (bg/border/rounded/shadow) is in the ``.minds-card``
+    # CSS class in tokens.css; the rendered HTML carries the class name
+    # rather than the underlying Tailwind utilities.
+    assert "minds-card" in html
+    # Default padding is "default" -> p-4.
+    assert "p-4" in html
+
+
+def test_card_row_spread_layout_adds_justify_between() -> None:
+    html = CATALOG.render("Card", layout="row-spread", _content="x")
+    assert "justify-between" in html
+    assert "items-center" in html
+
+
+def test_card_row_layout_omits_justify_between() -> None:
+    html = CATALOG.render("Card", layout="row", _content="x")
+    assert "items-center" in html
+    assert "justify-between" not in html
+
+
+def test_card_tight_padding_uses_px4_py25() -> None:
+    html = CATALOG.render("Card", padding="tight", _content="x")
+    assert "px-4" in html
+    assert "py-2.5" in html
+    assert "p-4 " not in html and not html.rstrip().endswith("p-4")
+
+
+def test_card_tag_anchor_renders_anchor_with_href() -> None:
+    html = CATALOG.render("Card", tag="a", href="/x", _content="body")
+    assert '<a ' in html
+    assert 'href="/x"' in html
+    # Anchors auto-disable underline + inherit text color so a Card anchor
+    # doesn't read like a regular hyperlink.
+    assert "no-underline" in html
+    assert "text-inherit" in html
+
+
+def test_card_interactive_adds_hover_classes() -> None:
+    plain = CATALOG.render("Card", _content="x")
+    interactive = CATALOG.render("Card", interactive=True, _content="x")
+    assert "hover:border-zinc-300" not in plain
+    assert "hover:border-zinc-300" in interactive
+    assert "cursor-pointer" in interactive
 
 
 def test_spinner_renders_for_each_size() -> None:

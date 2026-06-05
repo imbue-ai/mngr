@@ -231,14 +231,29 @@
         <div class="mt-1 text-[11px] text-zinc-500 font-mono">Notice.jinja</div>
       </div>
 
-      {# Card row #}
+      {# Cards #}
       <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Card row</div>
-        <CardRow>
-          <span class="font-medium text-zinc-700">my-service</span>
-          <Button variant="secondary">Manage</Button>
-        </CardRow>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">CardRow.jinja</div>
+        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Cards</div>
+        <div class="flex flex-col gap-2">
+          <Card>
+            <span class="text-sm text-zinc-700">Default block card -- caller arranges children.</span>
+          </Card>
+          <Card layout="row-spread">
+            <span class="font-medium text-zinc-700">my-service</span>
+            <Button variant="secondary">Manage</Button>
+          </Card>
+          <Card layout="row" padding="tight">
+            <span class="font-medium text-zinc-700">provider</span>
+            <span class="text-xs text-zinc-500">backend</span>
+            <span class="flex-1"></span>
+            <Button variant="secondary">Disable</Button>
+          </Card>
+          <Card tag="a" href="#" layout="row" interactive>
+            <span class="flex-1 font-medium text-zinc-900">Interactive card (tag=&quot;a&quot;)</span>
+            <span class="text-xs text-zinc-500">click anywhere</span>
+          </Card>
+        </div>
+        <div class="mt-1 text-[11px] text-zinc-500 font-mono">Card.jinja :: .minds-card from tokens.css</div>
       </div>
 
       {# Page container #}

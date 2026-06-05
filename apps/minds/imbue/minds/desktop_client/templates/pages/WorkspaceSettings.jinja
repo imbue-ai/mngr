@@ -83,10 +83,10 @@
 
       <SectionHeader divider>Sharing</SectionHeader>
       {% for server in servers %}
-        <CardRow>
+        <Card layout="row-spread">
           <span class="font-medium">{{ server }}</span>
           <ButtonLink href={{ "/sharing/" ~ agent_id ~ "/" ~ server }} variant="secondary">Manage sharing</ButtonLink>
-        </CardRow>
+        </Card>
       {% else %}
         <p class="text-zinc-500">No servers discovered for this workspace.</p>
       {% endfor %}

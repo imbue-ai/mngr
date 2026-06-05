@@ -37,15 +37,20 @@
       }
     }
 
-    window.landingRowClick = function (row) {
+    window.landingRowClick = function (event, row) {
       var agentId = row.dataset.agentId;
       var status = healthStatusByAgent[agentId];
       if (status === 'stuck' || status === 'restarting' || status === 'restart_failed') {
+        // Stuck workspaces redirect to /recovery instead of the row's default
+        // href; cancel the anchor's native navigation so we don't briefly
+        // navigate to the workspace before bouncing to recovery.
+        event.preventDefault();
         var ret = row.dataset.defaultHref || '';
         window.location = '/agents/' + encodeURIComponent(agentId) + '/recovery?return_to=' + encodeURIComponent(ret);
-      } else {
-        window.location = row.dataset.defaultHref;
       }
+      // Otherwise the row is an <a href=...>, so the browser's native click
+      // navigation handles it (and middle-click / cmd-click still open in a
+      // new window as users expect).
     };
 
     window.landingRestartClick = function (button) {
@@ -128,7 +133,11 @@
       list.innerHTML = '';
       entries.forEach(function (entry) {
         var row = document.createElement('div');
-        row.className = 'flex items-center gap-3 bg-white border border-zinc-200 rounded-xl px-4 py-2.5';
+        // Same surface as Card.jinja: ``.minds-card`` carries the
+        // bg/border/rounded/shadow; the Tailwind utilities handle the
+        // tight padding + flex layout. Keep this string in sync with
+        // Card.jinja's class output when extending the primitive.
+        row.className = 'minds-card flex items-center gap-3 px-4 py-2.5';
         row.dataset.providerName = entry.name;
 
         var nameEl = document.createElement('span');
@@ -386,10 +395,17 @@
       <div class="flex flex-col gap-1.5">
         {% for agent_id in agent_ids %}
           {% set destroying_status = destroying_status_by_agent_id.get(agent_id | string) %}
+          {# Precompute row-local strings so the Card invocation stays readable.
+             JinjaX component attributes are literal strings by default; the
+             ':' prefix turns one into a Python expression. #}
+          {% set accent_style = "--workspace-accent: " ~ agent_accents.get(agent_id | string, "oklch(65% 0.15 230)") ~ ";" %}
+          {% set goto_href = mngr_forward_origin ~ "/goto/" ~ agent_id ~ "/" %}
+          {% set destroying_href = "/destroying/" ~ agent_id %}
           {% if destroying_status %}
-            <a class="accent-spine relative flex items-center gap-3 bg-white border border-zinc-200 rounded-xl px-4 py-3.5 overflow-hidden transition no-underline text-inherit hover:border-zinc-300 hover:shadow-sm"
-               style="--workspace-accent: {{ agent_accents.get(agent_id | string, 'oklch(65% 0.15 230)') }};"
-               href="/destroying/{{ agent_id }}">
+            <Card tag="a" layout="row" interactive
+                  extra="accent-spine relative overflow-hidden"
+                  :href="destroying_href"
+                  :style="accent_style">
               <span class="flex-1 font-medium text-zinc-500 pl-1">{{ agent_names.get(agent_id | string, agent_id) }}</span>
               {% if destroying_status == 'running' %}
                 <StatusBadge extra="gap-2">
@@ -399,19 +415,24 @@
               {% else %}
                 <StatusBadge variant="error">Destroy failed</StatusBadge>
               {% endif %}
-            </a>
+            </Card>
           {% else %}
-            <div class="accent-spine relative flex items-center gap-3 bg-white border border-zinc-200 rounded-xl px-4 py-3.5 cursor-pointer overflow-hidden transition hover:border-zinc-300 hover:shadow-sm"
-                 style="--workspace-accent: {{ agent_accents.get(agent_id | string, 'oklch(65% 0.15 230)') }};"
-                 data-agent-id="{{ agent_id }}"
-                 data-default-href="{{ mngr_forward_origin }}/goto/{{ agent_id }}/"
-                 onclick="window.landingRowClick(this)">
+            <Card tag="a" layout="row" interactive
+                  extra="accent-spine relative overflow-hidden"
+                  :href="goto_href"
+                  :style="accent_style"
+                  :data-agent-id="agent_id"
+                  :data-default-href="goto_href"
+                  onclick="window.landingRowClick(event, this)">
               <span class="flex-1 font-medium text-zinc-900 pl-1">{{ agent_names.get(agent_id | string, agent_id) }}</span>
               <span class="landing-backup-badge hidden inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"></span>
               <a class="landing-backup-download hidden text-xs text-blue-600 hover:underline cursor-pointer" href="#">download</a>
               <span class="landing-health-badge hidden inline-flex items-center px-2 py-0.5 rounded text-sm font-medium"></span>
+              {# Inner buttons must stop the click from bubbling to the outer
+                 anchor AND preventDefault, otherwise clicking the icon also
+                 triggers the row's href navigation. #}
               <button class="bg-transparent border border-transparent rounded-md cursor-pointer p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 flex items-center justify-center"
-                      onclick="event.stopPropagation(); window.landingRestartClick(this)"
+                      onclick="event.stopPropagation(); event.preventDefault(); window.landingRestartClick(this)"
                       title="Restart workspace"
                       aria-label="Restart workspace">
                 <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -420,7 +441,7 @@
                 </svg>
               </button>
               <button class="bg-transparent border border-transparent rounded-md cursor-pointer p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 flex items-center justify-center"
-                      onclick="event.stopPropagation(); window.location='/workspace/{{ agent_id }}/settings'"
+                      onclick="event.stopPropagation(); event.preventDefault(); window.location='/workspace/{{ agent_id }}/settings'"
                       title="Settings"
                       aria-label="Workspace settings">
                 <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -428,7 +449,7 @@
                   <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
                 </svg>
               </button>
-            </div>
+            </Card>
           {% endif %}
         {% endfor %}
       </div>
