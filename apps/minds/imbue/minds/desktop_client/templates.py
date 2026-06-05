@@ -417,15 +417,18 @@ def render_inbox_list_fragment(
 
 
 @pure
-def render_inbox_unavailable_fragment(
-    message: str = "This permission request is no longer available.",
-) -> str:
+def render_inbox_unavailable_fragment(message: str = "") -> str:
     """Render the inbox right-pane "no longer available" fragment.
 
     Returned by ``GET /inbox/detail/<id>`` when the id is unknown or
     already resolved; also innerHTML-swapped into the right pane by the
     inbox shell JS when an SSE event resolves the currently-selected
     item.
+
+    ``message`` is an optional supporting sentence rendered under the
+    fragment's heading. When empty (the default), only the heading is
+    shown, so callers that drop the supporting sentence don't end up
+    duplicating the heading.
     """
     return CATALOG.render("InboxUnavailable", message=message)
 
