@@ -336,12 +336,15 @@ def build_antigravity_hooks_config() -> dict[str, Any]:
       turn -- or any subagent -- ends.
     * The conversation-ID capture handler: a second ``PreInvocation`` handler
       runs ``capture_conversation_id.sh``, which reads agy's hook payload from
-      stdin and records the active conversation ID (see
-      ``CONVERSATION_IDS_FILENAME``). ``assemble_command`` resumes that
-      conversation on restart and ``stream_transcript.sh`` tails its
-      transcript. agy delivers the payload stdin to each handler independently
-      (verified live against agy 1.0.4), so the two ``PreInvocation`` handlers
-      do not contend for stdin.
+      stdin and records every distinct conversation ID this agent touches --
+      the root agent's and its subagents' -- into ``CONVERSATION_IDS_FILENAME``.
+      That file is the transcript-scoping set: ``stream_transcript.sh`` tails
+      each one's transcript. Resume does NOT read it (subagents land there too);
+      ``assemble_command`` resumes the agent's main conversation from
+      ``root_conversation`` written by ``set_active_marker.sh`` above. agy
+      delivers the payload stdin to each handler independently (verified live
+      against agy 1.0.4), so the two ``PreInvocation`` handlers do not contend
+      for stdin.
 
     Auto-approval of tool permissions is NOT a hook: agy's documented
     ``PreToolUse`` ``{"decision": "allow"}`` output does not actually gate the
