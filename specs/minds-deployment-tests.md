@@ -111,7 +111,7 @@
 
 ### Orchestrator + recipes
 
-- New `apps/minds/scripts/test_deployments.py` -- plain-Python click-driven entrypoint (not a pytest wrapper) owning FCT worktree validation + branch push/restore lifecycle (operating on `<monorepo>/.external_worktrees/forever-claude-template/`), shared-env deploys, sequential dispatch of the two `uv run pytest` invocations (one per mark), ledger reads/writes, per-run cleanup, paired cleanup, and the `up` / `down` / `against` local modes.
+- New `apps/minds/scripts/run_deployment_tests.py` -- plain-Python click-driven entrypoint (not a pytest wrapper) owning FCT worktree validation + branch push/restore lifecycle (operating on `<monorepo>/.external_worktrees/forever-claude-template/`), shared-env deploys, sequential dispatch of the two `uv run pytest` invocations (one per mark), ledger reads/writes, per-run cleanup, paired cleanup, and the `up` / `down` / `against` local modes.
 - New `just` recipes: `minds-test-deployment`, `minds-test-deployment-cleanup`, `minds-test-deployment-up`, `minds-test-deployment-down`, `minds-test-services-against` -- thin wrappers around the script.
 
 ### Pytest suite
