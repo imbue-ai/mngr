@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from claude_agent_sdk import ClaudeAgentOptions
 from claude_agent_sdk import ClaudeSDKClient
 from claude_agent_sdk import HookContext
 from claude_agent_sdk import HookInput
@@ -20,6 +19,8 @@ from claude_agent_sdk import PermissionResultAllow
 from claude_agent_sdk import PermissionResultDeny
 from claude_agent_sdk import ResultMessage
 from claude_agent_sdk import ToolPermissionContext
+
+from imbue.mngr_robinhood.testing import make_sdk_options
 
 pytestmark = [pytest.mark.sdk_live, pytest.mark.asyncio, pytest.mark.timeout(600)]
 
@@ -44,10 +45,9 @@ async def test_can_use_tool_allow_lets_the_tool_run(sdk_live_model: str, sdk_cwd
         observed_tool_names.append(tool_name)
         return PermissionResultAllow(behavior="allow")
 
-    options = ClaudeAgentOptions(
-        model=sdk_live_model,
-        cwd=str(sdk_cwd),
-        setting_sources=[],
+    options = make_sdk_options(
+        sdk_live_model,
+        sdk_cwd,
         permission_mode="default",
         can_use_tool=can_use_tool,
     )
@@ -71,10 +71,9 @@ async def test_can_use_tool_deny_blocks_the_tool(sdk_live_model: str, sdk_cwd: P
         observed_tool_names.append(tool_name)
         return PermissionResultDeny(behavior="deny", message="denied by test", interrupt=False)
 
-    options = ClaudeAgentOptions(
-        model=sdk_live_model,
-        cwd=str(sdk_cwd),
-        setting_sources=[],
+    options = make_sdk_options(
+        sdk_live_model,
+        sdk_cwd,
         permission_mode="default",
         can_use_tool=can_use_tool,
     )
@@ -100,10 +99,9 @@ async def test_pre_tool_use_hook_observes_tool_call(sdk_live_model: str, sdk_cwd
         empty_output: HookJSONOutput = {}
         return empty_output
 
-    options = ClaudeAgentOptions(
-        model=sdk_live_model,
-        cwd=str(sdk_cwd),
-        setting_sources=[],
+    options = make_sdk_options(
+        sdk_live_model,
+        sdk_cwd,
         permission_mode="bypassPermissions",
         hooks={"PreToolUse": [HookMatcher(matcher="Bash", hooks=[pre_tool_use_hook])]},
     )

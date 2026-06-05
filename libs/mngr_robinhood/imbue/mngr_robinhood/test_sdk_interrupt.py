@@ -8,20 +8,16 @@ from pathlib import Path
 
 import pytest
 from claude_agent_sdk import AssistantMessage
-from claude_agent_sdk import ClaudeAgentOptions
 from claude_agent_sdk import ClaudeSDKClient
 from claude_agent_sdk import ResultMessage
+
+from imbue.mngr_robinhood.testing import make_sdk_options
 
 pytestmark = [pytest.mark.sdk_live, pytest.mark.asyncio, pytest.mark.flaky, pytest.mark.timeout(600)]
 
 
 async def test_interrupt_ends_an_in_flight_turn(sdk_live_model: str, sdk_cwd: Path) -> None:
-    options = ClaudeAgentOptions(
-        model=sdk_live_model,
-        cwd=str(sdk_cwd),
-        setting_sources=[],
-        permission_mode="bypassPermissions",
-    )
+    options = make_sdk_options(sdk_live_model, sdk_cwd, permission_mode="bypassPermissions")
     async with ClaudeSDKClient(options=options) as client:
         # Kick off a genuinely long-running turn so the interrupt has something to stop.
         await client.query(

@@ -14,27 +14,17 @@ from typing import Any
 
 import pytest
 from claude_agent_sdk import AssistantMessage
-from claude_agent_sdk import ClaudeAgentOptions
 from claude_agent_sdk import ResultMessage
-from claude_agent_sdk import TextBlock
 from claude_agent_sdk import query
+
+from imbue.mngr_robinhood.testing import collect_assistant_text
+from imbue.mngr_robinhood.testing import make_sdk_options
 
 pytestmark = [pytest.mark.sdk_live, pytest.mark.asyncio, pytest.mark.timeout(600)]
 
 
-def _collect_assistant_text(messages: list[Any]) -> str:
-    """Concatenate the text of every TextBlock across all AssistantMessages, as the docs show."""
-    texts: list[str] = []
-    for message in messages:
-        if isinstance(message, AssistantMessage):
-            for block in message.content:
-                if isinstance(block, TextBlock):
-                    texts.append(block.text)
-    return "\n".join(texts)
-
-
 async def test_query_with_string_prompt_yields_assistant_then_result(sdk_live_model: str, sdk_cwd: Path) -> None:
-    options = ClaudeAgentOptions(model=sdk_live_model, cwd=str(sdk_cwd), setting_sources=[])
+    options = make_sdk_options(sdk_live_model, sdk_cwd)
     messages = [
         message async for message in query(prompt="Reply with exactly the word PINGRESPONSE.", options=options)
     ]
@@ -52,7 +42,7 @@ async def test_query_with_string_prompt_yields_assistant_then_result(sdk_live_mo
     assert result.is_error is False
     assert result.subtype == "success"
     assert isinstance(result.session_id, str) and result.session_id != ""
-    assert "PINGRESPONSE" in _collect_assistant_text(messages).upper()
+    assert "PINGRESPONSE" in collect_assistant_text(messages).upper()
 
 
 async def test_query_with_streaming_input_prompt(sdk_live_model: str, sdk_cwd: Path) -> None:
@@ -63,30 +53,29 @@ async def test_query_with_streaming_input_prompt(sdk_live_model: str, sdk_cwd: P
             "message": {"role": "user", "content": "Reply with exactly the word STREAMOK."},
         }
 
-    options = ClaudeAgentOptions(model=sdk_live_model, cwd=str(sdk_cwd), setting_sources=[])
+    options = make_sdk_options(sdk_live_model, sdk_cwd)
     messages = [message async for message in query(prompt=_prompt_stream(), options=options)]
 
     result_messages = [m for m in messages if isinstance(m, ResultMessage)]
     assert len(result_messages) == 1
     assert result_messages[0].is_error is False
-    assert "STREAMOK" in _collect_assistant_text(messages).upper()
+    assert "STREAMOK" in collect_assistant_text(messages).upper()
 
 
 async def test_query_respects_system_prompt(sdk_live_model: str, sdk_cwd: Path) -> None:
     # A system prompt should steer output: here it adds a required marker token to every reply.
-    options = ClaudeAgentOptions(
-        model=sdk_live_model,
-        cwd=str(sdk_cwd),
-        setting_sources=[],
+    options = make_sdk_options(
+        sdk_live_model,
+        sdk_cwd,
         system_prompt="You are a test fixture. End every single response with the exact marker token KIWIFRUIT9000.",
     )
     messages = [message async for message in query(prompt="Say hello in one short sentence.", options=options)]
-    assert "KIWIFRUIT9000" in _collect_assistant_text(messages).upper()
+    assert "KIWIFRUIT9000" in collect_assistant_text(messages).upper()
 
 
 async def test_query_reports_selected_model_on_assistant_message(sdk_live_model: str, sdk_cwd: Path) -> None:
     # AssistantMessage.model is documented; selecting the haiku alias must resolve to a haiku model id.
-    options = ClaudeAgentOptions(model=sdk_live_model, cwd=str(sdk_cwd), setting_sources=[])
+    options = make_sdk_options(sdk_live_model, sdk_cwd)
     assistant_models: list[str] = [
         message.model
         async for message in query(prompt="Say hi.", options=options)

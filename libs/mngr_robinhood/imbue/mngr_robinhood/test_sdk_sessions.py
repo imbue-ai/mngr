@@ -8,7 +8,6 @@ back and mutated via ``list_sessions`` / ``get_session_info`` / ``get_session_me
 from pathlib import Path
 
 import pytest
-from claude_agent_sdk import ClaudeAgentOptions
 from claude_agent_sdk import ResultMessage
 from claude_agent_sdk import SDKSessionInfo
 from claude_agent_sdk import SessionMessage
@@ -19,12 +18,14 @@ from claude_agent_sdk import query
 from claude_agent_sdk import rename_session
 from claude_agent_sdk import tag_session
 
+from imbue.mngr_robinhood.testing import make_sdk_options
+
 pytestmark = [pytest.mark.sdk_live, pytest.mark.asyncio, pytest.mark.timeout(600)]
 
 
 async def _seed_session(model: str, cwd: Path, seed_prompt: str) -> str:
     """Run one real turn in ``cwd`` and return the created session id."""
-    options = ClaudeAgentOptions(model=model, cwd=str(cwd), setting_sources=[])
+    options = make_sdk_options(model, cwd)
     session_id: str | None = None
     async for message in query(prompt=seed_prompt, options=options):
         if isinstance(message, ResultMessage):

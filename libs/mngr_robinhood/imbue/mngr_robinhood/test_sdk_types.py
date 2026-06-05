@@ -13,7 +13,6 @@ from typing import Any
 
 import pytest
 from claude_agent_sdk import AssistantMessage
-from claude_agent_sdk import ClaudeAgentOptions
 from claude_agent_sdk import ClaudeSDKClient
 from claude_agent_sdk import ResultMessage
 from claude_agent_sdk import TextBlock
@@ -22,11 +21,13 @@ from claude_agent_sdk import ToolUseBlock
 from claude_agent_sdk import UserMessage
 from claude_agent_sdk import query
 
+from imbue.mngr_robinhood.testing import make_sdk_options
+
 pytestmark = [pytest.mark.sdk_live, pytest.mark.asyncio, pytest.mark.timeout(600)]
 
 
 async def test_text_and_result_message_shapes(sdk_live_model: str, sdk_cwd: Path) -> None:
-    options = ClaudeAgentOptions(model=sdk_live_model, cwd=str(sdk_cwd), setting_sources=[])
+    options = make_sdk_options(sdk_live_model, sdk_cwd)
     messages = [message async for message in query(prompt="Reply with exactly the word SHAPEOK.", options=options)]
 
     assistant_messages = [m for m in messages if isinstance(m, AssistantMessage)]
@@ -56,12 +57,7 @@ async def test_text_and_result_message_shapes(sdk_live_model: str, sdk_cwd: Path
 
 
 async def test_tool_use_and_tool_result_block_shapes(sdk_live_model: str, sdk_cwd: Path) -> None:
-    options = ClaudeAgentOptions(
-        model=sdk_live_model,
-        cwd=str(sdk_cwd),
-        setting_sources=[],
-        permission_mode="bypassPermissions",
-    )
+    options = make_sdk_options(sdk_live_model, sdk_cwd, permission_mode="bypassPermissions")
     collected: list[Any] = []
     async with ClaudeSDKClient(options=options) as client:
         await client.query("Use the Bash tool to run exactly: echo TYPECHECKTOKEN")

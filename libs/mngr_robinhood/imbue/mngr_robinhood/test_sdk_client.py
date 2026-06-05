@@ -5,35 +5,21 @@ connection, the lower-level ``receive_messages`` iterator, and the ``set_model``
 ``set_permission_mode`` control methods.
 """
 
-from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 from claude_agent_sdk import AssistantMessage
-from claude_agent_sdk import ClaudeAgentOptions
 from claude_agent_sdk import ClaudeSDKClient
 from claude_agent_sdk import ResultMessage
-from claude_agent_sdk import TextBlock
+
+from imbue.mngr_robinhood.testing import collect_assistant_text
+from imbue.mngr_robinhood.testing import make_sdk_options
 
 pytestmark = [pytest.mark.sdk_live, pytest.mark.asyncio, pytest.mark.timeout(600)]
 
 
-def _make_options(model: str, cwd: Path) -> ClaudeAgentOptions:
-    return ClaudeAgentOptions(model=model, cwd=str(cwd), setting_sources=[])
-
-
-def _result_text(messages: Sequence[object]) -> str:
-    texts: list[str] = []
-    for message in messages:
-        if isinstance(message, AssistantMessage):
-            for block in message.content:
-                if isinstance(block, TextBlock):
-                    texts.append(block.text)
-    return "\n".join(texts).upper()
-
-
 async def test_client_context_manager_receive_response(sdk_live_model: str, sdk_cwd: Path) -> None:
-    async with ClaudeSDKClient(options=_make_options(sdk_live_model, sdk_cwd)) as client:
+    async with ClaudeSDKClient(options=make_sdk_options(sdk_live_model, sdk_cwd)) as client:
         await client.query("Reply with exactly the word ALPHATOKEN.")
         messages = [message async for message in client.receive_response()]
 
@@ -42,12 +28,12 @@ async def test_client_context_manager_receive_response(sdk_live_model: str, sdk_
     assert len(result_messages) == 1
     assert isinstance(messages[-1], ResultMessage)
     assert result_messages[0].is_error is False
-    assert "ALPHATOKEN" in _result_text(messages)
+    assert "ALPHATOKEN" in collect_assistant_text(messages).upper()
 
 
 async def test_client_explicit_connect_and_disconnect(sdk_live_model: str, sdk_cwd: Path) -> None:
     # The documented manual lifecycle: construct, connect(), query, then disconnect().
-    client = ClaudeSDKClient(options=_make_options(sdk_live_model, sdk_cwd))
+    client = ClaudeSDKClient(options=make_sdk_options(sdk_live_model, sdk_cwd))
     await client.connect()
     try:
         await client.query("Reply with exactly the word BETATOKEN.")
@@ -56,19 +42,19 @@ async def test_client_explicit_connect_and_disconnect(sdk_live_model: str, sdk_c
         await client.disconnect()
 
     assert any(isinstance(m, ResultMessage) and not m.is_error for m in messages)
-    assert "BETATOKEN" in _result_text(messages)
+    assert "BETATOKEN" in collect_assistant_text(messages).upper()
 
 
 async def test_client_supports_multiple_turns_on_one_connection(sdk_live_model: str, sdk_cwd: Path) -> None:
-    async with ClaudeSDKClient(options=_make_options(sdk_live_model, sdk_cwd)) as client:
+    async with ClaudeSDKClient(options=make_sdk_options(sdk_live_model, sdk_cwd)) as client:
         await client.query("Reply with exactly the word FIRSTTOKEN.")
         first_turn = [message async for message in client.receive_response()]
 
         await client.query("Reply with exactly the word SECONDTOKEN.")
         second_turn = [message async for message in client.receive_response()]
 
-    assert "FIRSTTOKEN" in _result_text(first_turn)
-    assert "SECONDTOKEN" in _result_text(second_turn)
+    assert "FIRSTTOKEN" in collect_assistant_text(first_turn).upper()
+    assert "SECONDTOKEN" in collect_assistant_text(second_turn).upper()
 
     # The session id is stable across turns on a single connection.
     first_result = next(m for m in first_turn if isinstance(m, ResultMessage))
@@ -79,7 +65,7 @@ async def test_client_supports_multiple_turns_on_one_connection(sdk_live_model: 
 async def test_client_receive_messages_iterator(sdk_live_model: str, sdk_cwd: Path) -> None:
     # receive_messages() is the lower-level stream; it does not stop on its own, so we break
     # at the ResultMessage that terminates the turn.
-    async with ClaudeSDKClient(options=_make_options(sdk_live_model, sdk_cwd)) as client:
+    async with ClaudeSDKClient(options=make_sdk_options(sdk_live_model, sdk_cwd)) as client:
         await client.query("Reply with exactly the word GAMMATOKEN.")
         collected: list[object] = []
         async for message in client.receive_messages():
@@ -88,11 +74,11 @@ async def test_client_receive_messages_iterator(sdk_live_model: str, sdk_cwd: Pa
                 break
 
     assert isinstance(collected[-1], ResultMessage)
-    assert "GAMMATOKEN" in _result_text(collected)
+    assert "GAMMATOKEN" in collect_assistant_text(collected).upper()
 
 
 async def test_client_set_model_then_continues(sdk_live_model: str, sdk_cwd: Path) -> None:
-    async with ClaudeSDKClient(options=_make_options(sdk_live_model, sdk_cwd)) as client:
+    async with ClaudeSDKClient(options=make_sdk_options(sdk_live_model, sdk_cwd)) as client:
         await client.query("Reply with exactly the word PREMODEL.")
         _ = [message async for message in client.receive_response()]
 
@@ -104,11 +90,11 @@ async def test_client_set_model_then_continues(sdk_live_model: str, sdk_cwd: Pat
     after_models = [m.model for m in after if isinstance(m, AssistantMessage)]
     assert len(after_models) >= 1
     assert all("haiku" in model.lower() for model in after_models)
-    assert "POSTMODEL" in _result_text(after)
+    assert "POSTMODEL" in collect_assistant_text(after).upper()
 
 
 async def test_client_set_permission_mode_then_continues(sdk_live_model: str, sdk_cwd: Path) -> None:
-    async with ClaudeSDKClient(options=_make_options(sdk_live_model, sdk_cwd)) as client:
+    async with ClaudeSDKClient(options=make_sdk_options(sdk_live_model, sdk_cwd)) as client:
         await client.query("Reply with exactly the word PREMODE.")
         _ = [message async for message in client.receive_response()]
 
@@ -118,4 +104,4 @@ async def test_client_set_permission_mode_then_continues(sdk_live_model: str, sd
         after = [message async for message in client.receive_response()]
 
     assert any(isinstance(m, ResultMessage) and not m.is_error for m in after)
-    assert "POSTMODE" in _result_text(after)
+    assert "POSTMODE" in collect_assistant_text(after).upper()
