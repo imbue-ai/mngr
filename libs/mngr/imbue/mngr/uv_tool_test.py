@@ -23,10 +23,6 @@ from imbue.mngr.uv_tool import require_uv_tool_receipt
 
 # =============================================================================
 # Tests for _requirement_to_with_arg
-#
-# These exercise how each ToolRequirement field (specifier, editable, directory,
-# git) flows into a uv command -- the observable behavior. Plain constructor
-# field-storage is guaranteed by pydantic and is not tested separately.
 # =============================================================================
 
 
