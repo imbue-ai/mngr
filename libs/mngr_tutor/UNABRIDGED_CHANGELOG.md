@@ -4,6 +4,12 @@ Full, unedited changelog entries for the `mngr_tutor` project, consolidated nigh
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-02
+
+Updated to the repo-wide error-hierarchy consolidation: the check runner's
+`except (BaseMngrError, OSError)` now reads `except (MngrError, OSError)` (`BaseMngrError` has
+been removed). No behavior change.
+
 ## 2026-05-28
 
 # Dropped redundant per-project ty/ruff ratchet tests

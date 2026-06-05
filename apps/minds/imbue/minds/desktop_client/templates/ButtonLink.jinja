@@ -1,0 +1,12 @@
+{#def href, variant="secondary", extra="", id="", block=false #}
+{#
+  Anchor styled as a button. Use for navigation links that should look like
+  buttons. Usage:
+    <ButtonLink href="/create" variant="primary">Create</ButtonLink>
+
+  Pulls its base class string and variants map from the Catalog globals
+  ``BTN_BASE`` / ``BTN_VARIANTS`` (defined in templates.py).
+#}
+<a href="{{ href }}"
+   class="{{ BTN_BASE }} {{ BTN_VARIANTS[variant] }} {% if block %}w-full{% endif %} {{ extra }}"
+   {% if id %}id="{{ id }}"{% endif %}>{{ content }}</a>

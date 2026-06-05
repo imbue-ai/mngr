@@ -1855,7 +1855,7 @@ Acceptance tests can sometimes be flaky. This is ok. Make it possible to easily 
 
 ### Release Tests
 
-Release tests are comprehensive tests that only run when pushing to the special "release" branch. They verify the application is ready for release and may include slower, more thorough tests that would be too time-consuming to run on every PR.
+Release tests are comprehensive tests that verify the application is ready for release and may include slower, more thorough tests that would be too time-consuming to run on every PR. They do not run per-PR; instead the dedicated `Release Tests` workflow (`.github/workflows/release-tests.yml`) runs them on manual dispatch -- trigger it against `main` before cutting a release -- and automatically on `v*` tag pushes. The TMR workflow also exercises them on a daily schedule.
 
 Create release tests in the source package folder, using files that start with "test_" (same location as integration tests).
 

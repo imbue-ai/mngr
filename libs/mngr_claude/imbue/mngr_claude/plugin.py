@@ -8,7 +8,6 @@ import json
 import os
 import random
 import shlex
-import tempfile
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Mapping
@@ -40,17 +39,16 @@ from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.preservation import preserve_agent_data
-from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentStartError
-from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import is_macos
+from imbue.mngr.hosts.file_upload import upload_files_in_bulk
 from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -68,8 +66,6 @@ from imbue.mngr.plugins.hookspecs import OptionStackItem
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
-from imbue.mngr.primitives import HostName
-from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.utils.git_utils import find_git_common_dir
 from imbue.mngr.utils.polling import poll_until
@@ -878,32 +874,16 @@ def _merge_keychain_api_key(
     claude_json_data["primaryApiKey"] = keychain_api_key
 
 
-def _get_local_host(mngr_ctx: MngrContext) -> OnlineHostInterface:
-    """Get the local host instance for file operations."""
-    local_host_ref = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx).get_host(HostName("localhost"))
-    if not isinstance(local_host_ref, OnlineHostInterface):
-        raise MngrError("Local host is not online")
-    return local_host_ref
-
-
 def _write_generated_files(
     host: OnlineHostInterface,
     config_dir: Path,
     generated_files: dict[Path, str],
-    mngr_ctx: MngrContext,
 ) -> None:
     """Write generated config files to the per-agent config dir.
 
     For local hosts, writes files directly. For remote hosts, stages
     files to a local temp dir and rsyncs them in a single call.
     """
-    file_summary = sorted((str(rel), len(content)) for rel, content in generated_files.items())
-    logger.debug(
-        "_write_generated_files: host.is_local={}, config_dir={}, files={}",
-        host.is_local,
-        config_dir,
-        file_summary,
-    )
     if host.is_local:
         for relative, content in generated_files.items():
             dest = config_dir / relative
@@ -916,39 +896,12 @@ def _write_generated_files(
                 dest.unlink()
             host.write_text_file(dest, content)
     else:
-        local_host = _get_local_host(mngr_ctx)
-        with tempfile.TemporaryDirectory(prefix="mngr-claude-") as staging:
-            for relative, content in generated_files.items():
-                staged = Path(staging) / relative
-                staged.parent.mkdir(parents=True, exist_ok=True)
-                staged.write_text(content)
-            staged_listing = sorted(p.relative_to(staging).as_posix() for p in Path(staging).rglob("*") if p.is_file())
-            logger.info(
-                "_write_generated_files: staged {} file(s) in {} -> {}",
-                len(staged_listing),
-                staging,
-                staged_listing,
-            )
-            try:
-                host.copy_directory(local_host, Path(staging), config_dir)
-            except MngrError as exc:
-                logger.opt(exception=exc).error(
-                    "_write_generated_files: copy_directory failed (staging={}, config_dir={})",
-                    staging,
-                    config_dir,
-                )
-                raise
-        # Verify the rsync deposited what we expected -- if files end up missing
-        # at config_dir despite a clean copy_directory return, we want loud
-        # evidence in the bake/provisioning logs (vs. the silent no-op pattern
-        # that surfaced as a FileNotFoundError much later in patch-claude-config).
-        ls_result = host.execute_idempotent_command(f"ls -la {shlex.quote(str(config_dir))}", timeout_seconds=10.0)
-        logger.info(
-            "_write_generated_files: post-rsync ls of {} (success={}): stdout={!r}",
-            config_dir,
-            ls_result.success,
-            ls_result.stdout.strip(),
-        )
+        # Remote host: transfer all generated files in a single rsync via the shared
+        # bulk-upload helper (config_dir is absolute, so remote_home is unused).
+        files: dict[Path, bytes | str | Path] = {
+            config_dir / relative: content for relative, content in generated_files.items()
+        }
+        upload_files_in_bulk(host, files, "", skip_missing=False)
 
 
 def _sync_user_resources(host: OnlineHostInterface, config_dir: Path, *, symlink: bool) -> None:
@@ -1007,13 +960,12 @@ def _sync_user_resources(host: OnlineHostInterface, config_dir: Path, *, symlink
 
 def _rsync_claude_home_directories(
     host: OnlineHostInterface,
-    local_host: OnlineHostInterface,
     local_claude_dir: Path,
     config_dir: Path,
 ) -> None:
     """Transfer directories and individual files from ~/.claude/ to a remote config dir using rsync.
 
-    Uses a single host.copy_directory (rsync) call with include/exclude filters
+    Uses a single host.copy_local_directory (rsync) call with include/exclude filters
     to transfer all directories (skills/, agents/, commands/, plugins/) and
     individual files (keybindings.json) at once. Generated files like
     settings.json are handled separately by the caller.
@@ -1031,7 +983,7 @@ def _rsync_claude_home_directories(
         return
     include_args.append("--exclude=*")
     with log_span("Rsyncing claude home directories to per-agent config dir"):
-        host.copy_directory(local_host, local_claude_dir, config_dir, extra_args=" ".join(include_args))
+        host.copy_local_directory(local_claude_dir, config_dir, " ".join(include_args))
 
 
 def _resolve_plugins_dir_sentinel(host: OnlineHostInterface) -> None:
@@ -1963,7 +1915,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
             if host.is_local:
                 _sync_user_resources(host, config_dir, symlink=config.symlink_user_resources)
             else:
-                _rsync_claude_home_directories(host, _get_local_host(mngr_ctx), source_claude_dir, config_dir)
+                _rsync_claude_home_directories(host, source_claude_dir, config_dir)
         if host.is_local:
             if config.convert_macos_credentials and is_macos():
                 _provision_keychain_credentials(config_dir, mngr_ctx.concurrency_group)
@@ -1971,7 +1923,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
                 _provision_local_credentials(host, config_dir, symlink=config.sync_credentials_on_login)
 
         # 3. Write generated files to config_dir
-        _write_generated_files(host, config_dir, generated_files, mngr_ctx)
+        _write_generated_files(host, config_dir, generated_files)
 
     def provision(
         self,

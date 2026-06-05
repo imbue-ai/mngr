@@ -15,6 +15,8 @@ from imbue.minds.config.data_types import DeployLifecycleConfig
 from imbue.minds.config.data_types import DeploySecretsConfig
 from imbue.minds.config.data_types import MinContainersConfig
 from imbue.minds.config.data_types import ModalEnvStrategy
+from imbue.minds.config.data_types import PaidDefaultsConfig
+from imbue.minds.config.data_types import ScaledownWindowConfig
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.envs.local_store import client_config_exists
 from imbue.minds.envs.local_store import env_root_exists
@@ -92,6 +94,8 @@ def _deploy_config(
     tier: str = "dev",
     modal_env: str = "main",
     min_containers: MinContainersConfig | None = None,
+    scaledown_window: ScaledownWindowConfig | None = None,
+    paid: PaidDefaultsConfig | None = None,
     lifecycle: DeployLifecycleConfig | None = None,
 ) -> DeployEnvConfig:
     if lifecycle is None:
@@ -104,6 +108,8 @@ def _deploy_config(
         secrets=DeploySecretsConfig(services=(ServiceName("cloudflare"),)),
         lifecycle=lifecycle,
         min_containers=min_containers if min_containers is not None else MinContainersConfig(),
+        scaledown_window=scaledown_window if scaledown_window is not None else ScaledownWindowConfig(),
+        paid=paid if paid is not None else PaidDefaultsConfig(),
     )
 
 
@@ -225,8 +231,10 @@ def _build_fake_providers(
             raise ModalDeployError("push secret boom")
         pushed_secrets_state[modal_env].add(secret_name)
 
-    def deploy_litellm_proxy(modal_env, tier, min_containers, deploy_id, strategy, cg):
-        call_log["calls"].append(("deploy_litellm_proxy", modal_env, tier, min_containers, deploy_id, strategy))
+    def deploy_litellm_proxy(modal_env, tier, min_containers, scaledown_window, deploy_id, strategy, cg):
+        call_log["calls"].append(
+            ("deploy_litellm_proxy", modal_env, tier, min_containers, scaledown_window, deploy_id, strategy)
+        )
         if fail_step == "deploy_litellm":
             raise ModalDeployError("litellm deploy boom")
         # Track the deploy id as the "version" of the deployed app for
@@ -239,9 +247,9 @@ def _build_fake_providers(
             return AnyUrl(f"https://{_TEST_MODAL_WORKSPACE}-{modal_env}--llm-dev-proxy.modal.run")
         return AnyUrl(f"https://{_TEST_MODAL_WORKSPACE}--llm-{tier}-proxy.modal.run")
 
-    def deploy_remote_service_connector(modal_env, tier, min_containers, deploy_id, strategy, cg):
+    def deploy_remote_service_connector(modal_env, tier, min_containers, scaledown_window, deploy_id, strategy, cg):
         call_log["calls"].append(
-            ("deploy_remote_service_connector", modal_env, tier, min_containers, deploy_id, strategy)
+            ("deploy_remote_service_connector", modal_env, tier, min_containers, scaledown_window, deploy_id, strategy)
         )
         if fail_step == "deploy_connector":
             raise ModalDeployError("connector deploy boom")
@@ -268,6 +276,11 @@ def _build_fake_providers(
     def apply_pool_hosts_migrations(host_pool_dsn, cg):
         call_log["calls"].append(("apply_pool_hosts_migrations", host_pool_dsn.get_secret_value()))
         return ()
+
+    def seed_paid_list_defaults(host_pool_dsn, domains, emails, cg):
+        call_log["calls"].append(
+            ("seed_paid_list_defaults", host_pool_dsn.get_secret_value(), tuple(domains), tuple(emails))
+        )
 
     # Tracks deployed app versions across deploy + recover cycles. Lets
     # the fake `get_modal_app_latest_version` return None for the first
@@ -350,6 +363,7 @@ def _build_fake_providers(
         delete_modal_secret=delete_modal_secret,
         list_modal_secrets=list_modal_secrets,
         apply_pool_hosts_migrations=apply_pool_hosts_migrations,
+        seed_paid_list_defaults=seed_paid_list_defaults,
         get_modal_app_latest_version=get_modal_app_latest_version,
         rollback_modal_app=rollback_modal_app,
         create_neon_snapshot_branch=create_neon_snapshot_branch,
@@ -884,6 +898,82 @@ def test_deploy_env_shared_tier_threads_min_containers_through(
         ("deploy_litellm_proxy", "main", "staging", 3),
         ("deploy_remote_service_connector", "main", "staging", 2),
     ]
+
+
+def test_deploy_env_threads_scaledown_window_through(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
+    """``[scaledown_window]`` from deploy.toml lands on each deploy call.
+
+    Mirrors the committed shape of the dev tier (``connector = 600,
+    litellm_proxy = 600``) so a regression in the threading path surfaces
+    here before a real deploy. The scaledown window is logged at index 4
+    of each deploy call tuple (right after min_containers).
+    """
+    call_log = _make_call_log()
+    providers = _build_fake_providers(call_log)
+    deploy_env(
+        DevEnvName("staging"),
+        tier="staging",
+        deploy_config=_deploy_config(
+            tier="staging",
+            scaledown_window=ScaledownWindowConfig(connector=NonNegativeInt(600), litellm_proxy=NonNegativeInt(450)),
+        ),
+        credentials=_credentials(),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    deploys = [c for c in call_log["calls"] if c[0].startswith("deploy_") and c[0] != "deploy_mngr_agent"]
+    # Tuple shape: (name, modal_env, tier, min_containers, scaledown_window, ...).
+    assert [(c[0], c[4]) for c in deploys] == [
+        ("deploy_litellm_proxy", 450),
+        ("deploy_remote_service_connector", 600),
+    ]
+
+
+def test_deploy_env_seeds_default_paid_entries(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
+    """``[paid]`` defaults from deploy.toml are seeded after migrations.
+
+    Mirrors the committed shape (every tier defaults ``domains=["imbue.com"]``)
+    so a regression in the seed-threading path surfaces here before a real
+    deploy. The seed call must come after apply_pool_hosts_migrations.
+    """
+    call_log = _make_call_log()
+    providers = _build_fake_providers(call_log)
+    deploy_env(
+        DevEnvName("dev-josh"),
+        tier="dev",
+        deploy_config=_deploy_config(
+            tier="dev",
+            paid=PaidDefaultsConfig(domains=(NonEmptyStr("imbue.com"),)),
+        ),
+        credentials=_credentials(),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    seed_calls = [c for c in call_log["calls"] if c[0] == "seed_paid_list_defaults"]
+    assert len(seed_calls) == 1
+    # Tuple shape: (name, dsn, domains, emails).
+    assert seed_calls[0][2] == ("imbue.com",)
+    assert seed_calls[0][3] == ()
+    # Seed runs after the migration step.
+    assert _step_position(call_log, "seed_paid_list_defaults") > _step_position(
+        call_log, "apply_pool_hosts_migrations"
+    )
+
+
+def test_deploy_env_skips_paid_seed_when_no_defaults(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
+    """A tier with no ``[paid]`` defaults performs no seed call."""
+    call_log = _make_call_log()
+    providers = _build_fake_providers(call_log)
+    deploy_env(
+        DevEnvName("dev-josh"),
+        tier="dev",
+        # PaidDefaultsConfig() -> empty
+        deploy_config=_deploy_config(tier="dev"),
+        credentials=_credentials(),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    assert not [c for c in call_log["calls"] if c[0] == "seed_paid_list_defaults"]
 
 
 def test_destroy_env_tier_stops_apps_deletes_secrets_and_removes_env_root(

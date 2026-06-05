@@ -12,8 +12,9 @@ this file follows the same pattern as ``minds_api_proxy_test.py``:
    plus on the on-disk side effects in the temporary
    ``LATCHKEY_DIRECTORY`` we point the child at.
 
-Tests skip cleanly when Node is unavailable, mirroring the
-minds-api-proxy test module.
+Node ships in the shared mngr image, so these tests run on offload and
+assert the binary is present (a missing Node fails loudly rather than
+skipping), mirroring the minds-api-proxy test module.
 """
 
 import json
@@ -65,9 +66,6 @@ _FILE_SHARING_WRITE_METHODS: Final[tuple[str, ...]] = (
     "LOCK",
     "UNLOCK",
 )
-
-
-pytestmark = pytest.mark.skipif(_NODE_BINARY is None, reason="node binary not available on PATH")
 
 
 def _file_sharing_permission_name(path: str, access: str) -> str:

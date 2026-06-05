@@ -1336,7 +1336,10 @@ def test_clean_work_dir_removes_git_worktree(local_host: Host, temp_git_repo: Pa
 
 
 @pytest.mark.allow_warnings(
-    match=r"^git worktree remove failed, falling back to directory removal: fatal: not a git repository \(or any of the parent directories\): \.git"
+    # Match git's stable prefix only: the parenthetical after "not a git repository"
+    # is environment-dependent (e.g. "(or any of the parent directories): .git" vs
+    # "(or any parent up to mount point /)" when the temp dir is on a separate mount).
+    match=r"^git worktree remove failed, falling back to directory removal: fatal: not a git repository"
 )
 def test_remove_git_worktree_without_parseable_git_file_falls_back_to_rm(local_host: Host, tmp_path: Path) -> None:
     """_remove_git_worktree falls back to rm -rf when the .git file cannot be parsed."""
@@ -2083,7 +2086,10 @@ def test_gc_work_dirs_skips_offline_host_not_online_interface(
 
 
 @pytest.mark.allow_warnings(
-    match=r"^git worktree remove failed, falling back to directory removal: fatal: not a git repository \(or any of the parent directories\): \.git"
+    # Match git's stable prefix only: the parenthetical after "not a git repository"
+    # is environment-dependent (e.g. "(or any of the parent directories): .git" vs
+    # "(or any parent up to mount point /)" when the temp dir is on a separate mount).
+    match=r"^git worktree remove failed, falling back to directory removal: fatal: not a git repository"
 )
 def test_remove_git_worktree_falls_back_when_git_file_absent(local_host: Host, tmp_path: Path) -> None:
     """_remove_git_worktree falls back to rm -rf when the .git file does not exist."""
@@ -2171,7 +2177,9 @@ def test_get_orphaned_source_dirs_keeps_clone_with_unpushed_branch(
     assert [info.path for info in kept] == [clone]
 
 
-@pytest.mark.allow_warnings(match=r"Failed to list local branches in .*; treating as possibly-unpushed")
+# (?s) so .* spans git's multi-line stderr (the "not a git repository" message can
+# wrap onto a "Stopping at filesystem boundary" second line on separate-mount temp dirs).
+@pytest.mark.allow_warnings(match=r"(?s)Failed to list local branches in .*; treating as possibly-unpushed")
 def test_local_branches_not_on_any_remote_treats_failure_as_unpushed(local_host: Host, tmp_path: Path) -> None:
     """If git for-each-ref fails (e.g. path is not a git repo), report non-empty so
     the caller keeps the repo rather than deleting it. This guards against data loss

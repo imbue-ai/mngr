@@ -6,9 +6,13 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.base_provider import BaseProviderInstance
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.registry import build_provider_instance
 from imbue.mngr.providers.registry import get_config_class
 from imbue.mngr.providers.registry import list_backends
@@ -104,6 +108,20 @@ def get_provider_instance(
 
     _instance_cache[cache_key] = instance
     return instance
+
+
+def get_local_host(mngr_ctx: MngrContext) -> OnlineHostInterface:
+    """Resolve the local host as an OnlineHostInterface.
+
+    This is the canonical way to obtain a local host to use as an rsync/copy
+    source (e.g. for ``remote_host.copy_directory(local_host, ...)``) or to run
+    local commands through the host interface.
+    """
+    provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
+    host_interface = provider.get_host(HostName(LOCAL_HOST_NAME))
+    if not isinstance(host_interface, OnlineHostInterface):
+        raise MngrError("Local host is not online")
+    return host_interface
 
 
 def _is_backend_enabled(backend_name: str, mngr_ctx: MngrContext) -> bool:

@@ -2,17 +2,16 @@ name: CI
 
 on:
   push:
-    branches: [release, main]
+    branches: [main]
   pull_request:
     branches: ['**']
 
 jobs:
-  # Unit + integration tests via offload on Modal - runs on non-release branches
+  # Unit + integration tests via offload on Modal
   test-offload:
-    if: github.ref != 'refs/heads/release'
     runs-on: ubuntu-latest
     # `checks: write` is required by the report-flaky-aware-tests composite
-    # action: both its `mikepenz/action-junit-report@v5` invocations and its
+    # action: both its `mikepenz/action-junit-report@v6` invocations and its
     # `gh api POST /repos/.../check-runs` call need it. `contents: write` is
     # required so offload can `git push` its image-cache git notes back to
     # `refs/notes/offload-images`; without it, every run is a cache miss and
@@ -27,11 +26,25 @@ jobs:
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
 
     steps:
+      # Default shallow single-ref checkout, then deepen only THIS ref's
+      # history in the next step. offload needs the full ancestry of HEAD
+      # (to find its checkpoint commit and thin-diff against it), but not
+      # every other branch -- which `fetch-depth: 0` would also fetch, and on
+      # a repo with many branches that full-history-of-all-branches fetch can
+      # take minutes. The image-cache git notes are fetched separately below.
       - uses: actions/checkout@v6
-        with:
-          # Full history needed for offload's git-notes-backed image-cache
-          # lookup and thin-diff against the checkpoint commit.
-          fetch-depth: 0
+
+      - name: Deepen current-branch history for offload
+        # Deepen ONLY the checked-out commit's ancestry -- all offload needs to
+        # find and thin-diff its checkpoint. Naming the SHA matters: a bare
+        # `git fetch --unshallow origin` uses the broad refspec and pulls every
+        # branch's full history (including a heavy orphan branch), which is most
+        # of the fetch cost. GitHub allows fetching reachable SHAs, and the
+        # image-cache git notes are fetched separately below.
+        run: |
+          if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+            git fetch --no-tags --unshallow origin "$(git rev-parse HEAD)"
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -47,13 +60,13 @@ jobs:
         run: uv sync --all-packages
 
       - name: Install just
-        uses: extractions/setup-just@v2
+        uses: extractions/setup-just@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache offload binary
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -68,7 +81,7 @@ jobs:
           fi
 
       - name: Restore offload test durations from previous run
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: test-results/junit.xml
           key: offload-durations-${{ github.ref }}-${{ github.run_id }}
@@ -88,7 +101,7 @@ jobs:
 
       - name: Save offload test durations for next run
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: test-results/junit.xml
           key: offload-durations-${{ github.ref }}-${{ github.run_id }}
@@ -169,7 +182,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results-offload
           path: test-results/
@@ -180,8 +193,7 @@ jobs:
           include-hidden-files: true
           retention-days: 30
 
-  # Clean up old Modal test environments - runs on all branches including release,
-  # since both acceptance tests (non-release) and release tests (release) create environments.
+  # Clean up old Modal test environments left behind by acceptance tests.
   cleanup-modal-environments:
     runs-on: ubuntu-latest
     env:
@@ -208,9 +220,8 @@ jobs:
         run: uv run python scripts/cleanup_old_modal_test_environments.py --max-age-hours 1.0
 
 
-  # Acceptance tests via offload on Modal - runs on all branches (except release, since release tests are a superset)
+  # Acceptance tests via offload on Modal
   test-offload-acceptance:
-    if: github.ref != 'refs/heads/release'
     runs-on: ubuntu-latest
     # See note on `test-offload` above: `checks: write` is required by the
     # report-flaky-aware-tests composite action, and `contents: write` is
@@ -224,11 +235,25 @@ jobs:
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
 
     steps:
+      # Default shallow single-ref checkout, then deepen only THIS ref's
+      # history in the next step. offload needs the full ancestry of HEAD
+      # (to find its checkpoint commit and thin-diff against it), but not
+      # every other branch -- which `fetch-depth: 0` would also fetch, and on
+      # a repo with many branches that full-history-of-all-branches fetch can
+      # take minutes. The image-cache git notes are fetched separately below.
       - uses: actions/checkout@v6
-        with:
-          # Full history needed for offload's git-notes-backed image-cache
-          # lookup and thin-diff against the checkpoint commit.
-          fetch-depth: 0
+
+      - name: Deepen current-branch history for offload
+        # Deepen ONLY the checked-out commit's ancestry -- all offload needs to
+        # find and thin-diff its checkpoint. Naming the SHA matters: a bare
+        # `git fetch --unshallow origin` uses the broad refspec and pulls every
+        # branch's full history (including a heavy orphan branch), which is most
+        # of the fetch cost. GitHub allows fetching reachable SHAs, and the
+        # image-cache git notes are fetched separately below.
+        run: |
+          if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+            git fetch --no-tags --unshallow origin "$(git rev-parse HEAD)"
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -244,13 +269,13 @@ jobs:
         run: uv sync --all-packages
 
       - name: Install just
-        uses: extractions/setup-just@v2
+        uses: extractions/setup-just@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache offload binary
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -265,7 +290,7 @@ jobs:
           fi
 
       - name: Restore offload test durations from previous run
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: test-results/junit.xml
           key: offload-acceptance-durations-${{ github.ref }}-${{ github.run_id }}
@@ -285,7 +310,7 @@ jobs:
 
       - name: Save offload test durations for next run
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: test-results/junit.xml
           key: offload-acceptance-durations-${{ github.ref }}-${{ github.run_id }}
@@ -301,7 +326,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results-offload-acceptance
           path: test-results/
@@ -314,7 +339,6 @@ jobs:
   # Docker acceptance tests - runs on a GitHub runner with a real Docker daemon.
   # Temporary: these will move to offload once Docker-in-Docker support lands.
   test-docker:
-    if: github.ref != 'refs/heads/release'
     runs-on: ubuntu-latest
 
     steps:
@@ -366,7 +390,6 @@ jobs:
   # deps / xvfb into the test-docker runner where they would otherwise
   # only serve this one test.
   test-docker-electron:
-    if: github.ref != 'refs/heads/release'
     runs-on: ubuntu-latest
 
     steps:
@@ -383,7 +406,7 @@ jobs:
           sudo apt-get install -y tmux git openssh-server unison xvfb
 
       - name: Set up Node.js for Electron e2e test
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '24.15.0'
 
@@ -414,117 +437,3 @@ jobs:
         # `@pytest.mark.timeout(900)`, so the suite budget cannot kill
         # the pytest run before the per-test marker fires.
         run: xvfb-run -a env PYTEST_MAX_DURATION_SECONDS=900 uv run pytest -n 0 --timeout 900 --no-cov --cov-fail-under=0 -v --tb=short -m 'minds_electron and not release'
-
-  # Docker release tests - runs on a GitHub runner with a real Docker daemon,
-  # since Docker-in-Docker under gVisor (offload-modal-release) is too flaky.
-  # Mirrors the `test-docker` job above but filters for release-marked tests.
-  # Gated to release-branch push only, matching test-release below -- these
-  # tests are slow (real docker + release path) and should only run when
-  # cutting a release, not on every PR.
-  test-docker-release:
-    if: github.ref == 'refs/heads/release' && github.event_name == 'push'
-    runs-on: ubuntu-latest
-    env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y tmux git openssh-server unison
-
-      - name: Configure Docker Hub mirror
-        run: |
-          echo '{"registry-mirrors": ["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json
-          sudo systemctl restart docker
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          version: "latest"
-
-      - name: Install Python dependencies
-        run: uv sync --all-packages
-
-      - name: Install Claude Code CLI
-        run: npm install -g @anthropic-ai/claude-code@2.1.141
-
-      - name: Run Docker release tests
-        run: PYTEST_MAX_DURATION_SECONDS=900 uv run pytest -n 0 --timeout 600 --no-cov --cov-fail-under=0 -v --tb=short -m '(docker or docker_sdk) and release'
-
-  # Release tests - runs only on release branch pushes
-  test-release:
-    if: github.ref == 'refs/heads/release' && github.event_name == 'push'
-    runs-on: ${{ matrix.os }}
-    env:
-      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-        group: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y tmux git openssh-server unison
-
-      - name: Install system dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: brew install tmux unison
-
-      - name: Install Claude Code CLI
-        run: npm install -g @anthropic-ai/claude-code@2.1.141
-
-      - name: Configure Docker Hub mirror
-        if: runner.os == 'Linux'
-        run: |
-          echo '{"registry-mirrors": ["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json
-          sudo systemctl restart docker
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          version: "latest"
-
-      - name: Install Python dependencies
-        run: uv sync --all-packages
-
-      - name: Run release tests
-        run: |
-          export IS_RELEASE=1
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            # macOS runners don't have Docker; skip Docker-marked tests
-            uv run pytest -n 0 --timeout 90 --override-ini='addopts=-n 0' --no-cov -v --tb=short --splits 12 --group ${{ matrix.group }} --splitting-algorithm=least_duration -m 'release and not docker and not docker_sdk'
-          else
-            uv run pytest -n 0 --timeout 90 --override-ini='addopts=-n 0' --no-cov -v --tb=short --splits 12 --group ${{ matrix.group }} --splitting-algorithm=least_duration
-          fi
-
-      - name: Upload test timing data
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-durations-release-${{ matrix.os }}-${{ matrix.group }}
-          path: .test_output/test_durations_*.json
-          # The .test_output/ parent is hidden, so upload-artifact's default
-          # of stripping hidden paths would drop the entire glob match.
-          include-hidden-files: true
-          retention-days: 30

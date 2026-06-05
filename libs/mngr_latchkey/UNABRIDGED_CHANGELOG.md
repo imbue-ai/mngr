@@ -4,6 +4,30 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-04
+
+`mngr latchkey forward` now refreshes its provider set on SIGHUP instead of shutting down. SIGHUP bounces only the `mngr observe` child (the shared gateway and all reverse tunnels stay up); SIGINT/SIGTERM remain the shutdown signals. Its discovery consumer also retains agents whose provider errored on a poll rather than tearing down their reverse tunnels, dropping them only on an explicit destroy or a later successful poll. `LatchkeyForwardSupervisor` gained a `bounce()` method that SIGHUPs a live supervisor (or starts one if none is running) so embedders can refresh latchkey's provider set mid-session.
+
+## 2026-06-03
+
+The latchkey forward's discovery observer (`mngr observe --discovery-only`) now writes its event log to a private, per-environment directory under the latchkey plugin data dir instead of the shared mngr discovery log. This fixes workspaces flickering out of (and never reliably appearing in) the desktop UI: when latchkey's observer and another forward's observer shared one discovery log, a snapshot from one observer that didn't have the imbue_cloud provider registered (e.g. it started before the account was written to the profile) was tailed by the other observer and treated as authoritative "no hosts," repeatedly dropping live workspaces. The private log is cleared on forward (re)start so a prior run's stale snapshots aren't replayed.
+
+## 2026-06-02
+
+Internal refactor with no user-visible behavior change. Updated the JSON output call sites to use the renamed `write_json_line` helper from `imbue.mngr.cli.output_helpers` (formerly `emit_final_json`, now removed).
+
+Added `libs/mngr_latchkey/scripts/generate_services_json.py`, a developer tool that regenerates the bundled `services.json` permission catalog from a detent checkout's built-in request schemas. It classifies each schema as a scope or a permission (mirroring detent's own doc generator, including the AWS special case), groups permissions under their owning scope, and carries over detent's per-schema `$comment` summaries.
+
+Regenerated `services.json` against the current detent. Each scope entry now carries a `description` (detent's `$comment` for the scope), and `permissions` changed from a list of strings to a list of `{"name", "description"}` objects so each permission's summary is colocated with its name. The refresh also picks up detent's newer definitions: Slack gains `slack-auth-read`/`slack-auth-write`, and GitLab now exposes a separate `gitlab-git` scope (alongside `gitlab-api`), matching how GitHub is split.
+
+The `permissions` gateway extension now documents and validates the new scope-level `description` and the `{name, description}` permission objects. The `GET /permissions/available` and `GET /permissions/available/<service_name>` endpoints surface the scope and per-permission descriptions (their documented contract was updated to match), covered by new end-to-end tests that drive the extension over HTTP.
+
+The `permission_requests` gateway extension now validates the `scope` and `permissions` of incoming `predefined` POST `/permission-requests` bodies against the bundled `services.json` catalog. A request whose `scope` is not a known Detent scope, or whose `permissions` list contains entries that the catalog does not list under that scope, is rejected with HTTP 400 at creation time rather than persisted as a pending request that approval would happily splice into `permissions.json`. File-sharing requests are unaffected.
+
+The two Node-driven extension tests (`minds_api_proxy_test.py`, `permission_requests_test.py`) no longer silently skip in CI. They spawn a Node child process to drive the `.mjs` gateway extensions and carried `skipif(shutil.which("node") is None)`, which skipped silently on the Node-less offload image -- so they exercised nothing. With Node now installed in the shared mngr image, the `skipif` is removed: they run on offload and assert Node is present (a missing Node fails loudly rather than skipping).
+
+- pyproject.toml: align `imbue-mngr*==` pin stragglers with the satellites bumped in main's `e22e7010e` release commit. Several `imbue-mngr-*` libs still pinned to older versions even though `libs/mngr` had moved to 0.2.10; building the apps/minds ToDesktop bundle from main today would fail at `uv lock` in `apps/minds/scripts/build.js` because the workspace constraint graph is unsatisfiable. Day-to-day dev hides this because `[tool.uv.sources]` redirects every `imbue-mngr-*` to its workspace path, bypassing the `==` pin.
+
 ## 2026-06-01
 
 Bump Latchkey to version 2.14.0 to support GitHub git operations via Latchkey gateway.

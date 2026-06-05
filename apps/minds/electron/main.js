@@ -6,7 +6,19 @@ const paths = require('./paths');
 const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 
-todesktop.init();
+// Only init the auto-updater in packaged builds: in dev, electron.autoUpdater
+// is undefined on macOS, so todesktop's constructor throws.
+if (app.isPackaged) {
+  // Default is "never", which stages a downloaded update without ever
+  // prompting the user to install it.
+  todesktop.init({
+    updateReadyAction: {
+      showInstallAndRestartPrompt: 'always',
+    },
+  });
+} else {
+  console.log('[update] Skipping ToDesktop init (dev build -- not packaged)');
+}
 
 // Redirect Electron's userData directory to ~/.<MINDS_ROOT_NAME>/ so that dev
 // and production installs are fully isolated (cookies, sessions, caches, etc.).
@@ -288,6 +300,7 @@ function createBundleWebContentsViews(win) {
   });
   const contentView = new WebContentsView({
     webPreferences: {
+      preload: path.join(__dirname, 'content-relay-preload.js'),
       partition: CONTENT_PARTITION,
       contextIsolation: true,
       nodeIntegration: false,
@@ -295,6 +308,14 @@ function createBundleWebContentsViews(win) {
   });
   win.contentView.addChildView(chromeView);
   win.contentView.addChildView(contentView);
+
+  // Auto-open DevTools for dev-time inspection.
+  if (process.env.MINDS_OPEN_DEVTOOLS === '1') {
+    contentView.webContents.once('did-finish-load', () => {
+      contentView.webContents.openDevTools({ mode: 'detach' });
+    });
+  }
+
   return { chromeView, contentView };
 }
 
@@ -857,6 +878,7 @@ function prepareAllWindowsForRetry() {
     if (!bundle.contentView) {
       const contentView = new WebContentsView({
         webPreferences: {
+          preload: path.join(__dirname, 'content-relay-preload.js'),
           partition: CONTENT_PARTITION,
           contextIsolation: true,
           nodeIntegration: false,
@@ -1446,6 +1468,47 @@ async function onReady() {
   await runStartupSequence(initialBundle);
 }
 
+// User-initiated update check from the app menu's Check for Updates item.
+// autoUpdater.checkForUpdates() resolves to { updateInfo }: present when a
+// newer version exists (then downloaded in the background), absent when current.
+async function triggerUpdateCheck() {
+  const autoUpdater = todesktop.autoUpdater;
+  if (!autoUpdater || typeof autoUpdater.checkForUpdates !== 'function') {
+    dialog.showMessageBox({
+      type: 'info',
+      message: 'Update check unavailable.',
+      detail: app.isPackaged
+        ? 'The auto-updater is disabled until this build is released to the latest channel.'
+        : 'Updates are only available in installed builds.',
+    });
+    return;
+  }
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    const updateInfo = result && result.updateInfo;
+    if (updateInfo) {
+      const v = updateInfo.version || updateInfo.releaseName;
+      dialog.showMessageBox({
+        type: 'info',
+        message: v ? `Update ${v} found.` : 'Update found.',
+        detail: 'Downloading in the background. You will be prompted to restart when it is ready.',
+      });
+    } else {
+      dialog.showMessageBox({
+        type: 'info',
+        message: "You're up to date.",
+        detail: 'No newer version is available.',
+      });
+    }
+  } catch (err) {
+    dialog.showMessageBox({
+      type: 'error',
+      message: 'Update check failed.',
+      detail: String(err && err.message ? err.message : err),
+    });
+  }
+}
+
 function installApplicationMenu() {
   if (!isMac || process.env.MINDS_HIDE_MENU === '1') {
     // On Windows/Linux the frame is custom-drawn; on macOS with MINDS_HIDE_MENU
@@ -1461,6 +1524,8 @@ function installApplicationMenu() {
       label: app.name || 'Minds',
       submenu: [
         { role: 'about' },
+        { type: 'separator' },
+        { label: 'Check for Updates...', click: triggerUpdateCheck },
         { type: 'separator' },
         { role: 'services' },
         { type: 'separator' },
@@ -1491,6 +1556,31 @@ function installApplicationMenu() {
       ],
     },
     { role: 'editMenu' },
+    {
+      label: 'View',
+      submenu: [
+        {
+          label: 'Toggle Developer Tools',
+          // role: 'toggleDevTools' targets a BrowserWindow; we use BaseWindow,
+          // so toggle the focused bundle's content view explicitly.
+          accelerator: 'Alt+Cmd+I',
+          click: () => {
+            const bundle = getMostRecentWindow();
+            if (!bundle || bundle.window.isDestroyed()) return;
+            const cv = bundle.contentView;
+            if (cv && !cv.webContents.isDestroyed()) {
+              cv.webContents.toggleDevTools();
+            }
+          },
+        },
+        { type: 'separator' },
+        { role: 'resetZoom' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+      ],
+    },
     { role: 'windowMenu' },
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
@@ -1520,6 +1610,7 @@ async function runStartupSequence(bundle) {
       }
     });
   } catch (err) {
+    console.error('[startup] env-setup failed:', err.message);
     showErrorInAllWindows(
       'Setup failed -- you may not be connected to the internet',
       err.message,
@@ -1850,6 +1941,18 @@ ipcMain.on('navigate-to-request', (event, _agentId, eventId) => {
   // with no context lost, and no window switching.
   const sender = getBundleFromEvent(event);
   if (sender) openModal(sender, url);
+});
+
+// Open a permission-request modal on behalf of the (otherwise unprivileged)
+// workspace content view. Only content-relay-preload.js can emit this channel
+// -- the page itself never sees ipcRenderer -- and it does so only for an
+// allowlisted `minds:open-request-modal` postMessage. We re-validate the id
+// here (never trust the renderer) before building the `/requests/<id>` URL,
+// then reuse the same modal path as the requests-panel card click above.
+ipcMain.on('open-request-modal', (event, requestId) => {
+  if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
+  const sender = getBundleFromEvent(event);
+  if (sender) openModal(sender, toAbsoluteUrl('/requests/' + requestId));
 });
 
 ipcMain.on('close-modal', (event) => {
