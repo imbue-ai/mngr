@@ -81,7 +81,10 @@ def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path, attach
     activity_dir = host_dir / "activity"
     activity_file = activity_dir / "ssh"
     signal_file = host_dir / "signals" / session_name
-    attach_flags = "".join(f" {shlex.quote(arg)}" for arg in attach_args)
+    # attach_args are tmux client flags and go before the `attach` subcommand.
+    # Fold "tmux" into the join so empty attach_args yields just "tmux" (rather
+    # than a stray double space) and a non-empty one yields e.g. "tmux -CC".
+    attach_command = " ".join(("tmux", *(shlex.quote(arg) for arg in attach_args)))
     # Use single quotes around most things to avoid shell expansion issues,
     # but the paths need to be interpolated
     return (
@@ -99,7 +102,7 @@ def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path, attach
         # = exact-match prefix and shell-escaping rule are uniform with the rest
         # of the codebase (see TmuxSessionTarget docstring for the prefix-matching
         # bug this guards against).
-        f"tmux{attach_flags} attach -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()}; "
+        f"{attach_command} attach -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()}; "
         "kill $MNGR_ACTIVITY_PID 2>/dev/null; "
         # Check for signal files written by tmux key bindings (Ctrl-q writes "destroy", Ctrl-t writes "stop")
         f"SIGNAL_FILE='{signal_file}'; "
