@@ -167,7 +167,12 @@ def render_landing_page(
 # ``_dev_only_workspace_default`` for the gating rationale.
 _FALLBACK_GIT_URL: Final[str] = "https://github.com/imbue-ai/forever-claude-template.git"
 _FALLBACK_HOST_NAME: Final[str] = "assistant"
-_FALLBACK_BRANCH: Final[str] = "pilot"
+# Pin to an annotated FCT tag rather than a moving branch so a shipped
+# binary always clones the exact pilot snapshot it was verified against.
+# Pilot evolves independently; future binaries bump this to a newer tag
+# only after re-verifying. See FCT v0.2.35 (commit 4476621) for the snapshot
+# currently bound to this binary.
+_FALLBACK_BRANCH: Final[str] = "v0.2.35"
 
 # Root names that map to operator-managed shared tiers (production /
 # staging). For these tiers the MINDS_WORKSPACE_* env-var defaults are
