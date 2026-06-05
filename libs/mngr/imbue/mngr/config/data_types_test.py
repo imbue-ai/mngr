@@ -1430,12 +1430,12 @@ def test_tmux_config_defaults() -> None:
 
 def test_tmux_config_attach_args_accepts_string() -> None:
     """A string attach_args is shlex-split into tokens (mirrors cli_args)."""
-    config = TmuxConfig(attach_args="-CC -u")
+    config = TmuxConfig.model_validate({"attach_args": "-CC -u"})
     assert config.attach_args == ("-CC", "-u")
 
 
 def test_tmux_config_attach_args_accepts_list() -> None:
-    config = TmuxConfig(attach_args=["-CC"])
+    config = TmuxConfig.model_validate({"attach_args": ["-CC"]})
     assert config.attach_args == ("-CC",)
 
 
