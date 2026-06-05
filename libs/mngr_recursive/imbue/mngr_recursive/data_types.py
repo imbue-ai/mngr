@@ -18,18 +18,11 @@ class RecursivePluginConfig(PluginConfig):
         description="How mngr should be installed on remote hosts: auto, package, editable, or skip",
     )
 
-    def merge_with(self, override: "RecursivePluginConfig") -> "RecursivePluginConfig":  # ty: ignore[invalid-method-override]
-        """Merge this config with an override config.
-
-        Scalar fields: override wins if not None.
-        """
-        merged_enabled = override.enabled if override.enabled is not None else self.enabled
-        merged_is_errors_fatal = (
-            override.is_errors_fatal if override.is_errors_fatal is not None else self.is_errors_fatal
-        )
-        merged_install_mode = override.install_mode if override.install_mode is not None else self.install_mode
-        return RecursivePluginConfig(
-            enabled=merged_enabled,
-            is_errors_fatal=merged_is_errors_fatal,
-            install_mode=merged_install_mode,
-        )
+    # NOTE: merge_with is deliberately NOT overridden. The base PluginConfig.merge_with
+    # uses ``model_fields_set`` so that an override layer (e.g. project settings) only
+    # overrides the fields it explicitly set, leaving the rest inherited from the base
+    # layer (e.g. user settings). is_errors_fatal and install_mode are plain (non-None)
+    # fields, so a previous hand-rolled "override wins if not None" override clobbered
+    # them with the override layer's *defaults* even when that layer never set them --
+    # silently dropping the base layer's values. The inherited implementation handles
+    # subclass fields correctly, so there is nothing to add here.
