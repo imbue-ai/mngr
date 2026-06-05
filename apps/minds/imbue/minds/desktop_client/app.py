@@ -2683,6 +2683,21 @@ def _build_inbox_cards(request: Request) -> list[Mapping[str, str]]:
     pending = inbox.get_pending_requests() if inbox else []
     backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
     handlers: tuple[RequestEventHandler, ...] = request.app.state.request_event_handlers
+    # Map ws_name -> "homepage agent id" so the card accent matches the
+    # color the homepage tile and the titlebar use for that workspace
+    # name. Each minds workspace owns two sibling mngr agents -- a
+    # user-facing claude agent + a ``system-services`` agent. Latchkey
+    # permission requests are filed by ``system-services``, so
+    # ``req.agent_id`` is the sibling-not-shown-on-homepage. Computing
+    # accent off the homepage agent's id keeps the inbox color in sync
+    # with the rest of the UI. Falls back to keying off ``ws_name`` if
+    # no discovered agent claims that workspace (e.g. a freshly-arrived
+    # request whose host hasn't been re-discovered yet).
+    primary_agent_id_by_ws_name: dict[str, str] = {}
+    for aid in backend_resolver.list_known_workspace_ids():
+        wn = backend_resolver.get_workspace_name(aid)
+        if wn and wn not in primary_agent_id_by_ws_name:
+            primary_agent_id_by_ws_name[wn] = str(aid)
     cards: list[Mapping[str, str]] = []
     for req in pending:
         handler = find_handler_for_event(handlers, req)
@@ -2701,19 +2716,14 @@ def _build_inbox_cards(request: Request) -> list[Mapping[str, str]]:
         if not ws_name:
             info = backend_resolver.get_agent_display_info(parsed_id)
             ws_name = info.agent_name if info else req.agent_id[:16]
-        # Accent is keyed on ws_name rather than the request's
-        # ``req.agent_id`` so all sibling agents on the same host /
-        # workspace produce the same color in the inbox -- the user
-        # thinks of "permissions for workspace X" rather than
-        # "permissions filed by this specific sub-agent", so the
-        # color tracks the workspace identity instead.
+        accent_key = primary_agent_id_by_ws_name.get(ws_name, ws_name)
         cards.append(
             {
                 "id": str(req.event_id),
                 "kind_label": kind_label,
                 "ws_name": ws_name,
                 "display_name": display_name,
-                "accent": workspace_accent(ws_name),
+                "accent": workspace_accent(accent_key),
             }
         )
     return cards
