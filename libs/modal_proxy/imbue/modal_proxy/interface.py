@@ -7,7 +7,7 @@
 #
 # Three implementations are planned:
 # 1. DirectModalInterface -- wraps the real Modal Python SDK
-# 2. TestingModalInterface -- fakes Modal locally for integration tests
+# 2. FakeModalInterface -- fakes Modal locally for integration tests
 # 3. RemoteModalInterface -- proxies to a web server for managed service
 
 from abc import ABC
@@ -373,6 +373,6 @@ class ModalInterface(MutableModel, ABC):
         ``is_logging_to_loguru`` is True the writer additionally tees into
         loguru with deduplication. Implementations decide whether the
         capture is real (``DirectModalInterface``) or a no-op nullcontext
-        (``TestingModalInterface``).
+        (``FakeModalInterface``).
         """
         ...

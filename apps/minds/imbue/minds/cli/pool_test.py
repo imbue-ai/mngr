@@ -15,6 +15,7 @@ from click.testing import CliRunner
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
+from imbue.minds.cli.pool import _SECRET_BEARING_FLAGS
 from imbue.minds.cli.pool import build_create_admin_args
 from imbue.minds.cli.pool import build_destroy_admin_args
 from imbue.minds.cli.pool import build_list_admin_args
@@ -22,6 +23,7 @@ from imbue.minds.cli.pool import derive_public_key_from_private
 from imbue.minds.cli.pool import merge_ovh_env_into_subprocess_env
 from imbue.minds.cli.pool import pool
 from imbue.minds.cli.pool import resolved_management_public_key_path
+from imbue.minds.utils.secret_redaction import redact_secret_flag_values
 
 
 @pytest.fixture
@@ -30,6 +32,21 @@ def _isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("MINDS_ROOT_NAME", raising=False)
     return tmp_path
+
+
+def test_database_url_is_redacted_from_the_loggable_admin_command() -> None:
+    # The admin command echo is the path that leaked the production Neon DSN;
+    # the DSN must never survive into the rendered "Running: ..." log line.
+    dsn = "postgresql://neondb_owner:npg_supersecret@ep-host.neon.tech/host_pool"
+    args = build_list_admin_args(database_url=dsn)
+    full_command = ["mngr", "imbue_cloud", "admin", "pool"] + args
+
+    loggable = redact_secret_flag_values(full_command, secret_bearing_flags=_SECRET_BEARING_FLAGS)
+
+    assert "--database-url" in _SECRET_BEARING_FLAGS
+    assert "npg_supersecret" not in " ".join(loggable)
+    assert dsn not in " ".join(loggable)
+    assert loggable == ["mngr", "imbue_cloud", "admin", "pool", "list", "--database-url", "***"]
 
 
 def test_build_create_admin_args_injects_minds_env_tag() -> None:

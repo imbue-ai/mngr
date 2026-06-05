@@ -1,0 +1,256 @@
+import io
+import json
+
+from imbue.mngr_robinhood.data_types import OutputFormat
+from imbue.mngr_robinhood.data_types import ResultMeta
+from imbue.mngr_robinhood.output_modes import StreamingOutputWriter
+from imbue.mngr_robinhood.output_modes import build_result_envelope
+from imbue.mngr_robinhood.output_modes import build_system_init_envelope
+from imbue.mngr_robinhood.output_modes import transcript_event_to_stream_json
+
+
+def _assistant_event(text: str) -> dict[str, object]:
+    return {
+        "type": "assistant_message",
+        "event_id": f"evt-{text}",
+        "text": text,
+        "tool_calls": [],
+        "model": "claude-test",
+        "stop_reason": "end_turn",
+        "usage": None,
+        "message_uuid": f"uuid-{text}",
+    }
+
+
+def _user_event(content: str) -> dict[str, object]:
+    return {
+        "type": "user_message",
+        "event_id": f"evt-{content}",
+        "content": content,
+        "role": "user",
+        "message_uuid": f"uuid-{content}",
+    }
+
+
+def test_build_result_envelope_success() -> None:
+    meta = ResultMeta(session_id="session-1", duration_ms=1234, is_error=False, error_text=None)
+    envelope = build_result_envelope(text="hi there", meta=meta, turn_count=1)
+    assert envelope["type"] == "result"
+    assert envelope["subtype"] == "success"
+    assert envelope["is_error"] is False
+    assert envelope["result"] == "hi there"
+    assert envelope["session_id"] == "session-1"
+    assert envelope["duration_ms"] == 1234
+    assert envelope["total_cost_usd"] == 0.0
+    assert envelope["usage"] is None
+
+
+def test_build_result_envelope_error_substitutes_error_text() -> None:
+    meta = ResultMeta(session_id="session-1", duration_ms=2, is_error=True, error_text="boom")
+    envelope = build_result_envelope(text="ignored", meta=meta, turn_count=1)
+    assert envelope["subtype"] == "error"
+    assert envelope["is_error"] is True
+    assert envelope["result"] == "boom"
+
+
+def test_build_result_envelope_error_falls_back_when_text_missing() -> None:
+    meta = ResultMeta(session_id="session-1", duration_ms=2, is_error=True, error_text=None)
+    envelope = build_result_envelope(text="ignored", meta=meta, turn_count=1)
+    assert envelope["subtype"] == "error"
+    assert envelope["is_error"] is True
+    # claude -p's native envelope always carries a string here; verify we
+    # never emit JSON null even when error_text is missing.
+    assert isinstance(envelope["result"], str)
+    assert envelope["result"] != ""
+
+
+def test_build_system_init_envelope_shape() -> None:
+    envelope = build_system_init_envelope("session-2")
+    assert envelope["type"] == "system"
+    assert envelope["subtype"] == "init"
+    assert envelope["session_id"] == "session-2"
+
+
+def test_transcript_assistant_event_to_stream_json() -> None:
+    converted = transcript_event_to_stream_json(_assistant_event("hi"), "sess-1")
+    assert converted is not None
+    assert converted["type"] == "assistant"
+    message = converted["message"]
+    assert isinstance(message, dict)
+    assert message["role"] == "assistant"
+    assert message["content"] == [{"type": "text", "text": "hi"}]
+
+
+def test_transcript_user_event_to_stream_json() -> None:
+    converted = transcript_event_to_stream_json(_user_event("hi"), "sess-1")
+    assert converted is not None
+    assert converted["type"] == "user"
+
+
+def test_transcript_unknown_event_dropped() -> None:
+    converted = transcript_event_to_stream_json({"type": "something_else"}, "sess-1")
+    assert converted is None
+
+
+def test_text_writer_concatenates_assistant_turns() -> None:
+    stdout = io.StringIO()
+    writer = StreamingOutputWriter(output_format=OutputFormat.TEXT, session_id="session-1", stdout=stdout)
+    writer.emit_events([_assistant_event("hello"), _user_event("ignored"), _assistant_event("world")])
+    writer.finalize(ResultMeta(session_id="session-1", duration_ms=10, is_error=False, error_text=None), turn_count=1)
+    assert stdout.getvalue() == "helloworld\n"
+
+
+def test_text_writer_dedupes_events_by_id() -> None:
+    stdout = io.StringIO()
+    writer = StreamingOutputWriter(output_format=OutputFormat.TEXT, session_id="session-1", stdout=stdout)
+    writer.emit_events([_assistant_event("hello"), _assistant_event("hello")])
+    writer.finalize(ResultMeta(session_id="session-1", duration_ms=10, is_error=False, error_text=None), turn_count=1)
+    assert stdout.getvalue() == "hello\n"
+
+
+def test_json_writer_emits_single_envelope() -> None:
+    stdout = io.StringIO()
+    writer = StreamingOutputWriter(output_format=OutputFormat.JSON, session_id="session-1", stdout=stdout)
+    writer.emit_events([_assistant_event("hello")])
+    writer.finalize(ResultMeta(session_id="session-1", duration_ms=10, is_error=False, error_text=None), turn_count=1)
+    lines = stdout.getvalue().splitlines()
+    assert len(lines) == 1
+    parsed = json.loads(lines[0])
+    assert parsed["type"] == "result"
+    assert parsed["result"] == "hello"
+    assert parsed["session_id"] == "session-1"
+
+
+def test_json_writer_reports_orchestrator_turn_count() -> None:
+    stdout = io.StringIO()
+    writer = StreamingOutputWriter(output_format=OutputFormat.JSON, session_id="session-1", stdout=stdout)
+    # Two assistant_message events arrive within a single conversational turn.
+    writer.emit_events([_assistant_event("hello"), _assistant_event("world")])
+    writer.finalize(ResultMeta(session_id="session-1", duration_ms=10, is_error=False, error_text=None), turn_count=1)
+    parsed = json.loads(stdout.getvalue().strip())
+    # The field name comes from claude -p's native wire shape; we deliberately
+    # use the literal key to assert wire-compatibility.
+    assert parsed["num_turns"] == 1
+
+
+def test_stream_json_writer_emits_init_first_and_result_last() -> None:
+    stdout = io.StringIO()
+    writer = StreamingOutputWriter(output_format=OutputFormat.STREAM_JSON, session_id="session-1", stdout=stdout)
+    writer.emit_events([_assistant_event("hello")])
+    writer.finalize(ResultMeta(session_id="session-1", duration_ms=10, is_error=False, error_text=None), turn_count=1)
+    lines = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert len(lines) == 3
+    assert lines[0]["type"] == "system"
+    assert lines[0]["subtype"] == "init"
+    assert lines[1]["type"] == "assistant"
+    assert lines[2]["type"] == "result"
+
+
+def test_stream_json_writer_suppresses_user_messages_by_default() -> None:
+    stdout = io.StringIO()
+    writer = StreamingOutputWriter(output_format=OutputFormat.STREAM_JSON, session_id="session-1", stdout=stdout)
+    writer.emit_events([_user_event("hi"), _assistant_event("hello")])
+    writer.finalize(ResultMeta(session_id="session-1", duration_ms=10, is_error=False, error_text=None), turn_count=1)
+    types = [json.loads(line)["type"] for line in stdout.getvalue().splitlines()]
+    # Default matches claude -p: user prompts are not echoed back into the stream.
+    assert types == ["system", "assistant", "result"]
+
+
+def test_writer_tracks_assistant_message_count_across_events() -> None:
+    """Every assistant_message event bumps the count, even ones with empty text
+    (which are common for tool-only cycles within a single turn). Non-assistant
+    events (user_message, tool_result) do not advance the counter."""
+    stdout = io.StringIO()
+    writer = StreamingOutputWriter(output_format=OutputFormat.TEXT, session_id="s", stdout=stdout)
+    assert writer.assistant_message_count == 0
+
+    writer.emit_events([_assistant_event("hi")])
+    assert writer.assistant_message_count == 1
+
+    empty_text_assistant: dict[str, object] = {
+        "type": "assistant_message",
+        "event_id": "evt-tool-only",
+        "text": "",
+        "tool_calls": [],
+        "model": "claude-test",
+        "stop_reason": "tool_use",
+        "usage": None,
+        "message_uuid": "uuid-tool-only",
+    }
+    writer.emit_events([empty_text_assistant])
+    assert writer.assistant_message_count == 2
+
+    writer.emit_events([_user_event("ignored")])
+    assert writer.assistant_message_count == 2
+
+
+def test_writer_tracks_last_assistant_stop_reason() -> None:
+    """The orchestrator uses ``last_assistant_stop_reason`` to gate end-of-turn
+    finalization, so it must always reflect the most recently observed value."""
+    stdout = io.StringIO()
+    writer = StreamingOutputWriter(output_format=OutputFormat.TEXT, session_id="s", stdout=stdout)
+    assert writer.last_assistant_stop_reason is None
+
+    tool_use_assistant: dict[str, object] = {
+        "type": "assistant_message",
+        "event_id": "evt-1",
+        "text": "calling a tool",
+        "tool_calls": [],
+        "model": "claude-test",
+        "stop_reason": "tool_use",
+        "usage": None,
+        "message_uuid": "uuid-1",
+    }
+    writer.emit_events([tool_use_assistant])
+    assert writer.last_assistant_stop_reason == "tool_use"
+
+    end_turn_assistant: dict[str, object] = {
+        "type": "assistant_message",
+        "event_id": "evt-2",
+        "text": "final answer",
+        "tool_calls": [],
+        "model": "claude-test",
+        "stop_reason": "end_turn",
+        "usage": None,
+        "message_uuid": "uuid-2",
+    }
+    writer.emit_events([end_turn_assistant])
+    assert writer.last_assistant_stop_reason == "end_turn"
+
+
+def test_writer_ignores_non_string_stop_reason() -> None:
+    """A missing or non-string ``stop_reason`` must not clobber the last seen
+    value with ``None`` -- otherwise a malformed mid-stream event would erase
+    a previously observed terminal stop_reason and trigger an unnecessary
+    quiesce wait downstream."""
+    stdout = io.StringIO()
+    writer = StreamingOutputWriter(output_format=OutputFormat.TEXT, session_id="s", stdout=stdout)
+    writer.emit_events([_assistant_event("done")])
+    assert writer.last_assistant_stop_reason == "end_turn"
+
+    no_stop_reason: dict[str, object] = {
+        "type": "assistant_message",
+        "event_id": "evt-mal",
+        "text": "more",
+        "tool_calls": [],
+        "model": "claude-test",
+        "stop_reason": None,
+        "usage": None,
+        "message_uuid": "uuid-mal",
+    }
+    writer.emit_events([no_stop_reason])
+    assert writer.last_assistant_stop_reason == "end_turn"
+
+
+def test_stream_json_writer_replays_user_messages_when_enabled() -> None:
+    stdout = io.StringIO()
+    writer = StreamingOutputWriter(
+        output_format=OutputFormat.STREAM_JSON,
+        session_id="session-1",
+        stdout=stdout,
+        replay_user_messages=True,
+    )
+    writer.emit_events([_user_event("hi"), _assistant_event("hello")])
+    writer.finalize(ResultMeta(session_id="session-1", duration_ms=10, is_error=False, error_text=None), turn_count=1)
+    types = [json.loads(line)["type"] for line in stdout.getvalue().splitlines()]
+    assert types == ["system", "user", "assistant", "result"]

@@ -4,6 +4,10 @@ Full, unedited changelog entries for the `mngr_pi_coding` project, consolidated 
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-04
+
+Fixed remote provisioning of pi resource directories (skills/prompts/extensions/themes) to transfer with a single rsync (`host.copy_local_directory`) instead of uploading each file individually over SSH. The per-file approach opened an SFTP channel per file (a full round-trip over the tunnel) and did not scale to large resource sets -- the same failure mode as github issue 1825.
+
 ## 2026-05-28
 
 # Dropped redundant per-project ty/ruff ratchet tests
