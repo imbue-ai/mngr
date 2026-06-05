@@ -95,7 +95,14 @@ def test_prevent_setattr() -> None:
 
 
 def test_prevent_asyncio_import() -> None:
-    rc.check_asyncio_import(_DIR, snapshot(0))
+    # One: ``log_utils_test.py`` drives Modal's ``put_streaming_log`` /
+    # ``put_fetched_log`` via ``asyncio.run`` to verify our
+    # ``_QuietOutputManager`` override still captures build-log output
+    # after the modal 1.4.x refactor. Those two methods are
+    # ``async def`` in the upstream API; there is no sync wrapper to
+    # call instead. The asyncio use is confined to a single test file
+    # and does not leak into the package's runtime code.
+    rc.check_asyncio_import(_DIR, snapshot(1))
 
 
 def test_prevent_pandas_import() -> None:

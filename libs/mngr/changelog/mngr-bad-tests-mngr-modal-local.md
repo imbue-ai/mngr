@@ -1,0 +1,5 @@
+Consolidated the `listing_utils` tests into mngr (next to the code under test) and strengthened the script test:
+
+- The `build_listing_collection_script` / `parse_listing_collection_output` tests previously lived in `mngr_modal` even though they exercise `imbue.mngr.providers.listing_utils`; their unique coverage (empty-scalar handling and the malformed-agent-JSON skip path) now lives in `libs/mngr/imbue/mngr/providers/listing_utils_test.py`.
+- The `parse_optional_int` / `parse_optional_float` cases that had been mis-named `testparse_*` in `mngr_modal` are now covered by properly-named `test_parse_optional_int_*` / `test_parse_optional_float_*` tests in the same file.
+- `test_build_listing_collection_script_contains_key_sections` previously asserted only that scattered substrings existed. It is replaced by `test_build_listing_collection_script_emits_sections_in_required_order`, which asserts the sections appear in the exact order the single-pass parser depends on, that `host_dir`/`prefix` are interpolated into the real paths, and that the per-agent delimiter markers are present.

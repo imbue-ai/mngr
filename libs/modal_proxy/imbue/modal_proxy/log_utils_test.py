@@ -5,6 +5,7 @@ from loguru import logger
 from modal._output.manager import OutputManager
 from modal_proto import api_pb2
 
+from imbue.mngr.primitives import LogLevel
 from imbue.modal_proxy.log_utils import ModalLoguruWriter
 from imbue.modal_proxy.log_utils import _create_modal_loguru_writer
 from imbue.modal_proxy.log_utils import _create_multi_writer
@@ -63,14 +64,77 @@ def test_modal_loguru_writer_is_writable() -> None:
     assert writer.seekable() is False
 
 
-def test_modal_loguru_writer_deduplicates_messages() -> None:
-    """Should deduplicate consecutive messages."""
-    writer = _create_modal_loguru_writer()
+def test_modal_loguru_writer_emits_each_complete_line_to_loguru() -> None:
+    """Each newline-terminated line is emitted exactly once to loguru at BUILD level.
 
-    writer.write("same message")
-    result1 = writer.write("same message")
+    The writer buffers partial writes until it sees a trailing newline, then
+    emits the stripped line as a single BUILD-level loguru record. This test
+    drives writes through a real loguru sink (rather than only checking the
+    returned byte count) so that it observes what actually reaches loguru.
+    """
+    emitted: list[str] = []
+    sink_id = logger.add(
+        lambda msg: emitted.append(msg.record["message"]),
+        level=LogLevel.BUILD.value,
+        format="{message}",
+        filter=lambda record: record["level"].name == LogLevel.BUILD.value,
+    )
+    try:
+        writer = _create_modal_loguru_writer()
+        # A partial write (no newline) is buffered and emits nothing yet.
+        partial_result = writer.write("partial ")
+        assert partial_result == len("partial ")
+        assert emitted == []
+        # Completing the line flushes the accumulated buffer as one record.
+        rest_result = writer.write("line\n")
+        assert rest_result == len("line\n")
+        assert emitted == ["partial line"]
+    finally:
+        logger.remove(sink_id)
 
-    assert result1 == len("same message")
+
+def test_modal_loguru_writer_emits_repeated_message_once_per_write() -> None:
+    """Writing the same complete line twice emits it to loguru twice.
+
+    NOTE: the docstring on ``ModalLoguruWriter.write`` claims it deduplicates
+    consecutive identical messages, but the implementation does not -- it only
+    coalesces partial writes into whole lines. This test pins the *actual*
+    behavior (each completed identical line is emitted once, so two writes ->
+    two records) so the divergence between docstring and code is visible and a
+    future dedup change would surface here.
+    """
+    emitted: list[str] = []
+    sink_id = logger.add(
+        lambda msg: emitted.append(msg.record["message"]),
+        level=LogLevel.BUILD.value,
+        format="{message}",
+        filter=lambda record: record["level"].name == LogLevel.BUILD.value,
+    )
+    try:
+        writer = _create_modal_loguru_writer()
+        writer.write("same message\n")
+        writer.write("same message\n")
+        assert emitted == ["same message", "same message"]
+    finally:
+        logger.remove(sink_id)
+
+
+def test_modal_loguru_writer_skips_blank_writes() -> None:
+    """Whitespace-only writes are dropped and never reach loguru."""
+    emitted: list[str] = []
+    sink_id = logger.add(
+        lambda msg: emitted.append(msg.record["message"]),
+        level=LogLevel.BUILD.value,
+        format="{message}",
+        filter=lambda record: record["level"].name == LogLevel.BUILD.value,
+    )
+    try:
+        writer = _create_modal_loguru_writer()
+        result = writer.write("   \n")
+        assert result == len("   \n")
+        assert emitted == []
+    finally:
+        logger.remove(sink_id)
 
 
 def test_enable_modal_output_capture_returns_buffer_and_writer() -> None:

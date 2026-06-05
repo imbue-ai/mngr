@@ -1,0 +1,4 @@
+Moved the `log_utils` tests into modal_proxy (next to the code they exercise) and strengthened them:
+
+- The `ModalLoguruWriter`/`enable_modal_output_capture` tests previously lived in `mngr_modal` even though they import and test `imbue.modal_proxy.log_utils`; they now live at `libs/modal_proxy/imbue/modal_proxy/log_utils_test.py`.
+- The former dedup test only checked the byte count returned by a second `write` call and never observed loguru. It is replaced by tests that attach a real loguru sink and assert what actually reaches loguru: each newline-terminated line is emitted exactly once, partial writes are buffered until a newline, and whitespace-only writes are dropped. A test also pins the (currently absent) dedup behavior so the divergence between the writer's docstring and its implementation is visible and a future dedup change would surface.
