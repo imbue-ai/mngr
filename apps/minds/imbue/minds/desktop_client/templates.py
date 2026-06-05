@@ -172,7 +172,7 @@ _FALLBACK_HOST_NAME: Final[str] = "assistant"
 # Pilot evolves independently; future binaries bump this to a newer tag
 # only after re-verifying. See FCT v0.2.35 (commit 4476621) for the snapshot
 # currently bound to this binary.
-_FALLBACK_BRANCH: Final[str] = "v0.2.35"
+FALLBACK_BRANCH: Final[str] = "v0.2.35"
 
 # Root names that map to operator-managed shared tiers (production /
 # staging). For these tiers the MINDS_WORKSPACE_* env-var defaults are
@@ -246,7 +246,7 @@ def render_create_form(
     effective_name = (
         host_name if host_name else _dev_only_workspace_default("MINDS_WORKSPACE_NAME", _FALLBACK_HOST_NAME)
     )
-    effective_branch = branch if branch else _dev_only_workspace_default("MINDS_WORKSPACE_BRANCH", _FALLBACK_BRANCH)
+    effective_branch = branch if branch else _dev_only_workspace_default("MINDS_WORKSPACE_BRANCH", FALLBACK_BRANCH)
     has_account = bool(default_account_id and accounts)
     effective_launch_mode = (
         launch_mode if launch_mode is not None else (LaunchMode.IMBUE_CLOUD if has_account else LaunchMode.LIMA)

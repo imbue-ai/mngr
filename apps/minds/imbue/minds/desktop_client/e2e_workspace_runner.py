@@ -40,7 +40,7 @@ from playwright.sync_api import Page
 from playwright.sync_api import sync_playwright
 
 from imbue.minds.config.loader import repo_tier_client_config_path
-from imbue.minds.desktop_client.templates import _FALLBACK_BRANCH as _FORM_DEFAULT_BRANCH
+from imbue.minds.desktop_client.templates import FALLBACK_BRANCH as _FORM_DEFAULT_BRANCH
 
 # This file lives at apps/minds/imbue/minds/desktop_client/e2e_workspace_runner.py,
 # so parents[5] hops up over desktop_client, minds, imbue, minds, apps to the repo
@@ -180,7 +180,7 @@ def _shallow_clone_fct(branch: str, destination: Path) -> Path:
     """Shallow-clone ``branch`` of the FCT public remote into ``destination``.
 
     Also fetches any release tags into the clone. The minds create form's
-    default branch field (see ``_FALLBACK_BRANCH`` in templates.py) pins
+    default branch field (see ``FALLBACK_BRANCH`` in templates.py) pins
     to an annotated FCT tag (e.g. ``v0.2.35``); without this extra fetch,
     a depth-1 clone of an unrelated branch does not have the tag's commit,
     and the downstream ``mngr create`` clone of the form's branch field
@@ -207,7 +207,7 @@ def _shallow_clone_fct(branch: str, destination: Path) -> Path:
         timeout=120,
     )
     # The create form pre-fills its branch field with `_FORM_DEFAULT_BRANCH`
-    # (templates.py `_FALLBACK_BRANCH`), so the spawned `mngr create` runs
+    # (templates.py `FALLBACK_BRANCH`), so the spawned `mngr create` runs
     # `git checkout <that ref>` in this very clone. Leaving the clone on
     # the originally-cloned branch turns that into a real checkout that
     # rejects any uncommitted edits the test fixture made to opt files in
