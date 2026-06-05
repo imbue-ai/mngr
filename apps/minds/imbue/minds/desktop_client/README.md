@@ -2,6 +2,11 @@
 
 The local desktop client is a FastAPI app that handles authentication and traffic forwarding. It is the gateway through which users access all their workspaces.
 
+> For UI / template work (JinjaX components, the primitive catalog,
+> visual-diff workflow, JinjaX gotchas), see
+> [`templates/README.md`](templates/README.md) -- read that BEFORE adding
+> inline Tailwind to a template.
+
 Each workspace already runs its own `system_interface`, which serves the dockview UI and exposes its services under `/service/<name>/...` paths (handling Service Worker bootstrap, path rewriting, cookie scoping, and WebSocket shims internally). The desktop client's job is to route browser traffic for `<agent-id>.localhost:PORT/*` to the correct system interface -- it does not rewrite paths or inject anything itself.
 
 This desktop client is a separate component from any individual workspace's web server -- the desktop client does not define what workspaces do or how they respond to messages. It only handles routing and authentication so that the URLs being served by the workspace are accessible locally.
