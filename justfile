@@ -199,6 +199,12 @@ test-timings:
 test target:
   PYTEST_MAX_DURATION_SECONDS=600 uv run pytest -sv --no-cov -n 0 -m "acceptance or not acceptance" "{{target}}"
 
+# Run the opt-in live Claude Agent SDK tests (libs/mngr_robinhood). These make real,
+# paid API calls and are excluded from every CI run. ANTHROPIC_API_KEY must already be
+# exported (e.g. `set -a; source .env; set +a`). Pass extra pytest args via `args`.
+test-sdk-live args="":
+  RUN_SDK_LIVE_TESTS=1 PYTEST_MAX_DURATION_SECONDS=2400 uv run pytest -sv --no-cov -n 0 -o timeout=900 -m sdk_live libs/mngr_robinhood {{args}}
+
 # === minds deployment / services test orchestrator ===
 # Wraps apps/minds/scripts/test_deployments.py. See specs/minds-deployment-tests.md
 # and apps/minds/deployment_tests/README.md for the full design + usage.
