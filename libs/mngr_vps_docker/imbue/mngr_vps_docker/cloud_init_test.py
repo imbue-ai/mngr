@@ -1,9 +1,17 @@
 """Tests for cloud-init user_data generation."""
 
+from inline_snapshot import snapshot
+
 from imbue.mngr_vps_docker.cloud_init import _indent
 from imbue.mngr_vps_docker.cloud_init import generate_cloud_init_user_data
 from imbue.mngr_vps_docker.host_setup import PINNED_DOCKER_APT_VERSION
 from imbue.mngr_vps_docker.host_setup import PINNED_GVISOR_RELEASE
+
+# A realistic multi-line private key so the snapshot/YAML-parse tests exercise
+# ``_indent`` and any future regression in the (load-bearing) indentation of the
+# embedded key flips the snapshot below.
+_SAMPLE_PRIVATE_KEY = "-----BEGIN OPENSSH PRIVATE KEY-----\nline-one\nline-two\n-----END OPENSSH PRIVATE KEY-----"
+_SAMPLE_PUBLIC_KEY = "ssh-ed25519 AAAATESTKEY comment"
 
 
 def test_indent_single_line() -> None:
@@ -27,13 +35,55 @@ def test_indent_empty_string() -> None:
     assert result == ""
 
 
-def test_generate_cloud_init_starts_with_cloud_config() -> None:
+def test_generate_cloud_init_full_user_data_snapshot() -> None:
+    # Full-document snapshot: cloud-init user_data is structured YAML where
+    # indentation and key placement are load-bearing, so a substring check
+    # cannot tell "the string is present" from "the document is correct". The
+    # snapshot pins the exact rendered output; any structural regression (wrong
+    # nesting of the private key, reordered/duplicated keys, a flipped flag)
+    # changes it. Update intentionally via ``--inline-snapshot=fix``.
     result = generate_cloud_init_user_data(
-        host_private_key="-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----",
-        host_public_key="ssh-ed25519 AAAA testkey",
+        host_private_key=_SAMPLE_PRIVATE_KEY,
+        host_public_key=_SAMPLE_PUBLIC_KEY,
         install_gvisor_runtime=False,
     )
-    assert result.startswith("#cloud-config\n")
+    assert result == snapshot("""\
+#cloud-config
+ssh_deletekeys: true
+ssh_keys:
+  ed25519_private: |
+    -----BEGIN OPENSSH PRIVATE KEY-----
+    line-one
+    line-two
+    -----END OPENSSH PRIVATE KEY-----
+  ed25519_public: ssh-ed25519 AAAATESTKEY comment
+ssh_pwauth: false
+runcmd:
+  - |
+      set -e
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get install -y curl ca-certificates gnupg rsync inotify-tools jq
+  - |
+      set -e
+      export DEBIAN_FRONTEND=noninteractive
+      install -m 0755 -d /etc/apt/keyrings
+      curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+      chmod a+r /etc/apt/keyrings/docker.asc
+      . /etc/os-release
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list
+      apt-get update
+      apt-get install -y --allow-downgrades docker-ce=5:29.5.1-1~debian.12~bookworm docker-ce-cli=5:29.5.1-1~debian.12~bookworm containerd.io docker-buildx-plugin docker-compose-plugin
+      systemctl enable docker
+      systemctl start docker
+  - |
+      set -e
+      if ! grep -q '^MaxSessions' /etc/ssh/sshd_config 2>/dev/null; then
+          printf '\\nMaxSessions 100\\nMaxStartups 100:30:200\\n' >> /etc/ssh/sshd_config
+          systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null || true
+      fi
+  - touch /var/run/mngr-ready
+""")
 
 
 def test_generate_cloud_init_contains_host_key() -> None:
