@@ -112,6 +112,7 @@ from imbue.mngr_antigravity import resources as _antigravity_resources
 from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import CONVERSATION_IDS_FILENAME
+from imbue.mngr_antigravity.antigravity_config import ROOT_CONVERSATION_FILENAME
 from imbue.mngr_antigravity.antigravity_config import SET_ACTIVE_MARKER_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import TRUSTED_WORKSPACES_KEY
 from imbue.mngr_antigravity.antigravity_config import build_antigravity_hooks_config
@@ -417,16 +418,33 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         env_vars[_ANTIGRAVITY_APP_DATA_DIR_ENV_VAR] = str(get_antigravity_cli_dir(self._get_agy_home_dir()))
 
     def _get_conversation_ids_file_path(self) -> Path:
-        """Per-agent file recording the agy conversation IDs this agent worked on.
+        """Per-agent file recording every agy conversation ID this agent worked on.
 
         Written by ``capture_conversation_id.sh`` (the ``PreInvocation`` capture
-        hook); read on restart by ``assemble_command`` (last line -> resume that
-        conversation) and by ``stream_transcript.sh`` (unique lines -> tail each
-        conversation's transcript). Lives directly under the agent state dir so
-        the hook's ``$MNGR_AGENT_STATE_DIR/{CONVERSATION_IDS_FILENAME}`` and this
-        path resolve to the same file.
+        hook); read by ``stream_transcript.sh`` (unique lines -> tail each
+        conversation's transcript, including subagents'). This is the *set* of
+        conversations for transcript scoping; the agent's main conversation for
+        resume is tracked separately in ``root_conversation`` (see
+        ``_get_root_conversation_file_path``). Lives directly under the agent
+        state dir so the hook's ``$MNGR_AGENT_STATE_DIR/{CONVERSATION_IDS_FILENAME}``
+        and this path resolve to the same file.
         """
         return self._get_agent_dir() / CONVERSATION_IDS_FILENAME
+
+    def _get_root_conversation_file_path(self) -> Path:
+        """Per-agent file recording the *main* (root) agy conversation ID.
+
+        Written by ``set_active_marker.sh`` (the ``PreInvocation`` marker hook)
+        with the conversation that opens each turn -- the true root, since agy
+        runs the root agent's invocation before it spawns subagents. Read on
+        restart by ``assemble_command`` to resume the main conversation via
+        ``agy --conversation``. This is the single source of truth for "the
+        agent's current conversation", unaffected by the subagent ids that also
+        land in ``CONVERSATION_IDS_FILENAME``. Lives directly under the agent
+        state dir so the hook's ``$MNGR_AGENT_STATE_DIR/{ROOT_CONVERSATION_FILENAME}``
+        and this path resolve to the same file.
+        """
+        return self._get_agent_dir() / ROOT_CONVERSATION_FILENAME
 
     def provision(
         self,
@@ -807,9 +825,10 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
            any permissions policy flow through the per-agent ``settings.json``,
            not the CLI.
 
-        The resume-prelude resumes the agent's most-recently-active
-        conversation via ``agy --conversation`` on restart; it is shell-
-        evaluated at launch because the stored command is replayed on every
+        The resume-prelude resumes the agent's main (root) conversation via
+        ``agy --conversation`` on restart, reading the id from
+        ``root_conversation`` (see ``_get_root_conversation_file_path``); it is
+        shell-evaluated at launch because the stored command is replayed on every
         ``mngr start`` (see the inline comment on its construction below).
 
         Bash precedence note: ``A & B && C && ...`` parses as ``A &`` followed
@@ -822,8 +841,9 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         ``provision`` time, not here.)
 
         The ``--log-file`` arg writes agy's internal log to a per-agent path
-        for debugging. (Conversation-ID discovery reads the capture-hook file,
-        ``CONVERSATION_IDS_FILENAME``, not this log.)
+        for debugging. (Resume reads ``root_conversation`` and transcript
+        scoping reads ``CONVERSATION_IDS_FILENAME`` -- both hook-written files,
+        not this log.)
         """
         log_file_path = self._get_agy_log_file_path()
         agy_home = self._get_agy_home_dir()
@@ -843,18 +863,21 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         cd_cmd = f"cd {shlex.quote(symlink_path)}"
         home_prefix = f"env HOME={shlex.quote(str(agy_home))}"
 
-        # Resume the last-recorded conversation via `agy --conversation`,
+        # Resume the agent's main conversation via `agy --conversation`,
         # evaluated here in the shell because the stored command is replayed on
-        # each restart. agy resumes from its own incrementally-written store
-        # (which survives the hard kill `mngr stop` performs) and, if the
+        # each restart. The id comes from `root_conversation` -- the conversation
+        # that opened the most recent turn, i.e. the root agent's -- NOT the
+        # conversation-ids file, whose last line can be a subagent (subagents
+        # share the capture hook). agy resumes from its own incrementally-written
+        # store (which survives the hard kill `mngr stop` performs) and, if the
         # conversation was pruned, warns and starts fresh on its own -- so we
         # pass the flag whenever an id is recorded and don't stat the store
         # ourselves (which would couple us to agy's on-disk layout). `set --` /
         # "$@" appends the flag without unquoted-substitution word splitting,
         # so it works under both bash and zsh.
-        quoted_ids_file = shlex.quote(str(self._get_conversation_ids_file_path()))
+        quoted_root_file = shlex.quote(str(self._get_root_conversation_file_path()))
         resume_prelude = (
-            f"__mngr_cid=$(tail -n 1 {quoted_ids_file} 2>/dev/null || true); set --; "
+            f"__mngr_cid=$(cat {quoted_root_file} 2>/dev/null || true); set --; "
             'if [ -n "$__mngr_cid" ]; then set -- --conversation "$__mngr_cid"; fi'
         )
         agy_invocation = f"{base_command} {' '.join(extra_args)}"

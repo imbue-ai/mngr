@@ -1,21 +1,18 @@
 #!/usr/bin/env bash
-# Capture this agent's current agy conversation ID from a hook payload.
+# Record every distinct agy conversation ID this agent touches, for transcripts.
 #
 # agy fires this as a PreInvocation hook handler (see
-# build_antigravity_hooks_config). On every invocation agy passes a JSON
-# object on stdin that includes `"conversationId":"<uuid>"` (verified live
-# against agy 1.0.4, alongside artifactDirectoryPath/transcriptPath). We
-# extract that id and append it to the per-agent conversation-ids file when
-# it differs from the last recorded id, so:
+# build_antigravity_hooks_config). On every invocation -- for the root agent
+# AND each subagent it spawns -- agy passes a JSON object on stdin that includes
+# `"conversationId":"<uuid>"` (verified live against agy 1.0.4, alongside
+# artifactDirectoryPath/transcriptPath). We extract that id and append it once
+# to the per-agent conversation-ids file, whose `sort -u` is every conversation
+# this agent has touched -- stream_transcript.sh tails each one's transcript.
 #
-#   * `tail -n 1` of the file is the most-recently-active conversation --
-#     AntigravityAgent.assemble_command resumes it via `agy --conversation`.
-#   * `sort -u` of the file is every conversation this agent has touched --
-#     stream_transcript.sh tails each one's transcript.
-#
-# Appending only on change (rather than on every invocation) keeps the file
-# small while still recording every distinct conversation and preserving
-# which one is current across `/clear`, `/fork`, and `/switch`.
+# This file is the transcript-scoping *set* only; it does NOT pick the agent's
+# main conversation for resume (its lines include subagents). Resume reads
+# root_conversation, written by set_active_marker.sh. See
+# AntigravityAgent.assemble_command and CONVERSATION_IDS_FILENAME.
 #
 # The file name is kept in sync with CONVERSATION_IDS_FILENAME in
 # antigravity_config.py. This script must never write to stdout: agy treats
@@ -52,11 +49,11 @@ if [ -z "$conv_id" ]; then
     exit 0
 fi
 
-last_id=""
-if [ -f "$ids_file" ]; then
-    last_id=$(tail -n 1 "$ids_file" 2>/dev/null || true)
-fi
-
-if [ "$conv_id" != "$last_id" ]; then
+# Append each distinct id once. Order/recency does not matter: the only
+# consumer is stream_transcript.sh, which reads the unique set (`sort -u`). The
+# agent's main conversation for resume is tracked separately in
+# root_conversation by set_active_marker.sh. `grep -qxF` is a whole-line fixed
+# match; on a missing file it returns non-zero, so the first id is appended.
+if ! grep -qxF "$conv_id" "$ids_file" 2>/dev/null; then
     printf '%s\n' "$conv_id" >> "$ids_file"
 fi

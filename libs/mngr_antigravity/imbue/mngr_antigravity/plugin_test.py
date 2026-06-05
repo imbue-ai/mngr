@@ -389,23 +389,27 @@ def test_modify_env_vars_exposes_app_data_dir(antigravity_agent: AntigravityAgen
     assert "ANTIGRAVITY_AGY_LOG_FILE" not in env_vars
 
 
-def test_assemble_command_resumes_last_conversation_via_set_dash_dash(antigravity_agent: AntigravityAgent) -> None:
-    """The launch command resumes the last-recorded conversation, evaluated in the shell.
+def test_assemble_command_resumes_main_conversation_via_set_dash_dash(antigravity_agent: AntigravityAgent) -> None:
+    """The launch command resumes the main (root) conversation, evaluated in the shell.
 
     The stored command is replayed verbatim on every `mngr start`, so the
-    resume decision is shell-evaluated at launch: read the last line of the
-    per-agent conversation-ids file and, when present, pass `--conversation
-    "$id"` via `set --` / "$@" (which avoids unquoted-substitution word
-    splitting so it works in bash and zsh). We do not stat agy's store to
-    pre-check existence -- agy warns and starts fresh on its own for a pruned
-    conversation -- so the command stays decoupled from agy's on-disk layout.
+    resume decision is shell-evaluated at launch: read the root conversation id
+    from the per-agent root_conversation file and, when present, pass
+    `--conversation "$id"` via `set --` / "$@" (which avoids unquoted-substitution
+    word splitting so it works in bash and zsh). The id comes from
+    root_conversation (the root agent's), NOT the conversation-ids file whose
+    last line can be a subagent. We do not stat agy's store to pre-check
+    existence -- agy warns and starts fresh on its own for a pruned conversation
+    -- so the command stays decoupled from agy's on-disk layout.
     """
     command = str(antigravity_agent.assemble_command(antigravity_agent.host, (), command_override=None))
-    ids_file = str(antigravity_agent._get_conversation_ids_file_path())
-    # Reads the last recorded id from the per-agent ids file.
-    assert f"__mngr_cid=$(tail -n 1 {ids_file} 2>/dev/null || true)" in command
+    root_file = str(antigravity_agent._get_root_conversation_file_path())
+    # Reads the root conversation id from the per-agent root_conversation file.
+    assert f"__mngr_cid=$(cat {root_file} 2>/dev/null || true)" in command
     # Passes the flag positionally whenever an id is recorded (no store stat).
     assert 'if [ -n "$__mngr_cid" ]; then set -- --conversation "$__mngr_cid"; fi' in command
+    # Resume must not read the subagent-pollutable conversation-ids file.
+    assert "tail -n 1" not in command
     # No coupling to agy's conversation store path/extension.
     assert ".db" not in command
     assert "conversations/" not in command

@@ -258,13 +258,14 @@ _MNGR_HOOK_NAME: str = "mngr"
 # ``"active"`` that ``BaseAgent`` and the provider listing scripts check.
 ACTIVE_MARKER_FILENAME: str = "active"
 
-# Per-agent file (in ``$MNGR_AGENT_STATE_DIR``) recording the agy conversation
-# IDs this agent has worked on, one per line, appended whenever the active
-# conversation changes (see ``capture_conversation_id.sh``). Its last line is
-# the most-recently-active conversation -- ``AntigravityAgent.assemble_command``
-# resumes it via ``agy --conversation`` on restart -- and its unique lines are
-# every conversation this agent touched, which ``stream_transcript.sh`` tails.
-# The shell scripts hardcode this same literal; keep them in sync.
+# Per-agent file (in ``$MNGR_AGENT_STATE_DIR``) recording every agy conversation
+# ID this agent has touched -- the root agent's and its subagents' -- one per
+# line, appended the first time each is seen (see ``capture_conversation_id.sh``).
+# Its unique lines are the full set ``stream_transcript.sh`` tails. This is the
+# transcript-scoping set only; the agent's *main* conversation for resume is
+# tracked separately in ``ROOT_CONVERSATION_FILENAME`` (the conversation-ids file
+# is unsuitable for resume because subagents also land in it). The capture script
+# hardcodes this same literal; keep them in sync.
 CONVERSATION_IDS_FILENAME: str = "antigravity_conversation_ids"
 
 # Script (provisioned into ``$MNGR_AGENT_STATE_DIR/commands/``) that the
