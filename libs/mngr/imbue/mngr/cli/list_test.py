@@ -1233,6 +1233,17 @@ def test_get_field_value_returns_empty_for_missing_label() -> None:
     assert result == ""
 
 
+def test_get_field_value_resolves_bare_project_alias() -> None:
+    """The bare `project` field should resolve to the project label via the alias."""
+    agent = make_test_agent_details(labels={"project": "mngr"})
+    assert _get_field_value(agent, "project") == "mngr"
+
+
+def test_get_header_label_for_bare_project_alias() -> None:
+    """The bare `project` field should use the PROJECT header (via the alias)."""
+    assert _get_header_label("project") == "PROJECT"
+
+
 # =============================================================================
 # Fake api_list_agents for CLI-level list command output formatting tests
 # =============================================================================
