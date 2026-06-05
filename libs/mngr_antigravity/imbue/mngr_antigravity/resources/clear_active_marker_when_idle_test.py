@@ -1,15 +1,11 @@
 """Tests for clear_active_marker_when_idle.sh, the Stop hook idle gate.
 
-The script reads an agy Stop-hook payload (JSON) on stdin and removes the
-per-agent ``active`` lifecycle marker only when the payload reports
-``"fullyIdle":true`` -- i.e. when the root agent and every subagent /
-background task it launched have all finished. The marker drives BaseAgent's
-RUNNING/WAITING detection, so the tests pin: clear-on-fully-idle, keep on an
-explicit ``"fullyIdle":false`` (the form agy actually sends on an interim,
-not-yet-idle Stop -- verified live against agy 1.0.5), keep when the field is
-absent (defensive), tolerance of pretty-printed whitespace, stdout silence
-(agy treats Stop-hook stdout as a result that can block the stop), tolerance
-of garbage stdin, and loud failure on a missing state dir.
+The script removes the per-agent ``active`` marker only when agy's Stop-hook
+payload reports ``"fullyIdle":true``. The tests pin clear-on-fully-idle, keep
+on an interim ``"fullyIdle":false`` and on an absent field (defensive),
+whitespace tolerance, stdout silence (agy can treat Stop-hook stdout as a
+stop-blocking result), garbage-stdin tolerance, and loud failure on a missing
+state dir.
 """
 
 from __future__ import annotations
@@ -26,11 +22,8 @@ _CONV = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 def _payload(*, fully_idle: bool | None) -> str:
     """A Stop-hook payload shaped like the real one (verified live, agy 1.0.5).
 
-    agy emits ``fullyIdle`` explicitly: an interim Stop (async work still
-    running) carries ``"fullyIdle":false`` and the final Stop carries
-    ``"fullyIdle":true``. ``fully_idle=None`` drops the field entirely to
-    exercise the defensive path (an unexpected payload shape must not flip the
-    agent to WAITING).
+    agy emits ``fullyIdle`` explicitly (interim Stop ``false``, final ``true``).
+    ``fully_idle=None`` drops the field to exercise the defensive path.
     """
     brain = f"/home/u/.gemini/antigravity-cli/brain/{_CONV}"
     fields = [
@@ -112,12 +105,9 @@ def test_garbage_stdin_keeps_the_marker(tmp_path: Path) -> None:
 
 
 def test_missing_state_dir_fails_loudly(tmp_path: Path) -> None:
-    """An unset MNGR_AGENT_STATE_DIR is a wiring error: fail loudly, not silently.
-
-    mngr always sets it, and agy invokes this script via a path that embeds it,
-    so reaching the body unset means misconfiguration -- we surface it (stderr,
-    non-zero exit) rather than swallow it or remove a marker at the filesystem
-    root. We still keep stdout empty so the Stop hook never emits a result.
+    """An unset MNGR_AGENT_STATE_DIR is a wiring error: fail loudly (stderr,
+    non-zero exit), never silently remove a marker at the filesystem root. Keep
+    stdout empty so the Stop hook still emits no result.
     """
     result = subprocess.run(
         ["bash", str(_SCRIPT_PATH)],
