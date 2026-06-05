@@ -24,6 +24,8 @@ from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.errors import ProviderEmptyError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
@@ -332,7 +334,19 @@ def _get_selected_providers(mngr_ctx: MngrContext, opts: GcCliOptions) -> list[P
     if opts.provider:
         providers = []
         for provider_name in opts.provider:
-            providers.append(get_provider_instance(ProviderInstanceName(provider_name), mngr_ctx))
+            name = ProviderInstanceName(provider_name)
+            # Skip providers that report themselves empty (e.g. the Modal
+            # per-user environment doesn't exist yet) or unreachable. gc is a
+            # read/cleanup path: an empty provider has nothing to collect, so
+            # erroring out would make `mngr gc --provider modal` fail on a fresh
+            # setup. This mirrors get_all_provider_instances, which skips these
+            # same providers for the unfiltered `mngr gc` case.
+            try:
+                providers.append(get_provider_instance(name, mngr_ctx))
+            except ProviderEmptyError as e:
+                logger.debug("Skipping provider {} (empty -- nothing to gc): {}", name, e)
+            except ProviderUnavailableError as e:
+                logger.debug("Skipping provider {} (unavailable): {}", name, e)
         return providers
 
     return list(get_all_provider_instances(mngr_ctx))
