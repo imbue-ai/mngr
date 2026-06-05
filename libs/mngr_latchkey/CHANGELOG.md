@@ -39,6 +39,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: The latchkey forward's discovery observer (`mngr observe --discovery-only`) now writes its event log to a private, per-environment directory under the latchkey plugin data dir instead of the shared mngr discovery log, fixing workspaces flickering out of the desktop UI when latchkey's observer and another forward's observer shared one discovery log. The private log is cleared on forward (re)start so a prior run's stale snapshots aren't replayed.
 - Changed: Latchkey forward's discovery consumer now retains agents whose provider errored on a poll rather than tearing down their reverse tunnels, dropping them only on an explicit destroy or a later successful poll.
 - Changed: Aligned the workspace's `imbue-mngr*==` pin stragglers in `pyproject.toml` with the satellites bumped in main's release commit, so building the `apps/minds` ToDesktop bundle from main no longer fails at `uv lock`.
+- Changed: `mngr latchkey forward`'s discovery observer now writes back to the standard discovery event log instead of a private per-env `discovery-observe` directory. It is the single discovery observer for the host dir (minds' `mngr forward --observe-via-file` tails the same log), so the previous isolation onto a separate event log — needed only when two observers ran at once — is no longer required. Old `discovery-observe/` directories left by prior versions are inert and can be deleted manually.
 
 ### Fixed
 

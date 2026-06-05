@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Stopped `antigravity` agents now resume their prior agy conversation on restart. A `PreInvocation` capture hook records the agent's active agy conversation ID to a per-agent file, and `mngr start` shell-evaluates the stored launch command to resume via `agy --conversation <id>`. If the conversation has been pruned, agy starts fresh on its own. Clone-resume is not yet supported because agy's conversation store is global rather than per-agent.
+
+### Changed
+
+- Changed: The transcript streamer now discovers conversation IDs from the same capture-hook file used by resume rather than grepping agy's `--log-file`. This makes the hook file the single source of truth and fixes a latent bug where resumed conversations were missed because their log line reads `Resuming conversation`, not the `Resumed conversation` the streamer matched.
+
 ## [v0.1.1] - 2026-06-01
 
 ### Added

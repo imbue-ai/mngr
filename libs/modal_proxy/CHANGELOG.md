@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: Renamed the in-memory Modal test doubles from the `Testing*` prefix to the repo-standard `Fake*` prefix: `FakeModalInterface`, `FakeApp`, `FakeSandbox`, `FakeVolume`, `FakeSecret`, `FakeImage`, `FakeFunction`, `FakeExecProcess`, `FakeExecOutput`. This matches the dominant `Fake*` convention for test doubles across the codebase, accurately describes them (working in-memory/local implementations, not mocks/stubs), and stops pytest from collecting them as test classes.
+
+### Fixed
+
+- Fixed: Retry `modal deploy` when Modal reports "The selected app is locked - probably due to a concurrent modification". Modal serializes mutations to a single app, so two operations targeting the same app name concurrently (e.g. parallel `mngr create` against the same persistent provider app) would race and one would fail. `DirectModalInterface.deploy` now classifies the transient lock as a new retryable `ModalProxyAppLockedError` and rides through it with exponential backoff; non-lock deploy failures still raise immediately.
+
 ## [v0.1.11] - 2026-06-01
 
 ## [v0.1.10] - 2026-05-28

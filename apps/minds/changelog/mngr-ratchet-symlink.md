@@ -1,1 +1,0 @@
-Documented why `scripts/launch-and-verify.sh` and `scripts/first-message-verify.sh` intentionally use `set -uo pipefail` (omitting `-e`): both handle errors explicitly via a `fail` helper, `PIPESTATUS`, retry loops that depend on commands exiting non-zero, and diagnostic blocks on failure. No runtime behavior changed.

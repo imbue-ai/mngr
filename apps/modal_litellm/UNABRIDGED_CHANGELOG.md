@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-05
+
+Expanded the LiteLLM proxy's supported model list to cover the full current Anthropic Claude lineup: added `claude-opus-4-8` (latest Opus), `claude-opus-4-6`, `claude-opus-4-5`, `claude-opus-4-1`, `claude-sonnet-4-5`, and the bare `claude-haiku-4-5` alias, alongside the previously supported `claude-opus-4-7`, `claude-sonnet-4-6`, and the dated Opus 4 / Sonnet 4 / Haiku 4.5 ids. Each model now carries inline per-token pricing (input, output, cache-write, cache-read) registered via `litellm_params`, mirrored from litellm's price map, so cost tracking is accurate even on litellm versions whose bundled price map predates a model. Added `config_drift_test.py`, which fails CI if `app.py`'s model list and the local-dev `litellm_proxy/config.yaml` ever diverge.
+
+## 2026-06-04
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.
+
 ## 2026-06-03
 
 Added a configurable `scaledown_window` to the LiteLLM proxy Modal function, driven by `MINDS_LITELLM_PROXY_SCALEDOWN_WINDOW` (from the tier's `[scaledown_window].litellm_proxy` in `deploy.toml`). `0` (default) keeps Modal's own default; dev tiers set it high (~10 min) so the no-warm-pool proxy stays hot across a dev session.
