@@ -62,6 +62,15 @@
       color: #64748b;
       font-size: 13px;
     }
+    /* Drawer in-animation: small slide from the inside of the panel
+       (15px to the right of final position) plus a fade. Runs once
+       per inbox open (the modal view loads a fresh /inbox page each
+       time, so the animation re-runs naturally). */
+    @keyframes inbox-slide-in {
+      from { transform: translateX(15px); opacity: 0; }
+      to   { transform: translateX(0);    opacity: 1; }
+    }
+    #inbox-dialog { animation: inbox-slide-in 180ms ease-out; }
     /* When the body has no cards, the left column expands to fill the
        dialog and the right pane is hidden so the empty state reads as
        a single centered message rather than a half-empty split. The
