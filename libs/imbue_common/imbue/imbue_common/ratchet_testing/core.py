@@ -261,6 +261,12 @@ def _get_file_blame_dates(file_path: Path) -> dict[int, datetime]:
                 try:
                     current_line_number = int(parts[2])
                 except ValueError:
+                    # A non-header line can satisfy the length/prefix heuristic above
+                    # (e.g. a long `summary ...` line) and have a non-numeric third
+                    # token. Nulling current_line_number here is safe because
+                    # --line-porcelain always emits `committer-time` *before* those
+                    # metadata lines within a block, so the timestamp for this block
+                    # has already been recorded against the real (header) line number.
                     current_line_number = None
         elif line.startswith("committer-time ") and current_line_number is not None:
             timestamp_str = line.split(" ", 1)[1]
