@@ -237,15 +237,29 @@ def test_cli_docs_are_up_to_date() -> None:
 def test_prevent_bash_without_strict_mode() -> None:
     """Ensure all bash scripts in the repo use 'set -euo pipefail' for strict error handling.
 
-    Snapshot accommodates the committed secret-file templates at
-    ``.minds/template/*.sh``. Those files are shell-sourceable env
-    declarations (consumed by ``scripts/push_vault_from_file.py`` when
-    seeding HCP Vault), not executable scripts -- adding
-    ``set -euo pipefail`` to them would leak strict mode into whatever
-    shell sources them.
+    Snapshot accommodates two kinds of committed exception:
+
+    - The secret-file templates at ``.minds/template/*.sh``. Those files are
+      shell-sourceable env declarations (consumed by
+      ``scripts/push_vault_from_file.py`` when seeding HCP Vault), not
+      executable scripts -- adding ``set -euo pipefail`` to them would leak
+      strict mode into whatever shell sources them.
+    - The minds verify scripts ``apps/minds/scripts/first-message-verify.sh``
+      and ``apps/minds/scripts/launch-and-verify.sh``, which use
+      ``set -uo pipefail`` (omitting ``-e``) on purpose: they handle errors
+      explicitly (a ``fail`` helper, ``PIPESTATUS``, polling loops that depend
+      on commands exiting non-zero while they retry, and diagnostic blocks on
+      failure). ``-e`` would abort that handling instead of running it. The
+      sibling non-verify scripts in the same directory do use ``set -euo
+      pipefail``, so this omission is a deliberate, matched choice rather than
+      an oversight.
+
+    The count is enumerated against the full local checkout. In offload
+    sandboxes the count is lower because ``.dockerignore`` omits some of these
+    tracked paths from the build context, so they are absent on disk there.
     """
     violations = find_bash_scripts_without_strict_mode(_REPO_ROOT)
-    assert len(violations) <= snapshot(10), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
+    assert len(violations) <= snapshot(12), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
         f"  - {v}" for v in violations
     )
 
@@ -637,7 +651,7 @@ def test_pr_has_changelog_entry() -> None:
     """
     branch = detect_branch()
 
-    if not branch or branch in ("main", "release"):
+    if not branch or branch == "main":
         pytest.skip("Not a PR branch")
 
     for prefix in _CHANGELOG_EXEMPT_BRANCH_PREFIXES:

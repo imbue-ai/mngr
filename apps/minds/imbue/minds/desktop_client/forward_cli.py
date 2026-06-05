@@ -52,6 +52,7 @@ from imbue.minds.desktop_client.backend_resolver import parse_service_log_record
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
+from imbue.minds.utils.secret_redaction import redact_secret_flag_values
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
@@ -708,23 +709,15 @@ def _resolve_mngr_binary(candidate: str) -> str:
 
 
 def _redact_secrets(command: list[str]) -> list[str]:
-    """Return a copy of ``command`` with secret-bearing argument values masked.
+    """Return a copy of ``command`` with secret-bearing argument values masked for logging.
 
-    Used only for logging. The actual ``Popen`` call uses the unredacted
-    list so the plugin still receives the real values. Today we redact the
-    ``--preauth-cookie`` value (a freshly-minted shared secret between
-    minds, the plugin, and the Electron shell); future secret-bearing
-    flags can be added to ``_SECRET_BEARING_FLAGS``.
+    The actual ``Popen`` call uses the unredacted list so the plugin still
+    receives the real values. Today we redact the ``--preauth-cookie`` value
+    (a freshly-minted shared secret between minds, the plugin, and the
+    Electron shell); future secret-bearing flags can be added to
+    ``_SECRET_BEARING_FLAGS``.
     """
-    redacted = list(command)
-    for flag in _SECRET_BEARING_FLAGS:
-        try:
-            idx = redacted.index(flag)
-        except ValueError:
-            continue
-        if idx + 1 < len(redacted):
-            redacted[idx + 1] = "***"
-    return redacted
+    return redact_secret_flag_values(command, secret_bearing_flags=_SECRET_BEARING_FLAGS)
 
 
 _SECRET_BEARING_FLAGS: Final[tuple[str, ...]] = ("--preauth-cookie",)
