@@ -585,13 +585,13 @@ function notifyOpenFailed(url) {
   }).show();
 }
 
-// -- Sidebar / requests panel helpers (per-bundle) --
+// -- Sidebar helpers (per-bundle) --
 
-// Sidebar and requests-panel views are created lazily the first time the
-// user toggles them on, then reused for all subsequent toggles via
-// setVisible(true/false). Destroying and recreating a WebContentsView on
-// every click means spawning a fresh render process + preload + loadURL
-// round-trip; on rapid clicks these queue up and take seconds to drain.
+// The sidebar view is created lazily the first time the user toggles it
+// on, then reused for all subsequent toggles via setVisible(true/false).
+// Destroying and recreating a WebContentsView on every click means
+// spawning a fresh render process + preload + loadURL round-trip; on
+// rapid clicks these queue up and take seconds to drain.
 
 function openSidebar(bundle) {
   if (!bundle || bundle.window.isDestroyed()) return;
