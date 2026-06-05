@@ -1,9 +1,10 @@
 """Shared helpers for the live Claude Agent SDK test suite (test_sdk_*.py).
 
-These factor out the two pieces of setup/validation that are otherwise copy-pasted across the
-SDK test files: building the hermetic ``ClaudeAgentOptions`` and collecting assistant text from a
-message stream. They are non-fixture utilities, so they live here (per the project's testing
-conventions) rather than in conftest.py.
+These factor out the setup, stream-collection, and validation logic that is otherwise copy-pasted
+across the SDK test files: building the hermetic ``ClaudeAgentOptions``, running ``query()`` or a
+``ClaudeSDKClient`` turn to completion, and extracting the assistant text or terminal
+``ResultMessage`` from a message stream. They are non-fixture utilities, so they live here (per the
+project's testing conventions) rather than in conftest.py.
 """
 
 from collections.abc import Iterable
