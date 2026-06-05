@@ -5,9 +5,9 @@ Note: Unit tests for provider registry and configuration are in api/providers_te
 
 import json
 import subprocess
-import time
 from pathlib import Path
 from typing import cast
+from uuid import uuid4
 
 import pytest
 
@@ -49,6 +49,13 @@ from imbue.mngr.utils.testing import tmux_session_exists
 # Create API Integration Tests
 # =============================================================================
 
+# A single small sleep duration for the long-lived commands these tests run.
+# Keeping it short (vs the previous multi-day magic numbers) bounds the leak to
+# at most this many seconds if a session name mismatches and tmux cleanup misses
+# the process. It only needs to outlive the test body, which finishes in seconds.
+SLEEP_SECONDS = 60
+SLEEP_COMMAND = f"sleep {SLEEP_SECONDS}"
+
 
 def _get_local_host_for_test(test_ctx: MngrContext) -> OnlineHostInterface:
     local_provider = get_provider_instance(ProviderInstanceName(LOCAL_PROVIDER_NAME), test_ctx)
@@ -78,7 +85,7 @@ def _get_agent_from_create_result(result: CreateAgentResult, temp_mngr_ctx: Mngr
 
 def _make_options(
     name: AgentName,
-    command: str | None = "sleep 60",
+    command: str | None = SLEEP_COMMAND,
     *,
     agent_type: str = PLACEHOLDER_AGENT_TYPE,
     transfer_mode: TransferMode = TransferMode.NONE,
@@ -130,13 +137,15 @@ def test_create_simple_echo_agent(
     temp_work_dir: Path,
 ) -> None:
     """Test creating a simple agent that runs echo."""
-    agent_name = AgentName(f"test-echo-{int(time.time())}")
+    agent_name = AgentName(f"test-echo-{uuid4().hex[:8]}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
-        agent_options = _make_options(agent_name, "echo 'Hello from mngr test' && sleep 365817", agent_type="command")
+        agent_options = _make_options(
+            agent_name, f"echo 'Hello from mngr test' && {SLEEP_COMMAND}", agent_type="command"
+        )
 
         result = create(
             source_location=source_location,
@@ -145,13 +154,11 @@ def test_create_simple_echo_agent(
             mngr_ctx=temp_mngr_ctx,
         )
 
-        assert result.agent is not None
-        assert result.host is not None
-        assert result.agent.id is not None
-        assert result.host.id is not None
-        assert len(str(result.agent.id)) > 0
-        assert len(str(result.host.id)) > 0
+        # The agent's tmux session was created (the agent process is running).
         assert tmux_session_exists(session_name), f"Expected tmux session {session_name} to exist"
+        # And it ran in the source work_dir (in-place mode, transfer_mode=NONE).
+        agent = _get_agent_from_create_result(result, temp_mngr_ctx)
+        assert Path(agent.work_dir) == temp_work_dir
 
 
 @pytest.mark.tmux
@@ -160,13 +167,15 @@ def test_create_agent_with_new_host(
     temp_work_dir: Path,
 ) -> None:
     """Test creating an agent with explicit new host options."""
-    agent_name = AgentName(f"test-new-host-{int(time.time())}")
+    agent_name = AgentName(f"test-new-host-{uuid4().hex[:8]}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
-        agent_options = _make_options(agent_name, "echo 'Created with new host' && sleep 816394", agent_type="command")
+        agent_options = _make_options(
+            agent_name, f"echo 'Created with new host' && {SLEEP_COMMAND}", agent_type="command"
+        )
 
         target_host = NewHostOptions(
             provider=LOCAL_PROVIDER_NAME,
@@ -180,9 +189,12 @@ def test_create_agent_with_new_host(
             mngr_ctx=temp_mngr_ctx,
         )
 
-        assert result.agent.id is not None
-        assert result.host.id is not None
+        # The agent's tmux session was created (the agent process is running)
+        # and it resolved to the local host with the source work_dir.
         assert tmux_session_exists(session_name)
+        assert result.host.id == local_host.id
+        agent = _get_agent_from_create_result(result, temp_mngr_ctx)
+        assert Path(agent.work_dir) == temp_work_dir
 
 
 @pytest.mark.tmux
@@ -191,16 +203,19 @@ def test_create_agent_work_dir_is_created(
     temp_work_dir: Path,
 ) -> None:
     """Test that the agent work_dir directory is used."""
-    agent_name = AgentName(f"test-work-dir-{int(time.time())}")
+    agent_name = AgentName(f"test-work-dir-{uuid4().hex[:8]}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
+        marker_content = f"work_dir marker {uuid4().hex}"
         marker_file = temp_work_dir / "test_marker.txt"
-        marker_file.write_text("work_dir marker")
+        marker_file.write_text(marker_content)
 
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
-        agent_options = _make_options(agent_name, "cat test_marker.txt && sleep 30")
+        # The command cats a marker that only exists in temp_work_dir, so it only
+        # succeeds if the agent runs in that directory.
+        agent_options = _make_options(agent_name, f"cat test_marker.txt && {SLEEP_COMMAND}")
 
         result = create(
             source_location=source_location,
@@ -209,8 +224,13 @@ def test_create_agent_work_dir_is_created(
             mngr_ctx=temp_mngr_ctx,
         )
 
-        assert result.agent.id is not None
-        assert result.host.id is not None
+        # The reliable observable that the work_dir is used: the agent records
+        # temp_work_dir as its work_dir. (Capturing the cat output from the tmux
+        # pane is timing-flaky; the recorded work_dir is deterministic.)
+        agent = _get_agent_from_create_result(result, temp_mngr_ctx)
+        assert Path(agent.work_dir) == temp_work_dir
+        # The marker file lives in that recorded work_dir, so the cat had real input.
+        assert (Path(agent.work_dir) / "test_marker.txt").read_text() == marker_content
 
 
 @pytest.mark.tmux
@@ -220,13 +240,13 @@ def test_agent_state_is_persisted(
     temp_host_dir: Path,
 ) -> None:
     """Test that agent state is persisted to disk."""
-    agent_name = AgentName(f"test-persist-{int(time.time())}")
+    agent_name = AgentName(f"test-persist-{uuid4().hex[:8]}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
-        agent_options = _make_options(agent_name, "sleep 60")
+        agent_options = _make_options(agent_name, SLEEP_COMMAND)
 
         result = create(
             source_location=source_location,
@@ -269,7 +289,7 @@ def test_create_agent_with_unknown_type_raises(
     that the name is not recognized and suggests installing a plugin that
     provides it.
     """
-    agent_name = AgentName(f"test-unknown-type-{int(time.time())}")
+    agent_name = AgentName(f"test-unknown-type-{uuid4().hex[:8]}")
 
     local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
@@ -304,7 +324,7 @@ def test_create_agent_with_worktree(
     temp_git_repo: Path,
 ) -> None:
     """Test creating an agent using git worktree."""
-    agent_name = AgentName(f"test-worktree-{int(time.time())}")
+    agent_name = AgentName(f"test-worktree-{uuid4().hex[:8]}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -312,7 +332,7 @@ def test_create_agent_with_worktree(
 
         agent_options = _make_options(
             agent_name,
-            "sleep 527146",
+            SLEEP_COMMAND,
             transfer_mode=TransferMode.GIT_WORKTREE,
             git=AgentGitOptions(
                 new_branch_name=f"mngr/{agent_name}",
@@ -355,7 +375,7 @@ def test_worktree_with_custom_branch_name(
     temp_git_repo: Path,
 ) -> None:
     """Test creating a worktree with a custom branch name."""
-    agent_name = AgentName(f"test-worktree-custom-{int(time.time())}")
+    agent_name = AgentName(f"test-worktree-custom-{uuid4().hex[:8]}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
     custom_branch = "feature/custom-branch"
 
@@ -374,7 +394,7 @@ def test_worktree_with_custom_branch_name(
 
         agent_options = _make_options(
             agent_name,
-            "sleep 60",
+            SLEEP_COMMAND,
             transfer_mode=TransferMode.GIT_WORKTREE,
             git=AgentGitOptions(
                 base_branch=current_branch,
@@ -412,7 +432,7 @@ def test_worktree_with_existing_branch(
     temp_git_repo: Path,
 ) -> None:
     """Test creating a worktree that checks out an existing branch (no new branch created)."""
-    agent_name = AgentName(f"test-worktree-existing-{int(time.time())}")
+    agent_name = AgentName(f"test-worktree-existing-{uuid4().hex[:8]}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
     existing_branch = "feature/already-exists"
 
@@ -431,7 +451,7 @@ def test_worktree_with_existing_branch(
 
         agent_options = _make_options(
             agent_name,
-            "sleep 60",
+            SLEEP_COMMAND,
             transfer_mode=TransferMode.GIT_WORKTREE,
             git=AgentGitOptions(
                 base_branch=existing_branch,
@@ -485,7 +505,7 @@ def test_worktree_already_checked_out_gives_helpful_error(
 
     agent_options = _make_options(
         AgentName("test-already-checked-out"),
-        "sleep 60",
+        SLEEP_COMMAND,
         transfer_mode=TransferMode.GIT_WORKTREE,
         git=AgentGitOptions(
             base_branch=current_branch,
@@ -520,7 +540,7 @@ def test_worktree_in_repo_with_no_commits_gives_helpful_error(
 
     agent_options = _make_options(
         AgentName("test-no-commits"),
-        "sleep 60",
+        SLEEP_COMMAND,
         transfer_mode=TransferMode.GIT_WORKTREE,
         git=AgentGitOptions(
             base_branch="main",
@@ -543,12 +563,22 @@ def test_worktree_in_repo_with_no_commits_gives_helpful_error(
 
 
 class _RaiseAfterFileCopy:
-    """Plugin that raises after work_dir creation to simulate a late-stage failure."""
+    """Plugin that raises after work_dir creation to simulate a late-stage failure.
+
+    Records the ``work_dir_path`` the hook was handed before raising, so tests can
+    assert the worktree actually existed mid-flight (and was created where the
+    failure cleanup is then expected to remove it). Without this side channel the
+    cleanup assertions could pass vacuously if the worktree was never created.
+    """
+
+    def __init__(self) -> None:
+        self.captured_work_dir_path: Path | None = None
 
     @hookimpl
     def on_after_initial_file_copy(
         self, agent_options: CreateAgentOptions, host: OnlineHostInterface, work_dir_path: Path
     ) -> None:
+        self.captured_work_dir_path = work_dir_path
         raise RuntimeError("simulated failure after file copy")
 
 
@@ -564,7 +594,14 @@ def _list_branches(repo: Path) -> list[str]:
 
 
 def _list_worktree_paths(repo: Path) -> set[Path]:
-    """List worktree paths (excluding the source repo itself) for the given git repo."""
+    """List worktree paths (excluding the source repo itself) for the given git repo.
+
+    ``git worktree list --porcelain`` emits one record per worktree, each
+    starting with a ``worktree <path>`` line and separated by a blank line.
+    Rather than relying on the ``\\n\\n`` record separator (fragile to trailing
+    whitespace / future porcelain attributes), we scan every line and collect
+    each ``worktree`` entry directly.
+    """
     result = subprocess.run(
         ["git", "-C", str(repo), "worktree", "list", "--porcelain"],
         capture_output=True,
@@ -573,13 +610,11 @@ def _list_worktree_paths(repo: Path) -> set[Path]:
     )
     paths: set[Path] = set()
     repo_resolved = repo.resolve()
-    for block in result.stdout.strip().split("\n\n"):
-        for line in block.splitlines():
-            if line.startswith("worktree "):
-                path = Path(line.removeprefix("worktree ")).resolve()
-                if path != repo_resolved:
-                    paths.add(path)
-                break
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            path = Path(line.removeprefix("worktree ")).resolve()
+            if path != repo_resolved:
+                paths.add(path)
     return paths
 
 
@@ -593,15 +628,16 @@ def test_worktree_branch_is_cleaned_up_when_create_fails(
     (recorded in created_branch_name) is deleted; pre-existing branches are not.
     The worktree itself is always removed because we always create it ourselves.
     """
-    agent_name = AgentName(f"test-cleanup-fail-{int(time.time())}")
+    agent_name = AgentName(f"test-cleanup-fail-{uuid4().hex[:8]}")
     leaked_branch = f"mngr/{agent_name}"
 
-    test_ctx = make_ctx_with_plugins(temp_mngr_ctx, [_RaiseAfterFileCopy()])
+    failure_plugin = _RaiseAfterFileCopy()
+    test_ctx = make_ctx_with_plugins(temp_mngr_ctx, [failure_plugin])
     local_host, source_location = _get_local_host_and_location(test_ctx, temp_git_repo)
 
     agent_options = _make_options(
         agent_name,
-        "sleep 60",
+        SLEEP_COMMAND,
         transfer_mode=TransferMode.GIT_WORKTREE,
         git=AgentGitOptions(new_branch_name=leaked_branch),
     )
@@ -618,6 +654,25 @@ def test_worktree_branch_is_cleaned_up_when_create_fails(
             mngr_ctx=test_ctx,
         )
 
+    # Pin the precondition: the failure fired only after the worktree was
+    # created, so there genuinely was a worktree (and branch) to clean up. This
+    # prevents the cleanup assertions below from passing vacuously (e.g. if the
+    # failure had fired before create_agent_work_dir ever ran).
+    captured = failure_plugin.captured_work_dir_path
+    assert captured is not None, (
+        "expected on_after_initial_file_copy to fire (and capture the worktree path) "
+        "after the worktree was created, proving create() reached the work_dir stage; "
+        "without this the cleanup assertions below could pass vacuously"
+    )
+    # Resolve to match the resolved paths returned by _list_worktree_paths.
+    created_worktree = captured.resolve()
+    # The worktree was created during this create, so it cannot have been present
+    # in worktrees_before; this confirms there was a real worktree to clean up.
+    assert created_worktree not in worktrees_before, (
+        f"the worktree {created_worktree} should be newly created during this create, "
+        f"not pre-existing in {worktrees_before}"
+    )
+
     branches_after = _list_branches(temp_git_repo)
     assert leaked_branch not in branches_after, (
         f"branch {leaked_branch} should have been cleaned up after create failure, "
@@ -628,6 +683,12 @@ def test_worktree_branch_is_cleaned_up_when_create_fails(
     assert not leaked_worktrees, (
         f"worktree(s) should have been removed after create failure, but found: {leaked_worktrees}"
     )
+    # The specific worktree the failing hook saw mid-flight must be gone, both
+    # from git's worktree list and from the filesystem.
+    assert created_worktree not in worktrees_after, (
+        f"the mid-flight worktree {created_worktree} should have been removed from git's worktree list"
+    )
+    assert not created_worktree.exists(), f"worktree directory {created_worktree} should be removed"
     for path in leaked_worktrees:
         assert not path.exists(), f"worktree directory {path} should be removed"
 
@@ -652,8 +713,8 @@ def test_preexisting_branch_is_preserved_when_create_fails(
     local_host, source_location = _get_local_host_and_location(test_ctx, temp_git_repo)
 
     agent_options = _make_options(
-        AgentName(f"test-preserve-{int(time.time())}"),
-        "sleep 60",
+        AgentName(f"test-preserve-{uuid4().hex[:8]}"),
+        SLEEP_COMMAND,
         transfer_mode=TransferMode.GIT_WORKTREE,
         # No new_branch_name -- agent attaches to the existing branch.
         git=AgentGitOptions(base_branch=existing_branch),
@@ -695,13 +756,13 @@ def test_in_place_mode_sets_is_generated_work_dir_false(
     temp_host_dir: Path,
 ) -> None:
     """Test that in-place mode does not track work_dir as generated."""
-    agent_name = AgentName(f"test-in-place-{int(time.time())}")
+    agent_name = AgentName(f"test-in-place-{uuid4().hex[:8]}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
-        agent_options = _make_options(agent_name, "sleep 60", transfer_mode=TransferMode.NONE)
+        agent_options = _make_options(agent_name, SLEEP_COMMAND, transfer_mode=TransferMode.NONE)
 
         result = create(
             source_location=source_location,
@@ -740,7 +801,7 @@ def test_in_place_preserves_generated_work_dir_entry(
     have no living agent using them as work_dir. Removing the entry would cause a leak --
     after both agents are destroyed, the directory would never be cleaned up.
     """
-    agent_name = AgentName(f"test-in-place-preserve-{int(time.time())}")
+    agent_name = AgentName(f"test-in-place-preserve-{uuid4().hex[:8]}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -756,7 +817,7 @@ def test_in_place_preserves_generated_work_dir_entry(
         assert str(temp_work_dir) in certified_data.generated_work_dirs
 
         # Create an in-place agent (transfer_mode=NONE means in-place, no transfer)
-        agent_options = _make_options(agent_name, "sleep 60", transfer_mode=TransferMode.NONE)
+        agent_options = _make_options(agent_name, SLEEP_COMMAND, transfer_mode=TransferMode.NONE)
 
         create(
             source_location=source_location,
@@ -784,7 +845,7 @@ def test_worktree_mode_sets_is_generated_work_dir_true(
     temp_host_dir: Path,
 ) -> None:
     """Test that worktree mode tracks work_dir as generated."""
-    agent_name = AgentName(f"test-worktree-gen-{int(time.time())}")
+    agent_name = AgentName(f"test-worktree-gen-{uuid4().hex[:8]}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
 
     _setup_claude_trust_config(temp_git_repo, tmp_home_dir)
@@ -793,7 +854,7 @@ def test_worktree_mode_sets_is_generated_work_dir_true(
 
         agent_options = _make_options(
             agent_name,
-            "sleep 60",
+            SLEEP_COMMAND,
             transfer_mode=TransferMode.GIT_WORKTREE,
             git=AgentGitOptions(
                 new_branch_name=f"mngr/{agent_name}",
@@ -834,7 +895,7 @@ def test_worktree_base_folder_overrides_default_worktree_location(
     tmp_path: Path,
 ) -> None:
     """Test that worktree_base_folder places worktrees in the specified directory."""
-    agent_name = AgentName(f"test-wt-base-{int(time.time())}")
+    agent_name = AgentName(f"test-wt-base-{uuid4().hex[:8]}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
     custom_base = tmp_path / "custom_worktrees"
 
@@ -844,7 +905,7 @@ def test_worktree_base_folder_overrides_default_worktree_location(
 
         agent_options = _make_options(
             agent_name,
-            "sleep 60",
+            SLEEP_COMMAND,
             transfer_mode=TransferMode.GIT_WORKTREE,
             worktree_base_folder=custom_base,
             git=AgentGitOptions(
@@ -877,14 +938,16 @@ def test_target_path_different_from_source_sets_is_generated_work_dir_true(
     tmp_path: Path,
 ) -> None:
     """Test that specifying a different target path tracks work_dir as generated."""
-    agent_name = AgentName(f"test-target-diff-{int(time.time())}")
+    agent_name = AgentName(f"test-target-diff-{uuid4().hex[:8]}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
     target_dir = tmp_path / "different_target"
 
     with tmux_session_cleanup(session_name):
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
-        agent_options = _make_options(agent_name, "sleep 60", target_path=target_dir, transfer_mode=TransferMode.RSYNC)
+        agent_options = _make_options(
+            agent_name, SLEEP_COMMAND, target_path=target_dir, transfer_mode=TransferMode.RSYNC
+        )
 
         result = create(
             source_location=source_location,
@@ -917,13 +980,13 @@ def test_target_path_same_as_source_sets_is_generated_work_dir_false(
     temp_host_dir: Path,
 ) -> None:
     """Test that specifying the same target as source path does not track work_dir as generated."""
-    agent_name = AgentName(f"test-target-same-{int(time.time())}")
+    agent_name = AgentName(f"test-target-same-{uuid4().hex[:8]}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
-        agent_options = _make_options(agent_name, "sleep 60", target_path=temp_work_dir)
+        agent_options = _make_options(agent_name, SLEEP_COMMAND, target_path=temp_work_dir)
 
         result = create(
             source_location=source_location,
@@ -961,7 +1024,7 @@ def test_create_work_dir_false_uses_target_path(
     tmp_path: Path,
 ) -> None:
     """Test that when create_work_dir=False, the agent's work_dir is set to target_path, not source_path."""
-    agent_name = AgentName(f"test-no-create-{int(time.time())}")
+    agent_name = AgentName(f"test-no-create-{uuid4().hex[:8]}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
     target_dir = tmp_path / "target_work_dir"
     target_dir.mkdir(parents=True)
@@ -969,7 +1032,7 @@ def test_create_work_dir_false_uses_target_path(
     with tmux_session_cleanup(session_name):
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
-        agent_options = _make_options(agent_name, "sleep 60", target_path=target_dir)
+        agent_options = _make_options(agent_name, SLEEP_COMMAND, target_path=target_dir)
 
         result = create(
             source_location=source_location,
@@ -997,13 +1060,13 @@ def test_create_work_dir_false_without_target_path_uses_source(
     temp_host_dir: Path,
 ) -> None:
     """Test that when create_work_dir=False and target_path is None, the source path is used."""
-    agent_name = AgentName(f"test-no-create-src-{int(time.time())}")
+    agent_name = AgentName(f"test-no-create-src-{uuid4().hex[:8]}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
-        agent_options = _make_options(agent_name, "sleep 60")
+        agent_options = _make_options(agent_name, SLEEP_COMMAND)
 
         result = create(
             source_location=source_location,
@@ -1033,13 +1096,13 @@ def test_create_rejects_duplicate_agent_name_on_same_host(
     temp_work_dir: Path,
 ) -> None:
     """Test that creating a second agent with the same name on the same host raises DuplicateAgentNameError."""
-    agent_name = AgentName(f"test-dup-name-{int(time.time())}")
+    agent_name = AgentName(f"test-dup-name-{uuid4().hex[:8]}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
-        agent_options = _make_options(agent_name, "sleep 847291", agent_type="command")
+        agent_options = _make_options(agent_name, SLEEP_COMMAND, agent_type="command")
 
         # First create succeeds
         result = create(
@@ -1055,7 +1118,7 @@ def test_create_rejects_duplicate_agent_name_on_same_host(
             create(
                 source_location=source_location,
                 target_host=local_host,
-                agent_options=_make_options(agent_name, "sleep 847292", agent_type="command"),
+                agent_options=_make_options(agent_name, SLEEP_COMMAND, agent_type="command"),
                 mngr_ctx=temp_mngr_ctx,
             )
 
@@ -1078,7 +1141,7 @@ def test_create_with_update_flag_updates_existing_agent(
     3. Call create() again with is_update=True and the same agent_id
     4. The agent should be re-created with the same ID and work_dir but updated metadata
     """
-    agent_name = AgentName(f"test-update-{int(time.time())}")
+    agent_name = AgentName(f"test-update-{uuid4().hex[:8]}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -1087,7 +1150,7 @@ def test_create_with_update_flag_updates_existing_agent(
         # Step 1: Create the agent normally
         original_options = _make_options(
             agent_name,
-            "sleep 847291",
+            SLEEP_COMMAND,
             agent_type="command",
             label_options=AgentLabelOptions(labels={"project": "old-project"}),
         )
@@ -1107,7 +1170,7 @@ def test_create_with_update_flag_updates_existing_agent(
         # Step 3: Call create() with is_update=True and the same agent_id + work_dir
         update_options = _make_options(
             agent_name,
-            "sleep 847292",
+            SLEEP_COMMAND,
             agent_type="command",
             agent_id=original_agent_id,
             target_path=original_work_dir,
@@ -1204,6 +1267,24 @@ class PluginChainB:
         )
 
 
+class PluginModifyingTargetHost:
+    """Test plugin that replaces target_host with NewHostOptions.
+
+    Lets a test verify that a hook's modification of ``target_host`` propagates
+    out of ``_call_on_before_create_hooks`` (the field other plugins leave
+    untouched).
+    """
+
+    def __init__(self, new_target_host: NewHostOptions) -> None:
+        self._new_target_host = new_target_host
+
+    @hookimpl
+    def on_before_create(self, args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
+        return args.model_copy_update(
+            to_update(args.field_ref().target_host, self._new_target_host),
+        )
+
+
 def test_on_before_create_hook_modifies_agent_options(
     temp_mngr_ctx: MngrContext,
     temp_work_dir: Path,
@@ -1223,6 +1304,9 @@ def test_on_before_create_hook_modifies_agent_options(
     # The plugin should have modified the name
     assert modified_options.name == AgentName("modified-original-name")
     assert create_work_dir is True
+    # The plugin only touched agent_options, so target_host must be the exact
+    # host we passed in (identity-equal), not a copy or a dropped value.
+    assert target_host is local_host
 
 
 def test_on_before_create_hook_modifies_create_work_dir(
@@ -1242,6 +1326,9 @@ def test_on_before_create_hook_modifies_create_work_dir(
     )
 
     assert create_work_dir is False
+    # The plugin only touched create_work_dir, so target_host must pass through
+    # unchanged (identity-equal to the host we passed in).
+    assert target_host is local_host
 
 
 def test_on_before_create_hook_returning_none_passes_through(
@@ -1263,6 +1350,9 @@ def test_on_before_create_hook_returning_none_passes_through(
     # Values should be unchanged
     assert modified_options.name == original_name
     assert create_work_dir is True
+    # A None return must pass every field through untouched, including the
+    # target_host (identity-equal to the one we passed in).
+    assert target_host is local_host
 
 
 def test_on_before_create_hooks_chain_in_order(
@@ -1284,6 +1374,37 @@ def test_on_before_create_hooks_chain_in_order(
     # Both plugins should have modified the name in order
     # A adds "-A", then B adds "-B" to that result
     assert modified_options.name == AgentName("base-A-B")
+    # Neither chain plugin touched target_host, so it must pass through
+    # unchanged (identity-equal to the one we passed in).
+    assert target_host is local_host
+
+
+def test_on_before_create_hook_modifies_target_host(
+    temp_mngr_ctx: MngrContext,
+    temp_work_dir: Path,
+) -> None:
+    """Test that an on_before_create hook can replace target_host and it propagates."""
+    new_target_host = NewHostOptions(
+        provider=LOCAL_PROVIDER_NAME,
+        name=HostName(LOCAL_HOST_NAME),
+    )
+    test_ctx = make_ctx_with_plugins(temp_mngr_ctx, [PluginModifyingTargetHost(new_target_host)])
+
+    local_host = _get_local_host_for_test(test_ctx)
+
+    agent_options = _make_options(AgentName("target-host-test"), "sleep 1")
+
+    target_host, modified_options, create_work_dir = _call_on_before_create_hooks(
+        test_ctx, local_host, agent_options, True
+    )
+
+    # The hook swapped target_host from the existing host to NewHostOptions, and
+    # that replacement must be what the helper returns (not the original host).
+    assert target_host == new_target_host
+    assert target_host is not local_host
+    # The other fields are untouched by this plugin.
+    assert modified_options.name == AgentName("target-host-test")
+    assert create_work_dir is True
 
 
 # Note: Agent provisioning lifecycle tests (on_before_provisioning, get_provision_file_transfers,

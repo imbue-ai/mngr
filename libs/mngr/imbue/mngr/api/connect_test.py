@@ -1,6 +1,8 @@
 """Unit tests for the connect API module."""
 
+import json
 import os
+import re
 import shlex
 import subprocess
 from datetime import datetime
@@ -85,13 +87,33 @@ def test_build_ssh_activity_wrapper_script_kills_activity_tracker_on_exit() -> N
 
 
 def test_build_ssh_activity_wrapper_script_writes_json_with_time_and_pid() -> None:
-    """Test that the activity file contains JSON with time and ssh_pid."""
+    """Test that the activity printf emits valid JSON mapping time->TIME_MS and ssh_pid->$$.
+
+    A loose substring check (the bare words "time"/"ssh_pid"/"TIME_MS" appearing
+    somewhere) would survive a malformed printf -- e.g. swapped %d arguments so
+    ssh_pid receives the timestamp, or broken placeholders. Instead, extract the
+    real printf invocation from the generated script, run it through a shell with
+    concrete substitutions, and parse the result as JSON to prove both the format
+    string and the argument order are correct.
+    """
     script = _build_ssh_activity_wrapper_script("mngr-test", Path("/tmp/.mngr"))
 
-    # The script should write JSON with time and ssh_pid fields
-    assert "time" in script
-    assert "ssh_pid" in script
-    assert "TIME_MS" in script
+    # The activity loop computes TIME_MS before printf-ing it into the JSON.
+    assert "TIME_MS=$(($(date +%s) * 1000))" in script
+
+    # Extract the `printf '...' "$TIME_MS" "$$"` invocation (up to its redirect).
+    match = re.search(r"printf .*? > ", script)
+    assert match is not None, "expected a printf invocation writing the activity JSON"
+    printf_invocation = match.group(0).removesuffix(" > ")
+
+    # Substitute concrete, distinct values for the two arguments so a swapped
+    # %d ordering would produce a JSON object with the fields transposed.
+    time_ms_value = 1700000000000
+    ssh_pid_value = 4242
+    runnable = printf_invocation.replace('"$TIME_MS"', str(time_ms_value)).replace('"$$"', str(ssh_pid_value))
+    completed = subprocess.run(["sh", "-c", runnable], capture_output=True, text=True, check=True)
+
+    assert json.loads(completed.stdout) == {"time": time_ms_value, "ssh_pid": ssh_pid_value}
 
 
 def test_build_ssh_activity_wrapper_script_handles_paths_with_spaces() -> None:
@@ -112,19 +134,27 @@ def test_build_ssh_activity_wrapper_script_checks_for_signal_file() -> None:
 
 
 def test_build_ssh_activity_wrapper_script_exits_with_destroy_code_on_destroy_signal() -> None:
-    """Test that the wrapper script exits with SIGNAL_EXIT_CODE_DESTROY when signal is 'destroy'."""
+    """Test that the 'destroy' action is bound to SIGNAL_EXIT_CODE_DESTROY.
+
+    Asserting the action literal and the exit code independently would pass even
+    if the action-to-code mapping were swapped (both literals and both codes
+    coexist in the script). Assert the contiguous fragment that binds them.
+    """
     script = _build_ssh_activity_wrapper_script("mngr-test", Path("/tmp/.mngr"))
 
-    assert f"exit {SIGNAL_EXIT_CODE_DESTROY}" in script
-    assert '"destroy"' in script
+    assert f'[ "$ACTION" = "destroy" ]; then exit {SIGNAL_EXIT_CODE_DESTROY}' in script
 
 
 def test_build_ssh_activity_wrapper_script_exits_with_stop_code_on_stop_signal() -> None:
-    """Test that the wrapper script exits with SIGNAL_EXIT_CODE_STOP when signal is 'stop'."""
+    """Test that the 'stop' action is bound to SIGNAL_EXIT_CODE_STOP.
+
+    Asserting the action literal and the exit code independently would pass even
+    if the action-to-code mapping were swapped (both literals and both codes
+    coexist in the script). Assert the contiguous fragment that binds them.
+    """
     script = _build_ssh_activity_wrapper_script("mngr-test", Path("/tmp/.mngr"))
 
-    assert f"exit {SIGNAL_EXIT_CODE_STOP}" in script
-    assert '"stop"' in script
+    assert f'[ "$ACTION" = "stop" ]; then exit {SIGNAL_EXIT_CODE_STOP}' in script
 
 
 def test_build_ssh_activity_wrapper_script_removes_signal_file_after_reading() -> None:
@@ -144,6 +174,17 @@ def test_build_ssh_activity_wrapper_script_signal_file_uses_session_name() -> No
 # =========================================================================
 # Tests for _build_ssh_args
 # =========================================================================
+
+
+def _contains_adjacent_pair(args: list[str], pair: list[str]) -> bool:
+    """Return True if ``pair`` appears as consecutive elements within ``args``.
+
+    SSH options are emitted as two adjacent argv elements (e.g. ``["-o",
+    "StrictHostKeyChecking=yes"]``). A substring check against ``" ".join(args)``
+    would still pass if the ``-o`` flag were dropped or the option were split
+    across non-adjacent positions, so assert adjacency on the argv list instead.
+    """
+    return any(args[i : i + len(pair)] == pair for i in range(len(args) - len(pair) + 1))
 
 
 def _create_pyinfra_ssh_host(
@@ -191,12 +232,14 @@ def _make_ssh_host(
     )
 
 
-class _TestAgent(BaseAgent):
+class _FixedProcessNameAgent(BaseAgent):
     """Test agent that avoids SSH access for get_expected_process_name.
 
     BaseAgent.get_expected_process_name reads data.json via the host connector,
     which fails for SSH hosts in tests since no SSH server is running. This
     subclass returns a fixed process name to avoid that code path.
+
+    Named without a ``Test`` prefix so pytest does not attempt to collect it.
     """
 
     def get_expected_process_name(self) -> str:
@@ -207,9 +250,9 @@ def _make_remote_agent(
     host: Host,
     temp_mngr_ctx: MngrContext,
     agent_name: str = "test-agent",
-) -> _TestAgent:
+) -> _FixedProcessNameAgent:
     """Create a test agent on a remote host for testing connect_to_agent."""
-    return _TestAgent(
+    return _FixedProcessNameAgent(
         id=AgentId(f"agent-{uuid4().hex}"),
         name=AgentName(agent_name),
         agent_type=AgentTypeName("generic"),
@@ -232,12 +275,10 @@ def test_build_ssh_args_with_known_hosts_file(
 
     args = _build_ssh_args(host, opts)
 
-    assert "-i" in args
-    assert "/home/user/.ssh/id_rsa" in args
-    assert "-p" in args
-    assert "22" in args
-    assert "UserKnownHostsFile=/tmp/known_hosts" in " ".join(args)
-    assert "StrictHostKeyChecking=yes" in " ".join(args)
+    assert _contains_adjacent_pair(args, ["-i", "/home/user/.ssh/id_rsa"])
+    assert _contains_adjacent_pair(args, ["-p", "22"])
+    assert _contains_adjacent_pair(args, ["-o", "UserKnownHostsFile=/tmp/known_hosts"])
+    assert _contains_adjacent_pair(args, ["-o", "StrictHostKeyChecking=yes"])
     assert "ubuntu@example.com" in args
 
 
@@ -251,8 +292,8 @@ def test_build_ssh_args_with_allow_unknown_host(
 
     args = _build_ssh_args(host, opts)
 
-    assert "StrictHostKeyChecking=no" in " ".join(args)
-    assert "UserKnownHostsFile=/dev/null" in " ".join(args)
+    assert _contains_adjacent_pair(args, ["-o", "StrictHostKeyChecking=no"])
+    assert _contains_adjacent_pair(args, ["-o", "UserKnownHostsFile=/dev/null"])
 
 
 def test_build_ssh_args_raises_without_known_hosts_or_allow_unknown(
@@ -319,7 +360,7 @@ def test_build_ssh_args_known_hosts_dev_null_treated_as_missing(
     args = _build_ssh_args(host, opts)
 
     # Should fall through to the allow_unknown_host branch
-    assert "StrictHostKeyChecking=no" in " ".join(args)
+    assert _contains_adjacent_pair(args, ["-o", "StrictHostKeyChecking=no"])
 
 
 # =========================================================================
@@ -599,6 +640,18 @@ def test_ssh_wrapper_script_is_correctly_quoted_for_bash_c() -> None:
     be shell-quoted into a single 'bash -c <quoted_script>' string. Otherwise
     bash -c only receives the first word (e.g. 'mkdir'), causing errors like
     'mkdir: missing operand'.
+
+    NOTE (deferred): this re-derives the ``"bash -c " + shlex.quote(...)``
+    construction locally rather than exercising the production call site
+    (connect.py builds it inline inside ``connect_to_agent`` at the point where
+    it extends ``ssh_args`` with the ``-t`` remote command). As written this only
+    asserts the ``shlex.quote``/``shlex.split`` round-trip property of the
+    stdlib, so a regression where ``connect_to_agent`` forgot to call
+    ``shlex.quote`` would not be caught here. Properly closing that gap requires
+    extracting a callable helper in connect.py (e.g. ``_build_remote_ssh_command``)
+    and asserting ``shlex.split`` of *its* output -- which is out of scope for a
+    test-only change. The local construction below is kept in sync with
+    connect.py by hand until that helper exists.
     """
     wrapper_script = _build_ssh_activity_wrapper_script("mngr-test", Path("/mngr"))
     remote_command = "bash -c " + shlex.quote(wrapper_script)
@@ -618,7 +671,7 @@ def _make_local_host_and_agent(
     local_provider: LocalProviderInstance,
     mngr_ctx: MngrContext,
     agent_name: str = "test-agent",
-) -> tuple[Host, _TestAgent]:
+) -> tuple[Host, _FixedProcessNameAgent]:
     """Create a local host and agent for testing connect_to_agent."""
     host = Host(
         id=HostId(f"host-{uuid4().hex}"),
@@ -627,7 +680,7 @@ def _make_local_host_and_agent(
         provider_instance=local_provider,
         mngr_ctx=mngr_ctx,
     )
-    agent = _TestAgent(
+    agent = _FixedProcessNameAgent(
         id=AgentId(f"agent-{uuid4().hex}"),
         name=AgentName(agent_name),
         agent_type=AgentTypeName("generic"),

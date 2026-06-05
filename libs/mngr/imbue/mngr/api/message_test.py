@@ -1,12 +1,15 @@
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.api.cel_context import agent_to_cel_context
 from imbue.mngr.api.create import CreateAgentOptions
-from imbue.mngr.api.message import MessageResult
 from imbue.mngr.api.message import send_message_to_agents
+from imbue.mngr.config.agent_class_registry import register_agent_class
+from imbue.mngr.config.agent_config_registry import register_agent_config
+from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.host import Host
@@ -18,27 +21,6 @@ from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
-
-
-def test_message_result_initializes_with_empty_lists() -> None:
-    """Test that MessageResult initializes with empty lists."""
-    result = MessageResult()
-    assert result.successful_agents == []
-    assert result.failed_agents == []
-
-
-def test_message_result_can_add_successful_agent() -> None:
-    """Test that we can add successful agents to the result."""
-    result = MessageResult()
-    result.successful_agents.append("test-agent")
-    assert result.successful_agents == ["test-agent"]
-
-
-def test_message_result_can_add_failed_agent() -> None:
-    """Test that we can add failed agents to the result."""
-    result = MessageResult()
-    result.failed_agents.append(("test-agent", "error message"))
-    assert result.failed_agents == [("test-agent", "error message")]
 
 
 @pytest.mark.tmux
@@ -196,10 +178,15 @@ def test_send_message_to_agents_starts_stopped_agent_when_start_desired(
         on_error=lambda name, err: error_agents.append((name, err)),
     )
 
+    # The agent must have actually transitioned out of STOPPED (i.e. its tmux
+    # session was started), not merely been reported as a successful send.
+    started_state = agent.get_lifecycle_state()
+
     # Clean up
     host.destroy_agent(agent)
 
     # Agent should have been started and message sent successfully
+    assert started_state != AgentLifecycleState.STOPPED
     assert "start-test" in result.successful_agents
     assert "start-test" in success_agents
     assert len(error_agents) == 0
@@ -261,19 +248,42 @@ def test_send_message_to_agents_with_include_filter(
     assert "filter-test-2" not in result.successful_agents
 
 
+class _ExplodingSendAgent(BaseAgent):
+    """Real agent whose ``send_message`` always raises a ``SendMessageError``.
+
+    Registered as a dedicated agent type so ``send_message_to_agents`` resolves
+    and loads it through the normal production path (``host.get_agents()`` ->
+    ``resolve_agent_type``), rather than patching ``BaseAgent.send_message``
+    globally. This keeps the failure-isolation test wired to real behavior: if
+    the send path is refactored, this fake still fails for real.
+    """
+
+    def send_message(self, message: str) -> None:
+        raise SendMessageError(str(self.name), "simulated send failure")
+
+
 @pytest.mark.tmux
 def test_send_message_one_agent_failure_does_not_prevent_other_agents(
     temp_work_dir: Path,
     temp_mngr_ctx: MngrContext,
     local_provider: LocalProviderInstance,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One agent's SendMessageError must not kill the broadcast to other agents.
 
     SendMessageError is an AgentError, which inherits from MngrError. The per-agent
     send is guarded by ``except MngrError`` so that, in CONTINUE mode, one
     agent's failure is recorded without aborting the broadcast to the others.
+
+    The failing agent is a real ``_ExplodingSendAgent`` resolved via a
+    dedicated registered agent type (the agent registry is reset per test by
+    the autouse plugin-manager fixture), so no production internals are patched.
     """
+    # Register a one-off agent type whose send always raises. resolve_agent_type
+    # requires both a class and a config to be registered for the type name.
+    exploding_type = f"exploding-{uuid4().hex[:8]}"
+    register_agent_class(exploding_type, _ExplodingSendAgent)
+    register_agent_config(exploding_type, AgentTypeConfig)
+
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
@@ -281,7 +291,7 @@ def test_send_message_one_agent_failure_does_not_prevent_other_agents(
         work_dir_path=temp_work_dir,
         options=CreateAgentOptions(
             name=AgentName("will-explode"),
-            agent_type=AgentTypeName("generic"),
+            agent_type=AgentTypeName(exploding_type),
             command=CommandString("sleep 847280"),
         ),
     )
@@ -296,15 +306,6 @@ def test_send_message_one_agent_failure_does_not_prevent_other_agents(
 
     host.start_agents([agent1.id, agent2.id])
 
-    original_send = BaseAgent.send_message
-
-    def exploding_send(self: BaseAgent, message: str) -> None:
-        if str(self.name) == "will-explode":
-            raise SendMessageError("will-explode", "simulated send failure")
-        original_send(self, message)
-
-    monkeypatch.setattr(BaseAgent, "send_message", exploding_send)
-
     result = send_message_to_agents(
         mngr_ctx=temp_mngr_ctx,
         message_content="Hello",
@@ -316,9 +317,10 @@ def test_send_message_one_agent_failure_does_not_prevent_other_agents(
     host.destroy_agent(agent1)
     host.destroy_agent(agent2)
 
-    # The exploding agent should be recorded as failed
-    failed_names = [name for name, _err in result.failed_agents]
-    assert "will-explode" in failed_names
+    # The exploding agent should be recorded as failed with its send error.
+    failed_by_name = {name: err for name, err in result.failed_agents}
+    assert "will-explode" in failed_by_name
+    assert "simulated send failure" in failed_by_name["will-explode"]
 
     # The other agent must still have succeeded
     assert "will-succeed" in result.successful_agents
