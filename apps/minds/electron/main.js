@@ -1,4 +1,4 @@
-const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app, session, screen, dialog, clipboard, webContents } = require('electron');
+const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app, session, screen, dialog, clipboard } = require('electron');
 const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
@@ -487,31 +487,6 @@ function wireContentViewEvents(bundle, contentView) {
   });
 }
 
-// Decide which view should host devtools for the dev-tools shortcut / menu
-// item and whether to open them detached. The chrome (title bar) view and
-// modal surfaces are too small to host a docked devtools panel, so when one
-// of them has focus we open devtools targeted at that view in its own
-// window. All other views (content, sidebar, requests panel) and the
-// "nothing focused" case fall back to toggling the content view's docked
-// devtools, matching the previous behavior of the View > Toggle Developer
-// Tools menu item.
-function toggleDevToolsForView(bundle, wc) {
-  if (!bundle || bundle.window.isDestroyed()) return;
-  const isChromeOrModal =
-    wc &&
-    !wc.isDestroyed() &&
-    ((bundle.chromeView && wc === bundle.chromeView.webContents) ||
-      (bundle.modalView && wc === bundle.modalView.webContents));
-  if (isChromeOrModal) {
-    if (wc.isDevToolsOpened()) wc.closeDevTools();
-    else wc.openDevTools({ mode: 'detach' });
-    return;
-  }
-  if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-    bundle.contentView.webContents.toggleDevTools();
-  }
-}
-
 function registerShortcutsFor(bundle, wc) {
   wc.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown') return;
@@ -525,7 +500,9 @@ function registerShortcutsFor(bundle, wc) {
       (!isMac && input.control && input.shift && input.code === 'KeyC');
     if (devTools) {
       event.preventDefault();
-      toggleDevToolsForView(bundle, wc);
+      if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
+        bundle.contentView.webContents.toggleDevTools();
+      }
       return;
     }
     // When the app menu is installed, it owns cmd+W / cmd+Q / cmd+N; handling
@@ -1585,16 +1562,15 @@ function installApplicationMenu() {
         {
           label: 'Toggle Developer Tools',
           // role: 'toggleDevTools' targets a BrowserWindow; we use BaseWindow,
-          // so toggle devtools for the focused view explicitly. When focus
-          // is on the chrome (title bar) or a modal surface, devtools open
-          // detached in their own window (those views can't host a docked
-          // panel); otherwise we fall back to the content view's docked
-          // devtools.
+          // so toggle the focused bundle's content view explicitly.
           accelerator: 'Alt+Cmd+I',
           click: () => {
             const bundle = getMostRecentWindow();
-            if (!bundle) return;
-            toggleDevToolsForView(bundle, webContents.getFocusedWebContents());
+            if (!bundle || bundle.window.isDestroyed()) return;
+            const cv = bundle.contentView;
+            if (cv && !cv.webContents.isDestroyed()) {
+              cv.webContents.toggleDevTools();
+            }
           },
         },
         { type: 'separator' },

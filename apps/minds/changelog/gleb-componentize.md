@@ -1,5 +1,3 @@
-Make the dev-tools shortcut (Cmd+Alt+I on macOS, Ctrl+Shift+C elsewhere) and the View > Toggle Developer Tools menu item open devtools for the focused view. When the chrome (title bar) view or a modal surface has focus, devtools open in a detached window (those views are too small to host a docked panel); otherwise behavior is unchanged -- the content view's docked devtools toggle as before.
-
 Large pass over the desktop client's HTML templates to extract recurring inline Tailwind patterns into JinjaX primitives. The change set is mostly internal -- rendered behavior is preserved -- but a few visual tweaks ride along.
 
 New / generalized primitives (under ``apps/minds/imbue/minds/desktop_client/templates/``):
