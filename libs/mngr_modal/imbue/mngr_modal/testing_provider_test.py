@@ -67,6 +67,7 @@ from imbue.mngr_modal.instance import TAG_USER_PREFIX
 from imbue.mngr_modal.instance import _build_image_from_dockerfile_contents
 from imbue.mngr_modal.instance import _build_modal_secrets_from_env
 from imbue.mngr_modal.instance import _build_modal_volumes
+from imbue.mngr_modal.instance import _group_cached_layer_commands
 from imbue.mngr_modal.instance import _parse_volume_spec
 from imbue.mngr_modal.instance import _substitute_dockerfile_build_args
 from imbue.mngr_modal.routes.deployment import deploy_function
@@ -2523,6 +2524,51 @@ def test_build_image_from_dockerfile_no_layer_caching(
     object_id = image.get_object_id()
     assert object_id.startswith("img-")
     assert "python" not in object_id
+
+
+def test_group_cached_layer_commands_carries_args_forward() -> None:
+    # ARG declarations don't change image content, so they should not produce
+    # their own layers; instead they must be prepended to every later layer so
+    # build args stay in scope for the RUN/ENV instructions that reference them.
+    # (Regression: ARG scope does not survive across the separate per-layer
+    # dockerfile_commands builds, so a later RUN using ${NODE_VERSION} expanded
+    # to an empty string and 404'd.)
+    instructions: list[Mapping[str, object]] = [
+        {"instruction": "ARG", "content": 'ARG NODE_VERSION="24.15.0"'},
+        {"instruction": "COMMENT", "content": "# download node"},
+        {"instruction": "RUN", "content": "RUN curl .../v${NODE_VERSION}/node.tar.gz | tar xz"},
+        {"instruction": "ENV", "content": "ENV NODE_VERSION=${NODE_VERSION}"},
+    ]
+    groups = _group_cached_layer_commands(instructions)
+    assert groups == [
+        ['ARG NODE_VERSION="24.15.0"', "RUN curl .../v${NODE_VERSION}/node.tar.gz | tar xz"],
+        ['ARG NODE_VERSION="24.15.0"', "ENV NODE_VERSION=${NODE_VERSION}"],
+    ]
+
+
+def test_group_cached_layer_commands_accumulates_multiple_args() -> None:
+    # Every ARG seen so far is carried into each subsequent layer, in order.
+    instructions: list[Mapping[str, object]] = [
+        {"instruction": "ARG", "content": "ARG A=1"},
+        {"instruction": "RUN", "content": "RUN echo ${A}"},
+        {"instruction": "ARG", "content": "ARG B=2"},
+        {"instruction": "RUN", "content": "RUN echo ${A} ${B}"},
+    ]
+    groups = _group_cached_layer_commands(instructions)
+    assert groups == [
+        ["ARG A=1", "RUN echo ${A}"],
+        ["ARG A=1", "ARG B=2", "RUN echo ${A} ${B}"],
+    ]
+
+
+def test_group_cached_layer_commands_without_args_is_one_group_per_instruction() -> None:
+    instructions: list[Mapping[str, object]] = [
+        {"instruction": "RUN", "content": "RUN echo hello"},
+        {"instruction": "COMMENT", "content": "# noise"},
+        {"instruction": "RUN", "content": "RUN echo world"},
+    ]
+    groups = _group_cached_layer_commands(instructions)
+    assert groups == [["RUN echo hello"], ["RUN echo world"]]
 
 
 # ---------------------------------------------------------------------------

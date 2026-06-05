@@ -15,7 +15,6 @@ with @pytest.mark.acceptance and are skipped by default. To run them:
 """
 
 import json
-import os
 import subprocess
 from pathlib import Path
 
@@ -109,9 +108,6 @@ def _get_host_state(
     return None
 
 
-@pytest.mark.skip(
-    "This runs locally, fails remotely, I think because the make_tar_of_repo.sh script fails to create a current.tar.gz"
-)
 @pytest.mark.acceptance
 @pytest.mark.rsync
 @pytest.mark.timeout(300)
@@ -137,22 +133,33 @@ def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
     # Create a simple file so the directory isn't empty
     (source_dir / "test.txt").write_text("test content for idle shutdown test")
 
-    tar_dir = tmp_path / "tar_output"
-    tar_dir.mkdir()
-    temp_dir_with_tar = str(tar_dir)
-    commit_hash = os.environ.get("GITHUB_SHA", "") or Path(".mngr/image_commit_hash").read_text().strip()
+    # The `mngr create` below references repo-root-relative paths -- the
+    # `--file=libs/mngr/.../Dockerfile` and `context-dir=.mngr/dev/build/`
+    # build args -- so it must run with the repo root as its cwd. The autouse
+    # `setup_test_mngr_env` fixture chdir's into an isolated temp HOME, so we
+    # pass `cwd=repo_root` explicitly (computed from this file's location).
+    repo_root = Path(__file__).resolve().parents[4]
 
-    # go make the tar
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            f"./scripts/make_tar_of_repo.sh {commit_hash} {temp_dir_with_tar}",
-        ],
+    # Populate the Dockerfile build context (.mngr/dev/build/) with the keyframe
+    # tarball. In a normal `mngr create` this is done by the repo's
+    # `pre_command_scripts.create` hook (see .mngr/settings.toml), but that hook
+    # only fires under the real "mngr" project root; these tests run under an
+    # isolated MNGR_ROOT_NAME, so the hook never runs and we must replicate it.
+    #
+    # We resolve the commit from `.mngr/image_commit_hash`, NOT `GITHUB_SHA`: in
+    # CI `GITHUB_SHA` is the GitHub merge commit, which is absent from the
+    # offload sandbox's git history, so `git checkout` would fail. (The previous
+    # version of this test used `GITHUB_SHA` and wrote the tarball into a
+    # throwaway directory the build never read -- which is why it "ran locally"
+    # only when a real `.mngr/dev/build/` already existed, and failed remotely.)
+    image_commit_hash = (repo_root / ".mngr" / "image_commit_hash").read_text().strip()
+    subprocess.run(
+        ["./scripts/make_tar_of_repo.sh", image_commit_hash, ".mngr/dev/build"],
         capture_output=True,
         text=True,
         check=True,
         timeout=600,
+        cwd=repo_root,
         env=modal_subprocess_env.env,
     )
 
@@ -201,6 +208,7 @@ def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
         text=True,
         timeout=300,
         env=modal_subprocess_env.env,
+        cwd=repo_root,
     )
 
     assert result.returncode == 0, f"Agent creation failed: {result.stderr}\n{result.stdout}"
