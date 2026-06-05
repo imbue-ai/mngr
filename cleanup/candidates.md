@@ -81,9 +81,10 @@ Pilot's `.mngr/settings.toml:235-236` uses `uv tool install -e ...` and `--with-
 
 `scripts/web_view.py` + `scripts/web_view_test.py` (283 lines) are superseded by `scripts/layout.py`. Replacement is PR #73 (commit `ed6b1a3b`); `blueprint/agent-layout-ops/plan-agent-layout-ops.md` literally documents the intended rename. The merge in `c2f1b829` brought `layout.py` in but never deleted `web_view.py`. Verification: `grep -rn web_view` across pilot (excluding vendor) finds only the file itself, its test, and the stale plan doc — zero call sites in `.toml`/`.json`/`.sh`/SKILL.md. The workspace-server endpoints `web_view` targeted were also atomically replaced.
 
-- **status**: in_flight (iter 6)
+- **status**: **verified_stale**
 - **test path**: pilot-rc-dead-code / v0.2.36-rc5-dead-web-view → launch-to-msg with that template_ref
 - **expected blast radius**: nil (no callers; replacement covers all functions)
+- **landed**: pilot ff-merged to cad14a24. launch-to-msg verify green first try. 283 lines of dead code deleted.
 
 ### duplicate-port-zero-guard (MNGR, found 3rd pass)
 
@@ -139,3 +140,5 @@ Per-iteration: timestamp, candidate, candidate branch / tag, launch-to-msg run i
 | 5 | homebrew-path-augmentation | (no CI test) | n/a | n/a | still_needed | docker on macOS lives at /opt/homebrew/bin/docker or /usr/local/bin/docker; dropping homebrew prepend silently breaks docker users; launch-to-msg only exercises lima so it would not catch the regression |
 | 6 | revert-lima-start-new-default-timeout | mngr-rc-lima-timeout-revert (PR #1938) | 27013465788 success | 27013474227 success | green | cherry-picked to wz/minds_onboard (b7628677f); PR #1938 closed |
 | 7 | uv-tool-install-editable-mode | pilot-rc-uv-tool-non-editable / v0.2.36-rc4-uv-tool-non-editable | 27014712370 success | 27014677300 success | green | ff-merged into pilot (cb2091cf); v0.2.35 tag unchanged |
+| 8 | dead-web-view-script | pilot-rc-dead-code / v0.2.36-rc5-dead-web-view | 27016379803 success | n/a (pilot-only) | green | ff-merged into pilot (cad14a24); 283 lines deleted |
+| 9 | duplicate-port-zero-guard | mngr-rc-drop-port-zero-guard (PR #1939) | 27017785672 in flight | 27016476580 success | in_flight | iter 7 |
