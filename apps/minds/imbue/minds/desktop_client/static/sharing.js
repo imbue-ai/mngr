@@ -21,7 +21,7 @@
     h.appendChild(document.createTextNode(isEnabled ? '' : 'Share '));
 
     var codeEl = document.createElement('code');
-    codeEl.className = 'bg-zinc-100 rounded px-1.5 py-0.5 font-mono text-[0.95em]';
+    codeEl.className = 'bg-zinc-100 rounded-md px-1.5 py-0.5 font-mono text-[0.95em]';
     codeEl.textContent = serviceName;
     h.appendChild(codeEl);
 

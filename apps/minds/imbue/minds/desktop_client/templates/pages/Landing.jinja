@@ -24,16 +24,16 @@
       if (!badge) return;
       if (status === 'stuck') {
         badge.textContent = 'Server not responding';
-        badge.className = 'landing-health-badge inline-flex items-center px-2 py-0.5 rounded text-sm font-medium bg-amber-100 text-amber-800';
+        badge.className = 'landing-health-badge inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium bg-amber-100 text-amber-800';
       } else if (status === 'restarting') {
         badge.textContent = 'Restarting...';
-        badge.className = 'landing-health-badge inline-flex items-center px-2 py-0.5 rounded text-sm font-medium bg-amber-100 text-amber-800';
+        badge.className = 'landing-health-badge inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium bg-amber-100 text-amber-800';
       } else if (status === 'restart_failed') {
         badge.textContent = 'Restart failed';
-        badge.className = 'landing-health-badge inline-flex items-center px-2 py-0.5 rounded text-sm font-medium bg-amber-100 text-amber-800';
+        badge.className = 'landing-health-badge inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium bg-amber-100 text-amber-800';
       } else {
         badge.textContent = '';
-        badge.className = 'landing-health-badge hidden inline-flex items-center px-2 py-0.5 rounded text-sm font-medium';
+        badge.className = 'landing-health-badge hidden inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium';
       }
     }
 
@@ -148,7 +148,7 @@
         }
 
         var badge = document.createElement('span');
-        badge.className = 'inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ' + badgeClassForStatus(entry.status);
+        badge.className = 'inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium ' + badgeClassForStatus(entry.status);
         badge.textContent = badgeLabelForStatus(entry.status);
         row.appendChild(badge);
 
@@ -169,7 +169,7 @@
         var isPending = pendingClickedAt && (!lastFullSnapshotAt || pendingClickedAt > snapshotAt);
 
         var btn = document.createElement('button');
-        btn.className = 'px-2 py-1 text-xs rounded border border-zinc-300 bg-white hover:bg-zinc-50 text-zinc-700';
+        btn.className = 'px-2 py-1 text-xs rounded-md border border-zinc-200 bg-white hover:bg-zinc-50 text-zinc-700';
         if (isPending) {
           btn.disabled = true;
           btn.textContent = 'Waiting…';
@@ -219,7 +219,7 @@
       });
     })();
 
-    var BACKUP_BADGE_BASE = 'landing-backup-badge inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ';
+    var BACKUP_BADGE_BASE = 'landing-backup-badge inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium ';
     var BACKUP_RECENT_CREATE_MS = 75 * 60 * 1000;
     var BACKUP_CHECKING_TEXT = 'Checking backups…';
 
@@ -311,7 +311,7 @@
       document.querySelectorAll('.landing-backup-badge').forEach(function (badge) {
         if (badge.textContent === BACKUP_CHECKING_TEXT) {
           badge.textContent = '';
-          badge.className = 'landing-backup-badge hidden inline-flex items-center px-2 py-0.5 rounded text-xs font-medium';
+          badge.className = 'landing-backup-badge hidden inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium';
         }
       });
     }
@@ -419,9 +419,9 @@
                   :data-default-href="goto_href"
                   onclick="window.landingRowClick(event, this)">
               <span class="flex-1 font-medium text-zinc-900 pl-1">{{ agent_names.get(agent_id | string, agent_id) }}</span>
-              <span class="landing-backup-badge hidden inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"></span>
+              <span class="landing-backup-badge hidden inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium"></span>
               <a class="landing-backup-download hidden text-xs text-blue-600 hover:underline cursor-pointer" href="#">download</a>
-              <span class="landing-health-badge hidden inline-flex items-center px-2 py-0.5 rounded text-sm font-medium"></span>
+              <span class="landing-health-badge hidden inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium"></span>
               <Button variant="ghost" size="icon"
                       onclick="event.stopPropagation(); window.landingRestartClick(this)"
                       title="Restart workspace"
