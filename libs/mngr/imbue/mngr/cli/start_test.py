@@ -7,40 +7,33 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
-from imbue.mngr.cli.start import StartCliOptions
 from imbue.mngr.cli.start import _output_result
 from imbue.mngr.cli.start import start
 from imbue.mngr.cli.testing import create_test_agent_state
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.hosts.host import Host
-from imbue.mngr.primitives import AgentAddress
-from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import OutputFormat
 
 
-def test_start_cli_options_fields() -> None:
-    """Test StartCliOptions has required fields."""
-    opts = StartCliOptions(
-        agents=("agent1", "agent2"),
-        agent_list=(AgentAddress(agent=AgentName("agent3")),),
-        connect=False,
-        connect_command=None,
-        restart=False,
-        no_resume=False,
-        dry_run=False,
-        host=(),
-        output_format="human",
-        quiet=False,
-        verbose=0,
-        log_file=None,
-        log_commands=None,
-        plugin=(),
-        disable_plugin=(),
+def test_start_restart_flag_is_recognized_by_parser(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """The --restart flag must be recognized by Click's parser.
+
+    Driving the real CLI proves Click accepts --restart: an unrecognized flag
+    is a usage error (exit code 2 with a "No such option" message), whereas a
+    recognized flag lets the command proceed to agent resolution, which fails
+    with AgentNotFoundError (exit code 1) for a name that does not exist. This
+    exercises the actual parser rather than constructing StartCliOptions by hand.
+    """
+    result = cli_runner.invoke(
+        start,
+        ["nonexistent-restart-agent", "--restart"],
+        obj=plugin_manager,
     )
-    assert opts.agents == ("agent1", "agent2")
-    assert opts.agent_list == (AgentAddress(agent=AgentName("agent3")),)
-    assert opts.connect is False
-    assert opts.restart is False
+    assert result.exit_code == 1, result.output
+    assert "Agent not found: No agent(s) found matching: nonexistent-restart-agent" in result.output
 
 
 def test_start_requires_agent(

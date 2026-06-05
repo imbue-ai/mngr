@@ -1,5 +1,7 @@
 """Unit tests for the help command and topic pages."""
 
+import importlib.metadata
+import re
 import tomllib
 from pathlib import Path
 
@@ -407,18 +409,19 @@ def test_cli_version_flag(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """mngr --version should display version string and exit cleanly."""
+    """mngr --version prints exactly 'mngr <version>' for the installed imbue-mngr distribution."""
+    # imbue-mngr is installed in CI/offload (and in any environment that runs the
+    # test suite via uv), so the version resolves and the flag exits 0. We pin the
+    # expected output to the actual installed version that click.version_option reads
+    # (package_name="imbue-mngr", message="%(prog)s %(version)s" -> "mngr <version>").
+    installed_version = importlib.metadata.version("imbue-mngr")
     result = cli_runner.invoke(
         cli,
         ["--version"],
         obj=plugin_manager,
-        catch_exceptions=True,
+        catch_exceptions=False,
     )
-    # When the package is installed, --version prints the version and exits 0.
-    # In editable/dev installs the package name may not be resolvable, causing
-    # a RuntimeError.  Either outcome proves the flag is wired up correctly.
-    if result.exit_code == 0:
-        assert "mngr" in result.output
-    else:
-        assert result.exception is not None
-        assert "is not installed" in str(result.exception)
+    assert result.exit_code == 0
+    assert result.output.strip() == f"mngr {installed_version}"
+    # The version must be a real release string (e.g. "0.2.10"), not empty or a placeholder.
+    assert re.fullmatch(r"\d+\.\d+.*", installed_version) is not None

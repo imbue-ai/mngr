@@ -91,7 +91,8 @@ def test_emit_event_human_format_with_message(capsys: pytest.CaptureFixture[str]
 def test_emit_event_human_format_without_message(capsys: pytest.CaptureFixture[str]) -> None:
     """emit_event with HUMAN format without message should not output."""
     emit_event("destroyed", {"other": "data"}, OutputFormat.HUMAN)
-    # No exception should be raised
+    captured = capsys.readouterr()
+    assert captured.out == ""
 
 
 def test_emit_event_jsonl_format(capsys: pytest.CaptureFixture[str]) -> None:
@@ -267,7 +268,13 @@ def test_render_format_template_no_fields() -> None:
 
 
 def test_render_format_template_conversion_s() -> None:
-    """render_format_template should apply !s conversion."""
+    """render_format_template should apply !s conversion.
+
+    Because ``render_format_template`` is typed ``values: Mapping[str, str]``, the
+    value is already a ``str`` and ``str("test") == "test"``, so this only exercises
+    the parser/conversion branch for coverage -- ``!s`` is effectively a no-op given
+    string-typed values. (Contrast with ``!r``/``!a`` below, which transform the value.)
+    """
     result = render_format_template("{name!s}", {"name": "test"})
     assert result == "test"
 

@@ -2,9 +2,11 @@ import json
 from datetime import datetime
 from datetime import timezone
 
+import click
 import pluggy
 import pytest
 from click.testing import CliRunner
+from pydantic import BaseModel
 
 from imbue.mngr.cli.snapshot import SnapshotCreateCliOptions
 from imbue.mngr.cli.snapshot import SnapshotDestroyCliOptions
@@ -15,6 +17,9 @@ from imbue.mngr.cli.snapshot import _emit_destroy_dry_run
 from imbue.mngr.cli.snapshot import _emit_destroy_result
 from imbue.mngr.cli.snapshot import _emit_list_snapshots
 from imbue.mngr.cli.snapshot import snapshot
+from imbue.mngr.cli.snapshot import snapshot_create
+from imbue.mngr.cli.snapshot import snapshot_destroy
+from imbue.mngr.cli.snapshot import snapshot_list
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.main import cli
@@ -33,76 +38,37 @@ from imbue.mngr.primitives import SnapshotName
 # =============================================================================
 
 
-def test_snapshot_create_cli_options_fields() -> None:
-    """Test SnapshotCreateCliOptions has required fields."""
-    opts = SnapshotCreateCliOptions(
-        identifiers=("agent1",),
-        agent_list=(AgentAddress(agent=AgentName("agent2")),),
-        hosts=(HostAddress(host=HostName("host1")),),
-        name="my-snapshot",
-        on_error="continue",
-        tag=(),
-        description=None,
-        restart_if_larger_than=None,
-        pause_during=True,
-        wait=True,
-        output_format="human",
-        quiet=False,
-        verbose=0,
-        log_file=None,
-        log_commands=None,
-        plugin=(),
-        disable_plugin=(),
-    )
-    assert opts.identifiers == ("agent1",)
-    assert opts.agent_list == (AgentAddress(agent=AgentName("agent2")),)
-    assert opts.hosts == (HostAddress(host=HostName("host1")),)
-    assert opts.name == "my-snapshot"
-    assert opts.on_error == "continue"
+@pytest.mark.parametrize(
+    "command,options_class,flag,attr",
+    [
+        (snapshot_create, SnapshotCreateCliOptions, "--name", "name"),
+        (snapshot_create, SnapshotCreateCliOptions, "--on-error", "on_error"),
+        (snapshot_create, SnapshotCreateCliOptions, "--host", "hosts"),
+        (snapshot_list, SnapshotListCliOptions, "--limit", "limit"),
+        (snapshot_list, SnapshotListCliOptions, "--host", "hosts"),
+        (snapshot_destroy, SnapshotDestroyCliOptions, "--snapshot", "snapshots"),
+        (snapshot_destroy, SnapshotDestroyCliOptions, "--all-snapshots", "all_snapshots"),
+        (snapshot_destroy, SnapshotDestroyCliOptions, "--force", "force"),
+    ],
+)
+def test_snapshot_click_flags_map_to_cli_option_fields(
+    command: click.Command,
+    options_class: type[BaseModel],
+    flag: str,
+    attr: str,
+) -> None:
+    """Each snapshot subcommand flag must populate the matching options-class field.
 
-
-def test_snapshot_list_cli_options_fields() -> None:
-    """Test SnapshotListCliOptions has required fields."""
-    opts = SnapshotListCliOptions(
-        identifiers=("agent1",),
-        agent_list=(),
-        hosts=(HostAddress(host=HostName("host1")),),
-        limit=10,
-        after=None,
-        before=None,
-        output_format="json",
-        quiet=False,
-        verbose=0,
-        log_file=None,
-        log_commands=None,
-        plugin=(),
-        disable_plugin=(),
-    )
-    assert opts.identifiers == ("agent1",)
-    assert opts.hosts == (HostAddress(host=HostName("host1")),)
-    assert opts.limit == 10
-
-
-def test_snapshot_destroy_cli_options_fields() -> None:
-    """Test SnapshotDestroyCliOptions has required fields."""
-    opts = SnapshotDestroyCliOptions(
-        agents=("agent1",),
-        agent_list=(),
-        snapshots=("snap-123",),
-        all_snapshots=False,
-        force=True,
-        dry_run=False,
-        output_format="human",
-        quiet=False,
-        verbose=0,
-        log_file=None,
-        log_commands=None,
-        plugin=(),
-        disable_plugin=(),
-    )
-    assert opts.snapshots == ("snap-123",)
-    assert opts.force is True
-    assert opts.dry_run is False
+    setup_command_context builds the options class from click params by name, so a
+    flag whose click ``dest`` drifts from the model field name would silently fail
+    to populate. Assert the flag's option exists, targets the expected field, and
+    that the field is declared on the options class.
+    """
+    matching = [p for p in command.params if attr == p.name]
+    assert len(matching) == 1, f"expected exactly one click param named {attr!r}"
+    param = matching[0]
+    assert flag in param.opts or flag in param.secondary_opts
+    assert attr in options_class.model_fields
 
 
 # =============================================================================
@@ -299,56 +265,6 @@ def test_emit_destroy_dry_run_format_template(capsys: pytest.CaptureFixture[str]
 
 
 # =============================================================================
-# Options model instantiation tests
-# =============================================================================
-
-
-def test_snapshot_destroy_cli_options_can_be_instantiated() -> None:
-    """Test SnapshotDestroyCliOptions can be instantiated with all fields."""
-    opts = SnapshotDestroyCliOptions(
-        agents=(),
-        agent_list=(),
-        snapshots=(),
-        all_snapshots=True,
-        force=False,
-        dry_run=False,
-        output_format="json",
-        quiet=True,
-        verbose=1,
-        log_file=None,
-        log_commands=None,
-        plugin=(),
-        disable_plugin=(),
-    )
-    assert opts.all_snapshots is True
-    assert opts.force is False
-    assert opts.quiet is True
-    assert opts.verbose == 1
-
-
-def test_snapshot_list_cli_options_can_be_instantiated() -> None:
-    """Test SnapshotListCliOptions can be instantiated with various field values."""
-    opts = SnapshotListCliOptions(
-        identifiers=("a1", "a2"),
-        agent_list=(AgentAddress(agent=AgentName("a3")),),
-        hosts=(),
-        limit=5,
-        after=None,
-        before=None,
-        output_format="jsonl",
-        quiet=False,
-        verbose=2,
-        log_file=None,
-        log_commands=None,
-        plugin=(),
-        disable_plugin=(),
-    )
-    assert opts.identifiers == ("a1", "a2")
-    assert opts.limit == 5
-    assert opts.verbose == 2
-
-
-# =============================================================================
 # _emit_create_result output format tests (beyond format templates)
 # =============================================================================
 
@@ -476,15 +392,18 @@ def test_emit_list_snapshots_format_template(capsys: pytest.CaptureFixture[str])
     assert "snap-abc\ttest-snapshot" in captured.out
 
 
-def test_emit_list_snapshots_human_with_none_size(capsys: pytest.CaptureFixture[str]) -> None:
-    """_emit_list_snapshots handles None size_bytes correctly."""
+def test_emit_list_snapshots_format_template_none_size_renders_dash(capsys: pytest.CaptureFixture[str]) -> None:
+    """A None size_bytes renders as a standalone "-" in the size column.
+
+    Uses the "{size}" format template (rather than the HUMAN table, whose
+    "-" * 110 separator line would make a bare "-" substring trivially present)
+    so the assertion pins exactly what the None-size column produces.
+    """
     snap = _make_test_snapshot(size_bytes=None)
-    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN, format_template="{size}")
     _emit_list_snapshots([("host-1", snap)], output_opts)
     captured = capsys.readouterr()
-    output = captured.out
-    # size_bytes=None should display as "-"
-    assert "-" in output
+    assert captured.out.strip() == "-"
 
 
 # =============================================================================

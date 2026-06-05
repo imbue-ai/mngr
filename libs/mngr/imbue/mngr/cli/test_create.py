@@ -2,8 +2,8 @@
 
 import os
 import subprocess
-import time
 from pathlib import Path
+from uuid import uuid4
 
 import pluggy
 import pytest
@@ -20,18 +20,35 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
+from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import HostLocation
+from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import TransferMode
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
+from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.logging import LoggingConfig
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import capture_tmux_pane_contents
 from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.testing import tmux_session_exists
 from imbue.mngr.utils.testing import wait_for_agent_session
+
+
+def _get_local_agent_by_name(local_provider: LocalProviderInstance, agent_name: str) -> AgentInterface:
+    """Look up a just-created agent by name on the local host.
+
+    Fails if no agent (or more than one) with that name exists, so callers can
+    assert on the real persisted agent (its name, work_dir, agent_type) rather
+    than only on the create command's exit code.
+    """
+    host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
+    matching = [agent for agent in host.get_agents() if agent.name == AgentName(agent_name)]
+    assert len(matching) == 1, f"Expected exactly one agent named {agent_name!r}, found {[a.name for a in matching]}"
+    return matching[0]
 
 
 @pytest.mark.tmux
@@ -44,7 +61,7 @@ def test_cli_create_via_subprocess(
     mngr_test_root_name: str,
 ) -> None:
     """Test calling the mngr create command via subprocess."""
-    agent_name = f"test-subprocess-{int(time.time())}"
+    agent_name = f"test-subprocess-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
     env = os.environ.copy()
     # Pass the test environment variables to the subprocess for proper isolation
@@ -109,7 +126,7 @@ def test_cli_create_rejects_dirty_tree_by_default(
     mngr_test_root_name: str,
 ) -> None:
     """Without --no-ensure-clean, create should fail if the source git repo has uncommitted changes."""
-    agent_name = f"test-dirty-{int(time.time())}"
+    agent_name = f"test-dirty-{uuid4().hex}"
 
     (temp_git_repo / "untracked-file.txt").write_text("")
     subprocess.run(
@@ -170,7 +187,7 @@ def test_connect_flag_calls_tmux_attach_for_local_agent(
     can verify the agent was created and the returned options indicate a connect should happen,
     without actually calling os.execvp to attach to tmux.
     """
-    agent_name = f"test-connect-local-{int(time.time())}"
+    agent_name = f"test-connect-local-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
     address = parse_new_agent_location(agent_name)
 
@@ -199,7 +216,6 @@ def test_connect_flag_calls_tmux_attach_for_local_agent(
 
         # Verify the returned options indicate connect should happen
         # (_post_create would call connect_to_agent -> os.execvp with tmux attach)
-        assert opts.connect is True
         assert connection_opts.is_reconnect is True
 
 
@@ -209,14 +225,17 @@ def test_no_connect_flag_skips_tmux_attach(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
+    intercepted_execvp_calls: list[tuple[str, list[str]]],
 ) -> None:
     """Test that --no-connect flag skips attaching to the tmux session.
 
     When --no-connect is used, the command should complete and return control
-    to the caller (not exec into tmux attach). We verify this by checking that
-    the CLI completes and returns a result.
+    to the caller without exec-ing into tmux attach. We verify this by asserting
+    that no os.execvpe call was made (the connect path is the only thing that
+    would exec), symmetric with test_connect_flag_calls_tmux_attach_for_local_agent
+    which asserts the connect path was taken.
     """
-    agent_name = f"test-no-connect-{int(time.time())}"
+    agent_name = f"test-no-connect-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -243,6 +262,10 @@ def test_no_connect_flag_skips_tmux_attach(
         # --no-connect skips connecting to the agent after creation
         assert result.exit_code == 0, f"CLI failed with: {result.output}"
 
+        # The connect path is the only thing that exec's into tmux attach; with
+        # --no-connect it must be skipped entirely, so no execvpe call happens.
+        assert intercepted_execvp_calls == []
+
         wait_for(
             lambda: tmux_session_exists(session_name),
             timeout=15.0,
@@ -259,7 +282,7 @@ def test_message_file_flag_reads_message_from_file(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test that --message-file reads the initial message from a file."""
-    agent_name = f"test-message-file-{int(time.time())}"
+    agent_name = f"test-message-file-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     message_file = tmp_path / "message.txt"
@@ -310,7 +333,7 @@ def test_message_and_message_file_both_provided_raises_error(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test that providing both --message and --message-file raises an error."""
-    agent_name = f"test-both-message-{int(time.time())}"
+    agent_name = f"test-both-message-{uuid4().hex}"
 
     message_file = tmp_path / "message.txt"
     message_file.write_text("Hello from file")
@@ -350,7 +373,7 @@ def test_multiline_message_creates_file_and_pipes(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test that multi-line messages are sent using tmux send-keys."""
-    agent_name = f"test-multiline-{int(time.time())}"
+    agent_name = f"test-multiline-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     message_file = tmp_path / "multiline.txt"
@@ -403,7 +426,7 @@ def test_single_line_message_uses_echo(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test that single-line messages are sent using tmux send-keys."""
-    agent_name = f"test-single-line-{int(time.time())}"
+    agent_name = f"test-single-line-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
     single_line_message = "Hello single line"
 
@@ -452,7 +475,7 @@ def test_extra_window_with_named_window(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test that -w with name=command syntax creates a tmux window with the specified name."""
-    agent_name = f"test-named-window-{int(time.time())}"
+    agent_name = f"test-named-window-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -510,7 +533,7 @@ def test_extra_window_without_name_uses_default_window_name(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test that -w without name prefix creates a tmux window with default name (cmd-N)."""
-    agent_name = f"test-default-window-{int(time.time())}"
+    agent_name = f"test-default-window-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -572,7 +595,7 @@ def test_edit_message_sends_edited_content(
     intercepted_execvp_calls: list[tuple[str, list[str]]],
 ) -> None:
     """Test that --edit-message opens an editor and sends the edited message."""
-    agent_name = f"test-edit-message-{int(time.time())}"
+    agent_name = f"test-edit-message-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
     edited_message = "Hello from edited message"
 
@@ -629,7 +652,7 @@ def test_edit_message_with_initial_content(
     intercepted_execvp_calls: list[tuple[str, list[str]]],
 ) -> None:
     """Test that --edit-message with --message uses the message as initial content."""
-    agent_name = f"test-edit-initial-{int(time.time())}"
+    agent_name = f"test-edit-initial-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
     initial_content = "Initial content"
     edited_message = "Edited: " + initial_content
@@ -699,7 +722,7 @@ def test_edit_message_empty_content_does_not_send(
     intercepted_execvp_calls: list[tuple[str, list[str]]],
 ) -> None:
     """Test that empty content from editor does not send a message."""
-    agent_name = f"test-edit-empty-{int(time.time())}"
+    agent_name = f"test-edit-empty-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
     marker_text = "AGENT_READY_MARKER"
 
@@ -746,7 +769,7 @@ def test_edit_message_empty_content_does_not_send(
         )
 
         # Warning should be logged about no message being sent
-        assert "No message to send" in result.output or "empty" in result.output.lower()
+        assert "No message to send" in result.output
 
 
 @pytest.mark.tmux
@@ -758,9 +781,16 @@ def test_template_applies_values_from_config(
     plugin_manager: pluggy.PluginManager,
     tmp_path: Path,
 ) -> None:
-    """Test that --template applies values from the config file."""
-    agent_name = f"test-template-{int(time.time())}"
+    """Test that --template applies values from the config file.
+
+    The template sets ``message`` (and ``ensure_clean``); we observe the
+    template's effect directly by asserting the templated message reaches the
+    agent (the ``cat`` command echoes it into the pane), rather than only
+    checking that the command exits 0.
+    """
+    agent_name = f"test-template-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
+    template_message = f"template-applied-{uuid4().hex}"
 
     # Create a config directory with a template (using test root name)
     config_dir = tmp_path / "project"
@@ -768,11 +798,12 @@ def test_template_applies_values_from_config(
     mngr_dir = config_dir / f".{mngr_test_root_name}"
     mngr_dir.mkdir()
     settings_file = mngr_dir / "settings.toml"
-    settings_file.write_text("""
+    settings_file.write_text(f"""
 is_allowed_in_pytest = true
 
 [create_templates.mytemplate]
 ensure_clean = false
+message = "{template_message}"
 """)
 
     with tmux_session_cleanup(session_name):
@@ -790,8 +821,7 @@ ensure_clean = false
                 "--template",
                 "mytemplate",
                 "--",
-                "sleep",
-                "130005",
+                "cat",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -806,6 +836,15 @@ ensure_clean = false
             error_message=f"Expected tmux session {session_name} to exist",
         )
 
+        # The template's message value flows through to the agent; assert it
+        # actually reaches the pane (the only observable proof the template was
+        # applied, not just that create succeeded).
+        wait_for(
+            lambda: template_message in capture_tmux_pane_contents(TmuxWindowTarget(session_name=session_name)),
+            timeout=15.0,
+            error_message=f"Expected template message '{template_message}' to appear in tmux pane output",
+        )
+
 
 @pytest.mark.tmux
 def test_template_cli_args_take_precedence(
@@ -817,7 +856,7 @@ def test_template_cli_args_take_precedence(
     tmp_path: Path,
 ) -> None:
     """Test that CLI arguments override template values."""
-    agent_name = f"test-template-cli-{int(time.time())}"
+    agent_name = f"test-template-cli-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     # Create a config with a template that sets a message (using test root name)
@@ -882,7 +921,7 @@ def test_template_unknown_template_raises_error(
     tmp_path: Path,
 ) -> None:
     """Test that using an unknown template raises an error."""
-    agent_name = f"test-unknown-template-{int(time.time())}"
+    agent_name = f"test-unknown-template-{uuid4().hex}"
 
     # Create a config with one template (using test root name)
     config_dir = tmp_path / "project"
@@ -977,7 +1016,7 @@ def test_ensure_clean_skipped_with_explicit_base_branch(
     # Make the repo dirty
     (temp_git_repo / "dirty.txt").write_text("uncommitted change")
 
-    agent_name = f"test-base-branch-clean-{int(time.time())}"
+    agent_name = f"test-base-branch-clean-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -1027,7 +1066,7 @@ def test_ensure_clean_skipped_with_explicit_base_branch_git_mirror_mode(
     # Make the repo dirty
     (temp_git_repo / "dirty.txt").write_text("uncommitted change")
 
-    agent_name = f"test-copy-base-clean-{int(time.time())}"
+    agent_name = f"test-copy-base-clean-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -1229,9 +1268,14 @@ def test_same_target_path_in_address_and_flag_accepted(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
+    local_provider: LocalProviderInstance,
 ) -> None:
-    """Specifying the same path in :PATH and --target-path should not conflict."""
-    agent_name = f"test-same-tp-{int(time.time())}"
+    """Specifying the same path in :PATH and --target-path should not conflict.
+
+    Beyond accepting the redundant pair, the resulting agent must actually run
+    in that target directory, so we look the agent up and assert its work_dir.
+    """
+    agent_name = f"test-same-tp-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -1257,6 +1301,9 @@ def test_same_target_path_in_address_and_flag_accepted(
 
         assert result.exit_code == 0, f"CLI failed with: {result.output}"
 
+        agent = _get_local_agent_by_name(local_provider, agent_name)
+        assert agent.work_dir.resolve() == temp_work_dir.resolve()
+
 
 @pytest.mark.tmux
 def test_target_path_flag_works_standalone(
@@ -1264,9 +1311,14 @@ def test_target_path_flag_works_standalone(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
+    local_provider: LocalProviderInstance,
 ) -> None:
-    """--target-path without :PATH in the address should still work."""
-    agent_name = f"test-standalone-tp-{int(time.time())}"
+    """--target-path without :PATH in the address should still work.
+
+    The standalone --target-path must place the agent's work_dir at that path,
+    so we look the agent up and assert its work_dir rather than only the exit code.
+    """
+    agent_name = f"test-standalone-tp-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -1291,6 +1343,9 @@ def test_target_path_flag_works_standalone(
         )
 
         assert result.exit_code == 0, f"CLI failed with: {result.output}"
+
+        agent = _get_local_agent_by_name(local_provider, agent_name)
+        assert agent.work_dir.resolve() == temp_work_dir.resolve()
 
 
 def test_transfer_defaults_to_git_mirror_for_existing_remote_host(
@@ -1410,7 +1465,7 @@ def test_cli_create_from_git_url(
     assertion is against a long-stable top-level file (CLAUDE.md) so the test
     does not break on repo layout churn.
     """
-    agent_name = f"test-git-url-{int(time.time())}"
+    agent_name = f"test-git-url-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):

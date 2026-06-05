@@ -8,7 +8,7 @@ Tests of the non-interactive paths and of the ensure_* helpers live in
 agent_utils_test.py as plain unit tests.
 """
 
-import time
+from uuid import uuid4
 
 import click
 import pytest
@@ -28,14 +28,20 @@ def test_find_agent_by_address_or_interactively_returns_selected_agent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """With a real agent and no address, returns the refs of the agent chosen by the TUI."""
-    agent_name = f"test-select-agent-{int(time.time())}"
+    agent_name = f"test-select-agent-{uuid4().hex}"
     create_test_agent(agent_name, "sleep 564738")
     interactive_ctx = temp_mngr_ctx.model_copy_update(to_update(temp_mngr_ctx.field_ref().is_interactive, True))
 
-    # Monkeypatch only the TUI -- return the first agent from the list.
+    # Monkeypatch only the TUI. Before returning a choice, assert the created
+    # agent was actually handed to the selector -- this guards the listing step,
+    # so the test fails if list_agents returns the wrong set of candidates.
+    def fake_select(agents):
+        assert AgentName(agent_name) in {agent.name for agent in agents}
+        return agents[0]
+
     monkeypatch.setattr(
         "imbue.mngr.cli.agent_utils.select_agent_interactively",
-        lambda agents: agents[0],
+        fake_select,
     )
 
     host_ref, agent_ref = find_agent_by_address_or_interactively(
@@ -56,7 +62,7 @@ def test_find_agent_by_address_or_interactively_raises_abort_when_user_quits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """With a real agent present, raises click.Abort when the TUI returns None (user quit)."""
-    agent_name = f"test-select-quit-{int(time.time())}"
+    agent_name = f"test-select-quit-{uuid4().hex}"
     create_test_agent(agent_name, "sleep 564739")
     interactive_ctx = temp_mngr_ctx.model_copy_update(to_update(temp_mngr_ctx.field_ref().is_interactive, True))
 

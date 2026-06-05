@@ -39,6 +39,7 @@ from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.loader import get_or_create_profile_dir
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostLocation
@@ -87,6 +88,20 @@ def _write_agent_type_command_to_settings(settings_path: Path, type_name: str, c
     agent_types[type_name] = type_table
     settings_doc["agent_types"] = agent_types
     save_config_file(settings_path, settings_doc)
+
+
+def _get_only_local_agent(local_provider: LocalProviderInstance) -> AgentInterface:
+    """Return the single agent on the local host, failing if there is not exactly one.
+
+    Lets a create test assert on the real persisted agent (its name,
+    agent_type, work_dir) rather than only the command's exit code. The local
+    provider's host is the only place a ``local`` create lands, so finding the
+    agent there is itself proof the agent was created on the local provider.
+    """
+    host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
+    agents = host.get_agents()
+    assert len(agents) == 1, f"Expected exactly one local agent, found {[a.name for a in agents]}"
+    return agents[0]
 
 
 # =============================================================================
@@ -535,9 +550,10 @@ def test_resolve_source_location_clones_git_url(
 
 
 def test_resolve_target_host_with_auto_start_enabled(
+    local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """_resolve_target_host returns an online host when target is None and is_start_desired=True."""
+    """_resolve_target_host returns the started local host when target is None and is_start_desired=True."""
     result = _resolve_target_host(
         target_host=None,
         mngr_ctx=temp_mngr_ctx,
@@ -545,13 +561,53 @@ def test_resolve_target_host_with_auto_start_enabled(
     )
 
     assert isinstance(result, OnlineHostInterface)
+    # The resolved host must actually be the live local host (proves it was
+    # started/online, not merely that the call returned some OnlineHostInterface).
+    assert result.id == local_provider.host_id
+    assert result.is_local
+
+
+def test_resolve_target_host_with_auto_start_disabled_returns_already_online_local_host(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """With is_start_desired=False, the already-online local host is returned without raising.
+
+    ensure_host_started short-circuits when the host is already a live Host, so
+    disabling auto-start does not block resolution of the local default host.
+    This covers the is_start_desired=False branch the auto-start test does not.
+    """
+    result = _resolve_target_host(
+        target_host=None,
+        mngr_ctx=temp_mngr_ctx,
+        is_start_desired=False,
+    )
+
+    assert isinstance(result, OnlineHostInterface)
+    assert result.id == local_provider.host_id
+    assert result.is_local
+
+
+def test_resolve_target_host_passes_through_new_host_options(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A NewHostOptions target is returned unchanged (host creation is deferred to api_create)."""
+    new_host_options = NewHostOptions(provider=ProviderInstanceName("modal"))
+
+    result = _resolve_target_host(
+        target_host=new_host_options,
+        mngr_ctx=temp_mngr_ctx,
+        is_start_desired=True,
+    )
+
+    assert result is new_host_options
 
 
 def test_resolve_target_host_with_host_reference(
     local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """_resolve_target_host resolves a DiscoveredHost to an online host."""
+    """_resolve_target_host resolves a DiscoveredHost to the matching started online host."""
     host_ref = DiscoveredHost(
         provider_name=ProviderInstanceName("local"),
         host_id=local_provider.host_id,
@@ -565,6 +621,8 @@ def test_resolve_target_host_with_host_reference(
     )
 
     assert isinstance(result, OnlineHostInterface)
+    assert result.id == local_provider.host_id
+    assert result.is_local
 
 
 # =============================================================================
@@ -812,7 +870,7 @@ def test_resolve_agent_type_name_raises_when_nothing_supplied() -> None:
 
 def test_resolve_agent_type_name_error_mentions_available_types() -> None:
     """The 'no type provided' error must list every available type so the user can copy-paste one."""
-    with pytest.raises(UserInputError, match="claude.*my-custom"):
+    with pytest.raises(UserInputError, match=r"Available agent types: claude, my-custom"):
         _resolve_agent_type_name(None, False, None, ("claude", "my-custom"))
 
 
@@ -916,20 +974,22 @@ def test_create_headless_streams_output(
 
 
 @pytest.mark.tmux
-def test_create_headless_with_message_does_not_raise(
+def test_create_headless_with_message_routes_through_staging(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
     temp_host_dir: Path,
     tmp_path: Path,
 ) -> None:
-    """Passing --message on the headless path must not blow up in api_create.
+    """--message on the headless path must be routed through stage_initial_message.
 
     Headless agents cannot receive a message via wait_for_ready_signal +
-    send_message (both raise), so api_create must take the headless branch
-    and deliver the prompt through stage_initial_message instead. The
-    agent command here (a plain ``echo``) ignores the prompt file
-    (headless_command has no prompt semantics); the test is purely
-    checking that the flow completes when --message is supplied.
+    send_message (both raise), so api_create must take the headless branch and
+    call ``stage_initial_message`` instead. ``headless_command`` has no
+    prompt-file protocol, so its (default) ``stage_initial_message`` logs a
+    warning naming the agent class rather than delivering the prompt. Asserting
+    that warning fires proves the staging branch was actually taken for the
+    supplied ``--message`` -- which the previous "does not raise" assertions
+    (shared verbatim with the no-message streaming test) never observed.
     """
     profile_dir = get_or_create_profile_dir(temp_host_dir)
     _write_agent_type_command_to_settings(
@@ -956,6 +1016,11 @@ def test_create_headless_with_message_does_not_raise(
 
     assert result.exit_code == 0, f"CLI failed: {result.output}"
     assert "headless-test-output" in result.output
+    # The headless staging branch ran stage_initial_message for HeadlessCommand,
+    # whose default implementation warns it cannot deliver the message. This is
+    # the observable proof --message was staged (vs. routed via send_message,
+    # which the headless path never reaches).
+    assert "Ignoring initial_message for agent type HeadlessCommand" in result.output
 
 
 # =============================================================================
@@ -1040,6 +1105,9 @@ def test_create_headless_rejects_multiple_incompatible_flags(
     )
 
     assert result.exit_code != 0
+    # Assert the flags are listed in the rejection message specifically, not
+    # just echoed anywhere in click's usage/error text on some unrelated failure.
+    assert "does not support" in result.output
     assert "--reconnect" in result.output
     assert "--reuse" in result.output
     assert "--start-on-boot" in result.output
@@ -1833,8 +1901,14 @@ def test_create_accepts_name_flag_alone(
     cli_runner: CliRunner,
     temp_work_dir: Path,
     plugin_manager: pluggy.PluginManager,
+    local_provider: LocalProviderInstance,
 ) -> None:
-    """--name alone (no positional) should work for specifying the agent address."""
+    """--name alone (no positional) should create the agent on the local host.
+
+    The ``@.local`` address has no agent name, so a name is auto-generated; we
+    verify the feature worked by confirming the agent actually landed on the
+    local host with the requested type, not just that the command exited 0.
+    """
     result = cli_runner.invoke(
         create,
         [
@@ -1854,6 +1928,10 @@ def test_create_accepts_name_flag_alone(
 
     assert result.exit_code == 0
 
+    agent = _get_only_local_agent(local_provider)
+    assert agent.agent_type == AgentTypeName("command")
+    assert agent.work_dir.resolve() == temp_work_dir.resolve()
+
 
 # =============================================================================
 # Tests for --provider flag merge/conflict logic
@@ -1865,8 +1943,9 @@ def test_create_provider_flag_sets_provider(
     cli_runner: CliRunner,
     temp_work_dir: Path,
     plugin_manager: pluggy.PluginManager,
+    local_provider: LocalProviderInstance,
 ) -> None:
-    """--provider without an address provider should be accepted."""
+    """--provider (no provider in the address) should create the agent on that provider's host."""
     result = cli_runner.invoke(
         create,
         [
@@ -1886,6 +1965,10 @@ def test_create_provider_flag_sets_provider(
     )
 
     assert result.exit_code == 0
+
+    agent = _get_only_local_agent(local_provider)
+    assert agent.name == AgentName("my-agent")
+    assert agent.agent_type == AgentTypeName("command")
 
 
 def test_create_provider_flag_conflicts_with_address_provider(
@@ -1908,8 +1991,13 @@ def test_create_provider_flag_redundant_with_address_is_ok(
     cli_runner: CliRunner,
     temp_work_dir: Path,
     plugin_manager: pluggy.PluginManager,
+    local_provider: LocalProviderInstance,
 ) -> None:
-    """--provider matching the address provider should succeed (redundant but not conflicting)."""
+    """--provider matching the address provider should create the agent on that provider's host.
+
+    The redundant (but non-conflicting) provider should be accepted and the
+    agent should actually be created on the local host, not just exit 0.
+    """
     result = cli_runner.invoke(
         create,
         [
@@ -1929,6 +2017,10 @@ def test_create_provider_flag_redundant_with_address_is_ok(
     )
 
     assert result.exit_code == 0
+
+    agent = _get_only_local_agent(local_provider)
+    assert agent.name == AgentName("my-agent")
+    assert agent.agent_type == AgentTypeName("command")
 
 
 # =============================================================================

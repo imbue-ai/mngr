@@ -12,6 +12,12 @@ def _emitted_link_hrefs(ansi: str) -> set[str]:
     return set(re.findall(r"\x1b\]8;[^;]*;([^\x1b]+)\x1b", ansi))
 
 
+def _visible_lines(ansi: str) -> list[str]:
+    """Return the non-blank rendered lines with all ANSI escape sequences stripped."""
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", ansi)
+    return [line.rstrip() for line in plain.splitlines() if line.strip()]
+
+
 def test_anchor_link_resolves_against_same_doc() -> None:
     """An anchor-only link resolves to the doc's own URL plus the fragment."""
     hrefs = _emitted_link_hrefs(markdown_to_ansi("[Sec](#user-input-tracking)", 100, link_base=_BASE))
@@ -62,10 +68,25 @@ def test_link_inside_code_span_is_not_rewritten() -> None:
     """
     output = markdown_to_ansi("Literal `[notalink](nope.md)` here.", 100, link_base=_BASE)
     assert "[notalink](nope.md)" in output
-    assert "github.com" not in output
+    # The code-span text must not have been treated as a link, so no _BASE-derived
+    # href (the result of resolving "nope.md" against _BASE) should be emitted.
+    resolved_nope = "https://github.com/imbue-ai/mngr/blob/v9.9.9/libs/mngr_usage/docs/nope.md"
+    assert resolved_nope not in _emitted_link_hrefs(output)
 
 
 def test_no_link_base_leaves_links_alone() -> None:
     """Without a link_base, relative links are rendered as-is (no rewriting)."""
     hrefs = _emitted_link_hrefs(markdown_to_ansi("[Other](other.md)", 100))
     assert hrefs == {"other.md"}
+
+
+def test_width_wraps_long_line() -> None:
+    """The width argument bounds line length: a long line wraps to multiple narrow lines."""
+    text = "word " * 20
+    narrow = _visible_lines(markdown_to_ansi(text.strip(), 20))
+    wide = _visible_lines(markdown_to_ansi(text.strip(), 100))
+    # At width 100 the whole paragraph fits on a single rendered line.
+    assert len(wide) == 1
+    # At width 20 it must wrap, and no rendered line may exceed the requested width.
+    assert len(narrow) > 1
+    assert max(len(line) for line in narrow) <= 20

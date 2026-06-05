@@ -219,20 +219,23 @@ def test_config_get_nonexistent_key(
     assert result.exit_code != 0
 
 
-def test_config_list_outputs_something(
+def test_config_list_all_includes_prefix(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
+    mngr_test_prefix: str,
 ) -> None:
-    """Test that `config list` produces output."""
+    """`config list --all` includes the resolved ``prefix`` (the test env's prefix)."""
     result = cli_runner.invoke(
         config,
-        ["list"],
+        ["list", "--all", "--format", "json"],
         obj=plugin_manager,
         catch_exceptions=False,
     )
     assert result.exit_code == 0
-    # Should contain some configuration information
-    assert len(result.output.strip()) > 0
+    output = json.loads(result.output)
+    # The merged ``--all`` view includes ``prefix``; the test environment sets it
+    # to mngr_test_prefix via setup_mngr_test_environment.
+    assert output["config"]["prefix"] == mngr_test_prefix
 
 
 # =============================================================================
@@ -361,30 +364,37 @@ def test_config_path_scope_user(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that `config path --scope user` shows user config path."""
+    """`config path --scope user` reports the user settings.toml inside the active profile dir."""
     result = cli_runner.invoke(
         config,
-        ["path", "--scope", "user"],
+        ["path", "--scope", "user", "--format", "json"],
         obj=plugin_manager,
         catch_exceptions=False,
     )
     assert result.exit_code == 0
-    assert len(result.output.strip()) > 0
+    output = json.loads(result.output)
+    assert output["scope"] == "user"
+    # The user config lives at <host_dir>/profiles/<profile_id>/settings.toml.
+    path = Path(output["path"])
+    assert path.name == "settings.toml"
+    assert path.parent.parent.name == "profiles"
 
 
 def test_config_get_existing_key(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
+    mngr_test_prefix: str,
 ) -> None:
-    """Test that `config get prefix` returns the prefix value."""
+    """`config get prefix` resolves to the test environment's configured prefix."""
     result = cli_runner.invoke(
         config,
-        ["get", "prefix"],
+        ["get", "prefix", "--format", "json"],
         obj=plugin_manager,
         catch_exceptions=False,
     )
     assert result.exit_code == 0
-    assert len(result.output.strip()) > 0
+    output = json.loads(result.output)
+    assert output == {"key": "prefix", "value": mngr_test_prefix}
 
 
 def test_config_get_returns_provider_subclass_field(

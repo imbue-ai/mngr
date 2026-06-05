@@ -119,12 +119,23 @@ def test_filter_aliases_drops_alias_when_canonical_matches() -> None:
 
 
 def test_filter_aliases_keeps_alias_when_canonical_does_not_match() -> None:
+    # "c" is an alias for "create", but only "c" and "config" match "c"; the
+    # canonical "create" is NOT in the matched set, so the alias "c" is kept.
+    commands = ["c", "config"]
+    aliases = {"c": "create"}
+
+    result = _filter_aliases(commands, aliases, "c")
+
+    assert result == ["c", "config"]
+
+
+def test_filter_aliases_returns_empty_when_nothing_matches_prefix() -> None:
     commands = ["c", "config", "connect", "create"]
     aliases = {"c": "create"}
 
     result = _filter_aliases(commands, aliases, "cfg")
 
-    # "cfg" does not match anything, so nothing is returned
+    # "cfg" does not match any command, so nothing is returned.
     assert result == []
 
 

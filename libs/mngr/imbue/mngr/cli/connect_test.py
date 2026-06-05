@@ -1,64 +1,61 @@
 """Unit tests for the connect CLI command."""
 
+import pluggy
+from click.testing import CliRunner
+
 from imbue.mngr.cli.agent_selector import build_status_text
 from imbue.mngr.cli.agent_selector import filter_agents
 from imbue.mngr.cli.agent_selector import handle_search_key
-from imbue.mngr.cli.connect import ConnectCliOptions
-from imbue.mngr.primitives import AgentAddress
+from imbue.mngr.cli.connect import connect
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.utils.testing import make_test_agent_details
 
 # =============================================================================
-# Helpers
+# Tests for connect CLI option parsing
 # =============================================================================
 
 
-def _make_connect_opts(
-    agent: AgentAddress | None = None,
-    start: bool = True,
-    reconnect: bool = True,
-    session_command: str | None = None,
-    connect_command: str | None = None,
-    allow_unknown_host: bool = False,
-    output_format: str = "human",
-    quiet: bool = False,
-    verbose: int = 0,
-    log_file: str | None = None,
-    log_commands: bool | None = None,
-    plugin: tuple[str, ...] = (),
-    disable_plugin: tuple[str, ...] = (),
-) -> ConnectCliOptions:
-    """Create a ConnectCliOptions with sensible defaults, allowing overrides."""
-    return ConnectCliOptions(
-        agent=agent,
-        start=start,
-        reconnect=reconnect,
-        session_command=session_command,
-        connect_command=connect_command,
-        allow_unknown_host=allow_unknown_host,
-        output_format=output_format,
-        quiet=quiet,
-        verbose=verbose,
-        log_file=log_file,
-        log_commands=log_commands,
-        plugin=plugin,
-        disable_plugin=disable_plugin,
+def test_connect_session_command_flag_maps_to_option(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """The --session-command flag should parse into ConnectCliOptions.session_command.
+
+    The command raises NotImplementedError for a non-None session_command
+    before any agent resolution, so a NotImplementedError with the expected
+    message proves the flag was parsed into the option (a no-op flag would
+    instead proceed to agent lookup).
+    """
+    result = cli_runner.invoke(
+        connect,
+        ["my-agent", "--session-command", "bash"],
+        obj=plugin_manager,
+        catch_exceptions=True,
     )
 
-
-# =============================================================================
-# Tests for ConnectCliOptions
-# =============================================================================
+    assert isinstance(result.exception, NotImplementedError)
+    assert str(result.exception) == "--session-command is not implemented yet"
 
 
-def test_connect_cli_options_can_be_instantiated() -> None:
-    """Test that ConnectCliOptions can be instantiated with all required fields."""
-    address = AgentAddress(agent=AgentName("my-agent"))
-    opts = _make_connect_opts(agent=address)
-    assert opts.agent == address
-    assert opts.start is True
-    assert opts.reconnect is True
+def test_connect_no_reconnect_flag_maps_to_option(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """The --no-reconnect flag should parse into ConnectCliOptions.reconnect=False.
+
+    The command raises NotImplementedError when reconnect is False before any
+    agent resolution, proving the flag was parsed into the option.
+    """
+    result = cli_runner.invoke(
+        connect,
+        ["my-agent", "--no-reconnect"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+
+    assert isinstance(result.exception, NotImplementedError)
+    assert str(result.exception) == "--no-reconnect is not implemented yet"
 
 
 # =============================================================================

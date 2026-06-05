@@ -1,9 +1,9 @@
 """Tests for the destroy CLI command."""
 
 import subprocess
-import time
 from contextlib import ExitStack
 from pathlib import Path
+from uuid import uuid4
 
 import pluggy
 import pytest
@@ -34,7 +34,7 @@ def test_destroy_single_agent(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test destroying a single agent."""
-    agent_name = f"test-destroy-single-{int(time.time())}"
+    agent_name = f"test-destroy-single-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -89,7 +89,7 @@ def test_destroy_single_agent_via_session(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test destroying a single agent using the --session option."""
-    agent_name = f"test-destroy-session-{int(time.time())}"
+    agent_name = f"test-destroy-session-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -148,7 +148,7 @@ def test_destroy_with_confirmation(
     Stops the tmux session before calling destroy so the agent is not running,
     since non-force destroy blocks running agents.
     """
-    agent_name = f"test-destroy-confirm-{int(time.time())}"
+    agent_name = f"test-destroy-confirm-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -207,7 +207,7 @@ def test_destroy_blocks_running_agent_without_force(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test that destroying a running agent without --force is blocked with expected message."""
-    agent_name = f"test-destroy-blocked-{int(time.time())}"
+    agent_name = f"test-destroy-blocked-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -259,7 +259,7 @@ def test_destroy_nonexistent_agent(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test destroying a non-existent agent."""
+    """Test destroying a non-existent agent fails with a not-found error naming the agent."""
     result = cli_runner.invoke(
         destroy,
         ["nonexistent-agent"],
@@ -267,7 +267,10 @@ def test_destroy_nonexistent_agent(
         catch_exceptions=True,
     )
 
+    # AgentNotFoundError is a ClickException, so Click renders it to output and
+    # exits non-zero rather than propagating the Python exception.
     assert result.exit_code != 0
+    assert "Agent not found: No agent(s) found matching: nonexistent-agent" in result.output
 
 
 @pytest.mark.tmux
@@ -283,7 +286,7 @@ def test_destroy_prints_errors_if_any_identifier_not_found(
     1. Fail without destroying any agents
     2. Include all missing identifiers in the error message
     """
-    agent_name = f"test-destroy-partial-{int(time.time())}"
+    agent_name = f"test-destroy-partial-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
     nonexistent_name1 = "nonexistent-agent-897231"
     nonexistent_name2 = "nonexistent-agent-643892"
@@ -354,7 +357,7 @@ def test_destroy_multiple_agents(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test destroying multiple agents at once."""
-    timestamp = int(time.time())
+    timestamp = uuid4().hex
     agent_name1 = f"test-destroy-multi1-{timestamp}"
     agent_name2 = f"test-destroy-multi2-{timestamp}"
     session_name1 = f"{mngr_test_prefix}{agent_name1}"
@@ -519,7 +522,7 @@ def test_destroy_remove_created_branch_deletes_branch(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test that --remove-created-branch deletes the git branch after destroying a worktree agent."""
-    agent_name = f"test-rm-branch-{int(time.time())}"
+    agent_name = f"test-rm-branch-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
     branch_name = f"mngr/{agent_name}"
 
@@ -572,7 +575,7 @@ def test_destroy_without_remove_created_branch_leaves_branch(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test that destroy without --remove-created-branch leaves the git branch intact."""
-    agent_name = f"test-keep-branch-{int(time.time())}"
+    agent_name = f"test-keep-branch-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
     branch_name = f"mngr/{agent_name}"
 
@@ -622,7 +625,7 @@ def test_destroy_remove_created_branch_graceful_when_no_branch(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test that --remove-created-branch is a no-op when agent has no created_branch_name."""
-    agent_name = f"test-no-branch-{int(time.time())}"
+    agent_name = f"test-no-branch-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -679,7 +682,7 @@ def test_destroy_transfer_none_keeps_shared_worktree(
     the original agent (and any user shell with that worktree as cwd) is
     still using it.
     """
-    timestamp = int(time.time())
+    timestamp = uuid4().hex
     owner_name = f"test-tn-owner-{timestamp}"
     rider_name = f"test-tn-rider-{timestamp}"
     owner_session = f"{mngr_test_prefix}{owner_name}"
@@ -769,7 +772,7 @@ def test_destroy_transfer_none_standalone_keeps_user_worktree(
     """Destroying a standalone --transfer=none agent must not delete the
     pre-existing worktree it ran in.  This covers the case where the user
     points mngr at one of their own git worktrees (not generated by mngr)."""
-    timestamp = int(time.time())
+    timestamp = uuid4().hex
     user_worktree = tmp_path / "user_worktree"
     subprocess.run(
         ["git", "-C", str(temp_git_repo), "worktree", "add", str(user_worktree), "-b", "user-branch"],
@@ -833,7 +836,7 @@ def test_destroy_via_stdin(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test destroying multiple agents by piping names via stdin ('-')."""
-    timestamp = int(time.time())
+    timestamp = uuid4().hex
     agent_name1 = f"test-destroy-stdin1-{timestamp}"
     agent_name2 = f"test-destroy-stdin2-{timestamp}"
     session_name1 = f"{mngr_test_prefix}{agent_name1}"

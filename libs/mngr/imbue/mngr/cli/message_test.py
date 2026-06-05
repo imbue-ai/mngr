@@ -1,5 +1,7 @@
 import json
+from collections.abc import Callable
 from pathlib import Path
+from uuid import uuid4
 
 import click
 import pluggy
@@ -16,8 +18,6 @@ from imbue.mngr.cli.message import _emit_output
 from imbue.mngr.cli.message import _get_message_content
 from imbue.mngr.cli.message import message
 from imbue.mngr.config.data_types import OutputOptions
-from imbue.mngr.primitives import AgentAddress
-from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import OutputFormat
 
 _DEFAULT_OPTS = MessageCliOptions(
@@ -38,42 +38,20 @@ _DEFAULT_OPTS = MessageCliOptions(
 )
 
 
-def test_message_cli_options_has_expected_fields() -> None:
-    """Test that MessageCliOptions has all expected fields."""
-    opts = MessageCliOptions(
-        agents=("agent1", "agent2"),
-        agent_list=(AgentAddress(agent=AgentName("agent3")),),
-        message_content="Hello",
-        message_file=None,
-        on_error="continue",
-        start=False,
-        provider=(),
-        output_format="human",
-        quiet=False,
-        verbose=0,
-        log_file=None,
-        log_commands=None,
-        plugin=(),
-        disable_plugin=(),
-    )
-    assert opts.agents == ("agent1", "agent2")
-    assert opts.agent_list == (AgentAddress(agent=AgentName("agent3")),)
-    assert opts.message_content == "Hello"
-    assert opts.message_file is None
-
-
 def test_get_message_content_returns_option_when_provided() -> None:
     """Test that _get_message_content returns the option value when provided."""
     result = _get_message_content("Hello World", click.Context(click.Command("test")), is_interactive=False)
     assert result == "Hello World"
 
 
-def test_emit_human_output_handles_no_agents() -> None:
-    """Test that _emit_human_output handles no agents case."""
+def test_emit_human_output_handles_no_agents(capsys: pytest.CaptureFixture[str]) -> None:
+    """An empty result prints the 'no agents found' message and nothing else."""
     result = MessageResult()
 
-    # Should not raise
     _emit_human_output(result)
+
+    captured = capsys.readouterr()
+    assert captured.out == "No agents found to send message to\n"
 
 
 def test_emit_json_output_formats_successful_agents(capsys: pytest.CaptureFixture[str]) -> None:
@@ -129,11 +107,11 @@ def test_message_requires_agent(
     assert "Must specify at least one agent" in result.output
 
 
-def test_message_nonexistent_agent(
+def test_message_nonexistent_agent_reports_no_agents_found(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test message to a non-existent agent reports no agents found."""
+    """A name that matches no agent reports 'no agents found' and exits 0 (does not fail)."""
     result = cli_runner.invoke(
         message,
         ["nonexistent-agent-55231", "-m", "hello"],
@@ -142,7 +120,34 @@ def test_message_nonexistent_agent(
     )
     # The message command reports "no agents found" rather than failing
     assert result.exit_code == 0
-    assert "No agents found" in result.output
+    assert "No agents found to send message to" in result.output
+
+
+@pytest.mark.tmux
+def test_message_delivers_to_real_local_agent(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    create_test_agent: Callable[[str, str], str],
+) -> None:
+    """Messaging a real, running local agent reports the message was delivered to it.
+
+    Creates and starts an actual local (tmux-backed) agent running a unique
+    ``sleep`` command -- no LLM/network -- then drives the ``message`` command
+    against it and asserts the agent name appears in the success output.
+    """
+    agent_name = f"msg-target-{uuid4().hex}"
+    create_test_agent(agent_name, f"sleep {uuid4().hex}")
+
+    result = cli_runner.invoke(
+        message,
+        [agent_name, "-m", "hello from test"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert f"Message sent to: {agent_name}" in result.output
+    assert "Successfully sent message to 1 agent(s)" in result.output
 
 
 def test_message_no_all_flag(
@@ -260,11 +265,11 @@ def test_emit_human_output_only_failed_agents(capsys: pytest.CaptureFixture[str]
 # =============================================================================
 
 
-def test_message_dash_reads_agent_names_from_input(
+def test_message_dash_reads_nonexistent_agent_names_from_input(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test message '-' reads agent names from stdin and reports them not found."""
+    """'-' reads agent names from stdin; names that match no agent report 'no agents found'."""
     result = cli_runner.invoke(
         message,
         ["-", "-m", "hello"],
@@ -273,7 +278,33 @@ def test_message_dash_reads_agent_names_from_input(
         catch_exceptions=False,
     )
     assert result.exit_code == 0
-    assert "No agents found" in result.output
+    assert "No agents found to send message to" in result.output
+
+
+@pytest.mark.tmux
+def test_message_dash_reads_real_agent_name_from_input(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    create_test_agent: Callable[[str, str], str],
+) -> None:
+    """'-' reads a real agent's name from stdin and the message is delivered to it.
+
+    Confirms the stdin-parsed name is actually resolved to a running agent (not
+    just echoed), by asserting the agent appears in the delivery success output.
+    """
+    agent_name = f"stdin-target-{uuid4().hex}"
+    create_test_agent(agent_name, f"sleep {uuid4().hex}")
+
+    result = cli_runner.invoke(
+        message,
+        ["-", "-m", "hello via stdin"],
+        input=f"{agent_name}\n",
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert f"Message sent to: {agent_name}" in result.output
 
 
 # =============================================================================
@@ -281,12 +312,12 @@ def test_message_dash_reads_agent_names_from_input(
 # =============================================================================
 
 
-def test_message_file_reads_content_from_file(
+def test_message_file_with_nonexistent_agent_reports_no_agents_found(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
     tmp_path: Path,
 ) -> None:
-    """Test that --message-file reads message content from a file and sends it."""
+    """With --message-file but a name matching no agent, nothing is sent: 'no agents found'."""
     message_file = tmp_path / "message.txt"
     message_file.write_text("Hello from file")
 
@@ -298,7 +329,37 @@ def test_message_file_reads_content_from_file(
     )
 
     assert result.exit_code == 0
-    assert "No agents found" in result.output
+    assert "No agents found to send message to" in result.output
+
+
+@pytest.mark.tmux
+def test_message_file_reads_content_and_delivers_to_real_agent(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    create_test_agent: Callable[[str, str], str],
+    tmp_path: Path,
+) -> None:
+    """--message-file reads the file content and the message is delivered to a real agent.
+
+    Drives the full path: read the file, resolve a running local (tmux-backed)
+    agent, and deliver. Asserts the agent appears in the delivery success output.
+    """
+    agent_name = f"file-target-{uuid4().hex}"
+    create_test_agent(agent_name, f"sleep {uuid4().hex}")
+
+    message_file = tmp_path / "message.txt"
+    message_file.write_text("Hello from file")
+
+    result = cli_runner.invoke(
+        message,
+        [agent_name, "--message-file", str(message_file)],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert f"Message sent to: {agent_name}" in result.output
+    assert "Successfully sent message to 1 agent(s)" in result.output
 
 
 def test_message_and_message_file_both_provided_raises_error(

@@ -177,13 +177,16 @@ def test_rename_agent_not_found_fails(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that renaming a non-existent agent fails."""
+    """Test that renaming a non-existent agent fails with a clear message."""
     result = cli_runner.invoke(
         rename,
         ["nonexistent-agent-xyz", "new-name"],
         obj=plugin_manager,
     )
-    assert result.exit_code != 0
+    # A missing agent *name* surfaces as a UserInputError, which Click renders
+    # as an "Error: ..." line with exit code 1 (not a usage error).
+    assert result.exit_code == 1
+    assert "Could not find agent with ID or name: nonexistent-agent-xyz" in result.output
 
 
 def test_rename_to_existing_name_fails(

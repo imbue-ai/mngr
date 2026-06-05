@@ -5,78 +5,15 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.mngr.api.events import EventRecord
-from imbue.mngr.cli.events import EventsCliOptions
 from imbue.mngr.cli.events import _emit_event_record
 from imbue.mngr.cli.events import _write_and_flush_stdout
 from imbue.mngr.cli.events import events
 from imbue.mngr.cli.testing import create_agent_with_events_dir
-from imbue.mngr.primitives import AgentAddress
-from imbue.mngr.primitives import AgentName
-from imbue.mngr.primitives import AgentOrHostAddress
-
-_DEFAULT_TARGET = AgentAddress(agent=AgentName("my-agent"))
-
-
-def _make_events_opts(
-    target: AgentOrHostAddress = _DEFAULT_TARGET,
-    sources: tuple[str, ...] = (),
-    source: tuple[str, ...] = (),
-    include: tuple[str, ...] = (),
-    exclude: tuple[str, ...] = (),
-    follow: bool = False,
-    tail: int | None = None,
-    head: int | None = None,
-) -> EventsCliOptions:
-    return EventsCliOptions(
-        output_format="human",
-        quiet=False,
-        verbose=0,
-        log_file=None,
-        log_commands=None,
-        plugin=(),
-        disable_plugin=(),
-        target=target,
-        sources=sources,
-        source=source,
-        include=include,
-        exclude=exclude,
-        follow=follow,
-        tail=tail,
-        head=head,
-    )
 
 
 def test_events_cli_command_is_named_event_singular() -> None:
     """The CLI command is registered as singular `event` for consistency with other commands."""
     assert events.name == "event"
-
-
-def test_events_cli_options_can_be_constructed() -> None:
-    """Verify the options class can be instantiated with all required fields."""
-    opts = _make_events_opts()
-    assert opts.target == AgentAddress(agent=AgentName("my-agent"))
-    assert opts.follow is False
-    assert opts.tail is None
-    assert opts.head is None
-    assert opts.sources == ()
-    assert opts.source == ()
-
-
-def test_events_cli_options_with_tail() -> None:
-    opts = _make_events_opts(follow=True, tail=50)
-    assert opts.follow is True
-    assert opts.tail == 50
-
-
-def test_events_cli_options_with_head() -> None:
-    opts = _make_events_opts(head=20)
-    assert opts.head == 20
-
-
-def test_events_cli_options_with_sources() -> None:
-    opts = _make_events_opts(sources=("messages",), source=("logs/mngr",))
-    assert opts.sources == ("messages",)
-    assert opts.source == ("logs/mngr",)
 
 
 def test_events_cli_rejects_head_and_tail_together(
@@ -155,13 +92,6 @@ def test_emit_event_record_appends_newline_if_missing(capsys: pytest.CaptureFixt
 # =============================================================================
 # Filter and streaming behavior tests
 # =============================================================================
-
-
-def test_events_cli_options_with_include_and_exclude() -> None:
-    """Verify the include and exclude fields can be set."""
-    opts = _make_events_opts(include=('source == "messages"',), exclude=('source == "logs"',))
-    assert opts.include == ('source == "messages"',)
-    assert opts.exclude == ('source == "logs"',)
 
 
 # =============================================================================

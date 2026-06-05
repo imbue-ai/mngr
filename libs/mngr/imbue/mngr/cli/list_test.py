@@ -12,7 +12,9 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
+from imbue.mngr.api.list import ErrorInfo
 from imbue.mngr.api.list import ListResult
+from imbue.mngr.api.list import ProviderErrorInfo
 from imbue.mngr.cli.list import _StreamingHumanRenderer
 from imbue.mngr.cli.list import _StreamingTemplateEmitter
 from imbue.mngr.cli.list import _compute_column_widths
@@ -30,9 +32,11 @@ from imbue.mngr.cli.list import _should_use_streaming_mode
 from imbue.mngr.cli.list import _sort_agents_by_cel
 from imbue.mngr.cli.list import _truncate_to_width
 from imbue.mngr.cli.list import list_command
+from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
@@ -200,10 +204,16 @@ def test_get_header_label_resolves_alias() -> None:
 
 
 def test_compute_column_widths_resolves_alias_for_min_widths() -> None:
-    """Alias fields (host.provider) should pick up the same configured min width as the canonical name."""
-    aliased = _compute_column_widths(["host.provider"], 120)
-    canonical = _compute_column_widths(["host.provider_name"], 120)
-    assert aliased["host.provider"] == canonical["host.provider_name"]
+    """Alias fields (host.provider) should pick up the same configured min width as the canonical name.
+
+    Using a terminal too narrow to distribute any extra space isolates the min-width
+    resolution: the column collapses to exactly the configured min width (10 for
+    host.provider_name), which the alias must also resolve to.
+    """
+    aliased = _compute_column_widths(["host.provider"], 5)
+    canonical = _compute_column_widths(["host.provider_name"], 5)
+    assert aliased["host.provider"] == 10
+    assert canonical["host.provider_name"] == 10
 
 
 def test_get_field_value_list_index_first() -> None:
@@ -612,23 +622,24 @@ def test_truncate_to_width_very_narrow_column() -> None:
 
 
 def test_format_streaming_header_row_uses_custom_labels() -> None:
-    """_format_streaming_header_row should produce custom header labels."""
+    """_format_streaming_header_row should pin column order, labels, separators, and padding."""
     fields = ["name", "host.name", "state"]
+    # Widths for a 120-col terminal: name=42, host.name=37, state=37 (see _compute_column_widths).
     widths = _compute_column_widths(fields, 120)
     result = _format_streaming_header_row(fields, widths)
-    assert "NAME" in result
-    assert "HOST" in result
-    assert "STATE" in result
+    # Each column is left-justified to its width and joined with a two-space separator;
+    # the final column keeps its trailing padding.
+    assert result == "NAME".ljust(42) + "  " + "HOST".ljust(37) + "  " + "STATE".ljust(37)
 
 
 def test_format_streaming_agent_row_extracts_field_values() -> None:
-    """_format_streaming_agent_row should extract and format agent field values."""
+    """_format_streaming_agent_row should pin column order, values, separators, and padding."""
     agent = make_test_agent_details()
     fields = ["name", "host.provider_name"]
+    # Widths for a 120-col terminal: name=62, host.provider_name=56 (see _compute_column_widths).
     widths = _compute_column_widths(fields, 120)
     result = _format_streaming_agent_row(agent, fields, widths)
-    assert "test-agent" in result
-    assert "local" in result
+    assert result == "test-agent".ljust(62) + "  " + "local".ljust(56)
 
 
 def test_format_streaming_agent_row_truncates_long_values() -> None:
@@ -725,19 +736,30 @@ def test_streaming_renderer_finish_no_agents_shows_no_agents_found(capsys) -> No
 
 
 def test_streaming_renderer_thread_safety() -> None:
-    """Streaming renderer should handle concurrent calls without data corruption."""
+    """Streaming renderer should serialize concurrent writes without splicing rows.
+
+    Each thread renders many agents in a loop. A locking bug typically manifests as
+    interleaved characters within a line (two names spliced together) rather than a
+    wrong line count, so we assert that every expected name appears on exactly one line
+    as the sole data token, and that no line contains an unexpected (corrupted) value.
+    """
     captured = StringIO()
     renderer = _create_streaming_renderer(fields=["name"], is_tty=False, output=captured)
     renderer.start()
 
-    # Send agents from multiple threads concurrently
-    agent_count = 20
-    threads: list[threading.Thread] = []
-    for idx in range(agent_count):
-        agent = make_test_agent_details(name=f"agent-{idx}")
-        thread = threading.Thread(target=renderer, args=(agent,))
-        threads.append(thread)
+    thread_count = 8
+    writes_per_thread = 25
+    # Distinct, equal-length names so any character interleaving produces a token that is
+    # not in the expected set (rather than accidentally matching another valid name).
+    expected_names = {f"agent-{i:04d}" for i in range(thread_count * writes_per_thread)}
 
+    def write_batch(names: list[str]) -> None:
+        for name in names:
+            renderer(make_test_agent_details(name=name))
+
+    sorted_names = sorted(expected_names)
+    batches = [sorted_names[i * writes_per_thread : (i + 1) * writes_per_thread] for i in range(thread_count)]
+    threads = [threading.Thread(target=write_batch, args=(batch,)) for batch in batches]
     for thread in threads:
         thread.start()
     for thread in threads:
@@ -745,25 +767,33 @@ def test_streaming_renderer_thread_safety() -> None:
 
     renderer.finish()
 
-    output = captured.getvalue()
-    # All agents should appear exactly once (header + 20 agent lines)
-    lines = [line for line in output.strip().split("\n") if line.strip()]
-    # 1 header + 20 agent rows
-    assert len(lines) == agent_count + 1
+    lines = [line for line in captured.getvalue().split("\n") if line.strip()]
+    # 1 header row + one row per write, with no dropped or duplicated rows.
+    assert len(lines) == thread_count * writes_per_thread + 1
+    assert lines[0].strip() == "NAME"
+    # Each data row must collapse to exactly one of the expected names (the single column
+    # is the agent name, ljust-padded); a spliced row would yield an unknown token.
+    row_names = [line.strip() for line in lines[1:]]
+    assert sorted(row_names) == sorted_names
 
 
 def test_streaming_renderer_custom_fields() -> None:
-    """Streaming renderer should respect custom field selection."""
+    """Streaming renderer should respect custom field selection, order, and values.
+
+    The renderer computes widths from the live terminal size, so exact padding is not
+    pinned here; instead we assert the header and row collapse to exactly the requested
+    columns in order (whitespace-separated tokens).
+    """
     captured = StringIO()
     renderer = _create_streaming_renderer(fields=["name", "type"], is_tty=False, output=captured)
     renderer.start()
     renderer(make_test_agent_details())
     renderer.finish()
 
-    output = captured.getvalue()
-    assert "NAME" in output
-    assert "TYPE" in output
-    assert "generic" in output
+    lines = [line for line in captured.getvalue().split("\n") if line.strip()]
+    assert len(lines) == 2
+    assert lines[0].split() == ["NAME", "TYPE"]
+    assert lines[1].split() == ["test-agent", "generic"]
 
 
 def test_streaming_renderer_limit_caps_output() -> None:
@@ -1013,22 +1043,35 @@ def test_streaming_template_emitter_limit_caps_output() -> None:
 
 
 def test_streaming_template_emitter_thread_safety() -> None:
-    """_StreamingTemplateEmitter should handle concurrent calls without data corruption."""
+    """_StreamingTemplateEmitter should serialize concurrent writes without splicing lines.
+
+    Each thread emits many lines in a loop. A locking bug typically interleaves
+    characters within a line rather than changing the line count, so we assert every
+    expected name appears on exactly one line and no line is a corrupted splice.
+    """
     captured = StringIO()
     emitter = _StreamingTemplateEmitter(format_template="{name}", output=captured)
 
-    agent_count = 50
-    agents = [make_test_agent_details(name=f"agent-{i}") for i in range(agent_count)]
+    thread_count = 8
+    writes_per_thread = 25
+    expected_names = {f"agent-{i:04d}" for i in range(thread_count * writes_per_thread)}
 
-    threads = [threading.Thread(target=emitter, args=(agent,)) for agent in agents]
+    def emit_batch(names: list[str]) -> None:
+        for name in names:
+            emitter(make_test_agent_details(name=name))
+
+    sorted_names = sorted(expected_names)
+    batches = [sorted_names[i * writes_per_thread : (i + 1) * writes_per_thread] for i in range(thread_count)]
+    threads = [threading.Thread(target=emit_batch, args=(batch,)) for batch in batches]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join()
 
-    output = captured.getvalue()
-    lines = [line for line in output.strip().split("\n") if line]
-    assert len(lines) == agent_count
+    lines = [line for line in captured.getvalue().split("\n") if line]
+    # The template is exactly "{name}", so each line must equal one expected name with
+    # no duplicates, drops, or spliced corruption.
+    assert sorted(lines) == sorted_names
 
 
 # =============================================================================
@@ -1215,8 +1258,7 @@ def test_get_field_value_formats_multiple_labels() -> None:
     agent = make_test_agent_details(labels={"project": "mngr", "env": "prod"})
     result = _get_field_value(agent, "labels")
     # Dict ordering is guaranteed in Python 3.7+ so we can check exact output
-    assert "project=mngr" in result
-    assert "env=prod" in result
+    assert result == "project=mngr, env=prod"
 
 
 def test_get_field_value_accesses_specific_label() -> None:
@@ -1256,23 +1298,53 @@ class FakeApiListAgents:
     ListResult containing the pre-configured agents. If the caller passes
     an on_agent callback (streaming mode), agents are delivered via that
     callback as well.
+
+    To exercise the --on-error handling, an optional ``errors`` list and
+    ``abort_exception`` can be supplied. These mimic the real api_list_agents
+    contract: under ErrorBehavior.ABORT the underlying exception propagates
+    (api_list_agents re-raises), while under ErrorBehavior.CONTINUE the errors
+    are returned on the ListResult (and delivered via on_error if provided)
+    alongside whatever agents were successfully discovered.
     """
 
-    def __init__(self, agents: list[AgentDetails]) -> None:
+    def __init__(
+        self,
+        agents: list[AgentDetails],
+        errors: list[ErrorInfo] | None = None,
+        abort_exception: BaseException | None = None,
+    ) -> None:
         self.agents = agents
+        self.errors = errors or []
+        self.abort_exception = abort_exception
 
     def __call__(self, **kwargs: Any) -> ListResult:
-        result = ListResult(agents=list(self.agents))
+        error_behavior: ErrorBehavior | None = kwargs.get("error_behavior")
+        if self.abort_exception is not None and error_behavior == ErrorBehavior.ABORT:
+            raise self.abort_exception
+
+        result = ListResult(agents=list(self.agents), errors=list(self.errors))
         on_agent: Callable[[AgentDetails], None] | None = kwargs.get("on_agent")
         if on_agent is not None:
             for agent in self.agents:
                 on_agent(agent)
+        on_error: Callable[[ErrorInfo], None] | None = kwargs.get("on_error")
+        if on_error is not None:
+            for error in self.errors:
+                on_error(error)
         return result
 
 
-def _patch_list_agents(monkeypatch: pytest.MonkeyPatch, agents: list[AgentDetails]) -> None:
-    """Replace api_list_agents with a fake that returns the given agents."""
-    monkeypatch.setattr("imbue.mngr.cli.list.api_list_agents", FakeApiListAgents(agents))
+def _patch_list_agents(
+    monkeypatch: pytest.MonkeyPatch,
+    agents: list[AgentDetails],
+    errors: list[ErrorInfo] | None = None,
+    abort_exception: BaseException | None = None,
+) -> None:
+    """Replace api_list_agents with a fake that returns the given agents (and optional errors)."""
+    monkeypatch.setattr(
+        "imbue.mngr.cli.list.api_list_agents",
+        FakeApiListAgents(agents, errors=errors, abort_exception=abort_exception),
+    )
 
 
 # =============================================================================
@@ -1352,11 +1424,14 @@ def test_list_command_human_format_table_with_agents(
     )
 
     assert result.exit_code == 0
-    # Default human format includes NAME, STATE, HOST, PROVIDER headers
-    assert "NAME" in result.output
-    assert "STATE" in result.output
-    assert "my-agent" in result.output
-    assert "RUNNING" in result.output
+    # Batch human output is a tabulate "plain" table over the default display fields
+    # (name, state, host.name, host.provider_name, host.state, labels.project). The
+    # PROJECT column is empty for this agent, so its cells render blank.
+    assert result.output == (
+        "\n"
+        "NAME      STATE    HOST       PROVIDER    HOST STATE    PROJECT\n"
+        "my-agent  RUNNING  test-host  local       RUNNING\n"
+    )
 
 
 def test_list_command_human_format_custom_fields(
@@ -1384,6 +1459,71 @@ def test_list_command_human_format_custom_fields(
     assert "generic" in result.output
     # Should not contain default fields that were not requested
     assert "PROVIDER" not in result.output
+
+
+@pytest.mark.allow_warnings
+def test_list_command_on_error_continue_shows_agents_and_warns(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--on-error continue should display successfully-discovered agents and exit 1.
+
+    A provider error is induced via the faked api_list_agents: under CONTINUE it returns
+    the working provider's agents plus a ProviderErrorInfo (matching the real contract).
+    The CLI logs a warning per error (allow_warnings opts out of the no-warnings check)
+    and exits non-zero because at least one error occurred (see _run_list_iteration /
+    _list_streaming_human in list.py). The behavioral distinction from --on-error abort
+    is that the working provider's agent is still displayed.
+    """
+    agents = [make_test_agent_details(name="survivor", state=AgentLifecycleState.RUNNING)]
+    errors: list[ErrorInfo] = [
+        ProviderErrorInfo(
+            exception_type="ProviderDiscoveryError",
+            message="broken provider",
+            provider_name=ProviderInstanceName("broken"),
+        )
+    ]
+    _patch_list_agents(monkeypatch, agents, errors=errors)
+
+    result = cli_runner.invoke(
+        list_command,
+        ["--on-error", "continue"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    # Errors present -> non-zero exit, but the working provider's agent is still shown.
+    assert result.exit_code == 1
+    assert "survivor" in result.output
+
+
+def test_list_command_on_error_abort_raises_and_shows_nothing(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--on-error abort should stop on the first provider error before displaying agents.
+
+    Under ABORT the faked api_list_agents re-raises (as the real one does), so no agent
+    rows are emitted; the MngrError (a ClickException) renders as an Error message and
+    the command exits non-zero.
+    """
+    agents = [make_test_agent_details(name="survivor", state=AgentLifecycleState.RUNNING)]
+    abort_exception = MngrError("broken provider")
+    _patch_list_agents(monkeypatch, agents, abort_exception=abort_exception)
+
+    result = cli_runner.invoke(
+        list_command,
+        ["--on-error", "abort"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code != 0
+    # ABORT raises before any agent row is rendered, so nothing is displayed.
+    assert "survivor" not in result.output
+    assert "broken provider" in result.output
 
 
 def test_list_command_custom_header_overrides_default(

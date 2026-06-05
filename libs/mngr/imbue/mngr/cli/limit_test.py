@@ -14,8 +14,6 @@ from imbue.mngr.cli.limit import limit
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.interfaces.data_types import ActivityConfig
 from imbue.mngr.primitives import ActivitySource
-from imbue.mngr.primitives import AgentAddress
-from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import OutputFormat
 
@@ -50,34 +48,6 @@ def _make_limit_opts(
         plugin=(),
         disable_plugin=(),
     )
-
-
-def test_limit_cli_options_fields() -> None:
-    """Test LimitCliOptions has required fields."""
-    opts = LimitCliOptions(
-        agents=("agent1", "agent2"),
-        agent_list=(AgentAddress(agent=AgentName("agent3")),),
-        hosts=(),
-        start_on_boot=None,
-        idle_timeout=None,
-        idle_mode=None,
-        activity_sources=None,
-        add_activity_source=(),
-        remove_activity_source=(),
-        refresh_ssh_keys=False,
-        add_ssh_key=(),
-        remove_ssh_key=(),
-        output_format="human",
-        quiet=False,
-        verbose=0,
-        log_file=None,
-        log_commands=None,
-        plugin=(),
-        disable_plugin=(),
-    )
-    assert opts.agents == ("agent1", "agent2")
-    assert opts.agent_list == (AgentAddress(agent=AgentName("agent3")),)
-    assert opts.hosts == ()
 
 
 def test_limit_requires_target(
@@ -242,6 +212,57 @@ def test_build_updated_activity_config_add_remove_source() -> None:
     assert ActivitySource.BOOT not in result.activity_sources
 
 
+def test_build_updated_activity_config_rejects_bogus_activity_source() -> None:
+    """An unrecognized --activity-sources value should raise ValueError from ActivitySource."""
+    current = ActivityConfig(
+        idle_timeout_seconds=3600,
+        activity_sources=(ActivitySource.CREATE,),
+    )
+    with pytest.raises(ValueError):
+        _build_updated_activity_config(
+            current=current,
+            idle_timeout_str=None,
+            idle_mode_str=None,
+            activity_sources_str="bogus",
+            add_activity_source=(),
+            remove_activity_source=(),
+        )
+
+
+def test_build_updated_activity_config_rejects_bogus_idle_mode() -> None:
+    """An unrecognized --idle-mode value should raise ValueError from IdleMode."""
+    current = ActivityConfig(
+        idle_timeout_seconds=3600,
+        activity_sources=(ActivitySource.CREATE,),
+    )
+    with pytest.raises(ValueError):
+        _build_updated_activity_config(
+            current=current,
+            idle_timeout_str=None,
+            idle_mode_str="bogus",
+            activity_sources_str=None,
+            add_activity_source=(),
+            remove_activity_source=(),
+        )
+
+
+def test_limit_cli_rejects_bogus_activity_source(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """The limit CLI should surface a clear message for an invalid --add-activity-source value."""
+    result = cli_runner.invoke(
+        limit,
+        ["my-agent", "--add-activity-source", "bogus"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+
+    assert result.exit_code != 0
+    assert "Invalid value" in result.output
+    assert "'bogus'" in result.output
+
+
 def test_activity_sources_mutually_exclusive_with_add_remove(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
@@ -345,7 +366,7 @@ def test_limit_output_result_json(capsys: pytest.CaptureFixture[str]) -> None:
     captured = capsys.readouterr()
     data = json.loads(captured.out.strip())
     assert data["count"] == 1
-    assert len(data["changes"]) == 1
+    assert data["changes"][0] == {"setting": "idle_timeout", "value": 300}
 
 
 def test_limit_output_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
@@ -357,3 +378,4 @@ def test_limit_output_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
     data = json.loads(captured.out.strip())
     assert data["event"] == "limit_result"
     assert data["count"] == 1
+    assert data["changes"][0] == {"setting": "idle_timeout", "value": 300}

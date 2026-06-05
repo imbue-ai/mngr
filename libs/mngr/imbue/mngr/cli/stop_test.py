@@ -2,6 +2,7 @@
 
 import json
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 
 import pluggy
@@ -9,7 +10,6 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.mngr.api.discovery_events import write_full_discovery_snapshot
-from imbue.mngr.cli.stop import StopCliOptions
 from imbue.mngr.cli.stop import _ensure_providers_support_host_shutdown
 from imbue.mngr.cli.stop import _output_result
 from imbue.mngr.cli.stop import _stop_hosts_for_addresses
@@ -34,29 +34,25 @@ from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 
 
-def test_stop_cli_options_fields() -> None:
-    """Test StopCliOptions has required fields."""
-    opts = StopCliOptions(
-        agents=("agent1", "agent2"),
-        agent_list=(AgentAddress(agent=AgentName("agent3")),),
-        archive=False,
-        sessions=(),
-        stop_host=False,
-        dry_run=False,
-        snapshot_mode=None,
-        graceful=True,
-        graceful_timeout=None,
-        output_format="human",
-        quiet=False,
-        verbose=0,
-        log_file=None,
-        log_commands=None,
-        plugin=(),
-        disable_plugin=(),
+def test_stop_archive_flag_is_recognized_by_parser(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """The --archive flag must be recognized by Click's parser.
+
+    Driving the real CLI proves Click accepts --archive: an unrecognized flag
+    is a usage error (exit code 2), whereas a recognized flag lets the command
+    proceed to agent resolution, which fails with AgentNotFoundError (exit code
+    1) for a name that does not exist. This exercises the actual parser rather
+    than constructing StopCliOptions by hand.
+    """
+    result = cli_runner.invoke(
+        stop,
+        ["nonexistent-archive-agent", "--archive"],
+        obj=plugin_manager,
     )
-    assert opts.agents == ("agent1", "agent2")
-    assert opts.agent_list == (AgentAddress(agent=AgentName("agent3")),)
-    assert opts.sessions == ()
+    assert result.exit_code == 1, result.output
+    assert "Agent not found: No agent(s) found matching: nonexistent-archive-agent" in result.output
 
 
 def test_stop_requires_agent(
@@ -300,39 +296,28 @@ def test_stop_host_uses_ssh_free_resolution(
 
 
 # =============================================================================
-# StopCliOptions additional field tests
+# Additional flag-parsing tests
 # =============================================================================
 
 
-def test_stop_cli_options_accepts_all_optional_fields() -> None:
-    """Test StopCliOptions can be instantiated with all optional fields set."""
-    opts = StopCliOptions(
-        agents=("a1", "a2", "a3"),
-        agent_list=(AgentAddress(agent=AgentName("a4")),),
-        archive=True,
-        sessions=("mngr-session-1", "mngr-session-2"),
-        stop_host=True,
-        dry_run=False,
-        snapshot_mode="auto",
-        graceful=False,
-        graceful_timeout="30s",
-        output_format="json",
-        quiet=True,
-        verbose=2,
-        log_file=None,
-        log_commands=None,
-        plugin=("my-plugin",),
-        disable_plugin=("other-plugin",),
+def test_stop_format_template_flag_is_recognized_by_parser(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """The --format template flag must be recognized by Click's parser.
+
+    Driving the real CLI proves Click accepts --format with a template string:
+    an unrecognized flag is a usage error (exit code 2), whereas a recognized
+    flag lets the command proceed to agent resolution, which fails with
+    AgentNotFoundError (exit code 1) for a name that does not exist.
+    """
+    result = cli_runner.invoke(
+        stop,
+        ["nonexistent-template-agent", "--format", "{name}"],
+        obj=plugin_manager,
     )
-    assert opts.agents == ("a1", "a2", "a3")
-    assert opts.sessions == ("mngr-session-1", "mngr-session-2")
-    assert opts.snapshot_mode == "auto"
-    assert opts.graceful is False
-    assert opts.graceful_timeout == "30s"
-    assert opts.quiet is True
-    assert opts.verbose == 2
-    assert opts.plugin == ("my-plugin",)
-    assert opts.disable_plugin == ("other-plugin",)
+    assert result.exit_code == 1, result.output
+    assert "Agent not found: No agent(s) found matching: nonexistent-template-agent" in result.output
 
 
 # =============================================================================
@@ -378,11 +363,14 @@ def test_stop_output_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 def test_stop_output_result_format_template(capsys: pytest.CaptureFixture[str]) -> None:
-    """Test _output_result with a format template."""
+    """A '{name}' template should render exactly the agent name, one per line."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN, format_template="{name}")
     _output_result(["template-agent"], output_opts)
     captured = capsys.readouterr()
-    assert "template-agent" in captured.out
+    # The template must expand to exactly the name -- nothing else (no count
+    # line, no "Successfully stopped" prefix). A substring check would pass even
+    # if the template were ignored and the default human output emitted.
+    assert captured.out == "template-agent\n"
 
 
 # =============================================================================
@@ -480,7 +468,15 @@ def test_stop_archive_sets_archived_at_label(
         if data_path.exists():
             data = json.loads(data_path.read_text())
             if data.get("name") == "archive-test-agent":
-                assert "archived_at" in data.get("labels", {}), "archived_at label should be set"
+                labels = data.get("labels", {})
+                assert "archived_at" in labels, "archived_at label should be set"
+                archived_at = labels["archived_at"]
+                # The label must be a real ISO-8601 timestamp (stop.py records
+                # datetime.now(timezone.utc).isoformat()), not an empty string
+                # or arbitrary placeholder.
+                assert isinstance(archived_at, str) and archived_at != ""
+                parsed = datetime.fromisoformat(archived_at)
+                assert parsed.tzinfo is not None, "archived_at should be timezone-aware (UTC)"
                 return
 
     raise AssertionError("Could not find archive-test-agent data.json")

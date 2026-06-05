@@ -19,12 +19,15 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.providers.local.instance import LocalProviderInstance
 
 
 def test_get_agent_name_from_session_extracts_name() -> None:
@@ -51,46 +54,73 @@ def test_get_agent_name_from_session_returns_none_when_agent_name_empty() -> Non
     assert result is None
 
 
-def test_offline_host_to_destroy_can_be_instantiated() -> None:
-    """Test that _OfflineHostToDestroy fields can be set (arbitrary_types_allowed)."""
-    # _OfflineHostToDestroy requires actual interface objects (arbitrary_types_allowed).
-    # We verify the model_config allows arbitrary types and that the class has the expected annotations.
-    assert "host" in _OfflineHostToDestroy.model_fields
-    assert "provider" in _OfflineHostToDestroy.model_fields
-    assert "agent_names" in _OfflineHostToDestroy.model_fields
+def test_offline_host_to_destroy_holds_real_interface_objects(
+    local_host: Host,
+    local_provider: LocalProviderInstance,
+) -> None:
+    """_OfflineHostToDestroy must accept real interface instances in its
+    interface-typed fields (this is the whole point of arbitrary_types_allowed:
+    without it, pydantic would reject HostInterface/ProviderInstanceInterface).
 
-
-def test_destroy_targets_has_expected_fields() -> None:
-    """Test that _DestroyTargets has the expected fields."""
-    assert "online_agents" in _DestroyTargets.model_fields
-    assert "offline_hosts" in _DestroyTargets.model_fields
-    # ``online_hosts_with_provider`` is the deduplicated host+provider pairs
-    # the destroy loop uses to force-destroy hosts whose last live agent was
-    # just destroyed (the documented "destroy CLI destroys empty host" contract).
-    assert "online_hosts_with_provider" in _DestroyTargets.model_fields
-
-
-def test_destroy_cli_options_can_be_instantiated() -> None:
-    """Test that DestroyCliOptions can be instantiated with all required fields."""
-    opts = DestroyCliOptions(
-        agents=("agent1",),
-        agent_list=(),
-        force=False,
-        gc=True,
-        remove_created_branch=False,
-        allow_worktree_removal=True,
-        sessions=(),
-        dry_run=False,
-        output_format="human",
-        quiet=False,
-        verbose=0,
-        log_file=None,
-        log_commands=None,
-        plugin=(),
-        disable_plugin=(),
+    The local provider doesn't support true offline hosts, but ``local_host`` is
+    itself a concrete ``HostInterface``, which is all the field's annotation (and
+    arbitrary_types_allowed) requires.
+    """
+    agent_id = AgentId.generate()
+    target = _OfflineHostToDestroy(
+        host=local_host,
+        provider=local_provider,
+        agent_names=[AgentName("agent-a")],
+        agent_ids=[agent_id],
     )
-    assert opts.agents == ("agent1",)
-    assert opts.force is False
+    assert target.host is local_host
+    assert target.provider is local_provider
+    assert target.agent_names == [AgentName("agent-a")]
+    assert target.agent_ids == [agent_id]
+
+
+def test_destroy_targets_holds_real_interface_objects(
+    local_host: Host,
+    local_provider: LocalProviderInstance,
+) -> None:
+    """_DestroyTargets must accept real interface instances (arbitrary_types_allowed)
+    and default online_hosts_with_provider to an empty list when omitted.
+    """
+    offline = _OfflineHostToDestroy(
+        host=local_host,
+        provider=local_provider,
+        agent_names=[AgentName("agent-a")],
+        agent_ids=[AgentId.generate()],
+    )
+    targets = _DestroyTargets(online_agents=[], offline_hosts=[offline])
+    assert targets.online_agents == []
+    assert targets.offline_hosts == [offline]
+    # online_hosts_with_provider has a default_factory of list.
+    assert targets.online_hosts_with_provider == []
+
+
+@pytest.mark.parametrize(
+    "flag,attr",
+    [
+        ("--force", "force"),
+        ("--remove-created-branch", "remove_created_branch"),
+        ("--no-gc", "gc"),
+        ("--no-allow-worktree-removal", "allow_worktree_removal"),
+    ],
+)
+def test_destroy_click_flags_map_to_cli_option_fields(flag: str, attr: str) -> None:
+    """Each destroy click flag must populate the matching DestroyCliOptions field.
+
+    setup_command_context builds DestroyCliOptions from the click params by name,
+    so a flag whose click ``dest`` drifts from the model field name would silently
+    fail to populate. Assert the flag's option exists, targets the expected field,
+    and that the field is declared on the model.
+    """
+    matching = [p for p in destroy.params if attr == p.name]
+    assert len(matching) == 1, f"expected exactly one click param named {attr!r}"
+    param = matching[0]
+    assert flag in param.opts or flag in param.secondary_opts
+    assert attr in DestroyCliOptions.model_fields
 
 
 def test_destroy_requires_agent_or_all(
@@ -177,7 +207,9 @@ def test_destroy_output_result_format_template(capsys: pytest.CaptureFixture[str
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN, format_template="{name}")
     _output_result([AgentName("my-agent")], output_opts)
     captured = capsys.readouterr()
-    assert "my-agent" in captured.out
+    # The "{name}" template renders exactly the agent name, one line, with no
+    # surrounding human-format decoration.
+    assert captured.out.strip() == "my-agent"
 
 
 # =============================================================================
@@ -219,8 +251,10 @@ def test_destroy_address_force_nonexistent_agent(
         catch_exceptions=False,
     )
 
-    # --force swallows AgentNotFoundError and returns 0
+    # --force swallows AgentNotFoundError and returns 0, but still reports the
+    # not-found agent by name so the failure is visible (not silently dropped).
     assert result.exit_code == 0
+    assert "Error destroying agent(s): Agent not found: No agent(s) found matching: nonexistent" in result.output
 
 
 def test_destroy_plain_name_still_works(
@@ -235,8 +269,9 @@ def test_destroy_plain_name_still_works(
         catch_exceptions=False,
     )
 
-    # --force swallows the not-found error
+    # --force swallows the not-found error, but the name is still reported.
     assert result.exit_code == 0
+    assert "Error destroying agent(s): Agent not found: No agent(s) found matching: plain-agent-name" in result.output
 
 
 # =============================================================================
@@ -256,8 +291,10 @@ def test_destroy_dash_reads_agent_names(
         obj=plugin_manager,
         catch_exceptions=False,
     )
-    # --force swallows the not-found error, exits 0
+    # --force swallows the not-found error, exits 0; the stdin-read name is
+    # still reported so it isn't silently dropped.
     assert result.exit_code == 0
+    assert "Error destroying agent(s): Agent not found: No agent(s) found matching: agent-from-stdin" in result.output
 
 
 def test_destroy_dash_empty_input_is_noop(
@@ -270,9 +307,12 @@ def test_destroy_dash_empty_input_is_noop(
         ["-"],
         input="",
         obj=plugin_manager,
-        catch_exceptions=True,
+        catch_exceptions=False,
     )
+    # Empty stdin returns early before any destroy work -- no error output.
     assert result.exit_code == 0
+    assert "Error destroying" not in result.output
+    assert "No agent(s) found matching" not in result.output
 
 
 def test_destroy_dash_multiple_names(
@@ -287,8 +327,13 @@ def test_destroy_dash_multiple_names(
         obj=plugin_manager,
         catch_exceptions=False,
     )
-    # --force swallows the not-found error
+    # --force swallows the not-found error; all three stdin names are reported
+    # (sorted) in a single not-found message.
     assert result.exit_code == 0
+    assert (
+        "Error destroying agent(s): Agent not found: No agent(s) found matching: agent-one, agent-three, agent-two"
+        in result.output
+    )
 
 
 def test_destroy_dash_strips_whitespace(
@@ -303,7 +348,10 @@ def test_destroy_dash_strips_whitespace(
         obj=plugin_manager,
         catch_exceptions=False,
     )
+    # Whitespace and blank lines are stripped: only the trimmed "agent-padded"
+    # is parsed and reported as not-found (no padded variant).
     assert result.exit_code == 0
+    assert "Error destroying agent(s): Agent not found: No agent(s) found matching: agent-padded" in result.output
 
 
 # =============================================================================
