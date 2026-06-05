@@ -1,5 +1,5 @@
-import hashlib
 import json
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -9,6 +9,7 @@ import httpx
 import psycopg2
 import pytest
 from fastapi import HTTPException
+from inline_snapshot import snapshot
 from ovh.exceptions import ResourceNotFoundError as OvhResourceNotFoundError
 from starlette.testclient import TestClient
 from supertokens_python.exceptions import GeneralError as SuperTokensGeneralError
@@ -121,9 +122,17 @@ def test_make_tunnel_name_rejects_double_hyphen_in_username() -> None:
         make_tunnel_name("alice--bob", "agent1")
 
 
-def test_make_tunnel_name_truncates_agent_id() -> None:
+def test_make_tunnel_name_strips_agent_prefix() -> None:
+    # "agent--1" only exercises the "agent-" prefix strip (-> "-1"); it is shorter than the
+    # 16-char cap, so truncation does not fire here (see the dedicated test below).
     result = make_tunnel_name("alice", "agent--1")
     assert result == "alice---1"
+
+
+def test_make_tunnel_name_truncates_agent_id_to_sixteen_chars() -> None:
+    # After stripping "agent-", a 40-char id must be truncated to exactly 16 chars.
+    result = make_tunnel_name("alice", "agent-" + "b" * 40)
+    assert result == "alice--" + "b" * 16
 
 
 def test_make_hostname_format() -> None:
@@ -1432,12 +1441,15 @@ def test_http_ops_access_app_and_policies_roundtrip() -> None:
 def test_http_ops_kv_namespace_create_when_missing() -> None:
     """kv_get/kv_put/kv_delete + namespace creation path."""
     stored: dict[str, str] = {}
+    namespace_create_count = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal namespace_create_count
         path = request.url.path
         if request.method == "GET" and path.endswith("/storage/kv/namespaces"):
             return httpx.Response(200, json=_cf_result([]))
         if request.method == "POST" and path.endswith("/storage/kv/namespaces"):
+            namespace_create_count += 1
             return httpx.Response(200, json=_cf_result({"id": "ns1", "title": "cloudflare-forwarding-defaults"}))
         if "/storage/kv/namespaces/ns1/values/" in path:
             key = path.rsplit("/", 1)[-1]
@@ -1459,6 +1471,9 @@ def test_http_ops_kv_namespace_create_when_missing() -> None:
     assert ops.kv_get("alice--a1") == '{"default": "allow"}'
     ops.kv_delete("alice--a1")
     assert ops.kv_get("alice--a1") is None
+    # The missing-namespace branch must actually create the namespace (exactly once; the id
+    # is cached after the first call).
+    assert namespace_create_count == 1
 
 
 def test_http_ops_kv_namespace_reuses_existing() -> None:
@@ -1568,10 +1583,10 @@ def test_route_create_and_list_service_tokens(monkeypatch: pytest.MonkeyPatch) -
     resp = client.get("/tunnels/testuser--agent1/service-tokens", headers=_admin_headers())
     assert resp.status_code == 200
     listed = resp.json()
-    # FakeCloudflareOps.list_service_tokens returns an empty list by design (it
-    # doesn't persist created tokens), so the listing is empty -- the test
-    # still covers the endpoint + ForwardingCtx.list_service_tokens path.
-    assert listed == []
+    # The created token is surfaced by the listing; the secret is only returned
+    # at creation time, never on a later listing.
+    assert [t["name"] for t in listed] == ["my-token"]
+    assert listed[0]["client_secret"] is None
 
 
 def test_route_service_tokens_agent_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1638,9 +1653,11 @@ def test_ctx_create_service_token_and_list() -> None:
     token = ctx.create_service_token("alice--agent1", "alice", "svc-1")
     assert token.name == "svc-1"
     assert token.client_secret is not None
-    # FakeCloudflareOps.list_service_tokens returns []; list_service_tokens should
-    # reflect that rather than pulling from an internal cache.
-    assert ctx.list_service_tokens() == []
+    # The created token is surfaced by list_service_tokens (which reflects the
+    # ops layer), and the secret is never returned on a listing.
+    listed = ctx.list_service_tokens()
+    assert [t.name for t in listed] == ["svc-1"]
+    assert listed[0].client_secret is None
 
 
 # -- Host pool endpoint tests --
@@ -1942,7 +1959,8 @@ def test_http_ovh_ops_set_delete_at_expiration_is_idempotent_for_gone_vps() -> N
 
     ops = HttpOvhOps(application_key="ak", application_secret="as", consumer_key="ck", endpoint="ovh-us")
     ops.client = _NotFoundClient()
-    # Must not raise: a missing service means there is nothing left to cancel.
+    # The only observable contract here is "returns without raising": a missing service means
+    # there is nothing left to cancel, so the 404 is swallowed with no side effect to assert.
     ops.set_delete_at_expiration("vps-gone.vps.ovh.us", True)
 
 
@@ -2070,6 +2088,8 @@ def test_is_email_paid_bypasses_cache_when_ttl_zero(monkeypatch: pytest.MonkeyPa
 
 
 def test_require_paid_account_allows_when_email_is_listed() -> None:
+    # The only observable contract for the allow path is "returns without raising" (the guard
+    # returns None); the raising branches are covered by the sibling tests below.
     require_paid_account(AdminAuth(username="alice", email="alice@imbue.com"), paid_checker=lambda email: True)
 
 
@@ -2408,7 +2428,11 @@ def test_verify_bucket_ownership_accepts_owned() -> None:
 
 
 def test_derive_s3_secret_matches_sha256() -> None:
-    assert derive_s3_secret_access_key("hello") == hashlib.sha256(b"hello").hexdigest()
+    # Pin the expected digest as a literal rather than recomputing it with hashlib, so an
+    # accidental change to the hashing algorithm or input encoding is caught here.
+    assert derive_s3_secret_access_key("hello") == snapshot(
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    )
 
 
 # --- Route tests ---
@@ -2582,7 +2606,9 @@ def test_r2_keys_migration_declares_all_persisted_columns() -> None:
     migration_path = Path(__file__).parent.parent.parent / "migrations" / "004_r2_keys.sql"
     migration_sql = migration_path.read_text()
     for column in ("access_key_id", "owner_user_id", "bucket_name", "access", "alias", "created_at"):
-        assert column in migration_sql, f"r2_keys migration is missing column {column!r}"
+        # Word-boundary match so e.g. the bare "access" column is not spuriously
+        # satisfied by the substring inside "access_key_id".
+        assert re.search(rf"\b{re.escape(column)}\b", migration_sql), f"r2_keys migration is missing column {column!r}"
 
 
 def test_paid_lists_migration_declares_both_tables() -> None:
@@ -2592,4 +2618,8 @@ def test_paid_lists_migration_declares_both_tables() -> None:
     assert "create table paid_domains" in migration_sql
     assert "create table paid_emails" in migration_sql
     for column in ("is_paid", "created_at", "updated_at"):
-        assert column in migration_sql, f"paid-lists migration is missing column {column!r}"
+        # Word-boundary match so a column is not spuriously satisfied by a substring of
+        # another identifier or of comment prose.
+        assert re.search(rf"\b{re.escape(column)}\b", migration_sql), (
+            f"paid-lists migration is missing column {column!r}"
+        )
