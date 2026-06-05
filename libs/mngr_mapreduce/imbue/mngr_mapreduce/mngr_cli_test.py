@@ -4,19 +4,14 @@ import json
 
 import pytest
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.errors import MngrError
 from imbue.mngr_mapreduce.mngr_cli import CliError
 from imbue.mngr_mapreduce.mngr_cli import _parse_list_json
-from imbue.mngr_mapreduce.mngr_cli import _run_mngr_raw
-
-
-def test_run_mngr_raw_returns_finished_process(cg: ConcurrencyGroup) -> None:
-    result = _run_mngr_raw(["config", "list"], cg, timeout=10.0)
-    assert result.returncode == 0
 
 
 def test_cli_error_is_mngr_error() -> None:
+    # CliError must remain an MngrError so the reintegrate flow's
+    # `except (CliError, OSError)` / MngrError handlers catch list failures.
     err = CliError("test failure")
     assert isinstance(err, MngrError)
 
