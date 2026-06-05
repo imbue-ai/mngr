@@ -126,9 +126,12 @@ class FakeVolume(VolumeInterface):
         """Resolve a volume path to a local filesystem path."""
         # Strip leading slash and resolve relative to root
         clean = path.lstrip("/")
+        root = self.root_dir.resolve()
         resolved = (self.root_dir / clean).resolve()
-        # Ensure we don't escape the root directory
-        if not str(resolved).startswith(str(self.root_dir.resolve())):
+        # Ensure we don't escape the root directory. Use is_relative_to rather
+        # than a string-prefix check, which would let a sibling directory whose
+        # name merely extends the root's (e.g. "<root>_evil") slip through.
+        if not resolved.is_relative_to(root):
             raise ModalProxyError(f"Path escapes volume root: {path}")
         return resolved
 
