@@ -4,11 +4,12 @@ The script reads an agy Stop-hook payload (JSON) on stdin and removes the
 per-agent ``active`` lifecycle marker only when the payload reports
 ``"fullyIdle":true`` -- i.e. when the root agent and every subagent /
 background task it launched have all finished. The marker drives BaseAgent's
-RUNNING/WAITING detection, so the tests pin: clear-on-fully-idle,
-keep-while-not-idle (field omitted, as agy does for the proto's omitempty
-bool), keep on an explicit ``false``, tolerance of pretty-printed whitespace,
-stdout silence (agy treats Stop-hook stdout as a result that can block the
-stop), tolerance of garbage stdin, and loud failure on a missing state dir.
+RUNNING/WAITING detection, so the tests pin: clear-on-fully-idle, keep on an
+explicit ``"fullyIdle":false`` (the form agy actually sends on an interim,
+not-yet-idle Stop -- verified live against agy 1.0.5), keep when the field is
+absent (defensive), tolerance of pretty-printed whitespace, stdout silence
+(agy treats Stop-hook stdout as a result that can block the stop), tolerance
+of garbage stdin, and loud failure on a missing state dir.
 """
 
 from __future__ import annotations
@@ -25,9 +26,11 @@ _CONV = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 def _payload(*, fully_idle: bool | None) -> str:
     """A Stop-hook payload shaped like the real one (verified live, agy 1.0.5).
 
-    ``fully_idle=None`` omits the field, mirroring agy: the proto bool is
-    ``omitempty`` so a not-fully-idle Stop drops it entirely and only a
-    fully-idle Stop emits ``"fullyIdle":true``.
+    agy emits ``fullyIdle`` explicitly: an interim Stop (async work still
+    running) carries ``"fullyIdle":false`` and the final Stop carries
+    ``"fullyIdle":true``. ``fully_idle=None`` drops the field entirely to
+    exercise the defensive path (an unexpected payload shape must not flip the
+    agent to WAITING).
     """
     brain = f"/home/u/.gemini/antigravity-cli/brain/{_CONV}"
     fields = [
@@ -67,17 +70,22 @@ def test_fully_idle_clears_the_marker(tmp_path: Path) -> None:
     assert result.stdout == ""
 
 
-def test_not_idle_omitted_field_keeps_the_marker(tmp_path: Path) -> None:
-    """A not-fully-idle Stop omits fullyIdle (omitempty) -> agent stays RUNNING."""
+def test_explicit_false_keeps_the_marker(tmp_path: Path) -> None:
+    """An interim Stop sends ``"fullyIdle":false`` -> agent stays RUNNING.
+
+    This is the form agy actually emits while a subagent / background task is
+    still running (verified live against agy 1.0.5: a backgrounded shell task
+    produced a ``fullyIdle:false`` Stop followed by a ``fullyIdle:true`` one).
+    """
     _marker(tmp_path).touch()
-    _run(tmp_path, _payload(fully_idle=None))
+    _run(tmp_path, _payload(fully_idle=False))
     assert _marker(tmp_path).exists()
 
 
-def test_explicit_false_keeps_the_marker(tmp_path: Path) -> None:
-    """An explicit ``"fullyIdle":false`` also keeps the marker (defensive)."""
+def test_absent_field_keeps_the_marker(tmp_path: Path) -> None:
+    """A payload missing fullyIdle keeps the marker (defensive, never WAITING-early)."""
     _marker(tmp_path).touch()
-    _run(tmp_path, _payload(fully_idle=False))
+    _run(tmp_path, _payload(fully_idle=None))
     assert _marker(tmp_path).exists()
 
 

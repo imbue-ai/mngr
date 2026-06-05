@@ -282,17 +282,18 @@ CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME: str = "clear_active_marker_when_idle.
 
 # ``active`` is touched on every ``PreInvocation`` (the loop is about to call
 # the model, i.e. the agent is working). It is removed on ``Stop`` *only when
-# fully idle*: agy runs Stop hooks once per execution (the payload carries an
-# ``executionNum``) and reports ``fullyIdle`` -- true only when no subagent or
-# background task is still running. ``clear_active_marker_when_idle.sh`` reads
-# that field from stdin and removes the marker just on the fully-idle Stop, so
-# an agent that goes idle while async work continues keeps reporting RUNNING
-# until that work also completes (agy then fires a final Stop with
-# ``fullyIdle:true``). ``$MNGR_AGENT_STATE_DIR`` expands in agy's shell at
-# hook-execution time. The touch intentionally emits no stdout (``PreInvocation``
-# treats empty output as "no injected steps"; verified live against agy 1.0.3),
-# and the clear script likewise stays silent (agy treats Stop-hook stdout as a
-# structured result that can block the stop).
+# fully idle*: agy runs the Stop hooks each time the root agent goes idle and
+# reports ``fullyIdle`` -- true only when no subagent or background task it
+# launched is still running. ``clear_active_marker_when_idle.sh`` reads that
+# field from stdin and removes the marker just on the fully-idle Stop, so an
+# agent that goes idle while async work continues keeps reporting RUNNING until
+# that work also completes (agy emits ``"fullyIdle":false`` on the interim Stop
+# and fires a final Stop with ``"fullyIdle":true`` once the async work finishes
+# -- both verified live against agy 1.0.5). ``$MNGR_AGENT_STATE_DIR`` expands in
+# agy's shell at hook-execution time. The touch intentionally emits no stdout
+# (``PreInvocation`` treats empty output as "no injected steps"; verified live
+# against agy 1.0.3), and the clear script likewise stays silent (agy treats
+# Stop-hook stdout as a structured result that can block the stop).
 _SET_ACTIVE_COMMAND: str = f'touch "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'
 _CLEAR_ACTIVE_WHEN_IDLE_COMMAND: str = (
     f'bash "$MNGR_AGENT_STATE_DIR/commands/{CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME}"'

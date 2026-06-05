@@ -3,13 +3,15 @@
 # conversation is FULLY idle.
 #
 # agy fires this as a Stop hook handler (see build_antigravity_hooks_config).
-# It runs Stop hooks once per execution (the payload's StopHookArgs carries an
-# `executionNum`), passing a JSON object on stdin that includes
-# `"fullyIdle":<bool>` -- true only when the root agent AND every subagent /
-# background task it launched have all finished, false while async work is
-# still running. Because the proto field is `omitempty`, a not-fully-idle Stop
-# omits the field entirely and only a fully-idle Stop emits `"fullyIdle":true`
-# (verified live against agy 1.0.5).
+# When the root agent goes idle it runs the Stop hooks and passes a JSON object
+# on stdin that includes `"fullyIdle":<bool>` -- true only when the root agent
+# AND every subagent / background task it launched have all finished, and
+# `false` while async work is still running. agy emits the field explicitly in
+# both cases (a not-fully-idle Stop sends `"fullyIdle":false`, not an omitted
+# field), and fires Stop again -- a final time with `"fullyIdle":true` -- once
+# the async work completes and the root agent goes idle for good. Verified live
+# against agy 1.0.5 (a backgrounded shell task produced a `fullyIdle:false`
+# Stop followed by a `fullyIdle:true` Stop).
 #
 # The `active` marker drives BaseAgent's RUNNING/WAITING detection: present =>
 # RUNNING, absent => WAITING. PreInvocation touches it before every model call;
