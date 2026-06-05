@@ -351,15 +351,35 @@
         <div class="mt-1 text-[11px] text-zinc-500 font-mono">Button.jinja :: size=md|lg|icon, block=true</div>
       </div>
 
-      {# Link-styled buttons -- the recurring pattern for inline disclosure
-         toggles ("Configure...", "Show details", "Adjust"). There's no
-         ``variant="link"``; compose it via the ``extra`` slot to keep the
-         Button primitive's surface small. #}
+      {# Inline links. Use the Link component for real navigations -- it
+         picks up the ``text-blue-600 hover:underline`` recipe with an
+         optional ``weight="medium"`` for prominent auth-flow affordances. #}
+      <div class="mb-6">
+        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Links</div>
+        <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-wrap items-center gap-4">
+          <Link href="#">Back to projects</Link>
+          <Link href="#" weight="medium">Sign in</Link>
+          <Link href="#" extra="text-xs">Forgot password</Link>
+        </div>
+        <p class="mt-1 text-[11px] text-zinc-500">
+          ``weight="medium"`` is the auth-flow tab-switch / back-link
+          treatment. Size overrides (``text-xs`` etc.) go through ``extra``.
+        </p>
+        <div class="mt-0.5 text-[11px] text-zinc-500 font-mono">Link.jinja</div>
+      </div>
+
+      {# Link-styled buttons -- the recurring pattern for inline
+         disclosure TOGGLES that look like links but aren't navigations
+         ("Configure...", "Show advanced", "Adjust"). Compose via Button
+         ghost + ``extra`` rather than adding a ``variant="link"`` so the
+         Button primitive's surface stays small. Prefer the Link component
+         over this pattern when the affordance is a real navigation --
+         keyboard focus and accessibility are cleaner on a plain anchor. #}
       <div class="mb-6">
         <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Buttons -- link style (via extra=)</div>
         <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-wrap items-center gap-4">
           <Button variant="ghost"
-                  extra="!p-0 !bg-transparent text-blue-600 hover:!bg-transparent hover:underline hover:text-blue-700">
+                  extra="!p-0 !bg-transparent text-blue-600 hover:!bg-transparent hover:underline hover:!text-blue-700">
             Configure&hellip;
           </Button>
           <Button variant="ghost"

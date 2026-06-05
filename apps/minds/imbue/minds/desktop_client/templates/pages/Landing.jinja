@@ -420,7 +420,7 @@
                   onclick="window.landingRowClick(event, this)">
               <span class="flex-1 font-medium text-zinc-900 pl-1">{{ agent_names.get(agent_id | string, agent_id) }}</span>
               <span class="landing-backup-badge hidden inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium"></span>
-              <a class="landing-backup-download hidden text-xs text-blue-600 hover:underline cursor-pointer" href="#">download</a>
+              <Link href="#" class="landing-backup-download hidden cursor-pointer" extra="text-xs">download</Link>
               <span class="landing-health-badge hidden inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium"></span>
               <Button variant="ghost" size="icon"
                       onclick="event.stopPropagation(); window.landingRestartClick(this)"

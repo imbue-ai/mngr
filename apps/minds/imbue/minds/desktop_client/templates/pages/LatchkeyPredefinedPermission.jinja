@@ -63,11 +63,11 @@
              affordance rather than another permission row. A faint top
              border separates it from the permission list above. #}
           <div class="flex justify-end border-t border-zinc-100 pt-2">
-            <button type="button" id="permissions-adjust-link"
+            <Button variant="ghost" id="permissions-adjust-link"
                     onclick="showPermissionEditor()"
-                    class="text-xs text-blue-600 hover:underline cursor-pointer bg-transparent border-0 p-0">
+                    extra="!p-0 !bg-transparent text-xs text-blue-600 hover:!bg-transparent hover:underline hover:!text-blue-700">
               Adjust
-            </button>
+            </Button>
           </div>
         </Card>
       {% else %}
@@ -76,11 +76,11 @@
           <span class="font-medium">Adjust</span> below to choose what to grant.
         </Notice>
         <div class="flex justify-end mt-3">
-          <button type="button" id="permissions-adjust-link"
+          <Button variant="ghost" id="permissions-adjust-link"
                   onclick="showPermissionEditor()"
-                  class="text-xs text-blue-600 hover:underline cursor-pointer bg-transparent border-0 p-0">
+                  extra="!p-0 !bg-transparent text-xs text-blue-600 hover:!bg-transparent hover:underline hover:!text-blue-700">
             Adjust
-          </button>
+          </Button>
         </div>
       {% endif %}
     </div>

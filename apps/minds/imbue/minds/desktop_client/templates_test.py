@@ -754,6 +754,31 @@ def test_select_honors_width_prop() -> None:
     assert " w-full " not in html
 
 
+def test_link_regular_uses_blue_underline_recipe() -> None:
+    html = CATALOG.render("Link", href="/x", _content="back").strip()
+    assert '<a ' in html
+    assert 'href="/x"' in html
+    assert "text-blue-600" in html
+    assert "hover:underline" in html
+    assert "font-medium" not in html
+
+
+def test_link_medium_weight_adds_font_medium() -> None:
+    html = CATALOG.render("Link", href="/x", weight="medium", _content="Sign in")
+    assert "font-medium" in html
+
+
+def test_link_passes_through_arbitrary_attrs() -> None:
+    html = CATALOG.render(
+        "Link",
+        href="https://example.com",
+        _content="docs",
+        _attrs={"target": "_blank", "rel": "noopener"},
+    )
+    assert 'target="_blank"' in html
+    assert 'rel="noopener"' in html
+
+
 def test_textarea_renders_value_in_content_with_shared_shell() -> None:
     html = CATALOG.render(
         "Textarea",

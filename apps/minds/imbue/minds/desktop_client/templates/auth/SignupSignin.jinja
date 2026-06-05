@@ -42,7 +42,7 @@
       <auth.OauthIcon provider="github" /> Continue with GitHub
     </button>
     <div class="text-center mt-5 text-sm text-zinc-500">
-      Already have an account? <a href="#" data-show-tab="signin" class="text-blue-600 font-medium hover:underline">Sign in</a>
+      Already have an account? <Link href="#" weight="medium" data-show-tab="signin">Sign in</Link>
     </div>
   </div>
 
@@ -59,7 +59,7 @@
         <label for="signin-password" class="block text-sm font-medium text-zinc-900 mb-1.5">Password</label>
         <TextInput type="password" name="password" id="signin-password" required radius="lg" autocomplete="current-password" />
       </div>
-      <div class="text-right -mt-2 mb-4"><a href="/auth/forgot-password" class="text-xs text-blue-600 hover:underline">Forgot password?</a></div>
+      <div class="text-right -mt-2 mb-4"><Link href="/auth/forgot-password" extra="text-xs">Forgot password?</Link></div>
       <ButtonSubmit variant="primary" size="lg" block id="signin-btn">Sign in</ButtonSubmit>
     </form>
     <div class="flex items-center my-5 text-zinc-400 text-xs">
@@ -76,7 +76,7 @@
       <auth.OauthIcon provider="github" /> Continue with GitHub
     </button>
     <div class="text-center mt-5 text-sm text-zinc-500">
-      Don't have an account? <a href="#" data-show-tab="signup" class="text-blue-600 font-medium hover:underline">Create one</a>
+      Don't have an account? <Link href="#" weight="medium" data-show-tab="signup">Create one</Link>
     </div>
   </div>
 </auth.AuthBase>
