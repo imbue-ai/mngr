@@ -406,18 +406,17 @@
       body_class="bg-transparent text-zinc-900 font-sans antialiased"
       head={{ _head }}
       scripts={{ _scripts }}>
-  {# Right-anchored slide-in drawer: full viewport height (including
+  {# Left-anchored slide-in drawer: full viewport height (including
      under the title bar -- the modal view bounds from y=0 in main.js),
      ~70% width capped at a max, dropping to ~90% on small viewports.
-     The dialog is flush with all four edges on its right/top/bottom
-     and has no rounded corners so it reads as a top-level panel
-     attached to the screen edge. The backdrop dims the workspace
-     strip on the left. #}
+     The dialog is flush with the left/top/bottom edges and has no
+     rounded corners so it reads as a top-level panel attached to the
+     screen edge. The backdrop dims the workspace strip on the right. #}
   <div id="inbox-backdrop"
-       class="fixed inset-0 bg-black/30 flex justify-end"
+       class="fixed inset-0 bg-black/30 flex justify-start"
        onclick="onBackdropClick(event)">
     <div id="inbox-dialog"
-         class="relative w-[90vw] md:w-[70vw] max-w-[1100px] h-full flex flex-col bg-white border-l border-zinc-200 shadow-2xl overflow-hidden">
+         class="relative w-[90vw] md:w-[70vw] max-w-[1100px] h-full flex flex-col bg-white border-r border-zinc-200 shadow-2xl overflow-hidden">
       {# Header row. The close button is rendered inline (not via the
          absolute-positioned DialogCloseButton component) so it sits
          vertically aligned with the title. The auto-open checkbox lives
