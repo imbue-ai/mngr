@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed: Retry `modal deploy` when Modal reports "The selected app is locked - probably due to a concurrent modification". Modal serializes mutations to a single app, so two operations targeting the same app name concurrently (e.g. parallel `mngr create` against the same persistent provider app) would race and one would fail. `DirectModalInterface.deploy` now classifies the transient lock as a new retryable `ModalProxyAppLockedError` and rides through it with exponential backoff; non-lock deploy failures still raise immediately.
+
 ## [v0.1.11] - 2026-06-01
 
 ## [v0.1.10] - 2026-05-28

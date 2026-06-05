@@ -6,6 +6,12 @@ For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
 ## 2026-06-04
 
+`mngr forward --observe-via-file` makes the forward server consume discovery by tailing the shared discovery events file in-process rather than spawning its own `mngr observe --discovery-only` subprocess. Per-agent `mngr event` streams are still spawned for discovered agents. The flag is mutually exclusive with `--no-observe` and works with either `--service` or `--forward-port`. In this mode SIGHUP is a no-op (there is no observe child to bounce; the file's own writer re-emits snapshots that the tailer picks up automatically).
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.
+
+## 2026-06-04
+
 `mngr forward` no longer drops a live agent when its provider's discovery merely errored on a poll. The stream manager now retains agents whose provider is in the snapshot's `error_by_provider_name`, keeping their service mapping and per-agent events stream alive (logged at debug). A retained agent is only torn down on an explicit destroy or a later successful snapshot that omits it. A provider that succeeds and simply returns fewer agents still drops the missing ones as before.
 
 ## 2026-06-03

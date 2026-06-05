@@ -1,1 +1,0 @@
-- Refresh the stale test-type docstring in `conftest_hooks.py` that described acceptance tests as running "on all branches except release" and release tests as running "only on release". There is no `release` branch; acceptance tests run on every PR and release tests run via the dedicated Release Tests workflow (manual dispatch and `v*` tag pushes) and TMR. No behavior change.
