@@ -290,12 +290,12 @@
     // -- Approve / Deny submission --
 
     // Bring a just-revealed notification (progress / error / manual
-     // credentials box) into view at the bottom of the detail pane.
-     // Required because the form sits at the top of the right pane and
-     // the notice that's shown after Approve lives below it -- on a
-     // tall request fragment the notice would otherwise be scrolled
-     // off-screen. Scrolls all the way to the bottom of the detail
-     // pane so the notice + its trailing padding are both visible.
+    // credentials box) into view at the bottom of the detail pane.
+    // Required because the form sits at the top of the right pane and
+    // the notice that's shown after Approve lives below it -- on a
+    // tall request fragment the notice would otherwise be scrolled
+    // off-screen. Scrolls all the way to the bottom of the detail
+    // pane so the notice + its trailing padding are both visible.
     function scrollDetailIntoView(el) {
       if (!el) return;
       try {
