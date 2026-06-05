@@ -64,7 +64,7 @@ jobs:
         working-directory: apps/minds
         run: pnpm install --frozen-lockfile
 
-      - name: run launch-smoke spec
+      - name: run macos-launch spec
         working-directory: apps/minds
         run: |
           # Headless on CI; the spec doesn't depend on display, it just
@@ -74,7 +74,7 @@ jobs:
           # it when stdout isn't a TTY -- CI is fine).
           pnpm exec playwright test \
             --config=test/e2e/playwright.config.js \
-            launch-smoke.spec.js \
+            macos-launch.spec.js \
             --reporter=list,html
 
       - name: upload Playwright report

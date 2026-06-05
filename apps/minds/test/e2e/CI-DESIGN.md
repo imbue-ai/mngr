@@ -1,6 +1,6 @@
 # Playwright E2E in CI — design notes
 
-Goal: run `launch-smoke.spec.js`, `drive-existing.js`-equivalent, and a
+Goal: run `macos-launch.spec.js`, `drive-existing.js`-equivalent, and a
 slack-permission-flow scenario in CI, driven by Playwright clicks.
 
 ## Two CI workflows (split by runner capability)
@@ -9,7 +9,7 @@ slack-permission-flow scenario in CI, driven by Playwright clicks.
 
 - Free GitHub-hosted M-series Mac runners (no nested virt; can't boot lima).
 - Scope:
-  - `launch-smoke.spec.js` — `/Applications/Minds.app` launches, Create
+  - `macos-launch.spec.js` — `/Applications/Minds.app` launches, Create
     link visible, projects landing renders.
   - `headed-demo.spec.js` (sans `--headed`) — Create form fills cleanly.
 - Triggers: every push to `wz/minds_onboard` (and PRs).

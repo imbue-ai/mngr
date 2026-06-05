@@ -8,7 +8,7 @@ drive its chat panel through Playwright. Replaces the brittle HTTP+CLI
 
 | Spec | Scope | Requires lima? | Where it runs |
 |---|---|---|---|
-| `launch-smoke.spec.js` | Launch app, assert chrome window + Python backend + create form mount | no | every commit, vanilla macOS runner |
+| `macos-launch.spec.js` | Launch app, assert chrome window + Python backend + create form mount | no | every commit, vanilla macOS runner |
 | `chat-roundtrip.spec.js` | Create LIMA workspace, type a prompt, assert reply | yes (nested virt) | self-hosted `minds-runner` MacBook |
 
 Future:
@@ -31,8 +31,8 @@ Electron and the singleton lock would otherwise collide.
 Then:
 
 ```
-# launch-smoke only (fast, no lima):
-pnpm exec playwright test --config=test/e2e/playwright.config.js launch-smoke.spec.js
+# macos-launch only (fast, no lima):
+pnpm exec playwright test --config=test/e2e/playwright.config.js macos-launch.spec.js
 
 # chat round-trip (needs ANTHROPIC_API_KEY, takes 5-15 min):
 ANTHROPIC_API_KEY=sk-ant-... pnpm exec playwright test \
@@ -48,7 +48,7 @@ pre-release build:
 
 ```
 MINDS_APP_PATH=/tmp/Minds-260530xxxxx.app/Contents/MacOS/Minds \
-  pnpm exec playwright test --config=test/e2e/playwright.config.js launch-smoke.spec.js
+  pnpm exec playwright test --config=test/e2e/playwright.config.js macos-launch.spec.js
 ```
 
 ## Isolation
@@ -61,7 +61,7 @@ up manually with `rm -rf ~/.minds-pw-*`.
 
 ## CI integration (next)
 
-- `minds-macos-launch.yml` — runs `launch-smoke.spec.js` on GitHub's
+- `minds-macos-launch.yml` — runs `macos-launch.spec.js` on GitHub's
   `macos-latest` runner. Truly cold every commit. ~5 min.
 - `minds-launch-to-msg.yml` (existing) — extends the verify job to
   also run `chat-roundtrip.spec.js` on the self-hosted MacBook.
