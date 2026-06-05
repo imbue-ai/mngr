@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import stat
+import subprocess
 from pathlib import Path
 from typing import Callable
 
@@ -223,6 +225,212 @@ def test_wait_script_traps_env_file_cleanup_on_failure() -> None:
         "EXIT trap must be installed BEFORE the env-capture redirect (and "
         "before mngr create) and cleared AFTER successful shred"
     )
+
+
+# The structural tests above pin the *shape* of the generated wait-script.
+# The tests below pin its *behavior* by actually running it under bash with
+# a stub `uv` on PATH, so a behavior-preserving refactor of the template
+# (renamed vars, reordered statements) doesn't break them and -- more
+# importantly -- a script that is syntactically valid but functionally broken
+# (inverted guard, mis-scoped trap, dropped sentinel) is caught.
+_STUB_UV: str = (
+    "#!/usr/bin/env bash\n"
+    "# Stub `uv`: record each invocation and emulate the two real subcommands\n"
+    "# the wait-script issues (`uv run mngr create ...` and\n"
+    "# `uv run python -m ...subagent_wait ...`).\n"
+    'printf \'%s\\n\' "$*" >> "$UV_STUB_LOG"\n'
+    'if [ "${2:-}" = "mngr" ] && [ "${3:-}" = "create" ]; then\n'
+    '    exit "${STUB_MNGR_CREATE_EXIT:-0}"\n'
+    "fi\n"
+    'if [ "${2:-}" = "python" ]; then\n'
+    "    printf 'END_TURN:stub-subagent-reply'\n"
+    "    exit 0\n"
+    "fi\n"
+    "exit 0\n"
+)
+
+
+def _make_stub_uv(bin_dir: Path) -> None:
+    """Drop an executable stub `uv` into ``bin_dir`` (created if needed)."""
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    uv_path = bin_dir / "uv"
+    uv_path.write_text(_STUB_UV)
+    uv_path.chmod(0o755)
+
+
+def _run_generated_wait_script(
+    script_text: str,
+    state_dir: Path,
+    stub_bin: Path,
+    *,
+    mngr_create_exit: int = 0,
+    args: tuple[str, ...] = (),
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    """Write the generated wait-script to disk and run it under bash with the
+    stub `uv` first on PATH. Returns (completed_process, uv_invocation_log)."""
+    script_file = state_dir / "wait.sh"
+    script_file.write_text(script_text)
+    script_file.chmod(0o755)
+    uv_log = state_dir / "uv_stub.log"
+    env = dict(os.environ)
+    env["PATH"] = f"{stub_bin}{os.pathsep}{env['PATH']}"
+    env["MNGR_AGENT_STATE_DIR"] = str(state_dir)
+    env["UV_STUB_LOG"] = str(uv_log)
+    env["STUB_MNGR_CREATE_EXIT"] = str(mngr_create_exit)
+    completed = subprocess.run(
+        ["bash", str(script_file), *args],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return completed, uv_log
+
+
+def _seed_live_sidefiles(state_dir: Path, tool_use_id: str) -> None:
+    """Create the per-tool_use_id state subdirs plus prompt/map files so the
+    wait-script's idempotent guard passes and the init branch runs."""
+    for sub in ("subagent_prompts", "subagent_map", "proxy_commands", "subagent_results"):
+        (state_dir / sub).mkdir(parents=True, exist_ok=True)
+    (state_dir / "subagent_prompts" / f"{tool_use_id}.md").write_text("do the thing")
+    (state_dir / "subagent_map" / f"{tool_use_id}.json").write_text("{}")
+
+
+def test_wait_script_is_syntactically_valid_bash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`bash -n` must accept the generated script. A bad shlex.quote round-trip
+    (e.g. a parent_cwd containing quotes/spaces) or a malformed template edit
+    would produce a script that the shape-matching tests still pass but that
+    bash refuses to parse."""
+    monkeypatch.delenv("UV_TOOL_BIN_DIR", raising=False)
+    script = spawn_hook.build_wait_script(
+        tool_use_id="toolu_syntax",
+        target_name="parent--subagent-foo",
+        parent_cwd="/tmp/some dir/with'a quote",
+    )
+    script_file = tmp_path / "wait.sh"
+    script_file.write_text(script)
+    completed = subprocess.run(["bash", "-n", str(script_file)], capture_output=True, text=True, timeout=30)
+    assert completed.returncode == 0, f"bash -n rejected the generated script:\n{completed.stderr}"
+
+
+def test_wait_script_short_circuits_without_invoking_uv_when_sidefiles_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Behavioral check of the idempotent prelude: with PROMPT_FILE / MAP_FILE
+    absent (PostToolUse already cleaned up), running the script emits the
+    sentinel, exits 0, and never reaches `uv run mngr create`."""
+    monkeypatch.delenv("UV_TOOL_BIN_DIR", raising=False)
+    stub_bin = tmp_path / "bin"
+    _make_stub_uv(stub_bin)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    script = spawn_hook.build_wait_script(
+        tool_use_id="toolu_exec_guard",
+        target_name="parent--subagent-foo",
+        parent_cwd="/tmp/somewhere",
+    )
+
+    completed, uv_log = _run_generated_wait_script(script, state_dir, stub_bin)
+
+    assert completed.returncode == 0, completed.stderr
+    assert "MNGR_PROXY_END_OF_OUTPUT" in completed.stdout
+    # uv was never invoked: the prelude short-circuited before mngr create.
+    assert not uv_log.exists(), f"uv should not run on the cleaned-up path; log: {uv_log.read_text()}"
+
+
+def test_wait_script_trap_shreds_env_file_when_mngr_create_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Behavioral check of the EXIT trap: when `mngr create` exits non-zero,
+    `set -e` aborts the script but the EXIT trap still removes the env-file
+    holding the parent's captured secrets, and the init flag is NOT set (so a
+    retry re-runs create)."""
+    monkeypatch.delenv("UV_TOOL_BIN_DIR", raising=False)
+    stub_bin = tmp_path / "bin"
+    _make_stub_uv(stub_bin)
+    state_dir = tmp_path / "state"
+    tid = "toolu_exec_trap"
+    _seed_live_sidefiles(state_dir, tid)
+    script = spawn_hook.build_wait_script(
+        tool_use_id=tid,
+        target_name="parent--subagent-foo",
+        parent_cwd="/tmp/somewhere",
+    )
+
+    completed, uv_log = _run_generated_wait_script(script, state_dir, stub_bin, mngr_create_exit=1)
+
+    # The failed create aborts the script under set -e.
+    assert completed.returncode != 0
+    # We actually reached the create call (so the env-file had been written)...
+    assert uv_log.exists() and "mngr create" in uv_log.read_text()
+    # ...and the EXIT trap shredded it: no parent secrets left on disk.
+    assert not (state_dir / "proxy_commands" / f"env-{tid}.env").exists()
+    # Init flag untouched -> a subsequent invocation will retry create.
+    assert not (state_dir / "proxy_commands" / f"initialized-{tid}").exists()
+
+
+def test_wait_script_happy_path_relays_subagent_reply_and_cleans_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end behavioral check of the success path: create succeeds,
+    subagent_wait returns END_TURN, and the script writes the result file,
+    prints the body plus the sentinel, shreds the env-file, and marks
+    initialization done."""
+    monkeypatch.delenv("UV_TOOL_BIN_DIR", raising=False)
+    stub_bin = tmp_path / "bin"
+    _make_stub_uv(stub_bin)
+    state_dir = tmp_path / "state"
+    tid = "toolu_exec_ok"
+    _seed_live_sidefiles(state_dir, tid)
+    script = spawn_hook.build_wait_script(
+        tool_use_id=tid,
+        target_name="parent--subagent-foo",
+        parent_cwd="/tmp/somewhere",
+    )
+
+    completed, uv_log = _run_generated_wait_script(script, state_dir, stub_bin)
+
+    assert completed.returncode == 0, completed.stderr
+    # The subagent's reply is relayed verbatim, followed by the sentinel.
+    assert "stub-subagent-reply" in completed.stdout
+    assert "MNGR_PROXY_END_OF_OUTPUT" in completed.stdout
+    # Result file captured the body; env-file shredded; init flag set.
+    assert (state_dir / "subagent_results" / f"{tid}.txt").read_text() == "stub-subagent-reply"
+    assert not (state_dir / "proxy_commands" / f"env-{tid}.env").exists()
+    assert (state_dir / "proxy_commands" / f"initialized-{tid}").exists()
+    # Both subcommands ran: create, then the wait module.
+    log = uv_log.read_text()
+    assert "mngr create" in log
+    assert "subagent_wait" in log
+
+
+def test_wait_script_spawn_only_skips_wait_after_create(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """In --spawn-only (background) mode the script creates the child and exits
+    0 immediately, WITHOUT blocking on subagent_wait -- so no result file is
+    written and the wait module is never invoked."""
+    monkeypatch.delenv("UV_TOOL_BIN_DIR", raising=False)
+    stub_bin = tmp_path / "bin"
+    _make_stub_uv(stub_bin)
+    state_dir = tmp_path / "state"
+    tid = "toolu_exec_bg"
+    _seed_live_sidefiles(state_dir, tid)
+    script = spawn_hook.build_wait_script(
+        tool_use_id=tid,
+        target_name="parent--subagent-foo",
+        parent_cwd="/tmp/somewhere",
+    )
+
+    completed, uv_log = _run_generated_wait_script(script, state_dir, stub_bin, args=("--spawn-only",))
+
+    assert completed.returncode == 0, completed.stderr
+    log = uv_log.read_text()
+    assert "mngr create" in log
+    # The blocking wait module must not be invoked in spawn-only mode.
+    assert "subagent_wait" not in log
+    assert not (state_dir / "subagent_results" / f"{tid}.txt").exists()
+    # Initialization still completed (env shredded, flag set).
+    assert (state_dir / "proxy_commands" / f"initialized-{tid}").exists()
+    assert not (state_dir / "proxy_commands" / f"env-{tid}.env").exists()
 
 
 def test_spawn_prepends_resolved_agent_definition_body_to_prompt_file(
@@ -444,9 +652,9 @@ def test_rewrite_substitutes_output_and_cleans_up(
     # updatedToolOutput is MCP-only. The hook now emits no JSON; the
     # subagent end-turn text reaches the parent via Haiku's own final
     # reply (see hooks/spawn.py wait-script + mngr-proxy.agent.md).
-    # Result file remains on disk for diagnostics? No: the hook still
-    # cleans up side files because they are no longer needed once Haiku
-    # has captured the content from the wait-script's stdout.
+    # PostToolUse removes all per-tool_use_id sidefiles once Haiku has
+    # captured the content from the wait-script's stdout; nothing is
+    # retained for diagnostics on the success path.
     assert not map_file.exists()
     assert not result_file.exists()
     assert not prompt_file.exists()
@@ -828,5 +1036,13 @@ def test_guard_per_agent_plugin_cache_noop_when_cache_missing(tmp_path: Path) ->
     """
     state_dir = tmp_path / "agent-state-no-plugins"
     state_dir.mkdir()
-    # Should not raise.
+
     _stop_hook_guard.guard_per_agent_plugin_cache(state_dir)
+
+    # The contract is "tolerate a missing cache and do nothing": it must not
+    # raise AND must not materialize the cache tree it was looking for (a
+    # regression that did `mkdir(parents=True)` before checking would pass a
+    # bare "did not raise" assertion).
+    cache_root = state_dir / "plugin" / "claude" / "anthropic" / "plugins"
+    assert not cache_root.exists()
+    assert list(state_dir.iterdir()) == []

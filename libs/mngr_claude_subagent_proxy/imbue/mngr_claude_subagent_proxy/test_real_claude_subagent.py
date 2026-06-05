@@ -814,6 +814,14 @@ _PLAN_MODE_PROMPT: Final[str] = (
 )
 
 
+@pytest.mark.xfail(
+    reason="plan-mode propagation is not yet implemented -- see README 'Deferred / "
+    "out-of-scope'. The spawn hook does not forward --permission-mode plan to the "
+    "child's mngr-create call (hooks/spawn.py:build_wait_script), so the child never "
+    "inherits plan mode. strict=True makes this XPASS-and-fail the day the feature "
+    "lands, prompting removal of the marker.",
+    strict=True,
+)
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.rsync
