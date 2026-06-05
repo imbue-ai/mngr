@@ -4,9 +4,9 @@ from typing import Any
 from typing import IO
 
 from imbue.imbue_common.pure import pure
-from imbue.mngr_uncapped_claude.data_types import InputFormat
-from imbue.mngr_uncapped_claude.errors import InvalidStreamJsonInputError
-from imbue.mngr_uncapped_claude.errors import MissingPromptError
+from imbue.mngr_robinhood.data_types import InputFormat
+from imbue.mngr_robinhood.errors import InvalidStreamJsonInputError
+from imbue.mngr_robinhood.errors import MissingPromptError
 
 
 def iter_user_prompts(

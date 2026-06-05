@@ -9,7 +9,7 @@
 > * Use the Concise plan template (Overview, Expected behavior, Changes)
 > * Accept that all mngr errors become `ClickException` / user-facing (clean `Error:` rendering, no traceback) -- there is no internal "show-the-traceback" error tier remaining
 > * Collapse rule: drop a type from a multi-type `except` clause only when it is a strict subclass of another type already in that same clause (verified across packages); leave unrelated types like `OSError`, `docker.errors.*`, `BaseExceptionGroup`, and `ModalProxyError` (which is not a `MngrError`) intact
-> * Delete the tests that exist to document the old two-tier hierarchy (`mngr/errors_test.py::test_consolidated_errors_are_mngr_errors`, `mngr_uncapped_claude/errors_test.py::test_uncapped_claude_errors_are_mngr_errors`) outright; scrub any live docs of the distinction (only changelog files still mention `BaseMngrError`, and those stay as historical records)
+> * Delete the tests that exist to document the old two-tier hierarchy (`mngr/errors_test.py::test_consolidated_errors_are_mngr_errors`, `mngr_robinhood/errors_test.py::test_robinhood_errors_are_mngr_errors`) outright; scrub any live docs of the distinction (only changelog files still mention `BaseMngrError`, and those stay as historical records)
 > * In `imbue_common/logging_test.py`, replace the `BaseMngrError` usage with a local test-only `Exception` subclass, removing the `imbue_common` -> `imbue.mngr` cross-import
 > * Special case (`main.py` top-level handler): keep an explicit `MngrError` in the tuple for readability even though it is now covered by `click.ClickException`
 
@@ -65,11 +65,11 @@ For each, update the import (`BaseMngrError` -> `MngrError`, removing a now-dupl
 
 - `imbue/imbue_common/logging_test.py` -- remove `from imbue.mngr.errors import BaseMngrError`; define a local test-only `class _SampleLoggingError(Exception)` in the test module and use it in the two `raise`/`except` pairs (lines ~168-169, ~407-408). This removes the `imbue_common` -> `imbue.mngr` cross-import.
 
-### `libs/mngr_uncapped_claude`
+### `libs/mngr_robinhood`
 
-- `imbue/mngr_uncapped_claude/cli.py:71` -- `except BaseMngrError` -> `except MngrError`; update import.
-- `imbue/mngr_uncapped_claude/orchestrator.py` -- `:298,376` `except BaseMngrError` -> `except MngrError`; `:698,702` `except (OSError, BaseMngrError)` -> `except (OSError, MngrError)`; update import; reword the `BaseMngrError` comments at lines ~233 and ~270 to reference `MngrError`.
-- `imbue/mngr_uncapped_claude/errors_test.py` -- delete `test_uncapped_claude_errors_are_mngr_errors`; remove imports that become unused.
+- `imbue/mngr_robinhood/cli.py:71` -- `except BaseMngrError` -> `except MngrError`; update import.
+- `imbue/mngr_robinhood/orchestrator.py` -- `:298,376` `except BaseMngrError` -> `except MngrError`; `:698,702` `except (OSError, BaseMngrError)` -> `except (OSError, MngrError)`; update import; reword the `BaseMngrError` comments at lines ~233 and ~270 to reference `MngrError`.
+- `imbue/mngr_robinhood/errors_test.py` -- delete `test_robinhood_errors_are_mngr_errors`; remove imports that become unused.
 
 ### `libs/mngr_tutor`
 
@@ -101,7 +101,7 @@ Collapse `VpsApiError` / `VpsProvisioningError` (both subclasses of `VpsDockerEr
 
 Add one per touched project at `<project_dir>/changelog/mngr-fix-error-hierarchy-collapse.md`:
 
-- `libs/mngr/changelog/`, `libs/imbue_common/changelog/`, `libs/mngr_uncapped_claude/changelog/`, `libs/mngr_tutor/changelog/`, `libs/mngr_lima/changelog/`, `libs/mngr_ovh/changelog/`.
+- `libs/mngr/changelog/`, `libs/imbue_common/changelog/`, `libs/mngr_robinhood/changelog/`, `libs/mngr_tutor/changelog/`, `libs/mngr_lima/changelog/`, `libs/mngr_ovh/changelog/`.
 - Each briefly notes: `BaseMngrError` removed; all errors now inherit from `MngrError` directly; redundant `except` clauses collapsed.
 
 ## Verification
@@ -112,5 +112,5 @@ Add one per touched project at `<project_dir>/changelog/mngr-fix-error-hierarchy
 
 ## Risks / flags
 
-- **Deleting the two "hierarchy" tests removes live coverage of a still-valid invariant.** `test_consolidated_errors_are_mngr_errors` and `test_uncapped_claude_errors_are_mngr_errors` assert that the listed error types are `MngrError` / `click.ClickException` subclasses; only their docstrings mention `BaseMngrError`. Deleting them (per the chosen option) drops that assertion entirely. Alternative worth reconsidering: keep them with docstrings rewritten to drop the historical `BaseMngrError` framing.
+- **Deleting the two "hierarchy" tests removes live coverage of a still-valid invariant.** `test_consolidated_errors_are_mngr_errors` and `test_robinhood_errors_are_mngr_errors` assert that the listed error types are `MngrError` / `click.ClickException` subclasses; only their docstrings mention `BaseMngrError`. Deleting them (per the chosen option) drops that assertion entirely. Alternative worth reconsidering: keep them with docstrings rewritten to drop the historical `BaseMngrError` framing.
 - `MngrError` losing the `BaseMngrError` base is safe **only** because no class still inherits from `BaseMngrError` directly. The verification grep above guards against a stray subclass being missed.
