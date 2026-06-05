@@ -141,20 +141,24 @@ jobs:
               vci = b.get("versionControlInfo") or {}
               if vci.get("commitId") != target:                continue
               if vci.get("hasUncommittedChanges"):              continue
-              if b.get("status") not in ("ready",):             continue
-              mac = (b.get("mac") or {}).get("zip") or {}
-              # mac.zip can be a dict {arm64: {url}, x64: {url}} OR a list of
-              # {arch, url} entries depending on CLI version; cover both.
-              if isinstance(mac, dict):
-                  arm = mac.get("arm64") or {}
-                  url = arm.get("url") if isinstance(arm, dict) else None
-              elif isinstance(mac, list):
-                  url = next((e.get("url") for e in mac if isinstance(e, dict) and e.get("arch") == "arm64"), None)
-              else:
-                  url = None
+              # ToDesktop CLI v1.x reports completed Mac builds as
+              # status="succeeded". Older docs / some CLI versions used
+              # "ready"; accept both for forward compatibility.
+              if b.get("status") not in ("succeeded", "ready"):  continue
+              # The arm64 .zip URL lives under mac.artifactDownloads.zip.arm64.url
+              # in current ToDesktop responses. (Earlier CLI versions exposed
+              # mac.zip.arm64.url directly; check both layouts.)
+              mac = b.get("mac") or {}
+              zip_node = (mac.get("artifactDownloads") or {}).get("zip") or mac.get("zip") or {}
+              arm = zip_node.get("arm64") if isinstance(zip_node, dict) else None
+              url = arm.get("url") if isinstance(arm, dict) else None
               if url:
+                  # Prefer the build id from standardUniversalDownloadUrl
+                  # ("https://.../builds/<id>") -- it is the human-readable id
+                  # the dashboard shows; the bare "id" field is a UUID.
+                  bid = (b.get("standardUniversalDownloadUrl") or "").rstrip("/").split("/")[-1] or b.get("id", "")
                   print(url)
-                  print(b.get("id", ""), file=sys.stderr)
+                  print(bid, file=sys.stderr)
                   sys.exit(0)
           ' 2> /tmp/td-existing-build-id.txt || true)
           if [[ -n "$URL" ]]; then
