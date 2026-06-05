@@ -4,6 +4,7 @@ import json
 from imbue.mngr_robinhood.data_types import OutputFormat
 from imbue.mngr_robinhood.data_types import ResultMeta
 from imbue.mngr_robinhood.output_modes import StreamingOutputWriter
+from imbue.mngr_robinhood.output_modes import _parse_input_preview
 from imbue.mngr_robinhood.output_modes import build_result_envelope
 from imbue.mngr_robinhood.output_modes import build_system_init_envelope
 from imbue.mngr_robinhood.output_modes import transcript_event_to_stream_json
@@ -85,6 +86,79 @@ def test_transcript_user_event_to_stream_json() -> None:
     converted = transcript_event_to_stream_json(_user_event("hi"), "sess-1")
     assert converted is not None
     assert converted["type"] == "user"
+    # Assert the full converted message, not just the envelope type: a bug that
+    # read the wrong key or mangled the content (e.g. emitted a list) would
+    # leave the type as "user" and slip past a type-only assertion.
+    assert converted["message"] == {"role": "user", "content": "hi"}
+    assert converted["session_id"] == "sess-1"
+
+
+def test_transcript_assistant_event_with_tool_use_emits_tool_use_block() -> None:
+    event = _assistant_event("look")
+    event["tool_calls"] = [
+        {"tool_call_id": "call-1", "tool_name": "Bash", "input_preview": '{"cmd":"ls"}'},
+    ]
+    converted = transcript_event_to_stream_json(event, "sess-1")
+    assert converted is not None
+    content = converted["message"]["content"]
+    # The text block comes first, then one tool_use block per tool call with the
+    # input_preview parsed back into structured JSON.
+    assert content == [
+        {"type": "text", "text": "look"},
+        {"type": "tool_use", "id": "call-1", "name": "Bash", "input": {"cmd": "ls"}},
+    ]
+
+
+def test_transcript_tool_result_event_to_stream_json() -> None:
+    event = {
+        "type": "tool_result",
+        "event_id": "evt-tr",
+        "tool_call_id": "call-1",
+        "output": "command output",
+        "is_error": True,
+        "message_uuid": "uuid-tr",
+    }
+    converted = transcript_event_to_stream_json(event, "sess-1")
+    assert converted is not None
+    assert converted["type"] == "user"
+    assert converted["session_id"] == "sess-1"
+    assert converted["message"]["content"][0] == {
+        "type": "tool_result",
+        "tool_use_id": "call-1",
+        "content": "command output",
+        "is_error": True,
+    }
+
+
+def test_transcript_tool_result_event_is_error_false() -> None:
+    # ``is_error`` is coerced via ``bool(...)``; verify the False case explicitly
+    # so a regression that always emitted True (or dropped the key) is caught.
+    event = {
+        "type": "tool_result",
+        "event_id": "evt-tr2",
+        "tool_call_id": "call-2",
+        "output": "ok",
+        "is_error": False,
+        "message_uuid": "uuid-tr2",
+    }
+    converted = transcript_event_to_stream_json(event, "sess-1")
+    assert converted is not None
+    assert converted["message"]["content"][0]["is_error"] is False
+
+
+def test_parse_input_preview_empty_returns_empty_dict() -> None:
+    assert _parse_input_preview("") == {}
+
+
+def test_parse_input_preview_valid_json_returns_parsed_object() -> None:
+    assert _parse_input_preview('{"path":"x","n":3}') == {"path": "x", "n": 3}
+
+
+def test_parse_input_preview_unparseable_returns_raw_string() -> None:
+    # A truncated/invalid preview is surfaced verbatim (best-effort) rather than
+    # raising, so the consumer still sees something.
+    truncated = '{"path":"long val'
+    assert _parse_input_preview(truncated) == truncated
 
 
 def test_transcript_unknown_event_dropped() -> None:

@@ -3,6 +3,7 @@ import json
 import threading
 import time
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -10,6 +11,7 @@ from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
+from imbue.mngr_robinhood.agent_runtime import PER_AGENT_ENV_VARS_TO_DROP
 from imbue.mngr_robinhood.agent_runtime import build_pass_env_vars
 from imbue.mngr_robinhood.data_types import OutputFormat
 from imbue.mngr_robinhood.orchestrator import _StreamBufferConsumer
@@ -88,6 +90,26 @@ def test_build_pass_env_vars_is_populated() -> None:
     assert len(options.env_vars) > 0
 
 
+def test_build_pass_env_vars_forwards_passthrough_and_drops_per_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The point of ``build_pass_env_vars`` is to forward the parent's env
+    while dropping the per-agent ``MNGR_*`` / ``LLM_USER_PATH`` vars that mngr
+    re-derives for the spawned agent. Forwarding the parent's
+    ``MNGR_AGENT_STATE_DIR`` etc. would clobber the new agent's values, so this
+    asserts both halves: a non-per-agent var survives, and every per-agent var
+    is dropped even when set in the parent environment."""
+    passthrough_value = uuid4().hex
+    monkeypatch.setenv("ROBINHOOD_TEST_PASSTHROUGH", passthrough_value)
+    for dropped in PER_AGENT_ENV_VARS_TO_DROP:
+        monkeypatch.setenv(dropped, f"parent-{dropped}")
+
+    options = build_pass_env_vars()
+    env_by_key = {ev.key: ev.value for ev in options.env_vars}
+
+    assert env_by_key.get("ROBINHOOD_TEST_PASSTHROUGH") == passthrough_value
+    for dropped in PER_AGENT_ENV_VARS_TO_DROP:
+        assert dropped not in env_by_key
+
+
 def test_build_pass_env_vars_drops_kitty_terminal_vars(monkeypatch: pytest.MonkeyPatch) -> None:
     # KITTY_* terminal-emulator vars (notably KITTY_SHELL_INTEGRATION) wedge a headless tmux
     # agent's login-shell startup, so they must not be forwarded into the sourced env file.
@@ -134,6 +156,16 @@ def test_monotonic_ms_since_returns_non_negative_int() -> None:
     elapsed = monotonic_ms_since(start)
     assert isinstance(elapsed, int)
     assert elapsed >= 0
+
+
+def test_monotonic_ms_since_scales_to_milliseconds() -> None:
+    """Guard the ``* 1000`` scaling: a ``start`` deliberately set ~1s in the
+    past must yield a result on the order of 1000ms, not ~1 (which is what a
+    dropped milliseconds conversion would produce). The lower bound is loose
+    (900ms) so scheduler jitter can't make this flake; an unscaled result (~1)
+    or an inverted-sign result is still firmly caught."""
+    elapsed = monotonic_ms_since(time.monotonic() - 1.0)
+    assert elapsed >= 900
 
 
 def test_transcript_read_failure_warner_warns_once() -> None:
@@ -390,6 +422,10 @@ def test_ticker_picks_up_terminal_event_appended_during_polling(local_host: Host
     timer = threading.Timer(0.25, _append)
     timer.start()
     try:
+        # The 0.25s append delay vs the 2.0s deadline is a deliberate 8x margin:
+        # it is the flakiness guard for this wall-clock-dependent test. Do not
+        # tighten it -- if it ever flakes under heavy CI load, widen the
+        # deadline and/or mark the test @pytest.mark.flaky instead.
         deadline = time.monotonic() + 2.0
         result: AgentLifecycleState | None = None
         while result is None and time.monotonic() < deadline:
