@@ -1590,6 +1590,21 @@ function installApplicationMenu() {
             }
           },
         },
+        {
+          label: 'Toggle Chrome Developer Tools',
+          // Opens DevTools for the chrome view (titlebar + sidebar shell).
+          // No accelerator for now -- mostly a dev-time affordance for
+          // poking at the chrome's drag regions, SSE listeners, and the
+          // inbox modal-state class toggle.
+          click: () => {
+            const bundle = getMostRecentWindow();
+            if (!bundle || bundle.window.isDestroyed()) return;
+            const cv = bundle.chromeView;
+            if (cv && !cv.webContents.isDestroyed()) {
+              cv.webContents.toggleDevTools({ mode: 'detach' });
+            }
+          },
+        },
         { type: 'separator' },
         { role: 'resetZoom' },
         { role: 'zoomIn' },
