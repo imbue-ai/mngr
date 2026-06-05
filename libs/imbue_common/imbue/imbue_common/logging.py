@@ -218,8 +218,8 @@ def _build_flat_log_dict(
     exc = record["exception"]
     if exc is not None:
         event["exception"] = {
-            "type": exc.type.__name__ if exc.type else None,
-            "value": str(exc.value) if exc.value else None,
+            "type": exc.type.__name__ if exc.type is not None else None,
+            "value": str(exc.value) if exc.value is not None else None,
             "traceback": bool(exc.traceback),
         }
     else:
