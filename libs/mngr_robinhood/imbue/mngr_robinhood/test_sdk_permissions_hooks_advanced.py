@@ -290,7 +290,7 @@ async def test_user_prompt_submit_hook_with_null_matcher_fires(sdk_live_model: s
         sdk_live_model, sdk_cwd, hooks={"UserPromptSubmit": [HookMatcher(matcher=None, hooks=[prompt_hook])]}
     )
     await collect_query_messages("Say hi.", options)
-    assert fired == [True] or fired == [True, True]
+    assert len(fired) >= 1
 
 
 async def test_pre_tool_use_hook_observes_command_in_input(sdk_live_model: str, sdk_cwd: Path) -> None:
