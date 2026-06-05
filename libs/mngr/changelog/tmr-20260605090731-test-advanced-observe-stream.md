@@ -1,0 +1,1 @@
+Removed the superfluous `@pytest.mark.modal` from the `mngr observe --discovery-only` e2e tutorial test (it never shells out to the `modal` CLI, so the mark was a resource-guard `NEVER_INVOKED` violation) and strengthened it to create a local agent, capture the JSONL discovery stream, and assert the stream is well-formed JSON that reports the agent.

@@ -1,0 +1,1 @@
+Added an unhappy-path e2e test (`test_create_rejects_unknown_option`) covering the same `mngr create` tutorial block: it verifies that an unknown option is rejected with exit code 2, an empty stdout, and a usage error on stderr.

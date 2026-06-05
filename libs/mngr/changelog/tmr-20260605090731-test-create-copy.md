@@ -1,0 +1,1 @@
+- Fixed the BASIC CREATION tutorial: the "create a copy instead of a worktree" example used the removed `--copy` flag. It now uses `mngr create my-task --transfer=git-mirror`, matching the current `--transfer` interface (a plain rsync copy is still the default for non-git projects).

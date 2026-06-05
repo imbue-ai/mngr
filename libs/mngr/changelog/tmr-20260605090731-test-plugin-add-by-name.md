@@ -1,0 +1,1 @@
+Raised the per-test timeout for the `mngr plugin add <name>` e2e tutorial test so it accounts for mngr's ~10s cold-start cost, and strengthened its assertions to verify the command exits with a clean, controlled error (non-zero exit plus an "Aborted" message, no traceback) instead of merely checking the exit code.

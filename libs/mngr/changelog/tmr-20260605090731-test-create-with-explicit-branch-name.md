@@ -1,0 +1,1 @@
+Strengthened the `test_create_with_explicit_branch_name` e2e tutorial test: it now asserts that an explicit `--branch ":feature/my-task"` name is taken literally (no default `mngr/my-task` branch is created) and that the new branch starts from the current branch's commit.

@@ -11,7 +11,7 @@ from imbue.skitwright.expect import expect
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(300)
 def test_multiple_agents_coexist(e2e: E2eSession) -> None:
     # Pin a unique sleep value per agent so leaked processes trace back to the specific create call.
     for name, sleep_seconds in [("agent-a", 100101), ("agent-b", 100118), ("agent-c", 100119)]:
@@ -40,7 +40,7 @@ def test_multiple_agents_coexist(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(300)
 def test_list_filter_by_state(e2e: E2eSession) -> None:
     # Pin a unique sleep value per agent so leaked processes trace back to the specific create call.
     for name, sleep_seconds in [("running-agent", 100103), ("stopped-agent", 100121)]:
@@ -64,6 +64,9 @@ def test_list_filter_by_state(e2e: E2eSession) -> None:
     stopped_names = [a["name"] for a in stopped_agents]
     assert "stopped-agent" in stopped_names
     assert "running-agent" not in stopped_names
+    # The filter must select on actual state, not just name: every agent the
+    # --stopped filter returns must really be in the STOPPED state.
+    assert all(a["state"] == "STOPPED" for a in stopped_agents), stopped_agents
 
     # Without --stopped, both agents should appear (the non-stopped one may
     # be RUNNING or WAITING depending on timing)
@@ -73,6 +76,10 @@ def test_list_filter_by_state(e2e: E2eSession) -> None:
     )
     expect(all_result).to_succeed()
     all_agents = json.loads(all_result.stdout)["agents"]
-    all_names = [a["name"] for a in all_agents]
-    assert "running-agent" in all_names
-    assert "stopped-agent" in all_names
+    agent_states = {a["name"]: a["state"] for a in all_agents}
+    assert "running-agent" in agent_states
+    assert "stopped-agent" in agent_states
+    # The two agents must end up in distinct states: the one we stopped is
+    # STOPPED, while the untouched one is still alive (RUNNING or WAITING).
+    assert agent_states["stopped-agent"] == "STOPPED", agent_states
+    assert agent_states["running-agent"] in ("RUNNING", "WAITING"), agent_states

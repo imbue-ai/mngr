@@ -1,0 +1,1 @@
+- Gitignore the `tmr-report/` orchestrator output directory (alongside the existing `tmr_*/` rule) so test-runner report artifacts are not flagged as uncommitted changes.

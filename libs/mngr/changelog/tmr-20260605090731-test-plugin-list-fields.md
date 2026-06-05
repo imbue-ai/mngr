@@ -1,0 +1,1 @@
+Corrected the plugin-management tutorial: `mngr plugin list --fields` now demonstrates the real `enabled` field instead of the non-existent `active` field (which silently rendered as `-` for every plugin). Strengthened the corresponding e2e release test to assert that the requested fields render real values.

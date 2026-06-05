@@ -1,0 +1,1 @@
+Add `tmr-report/` to `.gitignore` so the TMR (test-mediated reconciliation) orchestrator's scratch output directory is ignored (the existing `**/tmr_*/` pattern uses an underscore and did not match the dash-named directory).

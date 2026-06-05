@@ -1,0 +1,1 @@
+Fixed the `test_create_in_place_alias_target` e2e release test so it passes: added an explicit `@pytest.mark.timeout(120)` (the test runs four sequential `mngr` invocations and was exceeding the global 10s `func_only` timeout), and removed the superfluous `@pytest.mark.modal` mark (the test is local-only and never invokes Modal, which the resource guard correctly flagged).

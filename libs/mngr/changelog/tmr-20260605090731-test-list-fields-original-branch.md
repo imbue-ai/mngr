@@ -1,0 +1,1 @@
+- Fix the WORKING WITH GIT tutorial to reference the real `initial_branch` field (the branch mngr creates for each agent) instead of the non-existent `git.original_branch` field in its `mngr list --fields` example, and harden the corresponding e2e test (correct its resource marks and assert on the command's actual output).

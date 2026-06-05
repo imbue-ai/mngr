@@ -1,0 +1,1 @@
+Fixed the `test_create_with_multiple_labels` e2e tutorial test: raised its per-test timeout so the local `mngr create` has time to complete, dropped the superfluous `@pytest.mark.modal` mark (the local create never invokes Modal), and strengthened it to verify that both labels are actually applied to the created agent via `mngr list --format json`.

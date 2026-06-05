@@ -1,0 +1,1 @@
+Strengthened the `test_create_with_custom_branch_pattern` e2e test to also verify that a `--branch ":feature/*"` pattern (with an omitted BASE) creates the new branch off the current branch, by asserting `feature/my-task` points at the same commit as `HEAD`.
