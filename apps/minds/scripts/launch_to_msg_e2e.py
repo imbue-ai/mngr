@@ -798,6 +798,11 @@ async def amain() -> int:
             phase_started_at = time.monotonic()
             phase_durations: dict[str, float] = {}
             done = False
+            # Captured at DONE; absolute or relative "/goto/<agent_id>/" URL
+            # whose redirect lands on the agent's "agent-<hex>.localhost" chat
+            # page. The minds backend assembles it from the canonical AgentId
+            # the inner `mngr create` emits + the configured mngr_forward port.
+            done_redirect_url = ""
             while time.time() < deadline and not done:
                 stat = await win.evaluate(
                     """async (id) => {
@@ -826,6 +831,7 @@ async def amain() -> int:
                     phase_started_at = now
                 if state == "DONE":
                     phase_durations[state] = round(time.monotonic() - phase_started_at, 2)
+                    done_redirect_url = payload.get("redirect_url", "")
                     done = True
                     break
                 if state == "FAILED":
@@ -861,32 +867,29 @@ async def amain() -> int:
                     tail = EVENTS_LOG.read_text(errors="ignore").splitlines()[-60:]
                     logger.error("minds-events.jsonl tail:\n{}", "\n".join(tail))
                 raise RuntimeError(f"creation didn't reach DONE in {CREATE_TIMEOUT}s (last={last_status})")
-            logger.info("creation DONE; opening chat panel by clicking the tile")
-            await win.goto(origin + "/")
-            with contextlib.suppress(Exception):
-                await win.click(f"text={HOST_NAME}", timeout=15_000)
-            # Tile click may navigate `win` to the chat URL OR open a new
-            # WebContentsView. Look at both.
-            chat_win: Page | None = None
-            chat_deadline = time.time() + 60
+            # creation DONE: minds' status API also returns ``redirect_url``,
+            # the absolute (or "/goto/..."-relative) URL whose redirect lands
+            # on the agent's "agent-<hex>.localhost" chat page. Navigate ``win``
+            # straight there rather than clicking the home-page tile -- the
+            # tile only renders once the landing page's discovery refresh has
+            # caught up with creation completion, and on local macOS the
+            # discovery lag routinely exceeds the click window's 15s.
+            if not done_redirect_url:
+                raise RuntimeError(
+                    "creation DONE without redirect_url; check the /api/create-agent/<id>/status contract"
+                )
+            target = done_redirect_url if done_redirect_url.startswith("http") else base + done_redirect_url
+            logger.info("creation DONE; navigating directly to {}", target)
+            await win.goto(target)
             chat_url_re = re.compile(r"agent-[a-f0-9]+\.localhost")
-            while time.time() < chat_deadline:
-                if chat_url_re.search(win.url):
-                    chat_win = win
-                    break
-                cand = await find_chat_window(ctx)
-                if cand is not None:
-                    chat_win = cand
-                    break
-                await asyncio.sleep(1)
-            if chat_win is None:
+            chat_deadline = time.time() + 30
+            while time.time() < chat_deadline and not chat_url_re.search(win.url):
+                await asyncio.sleep(0.5)
+            if not chat_url_re.search(win.url):
                 for p in all_pages(ctx):
                     with contextlib.suppress(Exception):
                         await snap_page(p, f"99-no-chat-{p.url.split('/')[-1] or 'root'}")
-                raise RuntimeError(
-                    f"agent DONE but no chat-URL page opened after tile click (pages={[p.url for p in all_pages(ctx)]})"
-                )
-            win = chat_win
+                raise RuntimeError(f"goto({target}) didn't redirect to chat URL within 30s (win.url={win.url})")
             logger.info("agent DONE; chat URL={}", win.url)
             await snap_page(win, "04-agent-DONE")
 

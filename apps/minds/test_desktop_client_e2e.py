@@ -44,6 +44,7 @@ import pytest
 import tomlkit
 from loguru import logger
 
+from imbue.minds.desktop_client.e2e_workspace_runner import _REPO_ROOT
 from imbue.minds.desktop_client.e2e_workspace_runner import configure_logging
 from imbue.minds.desktop_client.e2e_workspace_runner import create_workspace_via_electron
 from imbue.minds.desktop_client.e2e_workspace_runner import destroy_agent_best_effort
@@ -51,6 +52,47 @@ from imbue.minds.desktop_client.e2e_workspace_runner import ensure_minds_env_def
 from imbue.minds.desktop_client.e2e_workspace_runner import find_free_port
 from imbue.minds.desktop_client.e2e_workspace_runner import resolve_fct_path
 from imbue.mngr.utils.testing import get_short_random_string
+
+
+@contextmanager
+def _repo_settings_opted_into_pytest() -> Iterator[None]:
+    """Temporarily flip the mngr repo root's ``.mngr/settings.toml`` opt-in flag.
+
+    The Electron-spawned ``mngr`` (root_name=mngr) cwd-walks to the repo root's
+    ``.mngr/settings.toml``, which carries an explicit ``is_allowed_in_pytest =
+    false``. Under PYTEST_CURRENT_TEST that flag makes every ``mngr`` invocation
+    (including ``mngr auth list`` for imbue_cloud account discovery the Electron
+    app polls every ~1s) refuse to run, so the test eventually times out waiting
+    on the account list.
+
+    This wrapper flips the flag to True for the test's lifetime and restores the
+    original file verbatim on exit. Symmetric with ``_fct_settings_opted_into_pytest``
+    but handles the "key already present with value False" case the FCT version
+    rejects (FCT is not expected to ship the key at all).
+
+    We deliberately mutate the real file rather than redirecting
+    ``MNGR_PROJECT_CONFIG_DIR``: the env var would also redirect the spawned
+    ``mngr create``'s lookup inside the FCT clone, costing access to FCT's own
+    settings.toml that defines the docker create templates.
+    """
+    settings_path = _REPO_ROOT / ".mngr" / "settings.toml"
+    original = settings_path.read_text()
+    doc = tomlkit.parse(original)
+    current = doc.get("is_allowed_in_pytest")
+    # Only act if the key is set to False; True would already work, and a
+    # missing key would be a surprise worth surfacing.
+    if current is not False:
+        raise AssertionError(
+            f"{settings_path} has is_allowed_in_pytest={current!r}; this test expects "
+            "the repo-wide explicit `false` it has carried since the mng->mngr rename. "
+            "If the policy changed, update this fixture."
+        )
+    doc["is_allowed_in_pytest"] = True
+    settings_path.write_text(tomlkit.dumps(doc))
+    try:
+        yield
+    finally:
+        settings_path.write_text(original)
 
 
 @contextmanager
@@ -148,11 +190,14 @@ def test_create_local_docker_workspace_via_electron(
     debug_port = find_free_port()
     logger.info("Workspace name: {}; CDP debug port: {}", workspace_name, debug_port)
 
-    # The Electron-spawned `mngr create` loads FCT's .mngr/settings.toml under
-    # PYTEST_CURRENT_TEST; opt that checkout into the pytest config guard for the
-    # duration of the run without shipping the opt-in in FCT's real config (the
-    # snapshot script, which runs outside pytest, never needs it).
-    with _fct_settings_opted_into_pytest(fct_path):
+    # The Electron-spawned `mngr` loads two config trees under PYTEST_CURRENT_TEST:
+    # the repo root's `.mngr/settings.toml` (where the host `mngr auth list` runs)
+    # and the FCT checkout's (where `mngr create` runs from inside the clone).
+    # Both must opt into the pytest config guard or `mngr` refuses to run.
+    # Neither opt-in lives in committed state -- the repo's `is_allowed_in_pytest`
+    # is explicitly `false` and FCT doesn't ship the key at all -- so we toggle
+    # both transiently and restore on exit.
+    with _repo_settings_opted_into_pytest(), _fct_settings_opted_into_pytest(fct_path):
         try:
             create_workspace_via_electron(fct_path, workspace_name, debug_port)
         finally:
