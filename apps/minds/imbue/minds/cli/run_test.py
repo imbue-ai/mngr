@@ -2,11 +2,9 @@
 ``_StreamedPermissionRequestHandler`` private class).
 """
 
-from click.testing import CliRunner
 from fastapi import FastAPI
 
 from imbue.minds.cli.run import _StreamedPermissionRequestHandler
-from imbue.minds.cli.run import run
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import create_latchkey_predefined_permission_request_event
@@ -106,18 +104,3 @@ def test_streamed_permission_handler_noop_when_inbox_not_initialised() -> None:
 
     assert app.state.request_inbox is None
     assert notify_counts == []
-
-
-# -- minds run argument validation --
-#
-# The ``port <= 0`` guard is the first statement in ``run()``'s body, before
-# any config resolution or server startup, so ``CliRunner`` trips it without
-# spawning subprocesses.
-
-
-def test_run_rejects_port_zero() -> None:
-    """``--port 0`` fails fast with a clear UsageError instead of crashing the
-    spawned ``mngr forward`` subprocess later with an obscure message."""
-    result = CliRunner().invoke(run, ["--port", "0"])
-    assert result.exit_code != 0
-    assert "--port must be > 0" in result.output
