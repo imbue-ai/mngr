@@ -1,4 +1,6 @@
 import base64
+import ipaddress
+import struct
 
 import pytest
 from inline_snapshot import snapshot
@@ -48,27 +50,23 @@ def test_dc_ips_covers_all_five_data_centers() -> None:
     assert set(DC_IPS.keys()) == snapshot({1, 2, 3, 4, 5})
 
 
-def test_auth_key_to_string_session_works_for_all_dc_ids() -> None:
+@pytest.mark.parametrize("dc_id", sorted(DC_IPS))
+def test_auth_key_to_string_session_encodes_dc_ip_port_and_key(dc_id: int) -> None:
+    """Verify the packed binary contains the right dc_id, IP, port, and key for each DC.
+
+    Asserting only the "1" version prefix would pass even if the IP for a DC
+    were packed wrong; this decodes the full layout
+    (dc_id[1] + ip[4] + port[2] + key[256]) and checks every field.
+    """
     auth_key_hex = "ff" * 256
-    for dc_id in DC_IPS:
-        result = auth_key_to_string_session(dc_id, auth_key_hex)
-        assert result.startswith("1")
-
-
-def test_auth_key_to_string_session_encodes_correct_dc_and_key() -> None:
-    """Verify the packed binary contains the correct dc_id and auth key bytes."""
-    dc_id = 1
-    auth_key_hex = "ab" * 256
     result = auth_key_to_string_session(dc_id, auth_key_hex)
 
     decoded = base64.urlsafe_b64decode(result[1:])
 
-    # First byte is dc_id
-    assert decoded[0] == 1
-
-    # Last 256 bytes are the auth key
-    auth_key_bytes = decoded[-256:]
-    assert auth_key_bytes == bytes.fromhex(auth_key_hex)
+    assert decoded[0] == dc_id
+    assert decoded[1:5] == ipaddress.ip_address(DC_IPS[dc_id]).packed
+    assert struct.unpack(">H", decoded[5:7])[0] == 443
+    assert decoded[7:] == bytes.fromhex(auth_key_hex)
 
 
 def test_bot_token_pattern_matches_valid_tokens() -> None:
@@ -85,6 +83,8 @@ def test_bot_username_pattern_matches_tme_links() -> None:
     assert _BOT_USERNAME_PATTERN.search("no link here") is None
 
 
-def test_fallback_api_credentials_are_valid() -> None:
-    assert _FALLBACK_API_ID > 0
-    assert len(_FALLBACK_API_HASH) == 32
+def test_fallback_api_credentials_match_known_telegram_web_values() -> None:
+    # These are the public Telegram Web application credentials used as a
+    # fallback when live extraction fails; pin the exact values so an
+    # accidental change is caught in review rather than silently shipped.
+    assert (_FALLBACK_API_ID, _FALLBACK_API_HASH) == snapshot((2496, "8da85b0d5bfe62527e5b244c209159c3"))
