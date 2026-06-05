@@ -1,6 +1,5 @@
 """Tests for completion_writer module."""
 
-import json
 from pathlib import Path
 
 import click
@@ -10,10 +9,12 @@ from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.config.completion_cache import COMPLETION_CACHE_FILENAME
 from imbue.mngr.config.completion_cache import get_completion_cache_dir
 from imbue.mngr.config.completion_writer import _EXCLUDED_CONFIG_KEY_PREFIXES
+from imbue.mngr.config.completion_writer import _POSITIONAL_COMPLETION_SPEC
 from imbue.mngr.config.completion_writer import _extract_config_value_choices
 from imbue.mngr.config.completion_writer import _is_excluded_config_key
 from imbue.mngr.config.completion_writer import flatten_dict_keys
 from imbue.mngr.config.completion_writer import write_cli_completions_cache
+from imbue.mngr.config.conftest import read_completion_cache
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -23,6 +24,7 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import PluginName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.utils.testing import capture_loguru
 
 
 def test_get_completion_cache_dir_uses_env_var(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -42,6 +44,23 @@ def test_get_completion_cache_dir_falls_back_to_default_host_dir(
     monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path / "default_host"))
     result = get_completion_cache_dir()
     assert result == tmp_path / "default_host"
+    assert result.exists()
+
+
+def test_get_completion_cache_dir_falls_back_to_home_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With neither cache-dir nor host-dir env vars set, it falls back to ~/.mngr.
+
+    HOME is redirected to a temp dir by the autouse test fixture, so this
+    exercises the real ``~/.{root_name}`` default branch of read_default_host_dir
+    rather than an explicit MNGR_HOST_DIR override.
+    """
+    monkeypatch.delenv("MNGR_COMPLETION_CACHE_DIR", raising=False)
+    monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNGR_ROOT_NAME", raising=False)
+    result = get_completion_cache_dir()
+    assert result == Path("~/.mngr").expanduser()
     assert result.exists()
 
 
@@ -76,9 +95,11 @@ def test_write_cli_completions_cache_handles_oserror(monkeypatch: pytest.MonkeyP
 
     group = click.Group(name="test", commands={"hello": click.Command("hello")})
 
-    # Should not raise despite the OSError from atomic_write
-    write_cli_completions_cache(cli_group=group)
-    assert not (tmp_path / COMPLETION_CACHE_FILENAME).exists()
+    # Should not raise despite the OSError from atomic_write, and should take the
+    # documented debug-log swallow branch rather than silently passing.
+    with capture_loguru(level="DEBUG") as log_output:
+        write_cli_completions_cache(cli_group=group)
+    assert "Failed to write CLI completions cache" in log_output.getvalue()
 
 
 def test_write_cli_completions_cache_writes_valid_json(completion_cache_dir: Path) -> None:
@@ -94,10 +115,9 @@ def test_write_cli_completions_cache_writes_valid_json(completion_cache_dir: Pat
     write_cli_completions_cache(cli_group=group)
     cache_path = completion_cache_dir / COMPLETION_CACHE_FILENAME
     assert cache_path.exists()
-    data = json.loads(cache_path.read_text())
-    assert "commands" in data
-    assert "create" in data["commands"]
-    assert "list" in data["commands"]
+    data = read_completion_cache(completion_cache_dir)
+    assert "create" in data.commands
+    assert "list" in data.commands
 
 
 def test_write_cli_completions_cache_includes_git_branch_options(completion_cache_dir: Path) -> None:
@@ -110,15 +130,8 @@ def test_write_cli_completions_cache_includes_git_branch_options(completion_cach
     )
 
     write_cli_completions_cache(cli_group=group)
-    cache_path = completion_cache_dir / COMPLETION_CACHE_FILENAME
-    data = json.loads(cache_path.read_text())
-    assert "git_branch_options" in data
-    assert "create.--branch" in data["git_branch_options"]
-
-
-def _read_cache(cache_dir: Path) -> dict:
-    """Read and return the completion cache data."""
-    return json.loads((cache_dir / COMPLETION_CACHE_FILENAME).read_text())
+    data = read_completion_cache(completion_cache_dir)
+    assert "create.--branch" in data.git_branch_options
 
 
 def test_write_cli_completions_cache_includes_host_name_options(completion_cache_dir: Path) -> None:
@@ -131,10 +144,9 @@ def test_write_cli_completions_cache_includes_host_name_options(completion_cache
     )
 
     write_cli_completions_cache(cli_group=group)
-    data = _read_cache(completion_cache_dir)
+    data = read_completion_cache(completion_cache_dir)
 
-    assert "host_name_options" in data
-    assert data["host_name_options"] == []
+    assert data.host_name_options == []
 
 
 def test_write_cli_completions_cache_includes_positional_completions_for_event(
@@ -150,11 +162,15 @@ def test_write_cli_completions_cache_includes_positional_completions_for_event(
     )
 
     write_cli_completions_cache(cli_group=group)
-    data = _read_cache(completion_cache_dir)
+    data = read_completion_cache(completion_cache_dir)
 
-    assert "event" in data["positional_completions"]
-    assert data["positional_completions"]["event"] == [["agent_names", "host_names"], []]
-    assert "list" not in data["positional_completions"]
+    # The writer must propagate the spec faithfully for commands present in the
+    # group; comparing to the source constant (rather than a re-typed literal)
+    # keeps this from breaking on intentional spec edits while still catching a
+    # writer bug that mangles or drops the entry.
+    assert data.positional_completions["event"] == _POSITIONAL_COMPLETION_SPEC["event"]
+    # Commands without a spec entry must not appear.
+    assert "list" not in data.positional_completions
 
 
 def test_write_cli_completions_cache_includes_plugin_name_options(completion_cache_dir: Path) -> None:
@@ -173,9 +189,9 @@ def test_write_cli_completions_cache_includes_plugin_name_options(completion_cac
     )
 
     write_cli_completions_cache(cli_group=group)
-    data = _read_cache(completion_cache_dir)
+    data = read_completion_cache(completion_cache_dir)
 
-    assert "create.--plugin" in data["plugin_name_options"]
+    assert "create.--plugin" in data.plugin_name_options
 
 
 def test_write_cli_completions_cache_includes_positional_completions_for_plugin(
@@ -193,12 +209,12 @@ def test_write_cli_completions_cache_includes_positional_completions_for_plugin(
     group = click.Group(name="test", commands={"plugin": plugin_group})
 
     write_cli_completions_cache(cli_group=group)
-    data = _read_cache(completion_cache_dir)
+    data = read_completion_cache(completion_cache_dir)
 
-    assert data["positional_completions"]["plugin.enable"] == [["plugin_names"]]
-    assert data["positional_completions"]["plugin.disable"] == [["plugin_names"]]
-    assert data["positional_completions"]["plugin.add"] == [["catalog_packages"]]
-    assert data["positional_completions"]["plugin.remove"] == [["installed_packages"]]
+    assert data.positional_completions["plugin.enable"] == [["plugin_names"]]
+    assert data.positional_completions["plugin.disable"] == [["plugin_names"]]
+    assert data.positional_completions["plugin.add"] == [["catalog_packages"]]
+    assert data.positional_completions["plugin.remove"] == [["installed_packages"]]
 
 
 def test_write_cli_completions_cache_includes_catalog_package_names(
@@ -208,9 +224,9 @@ def test_write_cli_completions_cache_includes_catalog_package_names(
     group = click.Group(name="test", commands={"list": click.Command("list")})
 
     write_cli_completions_cache(cli_group=group)
-    data = _read_cache(completion_cache_dir)
+    data = read_completion_cache(completion_cache_dir)
 
-    catalog_packages = data["catalog_package_names"]
+    catalog_packages = data.catalog_package_names
     assert catalog_packages == sorted(set(catalog_packages))
     # Every catalog package is an installable PyPI distribution with the shared prefix.
     assert catalog_packages
@@ -231,10 +247,10 @@ def test_write_cli_completions_cache_includes_installed_plugin_packages(
         cli_group=group,
         installed_plugin_packages=["imbue-mngr-modal", "imbue-mngr-claude", "imbue-mngr-modal"],
     )
-    data = _read_cache(completion_cache_dir)
+    data = read_completion_cache(completion_cache_dir)
 
     # Deduplicated and sorted.
-    assert data["installed_plugin_package_names"] == ["imbue-mngr-claude", "imbue-mngr-modal"]
+    assert data.installed_plugin_package_names == ["imbue-mngr-claude", "imbue-mngr-modal"]
 
 
 def test_write_cli_completions_cache_installed_plugin_packages_defaults_empty(
@@ -244,9 +260,9 @@ def test_write_cli_completions_cache_installed_plugin_packages_defaults_empty(
     group = click.Group(name="test", commands={"list": click.Command("list")})
 
     write_cli_completions_cache(cli_group=group)
-    data = _read_cache(completion_cache_dir)
+    data = read_completion_cache(completion_cache_dir)
 
-    assert data["installed_plugin_package_names"] == []
+    assert data.installed_plugin_package_names == []
 
 
 def test_write_cli_completions_cache_includes_positional_completions_for_config(
@@ -265,11 +281,11 @@ def test_write_cli_completions_cache_includes_positional_completions_for_config(
     group = click.Group(name="test", commands={"config": config_group})
 
     write_cli_completions_cache(cli_group=group)
-    data = _read_cache(completion_cache_dir)
+    data = read_completion_cache(completion_cache_dir)
 
-    assert data["positional_completions"]["config.get"] == [["config_keys"]]
-    assert data["positional_completions"]["config.set"] == [["config_keys"], ["config_value_for_key"]]
-    assert data["positional_completions"]["config.unset"] == [["config_keys"]]
+    assert data.positional_completions["config.get"] == [["config_keys"]]
+    assert data.positional_completions["config.set"] == [["config_keys"], ["config_value_for_key"]]
+    assert data.positional_completions["config.unset"] == [["config_keys"]]
 
 
 def test_write_cli_completions_cache_with_mngr_ctx(
@@ -300,18 +316,22 @@ def test_write_cli_completions_cache_with_mngr_ctx(
     write_cli_completions_cache(
         cli_group=group, mngr_ctx=temp_mngr_ctx, registered_agent_types=list_registered_agent_types()
     )
-    data = _read_cache(completion_cache_dir)
+    data = read_completion_cache(completion_cache_dir)
 
-    # Agent types include at least the built-in registered types
-    assert "create.--type" in data["option_choices"]
-    assert len(data["option_choices"]["create.--type"]) > 0
+    # Agent types include the registered placeholder type ("generic").
+    assert "create.--type" in data.option_choices
+    assert "generic" in data.option_choices["create.--type"]
     # Provider names always include "local"
-    assert "local" in data["option_choices"]["create.--provider"]
-    assert "local" in data["option_choices"]["list.--provider"]
-    # Config keys are flattened from the config model
-    assert len(data["config_keys"]) > 0
-    # Plugin names come from the plugin manager
-    assert isinstance(data["plugin_names"], list)
+    assert "local" in data.option_choices["create.--provider"]
+    assert "local" in data.option_choices["list.--provider"]
+    # Config keys are flattened from the config model: a known top-level field must be present.
+    assert "headless" in data.config_keys
+    # plugin_names mirrors the live plugin manager's registered, non-private plugins.
+    expected_plugin_names = sorted(
+        {name for name, _ in temp_mngr_ctx.pm.list_name_plugin() if name and not name.startswith("_")}
+    )
+    assert data.plugin_names == expected_plugin_names
+    assert data.plugin_names, "the test environment registers agent plugins, so this must be non-empty"
 
 
 def test_write_cli_completions_cache_no_mngr_ctx(completion_cache_dir: Path) -> None:
@@ -322,10 +342,10 @@ def test_write_cli_completions_cache_no_mngr_ctx(completion_cache_dir: Path) -> 
     )
 
     write_cli_completions_cache(cli_group=group)
-    data = _read_cache(completion_cache_dir)
+    data = read_completion_cache(completion_cache_dir)
 
-    assert data["plugin_names"] == []
-    assert data["config_keys"] == []
+    assert data.plugin_names == []
+    assert data.config_keys == []
 
 
 # =============================================================================
@@ -377,9 +397,9 @@ def test_positional_nargs_fixed_args(completion_cache_dir: Path) -> None:
     group = click.Group(name="test", commands={"config": config_group})
 
     write_cli_completions_cache(cli_group=group)
-    data = _read_cache(completion_cache_dir)
+    data = read_completion_cache(completion_cache_dir)
 
-    nargs = data["positional_nargs_by_command"]
+    nargs = data.positional_nargs_by_command
     assert nargs["config.set"] == 2
     assert nargs["config.get"] == 1
     assert nargs["config.list"] == 0
@@ -398,9 +418,9 @@ def test_positional_nargs_unlimited(completion_cache_dir: Path) -> None:
     )
 
     write_cli_completions_cache(cli_group=group)
-    data = _read_cache(completion_cache_dir)
+    data = read_completion_cache(completion_cache_dir)
 
-    assert data["positional_nargs_by_command"]["destroy"] is None
+    assert data.positional_nargs_by_command["destroy"] is None
 
 
 def test_positional_nargs_simple_command(completion_cache_dir: Path) -> None:
@@ -417,10 +437,10 @@ def test_positional_nargs_simple_command(completion_cache_dir: Path) -> None:
     )
 
     write_cli_completions_cache(cli_group=group)
-    data = _read_cache(completion_cache_dir)
+    data = read_completion_cache(completion_cache_dir)
 
-    assert data["positional_nargs_by_command"]["connect"] == 1
-    assert data["positional_nargs_by_command"]["list"] == 0
+    assert data.positional_nargs_by_command["connect"] == 1
+    assert data.positional_nargs_by_command["list"] == 0
 
 
 # =============================================================================
@@ -488,8 +508,7 @@ def test_extract_config_value_choices_discovers_provider_fields() -> None:
 def test_extract_config_value_choices_empty_dicts_match_default() -> None:
     """With no plugins/providers, results should match the default config."""
     default_choices = _extract_config_value_choices(MngrConfig())
-    assert "plugins" not in {k.split(".")[0] for k in default_choices if "." in k} or True
-    # The key point: no plugin.* or provider.* keys should appear
+    # No plugin.* or provider.* keys should appear for a default config.
     plugin_keys = [k for k in default_choices if k.startswith("plugins.")]
     provider_keys = [k for k in default_choices if k.startswith("providers.")]
     assert plugin_keys == []
@@ -511,11 +530,10 @@ def test_write_cli_completions_cache_with_mngr_ctx_includes_config_value_choices
     group = click.Group(name="test", commands={"config": config_group})
 
     write_cli_completions_cache(cli_group=group, mngr_ctx=temp_mngr_ctx)
-    data = _read_cache(completion_cache_dir)
+    data = read_completion_cache(completion_cache_dir)
 
-    assert "config_value_choices" in data
-    assert data["config_value_choices"]["headless"] == ["true", "false"]
-    assert "TRACE" in data["config_value_choices"]["logging.console_level"]
+    assert data.config_value_choices["headless"] == ["true", "false"]
+    assert "TRACE" in data.config_value_choices["logging.console_level"]
 
 
 def test_write_cli_completions_cache_no_mngr_ctx_empty_config_value_choices(
@@ -528,9 +546,9 @@ def test_write_cli_completions_cache_no_mngr_ctx_empty_config_value_choices(
     )
 
     write_cli_completions_cache(cli_group=group)
-    data = _read_cache(completion_cache_dir)
+    data = read_completion_cache(completion_cache_dir)
 
-    assert data["config_value_choices"] == {}
+    assert data.config_value_choices == {}
 
 
 # =============================================================================
@@ -621,13 +639,13 @@ def test_excluded_config_keys_not_in_dynamic_completions(
     )
 
     write_cli_completions_cache(cli_group=group, mngr_ctx=temp_mngr_ctx)
-    data = _read_cache(completion_cache_dir)
+    data = read_completion_cache(completion_cache_dir)
 
     for prefix in _EXCLUDED_CONFIG_KEY_PREFIXES:
-        matching_keys = [k for k in data["config_keys"] if k == prefix or k.startswith(f"{prefix}.")]
+        matching_keys = [k for k in data.config_keys if k == prefix or k.startswith(f"{prefix}.")]
         assert matching_keys == [], f"excluded prefix {prefix!r} found in config_keys: {matching_keys}"
 
-        matching_choice_keys = [k for k in data["config_value_choices"] if k == prefix or k.startswith(f"{prefix}.")]
+        matching_choice_keys = [k for k in data.config_value_choices if k == prefix or k.startswith(f"{prefix}.")]
         assert matching_choice_keys == [], (
             f"excluded prefix {prefix!r} found in config_value_choices: {matching_choice_keys}"
         )

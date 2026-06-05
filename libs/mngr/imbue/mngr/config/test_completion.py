@@ -6,23 +6,16 @@ actually exist. This catches renames (e.g. --base-branch -> --branch)
 that unit tests with hand-crafted data miss.
 """
 
-import json
 from pathlib import Path
 
 import click
 
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.cli.help_topics import get_all_topics
-from imbue.mngr.config.completion_cache import COMPLETION_CACHE_FILENAME
-from imbue.mngr.config.completion_cache import CompletionCacheData
 from imbue.mngr.config.completion_writer import write_cli_completions_cache
+from imbue.mngr.config.conftest import read_completion_cache
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.main import cli
-
-
-def _read_cache(cache_dir: Path) -> CompletionCacheData:
-    data = json.loads((cache_dir / COMPLETION_CACHE_FILENAME).read_text())
-    return CompletionCacheData(**{k: v for k, v in data.items() if k in CompletionCacheData._fields})
 
 
 def _assert_option_exists_on_cli(dotted_key: str, label: str) -> None:
@@ -57,7 +50,7 @@ def test_option_choices_reference_real_options(
     write_cli_completions_cache(
         cli_group=cli, mngr_ctx=temp_mngr_ctx, registered_agent_types=list_registered_agent_types()
     )
-    cache = _read_cache(completion_cache_dir)
+    cache = read_completion_cache(completion_cache_dir)
 
     for choice_key in cache.option_choices:
         _assert_option_exists_on_cli(choice_key, "option_choices")
@@ -66,7 +59,7 @@ def test_option_choices_reference_real_options(
 def test_git_branch_options_reference_real_options(completion_cache_dir: Path) -> None:
     """Every git_branch_options key must reference an option that exists on the real CLI."""
     write_cli_completions_cache(cli_group=cli)
-    cache = _read_cache(completion_cache_dir)
+    cache = read_completion_cache(completion_cache_dir)
 
     for key in cache.git_branch_options:
         _assert_option_exists_on_cli(key, "git_branch_options")
@@ -75,7 +68,7 @@ def test_git_branch_options_reference_real_options(completion_cache_dir: Path) -
 def test_host_name_options_reference_real_options(completion_cache_dir: Path) -> None:
     """Every host_name_options key must reference an option that exists on the real CLI."""
     write_cli_completions_cache(cli_group=cli)
-    cache = _read_cache(completion_cache_dir)
+    cache = read_completion_cache(completion_cache_dir)
 
     for key in cache.host_name_options:
         _assert_option_exists_on_cli(key, "host_name_options")
@@ -84,7 +77,7 @@ def test_host_name_options_reference_real_options(completion_cache_dir: Path) ->
 def test_plugin_name_options_reference_real_options(completion_cache_dir: Path) -> None:
     """Every plugin_name_options key must reference an option that exists on the real CLI."""
     write_cli_completions_cache(cli_group=cli)
-    cache = _read_cache(completion_cache_dir)
+    cache = read_completion_cache(completion_cache_dir)
 
     for key in cache.plugin_name_options:
         _assert_option_exists_on_cli(key, "plugin_name_options")
@@ -140,7 +133,7 @@ def test_help_targets_cover_commands_and_topics(completion_cache_dir: Path) -> N
     """
     topic_names = sorted(get_all_topics().keys())
     write_cli_completions_cache(cli_group=cli, topic_names=topic_names)
-    cache = _read_cache(completion_cache_dir)
+    cache = read_completion_cache(completion_cache_dir)
 
     # The help command is wired to complete against the help_targets source.
     assert cache.positional_completions.get("help") == [["help_targets"]]
@@ -158,7 +151,7 @@ def test_help_targets_cover_commands_and_topics(completion_cache_dir: Path) -> N
 def test_help_targets_absent_without_topic_names(completion_cache_dir: Path) -> None:
     """Without passed-in topic names, help_targets still covers commands (topics just absent)."""
     write_cli_completions_cache(cli_group=cli)
-    cache = _read_cache(completion_cache_dir)
+    cache = read_completion_cache(completion_cache_dir)
 
     assert "create" in cache.help_targets
     assert "address" not in cache.help_targets
@@ -171,7 +164,7 @@ def test_every_option_is_classified(completion_cache_dir: Path) -> None:
     and renames (e.g. --agent-type -> --type) that would go undetected.
     """
     write_cli_completions_cache(cli_group=cli)
-    cache = _read_cache(completion_cache_dir)
+    cache = read_completion_cache(completion_cache_dir)
 
     cli_options = _collect_all_options_from_cli()
     missing: list[str] = []

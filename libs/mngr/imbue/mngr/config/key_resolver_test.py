@@ -53,6 +53,7 @@ def test_bare_key_strips_suffix() -> None:
     [
         ("true", True),
         ("false", False),
+        ("null", None),
         ("42", 42),
         ("3.14", 3.14),
         ('"quoted"', "quoted"),
@@ -155,15 +156,38 @@ def test_resolve_extends_rejects_scalar_for_unset_list_field() -> None:
 # =============================================================================
 
 
-def test_resolve_extends_recurses_into_nested_dicts() -> None:
-    """Recursion follows the override dict, applying extends at each level it appears."""
-    base = MngrConfig.model_construct()
+def test_resolve_extends_resolves_nested_extend_and_preserves_structure() -> None:
+    """Recursion resolves a nested ``__extend`` against the base value at that
+    level while leaving a sibling deeper bare structure untouched.
+
+    The ``commands.create.env__extend`` key extends the base
+    ``CommandDefaults.defaults['env']`` (exercising both the recursion into
+    ``commands.create`` and ``_apply_extend``), while the sibling
+    ``commands.create.cli_args`` bare assignment -- itself a nested dict --
+    passes through verbatim.
+    """
+    base = MngrConfig(
+        commands={"create": CommandDefaults(defaults={"env": ["X=1"]})},
+    )
     resolved = resolve_extends(
         base,
-        {"logging": {"console_level": "TRACE"}},
+        {
+            "commands": {
+                "create": {
+                    "env__extend": ["X=2"],
+                    "cli_args": {"nested": {"deep": "value"}},
+                }
+            }
+        },
     )
-    # No __extend keys -- the override passes through unchanged.
-    assert resolved == {"logging": {"console_level": "TRACE"}}
+    assert resolved == {
+        "commands": {
+            "create": {
+                "env": ["X=1", "X=2"],
+                "cli_args": {"nested": {"deep": "value"}},
+            }
+        }
+    }
 
 
 def test_resolve_extends_walks_through_command_defaults() -> None:
@@ -188,6 +212,13 @@ def test_resolve_extends_walks_through_create_template_options() -> None:
     transparency above -- both wrappers stash arbitrary per-key overrides in an
     inner mapping, so the resolver has to peek through to make ``__extend`` honour
     the existing value.
+
+    Because the base *does* have a value at ``options['env']``, the lookup is
+    non-None, so the preserve-extend branch (covered by
+    ``test_resolve_extends_preserves_extend_suffix_inside_new_create_template``)
+    is skipped and the key is materialised into the bare key via ``_apply_extend``
+    (concat-list semantics). The discriminator for preserve-vs-collapse is the
+    base lookup yielding ``None``, not the path itself.
     """
     base = MngrConfig(
         create_templates={CreateTemplateName("dev"): CreateTemplate(options={"env": ["X=1"]})},

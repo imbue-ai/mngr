@@ -18,6 +18,7 @@ from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import RetryConfig
 from imbue.mngr.config.data_types import StringDerivedTuple
+from imbue.mngr.config.data_types import USER_ID_FILENAME
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.config.data_types import detect_settings_narrowing
 from imbue.mngr.config.data_types import get_or_create_user_id
@@ -651,12 +652,6 @@ def test_mngr_config_merge_with_adds_new_create_templates(mngr_test_prefix: str)
     assert CreateTemplateName("docker") in merged.create_templates
 
 
-def test_mngr_config_create_templates_default_is_empty_dict(mngr_test_prefix: str) -> None:
-    """MngrConfig should have empty create_templates by default."""
-    config = MngrConfig(prefix=mngr_test_prefix)
-    assert config.create_templates == {}
-
-
 # =============================================================================
 # Tests for MngrConfig.pre_command_scripts
 # =============================================================================
@@ -690,21 +685,9 @@ def test_mngr_config_merge_with_preserves_pre_command_scripts_when_override_does
     assert merged.pre_command_scripts == {"create": ["echo create"]}
 
 
-def test_mngr_config_pre_command_scripts_default_is_empty_dict(mngr_test_prefix: str) -> None:
-    """MngrConfig should have empty pre_command_scripts by default."""
-    config = MngrConfig(prefix=mngr_test_prefix)
-    assert config.pre_command_scripts == {}
-
-
 # =============================================================================
 # Tests for MngrConfig.work_dir_extra_paths
 # =============================================================================
-
-
-def test_mngr_config_work_dir_extra_paths_default_is_empty_dict(mngr_test_prefix: str) -> None:
-    """MngrConfig should have empty work_dir_extra_paths by default."""
-    config = MngrConfig(prefix=mngr_test_prefix)
-    assert config.work_dir_extra_paths == {}
 
 
 def test_mngr_config_merge_with_replaces_work_dir_extra_paths(mngr_test_prefix: str) -> None:
@@ -739,16 +722,10 @@ def test_mngr_config_merge_with_preserves_work_dir_extra_paths_when_override_doe
 # =============================================================================
 
 
-def test_provider_instance_config_is_enabled_default_true() -> None:
-    """ProviderInstanceConfig.is_enabled should default to True."""
+def test_provider_instance_config_is_enabled_defaults_to_none() -> None:
+    """ProviderInstanceConfig.is_enabled should default to None."""
     config = ProviderInstanceConfig(backend=ProviderBackendName("local"))
     assert config.is_enabled is None
-
-
-def test_provider_instance_config_is_enabled_can_be_set_false() -> None:
-    """ProviderInstanceConfig.is_enabled can be set to False."""
-    config = ProviderInstanceConfig(backend=ProviderBackendName("local"), is_enabled=False)
-    assert config.is_enabled is False
 
 
 def test_provider_instance_config_merge_preserves_is_enabled_false() -> None:
@@ -762,22 +739,6 @@ def test_provider_instance_config_merge_preserves_is_enabled_false() -> None:
 # =============================================================================
 # Tests for MngrConfig.enabled_backends
 # =============================================================================
-
-
-def test_mngr_config_enabled_backends_default_empty(mngr_test_prefix: str) -> None:
-    """MngrConfig.enabled_backends should default to empty list (all backends enabled)."""
-    config = MngrConfig(prefix=mngr_test_prefix)
-    assert config.enabled_backends == []
-
-
-def test_mngr_config_enabled_backends_can_be_set(mngr_test_prefix: str) -> None:
-    """MngrConfig.enabled_backends can be set to specific backends."""
-    config = MngrConfig(
-        prefix=mngr_test_prefix,
-        enabled_backends=[ProviderBackendName("local"), ProviderBackendName("docker")],
-    )
-    assert ProviderBackendName("local") in config.enabled_backends
-    assert ProviderBackendName("docker") in config.enabled_backends
 
 
 def test_mngr_config_merge_enabled_backends_override_wins_when_not_empty(mngr_test_prefix: str) -> None:
@@ -914,19 +875,6 @@ def test_split_cli_args_string_does_not_treat_hash_as_comment() -> None:
 # =============================================================================
 
 
-def test_provider_instance_config_destroyed_host_persisted_seconds_defaults_to_none() -> None:
-    config = ProviderInstanceConfig(backend=ProviderBackendName("local"))
-    assert config.destroyed_host_persisted_seconds is None
-
-
-def test_provider_instance_config_destroyed_host_persisted_seconds_can_be_set() -> None:
-    config = ProviderInstanceConfig(
-        backend=ProviderBackendName("modal"),
-        destroyed_host_persisted_seconds=86400.0,
-    )
-    assert config.destroyed_host_persisted_seconds == 86400.0
-
-
 def test_provider_instance_config_merge_overrides_destroyed_host_persisted_seconds() -> None:
     base = ProviderInstanceConfig(
         backend=ProviderBackendName("local"),
@@ -983,11 +931,6 @@ def test_mngr_config_merge_keeps_base_destroyed_host_persisted_seconds_when_over
 # =============================================================================
 
 
-def test_provider_instance_config_min_online_host_age_seconds_defaults_to_none() -> None:
-    config = ProviderInstanceConfig(backend=ProviderBackendName("test"))
-    assert config.min_online_host_age_seconds is None
-
-
 def test_provider_instance_config_merge_overrides_min_online_host_age_seconds() -> None:
     base = ProviderInstanceConfig(backend=ProviderBackendName("test"), min_online_host_age_seconds=300.0)
     override = ProviderInstanceConfig(backend=ProviderBackendName("test"), min_online_host_age_seconds=600.0)
@@ -1037,11 +980,6 @@ def test_mngr_config_merge_keeps_base_connect_command_when_override_none(mngr_te
     override = MngrConfig.model_construct(prefix=mngr_test_prefix, connect_command=None)
     merged = base.merge_with(override)
     assert merged.connect_command == "base-cmd"
-
-
-def test_mngr_config_connect_command_defaults_to_none(mngr_test_prefix: str) -> None:
-    config = MngrConfig(prefix=mngr_test_prefix)
-    assert config.connect_command is None
 
 
 # =============================================================================
@@ -1251,6 +1189,54 @@ def test_would_assignment_narrow_exempts_string_derived_tuple() -> None:
     base: tuple[str, ...] = ("--debug",)
     assert would_assignment_narrow(base, StringDerivedTuple(("--verbose",))) is False
     assert would_assignment_narrow(base, ("--verbose",)) is True
+
+
+def test_would_assignment_narrow_flags_set_subset_and_allows_superset() -> None:
+    """A set/frozenset override that drops a base element narrows; a superset does not."""
+    base = frozenset({"a", "b"})
+    # Override drops "b" -- a strict subset is narrowing.
+    assert would_assignment_narrow(base, frozenset({"a"})) is True
+    # An empty override over a non-empty base drops everything -- narrowing.
+    assert would_assignment_narrow(base, frozenset()) is True
+    # A superset keeps every base element -- not narrowing.
+    assert would_assignment_narrow(base, frozenset({"a", "b", "c"})) is False
+    # An equal set is a no-op -- not narrowing.
+    assert would_assignment_narrow(base, {"a", "b"}) is False
+
+
+def test_would_assignment_narrow_flags_dict_base_with_non_dict_override() -> None:
+    """A non-empty dict base replaced by a scalar/None override drops every key -- narrowing."""
+    base = {"k": "v"}
+    assert would_assignment_narrow(base, "scalar") is True
+    assert would_assignment_narrow(base, 0) is True
+
+
+def test_detect_settings_narrowing_flags_disabled_plugins_subset(mngr_test_prefix: str) -> None:
+    """A frozenset field (disabled_plugins) narrowed by a strict subset is flagged."""
+    base = MngrConfig(prefix=mngr_test_prefix, disabled_plugins=frozenset({"p1", "p2"}))
+    override = MngrConfig(prefix=mngr_test_prefix, disabled_plugins=frozenset({"p1"}))
+    assert detect_settings_narrowing(base, override) == ["disabled_plugins"]
+
+
+def test_detect_settings_narrowing_allows_disabled_plugins_superset(mngr_test_prefix: str) -> None:
+    """A frozenset override that contains every base entry does not narrow."""
+    base = MngrConfig(prefix=mngr_test_prefix, disabled_plugins=frozenset({"p1"}))
+    override = MngrConfig(prefix=mngr_test_prefix, disabled_plugins=frozenset({"p1", "p2"}))
+    assert detect_settings_narrowing(base, override) == []
+
+
+def test_detect_settings_narrowing_flags_dict_value_replaced_by_scalar(mngr_test_prefix: str) -> None:
+    """A nested dict value (under commands.<name>.defaults) replaced by a scalar drops
+    every key of that dict and is flagged at the deepest path."""
+    base = MngrConfig(
+        prefix=mngr_test_prefix,
+        commands={"create": CommandDefaults(defaults={"nested": {"k": "v"}})},
+    )
+    override = MngrConfig(
+        prefix=mngr_test_prefix,
+        commands={"create": CommandDefaults(defaults={"nested": "scalar"})},
+    )
+    assert detect_settings_narrowing(base, override) == ["commands.create.defaults.nested"]
 
 
 def test_detect_settings_narrowing_flags_provider_subclass_list_replacement(mngr_test_prefix: str) -> None:
@@ -1480,7 +1466,7 @@ def test_get_or_create_user_id_uses_env_var_when_file_missing(tmp_path: Path, mo
 def test_get_or_create_user_id_validates_env_var_matches_existing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """get_or_create_user_id should assert when MNGR_USER_ID doesn't match existing file."""
+    """get_or_create_user_id should raise when MNGR_USER_ID doesn't match existing file."""
     profile_dir = tmp_path / "profile"
     profile_dir.mkdir()
     existing_id = "b" * 32
@@ -1489,7 +1475,7 @@ def test_get_or_create_user_id_validates_env_var_matches_existing(
 
     monkeypatch.setenv("MNGR_USER_ID", "c" * 32)
 
-    with pytest.raises(AssertionError, match="MNGR_USER_ID environment variable does not match"):
+    with pytest.raises(ConfigParseError, match="MNGR_USER_ID environment variable does not match"):
         get_or_create_user_id(profile_dir)
 
 
@@ -1510,9 +1496,14 @@ def test_get_or_create_user_id_accepts_env_var_matching_existing(
 
 
 def test_mngr_context_get_profile_user_id(temp_mngr_ctx: MngrContext) -> None:
-    """MngrContext.get_profile_user_id should return a non-empty user ID."""
+    """MngrContext.get_profile_user_id returns a stable id and persists it to disk."""
     user_id = temp_mngr_ctx.get_profile_user_id()
     assert len(user_id) == 32
+    # The id must be stable: repeated calls return the same value.
+    assert temp_mngr_ctx.get_profile_user_id() == user_id
+    # And it must have been written to the profile's user_id file.
+    user_id_file = temp_mngr_ctx.profile_dir / USER_ID_FILENAME
+    assert user_id_file.read_text().strip() == user_id
 
 
 # =============================================================================

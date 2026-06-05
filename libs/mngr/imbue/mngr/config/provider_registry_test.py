@@ -1,5 +1,7 @@
 """Tests for provider config classes and registry."""
 
+from pathlib import Path
+
 import pytest
 
 from imbue.mngr.errors import ConfigParseError
@@ -37,12 +39,12 @@ def test_local_provider_config_default_backend() -> None:
     assert config.backend == ProviderBackendName("local")
 
 
-def test_local_provider_config_merge_with_returns_override_backend() -> None:
-    """LocalProviderConfig.merge_with should return override's backend."""
-    base = LocalProviderConfig(backend=ProviderBackendName("local"))
-    override = LocalProviderConfig(backend=ProviderBackendName("local"))
+def test_local_provider_config_merge_with_overrides_host_dir() -> None:
+    """LocalProviderConfig.merge_with should let the override's host_dir win."""
+    base = LocalProviderConfig(host_dir=Path("/base/host/dir"))
+    override = LocalProviderConfig(host_dir=Path("/override/host/dir"))
     merged = base.merge_with(override)
-    assert merged.backend == ProviderBackendName("local")
+    assert merged.host_dir == Path("/override/host/dir")
 
 
 def test_local_provider_config_merge_with_raises_for_different_type() -> None:

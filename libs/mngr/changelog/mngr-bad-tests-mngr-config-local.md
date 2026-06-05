@@ -1,0 +1,7 @@
+Test-quality and isolation fixes under `imbue/mngr/config`, plus two small production hardening changes:
+
+- Plugin-config registry (`config/plugin_registry.py`) now has a `reset_plugin_config_registry()` that the autouse test fixture calls before/after each test, closing a cross-test leak (the registry previously persisted registrations for the rest of the worker session). Registry-listing tests now assert exact contents instead of mere membership.
+- `get_or_create_user_id` now raises `ConfigParseError` (instead of a bare `assert`, which `python -O` strips) when `MNGR_USER_ID` does not match the existing user-id file.
+- Strengthened or removed numerous weak/tautological tests: deleted `assert ... or True` and default-equals-default/constructor round-trip micro-tests; replaced loose `len(...) > 0`/`isinstance(..., list)` completion-cache assertions with concrete membership checks; added missing branch coverage for set/frozenset and dict-vs-non-dict settings narrowing; covered the `~/.mngr` completion-cache default branch, the JSON `null`->None scalar case, local-disables and lower-layer-survives precedence directions, and duplicate/empty plugin-config registration edge cases.
+- Renamed helper classes that pytest was collecting (`_TestParentConfig`, `TestPlugin`) so they no longer match `Test*`.
+- De-duplicated test setup: a shared `read_completion_cache` helper and an `isolated_load_config_pm` fixture in `config/conftest.py` replace per-file/per-test boilerplate.
