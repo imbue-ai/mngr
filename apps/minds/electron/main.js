@@ -1072,9 +1072,9 @@ function handleChromeSSEEvent(evt) {
     // Backend defaults auto_open to true; treat a missing field the same way.
     const autoOpen = evt.auto_open !== false;
     // Diff the pending *set* (ordered ids), not the count, so a swap at
-    // constant size still refreshes the panel. Auto-open keys off a
+    // constant size still refreshes the inbox list. Auto-open keys off a
     // genuinely new id appearing (not a count increase, which is blind to
-    // replacements), so approving/denying never reopens a panel the user
+    // replacements), so approving/denying never reopens an inbox the user
     // closed.
     const prevSet = new Set(prevIds);
     const hasNewRequest = newIds.some((id) => !prevSet.has(id));
@@ -1082,11 +1082,9 @@ function handleChromeSSEEvent(evt) {
     latestChromeState.requestIds = newIds;
     latestChromeState.requestCount = newCount;
     const shouldAutoOpen = autoOpen && hasNewRequest;
-    // Auto-open keys off a genuinely new id appearing (not a count increase,
-    // which is blind to replacements), so approving/denying never reopens an
-    // inbox the user closed. When the inbox modal is already open in a
-    // bundle, we instead forward the chrome-event to its shell JS (debounced)
-    // so the master list re-fetches its fragment.
+    // When the inbox modal is already open in a bundle, forward the
+    // chrome-event to its shell JS (debounced) so the master list
+    // re-fetches its fragment; otherwise, on a genuinely new id, open it.
     if (idsChanged || shouldAutoOpen) {
       for (const b of bundles) {
         if (shouldAutoOpen && !isInboxModalOpen(b)) {
