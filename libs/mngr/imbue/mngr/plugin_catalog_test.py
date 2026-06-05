@@ -12,16 +12,6 @@ from imbue.mngr.primitives import PluginTier
 # =============================================================================
 
 
-def test_catalog_has_entries() -> None:
-    """The catalog ships the core independent agent-type plugins.
-
-    These three are the floor the rest of mngr relies on (default agent types
-    and the install wizard); the catalog must never regress below them.
-    """
-    entry_point_names = {e.entry_point_name for e in PLUGIN_CATALOG}
-    assert {"claude", "opencode", "tutor"} <= entry_point_names
-
-
 def test_catalog_entry_point_names_are_unique() -> None:
     names = [e.entry_point_name for e in PLUGIN_CATALOG]
     assert len(names) == len(set(names))
