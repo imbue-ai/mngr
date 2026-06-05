@@ -59,6 +59,22 @@ Bump `LIMA_VERSION` in `apps/minds/scripts/build.js` from `2.0.3` to `2.1.1` (ma
 - **test path**: mngr candidate branch → launch-to-msg with template_ref=v0.2.35 (lima boot is full end-to-end)
 - **deep-dive verdict (2026-06-05)**: lima v2.1.1's `go.mod` pins `containers/gvisor-tap-vsock v0.8.8` -- the exact regressed version the 2.0.3 pin dodges. v2.1.2 bumps to 0.8.9 but 0.8.9's changelog does not mention the SSH-fresh-connection wedge or any systemd-255 fix. Umbrella `lima-vm/lima#4558` is still open with no closing PR; the original audit's `#5042` reference was a different bug (FD leak after ~2048 forwards on Ubuntu 25.10, patched in `pkg/portfwd/client.go` -- doesn't touch the SSH hang). The 2.0.3 pin remains correct.
 
+### revert-lima-start-new-default-timeout (MNGR, found 2nd pass)
+
+The branch's `libs/mngr_lima/imbue/mngr_lima/limactl.py:155` has `timeout: float = 1800.0`; main is at `600.0`. The only caller (`instance.py:467-473`) passes `timeout=self.config.vm_start_timeout_seconds` explicitly, so the function default is dead code. `f794b3e98` ("Revert all libs/ changes; keep branch scoped to apps/minds") missed this one line.
+
+- **status**: in_flight (iter 4)
+- **test path**: mngr-rc-lima-timeout-revert (PR #1938) → launch-to-msg with template_ref=v0.2.35 + ci.yml
+- **expected blast radius**: zero (dead default)
+
+### uv-tool-install-editable-mode (PILOT, found 2nd pass)
+
+Pilot's `.mngr/settings.toml:235-236` uses `uv tool install -e ...` and `--with-editable` for mngr/mngr_claude/mngr_modal; FCT main uses non-editable `uv tool install ...` and `--with`. Original symptom (commit `3684fa01`): "uv tool install emits 'Requirements contain conflicting URLs for package imbue-mngr'" — diagnosed against `a90c78a2`-era vendor/mngr. Subsequent refreshes (`d0d861ab`, `fb96b1b3`, `749e234d`-merge) may have eliminated the URL-form mismatch. Editable mode is a resolver workaround; nothing imports `mngr_modal` so its `--with-editable` buys nothing functionally.
+
+- **status**: staged (iter 5)
+- **test path**: pilot-rc-uv-tool-non-editable → tag `v0.2.36-rc4-uv-tool-non-editable` → launch-to-msg with that template_ref. Provision script runs inside lima at agent-create time, so a real lima create is the only valid verification.
+- **expected blast radius**: high if conflict recurs — provision Phase B fails before `mngr` lands, no agent boots, verify aborts. Zero if conflict has been resolved.
+
 ### homebrew-path-augmentation (MNGR)
 
 Drop the explicit `homebrewPaths` prepend in `apps/minds/electron/backend.js:228-242`. Lima is bundled now, so the original symptom (Homebrew limactl lookup) is gone. Risk: lima provider may shell out to other CLIs (`ssh`, etc.) that rely on Homebrew PATH on some hosts.
