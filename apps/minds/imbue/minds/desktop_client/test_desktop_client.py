@@ -1445,7 +1445,14 @@ def test_inbox_empty_state(tmp_path: Path) -> None:
     assert response.status_code == 200
     body = response.text
     assert "No pending requests" in body
-    assert "is-empty" in body
+    # The ``is-empty`` class must be on the ``#inbox-body`` element itself --
+    # the substring appears unconditionally inside the page's <style> block
+    # (selectors like ``#inbox-body.is-empty #inbox-detail``), so target the
+    # opening tag's attribute span specifically.
+    tag_start = body.find('id="inbox-body"')
+    tag_end = body.find(">", tag_start)
+    assert tag_start != -1
+    assert "is-empty" in body[tag_start:tag_end]
     # Should not include any inbox-card markup when empty.
     assert 'class="inbox-card' not in body
 
