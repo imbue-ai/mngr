@@ -120,8 +120,9 @@ def test_prevent_yaml_usage() -> None:
     # litellm mandates a YAML config file, so this app cannot use TOML here:
     # app.py builds/writes it (yaml.dump) and config_drift_test.py parses the
     # local-dev litellm_proxy/config.yaml (yaml.safe_load) to assert it stays
-    # in sync with app.py. These are references to litellm's externally-required
-    # format, not new YAML config of our own.
+    # in sync with app.py. app_test.py likewise parses the config the proxy
+    # writes. These are references to litellm's externally-required format, not
+    # new YAML config of our own.
     rc.check_yaml_usage(_DIR, snapshot(10))
 
 
@@ -148,7 +149,7 @@ def test_prevent_hardcoded_guarded_binary() -> None:
 
 
 def test_prevent_num_prefix() -> None:
-    rc.check_num_prefix(_DIR, snapshot(1))
+    rc.check_num_prefix(_DIR, snapshot(2))
 
 
 # --- Documentation ---

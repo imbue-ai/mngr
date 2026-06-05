@@ -1,55 +1,67 @@
 from pathlib import Path
 
 import app
-
-# The set of public model names the proxy is expected to expose. This is the
-# reviewed source of truth: adding or removing a model must show up as a diff
-# here, and each name is checked against the config the proxy actually writes.
-_EXPECTED_MODEL_NAMES = (
-    "claude-opus-4-7",
-    "claude-sonnet-4-6",
-    "claude-sonnet-4-20250514",
-    "claude-opus-4-20250514",
-    "claude-haiku-4-5-20251001",
-)
+import yaml
+from inline_snapshot import snapshot
 
 
-def test_write_config_file_exposes_each_expected_model_with_anthropic_routing() -> None:
-    """Every expected model must appear in the written config wired to anthropic.
+def test_write_config_file_round_trips_to_in_memory_litellm_config(
+    litellm_proxy_config_path: str,
+) -> None:
+    """The file the proxy reads at startup must deserialize back to LITELLM_CONFIG.
 
-    Reads the file the proxy actually consumes at startup and asserts, per model,
-    that both the public ``model_name: <name>`` entry and its
-    ``model: anthropic/<name>`` routing target are present. This catches a
-    hand-maintained model_list entry whose public name and routing target drift
-    apart (e.g. a typo when adding a model), which would otherwise silently route
-    requests to the wrong model. The entry count is pinned so a dropped or extra
-    model is caught too.
+    Guards that the whole config stays YAML-serializable (a non-serializable value
+    would raise in the writer) and that it round-trips faithfully through the
+    serializer LiteLLM uses -- so the proxy boots with exactly the intended config
+    rather than failing on a live Modal deploy. Comparing against the in-memory
+    constant also pins every field, including the litellm_settings block.
     """
-    config_path = app._write_config_file()
+    loaded_config = yaml.safe_load(Path(litellm_proxy_config_path).read_text())
 
-    written_config = Path(config_path).read_text()
-
-    for model_name in _EXPECTED_MODEL_NAMES:
-        assert f"model_name: {model_name}" in written_config
-        assert f"model: anthropic/{model_name}" in written_config
-    assert written_config.count("model_name:") == len(_EXPECTED_MODEL_NAMES)
+    assert loaded_config == app.LITELLM_CONFIG
 
 
-def test_write_config_file_emits_env_var_references_for_secret_resolution() -> None:
-    """The written config file is what the proxy reads at startup.
+def test_litellm_config_routes_each_model_to_anthropic_with_api_key_reference(
+    litellm_proxy_config_path: str,
+) -> None:
+    """Each exposed model must route to ``anthropic/<name>`` via the API-key env ref.
 
-    Calling the writer guards that the config stays serializable (a
-    non-serializable value would raise here, only otherwise surfacing as a proxy
-    container failing to boot on a live Modal deploy). The content assertions
-    guard the secret-resolution contract: LiteLLM resolves secrets only from
-    literal ``os.environ/<NAME>`` reference strings, so if serialization ever
-    quoted, escaped, or transformed them the proxy would treat them as literal
-    credentials instead of env-var lookups.
+    Asserts, per model, that the public model_name and its litellm routing target
+    agree (guarding a typo that would silently route to the wrong model) and that
+    the api_key is the ``os.environ/ANTHROPIC_API_KEY`` reference LiteLLM resolves
+    at runtime, not a literal credential. The exposed model-name set is pinned so
+    an added or removed model surfaces as a reviewed diff.
     """
-    config_path = app._write_config_file()
+    loaded_config = yaml.safe_load(Path(litellm_proxy_config_path).read_text())
 
-    written_config = Path(config_path).read_text()
+    model_names = [entry["model_name"] for entry in loaded_config["model_list"]]
+    assert model_names == snapshot(
+        [
+            "claude-opus-4-7",
+            "claude-sonnet-4-6",
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514",
+            "claude-haiku-4-5-20251001",
+        ]
+    )
+    for entry in loaded_config["model_list"]:
+        assert entry["litellm_params"]["model"] == f"anthropic/{entry['model_name']}"
+        assert entry["litellm_params"]["api_key"] == "os.environ/ANTHROPIC_API_KEY"
 
-    assert "os.environ/ANTHROPIC_API_KEY" in written_config
-    assert "os.environ/DATABASE_URL" in written_config
-    assert "os.environ/LITELLM_MASTER_KEY" in written_config
+
+def test_litellm_config_binds_database_and_master_key_to_env_references(
+    litellm_proxy_config_path: str,
+) -> None:
+    """general_settings + litellm_settings must carry the right env refs and policy.
+
+    Binds each secret to its role -- ``database_url`` and ``master_key`` must be
+    the ``os.environ/<NAME>`` references LiteLLM resolves at runtime (not literal
+    credentials) -- and pins the request-handling policy (``drop_params`` on,
+    retries off) the proxy is meant to deploy with.
+    """
+    loaded_config = yaml.safe_load(Path(litellm_proxy_config_path).read_text())
+
+    assert loaded_config["general_settings"]["database_url"] == "os.environ/DATABASE_URL"
+    assert loaded_config["general_settings"]["master_key"] == "os.environ/LITELLM_MASTER_KEY"
+    assert loaded_config["litellm_settings"]["drop_params"] is True
+    assert loaded_config["litellm_settings"]["num_retries"] == 0
