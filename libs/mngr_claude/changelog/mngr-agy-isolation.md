@@ -1,1 +1,0 @@
-Internal refactor (no behavior change): `ClaudeAgent._find_git_source_path` now delegates to the shared core helper `imbue.mngr.utils.git_utils.find_git_source_path` instead of inlining the `find_git_common_dir` + parent logic, which was duplicated in the `antigravity` plugin.
