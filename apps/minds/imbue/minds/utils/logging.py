@@ -39,6 +39,12 @@ class _LevelStyle(FrozenModel):
     color: str | None = Field(description="ANSI color wrapping the whole line, or None to render it plain (INFO).")
     prefix: str = Field(description='Text shown before the message (e.g. "WARNING: "); empty for no prefix.')
 
+    def loguru_format(self) -> str:
+        """The loguru format template for a line at this level, with color and prefix applied."""
+        if self.color is None:
+            return f"{self.prefix}{{message}}\n"
+        return f"{self.color}{self.prefix}{{message}}{_RESET_COLOR}\n"
+
 
 # Single source of truth for every console-output level: its loguru name (used to
 # set the sink threshold) plus how its lines are rendered. ``ConsoleLogLevel.NONE``
@@ -72,14 +78,12 @@ def _dynamic_stderr_sink(message: Any) -> None:
 def _format_user_message(record: Any) -> str:
     """Format user-facing log lines: colored, with a WARNING:/ERROR: prefix where applicable."""
     style = _STYLE_BY_LOGURU_NAME.get(record["level"].name)
-    # Unknown levels (loguru's SUCCESS/CRITICAL, which minds does not emit) and
-    # INFO (deliberately uncolored) render plain. If minds ever logs at CRITICAL,
-    # revisit whether it should get the error color.
+    # Loguru levels minds does not emit (its own SUCCESS/CRITICAL) are absent from
+    # the table and render plain. If minds ever logs at CRITICAL, revisit whether
+    # it should get the error color.
     if style is None:
         return "{message}\n"
-    if style.color is None:
-        return f"{style.prefix}{{message}}\n"
-    return f"{style.color}{style.prefix}{{message}}{_RESET_COLOR}\n"
+    return style.loguru_format()
 
 
 def setup_logging(
