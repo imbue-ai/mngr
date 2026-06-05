@@ -61,8 +61,8 @@ up manually with `rm -rf ~/.minds-pw-*`.
 
 ## CI integration (next)
 
-- `minds-launch-on-vanilla.yml` (new) — runs `launch-smoke.spec.js` on
-  GitHub's `macos-latest` runner. Truly cold every commit. ~5 min.
+- `minds-macos-launch.yml` — runs `launch-smoke.spec.js` on GitHub's
+  `macos-latest` runner. Truly cold every commit. ~5 min.
 - `minds-launch-to-msg.yml` (existing) — extends the verify job to
   also run `chat-roundtrip.spec.js` on the self-hosted MacBook.
   Replaces the imperative `first-message-verify.sh`.

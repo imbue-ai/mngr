@@ -1,8 +1,8 @@
-name: minds Playwright vanilla launch
+name: minds macOS launch
 
-# Runs the Playwright launch-smoke (and form-fill demo) against the latest
-# released minds.app on a TRULY vanilla macos-latest GitHub-hosted runner.
-# No lima, no agent creation, no credentials. Covers the cold-launch +
+# Runs the Playwright launch-smoke spec against the latest released
+# minds.app on a vanilla macos-latest GitHub-hosted runner. No lima,
+# no agent creation, no credentials. Covers the cold-launch +
 # UI-renders-cleanly path that previously could only be checked by Tart
 # under manual operation.
 #
@@ -24,7 +24,7 @@ on:
         default: ''
 
 jobs:
-  vanilla-launch:
+  macos-launch:
     runs-on: macos-latest
     timeout-minutes: 30
     steps:

@@ -5,7 +5,7 @@ slack-permission-flow scenario in CI, driven by Playwright clicks.
 
 ## Two CI workflows (split by runner capability)
 
-### `minds-playwright-vanilla.yml` — `runs-on: macos-latest`
+### `minds-macos-launch.yml` — `runs-on: macos-latest`
 
 - Free GitHub-hosted M-series Mac runners (no nested virt; can't boot lima).
 - Scope:
@@ -107,6 +107,6 @@ So path 1 it is. Concrete plan:
 
 ### What ships in this PR
 
-This PR lands the **vanilla launch CI workflow only** plus this design
+This PR lands the **macOS launch CI workflow only** plus this design
 doc. The slack mock and self-hosted runner extension come in a
 follow-up PR once the mock-server scaffold is built.
