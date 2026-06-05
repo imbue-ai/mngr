@@ -18,6 +18,22 @@ from imbue.mngr.primitives import AgentId
 _SECRETS_FILE: Final[str] = "runtime/secrets/telegram.env"
 
 
+def build_inject_command(agent_id: AgentId, bot_token: SecretStr) -> list[str]:
+    """Build the ``mngr exec`` argv that writes the bot token into the agent.
+
+    The token is ``shlex.quote``-escaped before interpolation into the remote
+    shell snippet so that a token containing spaces or shell metacharacters
+    cannot break out of the ``printf`` or inject additional commands.
+    """
+    safe_token = shlex.quote(bot_token.get_secret_value())
+    return [
+        MNGR_BINARY,
+        "exec",
+        str(agent_id),
+        f"mkdir -p runtime/secrets && printf 'export TELEGRAM_BOT_TOKEN=%s\\n' {safe_token} > {_SECRETS_FILE}",
+    ]
+
+
 def inject_telegram_bot_token(
     agent_id: AgentId,
     bot_token: SecretStr,
@@ -29,16 +45,10 @@ def inject_telegram_bot_token(
 
     Raises MngrCommandError if the mngr exec command fails.
     """
-    safe_token = shlex.quote(bot_token.get_secret_value())
     with log_span("Injecting Telegram bot token into agent {}", agent_id):
         cg = ConcurrencyGroup(name="mngr-exec-telegram-token")
         with cg:
-            command = [
-                MNGR_BINARY,
-                "exec",
-                str(agent_id),
-                f"mkdir -p runtime/secrets && printf 'export TELEGRAM_BOT_TOKEN=%s\\n' {safe_token} > {_SECRETS_FILE}",
-            ]
+            command = build_inject_command(agent_id, bot_token)
             result = cg.run_process_to_completion(
                 command=command,
                 is_checked_after=False,
