@@ -33,6 +33,17 @@ def _user_event(content: str) -> dict[str, object]:
     }
 
 
+def _tool_result_event(name: str, tool_call_id: str, output: str, is_error: bool) -> dict[str, object]:
+    return {
+        "type": "tool_result",
+        "event_id": f"evt-{name}",
+        "tool_call_id": tool_call_id,
+        "output": output,
+        "is_error": is_error,
+        "message_uuid": f"uuid-{name}",
+    }
+
+
 def test_build_result_envelope_success() -> None:
     meta = ResultMeta(session_id="session-1", duration_ms=1234, is_error=False, error_text=None)
     envelope = build_result_envelope(text="hi there", meta=meta, turn_count=1)
@@ -110,14 +121,7 @@ def test_transcript_assistant_event_with_tool_use_emits_tool_use_block() -> None
 
 
 def test_transcript_tool_result_event_to_stream_json() -> None:
-    event = {
-        "type": "tool_result",
-        "event_id": "evt-tr",
-        "tool_call_id": "call-1",
-        "output": "command output",
-        "is_error": True,
-        "message_uuid": "uuid-tr",
-    }
+    event = _tool_result_event("tr", tool_call_id="call-1", output="command output", is_error=True)
     converted = transcript_event_to_stream_json(event, "sess-1")
     assert converted is not None
     assert converted["type"] == "user"
@@ -133,14 +137,7 @@ def test_transcript_tool_result_event_to_stream_json() -> None:
 def test_transcript_tool_result_event_is_error_false() -> None:
     # ``is_error`` is coerced via ``bool(...)``; verify the False case explicitly
     # so a regression that always emitted True (or dropped the key) is caught.
-    event = {
-        "type": "tool_result",
-        "event_id": "evt-tr2",
-        "tool_call_id": "call-2",
-        "output": "ok",
-        "is_error": False,
-        "message_uuid": "uuid-tr2",
-    }
+    event = _tool_result_event("tr2", tool_call_id="call-2", output="ok", is_error=False)
     converted = transcript_event_to_stream_json(event, "sess-1")
     assert converted is not None
     assert converted["message"]["content"][0]["is_error"] is False
