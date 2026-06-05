@@ -1,5 +1,3 @@
-from datetime import datetime
-from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import cast
@@ -12,8 +10,6 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ModalAuthError
-from imbue.mngr.interfaces.data_types import CertifiedHostData
-from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -23,10 +19,8 @@ from imbue.mngr.primitives import UserId
 from imbue.mngr_modal.backend import ModalProviderBackend
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.instance import HOST_VOLUME_INFIX
-from imbue.mngr_modal.instance import HostRecord
 from imbue.mngr_modal.instance import MODAL_VOLUME_NAME_MAX_LENGTH
 from imbue.mngr_modal.instance import ModalProviderInstance
-from imbue.mngr_modal.instance import SandboxConfig
 from imbue.mngr_modal.instance import TAG_HOST_ID
 from imbue.mngr_modal.instance import TAG_HOST_NAME
 from imbue.mngr_modal.instance import TAG_USER_PREFIX
@@ -273,42 +267,6 @@ def test_handle_modal_auth_error_decorator_converts_auth_error_to_modal_auth_err
 # =============================================================================
 # discover_hosts and stopped host tests (unit tests with mocked volume)
 # =============================================================================
-
-
-def _make_host_record(
-    host_id: HostId,
-    host_name: str = "test-host",
-    snapshots: list[SnapshotRecord] | None = None,
-    failure_reason: str | None = None,
-) -> HostRecord:
-    """Create a HostRecord for testing."""
-    now = datetime.now(timezone.utc)
-    certified_data = CertifiedHostData(
-        host_id=str(host_id),
-        host_name=host_name,
-        user_tags={},
-        snapshots=snapshots or [],
-        failure_reason=failure_reason,
-        created_at=now,
-        updated_at=now,
-    )
-    return HostRecord(
-        ssh_host="test.host",
-        ssh_port=22,
-        ssh_host_public_key="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQ...",
-        config=SandboxConfig(cpu=1.0, memory=1.0),
-        certified_host_data=certified_data,
-    )
-
-
-def _make_snapshot_record(name: str = "initial") -> SnapshotRecord:
-    """Create a SnapshotRecord for testing."""
-    # The id is now the Modal image ID directly
-    return SnapshotRecord(
-        id="im-abc123",
-        name=name,
-        created_at="2026-01-01T00:00:00Z",
-    )
 
 
 def test_list_all_host_records_returns_empty_when_volume_empty(
@@ -1456,8 +1414,8 @@ def test_discover_hosts_and_agents_returns_agents_from_volume_data(
     """discover_hosts_and_agents builds DiscoveredHost->DiscoveredAgent map from volume data."""
     host_id = HostId.generate()
     agent_id = AgentId.generate()
-    snapshot = _make_snapshot_record("initial")
-    host_record = _make_host_record(host_id, host_name="my-host", snapshots=[snapshot])
+    snapshot = make_snapshot(name="initial")
+    host_record = make_host_record(host_id, host_name="my-host", snapshots=[snapshot])
     agent_data = [{"id": str(agent_id), "name": "test-agent", "type": "claude"}]
 
     with (
@@ -1486,7 +1444,7 @@ def test_discover_hosts_and_agents_excludes_destroyed_hosts_by_default(
 ) -> None:
     """discover_hosts_and_agents excludes destroyed hosts (no sandbox, no snapshots) by default."""
     host_id = HostId.generate()
-    host_record = _make_host_record(host_id, snapshots=[])
+    host_record = make_host_record(host_id, snapshots=[])
 
     with (
         patch.object(modal_provider, "_list_running_host_ids", return_value=set()),
@@ -1504,7 +1462,7 @@ def test_discover_hosts_and_agents_includes_destroyed_hosts_when_requested(
 ) -> None:
     """discover_hosts_and_agents includes destroyed hosts when include_destroyed=True."""
     host_id = HostId.generate()
-    host_record = _make_host_record(host_id, snapshots=[])
+    host_record = make_host_record(host_id, snapshots=[])
 
     with (
         patch.object(modal_provider, "_list_running_host_ids", return_value=set()),
@@ -1522,7 +1480,7 @@ def test_discover_hosts_and_agents_includes_running_hosts_from_host_records(
 ) -> None:
     """discover_hosts_and_agents includes running hosts (sandbox exists + host record exists)."""
     host_id = HostId.generate()
-    host_record = _make_host_record(host_id, host_name="running-host", snapshots=[])
+    host_record = make_host_record(host_id, host_name="running-host", snapshots=[])
 
     with (
         patch.object(modal_provider, "_list_running_host_ids", return_value={host_id}),
@@ -1624,7 +1582,7 @@ def test_check_host_name_is_unique_passes_when_no_existing_hosts() -> None:
 def test_check_host_name_is_unique_passes_when_name_is_different() -> None:
     """check_host_name_is_unique should not raise when the name is different from existing hosts."""
     host_id = HostId.generate()
-    existing_record = _make_host_record(host_id, host_name="existing-host", snapshots=[_make_snapshot_record()])
+    existing_record = make_host_record(host_id, host_name="existing-host", snapshots=[make_snapshot()])
 
     check_host_name_is_unique(
         _TEST_PROVIDER_NAME, HostName("different-host"), host_records=[existing_record], running_host_ids=set()
@@ -1634,7 +1592,7 @@ def test_check_host_name_is_unique_passes_when_name_is_different() -> None:
 def test_check_host_name_is_unique_raises_when_name_already_exists_on_running_host() -> None:
     """check_host_name_is_unique should raise HostNameConflictError when a running host has the same name."""
     host_id = HostId.generate()
-    existing_record = _make_host_record(host_id, host_name="taken-name")
+    existing_record = make_host_record(host_id, host_name="taken-name")
 
     with pytest.raises(HostNameConflictError) as exc_info:
         check_host_name_is_unique(
@@ -1646,7 +1604,7 @@ def test_check_host_name_is_unique_raises_when_name_already_exists_on_running_ho
 def test_check_host_name_is_unique_raises_when_name_exists_on_stopped_host_with_snapshots() -> None:
     """check_host_name_is_unique should raise when a stopped host with snapshots has the same name."""
     host_id = HostId.generate()
-    existing_record = _make_host_record(host_id, host_name="taken-name", snapshots=[_make_snapshot_record()])
+    existing_record = make_host_record(host_id, host_name="taken-name", snapshots=[make_snapshot()])
 
     with pytest.raises(HostNameConflictError):
         check_host_name_is_unique(
@@ -1658,7 +1616,7 @@ def test_check_host_name_is_unique_allows_reuse_of_destroyed_host_name() -> None
     """check_host_name_is_unique should allow reusing a name from a destroyed host."""
     host_id = HostId.generate()
     # A destroyed host: no snapshots, no failure_reason, not running
-    destroyed_record = _make_host_record(host_id, host_name="reusable-name", snapshots=[])
+    destroyed_record = make_host_record(host_id, host_name="reusable-name", snapshots=[])
 
     # Should not raise
     check_host_name_is_unique(
@@ -1669,9 +1627,9 @@ def test_check_host_name_is_unique_allows_reuse_of_destroyed_host_name() -> None
 def test_check_host_name_is_unique_raises_when_name_matches_any_non_destroyed() -> None:
     """check_host_name_is_unique should raise if the name matches any non-destroyed host."""
     host_records = [
-        _make_host_record(HostId.generate(), host_name="host-alpha", snapshots=[_make_snapshot_record()]),
-        _make_host_record(HostId.generate(), host_name="host-beta", snapshots=[_make_snapshot_record()]),
-        _make_host_record(HostId.generate(), host_name="host-gamma", snapshots=[_make_snapshot_record()]),
+        make_host_record(HostId.generate(), host_name="host-alpha", snapshots=[make_snapshot()]),
+        make_host_record(HostId.generate(), host_name="host-beta", snapshots=[make_snapshot()]),
+        make_host_record(HostId.generate(), host_name="host-gamma", snapshots=[make_snapshot()]),
     ]
 
     with pytest.raises(HostNameConflictError):
@@ -1683,7 +1641,7 @@ def test_check_host_name_is_unique_raises_when_name_matches_any_non_destroyed() 
 def test_check_host_name_is_unique_raises_when_name_exists_on_failed_host() -> None:
     """check_host_name_is_unique should raise for a failed host (not running, no snapshots, but has failure_reason)."""
     host_id = HostId.generate()
-    failed_record = _make_host_record(host_id, host_name="failed-host", failure_reason="Build failed")
+    failed_record = make_host_record(host_id, host_name="failed-host", failure_reason="Build failed")
 
     with pytest.raises(HostNameConflictError):
         check_host_name_is_unique(
