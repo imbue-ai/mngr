@@ -62,21 +62,6 @@
       color: #64748b;
       font-size: 13px;
     }
-    /* Drawer in-animation: small slide from the left edge (-15px
-       past the final position, slides right into place) plus a fade.
-       Backdrop scrim fades in alongside it on the same timing. Runs
-       once per inbox open (the modal view loads a fresh /inbox page
-       each time, so the animation re-runs naturally). */
-    @keyframes inbox-slide-in {
-      from { transform: translateX(-15px); opacity: 0; }
-      to   { transform: translateX(0);     opacity: 1; }
-    }
-    #inbox-dialog { animation: inbox-slide-in 180ms cubic-bezier(0.16, 1, 0.3, 1); }
-    @keyframes inbox-backdrop-fade-in {
-      from { background-color: rgba(0, 0, 0, 0); }
-      to   { background-color: rgba(0, 0, 0, 0.2); }
-    }
-    #inbox-backdrop { animation: inbox-backdrop-fade-in 180ms cubic-bezier(0.16, 1, 0.3, 1); }
     /* When the body has no cards, the left column expands to fill the
        dialog and the right pane is hidden so the empty state reads as
        a single centered message rather than a half-empty split. The
