@@ -7,15 +7,13 @@
   the empty state and apply the single-centered-message layout.
 
   ``cards`` is a sequence of dicts with keys: ``id``, ``kind_label``,
-  ``ws_name``, ``display_name``, ``agent_id``, ``accent``.
-  ``selected_id`` is the id of the currently-selected card (or empty
-  string for no selection).
+  ``ws_name``, ``display_name``, ``accent``. ``selected_id`` is the id
+  of the currently-selected card (or empty string for no selection).
 #}
 {% if cards %}
   {% for card in cards %}
     <div class="inbox-card {% if card.id == selected_id %}is-selected{% endif %}"
          data-request-id="{{ card.id }}"
-         data-agent-id="{{ card.agent_id }}"
          style="--workspace-accent: {{ card.accent }};">
       <div class="inbox-card-kind">{{ card.kind_label }}: {{ card.ws_name }}</div>
       <div class="inbox-card-display">{{ card.display_name }}</div>

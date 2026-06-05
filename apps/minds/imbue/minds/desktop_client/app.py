@@ -2675,8 +2675,8 @@ def _build_inbox_cards(request: Request) -> list[Mapping[str, str]]:
     """Build the inbox card dicts for the current pending requests.
 
     Each card carries the fields the InboxList JinjaX component reads:
-    ``id``, ``kind_label``, ``ws_name``, ``display_name``, ``agent_id``,
-    ``accent``. Order matches ``RequestInbox.get_pending_requests`` --
+    ``id``, ``kind_label``, ``ws_name``, ``display_name``, ``accent``.
+    Order matches ``RequestInbox.get_pending_requests`` --
     most-recent-first.
     """
     inbox: RequestInbox | None = request.app.state.request_inbox
@@ -2707,7 +2707,6 @@ def _build_inbox_cards(request: Request) -> list[Mapping[str, str]]:
                 "kind_label": kind_label,
                 "ws_name": ws_name,
                 "display_name": display_name,
-                "agent_id": req.agent_id,
                 "accent": workspace_accent(req.agent_id),
             }
         )
