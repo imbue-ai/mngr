@@ -96,14 +96,18 @@ _remove_deprecated_urwid_module_aliases()
 # plugin uses. Single-sourcing them this way keeps mngr-core and its plugins
 # from drifting apart.
 #
-# Two fixtures below intentionally OVERRIDE the plugin_testing versions because
-# mngr-core needs stricter behavior than plugins do:
-#   - plugin_manager: blocks every external entry-point plugin except those in
-#                     enabled_plugins (plugins instead load all entry points so
-#                     their own hooks are present).
-#   - mngr_test_id:   records the id in worker_test_ids, which mngr-core's
-#                     session_cleanup fixture (not shared with plugins) scans for
-#                     leaked tmux sessions at session end.
+# Two fixtures below override the plugin_testing versions. Only one is a genuine
+# design difference:
+#   - plugin_manager: deliberately diverges -- mngr-core blocks every external
+#                     entry-point plugin except those in enabled_plugins, whereas
+#                     the plugin-facing version loads all entry points so a
+#                     plugin's own hooks are present.
+#   - mngr_test_id:   identical to the shared version except it also appends to
+#                     worker_test_ids. That list is read only by mngr-core's
+#                     session_cleanup leak scan, which isn't shared with plugins,
+#                     so the bookkeeping would simply be inert there. This override
+#                     is incidental, not principled -- it could go away if that
+#                     scan were ever shared with plugins.
 # register_plugin_test_fixtures runs first; because these defs come after it,
 # they win for the mngr-core test session.
 
