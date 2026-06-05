@@ -534,14 +534,26 @@ def _screenshot_all(scenarios: list[Scenario], png_dir: Path, port: int) -> None
                     page.goto(target, wait_until="networkidle", timeout=15000)
                     # `networkidle` fires once tailwind.js finishes downloading,
                     # but the Play CDN does its utility-class scan + <style>
-                    # injection on DOMContentLoaded -- which can land AFTER
-                    # networkidle. Wait for the global to be defined AND for
-                    # the injected <style> element to have non-empty content,
-                    # so a screenshot can never race the runtime stylesheet.
+                    # injection asynchronously after that. Checking only that
+                    # *some* <style> is non-empty is wrong -- Tailwind's
+                    # preflight reset is injected very early, well before the
+                    # utility classes are generated. Instead, append a probe
+                    # element with a known Tailwind class and wait for that
+                    # class to actually resolve on it. Tailwind's mutation
+                    # observer regenerates the stylesheet for every class
+                    # currently in the DOM in the same pass, so a styled probe
+                    # proves the page's own utilities are styled too.
+                    page.evaluate(
+                        "() => {"
+                        "  const p = document.createElement('div');"
+                        "  p.id = '__tw_probe';"
+                        "  p.className = 'hidden';"
+                        "  document.body.appendChild(p);"
+                        "}"
+                    )
                     page.wait_for_function(
-                        "() => typeof tailwind !== 'undefined' "
-                        "&& Array.from(document.querySelectorAll('style'))"
-                        ".some(s => s.textContent.length > 0)",
+                        "() => { const p = document.getElementById('__tw_probe'); "
+                        "return p && getComputedStyle(p).display === 'none'; }",
                         timeout=5000,
                     )
                     # System-font pages resolve fonts.ready immediately; this
