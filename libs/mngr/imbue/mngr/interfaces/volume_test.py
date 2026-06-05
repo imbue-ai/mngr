@@ -1,65 +1,11 @@
-from typing import Mapping
-
 import pytest
 
 from imbue.mngr.interfaces.data_types import FileType
-from imbue.mngr.interfaces.data_types import VolumeFile
-from imbue.mngr.interfaces.volume import BaseVolume
+from imbue.mngr.interfaces.mock_volume_test import InMemoryVolume
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.interfaces.volume import ScopedVolume
 from imbue.mngr.interfaces.volume import _scoped_path
 from imbue.mngr.primitives import AgentId
-
-
-class InMemoryVolume(BaseVolume):
-    """In-memory volume implementation for testing."""
-
-    files: dict[str, bytes] = {}
-
-    def listdir(self, path: str) -> list[VolumeFile]:
-        path = path.rstrip("/")
-        results: list[VolumeFile] = []
-        for file_path in sorted(self.files):
-            parent = file_path.rsplit("/", 1)[0] if "/" in file_path else ""
-            if parent == path or (not path and "/" not in file_path):
-                results.append(
-                    VolumeFile(path=file_path, file_type=FileType.FILE, mtime=0, size=len(self.files[file_path]))
-                )
-        return results
-
-    def path_exists(self, path: str) -> bool:
-        if path in self.files:
-            return True
-        prefix = path.rstrip("/") + "/"
-        return any(k.startswith(prefix) for k in self.files)
-
-    def read_file(self, path: str) -> bytes:
-        if path not in self.files:
-            raise FileNotFoundError(path)
-        return self.files[path]
-
-    def remove_file(self, path: str, *, recursive: bool = False) -> None:
-        if not recursive:
-            if path not in self.files:
-                raise FileNotFoundError(path)
-            del self.files[path]
-            return
-        prefix = path.rstrip("/") + "/"
-        to_delete = [k for k in self.files if k == path or k.startswith(prefix)]
-        if not to_delete:
-            raise FileNotFoundError(path)
-        for k in to_delete:
-            del self.files[k]
-
-    def remove_directory(self, path: str) -> None:
-        prefix = path.rstrip("/") + "/"
-        to_delete = [k for k in self.files if k.startswith(prefix) or k == path.rstrip("/")]
-        for k in to_delete:
-            del self.files[k]
-
-    def write_files(self, file_contents_by_path: Mapping[str, bytes]) -> None:
-        self.files.update(file_contents_by_path)
-
 
 # =============================================================================
 # _scoped_path tests
@@ -172,9 +118,12 @@ def test_scoped_volume_listdir(volume_with_files: InMemoryVolume) -> None:
     paths = [e.path for e in entries]
     assert "agents/a1.json" in paths
     assert "agents/a2.json" in paths
-    for entry in entries:
-        data = scoped.read_file(entry.path)
-        assert len(data) > 0
+    # Reading each listed entry must resolve to the correct backing file, so
+    # assert exact contents (matching volume_with_files) rather than just
+    # non-empty bytes -- the latter would still pass if a scoped read returned
+    # the wrong file's data.
+    assert scoped.read_file("agents/a1.json") == b'{"id": "a1"}'
+    assert scoped.read_file("agents/a2.json") == b'{"id": "a2"}'
 
 
 def test_scoped_volume_listdir_preserves_file_type(volume_with_files: InMemoryVolume) -> None:
@@ -222,12 +171,17 @@ def test_scoped_volume_path_exists_missing(volume_with_files: InMemoryVolume) ->
 # =============================================================================
 
 
-def test_volume_file_fields() -> None:
-    vf = VolumeFile(path="/test.txt", file_type=FileType.FILE, mtime=1000, size=42)
-    assert vf.path == "/test.txt"
-    assert vf.file_type == FileType.FILE
-    assert vf.mtime == 1000
-    assert vf.size == 42
+def test_volume_file_size_reflects_listed_file_contents() -> None:
+    """listdir derives VolumeFile.size from the actual file contents.
+
+    This ties the VolumeFile fields to the production listing logic rather than
+    to literals the test itself passed into the constructor.
+    """
+    vol = InMemoryVolume(files={"report.txt": b"hello world"})
+    (entry,) = vol.listdir("")
+    assert entry.path == "report.txt"
+    assert entry.file_type == FileType.FILE
+    assert entry.size == len(b"hello world")
 
 
 def test_volume_file_type_enum_values() -> None:
