@@ -660,6 +660,26 @@ def test_card_interactive_adds_hover_classes() -> None:
     assert "cursor-pointer" in interactive
 
 
+def test_card_page_default_padding_and_max_width() -> None:
+    html = CATALOG.render("CardPage", title="x", _content="<p>body</p>")
+    # Card surface: bg/border/rounded/shadow + p-10 + max-w-[420px] + w-full.
+    assert "bg-white" in html
+    assert "rounded-xl" in html
+    assert "shadow-sm" in html
+    assert "p-10" in html
+    assert "max-w-[420px]" in html
+    assert "<p>body</p>" in html
+    # The body is flex-centered around the card.
+    assert "flex items-center justify-center min-h-screen" in html
+
+
+def test_card_page_form_padding_uses_p6() -> None:
+    html = CATALOG.render("CardPage", title="x", padding="form", max_width="max-w-[520px]", _content="x")
+    assert "p-6" in html
+    assert "p-10" not in html
+    assert "max-w-[520px]" in html
+
+
 def test_icon24_renders_with_stroke_shell_and_default_size() -> None:
     # ``home`` is one of the icons in the ICONS_24 catalog global.
     html = CATALOG.render("Icon24", name="home")

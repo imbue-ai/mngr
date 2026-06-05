@@ -156,11 +156,8 @@
   })();
 </script>
 {% endset %}
-<Base title="Create workspace"
-      body_class="bg-zinc-50 text-zinc-900 font-sans antialiased flex items-center justify-center min-h-screen p-6"
-      scripts={{ _scripts }}>
-  <main class="w-full max-w-[520px] bg-white border border-zinc-200 rounded-xl shadow-sm p-6">
-    <form id="create-form" action="/create" method="post">
+<CardPage title="Create workspace" padding="form" max_width="max-w-[520px]" scripts={{ _scripts }}>
+  <form id="create-form" action="/create" method="post">
 
       <div class="flex items-center justify-between gap-4 mb-5">
         <h1 class="text-sm font-medium text-zinc-500">Create workspace</h1>
@@ -290,6 +287,5 @@
           </div>
         </div>
       </div>
-    </form>
-  </main>
-</Base>
+  </form>
+</CardPage>
