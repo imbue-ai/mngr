@@ -15,5 +15,10 @@ Strengthened several weak tests in the remote_service_connector test suite:
   recomputing the production algorithm in the assertion.
 - Documented the intentional "returns without raising" contract for two no-positive-observable
   tests.
+- Moved the `TestClient`-driven end-to-end tests (routes, auth, host-lease, paid-list CRUD,
+  bucket endpoints) out of the unit `app_test.py` into a new integration file
+  `test_remote_service_connector_routes.py`, leaving the pure-function and single-layer unit
+  tests in `app_test.py`. The two cleanup-sweep tests now build their fake backend directly
+  instead of through the route test client.
 
 Test-only changes; no user-visible behavior change.
