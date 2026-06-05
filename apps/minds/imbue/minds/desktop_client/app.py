@@ -2752,9 +2752,7 @@ def _resolve_inbox_selection(
 
     handler = find_handler_for_event(handlers, target)
     if handler is None:
-        return str(target.event_id), (
-            f"<p>No handler registered for request type {target.request_type!r}</p>"
-        )
+        return str(target.event_id), (f"<p>No handler registered for request type {target.request_type!r}</p>")
     detail_html = handler.render_request_detail_fragment(
         req_event=target,
         backend_resolver=backend_resolver,
