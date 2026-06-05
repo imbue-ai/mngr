@@ -75,7 +75,12 @@ def extract_telegram_credentials_from_browser(
 
 
 def _extract_credentials_from_page(page: Page) -> TelegramUserCredentials:
-    """Extract credentials from a logged-in Telegram Web page's localStorage."""
+    """Extract credentials from a logged-in Telegram Web page's localStorage.
+
+    This is a thin shell around the live Playwright ``Page``: it pulls the raw
+    localStorage strings out of the browser and delegates all parsing/validation
+    to the pure helpers below (which are unit-tested directly).
+    """
     # Extract dc and user_auth
     auth_data = page.evaluate(
         """(() => {
@@ -85,9 +90,31 @@ def _extract_credentials_from_page(page: Page) -> TelegramUserCredentials:
         })()"""
     )
 
-    dc_str = auth_data.get("dc")
-    user_auth_str = auth_data.get("userAuth")
+    dc_id, user_id = _parse_dc_id_and_user_id(auth_data.get("dc"), auth_data.get("userAuth"))
 
+    # Extract the auth_key for the active DC (the localStorage key depends on dc_id)
+    dc_key_name = f"dc{dc_id}_auth_key"
+    auth_key_raw = page.evaluate(f"localStorage.getItem('{dc_key_name}')")
+    auth_key_hex = _parse_auth_key_hex(auth_key_raw, dc_id)
+
+    account_data = page.evaluate("localStorage.getItem('account1')")
+    first_name = _parse_first_name(account_data)
+
+    return TelegramUserCredentials(
+        dc_id=dc_id,
+        auth_key_hex=auth_key_hex,
+        user_id=user_id,
+        first_name=first_name,
+    )
+
+
+def _parse_dc_id_and_user_id(dc_str: str | None, user_auth_str: str | None) -> tuple[int, str]:
+    """Parse the data-center ID and user ID out of the raw localStorage strings.
+
+    ``dc_str`` is the ``dc`` entry and ``user_auth_str`` is the ``user_auth``
+    JSON entry. Raises TelegramCredentialExtractionError if either is missing or
+    malformed, or if the user ID is absent.
+    """
     if not dc_str or not user_auth_str:
         raise TelegramCredentialExtractionError(
             "Could not find Telegram auth data in localStorage. "
@@ -108,13 +135,19 @@ def _extract_credentials_from_page(page: Page) -> TelegramUserCredentials:
     if not user_id:
         raise TelegramCredentialExtractionError("user_auth in localStorage does not contain a user ID")
 
-    # Extract the auth_key for the active DC
-    dc_key_name = f"dc{dc_id}_auth_key"
-    auth_key_raw = page.evaluate(f"localStorage.getItem('{dc_key_name}')")
+    return dc_id, user_id
 
+
+def _parse_auth_key_hex(auth_key_raw: str | None, dc_id: int) -> str:
+    """Validate and normalize the raw ``dc{dc_id}_auth_key`` localStorage value.
+
+    The stored value may be a bare hex string or a JSON-encoded string (wrapped
+    in extra quotes). Raises TelegramCredentialExtractionError if it is missing,
+    unparseable, or not exactly ``_AUTH_KEY_HEX_LENGTH`` hex characters.
+    """
     if not auth_key_raw:
         raise TelegramCredentialExtractionError(
-            f"Could not find auth key for DC {dc_id} in localStorage (key: {dc_key_name})"
+            f"Could not find auth key for DC {dc_id} in localStorage (key: dc{dc_id}_auth_key)"
         )
 
     # The value may be JSON-encoded (wrapped in extra quotes)
@@ -131,19 +164,20 @@ def _extract_credentials_from_page(page: Page) -> TelegramUserCredentials:
             f"Auth key has unexpected length: {len(auth_key_hex)} hex chars (expected {_AUTH_KEY_HEX_LENGTH})"
         )
 
-    # Extract first name from account data
-    first_name = ""
-    account_data = page.evaluate("localStorage.getItem('account1')")
-    if account_data:
-        try:
-            parsed_account = json.loads(account_data)
-            first_name = parsed_account.get("firstName", "")
-        except (json.JSONDecodeError, AttributeError) as exc:
-            logger.warning("Could not parse account1 data for first name: {}", exc)
+    return auth_key_hex
 
-    return TelegramUserCredentials(
-        dc_id=dc_id,
-        auth_key_hex=auth_key_hex,
-        user_id=user_id,
-        first_name=first_name,
-    )
+
+def _parse_first_name(account_data: str | None) -> str:
+    """Extract the user's first name from the raw ``account1`` localStorage value.
+
+    Returns an empty string (and logs a warning) if the value is absent or
+    cannot be parsed -- the first name is best-effort and never fatal.
+    """
+    if not account_data:
+        return ""
+    try:
+        parsed_account = json.loads(account_data)
+        return parsed_account.get("firstName", "")
+    except (json.JSONDecodeError, AttributeError) as exc:
+        logger.warning("Could not parse account1 data for first name: {}", exc)
+        return ""
