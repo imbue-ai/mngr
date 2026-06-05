@@ -154,7 +154,7 @@
 
         if (entry.status === 'error' && entry.error_message) {
           var err = document.createElement('span');
-          err.className = 'flex-1 text-xs text-zinc-600 truncate';
+          err.className = 'flex-1 text-xs text-zinc-700 truncate';
           err.title = (entry.error_type || '') + ': ' + entry.error_message;
           err.textContent = (entry.error_type || '') + ': ' + entry.error_message;
           row.appendChild(err);
@@ -238,7 +238,7 @@
       } else if (state === 'NEVER') {
         text = 'Backup pending'; tone = 'bg-amber-100 text-amber-800';
       } else if (state === 'UNKNOWN') {
-        text = 'Backup status unknown'; tone = 'bg-zinc-100 text-zinc-600';
+        text = 'Backup status unknown'; tone = 'bg-zinc-100 text-zinc-500';
       } else {
         var createdMs = status && status.created_at ? Date.parse(status.created_at) : NaN;
         if (!isNaN(createdMs) && (Date.now() - createdMs) < BACKUP_RECENT_CREATE_MS) {
@@ -464,7 +464,7 @@
        summary to expand into the full list + freshness counters. #}
     <section class="mt-10 pt-6 border-t border-zinc-200" data-providers-panel hidden>
       <button type="button" data-providers-toggle
-              class="w-full flex items-center justify-between text-left text-sm text-zinc-600 hover:text-zinc-900 bg-transparent border-0 cursor-pointer p-0">
+              class="w-full flex items-center justify-between text-left text-sm text-zinc-700 hover:text-zinc-900 bg-transparent border-0 cursor-pointer p-0">
         <span data-providers-summary>0 providers enabled</span>
         <span data-providers-chevron class="text-zinc-400 ml-2">&#9656;</span>
       </button>

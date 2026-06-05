@@ -68,7 +68,7 @@ _BTN_VARIANTS: Final[Mapping[str, str]] = {
     "secondary": "bg-zinc-100 text-zinc-900 border border-zinc-200 hover:bg-zinc-200",
     "danger": "bg-red-50 text-red-600 border border-red-200 hover:bg-red-100",
     "success": "bg-emerald-800 text-emerald-50 border border-transparent hover:bg-emerald-900",
-    "ghost": "bg-transparent text-zinc-600 border border-transparent hover:bg-zinc-100 hover:text-zinc-900",
+    "ghost": "bg-transparent text-zinc-700 border border-transparent hover:bg-zinc-100 hover:text-zinc-900",
 }
 
 # Shared Tailwind class string for the three form-control components

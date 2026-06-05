@@ -54,7 +54,7 @@
                 </div>
                 {% set permission_description = description_by_permission_name.get(permission) %}
                 {% if permission_description %}
-                  <span class="block text-sm text-zinc-600 mt-0.5 ml-[26px]">{{ permission_description }}</span>
+                  <span class="block text-sm text-zinc-700 mt-0.5 ml-[26px]">{{ permission_description }}</span>
                 {% endif %}
               </div>
             {% endif %}
@@ -100,7 +100,7 @@
               <code class="text-sm font-mono text-zinc-900">{{ permission }}</code>
               {% set permission_description = description_by_permission_name.get(permission) %}
               {% if permission_description %}
-                <span class="block text-sm text-zinc-600 mt-0.5">{{ permission_description }}</span>
+                <span class="block text-sm text-zinc-700 mt-0.5">{{ permission_description }}</span>
               {% endif %}
             </span>
           </label>
