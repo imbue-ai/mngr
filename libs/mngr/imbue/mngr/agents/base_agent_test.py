@@ -1,6 +1,8 @@
 """Tests for BaseAgent lifecycle state detection and data methods."""
 
 import json
+import shlex
+from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -43,6 +45,27 @@ def test_agent(
         agent_type=None,
         extra_data=None,
         agent_class=BaseAgent,
+    )
+
+
+def _reload_agent(agent: BaseAgent) -> BaseAgent:
+    """Construct a fresh BaseAgent pointing at the same on-disk state.
+
+    Setter/getter round-trips that read back through the *same* instance can't
+    distinguish real persistence from an in-process cache that never flushes.
+    Reading through a freshly constructed agent (same id + host) proves the
+    value actually reached disk.
+    """
+    return BaseAgent(
+        id=agent.id,
+        name=agent.name,
+        agent_type=agent.agent_type,
+        work_dir=agent.work_dir,
+        create_time=agent.create_time,
+        host_id=agent.host_id,
+        host=agent.host,
+        mngr_ctx=agent.mngr_ctx,
+        agent_config=agent.agent_config,
     )
 
 
@@ -347,7 +370,16 @@ def test_tmux_target_uses_exact_match_window_zero(
     assert isinstance(target, TmuxWindowTarget)
     assert target.session_name == test_agent.session_name
     assert target.window == 0
-    assert target.as_shell_arg() == f"={test_agent.session_name}:0"
+
+    # Assert documented properties of the rendered -t arg rather than hardcoding
+    # the exact string + shlex.quote wrapper. The leading "=" forces exact
+    # session matching, and the trailing ":0" pins window 0. We unquote via
+    # shlex.split so the check holds even if the session name needs quoting.
+    shell_arg = target.as_shell_arg()
+    (unquoted,) = shlex.split(shell_arg)
+    assert unquoted == f"={test_agent.session_name}:0"
+    assert unquoted.startswith("=")
+    assert unquoted.endswith(":0")
 
 
 @pytest.mark.tmux
@@ -630,11 +662,12 @@ def test_get_labels_returns_empty_dict_by_default(
 def test_set_and_get_labels(
     test_agent: BaseAgent,
 ) -> None:
-    """Test that set_labels persists and get_labels retrieves them."""
+    """Test that set_labels persists to disk and get_labels retrieves them."""
     labels = {"env": "production", "team": "backend"}
     test_agent.set_labels(labels)
 
-    result = test_agent.get_labels()
+    # Read back through a fresh instance to prove on-disk persistence, not caching.
+    result = _reload_agent(test_agent).get_labels()
     assert result == labels
 
 
@@ -678,7 +711,11 @@ def test_get_is_start_on_boot_returns_false_by_default(
 def test_set_and_get_is_start_on_boot(
     test_agent: BaseAgent,
 ) -> None:
-    """Test that set_is_start_on_boot persists and get_is_start_on_boot retrieves it."""
+    """Test that set_is_start_on_boot persists and get_is_start_on_boot retrieves it.
+
+    In-instance round-trip (convenience check); on-disk persistence is proven
+    by test_set_and_get_labels via _reload_agent and by test_write_data_persists_to_file.
+    """
     test_agent.set_is_start_on_boot(True)
     assert test_agent.get_is_start_on_boot() is True
 
@@ -758,9 +795,10 @@ def test_record_activity_and_get_reported_activity_time(
 
     result = test_agent.get_reported_activity_time(ActivitySource.USER)
     assert result is not None
-    # mtime should be approximately now (within a few seconds)
+    # The file was written after `before`, so its mtime cannot precede it: the
+    # lower bound is 0.0. Keep a generous upper bound to tolerate slow CI.
     delta = (result - before).total_seconds()
-    assert -2.0 <= delta <= 5.0
+    assert 0.0 <= delta <= 5.0
 
 
 def test_record_activity_writes_json_with_expected_fields(
@@ -793,11 +831,12 @@ def test_get_plugin_data_returns_empty_dict_when_not_set(
 def test_set_and_get_plugin_data(
     test_agent: BaseAgent,
 ) -> None:
-    """Test that set_plugin_data persists and get_plugin_data retrieves it."""
+    """Test that set_plugin_data persists to disk and get_plugin_data retrieves it."""
     plugin_data = {"key1": "value1", "nested": {"a": 1}}
     test_agent.set_plugin_data("my-plugin", plugin_data)
 
-    result = test_agent.get_plugin_data("my-plugin")
+    # Read back through a fresh instance to prove on-disk persistence, not caching.
+    result = _reload_agent(test_agent).get_plugin_data("my-plugin")
     assert result == plugin_data
 
 
@@ -821,7 +860,11 @@ def test_plugin_data_is_isolated_per_plugin(
 def test_set_and_get_reported_plugin_file(
     test_agent: BaseAgent,
 ) -> None:
-    """Test that set_reported_plugin_file writes and get_reported_plugin_file reads."""
+    """Test that set_reported_plugin_file writes and get_reported_plugin_file reads.
+
+    In-instance round-trip (convenience check); on-disk persistence is proven by
+    test_set_and_get_labels via _reload_agent and by test_write_data_persists_to_file.
+    """
     test_agent.set_reported_plugin_file("my-plugin", "config.json", '{"hello": "world"}')
 
     result = test_agent.get_reported_plugin_file("my-plugin", "config.json")
@@ -869,11 +912,12 @@ def test_get_env_vars_returns_empty_dict_when_not_set(
 def test_set_and_get_env_vars(
     test_agent: BaseAgent,
 ) -> None:
-    """Test that set_env_vars persists and get_env_vars retrieves them."""
+    """Test that set_env_vars persists to disk and get_env_vars retrieves them."""
     env = {"API_KEY": "secret123", "DEBUG": "true"}
     test_agent.set_env_vars(env)
 
-    result = test_agent.get_env_vars()
+    # Read back through a fresh instance to prove on-disk persistence, not caching.
+    result = _reload_agent(test_agent).get_env_vars()
     assert result == env
 
 
@@ -934,14 +978,15 @@ def test_runtime_seconds_returns_positive_value_when_start_time_set(
     """Test that runtime_seconds returns a positive value when start time is in the past."""
     status_dir = local_provider.host_dir / "agents" / str(test_agent.id) / "status"
     status_dir.mkdir(parents=True, exist_ok=True)
-    # Set start time to 60 seconds ago
     start_time = datetime(2020, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
     (status_dir / "start_time").write_text(start_time.isoformat())
 
     result = test_agent.runtime_seconds
     assert result is not None
-    # Should be at least a few years worth of seconds (the start time is in 2020)
-    assert result > 100_000
+    # Verify both direction and magnitude: runtime is now - start_time. A bug
+    # returning a constant or the wrong epoch would fail this exact-magnitude check.
+    expected = (datetime.now(timezone.utc) - start_time).total_seconds()
+    assert abs(result - expected) < 5
 
 
 # =========================================================================
@@ -950,9 +995,20 @@ def test_runtime_seconds_returns_positive_value_when_start_time_set(
 
 
 class _StubHost:
-    """Minimal stub for testing _send_tmux_literal_keys without real tmux.
+    """Minimal recording stub for testing _send_tmux_literal_keys without real tmux.
 
-    Records execute_command and write_text_file calls for assertion.
+    Records the command-execution and file-write calls that the tmux send path
+    makes, so tests can assert the exact tmux commands produced.
+
+    Tradeoff note: this does NOT inherit OnlineHostInterface. That interface has
+    ~50 abstract methods (agent provisioning, snapshots, tags, locking, ...), so
+    a faithful subclass would dwarf the three methods exercised here, and the
+    neighboring tui_utils_test.py uses the same inline-stub approach. To still
+    surface signature drift, the three modeled methods mirror the real
+    OuterHostInterface signatures exactly (named, typed params -- not **kwargs),
+    so a rename or signature change to any of them fails type-checking here. The
+    residual gap (production calling a host method this stub does not model) is
+    covered by the tmux-marked integration tests above that drive a real host.
     """
 
     def __init__(
@@ -965,19 +1021,39 @@ class _StubHost:
         self.executed_commands: list[str] = []
         self.written_files: list[tuple[Path, str]] = []
 
-    def _execute_command(self, command: str, **kwargs: object) -> CommandResult:
+    def _execute_command(self, command: str) -> CommandResult:
         self.executed_commands.append(command)
         if self._command_results:
             return self._command_results.pop(0)
         return self._default_result
 
-    def execute_idempotent_command(self, command: str, **kwargs: object) -> CommandResult:
-        return self._execute_command(command, **kwargs)
+    def execute_idempotent_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        return self._execute_command(command)
 
-    def execute_stateful_command(self, command: str, **kwargs: object) -> CommandResult:
-        return self._execute_command(command, **kwargs)
+    def execute_stateful_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        return self._execute_command(command)
 
-    def write_text_file(self, path: Path, content: str, **kwargs: object) -> None:
+    def write_text_file(
+        self,
+        path: Path,
+        content: str,
+        encoding: str = "utf-8",
+        mode: str | None = None,
+    ) -> None:
         self.written_files.append((path, content))
 
 
@@ -1028,8 +1104,13 @@ def test_send_tmux_literal_keys_short_message_uses_send_keys(
     agent._send_tmux_literal_keys(TmuxWindowTarget(session_name="mngr-test", window=0), "hello")
 
     assert len(stub.executed_commands) == 1
-    assert "send-keys" in stub.executed_commands[0]
-    assert "-l" in stub.executed_commands[0]
+    command = stub.executed_commands[0]
+    assert "send-keys" in command
+    assert "-l" in command
+    # The literal message text must reach the command (shlex.quoted), targeting
+    # the exact-match window-0 pane for this session.
+    assert shlex.quote("hello") in command
+    assert "=mngr-test:0" in command
     assert len(stub.written_files) == 0
 
 
@@ -1049,12 +1130,21 @@ def test_send_tmux_literal_keys_long_message_uses_load_buffer(
 
     # Then execute load-buffer, paste-buffer, and cleanup
     assert len(stub.executed_commands) == 3
-    assert "load-buffer" in stub.executed_commands[0]
-    assert "-b" in stub.executed_commands[0]
-    assert "paste-buffer" in stub.executed_commands[1]
-    assert "-b" in stub.executed_commands[1]
-    assert "delete-buffer" in stub.executed_commands[2]
-    assert "rm -f" in stub.executed_commands[2]
+    load_command, paste_command, cleanup_command = stub.executed_commands
+
+    # The same buffer name must be used consistently across load/paste/delete so
+    # the pasted content is the content that was loaded and the buffer is cleaned
+    # up. Production derives the buffer name from the agent's own session_name.
+    quoted_buffer = shlex.quote(f"mngr-{agent.session_name}")
+    assert "load-buffer" in load_command
+    assert f"-b {quoted_buffer}" in load_command
+    assert "paste-buffer" in paste_command
+    assert f"-b {quoted_buffer}" in paste_command
+    # The paste must target the exact-match window-0 pane.
+    assert "=mngr-test:0" in paste_command
+    assert "delete-buffer" in cleanup_command
+    assert f"-b {quoted_buffer}" in cleanup_command
+    assert "rm -f" in cleanup_command
 
 
 def test_send_tmux_literal_keys_long_message_raises_on_load_buffer_failure(
@@ -1124,9 +1214,16 @@ def test_send_message_simple_sends_keys_and_enter(
     agent._send_message_simple(TmuxWindowTarget(session_name="mngr-test", window=0), "hello")
 
     assert len(stub.executed_commands) == 2
-    assert "send-keys" in stub.executed_commands[0]
-    assert "-l" in stub.executed_commands[0]
-    assert "Enter" in stub.executed_commands[1]
+    keys_command = stub.executed_commands[0]
+    enter_command = stub.executed_commands[1]
+    # First the literal message goes to the exact-match window-0 pane...
+    assert "send-keys" in keys_command
+    assert "-l" in keys_command
+    assert shlex.quote("hello") in keys_command
+    assert "=mngr-test:0" in keys_command
+    # ...then Enter is sent to that same pane.
+    assert "Enter" in enter_command
+    assert "=mngr-test:0" in enter_command
 
 
 def test_send_message_simple_raises_on_enter_failure(
@@ -1188,6 +1285,25 @@ def test_get_command_basename_strips_leading_subshell_syntax(
     agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
 
     assert agent._get_command_basename(CommandString("( /usr/bin/script.sh session ) &")) == "script.sh"
+
+
+def test_get_command_basename_empty_command(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """_get_command_basename returns '' when nothing remains after stripping subshell chars.
+
+    Production does ``str(command).lstrip("( ")`` then ``... if stripped else ""``.
+    A command consisting solely of subshell/space characters strips down to an
+    empty string and hits the falsy branch, yielding ''. (CommandString is
+    NonEmptyStr, so the empty branch is only reachable via all-subshell input,
+    not a literal empty string.) Relocated here from the integration test file
+    because this exercises only the pure string helper -- no host I/O.
+    """
+    stub = _StubHost()
+    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
+
+    assert agent._get_command_basename(CommandString("( ")) == ""
+    assert agent._get_command_basename(CommandString("(")) == ""
 
 
 # =========================================================================

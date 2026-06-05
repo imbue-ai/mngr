@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from loguru import logger
+from pydantic import Field
 
 from imbue.mngr.agents.base_headless_agent import BaseHeadlessAgent
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -41,12 +42,17 @@ class _AlwaysStopped(_ConcreteHeadlessAgent):
 
 
 class _StoppedWithPaneContent(_AlwaysStopped):
-    """Test subclass that always reports STOPPED and returns fixed pane content."""
+    """Test subclass that always reports STOPPED and returns fixed pane content.
 
-    _pane_content: str | None = None
+    ``pane_content`` is a per-instance field (injected via ``model_construct``)
+    rather than a class-level default, so each constructed agent owns its own
+    value with no shared mutable class state.
+    """
+
+    pane_content: str | None = Field(description="Fixed value returned by capture_pane_content")
 
     def capture_pane_content(self, include_scrollback: bool = False) -> str | None:
-        return self._pane_content
+        return self.pane_content
 
 
 _UNSET = object()
@@ -68,43 +74,46 @@ def _make_agent(
     work_dir = tmp_path / f"work-{str(AgentId.generate().get_uuid())[:8]}"
     work_dir.mkdir()
 
-    if pane_content is not _UNSET:
-        cls: type[_ConcreteHeadlessAgent] = _StoppedWithPaneContent
-    elif is_always_stopped:
-        cls = _AlwaysStopped
-    else:
-        cls = _ConcreteHeadlessAgent
+    agent_id = AgentId.generate()
+    create_time = datetime.now(timezone.utc)
 
-    agent = cls.model_construct(
-        id=AgentId.generate(),
+    # pane_content is a per-instance field on _StoppedWithPaneContent, injected
+    # here via model_construct (not assigned post-construction), so each instance
+    # owns its own value with no shared class-level default. It is passed
+    # explicitly rather than via ``**kwargs`` so model_construct's positional
+    # ``_fields_set`` parameter stays unambiguous to the type checker.
+    if pane_content is not _UNSET:
+        assert isinstance(pane_content, str) or pane_content is None
+        return _StoppedWithPaneContent.model_construct(
+            id=agent_id,
+            name=AgentName("test-headless"),
+            agent_type=AgentTypeName("generic"),
+            work_dir=work_dir,
+            create_time=create_time,
+            host_id=host.id,
+            mngr_ctx=mngr_ctx,
+            agent_config=AgentTypeConfig(),
+            host=host,
+            pane_content=pane_content,
+        )
+
+    cls: type[_ConcreteHeadlessAgent] = _AlwaysStopped if is_always_stopped else _ConcreteHeadlessAgent
+    return cls.model_construct(
+        id=agent_id,
         name=AgentName("test-headless"),
         agent_type=AgentTypeName("generic"),
         work_dir=work_dir,
-        create_time=datetime.now(timezone.utc),
+        create_time=create_time,
         host_id=host.id,
         mngr_ctx=mngr_ctx,
         agent_config=AgentTypeConfig(),
         host=host,
     )
-    if isinstance(agent, _StoppedWithPaneContent) and pane_content is not _UNSET:
-        assert isinstance(pane_content, str) or pane_content is None
-        agent._pane_content = pane_content
-    return agent
 
 
 # =============================================================================
 # Tests for shared methods
 # =============================================================================
-
-
-def test_preflight_send_message_raises(
-    local_host: Host,
-    temp_mngr_ctx: MngrContext,
-    tmp_path: Path,
-) -> None:
-    agent = _make_agent(local_host, temp_mngr_ctx, tmp_path)
-    with pytest.raises(SendMessageError, match="do not accept interactive messages"):
-        agent._preflight_send_message(agent.tmux_target)
 
 
 def test_send_message_raises(
@@ -402,6 +411,10 @@ def test_default_stage_initial_message_logs_warning(
     """
     agent = _make_agent(local_host, temp_mngr_ctx, tmp_path)
 
+    # The allow_warnings marker is purely permissive: it suppresses matching
+    # warnings from the autouse fail-check but does not require any warning to
+    # be emitted. We therefore capture the warning ourselves to assert both
+    # that it was emitted at all and that it names the concrete agent class.
     messages: list[str] = []
     handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
     try:

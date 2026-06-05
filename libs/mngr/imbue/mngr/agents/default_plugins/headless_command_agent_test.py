@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import subprocess
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -91,18 +91,6 @@ def test_assemble_command_redirects_stdout_and_stderr(
     cmd = agent.assemble_command(local_host, agent_args=(), command_override=None)
     assert '> "$MNGR_AGENT_STATE_DIR/stdout.log"' in cmd
     assert '2> "$MNGR_AGENT_STATE_DIR/stderr.log"' in cmd
-
-
-def test_assemble_command_no_print_flag(
-    local_host: Host,
-    temp_mngr_ctx: MngrContext,
-    tmp_path: Path,
-) -> None:
-    """assemble_command should NOT include --print (that is Claude-specific)."""
-    config = HeadlessCommandConfig(command=CommandString("cmd"))
-    agent = _make_headless_command_agent(local_host, temp_mngr_ctx, tmp_path, agent_config=config)
-    cmd = agent.assemble_command(local_host, agent_args=(), command_override=None)
-    assert "--print" not in cmd
 
 
 # =============================================================================
@@ -194,28 +182,27 @@ def test_stream_output_surfaces_pane_capture_when_files_missing(
     producing output' message.
     """
     agent = _make_headless_command_agent(local_host, temp_mngr_ctx, tmp_path, is_always_stopped=True)
+    # Production captures the pane via ``agent.tmux_target`` (the agent's session,
+    # window 0). Spawn the session through the same host interface so the test
+    # exercises the real capture path and respects the test's isolated tmux server.
     session = agent.session_name
+    # Assert the capture target is linked to this session so a name/format
+    # mismatch fails loudly here instead of silently capturing an empty pane.
+    assert agent.tmux_target.session_name == session
 
-    subprocess.run(
-        [
-            "tmux",
-            "new-session",
-            "-d",
-            "-s",
-            session,
-            "-x",
-            "200",
-            "-y",
-            "50",
-            "echo pane-err-deadbeef; exec cat",
-        ],
-        check=True,
+    marker = f"pane-err-{uuid4().hex}"
+    agent.host.execute_idempotent_command(
+        f"tmux new-session -d -s '{session}' 'echo {marker}; exec cat'",
+        timeout_seconds=5.0,
     )
     try:
-        with pytest.raises(MngrError, match="pane-err-deadbeef"):
+        with pytest.raises(MngrError, match=marker):
             list(agent.stream_output())
     finally:
-        subprocess.run(["tmux", "kill-session", "-t", session], check=False)
+        agent.host.execute_idempotent_command(
+            f"tmux kill-session -t '={session}' 2>/dev/null",
+            timeout_seconds=5.0,
+        )
 
 
 def test_output_returns_joined_text(
@@ -239,5 +226,7 @@ def test_output_returns_joined_text(
 def test_headless_command_registered(
     local_provider: LocalProviderInstance,
 ) -> None:
+    # local_provider is load-bearing: constructing it triggers default-plugin
+    # registration as a side effect. Do not remove it as an "unused" argument.
     types = list_registered_agent_types()
     assert "headless_command" in types

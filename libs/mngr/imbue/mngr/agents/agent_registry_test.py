@@ -40,6 +40,7 @@ def test_list_registered_agent_types_includes_builtin_types() -> None:
 def test_codex_agent_config_has_default_command() -> None:
     """Codex agent config should have a default command."""
     config = CodexAgentConfig()
+    # Pins the shipped default binary name "codex" -- a user-facing contract.
     assert config.command == CommandString("codex")
 
 
