@@ -48,6 +48,8 @@ def test_build_provider_instance_returns_docker_provider_instance(temp_mngr_ctx:
         is_for_host_creation=True,
     )
     assert isinstance(instance, DockerProviderInstance)
+    assert instance.config is config
+    assert instance.mngr_ctx is temp_mngr_ctx
 
 
 def test_build_provider_instance_with_custom_host_dir(temp_mngr_ctx: MngrContext) -> None:
@@ -115,12 +117,21 @@ def test_get_files_for_deploy_excludes_ssh_key_files(temp_mngr_ctx: MngrContext,
     (docker_dir / "docker_ssh_key").write_text("private-key-data")
     (docker_dir / "docker_ssh_key.pub").write_text("public-key-data")
     (docker_dir / "known_hosts").write_text("[localhost]:2222 ssh-ed25519 AAAA...")
+    # A non-excluded file in the same directory proves the filter discriminates
+    # by name rather than dropping everything (e.g. scanning the wrong dir).
+    config_file = docker_dir / "config.json"
+    config_file.write_text('{"docker": "config"}')
 
     result = get_files_for_deploy(
         mngr_ctx=temp_mngr_ctx, include_user_settings=True, include_project_settings=True, repo_root=tmp_path
     )
 
-    assert result == {}
+    # Exactly the non-excluded file is collected; none of the excluded files
+    # leak through. Set equality proves the filter discriminates by name rather
+    # than dropping (or never scanning) everything.
+    assert list(result.values()) == [config_file]
+    deployed_source_names = {value.name for value in result.values() if isinstance(value, Path)}
+    assert deployed_source_names == {"config.json"}
 
 
 def test_get_files_for_deploy_includes_non_key_files(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
@@ -135,5 +146,9 @@ def test_get_files_for_deploy_includes_non_key_files(temp_mngr_ctx: MngrContext,
     )
 
     assert len(result) == 1
-    matched_values = list(result.values())
-    assert matched_values[0] == config_file
+    [(dest_key, source)] = result.items()
+    assert source == config_file
+    # The destination key is the source rewritten relative to home under "~/".
+    # collect_deploy_files rejects any destination that does not start with "~".
+    assert dest_key == Path(f"~/{config_file.relative_to(Path.home())}")
+    assert str(dest_key).startswith("~/")

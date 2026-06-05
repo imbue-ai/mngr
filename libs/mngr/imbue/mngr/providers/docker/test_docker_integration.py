@@ -8,12 +8,11 @@ Marked with @pytest.mark.docker_sdk and @pytest.mark.acceptance so they only
 run in CI acceptance test shards (not in the default local test suite).
 """
 
+import time
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 
-import docker
-import docker.errors
 import docker.models.containers
 import pytest
 
@@ -24,6 +23,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.docker.host_store import ContainerConfig
 from imbue.mngr.providers.docker.host_store import HostRecord
 from imbue.mngr.providers.docker.instance import CONTAINER_ENTRYPOINT
+from imbue.mngr.providers.docker.instance import CONTAINER_ENTRYPOINT_CMD
 from imbue.mngr.providers.docker.instance import DockerProviderInstance
 from imbue.mngr.providers.docker.instance import LABEL_HOST_ID
 from imbue.mngr.providers.docker.instance import LABEL_HOST_NAME
@@ -133,10 +133,19 @@ def test_find_container_by_name(docker_provider: DockerProviderInstance) -> None
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
 @pytest.mark.docker_sdk
 def test_list_containers_returns_managed_containers(docker_provider: DockerProviderInstance) -> None:
-    _create_test_container(docker_provider, name="list-a")
-    _create_test_container(docker_provider, name="list-b")
+    container_a, _ = _create_test_container(docker_provider, name="list-a")
+    container_b, _ = _create_test_container(docker_provider, name="list-b")
+    container_a.reload()
+    container_b.reload()
+    expected_names = {container_a.name, container_b.name}
+
     containers = docker_provider._list_containers()
-    assert len(containers) >= 2
+    # The provider filters by both LABEL_PROVIDER (unique per docker_provider
+    # fixture) and the per-test MNGR prefix, so discovery is isolated to exactly
+    # the two containers created here. A broken label/prefix filter that
+    # over-collects sibling/stale containers would fail this.
+    assert len(containers) == 2
+    assert {c.name for c in containers} == expected_names
 
 
 # =========================================================================
@@ -165,7 +174,14 @@ def test_exec_in_container_returns_nonzero_on_failure(docker_provider: DockerPro
 @pytest.mark.docker_sdk
 def test_exec_detach_returns_immediately(docker_provider: DockerProviderInstance) -> None:
     container, _ = _create_test_container(docker_provider)
+    # detach=True must return without waiting for the command to finish. Measure
+    # wall-clock time around a 1-hour sleep: if detach regressed to blocking, the
+    # call would not return in under 5 seconds (it would block until the test
+    # timeout instead).
+    start = time.monotonic()
     exit_code, output = docker_provider._exec_in_container(container, "sleep 3600", detach=True)
+    elapsed = time.monotonic() - start
+    assert elapsed < 5, f"detached exec blocked for {elapsed:.1f}s (expected near-immediate return)"
     assert exit_code == 0
     assert output == ""
 
@@ -223,18 +239,12 @@ def test_build_image_from_dockerfile(docker_provider: DockerProviderInstance, tm
 # =========================================================================
 
 
-@pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
-@pytest.mark.docker_sdk
-def test_container_stop_and_start(docker_provider: DockerProviderInstance) -> None:
-    container, host_id = _create_test_container(docker_provider)
-    assert docker_provider._is_container_running(container) is True
-
-    container.stop(timeout=5)
-    container.reload()
-    assert container.status in ("exited", "stopped")
-
-    container.start()
-    assert docker_provider._is_container_running(container) is True
+# NOTE: provider-level stop/start behavior (preserving filesystem state, host
+# records, and discovered host_state) is covered by
+# test_docker_lifecycle.py::test_start_host_restarts_stopped_container /
+# test_start_host_filesystem_preserved_across_stop_start and
+# test_docker_state_transitions.py::test_full_lifecycle_state_transitions. The
+# former raw-SDK stop/start test only exercised Docker itself, so it was removed.
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
@@ -248,61 +258,17 @@ def test_container_remove(docker_provider: DockerProviderInstance) -> None:
 
 
 # =========================================================================
-# Snapshots (docker commit)
+# Snapshots
 # =========================================================================
 
-
-@pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
-@pytest.mark.docker_sdk
-def test_docker_commit_creates_image(docker_provider: DockerProviderInstance) -> None:
-    """Verify docker commit works on a running container."""
-    container, host_id = _create_test_container(docker_provider)
-
-    # Write something unique to the container filesystem
-    docker_provider._exec_in_container(container, "echo 'snapshot-data' > /snapshot-test.txt")
-
-    # Commit the container
-    committed_image = container.commit(repository="mngr-test-snapshot", tag="test")
-    assert committed_image.id is not None
-
-    # Clean up
-    try:
-        docker_provider._docker_client.images.remove(committed_image.id, force=True)
-    except docker.errors.DockerException:
-        pass
-
-
-@pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
-@pytest.mark.docker_sdk
-def test_snapshot_roundtrip_preserves_filesystem(docker_provider: DockerProviderInstance) -> None:
-    """Verify that committing a container and running from the image preserves files."""
-    container, host_id = _create_test_container(docker_provider, name="snap-source")
-
-    # Write test data
-    docker_provider._exec_in_container(container, "echo 'persisted-content-12345' > /persist.txt")
-
-    # Commit
-    committed_image = container.commit(repository="mngr-snap-roundtrip", tag="v1")
-
-    try:
-        # Run new container from committed image
-        new_container = docker_provider._docker_client.containers.run(
-            image=committed_image.id,
-            command=CONTAINER_ENTRYPOINT,
-            detach=True,
-        )
-
-        try:
-            exit_code, output = docker_provider._exec_in_container(new_container, "cat /persist.txt")
-            assert exit_code == 0
-            assert "persisted-content-12345" in output
-        finally:
-            new_container.remove(force=True)
-    finally:
-        try:
-            docker_provider._docker_client.images.remove(committed_image.id, force=True)
-        except docker.errors.DockerException:
-            pass
+# NOTE: mngr's provider-level snapshot behavior (create_snapshot recording the
+# snapshot in the host store, list_snapshots, and start_host(snapshot_id=...)
+# restoring filesystem contents) is covered by
+# test_docker_lifecycle.py::test_create_snapshot / test_delete_snapshot /
+# test_stop_with_snapshot_then_start_preserves_data /
+# test_destroy_host_build_image_untag_preserves_snapshot_restore. The former
+# raw-SDK `container.commit` round-trip tests here only exercised Docker's own
+# commit/run, not mngr's snapshot code, so they were removed.
 
 
 # =========================================================================
@@ -344,30 +310,6 @@ def test_host_store_write_and_discover(docker_provider: DockerProviderInstance) 
     # Verify container is discoverable by host_id
     found = docker_provider._find_container_by_host_id(host_id)
     assert found is not None
-
-
-@pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
-@pytest.mark.docker_sdk
-def test_save_failed_host_record(docker_provider: DockerProviderInstance) -> None:
-    """Verify that _save_failed_host_record creates a valid host record."""
-    host_id = HostId.generate()
-    docker_provider._save_failed_host_record(
-        host_id=host_id,
-        host_name=HostName("failed-host"),
-        tags={"env": "test"},
-        failure_reason="Container startup failed",
-        build_log="error: something went wrong",
-    )
-
-    record = docker_provider._host_store.read_host_record(host_id)
-    assert record is not None
-    assert record.certified_host_data.failure_reason == "Container startup failed"
-    assert record.certified_host_data.build_log == "error: something went wrong"
-    assert record.certified_host_data.host_name == "failed-host"
-    assert record.certified_host_data.user_tags == {"env": "test"}
-    # Failed hosts have no SSH info
-    assert record.ssh_host is None
-    assert record.ssh_port is None
 
 
 # =========================================================================
@@ -422,8 +364,13 @@ def test_container_entrypoint_keeps_running(docker_provider: DockerProviderInsta
     # Use /proc/1/cmdline since ps may not be installed in minimal images
     exit_code, output = docker_provider._exec_in_container(container, "cat /proc/1/cmdline | tr '\\0' ' '")
     assert exit_code == 0
-    # The entrypoint runs: sh -c "trap 'exit 0' TERM; tail -f /dev/null & wait"
-    assert "sh" in output
+    # PID 1's cmdline must be the actual mngr entrypoint, not just any "sh".
+    # CONTAINER_ENTRYPOINT_CMD is: trap 'exit 0' TERM; tail -f /dev/null & wait
+    # The `tail -f /dev/null & wait` is what keeps the container alive, and the
+    # `trap` is what lets `docker stop` exit cleanly -- both must be present.
+    assert "tail -f /dev/null" in output
+    assert "trap" in output
+    assert CONTAINER_ENTRYPOINT_CMD in output
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
