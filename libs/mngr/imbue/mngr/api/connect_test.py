@@ -22,6 +22,7 @@ from imbue.mngr.api.connect import SIGNAL_EXIT_CODE_STOP
 from imbue.mngr.api.connect import _build_ssh_activity_wrapper_script
 from imbue.mngr.api.connect import _build_ssh_args
 from imbue.mngr.api.connect import _determine_post_disconnect_action
+from imbue.mngr.api.connect import build_local_attach_argv
 from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.connect import resolve_connect_command
 from imbue.mngr.api.connect import run_connect_command
@@ -63,6 +64,26 @@ def test_build_ssh_activity_wrapper_script_attaches_to_tmux_session() -> None:
     # only if the name contains shell-special characters; '=mngr-my-agent' has
     # none, so it appears unquoted.
     assert "tmux attach -t =mngr-my-agent" in script
+
+
+def test_build_ssh_activity_wrapper_script_without_attach_args_is_plain_attach() -> None:
+    """With no attach_args the attach command is the plain `tmux attach` (no client flags)."""
+    script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"))
+    assert "tmux attach -t =mngr-my-agent" in script
+
+
+def test_build_ssh_activity_wrapper_script_inserts_attach_args_before_subcommand() -> None:
+    """attach_args are tmux client flags and must appear before the `attach` subcommand,
+    e.g. `tmux -CC attach` for iTerm2 control mode."""
+    script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"), attach_args=("-CC",))
+    assert "tmux -CC attach -t =mngr-my-agent" in script
+
+
+def test_build_ssh_activity_wrapper_script_silences_resize_stdout_for_control_mode() -> None:
+    """The background resize helper's stdout must be redirected (not just stderr) so a
+    control-mode (-CC) attach is not corrupted by stray tmux output on the SSH stdout stream."""
+    script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"), attach_args=("-CC",))
+    assert ">/dev/null 2>&1 &" in script
 
 
 def test_build_ssh_activity_wrapper_script_kills_activity_tracker_on_exit() -> None:
@@ -723,3 +744,22 @@ def test_resolve_connect_command_returns_none_when_neither_set(temp_mngr_ctx: Mn
     """resolve_connect_command should return None when neither CLI nor config is set."""
     result = resolve_connect_command(None, temp_mngr_ctx)
     assert result is None
+
+
+def test_build_local_attach_argv_without_attach_args_is_plain_attach() -> None:
+    """With no attach_args, the local attach argv is the plain `tmux attach -t =<session>`."""
+    argv = build_local_attach_argv("mngr-plain", ())
+    assert argv == ["tmux", "attach", "-t", "=mngr-plain"]
+
+
+def test_build_local_attach_argv_inserts_attach_args_before_subcommand() -> None:
+    """attach_args are tmux client flags and must appear before the `attach` subcommand,
+    e.g. `tmux -CC attach` for iTerm2 control mode."""
+    argv = build_local_attach_argv("mngr-ccmode", ("-CC",))
+    assert argv == ["tmux", "-CC", "attach", "-t", "=mngr-ccmode"]
+
+
+def test_build_local_attach_argv_passes_session_name_verbatim() -> None:
+    """The session name is passed verbatim to argv (no shell quoting) with the exact-match `=`."""
+    argv = build_local_attach_argv("mngr-weird name", ("-CC", "-u"))
+    assert argv == ["tmux", "-CC", "-u", "attach", "-t", "=mngr-weird name"]

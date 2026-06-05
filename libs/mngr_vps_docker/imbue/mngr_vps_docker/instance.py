@@ -2473,7 +2473,9 @@ class VpsDockerProvider(BaseProviderInstance):
                 )
 
             # Collect all data in one SSH command
-            script = build_listing_collection_script(str(self.host_dir), self.mngr_ctx.config.prefix)
+            script = build_listing_collection_script(
+                str(self.host_dir), self.mngr_ctx.config.prefix, self.mngr_ctx.config.tmux.primary_window_name
+            )
 
             with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
                 with log_span("Collecting listing data via single SSH command"):

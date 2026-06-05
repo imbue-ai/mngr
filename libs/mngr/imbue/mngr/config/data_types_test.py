@@ -18,6 +18,7 @@ from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import RetryConfig
 from imbue.mngr.config.data_types import StringDerivedTuple
+from imbue.mngr.config.data_types import TmuxConfig
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.config.data_types import detect_settings_narrowing
 from imbue.mngr.config.data_types import get_or_create_user_id
@@ -1354,6 +1355,11 @@ def _build_fully_populated_mngr_config(mngr_test_prefix: str) -> MngrConfig:
         pre_command_scripts={"create": ["echo non-default"]},
         retry=RetryConfig(connect_retry_times=999, connect_retry_delay="123s"),
         logging=LoggingConfig(file_level=LogLevel.TRACE),
+        tmux=TmuxConfig(
+            primary_window_name="non-default-window",
+            attach_args=("-CC",),
+            user_config_path=Path("/tmp/non-default-tmux.conf"),
+        ),
         is_remote_agent_installation_allowed=False,
         connect_command="non-default-connect",
         is_nested_tmux_allowed=True,
@@ -1407,6 +1413,45 @@ def test_mngr_config_merge_with_round_trips_every_field(mngr_test_prefix: str) -
     empty_override = parse_config({}, disabled_plugins=frozenset())
     merged = populated.merge_with(empty_override)
     assert merged == populated
+
+
+# =============================================================================
+# Tests for TmuxConfig
+# =============================================================================
+
+
+def test_tmux_config_defaults() -> None:
+    """TmuxConfig defaults preserve today's behavior: window named 'agent', no attach flags."""
+    config = TmuxConfig()
+    assert config.primary_window_name == "agent"
+    assert config.attach_args == ()
+    assert config.user_config_path is None
+
+
+def test_tmux_config_attach_args_accepts_string() -> None:
+    """A string attach_args is shlex-split into tokens (mirrors cli_args)."""
+    config = TmuxConfig(attach_args="-CC -u")
+    assert config.attach_args == ("-CC", "-u")
+
+
+def test_tmux_config_attach_args_accepts_list() -> None:
+    config = TmuxConfig(attach_args=["-CC"])
+    assert config.attach_args == ("-CC",)
+
+
+def test_tmux_config_merge_only_overrides_set_fields() -> None:
+    """An override that only sets attach_args must not clobber the base window name."""
+    base = TmuxConfig(primary_window_name="custom", attach_args=("-2",))
+    override = TmuxConfig.model_construct(attach_args=("-CC",))
+    merged = base.merge_with(override)
+    assert merged.primary_window_name == "custom"
+    assert merged.attach_args == ("-CC",)
+
+
+def test_tmux_config_merge_empty_override_is_noop() -> None:
+    base = TmuxConfig(primary_window_name="custom", attach_args=("-CC",))
+    merged = base.merge_with(TmuxConfig.model_construct())
+    assert merged == base
 
 
 # =============================================================================

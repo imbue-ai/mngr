@@ -331,22 +331,26 @@ def test_get_expected_process_name_uses_command_basename(
     assert test_agent.get_expected_process_name() == "sleep"
 
 
-def test_tmux_target_uses_exact_match_window_zero(
+def test_tmux_target_uses_exact_match_named_primary_window(
     test_agent: BaseAgent,
 ) -> None:
-    """tmux_target should return a TmuxWindowTarget pinned to window 0.
+    """tmux_target should return a TmuxWindowTarget pinned to the named primary window.
 
     The window pin protects against additional windows (watchers, ttyd) routing
-    target resolution to the wrong pane. When rendered via as_shell_arg(), the
-    leading ``=`` forces exact session-name matching; without it, tmux silently
-    falls back to prefix matching and a query for ``mngr-foo`` would match a
-    live session called ``mngr-foo-bar`` once ``mngr-foo`` is gone.
+    target resolution to the wrong pane. Targeting by name (``tmux.primary_window_name``,
+    default ``agent``) instead of ``:0`` keeps this correct regardless of the user's
+    tmux ``base-index``. When rendered via as_shell_arg(), the leading ``=`` forces
+    exact session-name matching; without it, tmux silently falls back to prefix
+    matching and a query for ``mngr-foo`` would match a live session called
+    ``mngr-foo-bar`` once ``mngr-foo`` is gone.
     """
+    window_name = test_agent.mngr_ctx.config.tmux.primary_window_name
+    assert window_name == "agent"
     target = test_agent.tmux_target
     assert isinstance(target, TmuxWindowTarget)
     assert target.session_name == test_agent.session_name
-    assert target.window == 0
-    assert target.as_shell_arg() == f"={test_agent.session_name}:0"
+    assert target.window == window_name
+    assert target.as_shell_arg() == f"={test_agent.session_name}:agent"
 
 
 @pytest.mark.tmux

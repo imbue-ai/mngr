@@ -55,7 +55,7 @@ def build_post_attach_resize_script(session_name: str) -> str:
 
 
 @pure
-def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path) -> str:
+def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path, attach_args: tuple[str, ...] = ()) -> str:
     """Build a shell script that tracks SSH activity while running tmux.
 
     The script:
@@ -71,10 +71,17 @@ def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path) -> str
     - ssh_pid: the PID of the SSH activity tracker process (for debugging)
 
     Note: The authoritative activity time is the file's mtime, not the JSON content.
+
+    ``attach_args`` are tmux *client* flags spliced in before the ``attach``
+    subcommand (``tmux <attach_args> attach ...``). The motivating case is
+    ``-CC`` (iTerm2 control mode), which turns the SSH session's stdout into a
+    control-protocol stream -- so the background resize helper's stdout is
+    redirected to /dev/null below to keep it from corrupting that stream.
     """
     activity_dir = host_dir / "activity"
     activity_file = activity_dir / "ssh"
     signal_file = host_dir / "signals" / session_name
+    attach_flags = "".join(f" {shlex.quote(arg)}" for arg in attach_args)
     # Use single quotes around most things to avoid shell expansion issues,
     # but the paths need to be interpolated
     return (
@@ -85,12 +92,14 @@ def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path) -> str
         f"sleep 5; done) & "
         "MNGR_ACTIVITY_PID=$!; "
         # Force a terminal resize after attaching to trigger SIGWINCH delivery.
-        f"(sleep 3; {build_post_attach_resize_script(session_name)}) 2>/dev/null & "
+        # Redirect stdout too (not just stderr) so control mode (-CC) is not
+        # corrupted by stray tmux command output on the SSH stdout stream.
+        f"(sleep 3; {build_post_attach_resize_script(session_name)}) >/dev/null 2>&1 & "
         # actually attach. Route the -t target through TmuxSessionTarget so the
         # = exact-match prefix and shell-escaping rule are uniform with the rest
         # of the codebase (see TmuxSessionTarget docstring for the prefix-matching
         # bug this guards against).
-        f"tmux attach -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()}; "
+        f"tmux{attach_flags} attach -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()}; "
         "kill $MNGR_ACTIVITY_PID 2>/dev/null; "
         # Check for signal files written by tmux key bindings (Ctrl-q writes "destroy", Ctrl-t writes "stop")
         f"SIGNAL_FILE='{signal_file}'; "
@@ -176,6 +185,19 @@ def _determine_post_disconnect_action(
         return None
 
 
+@pure
+def build_local_attach_argv(session_name: str, attach_args: tuple[str, ...]) -> list[str]:
+    """Build the argv for a local ``tmux attach`` (to hand to the tmux exec call).
+
+    ``attach_args`` are tmux *client* flags and so are spliced in before the
+    ``attach`` subcommand (e.g. ``-CC`` for iTerm2 control mode yields
+    ``tmux -CC attach -t =<session>``). The leading ``=`` forces tmux's
+    exact-session matching. The session name is passed verbatim (no shell
+    quoting) because argv reaches the exec'd process directly, not via a shell.
+    """
+    return ["tmux", *attach_args, "attach", "-t", f"={session_name}"]
+
+
 def resolve_connect_command(
     cli_connect_command: str | None,
     mngr_ctx: MngrContext,
@@ -245,12 +267,18 @@ def connect_to_agent(
         # wrong-shape the argument whenever session_name contains a
         # shell-special character. The leading `=` still forces tmux's
         # exact-session matching (same rule TmuxSessionTarget encodes).
-        os.execvpe("tmux", ["tmux", "attach", "-t", f"={session_name}"], env)
+        #
+        # attach_args are tmux *client* flags and so go before the `attach`
+        # subcommand (e.g. `-CC` for iTerm2 control mode: `tmux -CC attach ...`).
+        argv = build_local_attach_argv(session_name, mngr_ctx.config.tmux.attach_args)
+        os.execvpe("tmux", argv, env)
     else:
         ssh_args = _build_ssh_args(host, connection_opts)
 
         # Build wrapper script that tracks SSH activity while running tmux
-        wrapper_script = _build_ssh_activity_wrapper_script(session_name, host.host_dir)
+        wrapper_script = _build_ssh_activity_wrapper_script(
+            session_name, host.host_dir, mngr_ctx.config.tmux.attach_args
+        )
         # Pass the wrapper as a single remote command string so SSH doesn't
         # split it into separate words. SSH concatenates multiple remote command
         # arguments with spaces, which would cause 'bash -c' to only receive

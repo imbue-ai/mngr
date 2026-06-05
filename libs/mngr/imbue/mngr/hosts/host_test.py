@@ -10,6 +10,7 @@ from typing import Any
 from typing import IO
 from typing import cast
 
+import pluggy
 import pytest
 from paramiko import ChannelException
 from paramiko import SSHException
@@ -17,10 +18,13 @@ from pyinfra.api.command import StringCommand
 from pyinfra.api.host import Host as PyinfraHost
 from pyinfra.connectors.util import CommandOutput
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import EnvVar
+from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import TmuxConfig
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.errors import AgentError
 from imbue.mngr.errors import AgentStartError
@@ -54,9 +58,11 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.testing import get_short_random_string
+from imbue.mngr.utils.testing import make_mngr_ctx
 
 
 class _TestableAgent(BaseAgent):
@@ -656,6 +662,7 @@ def _build_command_with_defaults(
     additional_commands: list[NamedCommand] | None = None,
     unset_vars: list[str] | None = None,
     onboarding_text: str | None = None,
+    primary_window_name: str = "agent",
 ) -> str:
     """Call _build_start_agent_shell_command with standard test defaults."""
     return _build_start_agent_shell_command(
@@ -667,6 +674,7 @@ def _build_command_with_defaults(
         tmux_config_path=Path("/tmp/tmux.conf"),
         unset_vars=unset_vars if unset_vars is not None else [],
         host_dir=host_dir,
+        primary_window_name=primary_window_name,
         onboarding_text=onboarding_text,
     )
 
@@ -696,6 +704,40 @@ def test_build_start_agent_shell_command_produces_single_command(
     # Should contain the process monitor
     assert "nohup" in result
     assert "pane_pid" in result
+
+
+def test_build_start_agent_shell_command_names_primary_window_and_targets_it_by_name(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """new-session must name the primary window (-n) and all targets must use that name,
+    not the literal :0, so mngr works regardless of the user's tmux base-index.
+    """
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    result = _build_command_with_defaults(agent, temp_host_dir, primary_window_name="agent")
+
+    session = f"mngr-{agent.name}"
+    assert "new-session -d" in result
+    assert " -n agent" in result
+    # Targets address the window by name, never the literal :0 index.
+    assert f"={session}:agent" in result
+    assert f"={session}:0" not in result
+
+
+def test_build_start_agent_shell_command_uses_custom_primary_window_name(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """A custom tmux.primary_window_name flows into both -n and the window targets."""
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    result = _build_command_with_defaults(agent, temp_host_dir, primary_window_name="primary")
+
+    session = f"mngr-{agent.name}"
+    assert " -n primary" in result
+    assert f"={session}:primary" in result
+    assert f"={session}:agent" not in result
 
 
 def test_build_start_agent_shell_command_includes_unset_vars(
@@ -766,6 +808,7 @@ def test_build_start_agent_shell_command_send_keys_uses_end_of_options_separator
         tmux_config_path=Path("/tmp/tmux.conf"),
         unset_vars=[],
         host_dir=temp_host_dir,
+        primary_window_name="agent",
     )
 
     send_keys_l_lines = [line for line in result.split(" && ") if "send-keys" in line and " -l " in line]
@@ -2648,6 +2691,62 @@ def test_host_create_host_tmux_config_widens_status_left_before_user_config(
     assert content.index(widen_line) < content.index("source-file"), (
         "status-left-length must be set before the user config is sourced so the user can override it"
     )
+
+
+def _make_local_host_with_tmux_config(
+    tmux_config: TmuxConfig,
+    temp_host_dir: Path,
+    temp_profile_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+    active_concurrency_group: ConcurrencyGroup,
+    mngr_test_prefix: str,
+) -> Host:
+    """Build a local Host whose MngrConfig carries the given tmux config."""
+    config = MngrConfig(
+        default_host_dir=temp_host_dir,
+        prefix=mngr_test_prefix,
+        is_error_reporting_enabled=False,
+        tmux=tmux_config,
+    )
+    ctx = make_mngr_ctx(config, plugin_manager, temp_profile_dir, concurrency_group=active_concurrency_group)
+    provider = LocalProviderInstance(name=ProviderInstanceName("local"), host_dir=temp_host_dir, mngr_ctx=ctx)
+    return provider.create_host(HostName(LOCAL_HOST_NAME))
+
+
+def test_host_create_host_tmux_config_does_not_source_user_config_by_default(
+    local_host: Host,
+    temp_host_dir: Path,
+) -> None:
+    """With no tmux.user_config_path configured, only the ~/.tmux.conf source line is present."""
+    content = local_host._create_host_tmux_config().read_text()
+    assert content.count("source-file") == 1
+    assert "source-file ~/.tmux.conf" in content
+
+
+def test_host_create_host_tmux_config_sources_user_config_when_configured(
+    temp_host_dir: Path,
+    temp_profile_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+    active_concurrency_group: ConcurrencyGroup,
+    mngr_test_prefix: str,
+) -> None:
+    """A configured tmux.user_config_path is sourced (guarded by test -f) into the session config."""
+    user_config_path = "~/.mngr/tmux.user.conf"
+    host = _make_local_host_with_tmux_config(
+        TmuxConfig(user_config_path=Path(user_config_path)),
+        temp_host_dir,
+        temp_profile_dir,
+        plugin_manager,
+        active_concurrency_group,
+        mngr_test_prefix,
+    )
+    content = host._create_host_tmux_config().read_text()
+
+    assert f"if-shell 'test -f {user_config_path}' 'source-file {user_config_path}'" in content
+    # The user's own ~/.tmux.conf is still sourced as well.
+    assert "source-file ~/.tmux.conf" in content
+    # The path is interpolated unquoted so a leading ~ is expanded by the host shell/tmux.
+    assert f"'{user_config_path}'" not in content
 
 
 # =========================================================================

@@ -266,13 +266,15 @@ class BaseAgent(AgentInterface[AgentConfigT]):
 
     @property
     def tmux_target(self) -> TmuxWindowTarget:
-        """Structured tmux target for the agent's primary window (window 0).
+        """Structured tmux target for the agent's primary window.
 
-        Always pins window 0 because agents run there; using the session
-        without a window component selects the *currently active* window, which
-        is wrong when additional windows exist (e.g., watchers, ttyd).
+        Pins the named primary window (``tmux.primary_window_name``, default
+        ``agent``) because agents run there; using the session without a window
+        component selects the *currently active* window, which is wrong when
+        additional windows exist (e.g., watchers, ttyd). Targeting by name (not
+        ``:0``) keeps this correct regardless of the user's tmux ``base-index``.
         """
-        return TmuxWindowTarget(session_name=self.session_name, window=0)
+        return TmuxWindowTarget(session_name=self.session_name, window=self.mngr_ctx.config.tmux.primary_window_name)
 
     @contextmanager
     def _message_lock(self) -> Generator[None, None, None]:

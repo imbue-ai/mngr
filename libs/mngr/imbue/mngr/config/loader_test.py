@@ -890,6 +890,9 @@ def test_load_config_threads_every_field_from_toml(
     assert config.default_destroyed_host_persisted_seconds == 12345.0
     assert config.retry.connect_retry_times == 5
     assert config.retry.connect_retry_delay == "10s"
+    assert config.tmux.primary_window_name == "main"
+    assert config.tmux.attach_args == ("-CC",)
+    assert config.tmux.user_config_path == Path("~/.mngr/tmux.user.conf")
     assert "TEST_VAR" in config.unset_vars
     assert ProviderBackendName("local") in config.enabled_backends
     assert ".venv" in config.work_dir_extra_paths
@@ -914,6 +917,7 @@ _SAMPLE_CONFIG_VALUES: dict[str, Any] = {
     "work_dir_extra_paths": {".venv": "SHARE", ".test_output": "COPY"},
     "retry": {"connect_retry_times": 5, "connect_retry_delay": "10s"},
     "logging": {"file_level": "DEBUG"},
+    "tmux": {"primary_window_name": "main", "attach_args": ["-CC"], "user_config_path": "~/.mngr/tmux.user.conf"},
     "is_remote_agent_installation_allowed": False,
     "connect_command": "my-connect",
     "is_nested_tmux_allowed": True,
@@ -959,6 +963,11 @@ connect_retry_delay = "10s"
 
 [logging]
 file_level = "DEBUG"
+
+[tmux]
+primary_window_name = "main"
+attach_args = ["-CC"]
+user_config_path = "~/.mngr/tmux.user.conf"
 """
 
 

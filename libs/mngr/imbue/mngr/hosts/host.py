@@ -2450,6 +2450,24 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             "",
         ]
 
+        # Source the user's extra mngr-specific tmux config if one is configured.
+        # Unlike this auto-generated file, that path is never overwritten by mngr,
+        # so it is a stable place for users to add their own session config. The
+        # path is interpolated unquoted (matching the ~/.tmux.conf line above) so
+        # a leading ~ is expanded by the host's shell and tmux; user_config_path
+        # is expected to be an absolute or ~-relative path without shell-special
+        # characters.
+        user_config_path = self.mngr_ctx.config.tmux.user_config_path
+        if user_config_path is not None:
+            user_config_str = str(user_config_path)
+            lines.extend(
+                [
+                    "# Source the user's extra mngr tmux config if it exists",
+                    f"if-shell 'test -f {user_config_str}' 'source-file {user_config_str}'",
+                    "",
+                ]
+            )
+
         if self.is_local:
             # Local hosts: detach and exec into mngr destroy/stop directly
             lines.extend(
@@ -2548,6 +2566,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                         tmux_config_path=tmux_config_path,
                         unset_vars=self.mngr_ctx.config.unset_vars,
                         host_dir=self.host_dir,
+                        primary_window_name=self.mngr_ctx.config.tmux.primary_window_name,
                         onboarding_text=onboarding_text,
                     )
                     result = self.execute_stateful_command(combined_command, cwd=agent.work_dir)
@@ -2896,6 +2915,7 @@ def _build_start_agent_shell_command(
     tmux_config_path: Path,
     unset_vars: Sequence[str],
     host_dir: Path,
+    primary_window_name: str,
     onboarding_text: str | None = None,
 ) -> str:
     """Build a single shell command that starts an agent and its tmux session.
@@ -2931,15 +2951,20 @@ def _build_start_agent_shell_command(
     # message sending. Passing -x/-y appears to use a different tmux code
     # path that sets the PTY dimensions correctly at creation time.
     # The window will be resized to match the client's terminal when attached.
+    # Name the primary window (-n) and target it by name everywhere below, so
+    # mngr's targeting is independent of the user's tmux `base-index` setting
+    # (a `set -g base-index 1` in ~/.tmux.conf would otherwise create the agent
+    # window at index 1 while mngr hardcoded `:0`).
     steps.append(
         f"tmux -f {shlex.quote(str(tmux_config_path))} new-session -d"
         f" -s {shlex.quote(session_name)}"
+        f" -n {shlex.quote(primary_window_name)}"
         f" -x 200 -y 50"
         f" -c {shlex.quote(str(agent.work_dir))}"
         f" {shlex.quote(env_shell_cmd)}"
     )
 
-    quoted_exact_agent_window = TmuxWindowTarget(session_name=session_name, window=0).as_shell_arg()
+    quoted_exact_agent_window = TmuxWindowTarget(session_name=session_name, window=primary_window_name).as_shell_arg()
 
     # Save the user's original default-command (from their ~/.tmux.conf) into
     # the tmux session environment, then set default-command to env_shell_cmd.
