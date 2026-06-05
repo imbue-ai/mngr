@@ -25,8 +25,6 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.agents.agent_registry import reset_agent_registry
 from imbue.mngr.api.providers import reset_provider_instances
-from imbue.mngr.config.data_types import MngrConfig
-from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.plugin_catalog import get_independent_entry_point_names
 from imbue.mngr.plugins import hookspecs
@@ -40,7 +38,6 @@ from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
 from imbue.mngr.utils.plugin_testing import register_test_placeholder_agent_type
 from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr.utils.testing import init_git_repo
-from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr.utils.testing import worker_test_ids
 
 # Resource guards (tmux, rsync, unison, modal, docker_cli, docker_sdk) are
@@ -99,13 +96,14 @@ _remove_deprecated_urwid_module_aliases()
 # plugin uses. Single-sourcing them this way keeps mngr-core and its plugins
 # from drifting apart.
 #
-# A few fixtures below intentionally OVERRIDE the plugin_testing versions
-# because mngr-core needs stricter behavior than plugins do:
+# Two fixtures below intentionally OVERRIDE the plugin_testing versions because
+# mngr-core needs stricter behavior than plugins do:
 #   - plugin_manager: blocks every external entry-point plugin except those in
 #                     enabled_plugins (plugins instead load all entry points so
 #                     their own hooks are present).
-#   - mngr_test_id:   records the id in worker_test_ids for tmux cleanup.
-#   - temp_mngr_ctx:  resets the provider-instance cache on teardown.
+#   - mngr_test_id:   records the id in worker_test_ids, which mngr-core's
+#                     session_cleanup fixture (not shared with plugins) scans for
+#                     leaked tmux sessions at session end.
 # register_plugin_test_fixtures runs first; because these defs come after it,
 # they win for the mngr-core test session.
 
@@ -156,22 +154,6 @@ def temp_git_repo_cwd(temp_git_repo: Path, monkeypatch: pytest.MonkeyPatch) -> P
     """
     monkeypatch.chdir(temp_git_repo)
     return temp_git_repo
-
-
-@pytest.fixture
-def temp_mngr_ctx(
-    temp_config: MngrConfig, temp_profile_dir: Path, plugin_manager: pluggy.PluginManager
-) -> Generator[MngrContext, None, None]:
-    """Create a MngrContext with a temporary host directory.
-
-    Use this fixture when calling API functions that need a context.
-    """
-    cg = ConcurrencyGroup(name="test")
-    with cg:
-        yield make_mngr_ctx(temp_config, plugin_manager, temp_profile_dir, concurrency_group=cg)
-    # Clear the provider instance cache so cached instances don't outlive
-    # the ConcurrencyGroup that was just torn down.
-    reset_provider_instances()
 
 
 @pytest.fixture

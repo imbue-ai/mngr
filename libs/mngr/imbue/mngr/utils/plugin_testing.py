@@ -22,6 +22,7 @@ from imbue.mngr import resources as mngr_resources
 from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.agents.agent_registry import reset_agent_registry
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.api.providers import reset_provider_instances
 from imbue.mngr.config.agent_class_registry import is_agent_class_registered
 from imbue.mngr.config.agent_class_registry import register_agent_class
 from imbue.mngr.config.agent_config_registry import is_agent_config_registered
@@ -213,6 +214,9 @@ def temp_mngr_ctx(
     """Create a MngrContext with a temporary host directory."""
     with ConcurrencyGroup(name="test") as test_cg:
         yield make_mngr_ctx(temp_config, plugin_manager, temp_profile_dir, concurrency_group=test_cg)
+    # Clear the provider instance cache so cached instances don't outlive the
+    # ConcurrencyGroup that was just torn down.
+    reset_provider_instances()
 
 
 @pytest.fixture
