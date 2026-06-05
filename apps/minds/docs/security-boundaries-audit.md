@@ -6,7 +6,7 @@ Audit date: 2026-04-23
 
 The minds desktop app uses a layered proxy architecture:
 
-1. **Electron shell** (`electron/main.js`): Creates `BaseWindow` with multiple `WebContentsView` instances (chromeView, contentView, sidebarView, requestsPanelView). Manages window lifecycle and IPC.
+1. **Electron shell** (`electron/main.js`): Creates `BaseWindow` with multiple `WebContentsView` instances (chromeView, contentView, sidebarView, modalView). Manages window lifecycle and IPC.
 
 2. **Desktop client** (FastAPI, `desktop_client/app.py`): Runs on `localhost:PORT`. Handles auth, agent discovery, and proxies `<agent-id>.localhost:PORT` subdomain requests to per-agent system interfaces.
 
@@ -50,7 +50,7 @@ The bare-origin `minds_session` cookie is never sent to `agent-X.localhost` subd
 
 **localStorage: NO.** The desktop client's chrome UI pages load from `localhost:PORT` (e.g., `/_chrome`, `/_chrome/sidebar`). Agent content loads from `agent-X.localhost:PORT`. Different origins = separate localStorage.
 
-**Electron IPC: NO.** The preload script (which exposes `window.minds` IPC bridge) is only loaded in chromeView, sidebarView, and requestsPanelView. The contentView (where agent pages render) is created without a preload script (`main.js:218-224`), so agent pages cannot access Electron IPC.
+**Electron IPC: NO.** The preload script (which exposes `window.minds` IPC bridge) is only loaded in chromeView, sidebarView, and modalView. The contentView (where agent pages render) is created without a preload script (`main.js:218-224`), so agent pages cannot access Electron IPC.
 
 ## Detailed isolation mechanisms
 
