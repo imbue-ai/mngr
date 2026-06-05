@@ -13,17 +13,30 @@ from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_antigravity.antigravity_config import ACTIVE_MARKER_FILENAME
 from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import build_antigravity_hooks_config
-from imbue.mngr_antigravity.antigravity_config import get_antigravity_user_settings_path
+from imbue.mngr_antigravity.antigravity_config import build_isolated_settings
+from imbue.mngr_antigravity.antigravity_config import build_onboarding_seed
+from imbue.mngr_antigravity.antigravity_config import get_antigravity_cli_dir
+from imbue.mngr_antigravity.antigravity_config import get_antigravity_hooks_config_path
+from imbue.mngr_antigravity.antigravity_config import get_antigravity_oauth_token_path
+from imbue.mngr_antigravity.antigravity_config import get_antigravity_onboarding_cache_path
+from imbue.mngr_antigravity.antigravity_config import get_antigravity_settings_path
 from imbue.mngr_antigravity.antigravity_config import merge_trusted_workspace
 from imbue.mngr_antigravity.antigravity_config import read_antigravity_settings
 from imbue.mngr_antigravity.antigravity_config import serialize_antigravity_hooks
 from imbue.mngr_antigravity.antigravity_config import serialize_antigravity_settings
 
 
-def test_user_settings_path_lives_under_gemini_antigravity_cli() -> None:
-    """Path is fixed by agy; no env-var override exists in the binary."""
-    path = get_antigravity_user_settings_path()
-    assert path == Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
+def test_path_helpers_address_the_gemini_tree_under_a_given_home() -> None:
+    """All path helpers are rooted at a given ``$HOME``, so the same builders serve
+    both the user's real home and each agent's relocated home (no env-var override
+    exists in agy; a per-agent ``$HOME`` is the only lever)."""
+    home = Path("/some/home")
+    cli_dir = home / ".gemini" / "antigravity-cli"
+    assert get_antigravity_cli_dir(home) == cli_dir
+    assert get_antigravity_settings_path(home) == cli_dir / "settings.json"
+    assert get_antigravity_oauth_token_path(home) == cli_dir / "antigravity-oauth-token"
+    assert get_antigravity_onboarding_cache_path(home) == cli_dir / "cache" / "onboarding.json"
+    assert get_antigravity_hooks_config_path(home) == home / ".gemini" / "config" / "hooks.json"
 
 
 def test_serialize_round_trips_to_two_space_indented_json() -> None:
@@ -65,6 +78,69 @@ def test_merge_trusted_workspace_promotes_non_list_value_to_fresh_array() -> Non
 
     assert merged is not None
     assert merged["trustedWorkspaces"] == ["/work/agent-1"]
+
+
+# =============================================================================
+# Per-agent settings + onboarding builders
+# =============================================================================
+
+
+def test_build_isolated_settings_layers_base_trust_and_overrides() -> None:
+    """Base (copy of user settings) is the floor; trust is merged; overrides win on top."""
+    base = {"colorScheme": "dark", "model": "Base Model", "trustedWorkspaces": ["/repo"]}
+    overrides = {"model": "Override Model", "permissions": {"allow": ["command(git)"]}}
+
+    result = build_isolated_settings(base, overrides, ["/tmp/ws"])
+
+    # Inherited base key survives.
+    assert result["colorScheme"] == "dark"
+    # Overrides win over the base value.
+    assert result["model"] == "Override Model"
+    assert result["permissions"] == {"allow": ["command(git)"]}
+    # Workspace path appended to the inherited trust list (deduped, order preserved).
+    assert result["trustedWorkspaces"] == ["/repo", "/tmp/ws"]
+
+
+def test_build_isolated_settings_does_not_mutate_base() -> None:
+    """The builder is @pure: the caller's base mapping is left untouched."""
+    base = {"trustedWorkspaces": ["/repo"]}
+    build_isolated_settings(base, {}, ["/tmp/ws"])
+    assert base == {"trustedWorkspaces": ["/repo"]}
+
+
+def test_build_isolated_settings_dedupes_already_trusted_workspace() -> None:
+    base = {"trustedWorkspaces": ["/tmp/ws"]}
+    result = build_isolated_settings(base, {}, ["/tmp/ws"])
+    assert result["trustedWorkspaces"] == ["/tmp/ws"]
+
+
+def test_build_isolated_settings_leaves_trust_untouched_for_empty_workspace_list() -> None:
+    """An empty trusted_workspaces sequence must not change the inherited trust list."""
+    base = {"trustedWorkspaces": ["/repo"]}
+    result = build_isolated_settings(base, {}, [])
+    assert result["trustedWorkspaces"] == ["/repo"]
+
+
+def test_build_isolated_settings_omits_trust_key_for_empty_base_and_empty_workspaces() -> None:
+    """No spurious empty trustedWorkspaces key when there's nothing to trust."""
+    result = build_isolated_settings({}, {}, [])
+    assert "trustedWorkspaces" not in result
+
+
+def test_build_isolated_settings_seeds_trust_list_from_empty_base() -> None:
+    """With an empty base (sync_home_settings=False) the workspace still gets trusted."""
+    result = build_isolated_settings({}, {}, ["/tmp/ws"])
+    assert result["trustedWorkspaces"] == ["/tmp/ws"]
+
+
+def test_build_onboarding_seed_emits_the_three_nux_keys() -> None:
+    """The NUX seed must carry exactly the keys agy checks to skip the first-run flow."""
+    seed = build_onboarding_seed()
+    assert seed == {
+        "consumerOnboardingComplete": True,
+        "enterpriseOnboardingComplete": False,
+        "onboardingComplete": True,
+    }
 
 
 def test_read_antigravity_settings_returns_empty_dict_for_missing_file(
