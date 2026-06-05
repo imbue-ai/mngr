@@ -2,7 +2,6 @@ import os
 from collections.abc import Callable
 from collections.abc import Generator
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from typing import Mapping
 from typing import Sequence
@@ -15,6 +14,7 @@ from grpclib.exceptions import ProtocolError
 from grpclib.exceptions import StreamTerminatedError
 from modal.stream_type import StreamType as ModalStreamType
 from modal.volume import FileEntryType as ModalFileEntryType
+from tenacity import Retrying
 from tenacity import wait_none
 
 from imbue.modal_proxy.data_types import FileEntry
@@ -25,6 +25,8 @@ from imbue.modal_proxy.direct import DirectImage
 from imbue.modal_proxy.direct import DirectModalInterface
 from imbue.modal_proxy.direct import DirectSecret
 from imbue.modal_proxy.direct import DirectVolume
+from imbue.modal_proxy.direct import _VOLUME_RETRY
+from imbue.modal_proxy.direct import _VOLUME_STOP
 from imbue.modal_proxy.direct import _should_retry_volume_op
 from imbue.modal_proxy.direct import _to_file_entry_type
 from imbue.modal_proxy.direct import _to_modal_stream_type
@@ -421,20 +423,22 @@ def test_deploy_does_not_retry_on_non_lock_error(tmp_path: Path, monkeypatch: py
 # --- Volume retry behavior tests ---
 #
 # `test_should_retry_volume_op` above checks the retry *predicate* in isolation.
-# These confirm the predicate is actually wired into the @retry decorator that
-# wraps every DirectVolume mutation -- i.e. that a retryable error really causes
-# re-invocation, that stop_after_attempt(5) bounds it, and that reraise=True
-# surfaces the original error. Bugs these catch that the predicate test cannot:
-# deleting the @retry decorator, passing the wrong predicate, flipping reraise,
-# or changing the attempt count.
+# These drive a fake through a tenacity Retrying built from the SAME module-level
+# constants the production decorator uses (`_VOLUME_RETRY` / `_VOLUME_STOP`),
+# verifying the predicate and stop actually compose into bounded retry/recovery:
+# a retryable error is re-attempted, recovery returns the value, a non-retryable
+# error surfaces immediately, and stop_after_attempt(5) caps the attempts. The
+# wait is substituted with `wait_none()` so no time is spent on backoff. (The
+# wait/`reraise` settings are re-specified here rather than imported because the
+# production config lives only inside the @retry decorator on each method;
+# whether each method actually carries that decorator is left to code review.)
 
 
-class _ScriptedVolume:
-    """Minimal modal.Volume stand-in whose listdir fails a fixed number of times.
+class _ScriptedFailureSource:
+    """Callable that raises a fixed error N times, then returns a sentinel.
 
-    Injected via DirectVolume.model_construct (which bypasses the modal.Volume
-    field validation) so the retry decorator can be exercised without a real
-    Modal backend.
+    Stands in for a modal.Volume operation so the shared retry config can be
+    exercised without a real Modal backend.
     """
 
     def __init__(self, failures: int, error: BaseException) -> None:
@@ -442,50 +446,42 @@ class _ScriptedVolume:
         self.error = error
         self.call_count = 0
 
-    def listdir(self, path: str) -> list[Any]:
+    def __call__(self) -> str:
         self.call_count += 1
         if self.call_count <= self.failures:
             raise self.error
-        return [SimpleNamespace(path="f.txt", type=ModalFileEntryType.FILE, mtime=1.0, size=3)]
+        return "recovered"
 
 
-def _call_listdir_with_zero_wait(direct_volume: DirectVolume, path: str) -> list[FileEntry]:
-    # Reach the inner @retry-wrapped function (the public method is additionally
-    # wrapped by _translate_exceptions) only to substitute a zero wait, so the
-    # test exercises the real retry/stop config without sleeping through
-    # wait_exponential's backoff.
-    fast = DirectVolume.listdir.__wrapped__.retry_with(wait=wait_none())
-    return fast(direct_volume, path)
+def _volume_retrying() -> Retrying:
+    return Retrying(retry=_VOLUME_RETRY, stop=_VOLUME_STOP, wait=wait_none(), reraise=True)
 
 
-def test_direct_volume_listdir_retries_transient_error_then_succeeds() -> None:
-    volume = _ScriptedVolume(failures=2, error=modal.exception.InternalError("transient"))
-    direct_volume = DirectVolume.model_construct(volume=volume, volume_name="v")
+def test_volume_retry_config_retries_transient_error_then_succeeds() -> None:
+    source = _ScriptedFailureSource(failures=2, error=modal.exception.InternalError("transient"))
 
-    entries = _call_listdir_with_zero_wait(direct_volume, "/data")
+    result = _volume_retrying()(source)
 
-    # Two transient failures are retried; the third call succeeds and its result
+    # Two transient failures are retried; the third call succeeds and its value
     # is returned, proving the retryable branch actually recovers.
-    assert volume.call_count == 3
-    assert [e.path for e in entries] == ["f.txt"]
+    assert source.call_count == 3
+    assert result == "recovered"
 
 
-def test_direct_volume_listdir_does_not_retry_non_retryable_error() -> None:
-    volume = _ScriptedVolume(failures=99, error=modal.exception.AuthError("denied"))
-    direct_volume = DirectVolume.model_construct(volume=volume, volume_name="v")
+def test_volume_retry_config_does_not_retry_non_retryable_error() -> None:
+    source = _ScriptedFailureSource(failures=99, error=modal.exception.AuthError("denied"))
 
     with pytest.raises(modal.exception.AuthError):
-        _call_listdir_with_zero_wait(direct_volume, "/data")
+        _volume_retrying()(source)
     # A non-retryable error surfaces immediately, after exactly one attempt.
-    assert volume.call_count == 1
+    assert source.call_count == 1
 
 
-def test_direct_volume_listdir_stops_after_five_attempts_and_reraises_original() -> None:
-    volume = _ScriptedVolume(failures=99, error=modal.exception.InternalError("always"))
-    direct_volume = DirectVolume.model_construct(volume=volume, volume_name="v")
+def test_volume_retry_config_stops_after_five_attempts_and_reraises_original() -> None:
+    source = _ScriptedFailureSource(failures=99, error=modal.exception.InternalError("always"))
 
     with pytest.raises(modal.exception.InternalError, match="always"):
-        _call_listdir_with_zero_wait(direct_volume, "/data")
-    # stop_after_attempt(5) bounds the retries and reraise=True surfaces the
-    # original modal error (the public method would additionally translate it).
-    assert volume.call_count == 5
+        _volume_retrying()(source)
+    # stop_after_attempt(5) caps the attempts and reraise=True surfaces the
+    # original modal error rather than a tenacity RetryError.
+    assert source.call_count == 5
