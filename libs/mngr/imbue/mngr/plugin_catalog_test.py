@@ -1,5 +1,6 @@
 from imbue.mngr.plugin_catalog import PLUGIN_CATALOG
 from imbue.mngr.plugin_catalog import SignalCheck
+from imbue.mngr.plugin_catalog import UNPUBLISHED_PACKAGES
 from imbue.mngr.plugin_catalog import check_signal
 from imbue.mngr.plugin_catalog import get_all_cataloged_entry_point_names
 from imbue.mngr.plugin_catalog import get_catalog_entry
@@ -100,6 +101,17 @@ def test_get_installable_packages_deduplicates_by_package_name() -> None:
     packages = get_installable_packages()
     package_names = [p.package_name for p in packages]
     assert len(package_names) == len(set(package_names))
+
+
+def test_get_installable_packages_excludes_unpublished() -> None:
+    """No package marked unpublished is offered to the install wizard.
+
+    Asserts the exclusion contract against the UNPUBLISHED_PACKAGES constant
+    rather than reconstructing the function's output, so it survives catalog
+    additions and only fails if the exclusion branch itself regresses.
+    """
+    installable_names = {p.package_name for p in get_installable_packages()}
+    assert installable_names.isdisjoint(UNPUBLISHED_PACKAGES)
 
 
 def test_get_installable_packages_prefers_basic_tier() -> None:
