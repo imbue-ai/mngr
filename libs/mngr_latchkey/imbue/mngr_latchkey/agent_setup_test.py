@@ -21,6 +21,7 @@ from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_DISABLE_COUNTING
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PASSWORD
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE
+from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_SECONDARY
 from imbue.mngr_latchkey.agent_setup import _build_allowed_agent_anyof_entry
 from imbue.mngr_latchkey.agent_setup import _extract_agent_id_from_anyof_entry
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
@@ -29,6 +30,7 @@ from imbue.mngr_latchkey.agent_setup import register_agent_for_host
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
+from imbue.mngr_latchkey.remote_gateway import INNER_PORT
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import opaque_permissions_dir
 from imbue.mngr_latchkey.store import permissions_path_for_host
@@ -52,6 +54,9 @@ def test_prepare_no_latchkey_tunneled_returns_constant_url(tmp_path: Path) -> No
     """
     setup = prepare_agent_latchkey(None, is_tunneled=True)
     assert setup.env[ENV_LATCHKEY_GATEWAY] == f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
+    # Tunneled agents also get the secondary (per-VPS) gateway URL on a distinct port.
+    assert setup.env[ENV_LATCHKEY_GATEWAY_SECONDARY] == f"http://127.0.0.1:{INNER_PORT}"
+    assert INNER_PORT != AGENT_SIDE_LATCHKEY_PORT
     assert setup.env[ENV_LATCHKEY_DISABLE_COUNTING] == "1"
     assert ENV_LATCHKEY_GATEWAY_PASSWORD not in setup.env
     assert ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE not in setup.env
@@ -73,6 +78,7 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
     fake = _full_fake(tmp_path)
     setup = prepare_agent_latchkey(fake, is_tunneled=True)
     assert setup.env[ENV_LATCHKEY_GATEWAY] == f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
+    assert setup.env[ENV_LATCHKEY_GATEWAY_SECONDARY] == f"http://127.0.0.1:{INNER_PORT}"
     assert setup.env[ENV_LATCHKEY_GATEWAY_PASSWORD] == "hunter2"
     assert setup.env[ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE] == "header.payload.signature"
     assert setup.env[ENV_LATCHKEY_DISABLE_COUNTING] == "1"
@@ -144,6 +150,8 @@ def test_prepare_full_wiring_on_host_uses_live_port(tmp_path: Path) -> None:
     with ConcurrencyGroup(name="test-on-host-prepare") as cg:
         setup = prepare_agent_latchkey(fake, is_tunneled=False, concurrency_group=cg)
     assert setup.env[ENV_LATCHKEY_GATEWAY] == "http://127.0.0.1:55555"
+    # On-host (DEV) agents run on the gateway host itself -- no per-VPS secondary.
+    assert ENV_LATCHKEY_GATEWAY_SECONDARY not in setup.env
     assert setup.env[ENV_LATCHKEY_GATEWAY_PASSWORD] == "hunter2"
     assert setup.env[ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE] == "header.payload.signature"
 

@@ -120,7 +120,9 @@ latchkey.initialize()
 
 # (a) Pre-create env vars + opaque permissions handle for a new host.
 setup = prepare_agent_latchkey(latchkey, is_tunneled=True)
-# setup.env: LATCHKEY_GATEWAY[_PASSWORD,_PERMISSIONS_OVERRIDE,_DISABLE_COUNTING]
+# setup.env: LATCHKEY_GATEWAY[_SECONDARY,_PASSWORD,_PERMISSIONS_OVERRIDE,_DISABLE_COUNTING]
+#   LATCHKEY_GATEWAY_SECONDARY (tunneled mode only) is the agent's URL for the
+#   per-VPS gateway: http://127.0.0.1:<INNER_PORT>
 # setup.opaque_permissions_path: pass to finalize_host_permissions later
 
 # ... mngr create returns the canonical host id ...
