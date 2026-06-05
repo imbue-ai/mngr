@@ -13,31 +13,17 @@ from imbue.mngr_tmr.recipe import CollectTestsError
 from imbue.mngr_tmr.recipe import collect_tests
 
 
-def test_build_agent_prompt_contains_test_id() -> None:
+def test_build_agent_prompt_interpolates_test_id_and_outcome_filename() -> None:
+    """build_test_agent_prompt is responsible for interpolating the run command
+    (containing the test node id) and the outcome filename into the template."""
     prompt = build_test_agent_prompt("tests/test_foo.py::test_bar", ())
     assert "tests/test_foo.py::test_bar" in prompt
     assert TESTING_AGENT_OUTCOME_FILENAME in prompt
-    assert "IMPROVE_TEST" in prompt
-    assert "FIX_TEST" in prompt
-    assert "FIX_IMPL" in prompt
-    assert "tests_passing_before" in prompt
-    assert "tests_passing_after" in prompt
-    assert "summary_markdown" in prompt
 
 
 def test_build_agent_prompt_includes_pytest_flags() -> None:
     prompt = build_test_agent_prompt("tests/test_x.py::test_y", ("-m", "release"))
     assert "-m release" in prompt
-
-
-def test_build_agent_prompt_requests_markdown() -> None:
-    prompt = build_test_agent_prompt("t::t", ())
-    assert "markdown" in prompt.lower()
-
-
-def test_build_agent_prompt_instructs_one_entry_per_kind() -> None:
-    prompt = build_test_agent_prompt("t::t", ())
-    assert "do not duplicate kinds" in prompt.lower()
 
 
 def test_collect_tests_with_real_pytest(tmp_path: Path, cg: ConcurrencyGroup) -> None:

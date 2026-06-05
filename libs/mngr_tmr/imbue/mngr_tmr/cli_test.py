@@ -9,6 +9,7 @@ trick and the help-text surface contract.
 from typing import Any
 
 import click
+import pytest
 from click.testing import CliRunner
 from click.testing import Result
 
@@ -22,19 +23,28 @@ def test_cli_help(cli_runner: CliRunner) -> None:
     assert "PYTEST_ARGS" in result.output
 
 
-def test_cli_help_contains_options(cli_runner: CliRunner) -> None:
+@pytest.mark.parametrize(
+    "option",
+    [
+        "--agent-type",
+        "--poll-interval",
+        "--output-dir",
+        "--source",
+        "--provider",
+        "--env",
+        "--label",
+        "--timeout",
+        "--reducer-timeout",
+        "--max-parallel-agents",
+    ],
+)
+def test_cli_help_wires_in_shared_options(cli_runner: CliRunner, option: str) -> None:
+    """Guards that the shared mapreduce/common option decorators stay wired onto
+    ``tmr``. The options' own behavior is owned and tested by the framework
+    (imbue.mngr_mapreduce / imbue.mngr); this only asserts they are surfaced here.
+    """
     result = cli_runner.invoke(tmr, ["--help"])
-    assert "--agent-type" in result.output
-    assert "--poll-interval" in result.output
-    assert "--output-dir" in result.output
-    assert "--source" in result.output
-
-
-def test_cli_help_contains_provider_env_label_options(cli_runner: CliRunner) -> None:
-    result = cli_runner.invoke(tmr, ["--help"])
-    assert "--provider" in result.output
-    assert "--env" in result.output
-    assert "--label" in result.output
+    assert option in result.output
 
 
 def test_cli_help_drops_removed_options(cli_runner: CliRunner) -> None:
@@ -48,13 +58,6 @@ def test_cli_help_drops_removed_options(cli_runner: CliRunner) -> None:
     assert "--integrator-type" not in result.output
     assert "--integrator-template" not in result.output
     assert "--use-snapshot" not in result.output
-
-
-def test_cli_help_contains_timeout_options(cli_runner: CliRunner) -> None:
-    result = cli_runner.invoke(tmr, ["--help"])
-    assert "--timeout" in result.output
-    assert "--reducer-timeout" in result.output
-    assert "--max-parallel-agents" in result.output
 
 
 def _invoke_tmr_command(
