@@ -2,6 +2,7 @@ import sys
 from enum import auto
 from pathlib import Path
 from typing import Any
+from typing import NamedTuple
 
 from loguru import logger
 
@@ -28,16 +29,34 @@ class ConsoleLogLevel(UpperCaseStrEnum):
     NONE = auto()
 
 
-# Map our enum to loguru level strings. ``ConsoleLogLevel.NONE`` is intentionally
-# absent: it means "add no console sink at all" and is filtered out by the caller
-# (``setup_logging``) before any lookup here, so it never reaches this map.
-_LEVEL_MAP = {
-    ConsoleLogLevel.TRACE: "TRACE",
-    ConsoleLogLevel.DEBUG: "DEBUG",
-    ConsoleLogLevel.INFO: "INFO",
-    ConsoleLogLevel.WARN: "WARNING",
-    ConsoleLogLevel.ERROR: "ERROR",
+class _LevelStyle(NamedTuple):
+    """How a console log level maps onto loguru and how its lines are rendered."""
+
+    # The loguru level name this console level corresponds to (loguru spells WARN
+    # as "WARNING").
+    loguru_name: str
+    # ANSI color wrapping the whole line, or None to render it plain (INFO).
+    color: str | None
+    # Text shown before the message (e.g. "WARNING: "); empty for no prefix.
+    prefix: str
+
+
+# Single source of truth for every console-output level: its loguru name (used to
+# set the sink threshold) plus how its lines are rendered. ``ConsoleLogLevel.NONE``
+# is intentionally absent: it means "add no console sink at all", so it has no
+# loguru level and is filtered out by ``setup_logging`` before any lookup here.
+_LEVEL_STYLES: dict[ConsoleLogLevel, _LevelStyle] = {
+    ConsoleLogLevel.TRACE: _LevelStyle("TRACE", _TRACE_COLOR, ""),
+    ConsoleLogLevel.DEBUG: _LevelStyle("DEBUG", _DEBUG_COLOR, ""),
+    ConsoleLogLevel.INFO: _LevelStyle("INFO", None, ""),
+    ConsoleLogLevel.WARN: _LevelStyle("WARNING", _WARNING_COLOR, "WARNING: "),
+    ConsoleLogLevel.ERROR: _LevelStyle("ERROR", _ERROR_COLOR, "ERROR: "),
 }
+
+# Reverse lookup for the stderr sink, which receives records tagged with loguru
+# level *names* rather than our enum. Levels absent here -- loguru's own SUCCESS /
+# CRITICAL, which minds does not emit -- render plain via the ``None`` default.
+_STYLE_BY_LOGURU_NAME: dict[str, _LevelStyle] = {style.loguru_name: style for style in _LEVEL_STYLES.values()}
 
 
 def _dynamic_stderr_sink(message: Any) -> None:
@@ -52,21 +71,16 @@ def _dynamic_stderr_sink(message: Any) -> None:
 
 
 def _format_user_message(record: Any) -> str:
-    """Format user-facing log messages with colored prefixes for warnings and errors."""
-    level_name = record["level"].name
-    if level_name == "WARNING":
-        return f"{_WARNING_COLOR}WARNING: {{message}}{_RESET_COLOR}\n"
-    if level_name == "ERROR":
-        return f"{_ERROR_COLOR}ERROR: {{message}}{_RESET_COLOR}\n"
-    if level_name == "DEBUG":
-        return f"{_DEBUG_COLOR}{{message}}{_RESET_COLOR}\n"
-    if level_name == "TRACE":
-        return f"{_TRACE_COLOR}{{message}}{_RESET_COLOR}\n"
-    # INFO (the common case) is rendered plain and uncolored by design; any other
-    # loguru level we don't explicitly color (e.g. SUCCESS) also falls through to
-    # this plain format. If minds ever logs at CRITICAL, revisit whether it should
-    # get the error color.
-    return "{message}\n"
+    """Format user-facing log lines: colored, with a WARNING:/ERROR: prefix where applicable."""
+    style = _STYLE_BY_LOGURU_NAME.get(record["level"].name)
+    # Unknown levels (loguru's SUCCESS/CRITICAL, which minds does not emit) and
+    # INFO (deliberately uncolored) render plain. If minds ever logs at CRITICAL,
+    # revisit whether it should get the error color.
+    if style is None:
+        return "{message}\n"
+    if style.color is None:
+        return f"{style.prefix}{{message}}\n"
+    return f"{style.color}{style.prefix}{{message}}{_RESET_COLOR}\n"
 
 
 def setup_logging(
@@ -90,7 +104,7 @@ def setup_logging(
     if console_level != ConsoleLogLevel.NONE:
         logger.add(
             _dynamic_stderr_sink,
-            level=_LEVEL_MAP[console_level],
+            level=_LEVEL_STYLES[console_level].loguru_name,
             format=_format_user_message,
             colorize=False,
             diagnose=False,
