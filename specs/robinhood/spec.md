@@ -1,8 +1,8 @@
-# mngr_robinhood_claude
+# mngr_robinhood
 
 ## Refined prompt
 
-we're going to make a new mngr plugin, mngr_robinhood_claude, that exposes a single command, "mngr robinhood-claude" that acts *exactly* like "claude -p", except it will use mngr create, mngr message, and mngr transcript to implement it.
+we're going to make a new mngr plugin, mngr_robinhood, that exposes a single command, "mngr robinhood" that acts *exactly* like "claude -p", except it will use mngr create, mngr message, and mngr transcript to implement it.
 
 Go gather all of the context for the mngr library and its mngr_claude plugin (per instructions in CLAUDE.md). Also take a look at the output of "claude --help" to see which options matter for -p / --print
 
@@ -19,10 +19,10 @@ Basically, there are only a few, and it's about reading from stdin, what input f
 You'll probably need to experiment a little bit with claude -p in order to see the exact formats and effects of those options.
 
 * Uses internal Python APIs (`api_create`, `send_message_to_agents`, `read_event_content`); never shells out to `mngr`.
-* Spawns a regular `claude` agent type via `mngr create --no-connect --transfer none --message <first-prompt>` (auto-generated agent name with `robinhood-` prefix AND `created-by=robinhood-claude` label, local host, current cwd). For follow-up turns in stream-json input mode, uses `mngr message`. Each turn's reply is harvested from `mngr transcript --format jsonl`.
+* Spawns a regular `claude` agent type via `mngr create --no-connect --transfer none --message <first-prompt>` (auto-generated agent name with `robinhood-` prefix AND `created-by=robinhood` label, local host, current cwd). For follow-up turns in stream-json input mode, uses `mngr message`. Each turn's reply is harvested from `mngr transcript --format jsonl`.
 * The agent is ephemeral: destroyed on exit (success, failure, or signal).
 * End-of-turn detection: inline polling of `agent.get_lifecycle_state()` waiting for `WAITING` (premature `STOPPED`/`DONE` returns `EXIT_CLAUDE_ERROR=1`).
-* Sets `mngr_claude`'s existing unattended config vars (`auto_dismiss_dialogs=True`, `auto_allow_permissions=True`, plus `settings_overrides.skipDangerousModePermissionPrompt=true` and `settings_overrides.bypassPermissionsModeAccepted=true`) via `mngr create -S` settings overrides; no new permission semantics introduced. The two `settings_overrides.*` flags are normally added by `mngr_claude` only when `not host.is_local`; robinhood-claude always runs on the local host, so we set them explicitly to avoid hangs on those prompts.
+* Sets `mngr_claude`'s existing unattended config vars (`auto_dismiss_dialogs=True`, `auto_allow_permissions=True`, plus `settings_overrides.skipDangerousModePermissionPrompt=true` and `settings_overrides.bypassPermissionsModeAccepted=true`) via `mngr create -S` settings overrides; no new permission semantics introduced. The two `settings_overrides.*` flags are normally added by `mngr_claude` only when `not host.is_local`; robinhood always runs on the local host, so we set them explicitly to avoid hangs on those prompts.
 * Working directory: user's cwd, in-place; implies `--no-ensure-clean` so a dirty tree is OK.
 * `session_preserve_on_destroy` stays at its default (`True`); per-invocation session files remain on disk for debugging.
 * Pass through all `claude` flags as agent args via `--` to `mngr create`, except:
@@ -43,12 +43,12 @@ You'll probably need to experiment a little bit with claude -p in order to see t
 * Signals: SIGINT and SIGTERM are trapped; the agent is destroyed before the signal is re-raised so the shell sees the conventional `128+signum` exit code.
 * Exit code: 0 on a successful turn (transcript shows `assistant` reply, no `is_error` event); 1 on a claude/api error (transcript or stream-json result carries `is_error=true`); 2 on mngr-side failures (agent failed to start, transcript unreadable, invalid args, missing prompt, etc.).
 * Pre-flight: none. `mngr create` is responsible for its own failure modes (no claude binary, no auth, etc.); those surface as exit 2.
-* Plugin packaging: `libs/mngr_robinhood_claude/imbue/mngr_robinhood_claude/` mirroring `mngr_wait`'s layout. PyPI name `imbue-mngr-robinhood-claude`. Hard deps on `imbue-mngr` and `imbue-mngr-claude`.
-* CLI surface: just `mngr robinhood-claude` (no alias). Standard `CommandHelpMetadata` entry so it shows up in `mngr --help` and `mngr ask`.
+* Plugin packaging: `libs/mngr_robinhood/imbue/mngr_robinhood/` mirroring `mngr_wait`'s layout. PyPI name `imbue-mngr-robinhood`. Hard deps on `imbue-mngr` and `imbue-mngr-claude`.
+* CLI surface: just `mngr robinhood` (no alias). Standard `CommandHelpMetadata` entry so it shows up in `mngr --help` and `mngr ask`.
 
 ## Overview
 
-- Adds a new top-level mngr command `mngr robinhood-claude` that behaves as a drop-in replacement for `claude -p`.
+- Adds a new top-level mngr command `mngr robinhood` that behaves as a drop-in replacement for `claude -p`.
 - Each invocation spins up a fresh `claude` agent via `mngr create --no-connect --transfer none`, delivers the user prompt(s) through `mngr message`, harvests replies from `mngr transcript`, and destroys the agent on exit.
 - Motivation: lets every Claude-driven workflow that today shells out to `claude -p` instead route through mngr — getting agent isolation, environment portability, and the full mngr observability surface "for free", without modifying any consumer scripts.
 - All consumed claude flags (`-p`, `--input-format`, `--output-format`, `--replay-user-messages`) are simulated by the wrapper; every other claude flag passes through as agent args.
@@ -56,37 +56,37 @@ You'll probably need to experiment a little bit with claude -p in order to see t
 
 ## Expected Behavior
 
-- `mngr robinhood-claude "summarize this repo"` runs in the current directory, prints claude's text response to stdout, exits 0.
-- `cat error.log | mngr robinhood-claude "explain this"` and `cat error.log | mngr robinhood-claude` both work: stdin is read when no positional prompt is given.
-- `mngr robinhood-claude` with neither argv prompt nor piped stdin → exit 2 with `error: no prompt provided`.
-- `mngr robinhood-claude "..." --output-format json` prints a single JSON object matching `claude -p --output-format json`'s shape (synthesized `result` envelope with `result`, `session_id`, `duration_ms`, `is_error`, plus zeroed/null cost/usage fields).
-- `mngr robinhood-claude "..." --output-format stream-json --verbose` streams NDJSON events as the agent works; first line is a `system/init` envelope, subsequent lines are reformatted transcript events, final line is the `result` envelope.
-- `mngr robinhood-claude --input-format=stream-json --output-format=stream-json` reads NDJSON `user` lines from stdin, sends each one as a `mngr message`, waits for end-of-turn, emits NDJSON output events between turns, and exits 0 on stdin EOF (after destroying the agent).
+- `mngr robinhood "summarize this repo"` runs in the current directory, prints claude's text response to stdout, exits 0.
+- `cat error.log | mngr robinhood "explain this"` and `cat error.log | mngr robinhood` both work: stdin is read when no positional prompt is given.
+- `mngr robinhood` with neither argv prompt nor piped stdin → exit 2 with `error: no prompt provided`.
+- `mngr robinhood "..." --output-format json` prints a single JSON object matching `claude -p --output-format json`'s shape (synthesized `result` envelope with `result`, `session_id`, `duration_ms`, `is_error`, plus zeroed/null cost/usage fields).
+- `mngr robinhood "..." --output-format stream-json --verbose` streams NDJSON events as the agent works; first line is a `system/init` envelope, subsequent lines are reformatted transcript events, final line is the `result` envelope.
+- `mngr robinhood --input-format=stream-json --output-format=stream-json` reads NDJSON `user` lines from stdin, sends each one as a `mngr message`, waits for end-of-turn, emits NDJSON output events between turns, and exits 0 on stdin EOF (after destroying the agent).
 - All claude-side flags (`--model`, `--allowedTools`, `--system-prompt`, `--bare`, etc.) reach the spawned claude unchanged.
-- `mngr robinhood-claude -c "..."` (or `--resume`, `--session-id`) exits 2 immediately with `error: --continue / --resume / --session-id are not supported by mngr robinhood-claude in v1`.
-- `--include-partial-messages`, `--max-budget-usd`, `--include-hook-events`, `--fallback-model`, `--no-session-persistence` each error the same way (`error: --X is not supported by mngr robinhood-claude in v1`).
-- A stream-json input line that is anything other than `{"type":"user","message":{"role":"user","content":"<string>"}}` exits 2 with `error: only simple text user messages are supported by mngr robinhood-claude in v1` and includes the offending line in the message.
+- `mngr robinhood -c "..."` (or `--resume`, `--session-id`) exits 2 immediately with `error: --continue / --resume / --session-id are not supported by mngr robinhood in v1`.
+- `--include-partial-messages`, `--max-budget-usd`, `--include-hook-events`, `--fallback-model`, `--no-session-persistence` each error the same way (`error: --X is not supported by mngr robinhood in v1`).
+- A stream-json input line that is anything other than `{"type":"user","message":{"role":"user","content":"<string>"}}` exits 2 with `error: only simple text user messages are supported by mngr robinhood in v1` and includes the offending line in the message.
 - Ctrl-C destroys the spawned agent before re-raising SIGINT; no orphan `robinhood-*` agents remain on the local host.
-- The spawned agent name is `robinhood-<coolname>` (e.g. `robinhood-graceful-unicorn`) with a `created-by=robinhood-claude` label; visible briefly in `mngr list` while the run is in progress.
-- Multiple `mngr robinhood-claude` invocations in the same cwd run concurrently without locking; each has its own unique agent.
+- The spawned agent name is `robinhood-<coolname>` (e.g. `robinhood-graceful-unicorn`) with a `created-by=robinhood` label; visible briefly in `mngr list` while the run is in progress.
+- Multiple `mngr robinhood` invocations in the same cwd run concurrently without locking; each has its own unique agent.
 - A working tree with uncommitted changes is fine — `--no-ensure-clean` is implied.
 - mngr's normal progress output (status spinners, "Creating agent..." lines) is suppressed; only claude-style output appears on stdout. mngr-side errors still go to stderr.
 - The full current env is forwarded to the agent via `--pass-env` so `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`, Bedrock/Vertex creds, etc. work without explicit configuration.
-- `mngr --help` lists `robinhood-claude`; `mngr ask "how do I run claude unattended"` surfaces it.
+- `mngr --help` lists `robinhood`; `mngr ask "how do I run claude unattended"` surfaces it.
 - Per-invocation session files remain on disk (mngr_claude default `preserve_sessions_on_destroy=True`) for debugging.
 
 ## Implementation Plan
 
 ### Package layout
 
-- `libs/mngr_robinhood_claude/`
-  - `pyproject.toml` — pypi name `imbue-mngr-robinhood-claude`, entry point `mngr_robinhood_claude = "imbue.mngr_robinhood_claude.plugin"`, deps on `imbue-mngr` and `imbue-mngr-claude`.
+- `libs/mngr_robinhood/`
+  - `pyproject.toml` — pypi name `imbue-mngr-robinhood`, entry point `mngr_robinhood = "imbue.mngr_robinhood.plugin"`, deps on `imbue-mngr` and `imbue-mngr-claude`.
   - `README.md` — short description plus a usage example.
   - `conftest.py` — registers the shared conftest hooks and suppresses startup warnings (matches `mngr_wait`).
-  - `imbue/mngr_robinhood_claude/`
+  - `imbue/mngr_robinhood/`
     - `__init__.py` — blank (per CLAUDE.md).
     - `plugin.py` — pluggy `@hookimpl register_cli_commands()` returning the click command.
-    - `cli.py` — the `robinhood-claude` click command + top-level `_run(...)` orchestrator.
+    - `cli.py` — the `robinhood` click command + top-level `_run(...)` orchestrator.
     - `arg_partition.py` — pure helpers that split a raw argv into (simulated, rejected, pass-through) buckets.
     - `input_modes.py` — pure helpers for reading the next user-turn prompt from text/stream-json sources.
     - `output_modes.py` — pure helpers that convert common-transcript events into text/json/stream-json output bytes.
@@ -99,14 +99,14 @@ You'll probably need to experiment a little bit with claude -p in order to see t
 ### Key code paths and signatures
 
 - `plugin.py`
-  - `@hookimpl def register_cli_commands() -> Sequence[click.Command]` → `[robinhood_claude]`.
+  - `@hookimpl def register_cli_commands() -> Sequence[click.Command]` → `[robinhood]`.
 
 - `cli.py`
-  - `class RobinhoodClaudeCliOptions(CommonCliOptions)` — captures top-level argv before partitioning.
-  - `@click.command(name="robinhood-claude", context_settings={"ignore_unknown_options": True, "allow_extra_args": True})` plus an `@click.argument("argv", nargs=-1, type=click.UNPROCESSED)` so click does no opinionated parsing of claude's own flags.
-  - `@click.pass_context def robinhood_claude(ctx, **kwargs)` — sets up the mngr context via `setup_command_context`, parses argv via `partition_args(...)`, dispatches to `orchestrator.run(...)`, exits with the resulting code.
-  - `CommandHelpMetadata(key="robinhood-claude", one_line_description="Drop-in mngr-backed replacement for `claude -p`", ...).register()` so `mngr ask` and `mngr --help` know about it.
-  - `add_pager_help_option(robinhood_claude)`.
+  - `class RobinhoodCliOptions(CommonCliOptions)` — captures top-level argv before partitioning.
+  - `@click.command(name="robinhood", context_settings={"ignore_unknown_options": True, "allow_extra_args": True})` plus an `@click.argument("argv", nargs=-1, type=click.UNPROCESSED)` so click does no opinionated parsing of claude's own flags.
+  - `@click.pass_context def robinhood(ctx, **kwargs)` — sets up the mngr context via `setup_command_context`, parses argv via `partition_args(...)`, dispatches to `orchestrator.run(...)`, exits with the resulting code.
+  - `CommandHelpMetadata(key="robinhood", one_line_description="Drop-in mngr-backed replacement for `claude -p`", ...).register()` so `mngr ask` and `mngr --help` know about it.
+  - `add_pager_help_option(robinhood)`.
 
 - `arg_partition.py`
   - `SIMULATED_FLAGS: frozenset[str] = {"-p", "--print", "--input-format", "--output-format", "--replay-user-messages"}` — value-or-flag-form aware.
@@ -127,7 +127,7 @@ You'll probably need to experiment a little bit with claude -p in order to see t
   - `def run(mngr_ctx: MngrContext, partition: ArgPartition, formats: ResolvedFormats, stdin: TextIO, stdout: TextIO) -> int` — top-level driver. Order of operations:
     1. Install SIGINT/SIGTERM handlers that call `destroy_run(...)` then re-raise.
     2. Read the *first* prompt from `input_modes.iter_user_prompts(...)`. If there is no first prompt → `return 2`.
-    3. Build `CreateAgentOptions` for an `AgentTypeName("claude")` agent with: `agent_args = partition.pass_through_agent_args`; `initial_message = first_prompt`; settings overrides (see below); auto-generated name `robinhood-<coolname>` and label `created-by=robinhood-claude`; `target_path = Path.cwd()`; transfer mode `NONE`; `--no-connect` semantics (no connection options).
+    3. Build `CreateAgentOptions` for an `AgentTypeName("claude")` agent with: `agent_args = partition.pass_through_agent_args`; `initial_message = first_prompt`; settings overrides (see below); auto-generated name `robinhood-<coolname>` and label `created-by=robinhood`; `target_path = Path.cwd()`; transfer mode `NONE`; `--no-connect` semantics (no connection options).
     4. Call `api_create(...)` and remember the returned agent.
     5. For each subsequent prompt (stream-json input mode only), call `send_message_to_agents(message_content=prompt, include_filters=(f"id == \"{agent_id}\"",), error_behavior=ABORT, ...)`. The first prompt is delivered via `initial_message` and skipped here.
     6. After each prompt is delivered, poll `agent.get_lifecycle_state()` every `_POLL_INTERVAL_SECONDS` until it reaches `WAITING` (or terminates as `STOPPED`/`DONE`, which is treated as a claude-side failure). Each poll iteration also drains new events from `read_event_content(target, "claude/common_transcript/events.jsonl")` and pushes them through `StreamingOutputWriter.emit_events(...)`.
@@ -139,7 +139,7 @@ You'll probably need to experiment a little bit with claude -p in order to see t
     - `agent_types.claude.auto_allow_permissions = true`
     - `agent_types.claude.settings_overrides.skipDangerousModePermissionPrompt = true`
     - `agent_types.claude.settings_overrides.bypassPermissionsModeAccepted = true`
-    - (The two `settings_overrides.*` flags are normally added by `mngr_claude` only when `not host.is_local`; robinhood-claude always runs on the local host, so we set them explicitly to avoid hangs on the "bypass permissions mode" and "skip dangerous mode" prompts.)
+    - (The two `settings_overrides.*` flags are normally added by `mngr_claude` only when `not host.is_local`; robinhood always runs on the local host, so we set them explicitly to avoid hangs on the "bypass permissions mode" and "skip dangerous mode" prompts.)
 
 - `data_types.py`
   - `class InputFormat(UpperCaseStrEnum)` — `TEXT`, `STREAM_JSON`.
@@ -164,13 +164,13 @@ You'll probably need to experiment a little bit with claude -p in order to see t
 
 ### Documentation
 
-- Add `libs/mngr_robinhood_claude/README.md` with: one-paragraph description, install snippet, three short usage examples (text, json, stream-json), and a list of v1 unsupported flags.
-- Update the top-level `README.md` "Sub-projects" list to include `libs/mngr_robinhood_claude/`.
-- Add changelog entry at `changelog/mngr-robinhood-claude.md` (stub already exists; expand at PR time).
+- Add `libs/mngr_robinhood/README.md` with: one-paragraph description, install snippet, three short usage examples (text, json, stream-json), and a list of v1 unsupported flags.
+- Update the top-level `README.md` "Sub-projects" list to include `libs/mngr_robinhood/`.
+- Add changelog entry at `changelog/mngr-robinhood.md` (stub already exists; expand at PR time).
 
 ## Implementation Phases
 
-1. **Skeleton & arg partitioning.** Create the package layout. Implement `arg_partition.py` + tests (rejects bad flags, partitions correctly across all forms `--flag=value`, `--flag value`, short forms). Wire up `plugin.py` and a no-op `cli.py` that just prints the partition. Verify `mngr robinhood-claude --help` works. No agent code yet.
+1. **Skeleton & arg partitioning.** Create the package layout. Implement `arg_partition.py` + tests (rejects bad flags, partitions correctly across all forms `--flag=value`, `--flag value`, short forms). Wire up `plugin.py` and a no-op `cli.py` that just prints the partition. Verify `mngr robinhood --help` works. No agent code yet.
 2. **Text-mode end-to-end.** Implement `orchestrator.run(...)` for the single-turn text case: spawn a real claude agent via `api_create`, deliver `initial_message`, wait for `WAITING`, harvest the last assistant `text` from `common_transcript/events.jsonl`, print it, destroy the agent. Implement `--quiet`/`--headless` suppression and signal cleanup. Smoke-test manually.
 3. **JSON output.** Implement `output_modes.build_result_envelope(...)` and the `json` output path. Compare side-by-side with `claude -p --output-format json` output on a fixed prompt; fields mngr can't observe are zeroed/null but the shape is identical.
 4. **Stream-json input.** Implement `input_modes.iter_user_prompts` for `STREAM_JSON`. Drive multi-turn via `send_message_to_agents` after the first turn. Manually verify with a multi-line stdin script.
@@ -182,7 +182,7 @@ You'll probably need to experiment a little bit with claude -p in order to see t
 ### Unit tests (xdist-parallel `_test.py`)
 
 - `arg_partition_test.py`:
-  - partitions `mngr robinhood-claude -p --output-format=json "hello"` correctly across forms.
+  - partitions `mngr robinhood -p --output-format=json "hello"` correctly across forms.
   - rejects each flag in `REJECTED_FLAGS` with the expected error message.
   - separates pass-through args (`--model opus`, `-- --foo`) from simulated args.
   - validates `--replay-user-messages` requires both stream-json formats.
@@ -197,7 +197,7 @@ You'll probably need to experiment a little bit with claude -p in order to see t
   - mocks `api_create` / `send_message_to_agents` / `wait_for_state` / `read_event_content` to verify the call sequence (create → message → wait → harvest → destroy).
   - SIGINT during a run calls `destroy_run` exactly once.
 
-### Integration tests (no marker, mock-agent based — `test_robinhood_claude.py`)
+### Integration tests (no marker, mock-agent based — `test_robinhood.py`)
 
 - Spawn the click CLI in-process with `CliRunner`, using a mock claude agent type registered in the test harness (see `libs/mngr_claude/imbue/mngr_claude/conftest.py` for the existing pattern with `mock_claude_test.py`).
 - Verify text output for a single prompt, json output shape, stream-json output framing, stream-json input multi-turn flow.
@@ -205,17 +205,17 @@ You'll probably need to experiment a little bit with claude -p in order to see t
 - Verify `--ensure-clean` is *not* applied (dirty tree allowed).
 - Verify each rejected flag exits with code 2 and the expected error string.
 
-### Release tests (`@pytest.mark.release`, `test_robinhood_claude_release.py`)
+### Release tests (`@pytest.mark.release`, `test_robinhood_release.py`)
 
 - One end-to-end test that invokes the real `claude` binary via the plugin with a fixed simple prompt and asserts a non-empty assistant reply comes back. Skipped automatically on hosts without `claude` installed; CI provides it.
 - Repeat for each output format to verify shape matches the real `claude -p --output-format X` on the same prompt.
 
 ### Manual verification before declaring complete
 
-- `mngr robinhood-claude "say hi"` produces a short text reply, exits 0.
-- `echo "say hi" | mngr robinhood-claude` same.
-- `mngr robinhood-claude "say hi" --output-format=json | jq .result` returns the reply text.
-- Multi-turn via stream-json: `printf '%s\n%s\n' '{"type":"user","message":{"role":"user","content":"hi"}}' '{"type":"user","message":{"role":"user","content":"again"}}' | mngr robinhood-claude --input-format=stream-json --output-format=stream-json` emits two assistant turns.
+- `mngr robinhood "say hi"` produces a short text reply, exits 0.
+- `echo "say hi" | mngr robinhood` same.
+- `mngr robinhood "say hi" --output-format=json | jq .result` returns the reply text.
+- Multi-turn via stream-json: `printf '%s\n%s\n' '{"type":"user","message":{"role":"user","content":"hi"}}' '{"type":"user","message":{"role":"user","content":"again"}}' | mngr robinhood --input-format=stream-json --output-format=stream-json` emits two assistant turns.
 - Ctrl-C during a run leaves no `robinhood-*` agent in `mngr list`.
 - Rejected flags (`-c`, `--max-budget-usd`, ...) exit 2 with a clear message.
 

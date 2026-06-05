@@ -78,7 +78,7 @@ SECONDARY_COMMANDS = {
     "tmr",
     "transcript",
     "tutor",
-    "robinhood-claude",
+    "robinhood",
     "usage",
     "wait",
     "notify",

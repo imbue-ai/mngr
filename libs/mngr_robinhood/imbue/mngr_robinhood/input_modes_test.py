@@ -3,10 +3,10 @@ from collections.abc import Iterator
 
 import pytest
 
-from imbue.mngr_robinhood_claude.data_types import InputFormat
-from imbue.mngr_robinhood_claude.errors import InvalidStreamJsonInputError
-from imbue.mngr_robinhood_claude.errors import MissingPromptError
-from imbue.mngr_robinhood_claude.input_modes import iter_user_prompts
+from imbue.mngr_robinhood.data_types import InputFormat
+from imbue.mngr_robinhood.errors import InvalidStreamJsonInputError
+from imbue.mngr_robinhood.errors import MissingPromptError
+from imbue.mngr_robinhood.input_modes import iter_user_prompts
 
 
 def _collect(it: Iterator[str]) -> list[str]:

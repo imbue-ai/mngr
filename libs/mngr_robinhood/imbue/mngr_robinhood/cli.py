@@ -10,14 +10,14 @@ from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.errors import MngrError
-from imbue.mngr_robinhood_claude.arg_partition import partition_args
-from imbue.mngr_robinhood_claude.errors import UnsupportedClaudeFlagError
-from imbue.mngr_robinhood_claude.orchestrator import EXIT_MNGR_ERROR
-from imbue.mngr_robinhood_claude.orchestrator import run as orchestrator_run
+from imbue.mngr_robinhood.arg_partition import partition_args
+from imbue.mngr_robinhood.errors import UnsupportedClaudeFlagError
+from imbue.mngr_robinhood.orchestrator import EXIT_MNGR_ERROR
+from imbue.mngr_robinhood.orchestrator import run as orchestrator_run
 
 
-class RobinhoodClaudeCliOptions(CommonCliOptions):
-    """CLI options for the robinhood-claude command.
+class RobinhoodCliOptions(CommonCliOptions):
+    """CLI options for the robinhood command.
 
     Only captures the trailing argv tuple: every meaningful flag is parsed
     by :func:`partition_args` rather than by click, so the user sees the
@@ -28,7 +28,7 @@ class RobinhoodClaudeCliOptions(CommonCliOptions):
 
 
 @click.command(
-    name="robinhood-claude",
+    name="robinhood",
     context_settings={
         "ignore_unknown_options": True,
         "allow_extra_args": True,
@@ -37,7 +37,7 @@ class RobinhoodClaudeCliOptions(CommonCliOptions):
 @click.argument("argv", nargs=-1, type=click.UNPROCESSED)
 @add_common_options
 @click.pass_context
-def robinhood_claude(ctx: click.Context, **_kwargs: Any) -> None:
+def robinhood(ctx: click.Context, **_kwargs: Any) -> None:
     # Force ``--quiet`` and ``--headless`` regardless of what the user passed:
     # this command pretends to be ``claude -p``, whose stdout/stderr contract is
     # "only the model's response shows up, nothing else." mngr's own loguru
@@ -50,8 +50,8 @@ def robinhood_claude(ctx: click.Context, **_kwargs: Any) -> None:
     ctx.params["headless"] = True
     mngr_ctx, _output_opts, opts = setup_command_context(
         ctx=ctx,
-        command_name="robinhood-claude",
-        command_class=RobinhoodClaudeCliOptions,
+        command_name="robinhood",
+        command_class=RobinhoodCliOptions,
     )
 
     try:
@@ -76,9 +76,9 @@ def robinhood_claude(ctx: click.Context, **_kwargs: Any) -> None:
 
 
 CommandHelpMetadata(
-    key="robinhood-claude",
+    key="robinhood",
     one_line_description="Drop-in `claude -p` replacement backed by `mngr create` / `message` / `transcript`",
-    synopsis="mngr robinhood-claude [CLAUDE_FLAGS...] [PROMPT]",
+    synopsis="mngr robinhood [CLAUDE_FLAGS...] [PROMPT]",
     description="""Run a single `claude -p`-style invocation by spawning a fresh, ephemeral
 `mngr` claude agent in the current directory. The agent receives the prompt,
 runs to end-of-turn, the response is collected from the agent's transcript,
@@ -106,14 +106,14 @@ Exit codes:
   1 - The spawned claude agent exited before completing the turn
   2 - mngr-side failure (bad flags, missing prompt, agent failed to start, etc.)""",
     examples=(
-        ("Single prompt", 'mngr robinhood-claude "summarize this repo"'),
-        ("JSON output", 'mngr robinhood-claude "summarize" --output-format json'),
-        ("Stream output", 'mngr robinhood-claude "explain recursion" --output-format stream-json --verbose'),
-        ("Pipe stdin", 'cat error.log | mngr robinhood-claude "explain this"'),
+        ("Single prompt", 'mngr robinhood "summarize this repo"'),
+        ("JSON output", 'mngr robinhood "summarize" --output-format json'),
+        ("Stream output", 'mngr robinhood "explain recursion" --output-format stream-json --verbose'),
+        ("Pipe stdin", 'cat error.log | mngr robinhood "explain this"'),
         (
             "Multi-turn via stream-json",
             'printf \'%s\\n\' \'{"type":"user","message":{"role":"user","content":"hi"}}\''
-            " | mngr robinhood-claude --input-format stream-json --output-format stream-json",
+            " | mngr robinhood --input-format stream-json --output-format stream-json",
         ),
     ),
     see_also=(
@@ -123,4 +123,4 @@ Exit codes:
     ),
 ).register()
 
-add_pager_help_option(robinhood_claude)
+add_pager_help_option(robinhood)

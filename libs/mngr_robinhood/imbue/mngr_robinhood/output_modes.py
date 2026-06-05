@@ -10,8 +10,8 @@ from pydantic import Field
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr_robinhood_claude.data_types import OutputFormat
-from imbue.mngr_robinhood_claude.data_types import ResultMeta
+from imbue.mngr_robinhood.data_types import OutputFormat
+from imbue.mngr_robinhood.data_types import ResultMeta
 
 # Hard-coded model identifier used in the synthesized stream-json system/init
 # envelope. mngr does not know which model the spawned agent picked, so we
@@ -197,7 +197,7 @@ def _parse_input_preview(preview: str) -> object:
 class StreamingOutputWriter(MutableModel):
     """Stateful helper that emits incremental output as transcript events arrive.
 
-    One writer instance handles a single ``mngr robinhood-claude`` invocation.
+    One writer instance handles a single ``mngr robinhood`` invocation.
     The caller feeds it events from each turn via :meth:`emit_events`, then
     calls :meth:`finalize` with the result metadata to write any trailing
     envelope (for ``json``/``stream-json``) or the accumulated assistant
