@@ -99,7 +99,9 @@ def _get_if_chain_end_line(if_node: ast.If) -> int:
         else:
             break
 
-    if hasattr(current, "end_lineno") and current.end_lineno is not None:
+    # Every parsed ast.stmt carries end_lineno; the typeshed stub still types it
+    # Optional, so the is-not-None check (not a hasattr probe) is what matters.
+    if current.end_lineno is not None:
         return current.end_lineno
 
     return current.lineno
