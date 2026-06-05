@@ -269,7 +269,12 @@ def neon_project_exists(*, name: DevEnvName, org_id: str, api_token: SecretStr) 
         resp = client.get(url, headers=headers)
         resp.raise_for_status()
     payload = resp.json()
-    raw_projects = payload.get("projects", [])
+    # Index ``projects`` directly rather than defaulting to ``[]``: a 200 from Neon's
+    # list-projects endpoint always carries the key (possibly an empty list). Coercing a
+    # missing key to ``[]`` would make this return False, which would silently let the
+    # post-destroy ``not neon_project_exists(...)`` assertion pass even if a project leaked.
+    # A surprising response shape should crash here, not be read as "no projects".
+    raw_projects = payload["projects"]
     matches = [p for p in raw_projects if p.get("name") == project_name]
     return len(matches) > 0
 
