@@ -2,11 +2,12 @@ import sys
 from enum import auto
 from pathlib import Path
 from typing import Any
-from typing import NamedTuple
 
 from loguru import logger
+from pydantic import Field
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import make_jsonl_file_sink
 
 # ANSI color codes that work well on both light and dark backgrounds.
@@ -29,16 +30,14 @@ class ConsoleLogLevel(UpperCaseStrEnum):
     NONE = auto()
 
 
-class _LevelStyle(NamedTuple):
+class _LevelStyle(FrozenModel):
     """How a console log level maps onto loguru and how its lines are rendered."""
 
-    # The loguru level name this console level corresponds to (loguru spells WARN
-    # as "WARNING").
-    loguru_name: str
-    # ANSI color wrapping the whole line, or None to render it plain (INFO).
-    color: str | None
-    # Text shown before the message (e.g. "WARNING: "); empty for no prefix.
-    prefix: str
+    loguru_name: str = Field(
+        description='The loguru level name this console level corresponds to (loguru spells WARN as "WARNING").'
+    )
+    color: str | None = Field(description="ANSI color wrapping the whole line, or None to render it plain (INFO).")
+    prefix: str = Field(description='Text shown before the message (e.g. "WARNING: "); empty for no prefix.')
 
 
 # Single source of truth for every console-output level: its loguru name (used to
@@ -46,11 +45,11 @@ class _LevelStyle(NamedTuple):
 # is intentionally absent: it means "add no console sink at all", so it has no
 # loguru level and is filtered out by ``setup_logging`` before any lookup here.
 _LEVEL_STYLES: dict[ConsoleLogLevel, _LevelStyle] = {
-    ConsoleLogLevel.TRACE: _LevelStyle("TRACE", _TRACE_COLOR, ""),
-    ConsoleLogLevel.DEBUG: _LevelStyle("DEBUG", _DEBUG_COLOR, ""),
-    ConsoleLogLevel.INFO: _LevelStyle("INFO", None, ""),
-    ConsoleLogLevel.WARN: _LevelStyle("WARNING", _WARNING_COLOR, "WARNING: "),
-    ConsoleLogLevel.ERROR: _LevelStyle("ERROR", _ERROR_COLOR, "ERROR: "),
+    ConsoleLogLevel.TRACE: _LevelStyle(loguru_name="TRACE", color=_TRACE_COLOR, prefix=""),
+    ConsoleLogLevel.DEBUG: _LevelStyle(loguru_name="DEBUG", color=_DEBUG_COLOR, prefix=""),
+    ConsoleLogLevel.INFO: _LevelStyle(loguru_name="INFO", color=None, prefix=""),
+    ConsoleLogLevel.WARN: _LevelStyle(loguru_name="WARNING", color=_WARNING_COLOR, prefix="WARNING: "),
+    ConsoleLogLevel.ERROR: _LevelStyle(loguru_name="ERROR", color=_ERROR_COLOR, prefix="ERROR: "),
 }
 
 # Reverse lookup for the stderr sink, which receives records tagged with loguru
