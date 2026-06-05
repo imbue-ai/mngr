@@ -99,9 +99,10 @@ Pilot's `.mngr/settings.toml:235-236` uses `uv tool install -e ...` and `--with-
 
 `.agents/skills/do-something-new/SKILL.md:103-110` — 8-line block inserted before main's restructured Step 5/6. Main has since substantially restructured the skill (`e63ab69d`, `9b9a05ed`); the paragraph either restates or contradicts main's now-canonical framing.
 
-- **status**: **deferred** (medium confidence; skill semantics have no automated verifier)
-- **test path**: no CI test possible; needs human read-through against main's restructured steps
-- **recommendation**: drop into a follow-up review pass after the human reads main's Step 5/6
+- **status**: **verified_stale**
+- **test path**: no CI test possible (skill markdown has no automated verifier; do-something-new is not exercised by launch-to-msg)
+- **resolution (post-sweep)**: read main's Step 5+6+7 directly against pilot's paragraph. Confirmed main covers the same "sample is feedback instrument, crystallization produces the durable skill, build surfaces from confirmed sample" concept structurally. Pilot's `.agents/skills/<name>/scripts/run.py` mention is captured by main's Step 7 ("surfaces"). Removing the paragraph leaves pilot byte-identical to main's SKILL.md.
+- **landed**: pilot ff-merged to fa8b080b. Pilot's SKILL.md now byte-identical to FCT main's.
 
 ### homebrew-path-augmentation (MNGR)
 
@@ -143,6 +144,7 @@ Per-iteration: timestamp, candidate, candidate branch / tag, launch-to-msg run i
 | 7 | uv-tool-install-editable-mode | pilot-rc-uv-tool-non-editable / v0.2.36-rc4-uv-tool-non-editable | 27014712370 success | 27014677300 success | green | ff-merged into pilot (cb2091cf); v0.2.35 tag unchanged |
 | 8 | dead-web-view-script | pilot-rc-dead-code / v0.2.36-rc5-dead-web-view | 27016379803 success | n/a (pilot-only) | green | ff-merged into pilot (cad14a24); 283 lines deleted |
 | 9 | duplicate-port-zero-guard | mngr-rc-drop-port-zero-guard (PR #1939) | 27017785672 success | 27016476580 success | green | cherry-picked to wz/minds_onboard (82b125d72); PR #1939 closed |
+| 10 | stale-do-something-new-paragraph | pilot-rc-stale-skill-paragraph | n/a (markdown only) | n/a | static-verified | ff-merged into pilot (fa8b080b); SKILL.md now byte-identical to FCT main |
 
 ## Final cumulative verify (2026-06-05)
 
