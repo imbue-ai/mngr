@@ -41,16 +41,11 @@
       var agentId = row.dataset.agentId;
       var status = healthStatusByAgent[agentId];
       if (status === 'stuck' || status === 'restarting' || status === 'restart_failed') {
-        // Stuck workspaces redirect to /recovery instead of the row's default
-        // href; cancel the anchor's native navigation so we don't briefly
-        // navigate to the workspace before bouncing to recovery.
-        event.preventDefault();
         var ret = row.dataset.defaultHref || '';
         window.location = '/agents/' + encodeURIComponent(agentId) + '/recovery?return_to=' + encodeURIComponent(ret);
+      } else {
+        window.location = row.dataset.defaultHref;
       }
-      // Otherwise the row is an <a href=...>, so the browser's native click
-      // navigation handles it (and middle-click / cmd-click still open in a
-      // new window as users expect).
     };
 
     window.landingRestartClick = function (button) {
@@ -417,31 +412,18 @@
               {% endif %}
             </Card>
           {% else %}
-            {# Stretched-link pattern: the Card is a <div> and an inner
-               <a class="absolute inset-0"> covers the whole surface so
-               clicks anywhere navigate to the workspace (and middle-click /
-               cmd-click open it in a new window). The download link and
-               the icon buttons sit ABOVE the anchor in z-order so they
-               capture their own clicks instead of triggering navigation.
-               We cannot nest the buttons inside an outer <a> directly --
-               browsers auto-close the anchor when they encounter nested
-               interactive content (button, another anchor), kicking those
-               children out of the flex container and breaking the row. #}
             <Card layout="row" interactive
                   extra="accent-spine relative overflow-hidden"
                   :style="accent_style"
                   :data-agent-id="agent_id"
-                  :data-default-href="goto_href">
-              <a class="absolute inset-0 z-0 no-underline text-inherit"
-                 href="{{ goto_href }}"
-                 onclick="window.landingRowClick(event, this.parentElement)"
-                 aria-label="Open workspace"></a>
-              <span class="relative z-10 flex-1 font-medium text-zinc-900 pl-1">{{ agent_names.get(agent_id | string, agent_id) }}</span>
-              <span class="relative z-10 landing-backup-badge hidden inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"></span>
-              <a class="relative z-10 landing-backup-download hidden text-xs text-blue-600 hover:underline cursor-pointer" href="#">download</a>
-              <span class="relative z-10 landing-health-badge hidden inline-flex items-center px-2 py-0.5 rounded text-sm font-medium"></span>
-              <button class="relative z-10 bg-transparent border border-transparent rounded-md cursor-pointer p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 flex items-center justify-center"
-                      onclick="window.landingRestartClick(this)"
+                  :data-default-href="goto_href"
+                  onclick="window.landingRowClick(event, this)">
+              <span class="flex-1 font-medium text-zinc-900 pl-1">{{ agent_names.get(agent_id | string, agent_id) }}</span>
+              <span class="landing-backup-badge hidden inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"></span>
+              <a class="landing-backup-download hidden text-xs text-blue-600 hover:underline cursor-pointer" href="#">download</a>
+              <span class="landing-health-badge hidden inline-flex items-center px-2 py-0.5 rounded text-sm font-medium"></span>
+              <button class="bg-transparent border border-transparent rounded-md cursor-pointer p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 flex items-center justify-center"
+                      onclick="event.stopPropagation(); window.landingRestartClick(this)"
                       title="Restart workspace"
                       aria-label="Restart workspace">
                 <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -449,8 +431,8 @@
                   <path d="M21 3v6h-6"/>
                 </svg>
               </button>
-              <button class="relative z-10 bg-transparent border border-transparent rounded-md cursor-pointer p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 flex items-center justify-center"
-                      onclick="window.location='/workspace/{{ agent_id }}/settings'"
+              <button class="bg-transparent border border-transparent rounded-md cursor-pointer p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 flex items-center justify-center"
+                      onclick="event.stopPropagation(); window.location='/workspace/{{ agent_id }}/settings'"
                       title="Settings"
                       aria-label="Workspace settings">
                 <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
