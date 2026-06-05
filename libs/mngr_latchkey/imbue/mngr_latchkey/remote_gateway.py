@@ -219,6 +219,8 @@ def sync_credentials(host: OuterHostInterface, latchkey_directory: Path) -> None
 
     remote_path = _resolve_remote_latchkey_directory(host) / _CREDENTIALS_FILENAME
     with log_span("Syncing latchkey credentials to VPS {} ({})", host.get_name(), remote_path):
+        # ``is_atomic`` writes to a sibling ``.tmp`` then ``mv``s it into place, so
+        # the gateway never reads a half-written file mid-sync.
         host.write_file(remote_path, content, mode=_REMOTE_FILE_MODE, is_atomic=True)
 
 
@@ -244,7 +246,10 @@ def sync_permissions(host: OuterHostInterface, latchkey_directory: Path, host_id
 
     remote_path = _resolve_remote_latchkey_directory(host) / _REMOTE_PERMISSIONS_FILENAME
     with log_span("Syncing latchkey permissions for host {} to VPS {} ({})", host_id, host.get_name(), remote_path):
-        host.write_text_file(remote_path, content, mode=_REMOTE_FILE_MODE)
+        # ``is_atomic`` writes to a sibling ``.tmp`` then ``mv``s it into place, so
+        # the gateway never reads a half-written file mid-sync. (``write_text_file``
+        # has no atomic mode, hence the explicit ``write_file`` with encoded bytes.)
+        host.write_file(remote_path, content.encode("utf-8"), mode=_REMOTE_FILE_MODE, is_atomic=True)
 
 
 def _build_gateway_start_script(outer_port: int) -> str:

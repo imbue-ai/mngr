@@ -37,6 +37,7 @@ class _WrittenFile(MutableModel):
     path: str = Field(description="Destination path on the VPS")
     content: bytes = Field(description="Bytes written")
     mode: str | None = Field(default=None, description="chmod mode requested (if any)")
+    is_atomic: bool = Field(default=False, description="Whether the write was requested atomically (tmp + rename)")
 
 
 class _StubOuter(MutableModel):
@@ -80,7 +81,7 @@ class _StubOuter(MutableModel):
         return self.result
 
     def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
-        self.written.append(_WrittenFile(path=str(path), content=content, mode=mode))
+        self.written.append(_WrittenFile(path=str(path), content=content, mode=mode, is_atomic=is_atomic))
 
     def write_text_file(
         self,
@@ -172,6 +173,8 @@ def test_sync_credentials_copies_local_file_to_remote_latchkey_dir(tmp_path: Pat
     assert written[0].path == "/root/.latchkey/credentials.json.enc"
     assert written[0].content == b"encrypted-secret-bytes"
     assert written[0].mode == "0600"
+    # Written atomically (tmp + rename) so the remote gateway never reads a partial file.
+    assert written[0].is_atomic is True
 
 
 def test_sync_credentials_raises_when_local_file_missing(tmp_path: Path) -> None:
@@ -197,6 +200,8 @@ def test_sync_permissions_copies_per_host_file_to_remote_permissions_json(tmp_pa
     assert written[0].path == "/root/.latchkey/permissions.json"
     assert b"slack-read-all" in written[0].content
     assert written[0].mode == "0600"
+    # Written atomically (tmp + rename) so the remote gateway never reads a partial file.
+    assert written[0].is_atomic is True
 
 
 def test_sync_permissions_falls_back_to_restrictive_default_when_local_missing(tmp_path: Path) -> None:
