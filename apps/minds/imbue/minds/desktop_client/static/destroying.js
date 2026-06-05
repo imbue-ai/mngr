@@ -21,7 +21,7 @@
     statusContainer.innerHTML = '';
     if (status === 'running') {
       statusContainer.innerHTML =
-        '<span class="inline-block w-3 h-3 border-2 border-zinc-300 border-t-zinc-600 rounded-full animate-spin"></span>' +
+        '<span class="spinner inline-block w-3 h-3 align-middle"></span>' +
         '<span class="text-zinc-700">Running...</span>';
     } else if (status === 'failed') {
       statusContainer.innerHTML =

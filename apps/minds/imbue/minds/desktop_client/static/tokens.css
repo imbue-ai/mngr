@@ -153,6 +153,16 @@ html {
   border-radius: 50%;
   animation: spin 800ms linear infinite;
 }
+/*
+ * Accent-toned spinner: blue ring + saturated blue top, used inside
+ * primary-action affordances (the backup-export "downloading..."
+ * indicator). The base ``.spinner`` provides geometry + animation;
+ * ``.spinner-accent`` only overrides the colors.
+ */
+.spinner-accent {
+  border-color: #93c5fd; /* blue-300 */
+  border-top-color: #2563eb; /* blue-600 */
+}
 @keyframes spin {
   to {
     transform: rotate(360deg);

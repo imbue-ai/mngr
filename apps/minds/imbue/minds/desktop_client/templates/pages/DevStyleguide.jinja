@@ -311,12 +311,19 @@
       {# Spinner #}
       <div class="mb-6">
         <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Spinner</div>
-        <div class="bg-white border border-zinc-200 rounded-lg p-4 flex items-center gap-4">
-          <Spinner size="sm" />
-          <Spinner size="md" />
-          <Spinner size="lg" />
+        <div class="bg-white border border-zinc-200 rounded-lg p-4 flex items-center gap-6">
+          <div class="flex items-center gap-3">
+            <Spinner size="sm" />
+            <Spinner size="md" />
+            <Spinner size="lg" />
+          </div>
+          <div class="flex items-center gap-3 pl-6 border-l border-zinc-200">
+            <Spinner size="sm" tone="accent" />
+            <Spinner size="md" tone="accent" />
+            <Spinner size="lg" tone="accent" />
+          </div>
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">tokens.css :: .spinner + Spinner.jinja</div>
+        <div class="mt-1 text-[11px] text-zinc-500 font-mono">tokens.css :: .spinner (+ .spinner-accent) + Spinner.jinja</div>
       </div>
 
       {# Buttons #}

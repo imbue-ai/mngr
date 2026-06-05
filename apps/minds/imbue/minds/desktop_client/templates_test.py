@@ -667,6 +667,16 @@ def test_spinner_renders_for_each_size() -> None:
         assert css_class in html
 
 
+def test_spinner_default_tone_omits_accent_class() -> None:
+    html = CATALOG.render("Spinner", size="sm")
+    assert "spinner-accent" not in html
+
+
+def test_spinner_accent_tone_adds_accent_class() -> None:
+    html = CATALOG.render("Spinner", size="sm", tone="accent")
+    assert "spinner-accent" in html
+
+
 def test_oauth_icon_google_includes_google_svg_path() -> None:
     html = CATALOG.render("auth.OauthIcon", provider="google")
     # One of the four <path d="..."> values unique to the Google glyph
