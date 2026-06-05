@@ -132,7 +132,7 @@ def test_plugin_registers_multiple_commands(cli_runner: CliRunner) -> None:
         assert captured.get("beta_called") is True
 
 
-def test_plugin_returning_none_does_not_add_commands(cli_runner: CliRunner) -> None:
+def test_plugin_returning_none_does_not_add_commands() -> None:
     """A plugin returning None registers no commands and leaves the cli command set unchanged."""
     commands_before = set(cli.commands)
     with plugin_commands_registered([_PluginWithNoCommands()]) as added:
@@ -140,7 +140,7 @@ def test_plugin_returning_none_does_not_add_commands(cli_runner: CliRunner) -> N
         assert set(cli.commands) == commands_before
 
 
-def test_plugin_returning_empty_list_does_not_add_commands(cli_runner: CliRunner) -> None:
+def test_plugin_returning_empty_list_does_not_add_commands() -> None:
     """A plugin returning an empty list registers no commands and leaves the cli command set unchanged."""
     commands_before = set(cli.commands)
     with plugin_commands_registered([_PluginWithEmptyList()]) as added:
