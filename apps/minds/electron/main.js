@@ -309,10 +309,18 @@ function createBundleWebContentsViews(win) {
   win.contentView.addChildView(chromeView);
   win.contentView.addChildView(contentView);
 
-  // Auto-open DevTools for dev-time inspection.
+  // Auto-open DevTools for dev-time inspection on both the chrome
+  // (titlebar) view and the workspace content view.
   if (process.env.MINDS_OPEN_DEVTOOLS === '1') {
+    chromeView.webContents.once('did-finish-load', () => {
+      if (!chromeView.webContents.isDestroyed()) {
+        chromeView.webContents.openDevTools({ mode: 'detach' });
+      }
+    });
     contentView.webContents.once('did-finish-load', () => {
-      contentView.webContents.openDevTools({ mode: 'detach' });
+      if (!contentView.webContents.isDestroyed()) {
+        contentView.webContents.openDevTools({ mode: 'detach' });
+      }
     });
   }
 
