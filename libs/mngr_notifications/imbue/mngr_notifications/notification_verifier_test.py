@@ -62,7 +62,8 @@ def test_run_test_notification_linux(notification_cg: ConcurrencyGroup) -> None:
     assert result.error_message is None
     # The "sent" result must reflect a real notify call, not just a hardcoded True.
     assert len(notifier.calls) == 1
-    assert notifier.calls[0][2] is None  # no click action on the Linux verification path
+    # The Linux verification path sends a plain notification with no click action.
+    assert notifier.calls[0][2] is None
 
 
 def test_run_test_notification_binary_check_fails(notification_cg: ConcurrencyGroup) -> None:
