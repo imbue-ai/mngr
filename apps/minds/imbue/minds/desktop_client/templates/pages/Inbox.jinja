@@ -421,8 +421,11 @@
       {# Header row. The close button is rendered inline (not via the
          absolute-positioned DialogCloseButton component) so it sits
          vertically aligned with the title. The auto-open checkbox lives
-         in the left column's footer, not here. #}
-      <div class="flex items-center justify-between gap-4 px-5 py-3 border-b border-zinc-200">
+         in the left column's footer, not here. The fixed height
+         matches the chrome titlebar (h-[38px] in Chrome.jinja) so the
+         two headers line up visually when the drawer sits beside the
+         workspace's titlebar strip. #}
+      <div class="flex items-center justify-between gap-4 px-5 h-[38px] border-b border-zinc-200">
         <h1 class="text-sm font-semibold text-zinc-800 uppercase tracking-wider leading-none">Inbox</h1>
         <button type="button" aria-label="Close"
                 id="inbox-close-btn"
