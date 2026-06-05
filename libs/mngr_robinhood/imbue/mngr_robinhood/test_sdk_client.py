@@ -5,6 +5,7 @@ connection, the lower-level ``receive_messages`` iterator, and the ``set_model``
 ``set_permission_mode`` control methods.
 """
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -21,7 +22,7 @@ def _make_options(model: str, cwd: Path) -> ClaudeAgentOptions:
     return ClaudeAgentOptions(model=model, cwd=str(cwd), setting_sources=[])
 
 
-def _result_text(messages: list[object]) -> str:
+def _result_text(messages: Sequence[object]) -> str:
     texts: list[str] = []
     for message in messages:
         if isinstance(message, AssistantMessage):

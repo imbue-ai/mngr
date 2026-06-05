@@ -12,6 +12,9 @@ from typing import Any
 import pytest
 from claude_agent_sdk import ClaudeAgentOptions
 from claude_agent_sdk import ClaudeSDKClient
+from claude_agent_sdk import HookContext
+from claude_agent_sdk import HookInput
+from claude_agent_sdk import HookJSONOutput
 from claude_agent_sdk import HookMatcher
 from claude_agent_sdk import PermissionResultAllow
 from claude_agent_sdk import PermissionResultDeny
@@ -90,9 +93,12 @@ async def test_pre_tool_use_hook_observes_tool_call(sdk_live_model: str, sdk_cwd
     observed_tool_names: list[str] = []
     marker_file = sdk_cwd / "HOOK_MARKER.txt"
 
-    async def pre_tool_use_hook(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict[str, Any]:
-        observed_tool_names.append(input_data.get("tool_name", ""))
-        return {}
+    async def pre_tool_use_hook(
+        input_data: HookInput, tool_use_id: str | None, context: HookContext
+    ) -> HookJSONOutput:
+        observed_tool_names.append(str(input_data.get("tool_name", "")))
+        empty_output: HookJSONOutput = {}
+        return empty_output
 
     options = ClaudeAgentOptions(
         model=sdk_live_model,
