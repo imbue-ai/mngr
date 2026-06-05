@@ -1,34 +1,38 @@
-"""Tests for plugin CLI commands hook."""
+"""Tests for plugin CLI commands hook.
 
-from collections.abc import Generator
+These drive the production ``_register_plugin_commands()`` wiring (via the shared
+``plugin_commands_registered`` helper) against the real ``cli`` group, so a
+regression in that function would actually be caught. Each test plugin records
+the values it observes into a per-test dict passed to its constructor, avoiding
+shared module-level state between tests.
+"""
+
 from collections.abc import Sequence
-from contextlib import contextmanager
 from typing import Any
 
 import click
-import pluggy
 from click.testing import CliRunner
 
-import imbue.mngr.main
 from imbue.mngr import hookimpl
-from imbue.mngr.main import reset_plugin_manager
-from imbue.mngr.plugins import hookspecs
-
-# Module-level containers to capture values from test commands.
-# This avoids using disallowed output methods (see ratchet tests).
-_captured_values: dict[str, Any] = {}
+from imbue.mngr.main import cli
+from imbue.mngr.plugins.testing import plugin_commands_registered
 
 
 class _PluginWithSimpleCommand:
     """A test plugin that adds a simple command."""
 
+    def __init__(self, captured: dict[str, Any]) -> None:
+        self._captured = captured
+
     @hookimpl
     def register_cli_commands(self) -> Sequence[click.Command] | None:
+        captured = self._captured
+
         @click.command()
         @click.option("--name", default="World", help="Name to greet")
         def greet(name: str) -> None:
             """Greet someone."""
-            _captured_values["greet_name"] = name
+            captured["greet_name"] = name
 
         return [greet]
 
@@ -36,17 +40,22 @@ class _PluginWithSimpleCommand:
 class _PluginWithMultipleCommands:
     """A test plugin that adds multiple commands."""
 
+    def __init__(self, captured: dict[str, Any]) -> None:
+        self._captured = captured
+
     @hookimpl
     def register_cli_commands(self) -> Sequence[click.Command] | None:
+        captured = self._captured
+
         @click.command()
         def cmd_alpha() -> None:
             """Alpha command."""
-            _captured_values["alpha_called"] = True
+            captured["alpha_called"] = True
 
         @click.command()
         def cmd_beta() -> None:
             """Beta command."""
-            _captured_values["beta_called"] = True
+            captured["beta_called"] = True
 
         return [cmd_alpha, cmd_beta]
 
@@ -70,170 +79,121 @@ class _PluginWithEmptyList:
 class _PluginWithContextCommand:
     """A test plugin that adds a command using click context."""
 
+    def __init__(self, captured: dict[str, Any]) -> None:
+        self._captured = captured
+
     @hookimpl
     def register_cli_commands(self) -> Sequence[click.Command] | None:
+        captured = self._captured
+
         @click.command()
         @click.pass_context
         def ctxcmd(ctx: click.Context) -> None:
             """Command that uses context."""
-            _captured_values["ctx_obj_type"] = type(ctx.obj).__name__
+            captured["ctx_obj_type"] = type(ctx.obj).__name__
 
         return [ctxcmd]
 
 
-@contextmanager
-def _test_cli_with_plugin(
-    plugin: Any,
-) -> Generator[click.Group, None, None]:
-    """Create a test CLI group with a plugin registered, restoring state on exit."""
-    with _test_cli_with_plugins([plugin]) as test_cli:
-        yield test_cli
+def test_plugin_registers_simple_command(cli_runner: CliRunner) -> None:
+    """A plugin command registered via the production wiring is reachable on the real cli."""
+    captured: dict[str, Any] = {}
+    with plugin_commands_registered([_PluginWithSimpleCommand(captured)]) as added:
+        assert [c.name for c in added] == ["greet"]
 
-
-@contextmanager
-def _test_cli_with_plugins(
-    plugins: Sequence[Any],
-) -> Generator[click.Group, None, None]:
-    """Create a test CLI group with multiple plugins registered, restoring state on exit."""
-    reset_plugin_manager()
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    for plugin in plugins:
-        pm.register(plugin)
-
-    old_pm = imbue.mngr.main._plugin_manager_container["pm"]
-    imbue.mngr.main._plugin_manager_container["pm"] = pm
-
-    @click.group()
-    @click.pass_context
-    def test_cli(ctx: click.Context) -> None:
-        ctx.obj = pm
-
-    all_command_lists = pm.hook.register_cli_commands()
-    for command_list in all_command_lists:
-        if command_list is None:
-            continue
-        for command in command_list:
-            if command.name is None:
-                continue
-            test_cli.add_command(command)
-
-    try:
-        yield test_cli
-    finally:
-        imbue.mngr.main._plugin_manager_container["pm"] = old_pm
-
-
-def test_plugin_registers_simple_command() -> None:
-    """Test that a plugin can register a simple command."""
-    _captured_values.clear()
-    with _test_cli_with_plugin(_PluginWithSimpleCommand()) as test_cli:
-        runner = CliRunner()
-        result = runner.invoke(test_cli, ["greet"])
+        result = cli_runner.invoke(cli, ["greet"])
 
         assert result.exit_code == 0
-        assert _captured_values.get("greet_name") == "World"
+        assert captured.get("greet_name") == "World"
 
 
-def test_plugin_command_with_option() -> None:
-    """Test that a plugin command's options work correctly."""
-    _captured_values.clear()
-    with _test_cli_with_plugin(_PluginWithSimpleCommand()) as test_cli:
-        runner = CliRunner()
-        result = runner.invoke(test_cli, ["greet", "--name", "Plugin"])
+def test_plugin_command_with_option(cli_runner: CliRunner) -> None:
+    """A plugin command's options work correctly when invoked on the real cli."""
+    captured: dict[str, Any] = {}
+    with plugin_commands_registered([_PluginWithSimpleCommand(captured)]):
+        result = cli_runner.invoke(cli, ["greet", "--name", "Plugin"])
 
         assert result.exit_code == 0
-        assert _captured_values.get("greet_name") == "Plugin"
+        assert captured.get("greet_name") == "Plugin"
 
 
-def test_plugin_registers_multiple_commands() -> None:
-    """Test that a plugin can register multiple commands."""
-    _captured_values.clear()
-    with _test_cli_with_plugin(_PluginWithMultipleCommands()) as test_cli:
-        runner = CliRunner()
+def test_plugin_registers_multiple_commands(cli_runner: CliRunner) -> None:
+    """A plugin can register multiple commands, all reachable on the real cli."""
+    captured: dict[str, Any] = {}
+    with plugin_commands_registered([_PluginWithMultipleCommands(captured)]) as added:
+        assert {c.name for c in added} == {"cmd-alpha", "cmd-beta"}
 
-        # Test cmd_alpha
-        result_alpha = runner.invoke(test_cli, ["cmd-alpha"])
+        result_alpha = cli_runner.invoke(cli, ["cmd-alpha"])
         assert result_alpha.exit_code == 0
-        assert _captured_values.get("alpha_called") is True
+        assert captured.get("alpha_called") is True
 
-        # Test cmd_beta
-        result_beta = runner.invoke(test_cli, ["cmd-beta"])
+        result_beta = cli_runner.invoke(cli, ["cmd-beta"])
         assert result_beta.exit_code == 0
-        assert _captured_values.get("beta_called") is True
+        assert captured.get("beta_called") is True
 
 
-def test_plugin_returning_none_does_not_add_commands() -> None:
-    """Test that a plugin returning None doesn't break anything."""
-    with _test_cli_with_plugin(_PluginWithNoCommands()) as test_cli:
-        runner = CliRunner()
-        result = runner.invoke(test_cli, ["--help"])
-
-        assert result.exit_code == 0
-        # The help should work, but no extra commands should be added
-        assert "greet" not in result.output
+def test_plugin_returning_none_does_not_add_commands(cli_runner: CliRunner) -> None:
+    """A plugin returning None registers no commands and leaves the cli command set unchanged."""
+    commands_before = set(cli.commands)
+    with plugin_commands_registered([_PluginWithNoCommands()]) as added:
+        assert added == []
+        assert set(cli.commands) == commands_before
 
 
-def test_plugin_returning_empty_list_does_not_add_commands() -> None:
-    """Test that a plugin returning an empty list doesn't break anything."""
-    with _test_cli_with_plugin(_PluginWithEmptyList()) as test_cli:
-        runner = CliRunner()
-        result = runner.invoke(test_cli, ["--help"])
-
-        assert result.exit_code == 0
-        assert "greet" not in result.output
+def test_plugin_returning_empty_list_does_not_add_commands(cli_runner: CliRunner) -> None:
+    """A plugin returning an empty list registers no commands and leaves the cli command set unchanged."""
+    commands_before = set(cli.commands)
+    with plugin_commands_registered([_PluginWithEmptyList()]) as added:
+        assert added == []
+        assert set(cli.commands) == commands_before
 
 
-def test_multiple_plugins_can_register_commands() -> None:
-    """Test that multiple plugins can each register commands."""
-    _captured_values.clear()
-    plugins = [_PluginWithSimpleCommand(), _PluginWithMultipleCommands()]
-    with _test_cli_with_plugins(plugins) as test_cli:
-        runner = CliRunner()
+def test_multiple_plugins_can_register_commands(cli_runner: CliRunner) -> None:
+    """Multiple plugins can each register commands, all reachable on the real cli."""
+    captured: dict[str, Any] = {}
+    plugins = [_PluginWithSimpleCommand(captured), _PluginWithMultipleCommands(captured)]
+    with plugin_commands_registered(plugins) as added:
+        assert {c.name for c in added} == {"greet", "cmd-alpha", "cmd-beta"}
 
-        # Test greet from _PluginWithSimpleCommand
-        result_greet = runner.invoke(test_cli, ["greet"])
+        result_greet = cli_runner.invoke(cli, ["greet"])
         assert result_greet.exit_code == 0
-        assert _captured_values.get("greet_name") == "World"
+        assert captured.get("greet_name") == "World"
 
-        # Test cmd_alpha from _PluginWithMultipleCommands
-        result_alpha = runner.invoke(test_cli, ["cmd-alpha"])
+        result_alpha = cli_runner.invoke(cli, ["cmd-alpha"])
         assert result_alpha.exit_code == 0
-        assert _captured_values.get("alpha_called") is True
+        assert captured.get("alpha_called") is True
 
-        # Test cmd_beta from _PluginWithMultipleCommands
-        result_beta = runner.invoke(test_cli, ["cmd-beta"])
+        result_beta = cli_runner.invoke(cli, ["cmd-beta"])
         assert result_beta.exit_code == 0
-        assert _captured_values.get("beta_called") is True
+        assert captured.get("beta_called") is True
 
 
-def test_plugin_commands_appear_in_help() -> None:
-    """Test that plugin commands appear in the CLI help."""
-    with _test_cli_with_plugin(_PluginWithSimpleCommand()) as test_cli:
-        runner = CliRunner()
-        result = runner.invoke(test_cli, ["--help"])
+def test_plugin_commands_appear_in_help(cli_runner: CliRunner) -> None:
+    """Plugin commands appear in the real cli's help output."""
+    captured: dict[str, Any] = {}
+    with plugin_commands_registered([_PluginWithSimpleCommand(captured)]):
+        result = cli_runner.invoke(cli, ["--help"])
 
         assert result.exit_code == 0
         assert "greet" in result.output
 
 
-def test_plugin_command_help_shows_description() -> None:
-    """Test that plugin command help shows the command's docstring."""
-    with _test_cli_with_plugin(_PluginWithSimpleCommand()) as test_cli:
-        runner = CliRunner()
-        result = runner.invoke(test_cli, ["greet", "--help"])
+def test_plugin_command_help_shows_description(cli_runner: CliRunner) -> None:
+    """Plugin command help shows the command's docstring and options."""
+    captured: dict[str, Any] = {}
+    with plugin_commands_registered([_PluginWithSimpleCommand(captured)]):
+        result = cli_runner.invoke(cli, ["greet", "--help"])
 
         assert result.exit_code == 0
         assert "Greet someone" in result.output
         assert "--name" in result.output
 
 
-def test_plugin_command_with_context() -> None:
-    """Test that a plugin command can access the click context."""
-    _captured_values.clear()
-    with _test_cli_with_plugin(_PluginWithContextCommand()) as test_cli:
-        runner = CliRunner()
-        result = runner.invoke(test_cli, ["ctxcmd"])
+def test_plugin_command_with_context(cli_runner: CliRunner) -> None:
+    """A plugin command can access the click context (which holds the plugin manager)."""
+    captured: dict[str, Any] = {}
+    with plugin_commands_registered([_PluginWithContextCommand(captured)]):
+        result = cli_runner.invoke(cli, ["ctxcmd"])
 
         assert result.exit_code == 0
-        assert _captured_values.get("ctx_obj_type") == "PluginManager"
+        assert captured.get("ctx_obj_type") == "PluginManager"
