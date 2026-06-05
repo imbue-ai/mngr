@@ -204,7 +204,10 @@
         // shifted indices; re-resolve the highlight against the fresh
         // DOM rather than the pre-fetch sibling guess.
         var stillThere = inboxList.querySelector('.inbox-card[data-request-id="' + nextId + '"]');
-        if (!stillThere) nextId = (inboxList.querySelector(".inbox-card") || {}).getAttribute && inboxList.querySelector(".inbox-card").getAttribute("data-request-id");
+        if (!stillThere) {
+          var fallback = inboxList.querySelector(".inbox-card");
+          nextId = fallback ? fallback.getAttribute("data-request-id") : null;
+        }
       }
       if (nextId) {
         await selectItem(nextId);
