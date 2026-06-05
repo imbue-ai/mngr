@@ -681,16 +681,6 @@ function openModal(bundle, url) {
   }
   bundle.modalVisible = true;
   bundle.modalUrl = url;
-  // Hide the chrome view (in-content title bar) while the modal is open
-  // so the inbox drawer actually covers the y=0..TITLEBAR_HEIGHT strip
-  // visually. Without this the chrome view paints on top of the modal
-  // in that strip (z-order quirk with Electron's BaseWindow contentView
-  // children -- transparent modal pixels reveal the chrome below them).
-  // The OS-level traffic-light overlays on macOS are unaffected and
-  // stay visible.
-  if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
-    bundle.chromeView.setVisible(false);
-  }
   if (!bundle.modalView.webContents.isDestroyed()) {
     bundle.modalView.webContents.loadURL(url);
   }
@@ -703,10 +693,6 @@ function closeModal(bundle) {
   bundle.modalView.setVisible(false);
   bundle.modalVisible = false;
   bundle.modalUrl = null;
-  // Restore the chrome view we hid when the modal opened.
-  if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
-    bundle.chromeView.setVisible(true);
-  }
   // Drop the page so its websockets/timers stop and a stale dialog isn't
   // briefly visible the next time the modal opens.
   if (!bundle.modalView.webContents.isDestroyed()) {
