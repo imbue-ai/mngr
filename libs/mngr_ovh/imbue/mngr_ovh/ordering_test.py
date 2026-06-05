@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import ovh
 import pytest
+from ovh.exceptions import APIError
 
 from imbue.mngr.errors import MngrError
 from imbue.mngr_ovh.client import OvhVpsClient
@@ -768,3 +769,60 @@ def test_rebuild_waits_when_tasks_still_active() -> None:
         task_timeout_seconds=10.0,
     )
     assert rebuild_was_called == [True]
+
+
+def test_rebuild_retries_when_ovh_rejects_with_running_tasks_despite_empty_drain() -> None:
+    """OVH's task listing is eventually consistent, so the drain can report no
+    active tasks while ``/rebuild`` is still rejected with "...running tasks on
+    the VPS". The rebuild must re-drain and retry that POST until OVH accepts
+    it instead of failing the whole bake (the 3A fresh-order failure).
+    """
+    rebuild_attempts: list[int] = []
+
+    def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+        # Drain always reports empty -- the listing lags reality.
+        if method == "GET" and "/tasks?state=" in path:
+            return []
+        if method == "POST" and path.endswith("/rebuild"):
+            rebuild_attempts.append(1)
+            # OVH rejects while a task is in flight; accept on the third try.
+            if len(rebuild_attempts) < 3:
+                raise APIError("Action not available while there are running tasks on the VPS")
+            return {"id": 321, "state": "todo"}
+        if method == "GET" and "/tasks/321" in path:
+            return {"id": 321, "state": "done", "type": "reinstallVm"}
+        raise AssertionError(f"Unexpected call: {method} {path}")
+
+    client = _client(fake_call)
+    rebuild_vps_with_public_key(
+        client,
+        service_name="vps-x.vps.ovh.us",
+        image_id="uuid-img",
+        public_ssh_key="ssh-ed25519 AAAA test",
+        task_timeout_seconds=10.0,
+    )
+    assert len(rebuild_attempts) == 3
+
+
+def test_rebuild_does_not_retry_non_running_task_api_errors() -> None:
+    """A rebuild rejection unrelated to in-flight tasks surfaces immediately, not retried."""
+    rebuild_attempts: list[int] = []
+
+    def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+        if method == "GET" and "/tasks?state=" in path:
+            return []
+        if method == "POST" and path.endswith("/rebuild"):
+            rebuild_attempts.append(1)
+            raise APIError("Bad Request: imageId not found")
+        raise AssertionError(f"Unexpected call: {method} {path}")
+
+    client = _client(fake_call)
+    with pytest.raises(VpsApiError):
+        rebuild_vps_with_public_key(
+            client,
+            service_name="vps-x.vps.ovh.us",
+            image_id="uuid-img",
+            public_ssh_key="ssh-ed25519 AAAA test",
+            task_timeout_seconds=10.0,
+        )
+    assert len(rebuild_attempts) == 1
