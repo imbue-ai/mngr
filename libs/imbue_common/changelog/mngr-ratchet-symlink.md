@@ -1,1 +1,0 @@
-Ratchet file scans no longer crash on a tracked symlink that resolves to a directory. The file walker (`_get_all_files_with_extension`) now filters on `is_file()` instead of `exists()`, so a symlink-to-directory (which git lists as a blob but cannot be read as a file) is skipped instead of raising `FileReadError`.
