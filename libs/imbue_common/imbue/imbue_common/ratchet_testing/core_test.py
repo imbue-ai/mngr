@@ -201,6 +201,38 @@ def test_get_all_files_includes_untracked_non_ignored_files(git_repo: Path) -> N
     assert "untracked.py" in result_names
 
 
+def test_get_all_files_excludes_symlink_to_directory(git_repo: Path) -> None:
+    """A tracked symlink that resolves to a directory must be excluded.
+
+    Git lists such a symlink as a blob, so it appears in `git ls-files`, but it
+    cannot be read as a file (`read_text` raises IsADirectoryError). Filtering on
+    `is_file()` rather than `exists()` keeps it out so ratchet scans don't crash
+    (regression test for the tracked `.claude/skills/*` symlinks into a skills tree).
+    """
+    target_dir = git_repo / "target_dir"
+    target_dir.mkdir()
+    (target_dir / "real.py").write_text("print('real')")
+    link_to_dir = git_repo / "link_to_dir"
+    link_to_dir.symlink_to(target_dir)
+
+    subprocess.run(["git", "add", "."], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "Add symlink to directory"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+
+    result = _get_all_files_with_extension(git_repo, None)
+    result_names = [p.name for p in result]
+    assert "link_to_dir" not in result_names
+    assert "real.py" in result_names
+
+    # The full scan must not raise FileReadError on the directory symlink.
+    chunks = get_ratchet_failures(git_repo, None, RegexPattern(r"print"))
+    assert all(chunk.file_path.name != "link_to_dir" for chunk in chunks)
+
+
 def test_read_file_contents_caches_results(tmp_path: Path) -> None:
     test_file = tmp_path / "test.txt"
     test_file.write_text("original content")

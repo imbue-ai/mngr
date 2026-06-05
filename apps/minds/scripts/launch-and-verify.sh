@@ -2,6 +2,8 @@
 # Launch the installed minds.app and wait for its backend to come up.
 # Success: ~/.minds/logs/minds-events.jsonl is written within the timeout.
 # Failure: timeout, log macOS console + any partial state, exit non-zero.
+#
+# FIXME: convert the script so that `-e` can be used.
 set -uo pipefail
 
 EVENTS_LOG="$HOME/.minds/logs/minds-events.jsonl"
