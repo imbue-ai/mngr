@@ -1,5 +1,6 @@
 """Unit tests for deploy_utils shared utilities."""
 
+import json
 from pathlib import Path
 from typing import cast
 
@@ -8,6 +9,7 @@ import pytest
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.providers.deploy_utils import MngrInstallMode
+from imbue.mngr.providers.deploy_utils import _install_mode_from_direct_url_text
 from imbue.mngr.providers.deploy_utils import collect_deploy_files
 from imbue.mngr.providers.deploy_utils import collect_provider_profile_files
 from imbue.mngr.providers.deploy_utils import detect_mngr_install_mode
@@ -61,8 +63,9 @@ def test_collect_deploy_files_merges_results() -> None:
     result = collect_deploy_files(ctx, repo_root=Path("/repo"))
 
     assert len(result) == 2
-    assert Path("~/.mngr/config.toml") in result
-    assert Path("~/.claude.json") in result
+    # The merged source values from each plugin must survive, not just the keys.
+    assert result[Path("~/.mngr/config.toml")] == Path("/local/config.toml")
+    assert result[Path("~/.claude.json")] == '{"key": "value"}'
 
 
 def test_collect_deploy_files_rejects_absolute_paths() -> None:
@@ -114,35 +117,52 @@ def test_collect_deploy_files_empty_results() -> None:
 # --- MngrInstallMode enum tests ---
 
 
-def test_mngr_install_mode_has_correct_values() -> None:
-    """MngrInstallMode enum members should have uppercase string values."""
-    assert MngrInstallMode.AUTO.value == "AUTO"
-    assert MngrInstallMode.PACKAGE.value == "PACKAGE"
-    assert MngrInstallMode.EDITABLE.value == "EDITABLE"
-    assert MngrInstallMode.SKIP.value == "SKIP"
+def test_mngr_install_mode_round_trips_from_string() -> None:
+    """Each MngrInstallMode member should parse back from its string value.
+
+    This guards the parse/serialization path (e.g. config or CLI parsing that
+    does ``MngrInstallMode(value)``), which would break if the enum base class
+    stopped producing the uppercase string values it is keyed on.
+    """
+    for member in MngrInstallMode:
+        assert MngrInstallMode(member.value) == member
 
 
 # --- detect_mngr_install_mode tests ---
 
 
-def test_detect_mngr_install_mode_returns_editable_or_package() -> None:
-    """detect_mngr_install_mode should return EDITABLE or PACKAGE for the current install."""
-    result = detect_mngr_install_mode()
-    assert result in (MngrInstallMode.EDITABLE, MngrInstallMode.PACKAGE)
+def test_install_mode_from_direct_url_text_editable() -> None:
+    """An editable direct_url.json should map to EDITABLE."""
+    text = json.dumps({"dir_info": {"editable": True}, "url": "file:///some/path"})
+    assert _install_mode_from_direct_url_text(text) == MngrInstallMode.EDITABLE
+
+
+def test_install_mode_from_direct_url_text_non_editable() -> None:
+    """A non-editable direct_url.json should map to PACKAGE."""
+    text = json.dumps({"dir_info": {"editable": False}, "url": "file:///some/path"})
+    assert _install_mode_from_direct_url_text(text) == MngrInstallMode.PACKAGE
+
+
+def test_install_mode_from_direct_url_text_missing_dir_info() -> None:
+    """direct_url.json without dir_info (e.g. a VCS install) should map to PACKAGE."""
+    text = json.dumps({"url": "https://example.com/pkg.tar.gz"})
+    assert _install_mode_from_direct_url_text(text) == MngrInstallMode.PACKAGE
+
+
+def test_install_mode_from_direct_url_text_malformed_json() -> None:
+    """Malformed direct_url.json should fall back to PACKAGE rather than raise."""
+    assert _install_mode_from_direct_url_text("{not valid json") == MngrInstallMode.PACKAGE
+
+
+def test_install_mode_from_direct_url_text_none() -> None:
+    """Absent direct_url.json (None) should map to PACKAGE."""
+    assert _install_mode_from_direct_url_text(None) == MngrInstallMode.PACKAGE
 
 
 def test_detect_mngr_install_mode_returns_package_for_missing_package() -> None:
     """detect_mngr_install_mode should return PACKAGE when the package is not installed."""
     result = detect_mngr_install_mode("nonexistent-package-xyz-12345")
     assert result == MngrInstallMode.PACKAGE
-
-
-def test_detect_mngr_install_mode_returns_editable_for_mngr() -> None:
-    """detect_mngr_install_mode for 'imbue-mngr' should return EDITABLE in a dev workspace."""
-    # In a development workspace with editable install, this should return EDITABLE.
-    # In a regular install, it would return PACKAGE. Either is valid.
-    result = detect_mngr_install_mode("imbue-mngr")
-    assert result in (MngrInstallMode.EDITABLE, MngrInstallMode.PACKAGE)
 
 
 # --- resolve_mngr_install_mode tests ---

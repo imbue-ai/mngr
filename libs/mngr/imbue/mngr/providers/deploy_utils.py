@@ -30,6 +30,24 @@ class MngrInstallMode(UpperCaseStrEnum):
     SKIP = auto()
 
 
+def _install_mode_from_direct_url_text(direct_url_text: str | None) -> MngrInstallMode:
+    """Map the contents of a package's direct_url.json (PEP 610) to an install mode.
+
+    Returns EDITABLE only when the JSON parses and ``dir_info.editable`` is
+    truthy; returns PACKAGE for missing text, malformed JSON, or a non-editable
+    install.
+    """
+    if direct_url_text is None:
+        return MngrInstallMode.PACKAGE
+    try:
+        direct_url = json.loads(direct_url_text)
+    except (json.JSONDecodeError, AttributeError):
+        return MngrInstallMode.PACKAGE
+    if direct_url.get("dir_info", {}).get("editable", False):
+        return MngrInstallMode.EDITABLE
+    return MngrInstallMode.PACKAGE
+
+
 def detect_mngr_install_mode(package_name: str = "imbue-mngr") -> MngrInstallMode:
     """Detect whether a package is installed in editable or package mode.
 
@@ -42,15 +60,7 @@ def detect_mngr_install_mode(package_name: str = "imbue-mngr") -> MngrInstallMod
     except importlib.metadata.PackageNotFoundError:
         return MngrInstallMode.PACKAGE
 
-    direct_url_text = dist.read_text("direct_url.json")
-    if direct_url_text is not None:
-        try:
-            direct_url = json.loads(direct_url_text)
-        except (json.JSONDecodeError, AttributeError):
-            return MngrInstallMode.PACKAGE
-        if direct_url.get("dir_info", {}).get("editable", False):
-            return MngrInstallMode.EDITABLE
-    return MngrInstallMode.PACKAGE
+    return _install_mode_from_direct_url_text(dist.read_text("direct_url.json"))
 
 
 def resolve_mngr_install_mode(mode: MngrInstallMode, package_name: str = "imbue-mngr") -> MngrInstallMode:
