@@ -74,20 +74,21 @@ html {
 }
 
 /*
- * Shared card surface (bg, border, rounded corners, subtle shadow).
- * The Card.jinja component composes this with Tailwind utilities for
- * layout (flex/justify) and padding. JS-rendered surfaces that can't
- * call the Jinja component -- e.g. the providers list in
- * templates/pages/Landing.jinja -- reference the same class string so
- * one edit here re-styles every card. Values mirror the Tailwind
- * utilities they replace: bg-white, border border-zinc-200,
- * rounded-xl, shadow-sm.
+ * Shared card surface (bg, border, rounded corners). No baseline shadow
+ * -- non-clickable cards read as flat surfaces; the Card.jinja
+ * ``interactive`` prop adds ``hover:shadow-sm`` so clickable cards lift
+ * slightly on hover. The Card.jinja component composes this with
+ * Tailwind utilities for layout (flex/justify) and padding. JS-rendered
+ * surfaces that can't call the Jinja component -- e.g. the providers
+ * list in templates/pages/Landing.jinja -- reference the same class
+ * string so one edit here re-styles every card. Values mirror the
+ * Tailwind utilities they replace: bg-white, border border-zinc-200,
+ * rounded-xl.
  */
 .minds-card {
   background: #ffffff;
   border: 1px solid #e4e4e7;
   border-radius: 0.75rem;
-  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
 }
 
 /*

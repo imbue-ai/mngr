@@ -40,7 +40,7 @@
   "default": "p-4",
   "tight": "px-4 py-2.5",
 }[padding] -%}
-{%- set _interactive_cls = "cursor-pointer transition hover:border-zinc-300" if interactive else "" -%}
+{%- set _interactive_cls = "cursor-pointer transition hover:border-zinc-300 hover:shadow-sm" if interactive else "" -%}
 {%- set _anchor_cls = "no-underline text-inherit" if tag == "a" else "" -%}
 {%- set _cls = ["minds-card", _layout_cls, _padding_cls, _interactive_cls, _anchor_cls, extra] | reject("equalto", "") | join(" ") -%}
 {%- if tag == "a" -%}
