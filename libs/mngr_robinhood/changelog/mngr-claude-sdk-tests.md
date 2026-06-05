@@ -20,6 +20,12 @@ permission and hook behavior (`can_use_tool` input rewriting and deny semantics,
 `fork_session`, `continue_conversation`) plus `SDKSessionInfo`/`SessionMessage` field contracts
 and `list_sessions` paging.
 
+A dedicated `test_sdk_session_functions.py` adds thorough coverage of the five session
+functions (`list_sessions`, `get_session_messages`, `get_session_info`, `rename_session`,
+`tag_session`): `limit`/`offset` paging on real sessions, `list_sessions` newest-first
+ordering, `SDKSessionInfo` field-value contracts (summary/tag/custom_title/file_size/created_at),
+directory isolation, and rename/tag overwrite-and-clear semantics.
+
 These tests make real, paid API calls and are excluded from all CI runs via the new `sdk_live`
 marker; they only run when `RUN_SDK_LIVE_TESTS=1` and `ANTHROPIC_API_KEY` are both set (run them
 with `just test-sdk-live`). Added `claude-agent-sdk` as a dependency and `pytest-asyncio` as a
