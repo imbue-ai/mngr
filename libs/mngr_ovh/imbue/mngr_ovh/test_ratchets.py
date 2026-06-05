@@ -211,7 +211,7 @@ def test_prevent_monkeypatch_setattr() -> None:
 
 
 def test_prevent_test_container_classes() -> None:
-    rc.check_test_container_classes(_DIR, snapshot(8))
+    rc.check_test_container_classes(_DIR, snapshot(0))
 
 
 def test_prevent_pytest_mark_integration() -> None:

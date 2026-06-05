@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.errors import MngrError
-from imbue.mngr_ovh.pending_orders import PendingOrderRecord
 from imbue.mngr_ovh.pending_orders import delete_pending_order_marker
 from imbue.mngr_ovh.pending_orders import pending_orders_dir
 from imbue.mngr_ovh.pending_orders import read_pending_order_markers
@@ -77,21 +76,19 @@ def test_marker_file_uses_expected_path_shape(tmp_path: Path) -> None:
     assert payload["region"] == "US-WEST-OR"
 
 
-def test_pending_order_record_field_set_is_locked() -> None:
-    """FrozenModel + ``extra=forbid`` (inherited) means adding/removing fields needs an explicit refactor."""
-    # Missing the required ``created_at_unix`` field.
-    with pytest.raises(ValueError):
-        PendingOrderRecord.model_validate({"order_id": 1, "plan_code": "p", "region": "r"})
-    with pytest.raises(ValueError):
-        PendingOrderRecord.model_validate(
-            {
-                "order_id": 1,
-                "plan_code": "p",
-                "region": "r",
-                "created_at_unix": 1.0,
-                "bogus_extra": True,
-            }
-        )
+def test_marker_on_disk_schema_is_exactly_the_four_documented_fields(tmp_path: Path) -> None:
+    """Pin the persisted JSON schema -- the project-owned on-disk contract.
+
+    ``read_pending_order_markers`` (and any operator grepping the marker
+    files) depends on this exact key set. Adding or removing a field
+    silently changes what older/newer mngr versions can parse, so lock
+    the serialized shape here rather than re-testing pydantic's generic
+    required-field / ``extra=forbid`` behavior (which is framework, not
+    project, logic).
+    """
+    written = write_pending_order_marker(tmp_path, order_id=7, plan_code="vps-2025-model1", region="US-WEST-OR")
+    payload = json.loads(written.read_text())
+    assert set(payload.keys()) == {"order_id", "plan_code", "region", "created_at_unix"}
 
 
 def test_write_surfaces_oserror_as_mngr_error(tmp_path: Path) -> None:
@@ -99,10 +96,12 @@ def test_write_surfaces_oserror_as_mngr_error(tmp_path: Path) -> None:
 
     Triggers a real ``OSError`` by occupying the ``pending_orders`` path
     with a regular file, so the ``mkdir(parents=True, exist_ok=True)``
-    inside ``write_pending_order_marker`` fails with ``NotADirectoryError``
-    (an OSError subclass).
+    inside ``write_pending_order_marker`` fails. The contract under test
+    is that the raw ``OSError`` is surfaced *as* ``MngrError`` -- assert
+    that specific type, not a union that would also accept the unwrapped
+    error (which would let the test pass even if the wrapping were removed).
     """
     # Pre-occupy where the pending_orders directory would go.
     (tmp_path / "pending_orders").write_text("not a directory")
-    with pytest.raises((MngrError, NotADirectoryError, FileExistsError)):
+    with pytest.raises(MngrError):
         write_pending_order_marker(tmp_path, order_id=42, plan_code="p", region="r")

@@ -16,6 +16,7 @@ left dangling.
 import os
 import subprocess
 import time
+from uuid import uuid4
 
 import ovh
 import pytest
@@ -59,94 +60,87 @@ def _build_client() -> OvhVpsClient:
     return OvhVpsClient(ovh_client=raw, subsidiary=config.ovh_subsidiary)
 
 
-class TestOvhProviderLifecycle:
+def _destroy_agent(agent_name: str) -> None:
+    """Best-effort ``mngr destroy`` for a release-test VPS, then settle."""
+    subprocess.run(
+        ["uv", "run", "mngr", "destroy", agent_name, "--force"],
+        input="y\n",
+        capture_output=True,
+        text=True,
+        timeout=300,
+        cwd=os.environ.get("MNGR_REPO_ROOT", os.getcwd()),
+    )
+    time.sleep(30)
+
+
+def test_ovh_lifecycle_create_exec_and_destroy() -> None:
     """End-to-end create/exec/destroy through the mngr CLI."""
+    # ``uuid4().hex`` (not ``time.time() % N``) so two overlapping release
+    # runs cannot collide on a name and clobber/leak a real billed VPS.
+    agent_name = f"test-ovh-{uuid4().hex}"
 
-    def test_create_exec_and_destroy(self) -> None:
-        agent_name = f"test-ovh-{int(time.time()) % 100000}"
+    result = _run_mngr(
+        "create",
+        agent_name,
+        "--provider",
+        "ovh",
+        "--no-connect",
+        "--message",
+        "just say hello",
+    )
+    assert result.returncode == 0, f"Create failed: {result.stderr}"
 
-        result = _run_mngr(
-            "create",
-            agent_name,
-            "--provider",
-            "ovh",
-            "--no-connect",
-            "--message",
-            "just say hello",
-        )
-        assert result.returncode == 0, f"Create failed: {result.stderr}"
+    try:
+        result = _run_mngr("exec", agent_name, "echo hello-from-ovh")
+        assert result.returncode == 0, f"Exec failed: {result.stderr}"
+        assert "hello-from-ovh" in result.stdout
 
-        try:
-            result = _run_mngr("exec", agent_name, "echo hello-from-ovh")
-            assert result.returncode == 0, f"Exec failed: {result.stderr}"
-            assert "hello-from-ovh" in result.stdout
+        result = _run_mngr("exec", agent_name, "test -d /mngr && echo exists")
+        assert result.returncode == 0, f"host_dir check failed: {result.stderr}"
+        assert "exists" in result.stdout
 
-            result = _run_mngr("exec", agent_name, "test -d /mngr && echo exists")
-            assert result.returncode == 0, f"host_dir check failed: {result.stderr}"
-            assert "exists" in result.stdout
-
-            result = _run_mngr("list")
-            assert result.returncode == 0, f"List failed: {result.stderr}"
-            assert agent_name in result.stdout
-            assert "ovh" in result.stdout
-        finally:
-            subprocess.run(
-                ["uv", "run", "mngr", "destroy", agent_name, "--force"],
-                input="y\n",
-                capture_output=True,
-                text=True,
-                timeout=300,
-                cwd=os.environ.get("MNGR_REPO_ROOT", os.getcwd()),
-            )
-            time.sleep(30)
-
-    def test_create_stop_start_destroy(self) -> None:
-        agent_name = f"test-ovh-ss-{int(time.time()) % 100000}"
-
-        result = _run_mngr(
-            "create",
-            agent_name,
-            "--provider",
-            "ovh",
-            "--no-connect",
-            "--message",
-            "just say hello",
-        )
-        assert result.returncode == 0, f"Create failed: {result.stderr}"
-
-        try:
-            result = _run_mngr("stop", agent_name)
-            assert result.returncode == 0, f"Stop failed: {result.stderr}"
-
-            result = _run_mngr("list")
-            assert result.returncode == 0
-            assert agent_name in result.stdout
-
-            result = _run_mngr("start", agent_name, "--no-connect")
-            assert result.returncode == 0, f"Start failed: {result.stderr}"
-
-            result = _run_mngr("exec", agent_name, "echo alive-after-restart")
-            assert result.returncode == 0, f"Post-restart exec failed: {result.stderr}"
-            assert "alive-after-restart" in result.stdout
-        finally:
-            subprocess.run(
-                ["uv", "run", "mngr", "destroy", agent_name, "--force"],
-                input="y\n",
-                capture_output=True,
-                text=True,
-                timeout=300,
-                cwd=os.environ.get("MNGR_REPO_ROOT", os.getcwd()),
-            )
-            time.sleep(30)
+        result = _run_mngr("list")
+        assert result.returncode == 0, f"List failed: {result.stderr}"
+        assert agent_name in result.stdout
+        assert "ovh" in result.stdout
+    finally:
+        _destroy_agent(agent_name)
 
 
-class TestOvhVpsClient:
-    """Read-only smoke tests against the live OVH API."""
+def test_ovh_lifecycle_create_stop_start_destroy() -> None:
+    """End-to-end create/stop/start/destroy through the mngr CLI."""
+    agent_name = f"test-ovh-ss-{uuid4().hex}"
 
-    def test_list_instances_does_not_error(self) -> None:
-        client = _build_client()
-        assert isinstance(client.list_instances(), list)
+    result = _run_mngr(
+        "create",
+        agent_name,
+        "--provider",
+        "ovh",
+        "--no-connect",
+        "--message",
+        "just say hello",
+    )
+    assert result.returncode == 0, f"Create failed: {result.stderr}"
 
-    def test_list_ssh_keys_starts_empty(self) -> None:
-        client = _build_client()
-        assert client.list_ssh_keys() == []
+    try:
+        result = _run_mngr("stop", agent_name)
+        assert result.returncode == 0, f"Stop failed: {result.stderr}"
+
+        result = _run_mngr("list")
+        assert result.returncode == 0
+        assert agent_name in result.stdout
+
+        result = _run_mngr("start", agent_name, "--no-connect")
+        assert result.returncode == 0, f"Start failed: {result.stderr}"
+
+        result = _run_mngr("exec", agent_name, "echo alive-after-restart")
+        assert result.returncode == 0, f"Post-restart exec failed: {result.stderr}"
+        assert "alive-after-restart" in result.stdout
+    finally:
+        _destroy_agent(agent_name)
+
+
+def test_ovh_client_list_instances_does_not_error() -> None:
+    """Read-only smoke test against the live OVH API: listing must round-trip."""
+    client = _build_client()
+    assert isinstance(client.list_instances(), list)

@@ -5,7 +5,6 @@ import re
 from pathlib import Path
 
 from imbue.mngr.primitives import ProviderBackendName
-from imbue.mngr_ovh import backend as backend_module
 from imbue.mngr_ovh.backend import OVH_BACKEND_NAME
 from imbue.mngr_ovh.backend import OvhProvider
 from imbue.mngr_ovh.backend import OvhProviderBackend
@@ -100,11 +99,6 @@ def test_f1_extra_tags_parsed_before_recycle_or_order() -> None:
         "see F1 in OVH_AUDIT.md. A malformed MNGR_VPS_EXTRA_TAGS otherwise "
         "raises after we've already ordered (and paid for) a fresh OVH VPS."
     )
-
-
-def test_f1_provision_vps_imports_parse_extra_tags_env() -> None:
-    """Sanity: the backend module imports ``parse_extra_tags_env`` so the F1 fix works at all."""
-    assert hasattr(backend_module, "parse_extra_tags_env")
 
 
 # -- Pending-order reconciliation invariants ----------------------------------

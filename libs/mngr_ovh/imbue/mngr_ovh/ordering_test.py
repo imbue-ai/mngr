@@ -696,6 +696,7 @@ def test_rebuild_polls_task_to_completion() -> None:
             {"id": 555, "state": "done", "type": "reinstallVm"},
         ]
     )
+    rebuild_body: list[Any] = []
 
     def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
         # The pre-rebuild drain probes both ?state=todo and ?state=doing;
@@ -703,6 +704,7 @@ def test_rebuild_polls_task_to_completion() -> None:
         if method == "GET" and "/tasks?state=" in path:
             return []
         if method == "POST" and path.endswith("/rebuild"):
+            rebuild_body.append(body)
             return {"id": 555, "state": "todo"}
         return next(task_polls)
 
@@ -714,6 +716,17 @@ def test_rebuild_polls_task_to_completion() -> None:
         public_ssh_key="ssh-ed25519 AAAA test",
         task_timeout_seconds=10.0,
     )
+    # The rebuild must actually have been POSTed (with our image + key),
+    # and the poller must have walked the task all the way to ``done``.
+    # Without these assertions the test passes even if ``/rebuild`` never
+    # fired or the success path silently no-op'd ("no exception" is not a
+    # sufficient assertion).
+    assert len(rebuild_body) == 1
+    assert rebuild_body[0]["imageId"] == "uuid-img"
+    assert rebuild_body[0]["publicSshKey"] == "ssh-ed25519 AAAA test"
+    # All three scripted task polls were consumed, i.e. we observed the
+    # terminal ``done`` state rather than returning early.
+    assert next(task_polls, None) is None
 
 
 def test_rebuild_raises_when_task_errors() -> None:

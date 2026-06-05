@@ -55,15 +55,23 @@ def test_attach_tag_issues_post() -> None:
 
 
 def test_attach_tags_issues_one_post_per_pair() -> None:
-    captured: list[str] = []
+    captured: list[tuple[str, str, Any]] = []
 
     def fake(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
-        captured.append(method)
+        captured.append((method, path, body))
         return None
 
     client = _client(fake)
     attach_tags(client, "urn:v1:us:resource:vps:vps-x", {"a": "1", "b": "2"})
-    assert captured == ["POST", "POST"]
+    # Each pair must POST to the resource's tag endpoint with its own
+    # ``{key, value}`` body -- not just "two POSTs happened". A bug that
+    # swapped key/value, posted to the wrong urn, or dropped a pair would
+    # still produce two POSTs but fail this comparison.
+    by_key = sorted(captured, key=lambda c: c[2]["key"])
+    assert by_key == [
+        ("POST", "/v2/iam/resource/urn:v1:us:resource:vps:vps-x/tag", {"key": "a", "value": "1"}),
+        ("POST", "/v2/iam/resource/urn:v1:us:resource:vps:vps-x/tag", {"key": "b", "value": "2"}),
+    ]
 
 
 def test_delete_tag_issues_delete() -> None:
