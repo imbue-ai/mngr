@@ -1,12 +1,16 @@
 onlyBuiltDependencies:
   - electron
 
-# TEMPORARY: dependency cooldown disabled (was 20160 = 14 days) while we
-# stabilize the CI pipeline. The cooldown was added for supply-chain
-# hardening (refuse versions <14d old so freshly-compromised releases
-# can't be pulled in before being yanked); restore it once the pin-drift
-# / CI churn settles. Tracked TODO for revisit.
-minimumReleaseAge: 0
+# Supply-chain hardening: refuse to install any version published less than
+# 14 days ago (20160 minutes), including transitive dependencies. A
+# freshly-compromised release therefore cannot be pulled in until it has had
+# time to be noticed and yanked. Only bites during resolution (e.g. `pnpm
+# install` without --frozen-lockfile, `pnpm add`, `pnpm update`); frozen
+# installs replay the existing lockfile unaffected.
+minimumReleaseAge: 20160
+minimumReleaseAgeExclude:
+  - latchkey
+  - "@imbue-ai/detent"
 
 # ToDesktop builds every platform target from one host, but pnpm (like
 # npm) only installs optional deps matching the build host's
