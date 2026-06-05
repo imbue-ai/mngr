@@ -55,15 +55,17 @@ Original disable rationale (commit `654ccc8a` 2026-04-28) cited two root causes:
 
 Bump `LIMA_VERSION` in `apps/minds/scripts/build.js` from `2.0.3` to `2.1.1` (main's value). Upstream issue `lima-vm/lima#5042` is closed but `#4558` (umbrella) still open. Need to verify the 2.1.x changelog confirms the gvisor-tap-vsock fix landed before bumping.
 
-- **status**: pending (defer pending changelog read)
+- **status**: **still_needed** (no CI test needed)
 - **test path**: mngr candidate branch → launch-to-msg with template_ref=v0.2.35 (lima boot is full end-to-end)
+- **deep-dive verdict (2026-06-05)**: lima v2.1.1's `go.mod` pins `containers/gvisor-tap-vsock v0.8.8` -- the exact regressed version the 2.0.3 pin dodges. v2.1.2 bumps to 0.8.9 but 0.8.9's changelog does not mention the SSH-fresh-connection wedge or any systemd-255 fix. Umbrella `lima-vm/lima#4558` is still open with no closing PR; the original audit's `#5042` reference was a different bug (FD leak after ~2048 forwards on Ubuntu 25.10, patched in `pkg/portfwd/client.go` -- doesn't touch the SSH hang). The 2.0.3 pin remains correct.
 
 ### homebrew-path-augmentation (MNGR)
 
 Drop the explicit `homebrewPaths` prepend in `apps/minds/electron/backend.js:228-242`. Lima is bundled now, so the original symptom (Homebrew limactl lookup) is gone. Risk: lima provider may shell out to other CLIs (`ssh`, etc.) that rely on Homebrew PATH on some hosts.
 
-- **status**: pending (audit other CLI lookups first)
+- **status**: **still_needed** (no CI test; reverting would break docker users)
 - **test path**: mngr candidate branch → launch-to-msg + ci.yml
+- **deep-dive verdict (2026-06-05)**: `docker` on macOS lives at `/opt/homebrew/bin/docker` (Apple Silicon) or `/usr/local/bin/docker` (Intel) -- not `/usr/bin/`. Dropping the homebrew prepend breaks the docker provider for every minds user on macOS who selects Docker. launch-to-msg only exercises lima (bundled, absolute path) so it would pass while silently regressing docker users. CI can't verify safety here; the augmentation stays.
 
 ### laptop-agent-types-seed (MNGR)
 
@@ -91,3 +93,5 @@ Per-iteration: timestamp, candidate, candidate branch / tag, launch-to-msg run i
 | 1 | todowrite-cleanup-pilot | pilot-rc-todowrite-cleanup / v0.2.36-rc1-todowrite-cleanup | 27006016613 success | 27005966487 success | green | ff-merged into pilot (749e234d), v0.2.35 tag unchanged |
 | 2 | restore-supply-chain-cooldowns | mngr-rc-restore-cooldowns (PR #1936) | 27007931011 success (rerun after lima -15 flake) | 27007963943 success | green | cherry-picked to wz/minds_onboard (c930b05ed); PR #1936 closed |
 | 3 | restore-stop-hook-enabled-when | pilot-rc-stop-hook / v0.2.36-rc2-stop-hook | 27010826323 success | 27010815083 success | green | ff-merged into pilot (c135679e), v0.2.35 tag unchanged |
+| 4 | lima-2.0.3-to-2.1.1 | (no CI test) | n/a | n/a | still_needed | deep-dive showed 2.1.1 ships the exact regressed gvisor-tap-vsock 0.8.8; #5042 reference was misidentified; #4558 still open |
+| 5 | homebrew-path-augmentation | (no CI test) | n/a | n/a | still_needed | docker on macOS lives at /opt/homebrew/bin/docker or /usr/local/bin/docker; dropping homebrew prepend silently breaks docker users; launch-to-msg only exercises lima so it would not catch the regression |
