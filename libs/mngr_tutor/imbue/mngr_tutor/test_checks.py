@@ -49,7 +49,7 @@ def test_agent_exists_checks_reflect_a_real_created_agent(
     The unit tests only cover the missing-agent branch, so a bug that made
     _check_agent_exists always return False would slip past them but fail here.
     """
-    agent_name = f"tutor-exists-{uuid4().hex[:8]}"
+    agent_name = f"tutor-exists-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -74,7 +74,7 @@ def test_agent_in_state_check_matches_the_agents_actual_state(
     Covers the `agent.state in expected_states` comparison in _check_agent_in_state,
     which the unit tests (missing agent -> False) never reach.
     """
-    agent_name = f"tutor-state-{uuid4().hex[:8]}"
+    agent_name = f"tutor-state-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -107,7 +107,7 @@ def test_file_exists_in_work_dir_check_detects_files_under_the_agents_work_dir(
     Covers the `(agent.work_dir / file_path).exists()` logic in
     _check_file_exists_in_work_dir, including the False case for an absent file.
     """
-    agent_name = f"tutor-file-{uuid4().hex[:8]}"
+    agent_name = f"tutor-file-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -116,12 +116,12 @@ def test_file_exists_in_work_dir_check_detects_files_under_the_agents_work_dir(
         )
 
         work_dir = _get_agent_details(temp_mngr_ctx, AgentName(agent_name)).work_dir
-        marker_name = f"tutor-marker-{uuid4().hex[:8]}.txt"
+        marker_name = f"tutor-marker-{uuid4().hex}.txt"
         (work_dir / marker_name).write_text("present")
 
         present_check = FileExistsInAgentWorkDirCheck(agent_name=AgentName(agent_name), file_path=marker_name)
         absent_check = FileExistsInAgentWorkDirCheck(
-            agent_name=AgentName(agent_name), file_path=f"absent-{uuid4().hex[:8]}.txt"
+            agent_name=AgentName(agent_name), file_path=f"absent-{uuid4().hex}.txt"
         )
 
         assert run_check(present_check, temp_mngr_ctx) is True
@@ -143,7 +143,7 @@ def test_tmux_session_has_clients_check_is_false_when_session_has_no_attached_cl
     in checks_test.py. The fully-positive path (a client attached) is not covered here
     because attaching a real tmux client requires a controlling terminal.
     """
-    agent_name = f"tutor-clients-{uuid4().hex[:8]}"
+    agent_name = f"tutor-clients-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
