@@ -144,6 +144,16 @@ Per-iteration: timestamp, candidate, candidate branch / tag, launch-to-msg run i
 | 8 | dead-web-view-script | pilot-rc-dead-code / v0.2.36-rc5-dead-web-view | 27016379803 success | n/a (pilot-only) | green | ff-merged into pilot (cad14a24); 283 lines deleted |
 | 9 | duplicate-port-zero-guard | mngr-rc-drop-port-zero-guard (PR #1939) | 27017785672 success | 27016476580 success | green | cherry-picked to wz/minds_onboard (82b125d72); PR #1939 closed |
 
+## Final cumulative verify (2026-06-05)
+
+After all 7 individual landings, a final end-to-end CI run validated the SUM of the cleanups together:
+
+- mngr SHA `120c836ef` (wz/minds_onboard with all cherry-picks)
+- FCT tag `v0.2.36-rc6-final-verify` -> pilot `cad14a24` (all four pilot merges)
+- launch-to-msg run `27020581457`: **build success + verify success**
+
+Confirms the cleanups don't interact in unexpected ways — they're each safe on top of the prior ones. v0.2.35 release tag at `fb96b1b3` untouched throughout.
+
 ## Sweep summary (2026-06-05)
 
 Worked through three inventory passes (six subagents in pass 1, two each in passes 2-3) and seven CI-validated test iterations. Mac runner was strictly serial; ci.yml ran in parallel via candidate PRs.
