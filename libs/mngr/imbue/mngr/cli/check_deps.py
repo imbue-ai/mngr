@@ -1,12 +1,12 @@
 """Check and optionally install system dependencies for mngr."""
 
+from enum import auto
 from typing import Any
 
 import click
-from click_option_group import MutuallyExclusiveOptionGroup
-from click_option_group import optgroup
 from loguru import logger
 
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
@@ -22,6 +22,42 @@ from imbue.mngr.utils.deps import describe_install_commands
 from imbue.mngr.utils.deps import detect_os
 from imbue.mngr.utils.deps import install_deps_batch
 from imbue.mngr.utils.deps import install_modern_bash
+
+
+class DependencyScope(UpperCaseStrEnum):
+    """Which dependencies determine success (the exit code) and the install target.
+
+    This is orthogonal to whether/how we install (see ``InstallMode``): it only
+    selects which dependencies "count".
+    """
+
+    # Only core dependencies count: exit non-zero only if a core dependency is missing.
+    CORE = auto()
+    # Every dependency counts (core + optional): exit non-zero if anything is missing.
+    ALL = auto()
+
+
+class InstallMode(UpperCaseStrEnum):
+    """Whether (and how) to install missing dependencies.
+
+    Orthogonal to ``DependencyScope``: the scope decides what gets installed under
+    ``AUTO`` and what determines the exit code; this decides the install behavior.
+    """
+
+    # Check only -- never install.
+    NONE = auto()
+    # Prompt the user before installing anything.
+    INTERACTIVE = auto()
+    # Install missing in-scope dependencies without prompting.
+    AUTO = auto()
+
+
+def _scope_choices() -> list[str]:
+    return [s.value.lower() for s in DependencyScope]
+
+
+def _install_choices() -> list[str]:
+    return [m.value.lower() for m in InstallMode]
 
 
 def _print_status_table(
@@ -57,6 +93,23 @@ def _print_status_table(
             "missing",
             "modern bash required for mngr scripts",
         )
+
+
+def _scope_missing(missing: list[SystemDependency], scope: DependencyScope) -> list[SystemDependency]:
+    """Filter the missing deps down to those that count for the given scope.
+
+    Under ``CORE`` scope only core dependencies count; under ``ALL`` scope every
+    missing dependency counts. (Modern bash on macOS is a core requirement but is
+    not a ``SystemDependency``, so it is tracked separately via ``need_bash``.)
+    """
+    if scope == DependencyScope.CORE:
+        return [dep for dep in missing if dep.category == DependencyCategory.CORE]
+    return list(missing)
+
+
+def _should_fail(missing: list[SystemDependency], scope: DependencyScope, need_bash: bool) -> bool:
+    """Whether the command should exit non-zero: any in-scope dep (or core bash) missing."""
+    return bool(_scope_missing(missing, scope)) or need_bash
 
 
 def _prompt_install_choice(
@@ -126,14 +179,13 @@ def _run_installation(
 
 def _report_post_install_status(
     failed: list[SystemDependency],
-    need_bash: bool,
+    still_missing: list[SystemDependency],
     os_name: OsName,
-    all_deps: tuple[SystemDependency, ...],
+    tried_bash: bool,
     bash_ok_now: bool,
-) -> bool:
-    """Print post-install status. Returns True if all core deps (and bash) are now present."""
+) -> None:
+    """Print which deps failed to install and which are still missing after the attempt."""
     write_human_line("")
-    still_missing = [dep for dep in all_deps if not dep.is_available()]
 
     if failed:
         write_human_line("Failed to install: {}", ", ".join(d.binary for d in failed))
@@ -141,80 +193,112 @@ def _report_post_install_status(
     if still_missing:
         write_human_line("Still missing: {}", ", ".join(d.binary for d in still_missing))
 
-    if os_name == OsName.MACOS and not bash_ok_now and need_bash:
+    if os_name == OsName.MACOS and tried_bash and not bash_ok_now:
         write_human_line(
             "WARNING: PATH-resolved bash is still old after install. "
             "Ensure /opt/homebrew/bin (Apple Silicon) or /usr/local/bin (Intel) is before /bin in your PATH."
         )
 
-    still_missing_core = [d for d in still_missing if d.category == DependencyCategory.CORE]
-    return len(still_missing_core) == 0 and bash_ok_now
 
+def _check_deps_impl(ctx: click.Context, scope: DependencyScope, install_mode: InstallMode) -> None:
+    """Implementation of the dependencies command.
 
-def _check_deps_impl(ctx: click.Context, interactive: bool, core: bool, install_all: bool) -> None:
-    """Implementation of the dependencies command."""
+    Two orthogonal axes:
+      - ``scope`` selects which dependencies count: ``core`` means exit non-zero
+        only if a core dependency is missing (missing optional deps are tolerated);
+        ``all`` means exit non-zero if anything is missing. It also selects the
+        ``auto`` install target.
+      - ``install_mode`` selects whether/how to install: ``none`` (check only),
+        ``interactive`` (prompt), or ``auto`` (install without prompting).
+    """
     os_name = detect_os()
 
     missing = [dep for dep in ALL_DEPS if not dep.is_available()]
     missing_core = [dep for dep in missing if dep.category == DependencyCategory.CORE]
     bash_ok = check_bash_version() if os_name == OsName.MACOS else True
+    # Modern bash on macOS is a core requirement, so it counts under either scope.
+    need_bash = os_name == OsName.MACOS and not bash_ok
 
     write_human_line("System dependencies ({})", os_name)
     _print_status_table(ALL_DEPS, missing, bash_ok, os_name)
     write_human_line("")
 
-    if len(missing) == 0 and bash_ok:
+    if not missing and not need_bash:
         write_human_line("All system dependencies are present.")
         return
 
-    if not interactive and not core and not install_all:
-        count = len(missing) + (0 if bash_ok else 1)
-        write_human_line("{} missing dependency(ies). Use -i to install interactively.", count)
-        ctx.exit(1)
+    # Check only: report status scoped to what determines the exit code, then exit.
+    if install_mode == InstallMode.NONE:
+        # bash (macOS) is a core requirement, so it counts toward the in-scope total.
+        in_scope_count = len(_scope_missing(missing, scope)) + (0 if bash_ok else 1)
+        if in_scope_count > 0:
+            noun = "core dependency(ies)" if scope == DependencyScope.CORE else "dependency(ies)"
+            write_human_line(
+                "{} missing {}. Use --install interactive to choose what to install.", in_scope_count, noun
+            )
+        else:
+            # We only reach the NONE branch when something is missing, and a zero
+            # in-scope count with no missing bash means scope is core and every
+            # missing dep is optional -- tolerated, so this still exits 0.
+            optional_missing_count = len(missing) - len(missing_core)
+            write_human_line(
+                "All core dependencies present. {} optional dependency(ies) missing (tolerated by --scope core).",
+                optional_missing_count,
+            )
+        if _should_fail(missing, scope, need_bash):
+            ctx.exit(1)
+        return
 
-    need_bash = os_name == OsName.MACOS and not bash_ok
-
-    if install_all:
-        to_install: list[SystemDependency] = missing
-    elif core:
-        to_install = missing_core
+    # Decide what to install. AUTO installs the in-scope missing deps directly;
+    # INTERACTIVE delegates the choice to the prompt.
+    if install_mode == InstallMode.AUTO:
+        to_install: list[SystemDependency] = _scope_missing(missing, scope)
     else:
         prompted = _prompt_install_choice(missing, missing_core, need_bash, os_name)
         if prompted is None:
+            # User skipped: exit based on the (unchanged) in-scope state.
+            if _should_fail(missing, scope, need_bash):
+                ctx.exit(1)
             return
         to_install = prompted
 
     if not to_install and not need_bash:
+        # Nothing in scope to install (e.g. --scope core when only optional deps
+        # are missing). Honor the scope verdict uniformly rather than assuming a
+        # zero exit -- a dep with no install_method would otherwise slip through.
         write_human_line("Nothing to install.")
+        if _should_fail(missing, scope, need_bash):
+            ctx.exit(1)
         return
 
     failed = _run_installation(to_install, need_bash, os_name)
     bash_ok_now = check_bash_version() if os_name == OsName.MACOS else True
-    all_core_ok = _report_post_install_status(failed, need_bash, os_name, ALL_DEPS, bash_ok_now)
-    if not all_core_ok:
+    need_bash_now = os_name == OsName.MACOS and not bash_ok_now
+    still_missing = [dep for dep in ALL_DEPS if not dep.is_available()]
+    _report_post_install_status(failed, still_missing, os_name, tried_bash=need_bash, bash_ok_now=bash_ok_now)
+    if _should_fail(still_missing, scope, need_bash_now):
         ctx.exit(1)
 
 
 @click.command(name="dependencies", hidden=True)
-@optgroup.group("Install mode", cls=MutuallyExclusiveOptionGroup)
-@optgroup.option(
-    "-i",
-    "--interactive",
-    is_flag=True,
-    help="Interactively prompt to install missing dependencies",
+@click.option(
+    "--scope",
+    type=click.Choice(_scope_choices(), case_sensitive=False),
+    default=DependencyScope.ALL.value.lower(),
+    show_default=True,
+    help="Which dependencies must be present for a zero exit code (and which to auto-install): "
+    "'core' (exit non-zero only if a core dependency is missing; missing optional deps are tolerated) "
+    "or 'all' (exit non-zero if anything is missing).",
 )
-@optgroup.option(
-    "-c",
-    "--core",
-    is_flag=True,
-    help="Automatically install core dependencies without prompting",
-)
-@optgroup.option(
-    "-a",
-    "--all",
-    "install_all",
-    is_flag=True,
-    help="Automatically install all dependencies (core + optional) without prompting",
+@click.option(
+    "--install",
+    "install_mode",
+    type=click.Choice(_install_choices(), case_sensitive=False),
+    default=InstallMode.NONE.value.lower(),
+    show_default=True,
+    help="Whether to install missing dependencies: "
+    "'none' (check only), 'interactive' (prompt before installing), or "
+    "'auto' (install missing in-scope dependencies without prompting).",
 )
 @add_common_options
 @click.pass_context
@@ -222,9 +306,8 @@ def check_deps(ctx: click.Context, **kwargs: Any) -> None:
     try:
         _check_deps_impl(
             ctx=ctx,
-            interactive=kwargs["interactive"],
-            core=kwargs["core"],
-            install_all=kwargs["install_all"],
+            scope=DependencyScope(kwargs["scope"].upper()),
+            install_mode=InstallMode(kwargs["install_mode"].upper()),
         )
     except AbortError as e:
         logger.error("Aborted: {}", e.message)
@@ -236,18 +319,27 @@ CommandHelpMetadata(
     one_line_description="Check and install system dependencies",
     synopsis="mngr dependencies [OPTIONS]",
     description="""Checks whether the system dependencies required by mngr are installed.
-By default, prints a status table and exits 0 (all present) or 1 (something missing).
+Prints a status table; by default exits 0 (all present) or 1 (something missing).
 
-Use -i to interactively choose what to install, -c to auto-install core dependencies,
-or -a to auto-install everything (core + optional).
+Two orthogonal options control its behavior:
+  --scope core|all      Which dependencies count toward the exit code (and which
+                        --install auto targets). 'core' exits non-zero only when a
+                        core dependency is missing -- missing optional deps are
+                        tolerated. 'all' (default) exits non-zero if anything is missing.
+  --install none|interactive|auto
+                        Whether to install missing deps. 'none' (default) only
+                        checks; 'interactive' prompts; 'auto' installs the in-scope
+                        missing deps without prompting.
 
-Core dependencies: ssh, git, tmux, jq
-Optional dependencies: claude (agent type), rsync (push/pull), unison (pair)""",
+Core dependencies: git, tmux, jq
+Optional dependencies: ssh (remote connect / rsync / git over SSH), claude (agent type),
+rsync (push/pull), unison (pair)""",
     examples=(
         ("Check which dependencies are missing", "mngr dependencies"),
-        ("Interactively install missing dependencies", "mngr dependencies -i"),
-        ("Auto-install core dependencies", "mngr dependencies -c"),
-        ("Auto-install everything", "mngr dependencies -a"),
+        ("Fail only if a core dependency is missing", "mngr dependencies --scope core"),
+        ("Interactively install missing dependencies", "mngr dependencies --install interactive"),
+        ("Auto-install only the core dependencies", "mngr dependencies --scope core --install auto"),
+        ("Auto-install everything", "mngr dependencies --install auto"),
     ),
     see_also=(("extras", "Install optional extras (plugins, completion, etc.)"),),
 ).register()

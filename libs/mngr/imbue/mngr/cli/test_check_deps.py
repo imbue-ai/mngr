@@ -12,7 +12,7 @@ from imbue.mngr.cli.check_deps import check_deps
 
 @pytest.mark.release
 @pytest.mark.timeout(120)
-def test_check_deps_all_flag(cli_runner: CliRunner) -> None:
-    """Running 'mngr dependencies --all' runs the full check/install flow."""
-    result = cli_runner.invoke(check_deps, ["--all"])
+def test_check_deps_install_auto(cli_runner: CliRunner) -> None:
+    """Running 'mngr dependencies --install auto' runs the full check/install flow."""
+    result = cli_runner.invoke(check_deps, ["--install", "auto"])
     assert "System dependencies" in result.output
