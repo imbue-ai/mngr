@@ -40,6 +40,7 @@ from playwright.sync_api import Page
 from playwright.sync_api import sync_playwright
 
 from imbue.minds.config.loader import repo_tier_client_config_path
+from imbue.minds.desktop_client.templates import _FALLBACK_BRANCH as _FORM_DEFAULT_BRANCH
 
 # This file lives at apps/minds/imbue/minds/desktop_client/e2e_workspace_runner.py,
 # so parents[5] hops up over desktop_client, minds, imbue, minds, apps to the repo
@@ -205,7 +206,37 @@ def _shallow_clone_fct(branch: str, destination: Path) -> Path:
         text=True,
         timeout=120,
     )
+    # The create form pre-fills its branch field with `_FORM_DEFAULT_BRANCH`
+    # (templates.py `_FALLBACK_BRANCH`), so the spawned `mngr create` runs
+    # `git checkout <that ref>` in this very clone. Leaving the clone on
+    # the originally-cloned branch turns that into a real checkout that
+    # rejects any uncommitted edits the test fixture made to opt files in
+    # (e.g. `.mngr/settings.toml is_allowed_in_pytest`). Pre-positioning
+    # to the form's default makes that downstream checkout a no-op even
+    # when the working tree is dirty. Best effort: if the ref is not
+    # reachable (e.g. tag not present on FCT remote yet), leave the clone
+    # as-is and let `mngr create` surface the resulting error.
+    _checkout_best_effort(destination, _FORM_DEFAULT_BRANCH)
     return destination
+
+
+def _checkout_best_effort(repo: Path, ref: str) -> None:
+    verify = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--verify", f"{ref}^{{commit}}"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if verify.returncode != 0:
+        logger.info("Skipping pre-checkout of FCT clone to {!r}: ref not reachable", ref)
+        return
+    subprocess.run(
+        ["git", "-C", str(repo), "checkout", "--detach", ref],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
 
 
 def resolve_fct_path(scratch_dir: Path) -> Path:

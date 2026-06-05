@@ -42,11 +42,15 @@ payload=$(cat)
 
 # Extract the first `"conversationId":"<uuid>"` value. POSIX grep/sed only --
 # no jq dependency (jq may be absent on remote hosts).
+# `|| true` keeps a payload with no conversationId match (grep exits 1)
+# from tripping `set -e` via `pipefail` -- a missing id is a normal case
+# handled by the empty-id branch below, not an error.
 conv_id=$(
     printf '%s' "$payload" \
         | grep -oE '"conversationId":"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"' \
         | head -n 1 \
-        | sed -E 's/.*:"([0-9a-f-]+)".*/\1/'
+        | sed -E 's/.*:"([0-9a-f-]+)".*/\1/' \
+        || true
 )
 
 # No id in the payload -> nothing to record (never clobber the file).
