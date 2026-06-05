@@ -48,16 +48,21 @@
     }
     /* When the body has no cards, the left column expands to fill the
        dialog and the right pane is hidden so the empty state reads as
-       a single centered message rather than a half-empty split. */
+       a single centered message rather than a half-empty split. The
+       auto-open footer centers itself in this state (versus its
+       default left alignment when the list has cards). */
     #inbox-body.is-empty #inbox-detail { display: none; }
-    #inbox-body.is-empty #inbox-list {
+    #inbox-body.is-empty #inbox-left-column {
       flex: 1 1 auto;
       width: auto;
       border-right: none;
+    }
+    #inbox-body.is-empty #inbox-list {
       display: flex;
       align-items: center;
       justify-content: center;
     }
+    #inbox-body.is-empty #inbox-list-footer { justify-content: center; }
   </style>
 {% endset %}
 {% set _scripts %}
@@ -347,19 +352,39 @@
        onclick="onBackdropClick(event)">
     <div id="inbox-dialog"
          class="relative w-full max-w-[1000px] h-[80vh] flex flex-col bg-white border border-zinc-200 rounded-2xl shadow-xl overflow-hidden">
+      {# Header row. The close button is rendered inline (not via the
+         absolute-positioned DialogCloseButton component) so it sits
+         vertically aligned with the title. The auto-open checkbox lives
+         in the left column's footer, not here. #}
       <div class="flex items-center justify-between gap-4 px-5 py-3 border-b border-zinc-200">
-        <h1 class="text-sm font-semibold text-zinc-800 uppercase tracking-wider">Inbox</h1>
-        <label class="text-xs text-zinc-500 cursor-pointer flex items-center gap-1.5">
-          <input type="checkbox" id="inbox-auto-open"
-                 {% if auto_open %}checked{% endif %}
-                 onchange="onAutoOpenToggle(event)">
-          Auto-open on new request
-        </label>
-        <DialogCloseButton id="inbox-close-btn" onclick="closeInbox()" />
+        <h1 class="text-sm font-semibold text-zinc-800 uppercase tracking-wider leading-none">Inbox</h1>
+        <button type="button" aria-label="Close"
+                id="inbox-close-btn"
+                onclick="closeInbox()"
+                class="inline-flex items-center justify-center w-6 h-6 rounded-md text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 transition-colors cursor-pointer">
+          <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" class="w-4 h-4">
+            <path fill-rule="evenodd" clip-rule="evenodd"
+                  d="M4.22 4.22a.75.75 0 0 1 1.06 0L10 8.94l4.72-4.72a.75.75 0 1 1 1.06 1.06L11.06 10l4.72 4.72a.75.75 0 1 1-1.06 1.06L10 11.06l-4.72 4.72a.75.75 0 0 1-1.06-1.06L8.94 10 4.22 5.28a.75.75 0 0 1 0-1.06Z" />
+          </svg>
+        </button>
       </div>
       <div id="inbox-body" class="flex flex-1 min-h-0 {% if is_empty %}is-empty{% endif %}">
-        <div id="inbox-list" class="w-72 border-r border-zinc-200 overflow-y-auto bg-zinc-50">
-          <InboxList :cards="cards" :selected_id="selected_id" />
+        {# Left column: scrollable cards (or empty placeholder) on top,
+           pinned auto-open footer at the bottom. The footer's horizontal
+           alignment flips based on ``#inbox-body.is-empty`` (centered
+           when empty, left-aligned otherwise). #}
+        <div id="inbox-left-column" class="flex flex-col w-72 border-r border-zinc-200 bg-zinc-50">
+          <div id="inbox-list" class="flex-1 overflow-y-auto">
+            <InboxList :cards="cards" :selected_id="selected_id" />
+          </div>
+          <div id="inbox-list-footer" class="border-t border-zinc-200 px-3 py-2 flex items-center">
+            <label class="text-xs text-zinc-500 cursor-pointer flex items-center gap-1.5 leading-none">
+              <input type="checkbox" id="inbox-auto-open"
+                     {% if auto_open %}checked{% endif %}
+                     onchange="onAutoOpenToggle(event)">
+              Auto-open on new request
+            </label>
+          </div>
         </div>
         <div id="inbox-detail" class="flex-1 overflow-y-auto p-6 sm:p-7">
           {{ detail_html|safe }}
