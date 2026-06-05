@@ -73,8 +73,12 @@ from imbue.mngr_latchkey.store import permissions_path_for_host
 _OBSERVER_STOP_TIMEOUT_SECONDS: float = 5.0
 
 
-class _LatchkeyStateChangeHandler(MutableModel, FileSystemEventHandler):
+class _LatchkeyStateChangeHandler(FrozenModel, FileSystemEventHandler):
     """watchdog handler that routes credential / per-host-permission file changes to sync callbacks.
+
+    Frozen (and therefore hashable) because the watchdog observer stores
+    scheduled handlers in a set; it is pure config + callbacks with no mutable
+    state.
 
     Implements the ``dispatch`` method the watchdog observer calls for every
     filesystem event; it matches the changed path against the local credentials

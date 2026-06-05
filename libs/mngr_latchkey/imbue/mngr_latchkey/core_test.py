@@ -10,6 +10,7 @@ import psutil
 import pytest
 from pydantic import PrivateAttr
 from watchdog.events import FileModifiedEvent
+from watchdog.observers import Observer
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
@@ -977,6 +978,12 @@ def test_remote_state_watch_handler_routes_credential_and_permission_changes(
         unknown_permissions = permissions_path_for_host(handler.latchkey.plugin_data_dir, HostId())
         event_handler.dispatch(FileModifiedEvent(str(unknown_permissions)))
         assert handler._synced == []
+
+        # Regression: the watchdog observer stores handlers in a set, so the
+        # handler must be hashable and schedulable (a MutableModel would raise
+        # ``TypeError: unhashable type`` here).
+        assert hash(event_handler) is not None
+        Observer().schedule(event_handler, str(tmp_path), recursive=False)
 
 
 def _make_fake_latchkey_binary_with_ensure_browser_counter(tmp_path: Path, counter_path: Path) -> Path:
