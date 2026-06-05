@@ -3,6 +3,9 @@
 from pathlib import Path
 
 import pytest
+from pydantic import AnyUrl
+from pydantic import Field
+from pydantic import PrivateAttr
 from pydantic import SecretStr
 
 from imbue.mngr.primitives import AgentId
@@ -13,6 +16,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_imbue_cloud.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.data_types import LeasedHostInfo
 from imbue.mngr_imbue_cloud.instance import ImbueCloudProvider
@@ -53,9 +57,13 @@ from imbue.mngr_imbue_cloud.primitives import LeaseDbId
 def test_map_docker_status_to_host_state(status: str, exit_code: int, expected_state: HostState) -> None:
     state, note = _map_docker_status_to_host_state(status, exit_code)
     assert state == expected_state
-    # Every mapping returns a non-empty diagnostic note that gets folded
-    # into HostDetails.failure_reason; assert it's at least populated so
-    # the user sees *something* in the listing.
+    # The state mapping is the contract this matrix pins. The note assertion is
+    # intentionally only a populated-ness check (every mapping must fold *some*
+    # diagnostic into HostDetails.failure_reason so the user sees something in
+    # the listing); the specific note *content* for the cases that carry
+    # debugging info is pinned by the dedicated tests below
+    # (test_map_docker_status_running_note_mentions_inner_ssh and
+    # test_map_docker_status_exited_nonzero_note_includes_exit_code).
     assert note is not None
     assert note != ""
 
@@ -270,32 +278,36 @@ def test_build_pool_host_wipe_script_renders_safe_host_id_inline() -> None:
 # =============================================================================
 
 
-class _RecordingReleaseClient:
-    """Stub connector client that records release_host calls (and reports success)."""
+class _RecordingReleaseClient(ImbueCloudConnectorClient):
+    """Concrete connector-client mock that records release_host calls.
 
-    def __init__(self) -> None:
-        self.release_calls: list[str] = []
+    Inherits the real ``ImbueCloudConnectorClient`` interface so that a future
+    signature change to ``release_host`` fails this test (rather than silently
+    passing against a stale hand-rolled stub).
+    """
 
-    def release_host(self, access_token: SecretStr, host_db_id: str) -> bool:
+    release_calls: list[str] = Field(default_factory=list)
+
+    def release_host(self, access_token: SecretStr, host_db_id: str) -> None:
         self.release_calls.append(host_db_id)
-        return True
 
 
 class _ReleaseGuardProvider(ImbueCloudProvider):
     """Provider stub that records local-state cleanup instead of touching disk."""
 
-    _cleanup_calls: list[HostId] = []
+    # PrivateAttr(default_factory=...) gives each instance its own list, so the
+    # recorder can never leak state across tests via a shared class-level default.
+    _cleanup_calls: list[HostId] = PrivateAttr(default_factory=list)
 
     def _cleanup_local_host_state(self, host_id: HostId) -> None:
         self._cleanup_calls.append(host_id)
 
 
 def _make_release_guard_provider() -> tuple[_ReleaseGuardProvider, _RecordingReleaseClient]:
-    client = _RecordingReleaseClient()
+    client = _RecordingReleaseClient(base_url=AnyUrl("https://example.com"))
     provider = _ReleaseGuardProvider.model_construct(
         name=ProviderInstanceName("imbue-cloud-test"),
         client=client,
-        _cleanup_calls=[],
     )
     return provider, client
 

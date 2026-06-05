@@ -5,6 +5,10 @@ from imbue.mngr_imbue_cloud.cli.paid import _resolve_admin_api_key
 from imbue.mngr_imbue_cloud.cli.paid import paid
 
 
+# test_paid_group_lists_* and test_paid_subgroups_* are deliberate *wiring*
+# smoke tests: they assert only that the click groups register subgroups/commands
+# of the expected names, not their behavior. Behavioral validation lives in the
+# _resolve_admin_api_key and test_domain_add_requires_connector_url tests below.
 def test_paid_group_lists_domain_and_email_subgroups() -> None:
     result = CliRunner().invoke(paid, ["--help"])
     assert result.exit_code == 0

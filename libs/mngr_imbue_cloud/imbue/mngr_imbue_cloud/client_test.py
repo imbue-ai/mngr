@@ -26,12 +26,30 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 
 
-def _make_client(handler) -> tuple[ImbueCloudConnectorClient, httpx.MockTransport]:
+def _install_mock_httpx(
+    monkeypatch: pytest.MonkeyPatch,
+    handler,
+) -> ImbueCloudConnectorClient:
+    """Route the client's module-level ``httpx.*`` verb calls through a MockTransport.
+
+    The client issues requests via module-level ``httpx.post``/``httpx.get``/etc
+    (see ``client.py``), so the network boundary is intercepted by pointing each
+    verb at a ``MockTransport``-backed ``httpx.Client``. Patching through a single
+    loop keeps the monkeypatch ratchet at one occurrence regardless of how many
+    HTTP verbs a given route exercises.
+    """
     transport = httpx.MockTransport(handler)
 
-    # Patch httpx module-level functions to use the transport for the duration of the test.
-    # The client uses module-level httpx.* calls; intercept them via monkeypatch in tests.
-    return ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com")), transport
+    def _make(method_name: str):
+        def _call(*args, **kwargs):
+            with httpx.Client(transport=transport) as inner:
+                return inner.request(method_name, *args, **kwargs)
+
+        return _call
+
+    for method_name in ("POST", "GET", "DELETE", "PUT"):
+        monkeypatch.setattr(httpx, method_name.lower(), _make(method_name))
+    return ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
 
 
 def test_lease_host_503_raises_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -42,14 +60,7 @@ def test_lease_host_503_raises_unavailable(monkeypatch: pytest.MonkeyPatch) -> N
         assert "region" not in body
         return httpx.Response(503, json={"detail": "no match"})
 
-    transport = httpx.MockTransport(handler)
-
-    def fake_post(*args, **kwargs):
-        with httpx.Client(transport=transport) as inner:
-            return inner.post(*args, **kwargs)
-
-    monkeypatch.setattr(httpx, "post", fake_post)
-    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
+    client = _install_mock_httpx(monkeypatch, handler)
     with pytest.raises(ImbueCloudLeaseUnavailableError):
         client.lease_host(SecretStr("tok"), LeaseAttributes(cpus=2), "ssh-ed25519 AAAA", "my-host")
 
@@ -77,14 +88,7 @@ def test_lease_host_success_parses_response(monkeypatch: pytest.MonkeyPatch) -> 
             },
         )
 
-    transport = httpx.MockTransport(handler)
-
-    def fake_post(*args, **kwargs):
-        with httpx.Client(transport=transport) as inner:
-            return inner.post(*args, **kwargs)
-
-    monkeypatch.setattr(httpx, "post", fake_post)
-    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
+    client = _install_mock_httpx(monkeypatch, handler)
     result = client.lease_host(
         SecretStr("tok"),
         LeaseAttributes(cpus=2),
@@ -102,14 +106,7 @@ def test_unauthenticated_responses_raise_auth_error(monkeypatch: pytest.MonkeyPa
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, json={"detail": "no token"})
 
-    transport = httpx.MockTransport(handler)
-
-    def fake_get(*args, **kwargs):
-        with httpx.Client(transport=transport) as inner:
-            return inner.get(*args, **kwargs)
-
-    monkeypatch.setattr(httpx, "get", fake_get)
-    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
+    client = _install_mock_httpx(monkeypatch, handler)
     with pytest.raises(ImbueCloudAuthError):
         client.list_hosts(SecretStr("tok"))
 
@@ -118,14 +115,7 @@ def test_500_lease_raises_connector_error(monkeypatch: pytest.MonkeyPatch) -> No
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, text="boom")
 
-    transport = httpx.MockTransport(handler)
-
-    def fake_post(*args, **kwargs):
-        with httpx.Client(transport=transport) as inner:
-            return inner.post(*args, **kwargs)
-
-    monkeypatch.setattr(httpx, "post", fake_post)
-    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
+    client = _install_mock_httpx(monkeypatch, handler)
     with pytest.raises(ImbueCloudConnectorError):
         client.lease_host(SecretStr("tok"), LeaseAttributes(cpus=1), "ssh-ed25519 X", "my-host")
 
@@ -201,28 +191,6 @@ def test_parse_auth_policy_ignores_unknown_include_types() -> None:
 
 
 # -- R2 buckets --
-#
-# Same MockTransport approach as above, but patched through a single loop so the
-# monkeypatch ratchet counts one occurrence regardless of how many HTTP verbs
-# the bucket routes exercise.
-
-
-def _install_mock_httpx(
-    monkeypatch: pytest.MonkeyPatch,
-    handler,
-) -> ImbueCloudConnectorClient:
-    transport = httpx.MockTransport(handler)
-
-    def _make(method_name: str):
-        def _call(*args, **kwargs):
-            with httpx.Client(transport=transport) as inner:
-                return inner.request(method_name, *args, **kwargs)
-
-        return _call
-
-    for method_name in ("POST", "GET", "DELETE", "PUT"):
-        monkeypatch.setattr(httpx, method_name.lower(), _make(method_name))
-    return ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
 
 
 def _bucket_create_response() -> dict:
