@@ -542,16 +542,16 @@ def minimal_install_env(
     The subprocess environment is intentionally minimal (not inherited from
     the parent process). PATH contains only the venv bin and the directories
     of mngr's declared system dependencies: CORE_DEPS from
-    libs/mngr/imbue/mngr/utils/deps.py (git, tmux, jq, ssh) plus two
+    libs/mngr/imbue/mngr/utils/deps.py (git, tmux, jq) plus three
     fixture-specific extras (curl, used by scripts/install.sh to bootstrap
-    uv, and rsync, an optional dep included so file-sync code paths are
-    exercised). This catches code that depends on tools from the developer's
-    environment (e.g. the modal CLI being on PATH).
+    uv, and rsync + ssh, optional deps included so file-sync and remote
+    code paths are exercised). This catches code that depends on tools from
+    the developer's environment (e.g. the modal CLI being on PATH).
     """
     # Pull the core binary names from CORE_DEPS so this list cannot drift
-    # away from what mngr actually requires. The two extras below are
+    # away from what mngr actually requires. The extras below are
     # fixture-specific (see docstring above).
-    system_deps = [dep.binary for dep in CORE_DEPS] + ["curl", "rsync"]
+    system_deps = [dep.binary for dep in CORE_DEPS] + ["curl", "rsync", "ssh"]
     dep_dirs: set[str] = set()
     for dep in system_deps:
         dep_path = shutil.which(dep)

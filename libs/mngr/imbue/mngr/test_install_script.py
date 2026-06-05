@@ -109,7 +109,7 @@ def test_install_sh_upgrades_when_mngr_already_installed(tmp_path: Path) -> None
     assert "uv tool list" in calls
     assert "uv tool upgrade imbue-mngr" in calls
     assert "uv tool install imbue-mngr" not in calls
-    assert "mngr dependencies -i" in calls
+    assert "mngr dependencies --install interactive --scope core" in calls
     assert "mngr extras -i" in calls
 
 
@@ -130,7 +130,7 @@ def test_install_sh_installs_when_mngr_not_present(tmp_path: Path) -> None:
     calls = log_file.read_text()
     assert "uv tool install imbue-mngr" in calls
     assert "uv tool upgrade imbue-mngr" not in calls
-    assert "mngr dependencies -i" in calls
+    assert "mngr dependencies --install interactive --scope core" in calls
     assert "mngr extras -i" in calls
 
 
@@ -167,7 +167,7 @@ def test_install_sh_errors_when_mngr_not_on_path_after_install(tmp_path: Path) -
 
 @pytest.mark.timeout(30)
 def test_install_sh_continues_when_dependencies_fail(tmp_path: Path) -> None:
-    """A failure in `mngr dependencies -i` must not abort step 4 (`mngr extras -i`).
+    """A failure in `mngr dependencies --install interactive` must not abort step 4 (`mngr extras -i`).
 
     The `|| warn` pattern in install.sh exists so a single broken system
     dependency does not stop the rest of the installer.
@@ -184,7 +184,7 @@ def test_install_sh_continues_when_dependencies_fail(tmp_path: Path) -> None:
 
     assert result.returncode == 0, f"install.sh failed unexpectedly\nstderr:\n{result.stderr}"
     calls = log_file.read_text()
-    assert "mngr dependencies -i" in calls
+    assert "mngr dependencies --install interactive --scope core" in calls
     assert "mngr extras -i" in calls
     # Pin the assertion to the step-3 warning text from install.sh so a
     # regression that fires the wrong || warn (or none at all) is caught.

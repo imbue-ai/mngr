@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-05
+
+Updated references following the `mngr_uncapped_claude` plugin rename: mentions
+of the `mngr uncapped-claude` command (in the changelog and a test docstring)
+now read `mngr robinhood`. No behavior change.
+
 ## 2026-06-04
 
 Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.

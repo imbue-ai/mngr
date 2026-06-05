@@ -86,6 +86,7 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import TransferMode
+from imbue.mngr.utils.deps import SSH
 from imbue.mngr.utils.env_utils import build_source_env_shell_commands
 from imbue.mngr.utils.env_utils import parse_env_file
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
@@ -1332,6 +1333,11 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         same_machine = _is_same_machine(source_host, self)
         target_ssh_info = self.get_ssh_connection_info()
 
+        # Cross-machine git transfer shells out to the ssh binary (via
+        # GIT_SSH_COMMAND); ssh is optional, so surface a clear error if it's absent.
+        if not same_machine:
+            SSH.require()
+
         # Same-machine push uses a bare local-on-host URL with no SSH
         # transport (covers both local-laptop-to-itself and
         # remote-host-to-itself).
@@ -1737,6 +1743,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                             f"rm -f {shlex.quote(str(host_files_from))}", timeout_seconds=5.0
                         )
             return
+
+        # Every remaining branch transfers to/from a remote host and uses the ssh
+        # binary as rsync's transport (-e ssh); ssh is optional, so require it here.
+        SSH.require()
 
         if source_host.is_local and not self.is_local:
             # Local to remote
