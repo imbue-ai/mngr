@@ -1,0 +1,334 @@
+{#def cards, selected_id="", detail_html="", is_empty=False #}
+{#
+  Inbox modal page. Hosts:
+    - Transparent body + dim backdrop (so the desktop client modal view
+      reveals the workspace behind the inbox).
+    - Master/detail layout: a left list (#inbox-list) and a right detail
+      pane (#inbox-detail), both swappable via fragment fetches.
+    - The shell JS that owns selection, Approve/Deny + auto-advance,
+      SSE-driven list refresh, and escape/backdrop dismissal.
+
+  ``cards`` is the initial pending-request list; ``selected_id`` the id
+  of the initially-selected card; ``detail_html`` is the pre-rendered
+  right-pane HTML (a handler fragment, the "no longer available"
+  fragment, or an empty placeholder). ``is_empty`` is True when there
+  are no pending requests and the layout collapses to a centered message.
+#}
+{% set _head %}
+  <style>
+    .inbox-card {
+      padding: 10px 12px;
+      cursor: pointer;
+      border-left: 3px solid transparent;
+      transition: background 100ms;
+    }
+    .inbox-card:hover { background: rgba(0, 0, 0, 0.04); }
+    .inbox-card.is-selected {
+      background: rgba(0, 0, 0, 0.06);
+      border-left-color: var(--workspace-accent, #94a3b8);
+    }
+    .inbox-card-kind {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: #64748b;
+    }
+    .inbox-card-display {
+      font-size: 13px;
+      color: #18181b;
+      font-weight: 500;
+      margin-top: 2px;
+    }
+    .inbox-empty-placeholder {
+      padding: 32px 16px;
+      text-align: center;
+      color: #64748b;
+      font-size: 13px;
+    }
+    /* When the body has no cards, the left column expands to fill the
+       dialog and the right pane is hidden so the empty state reads as
+       a single centered message rather than a half-empty split. */
+    #inbox-body.is-empty #inbox-detail { display: none; }
+    #inbox-body.is-empty #inbox-list {
+      flex: 1 1 auto;
+      width: auto;
+      border-right: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+  </style>
+{% endset %}
+{% set _scripts %}
+<script>
+  (function () {
+    var inboxBody = document.getElementById("inbox-body");
+    var inboxList = document.getElementById("inbox-list");
+    var inboxDetail = document.getElementById("inbox-detail");
+
+    function closeInbox() {
+      if (window.minds && window.minds.closeModal) {
+        window.minds.closeModal();
+      } else {
+        window.location.href = "/";
+      }
+    }
+    window.closeInbox = closeInbox;
+
+    function onBackdropClick(event) {
+      if (event.target && event.target.id === "inbox-backdrop") closeInbox();
+    }
+    window.onBackdropClick = onBackdropClick;
+
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") closeInbox();
+    });
+
+    // The Adjust toggle (predefined-permission "simple vs editor" view)
+    // is the only per-handler script we used to inject; with no per-handler
+    // scripts in the inbox shell, it lives here as a global so the
+    // fragment's onclick=showPermissionEditor() still works after swap.
+    window.showPermissionEditor = function () {
+      var simple = document.getElementById("permissions-simple-view");
+      var editor = document.getElementById("permissions-editor-view");
+      if (simple) simple.classList.add("hidden");
+      if (editor) editor.classList.remove("hidden");
+    };
+
+    // Approve becomes available as soon as any name="permissions" input
+    // is checked. Re-run after every right-pane swap and on checkbox
+    // change (via the delegated handler below).
+    function updateApproveState() {
+      var form = document.getElementById("permissions-form");
+      if (!form) return;
+      var approveBtn = document.getElementById("permissions-approve-btn");
+      if (!approveBtn) return;
+      var anyChecked = form.querySelector('input[name="permissions"]:checked') !== null;
+      approveBtn.disabled = !anyChecked;
+    }
+    window.updateApproveState = updateApproveState;
+
+    function applyEmptyState() {
+      var hasCards = !!inboxList.querySelector(".inbox-card");
+      if (hasCards) inboxBody.classList.remove("is-empty");
+      else inboxBody.classList.add("is-empty");
+    }
+
+    function getSelectedId() {
+      var card = inboxList.querySelector(".inbox-card.is-selected");
+      return card ? card.getAttribute("data-request-id") : null;
+    }
+
+    function findNextPendingId(resolvedId) {
+      // Pick the next card after the resolved one, falling back to the
+      // previous, falling back to any other pending card. Operates on
+      // the rendered DOM order (most-recent-first, server-determined).
+      var current = inboxList.querySelector('.inbox-card[data-request-id="' + resolvedId + '"]');
+      if (!current) {
+        var any = inboxList.querySelector(".inbox-card");
+        return any ? any.getAttribute("data-request-id") : null;
+      }
+      var sibling = current.nextElementSibling;
+      while (sibling && !sibling.classList.contains("inbox-card")) sibling = sibling.nextElementSibling;
+      if (!sibling) {
+        sibling = current.previousElementSibling;
+        while (sibling && !sibling.classList.contains("inbox-card")) sibling = sibling.previousElementSibling;
+      }
+      return sibling ? sibling.getAttribute("data-request-id") : null;
+    }
+
+    async function fetchListFragment() {
+      var resp = await fetch("/inbox/list", { credentials: "same-origin" });
+      if (!resp.ok) return;
+      var html = await resp.text();
+      inboxList.innerHTML = html;
+      applyEmptyState();
+    }
+
+    async function fetchDetailFragment(id) {
+      var resp = await fetch("/inbox/detail/" + encodeURIComponent(id), { credentials: "same-origin" });
+      if (!resp.ok) {
+        // The server returns 200 with an "unavailable" fragment for stale ids;
+        // anything else is a real error, leave the pane untouched.
+        return;
+      }
+      var html = await resp.text();
+      inboxDetail.innerHTML = html;
+      updateApproveState();
+    }
+
+    function setSelectedCard(id) {
+      inboxList.querySelectorAll(".inbox-card.is-selected").forEach(function (c) {
+        c.classList.remove("is-selected");
+      });
+      if (!id) return;
+      var card = inboxList.querySelector('.inbox-card[data-request-id="' + id + '"]');
+      if (card) card.classList.add("is-selected");
+    }
+
+    function updateUrl(id) {
+      try {
+        var target = id ? "/inbox?selected=" + encodeURIComponent(id) : "/inbox";
+        history.replaceState(null, "", target);
+      } catch (e) { /* noop in restricted contexts */ }
+    }
+
+    async function selectItem(id) {
+      setSelectedCard(id);
+      updateUrl(id);
+      if (id) await fetchDetailFragment(id);
+    }
+
+    async function advanceAfterResolution(resolvedId) {
+      var nextId = findNextPendingId(resolvedId);
+      await fetchListFragment();
+      if (nextId) {
+        // The list refetch may have dropped the just-resolved card and
+        // shifted indices; re-resolve the highlight against the fresh
+        // DOM rather than the pre-fetch sibling guess.
+        var stillThere = inboxList.querySelector('.inbox-card[data-request-id="' + nextId + '"]');
+        if (!stillThere) nextId = (inboxList.querySelector(".inbox-card") || {}).getAttribute && inboxList.querySelector(".inbox-card").getAttribute("data-request-id");
+      }
+      if (nextId) {
+        await selectItem(nextId);
+      } else {
+        inboxDetail.innerHTML = "";
+        updateUrl(null);
+      }
+    }
+
+    // -- Approve / Deny submission --
+
+    async function submitGrant(form, resolvedId) {
+      var approveBtn = document.getElementById("permissions-approve-btn");
+      var errorBox = document.getElementById("permissions-error");
+      var errorMsg = document.getElementById("permissions-error-message");
+      var manualBox = document.getElementById("permissions-manual-credentials");
+      var progress = document.getElementById("permissions-progress");
+      if (approveBtn) approveBtn.disabled = true;
+      if (errorBox) errorBox.classList.add("hidden");
+      if (manualBox) manualBox.classList.add("hidden");
+      if (progress) progress.classList.remove("hidden");
+
+      var formData = new FormData(form);
+      try {
+        var response = await fetch(form.action, {
+          method: "POST",
+          body: formData,
+          credentials: "same-origin",
+        });
+        if (!response.ok) {
+          var text = await response.text();
+          throw new Error(text || ("HTTP " + response.status));
+        }
+        var data = await response.json();
+        if (data.outcome === "GRANTED" || data.outcome === "DENIED") {
+          await advanceAfterResolution(resolvedId);
+          return;
+        }
+        if (progress) progress.classList.add("hidden");
+        if (data.outcome === "NEEDS_MANUAL_CREDENTIALS") {
+          var cmdEl = document.getElementById("permissions-manual-credentials-command");
+          var msgEl = document.getElementById("permissions-manual-credentials-message");
+          if (cmdEl) cmdEl.textContent = data.set_credentials_example || "";
+          if (msgEl) msgEl.textContent = data.message || "";
+          if (manualBox) manualBox.classList.remove("hidden");
+          updateApproveState();
+          return;
+        }
+        if (errorMsg) errorMsg.textContent = data.message || "Authorization failed.";
+        if (errorBox) errorBox.classList.remove("hidden");
+        if (approveBtn) approveBtn.disabled = false;
+      } catch (err) {
+        if (progress) progress.classList.add("hidden");
+        if (errorMsg) errorMsg.textContent = err && err.message ? err.message : String(err);
+        if (errorBox) errorBox.classList.remove("hidden");
+        if (approveBtn) approveBtn.disabled = false;
+      }
+    }
+
+    window.submitPermissionDeny = function () {
+      var form = document.getElementById("permissions-form");
+      if (!form) return;
+      var resolvedId = getSelectedId();
+      var approveBtn = document.getElementById("permissions-approve-btn");
+      if (approveBtn) approveBtn.disabled = true;
+      var denyUrl = form.action.replace(/\/grant\b/, "/deny");
+      // Fire-and-forget so the user doesn't wait for mngr message round trips,
+      // and so the next-item swap can start immediately. keepalive lets the
+      // request finish even if the page transitions away unexpectedly.
+      fetch(denyUrl, {
+        method: "POST",
+        credentials: "same-origin",
+        keepalive: true,
+      }).catch(function () {});
+      advanceAfterResolution(resolvedId);
+    };
+
+    // -- Event delegation --
+
+    inboxList.addEventListener("click", function (e) {
+      var card = e.target.closest(".inbox-card");
+      if (!card) return;
+      var id = card.getAttribute("data-request-id");
+      if (id) selectItem(id);
+    });
+
+    inboxDetail.addEventListener("submit", function (e) {
+      var form = e.target;
+      if (!form || form.id !== "permissions-form") return;
+      e.preventDefault();
+      submitGrant(form, getSelectedId());
+    });
+
+    inboxDetail.addEventListener("change", function (e) {
+      if (e.target && e.target.name === "permissions") updateApproveState();
+    });
+
+    // -- SSE-driven list refresh (Electron forwards chrome events) --
+
+    if (window.minds && window.minds.onChromeEvent) {
+      window.minds.onChromeEvent(function (evt) {
+        if (!evt || evt.type !== "requests") return;
+        var currentId = getSelectedId();
+        var newIds = Array.isArray(evt.request_ids) ? evt.request_ids.map(String) : [];
+        fetchListFragment().then(function () {
+          if (currentId && newIds.indexOf(currentId) === -1) {
+            inboxDetail.innerHTML = '<div class="permissions-detail"><h1 class="text-xl font-semibold text-zinc-900 leading-tight">This permission request is no longer available</h1></div>';
+            updateUrl(null);
+          }
+        });
+      });
+    }
+
+    // Initial state: set Approve-button availability for the server-rendered
+    // detail, and pick the right empty/non-empty body class.
+    applyEmptyState();
+    updateApproveState();
+  })();
+</script>
+{% endset %}
+<Base title="Inbox"
+      body_class="bg-transparent text-zinc-900 font-sans antialiased"
+      head={{ _head }}
+      scripts={{ _scripts }}>
+  <div id="inbox-backdrop"
+       class="fixed inset-0 bg-black/40 flex items-center justify-center p-6"
+       onclick="onBackdropClick(event)">
+    <div id="inbox-dialog"
+         class="relative w-full max-w-[1000px] h-[80vh] flex flex-col bg-white border border-zinc-200 rounded-2xl shadow-xl overflow-hidden">
+      <div class="flex items-center justify-between px-5 py-3 border-b border-zinc-200">
+        <h1 class="text-sm font-semibold text-zinc-800 uppercase tracking-wider">Inbox</h1>
+        <DialogCloseButton id="inbox-close-btn" onclick="closeInbox()" />
+      </div>
+      <div id="inbox-body" class="flex flex-1 min-h-0 {% if is_empty %}is-empty{% endif %}">
+        <div id="inbox-list" class="w-72 border-r border-zinc-200 overflow-y-auto bg-zinc-50">
+          <InboxList :cards="cards" :selected_id="selected_id" />
+        </div>
+        <div id="inbox-detail" class="flex-1 overflow-y-auto p-6 sm:p-7">
+          {{ detail_html|safe }}
+        </div>
+      </div>
+    </div>
+  </div>
+</Base>

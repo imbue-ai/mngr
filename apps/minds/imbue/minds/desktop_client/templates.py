@@ -379,9 +379,48 @@ def render_auth_error_page(message: str) -> str:
     return CATALOG.render("pages.AuthError", message=message)
 
 
-def render_request_unavailable_page(message: str) -> str:
-    """Render the page shown when a request is already resolved or missing."""
-    return CATALOG.render("pages.RequestUnavailable", message=message)
+def render_inbox_page(
+    cards: Sequence[Mapping[str, str]],
+    selected_id: str = "",
+    detail_html: str = "",
+    is_empty: bool = False,
+) -> str:
+    """Render the full inbox modal page served by ``GET /inbox``.
+
+    ``cards`` is the initial left-list content (most-recent-first).
+    ``selected_id`` highlights one card; ``detail_html`` is the
+    pre-rendered right-pane fragment (handler detail, unavailable
+    fragment, or empty). ``is_empty`` is True when there are no
+    pending requests and the layout collapses to a centered message.
+    """
+    return CATALOG.render(
+        "pages.Inbox",
+        cards=cards,
+        selected_id=selected_id,
+        detail_html=detail_html,
+        is_empty=is_empty,
+    )
+
+
+def render_inbox_list_fragment(
+    cards: Sequence[Mapping[str, str]],
+    selected_id: str = "",
+) -> str:
+    """Render the inbox left-list fragment served by ``GET /inbox/list``."""
+    return CATALOG.render("InboxList", cards=cards, selected_id=selected_id)
+
+
+def render_inbox_unavailable_fragment(
+    message: str = "This permission request is no longer available.",
+) -> str:
+    """Render the inbox right-pane "no longer available" fragment.
+
+    Returned by ``GET /inbox/detail/<id>`` when the id is unknown or
+    already resolved; also innerHTML-swapped into the right pane by the
+    inbox shell JS when an SSE event resolves the currently-selected
+    item.
+    """
+    return CATALOG.render("InboxUnavailable", message=message)
 
 
 # CSS for the recovery page's restart controls, appended to the shared

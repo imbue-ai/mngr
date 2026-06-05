@@ -108,10 +108,10 @@ def test_display_name_returns_path(tmp_path: Path) -> None:
     assert handler.display_name_for_event(event) == "/home/user/data.txt"
 
 
-# -- render_request_page --
+# -- render_request_detail_fragment --
 
 
-def test_render_request_page_shows_path_and_rationale(tmp_path: Path) -> None:
+def test_render_request_detail_fragment_shows_path_and_rationale(tmp_path: Path) -> None:
     handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
     event = create_latchkey_file_sharing_permission_request_event(
         agent_id=str(AgentId()),
@@ -119,26 +119,25 @@ def test_render_request_page_shows_path_and_rationale(tmp_path: Path) -> None:
         access="READ",
         rationale="summarize the doc",
     )
-    response = handler.render_request_page(
+    body = handler.render_request_detail_fragment(
         req_event=event,
         backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
         mngr_forward_origin="http://localhost:8421",
     )
-    assert response.status_code == 200
-    body = bytes(response.body).decode("utf-8")
     assert "/home/user/important.txt" in body
     assert "summarize the doc" in body
     assert "Approve" in body and "Deny" in body
-    # The dialog must show the human-readable access label so the user
+    # The fragment must show the human-readable access label so the user
     # knows what's being granted.
     assert "read-only" in body
-    # The dialog must escape user-controlled values; ensure quoting
-    # uses HTML-safe attributes rather than raw interpolation.
-    # Presence of the form-submit JS tag confirms the dialog wired in.
-    assert "<script>" in body
+    # The fragment is right-pane-only and has no chrome of its own; the
+    # inbox shell owns the backdrop, close button, and submission JS.
+    assert "<html" not in body
+    assert "permissions-backdrop" not in body
+    assert "<script>" not in body
 
 
-def test_render_request_page_marks_write_grants_distinctly(tmp_path: Path) -> None:
+def test_render_request_detail_fragment_marks_write_grants_distinctly(tmp_path: Path) -> None:
     """WRITE grants render the broader human-readable access label."""
     handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
     event = create_latchkey_file_sharing_permission_request_event(
@@ -147,19 +146,18 @@ def test_render_request_page_marks_write_grants_distinctly(tmp_path: Path) -> No
         access="WRITE",
         rationale="edit it",
     )
-    response = handler.render_request_page(
+    body = handler.render_request_detail_fragment(
         req_event=event,
         backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
         mngr_forward_origin="",
     )
-    body = bytes(response.body).decode("utf-8")
     assert "read &amp; write" in body or "read & write" in body
     # The read-only label must not appear when WRITE access is being
-    # requested, otherwise the dialog would be misleading.
+    # requested, otherwise the fragment would be misleading.
     assert "read-only" not in body
 
 
-def test_render_request_page_escapes_html_in_inputs(tmp_path: Path) -> None:
+def test_render_request_detail_fragment_escapes_html_in_inputs(tmp_path: Path) -> None:
     handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
     event = create_latchkey_file_sharing_permission_request_event(
         agent_id=str(AgentId()),
@@ -167,12 +165,11 @@ def test_render_request_page_escapes_html_in_inputs(tmp_path: Path) -> None:
         access="READ",
         rationale="<img src=x onerror=alert(2)>",
     )
-    response = handler.render_request_page(
+    body = handler.render_request_detail_fragment(
         req_event=event,
         backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
         mngr_forward_origin="",
     )
-    body = bytes(response.body).decode("utf-8")
     # Raw HTML must not appear; entities must.
     assert "<script>alert(1)" not in body
     assert "&lt;script&gt;alert(1)" in body
@@ -320,8 +317,8 @@ def test_deny_still_writes_response_when_gateway_delete_fails(tmp_path: Path) ->
 # -- Wiring through the FastAPI dispatcher --
 
 
-def test_request_page_route_dispatches_to_handler(tmp_path: Path) -> None:
-    """GET /requests/<id> for a file-sharing event routes to FileSharingGrantHandler."""
+def test_inbox_detail_route_dispatches_to_handler(tmp_path: Path) -> None:
+    """GET /inbox/detail/<id> for a file-sharing event routes to FileSharingGrantHandler."""
     handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
     event = create_latchkey_file_sharing_permission_request_event(
         agent_id=str(AgentId()),
@@ -332,7 +329,7 @@ def test_request_page_route_dispatches_to_handler(tmp_path: Path) -> None:
     inbox = RequestInbox().add_request(event)
     client = _build_authenticated_client(tmp_path, handler, inbox)
 
-    response = client.get(f"/requests/{event.event_id}")
+    response = client.get(f"/inbox/detail/{event.event_id}")
     assert response.status_code == 200
     assert "/home/user/x.txt" in response.text
 

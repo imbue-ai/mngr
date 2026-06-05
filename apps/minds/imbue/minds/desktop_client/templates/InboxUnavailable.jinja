@@ -1,0 +1,14 @@
+{#def message="This permission request is no longer available." #}
+{#
+  Right-pane fragment shown when ?selected=<id> can't be resolved
+  (unknown id, already-resolved request, externally resolved while
+  open). Served by GET /inbox/detail/<id> for stale ids; also
+  innerHTML-swapped into #inbox-detail by the shell JS when an SSE
+  event resolves the currently-selected item.
+#}
+<div class="permissions-detail">
+  <h1 class="text-xl font-semibold text-zinc-900 leading-tight">
+    This permission request is no longer available
+  </h1>
+  <p class="mt-2 text-zinc-600">{{ message }}</p>
+</div>

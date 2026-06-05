@@ -1,18 +1,18 @@
-"""Latchkey permission-dialog HTML rendering.
+"""Latchkey permission-detail HTML rendering.
 
-The generic permission dialog chrome is provided by the
-``PermissionsDialog`` JinjaX component (plus the smaller PermissionsHeader,
-PermissionsForm, PermissionsManualCredentials, and PermissionsError
-components). Subpage components live under ``templates/pages/`` and
-compose those primitives. This module wraps the two latchkey-specific
-subpages in typed render functions:
+The detail fragment renderers compose the shared Permissions* JinjaX
+components (PermissionsHeader, PermissionsForm,
+PermissionsManualCredentials, PermissionsError) into the right-pane
+body for a single pending latchkey permission request. The inbox shell
+provides the surrounding modal chrome (backdrop, close button, submit
+JS, escape/backdrop dismiss).
 
 * :func:`render_predefined_permission_dialog` renders the
   ``pages.LatchkeyPredefinedPermission`` component (checkbox per detent
   permission schema, with the auth-browser progress notice);
 * :func:`render_file_sharing_permission_dialog` renders the
   ``pages.LatchkeyFileSharingPermission`` component (single hidden
-  ``permissions=file-sharing`` input so the dialog reads as a plain
+  ``permissions=file-sharing`` input so the fragment reads as a plain
   yes/no for the requested path).
 
 Keeping these renderers next to the handlers (rather than in the shared
@@ -26,7 +26,6 @@ from collections.abc import Sequence
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
 from imbue.minds.desktop_client.templates import CATALOG
-from imbue.minds.desktop_client.templates import workspace_accent
 
 
 @pure
@@ -40,7 +39,7 @@ def render_predefined_permission_dialog(
     will_open_browser: bool,
     mngr_forward_origin: str = "",
 ) -> str:
-    """Render the predefined (catalog-backed) permission approval dialog.
+    """Render the predefined (catalog-backed) permission detail fragment.
 
     ``will_open_browser`` controls the in-progress notice shown after the
     user clicks Approve: when True (latchkey will run ``auth browser``),
@@ -49,7 +48,7 @@ def render_predefined_permission_dialog(
     credentials), it shows a generic ``Granting permission...`` message.
 
     ``mngr_forward_origin`` is the bare origin of the ``mngr forward`` plugin;
-    the workspace link in the dialog points at ``{mngr_forward_origin}/goto/<agent>/``.
+    the workspace link in the fragment points at ``{mngr_forward_origin}/goto/<agent>/``.
     """
     return CATALOG.render(
         "pages.LatchkeyPredefinedPermission",
@@ -62,7 +61,6 @@ def render_predefined_permission_dialog(
         permission_schemas=service.permission_schemas,
         description_by_permission_name=service.description_by_permission_name,
         checked_permissions=set(checked_permissions),
-        accent=workspace_accent(agent_id),
         will_open_browser=will_open_browser,
         mngr_forward_origin=mngr_forward_origin,
     )
@@ -79,21 +77,20 @@ def render_file_sharing_permission_dialog(
     access_human_label: str,
     mngr_forward_origin: str = "",
 ) -> str:
-    """Render the file-sharing permission approval dialog.
+    """Render the file-sharing permission detail fragment.
 
-    Mirrors the predefined dialog's chrome, header, rationale card, and
-    submission JS (via the shared ``PermissionsDialog`` /
-    ``PermissionsHeader`` / ``PermissionsForm`` JinjaX components);
+    Mirrors the predefined dialog's header, rationale card, and
+    submission form (via the shared Permissions* JinjaX components);
     swaps the per-permission checkbox list for a short explanation of
     what the agent will be allowed to do with the path.
 
     ``access`` carries the agent's requested access mode (``READ`` or
     ``WRITE``) verbatim; ``access_human_label`` is the lower-case
     human-readable rendering (``"read-only"`` / ``"read & write"``)
-    used in the dialog body.
+    used in the fragment body.
 
     ``mngr_forward_origin`` is the bare origin of the ``mngr forward`` plugin;
-    the workspace link in the dialog points at ``{mngr_forward_origin}/goto/<agent>/``.
+    the workspace link in the fragment points at ``{mngr_forward_origin}/goto/<agent>/``.
     """
     return CATALOG.render(
         "pages.LatchkeyFileSharingPermission",
@@ -105,6 +102,5 @@ def render_file_sharing_permission_dialog(
         access=access,
         access_human_label=access_human_label,
         display_name=file_path,
-        accent=workspace_accent(agent_id),
         mngr_forward_origin=mngr_forward_origin,
     )

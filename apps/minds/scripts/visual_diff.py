@@ -74,7 +74,8 @@ from imbue.minds.desktop_client.templates import render_dev_styleguide_page
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
-from imbue.minds.desktop_client.templates import render_request_unavailable_page
+from imbue.minds.desktop_client.templates import render_inbox_page
+from imbue.minds.desktop_client.templates import render_inbox_unavailable_fragment
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
@@ -376,8 +377,12 @@ def _build_scenarios() -> list[Scenario]:
             builder=lambda: render_auth_error_page(message="This code has already been used."),
         ),
         Scenario(
-            name="request_unavailable",
-            builder=lambda: render_request_unavailable_page(message="This request was already granted."),
+            name="inbox_unavailable_fragment",
+            builder=lambda: render_inbox_unavailable_fragment(message="This request was already granted."),
+        ),
+        Scenario(
+            name="inbox_empty",
+            builder=lambda: render_inbox_page(cards=[], selected_id="", detail_html="", is_empty=True),
         ),
         # -- Dev styleguide ----------------------------------------------
         Scenario(name="dev_styleguide", builder=render_dev_styleguide_page),

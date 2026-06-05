@@ -1,11 +1,12 @@
-{#def agent_id, request_id, ws_name, rationale, file_path, access, access_human_label, display_name, accent, mngr_forward_origin #}
+{#def agent_id, request_id, ws_name, rationale, file_path, access, access_human_label, display_name, mngr_forward_origin #}
 {#
-  Latchkey file-sharing permission request dialog. Composes the
-  Permissions* components; provides a single hidden checked
+  Latchkey file-sharing permission request fragment. Rendered inside the
+  inbox modal's right pane. Provides a single hidden checked
   ``name="permissions"`` input so the Approve button enables on first
-  paint (file sharing has no per-permission choice).
+  paint (file sharing has no per-permission choice). Chrome and form
+  submission JS live in the inbox shell.
 #}
-<PermissionsDialog :display_name="display_name" :accent="accent">
+<div class="permissions-detail">
   <PermissionsHeader :display_name="display_name" :ws_name="ws_name" :agent_id="agent_id" :rationale="rationale" />
 
   <PermissionsForm :request_id="request_id">
@@ -51,4 +52,4 @@
 
   <PermissionsManualCredentials />
   <PermissionsError />
-</PermissionsDialog>
+</div>
