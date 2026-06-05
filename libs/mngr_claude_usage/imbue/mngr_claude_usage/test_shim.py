@@ -1,9 +1,9 @@
 """Integration tests for claude_statusline.sh.
 
-Exercises the provisioned shim shell script directly via subprocess. Lives in a
-``test_*.py`` integration file (not the ``plugin_test.py`` unit file) because it
-spawns ``bash`` against the real shell artifact rather than testing Python in
-isolation -- matching how the sibling writer script is tested in test_writer.py.
+Exercises the provisioned shim shell script directly via subprocess. This is a
+``test_*.py`` integration file because it spawns ``bash`` against the real shell
+artifact rather than testing Python in isolation, matching how the sibling writer
+script is tested in test_writer.py.
 """
 
 from __future__ import annotations

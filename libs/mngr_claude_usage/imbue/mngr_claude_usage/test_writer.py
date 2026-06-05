@@ -17,10 +17,6 @@ from pathlib import Path
 
 import pytest
 
-# The writer_path / events_file fixtures live in conftest.py (shared across the
-# library's shell-script tests) per the repo convention that fixtures belong in
-# conftest, not in individual test files.
-
 
 def _has_jq() -> bool:
     return shutil.which("jq") is not None
@@ -65,15 +61,13 @@ def test_writer_emits_event_with_rate_limits(writer_path: Path, events_file: Pat
     assert event["source"] == "claude/usage"
     assert event["type"] == "cost_snapshot"
     assert event["event_id"].startswith("evt-")
-    # The event timestamp must be canonical UTC ISO 8601 with a fixed 9-digit
-    # fractional part (the writer emits `<date>T<time>.000000000Z`). A bare
-    # `"T" in ts` check would pass on garbage like "garbageT", so regex the full
-    # shape -- including the trailing `Z` that pins it to UTC. The regex alone
-    # can't tell that the calendar fields name a real instant (it would accept
-    # month 13), so also strptime the seconds-resolution `[:19]` prefix. We slice
-    # to 19 chars because strptime's `%f` only parses 1-6 fractional digits and
-    # would choke on the 9-digit fraction; the prefix carries the calendar fields
-    # we want to validate.
+    # The event timestamp is canonical UTC ISO 8601 with a fixed 9-digit
+    # fractional part (the writer emits `<date>T<time>.000000000Z`). The regex
+    # pins the full shape, including the trailing `Z` that anchors it to UTC.
+    # The regex alone can't tell that the calendar fields name a real instant
+    # (it would accept month 13), so also strptime the seconds-resolution `[:19]`
+    # prefix -- sliced to 19 chars because strptime's `%f` only parses 1-6
+    # fractional digits and would choke on the 9-digit fraction.
     timestamp = event["timestamp"]
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{9}Z", timestamp), timestamp
     datetime.strptime(timestamp[:19], "%Y-%m-%dT%H:%M:%S")
@@ -200,10 +194,9 @@ def test_writer_handles_concurrent_appends(writer_path: Path, events_file: Path)
             assert r.returncode == 0, r.stderr
     lines = [line for line in events_file.read_text().splitlines() if line.strip()]
     assert len(lines) == 20
-    # Every distinct submitted event must survive exactly once. Checking only the
-    # line count would miss a bug that duplicated one append while losing another
-    # (count stays 20); reconstructing the set of used_percentage values catches
-    # that. json.loads on each line also fails on any torn/interleaved output.
+    # Every distinct submitted event must survive exactly once: reconstructing the
+    # set of used_percentage values confirms none was dropped or duplicated (a count
+    # check alone would not), and json.loads on each line fails on any torn output.
     seen_percentages = {json.loads(line)["rate_limits"]["five_hour"]["used_percentage"] for line in lines}
     assert seen_percentages == {float(i) for i in range(20)}
 

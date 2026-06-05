@@ -215,11 +215,11 @@ def test_hookimpl_skips_non_claude_agent(
 ) -> None:
     """The hookimpl filters with isinstance(agent, ClaudeAgent). A real non-Claude
     agent (a plain BaseAgent of the 'generic' type) must be a no-op -- no host
-    commands dir, no settings.local.json. Because the agent runs on a real host,
-    removing the isinstance guard would make provisioning actually run and create
-    those artifacts, so these assertions fail for the right reason rather than on
-    a fake object's missing methods. Real ClaudeAgent provisioning is exercised in
-    mngr_claude's own tests; this test just locks in the filter behavior."""
+    commands dir, no settings.local.json. The agent runs on a real host, so
+    removing the isinstance guard would let provisioning actually run and create
+    those artifacts, which these assertions would then catch. Real ClaudeAgent
+    provisioning is exercised in mngr_claude's own tests; this test just locks in
+    the filter behavior."""
     work_dir = tmp_path / "work"
     work_dir.mkdir()
     agent = create_test_agent(
