@@ -1826,7 +1826,7 @@ def test_gc_volumes_handles_delete_error_with_continue(temp_host_dir: Path, temp
 
     # The volume is orphaned because its owning host is DESTROYED (not because
     # the host list is empty -- an empty host list is now treated as a failed
-    # discovery and skipped, see test_gc_volumes_skips_when_discovery_returns_no_hosts).
+    # discovery and skipped, see test_gc_volumes_does_not_delete_when_no_hosts_discovered).
     destroyed_host_ref = DiscoveredHost(
         host_id=destroyed_host_id,
         host_name=HostName("destroyed-host"),
