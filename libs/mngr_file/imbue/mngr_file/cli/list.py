@@ -266,8 +266,11 @@ def _get_field_value(entry: FileEntry, field: str) -> str:
             return entry.modified if entry.modified is not None else "-"
         case "permissions":
             return entry.permissions if entry.permissions is not None else "-"
-        case _:
-            return ""
+        case _ as unhandled:
+            # Fields are validated against _ALL_FIELDS before rendering, so this is
+            # unreachable for legitimate input. If a new field is added to _ALL_FIELDS
+            # without a case here, crash loudly rather than render a silent blank column.
+            raise MngrError(f"No display formatter for field: {unhandled}")
 
 
 @pure

@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr_file.cli.list import _emit_list_result
@@ -143,8 +144,9 @@ def test_get_field_value(field: str, entry_kwargs: dict[str, Any], expected: str
     assert _get_field_value(entry, field) == expected
 
 
-def test_get_field_value_returns_empty_for_unknown_field() -> None:
-    assert _get_field_value(_make_file_entry(), "nonexistent") == ""
+def test_get_field_value_raises_for_unknown_field() -> None:
+    with pytest.raises(MngrError, match="No display formatter for field: nonexistent"):
+        _get_field_value(_make_file_entry(), "nonexistent")
 
 
 # --- _entry_to_field_mapping / _entry_to_json_dict ---
