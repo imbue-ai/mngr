@@ -1190,8 +1190,24 @@ def test_get_or_create_profile_dir_raises_on_non_string_profile(tmp_path: Path) 
     config_path = base_dir / "config.toml"
     config_path.write_text("profile = 12345\n")
 
-    with pytest.raises(ConfigParseError, match="'profile' in .* must be a non-empty string"):
+    with pytest.raises(ConfigParseError, match="'profile' in .* must be a string"):
         get_or_create_profile_dir(base_dir)
+
+
+def test_get_or_create_profile_dir_regenerates_on_empty_profile(tmp_path: Path) -> None:
+    """An empty-string 'profile' value falls through to self-heal (mint a new profile)."""
+    base_dir = tmp_path / "mngr"
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    config_path = base_dir / "config.toml"
+    config_path.write_text('profile = ""\n')
+
+    result = get_or_create_profile_dir(base_dir)
+
+    assert result.exists()
+    assert result.parent == base_dir / "profiles"
+    # config.toml is rewritten with the freshly minted profile id.
+    assert config_path.read_text().strip() != 'profile = ""'
 
 
 def test_get_or_create_profile_dir_returns_same_profile_on_subsequent_calls(tmp_path: Path) -> None:

@@ -343,20 +343,21 @@ def get_or_create_profile_dir(base_dir: Path) -> Path:
     root_config = try_load_toml(config_path)
     if root_config is not None:
         profile_id = root_config.get("profile")
-        if profile_id is not None:
-            # A present `profile` key must be a non-empty string. A non-string
-            # (e.g. `profile = 12345` from a hand-edit) would otherwise blow up
-            # opaquely in `profiles_dir / profile_id`; surface it as a clear
-            # config error instead.
-            if not isinstance(profile_id, str) or not profile_id:
-                raise ConfigParseError(f"'profile' in {config_path} must be a non-empty string, got {profile_id!r}")
+        # A present `profile` key that isn't a string (e.g. `profile = 12345`
+        # from a hand-edit) would otherwise blow up opaquely in
+        # `profiles_dir / profile_id`; surface it as a clear config error
+        # instead. An empty string falls through to self-heal below, matching
+        # the original truthiness behavior.
+        if profile_id is not None and not isinstance(profile_id, str):
+            raise ConfigParseError(f"'profile' in {config_path} must be a string, got {profile_id!r}")
+        if profile_id:
             profile_dir = profiles_dir / profile_id
             profile_dir.mkdir(parents=True, exist_ok=True)
             return profile_dir
 
-    # No valid config.toml or no profile specified -- create a new profile.
-    # config.toml is mngr-owned and holds only the profile pointer, so rewriting
-    # it here intentionally does not preserve any other content.
+    # No valid config.toml or no (or empty) profile specified -- create a new
+    # profile. config.toml is mngr-owned and holds only the profile pointer, so
+    # rewriting it here intentionally does not preserve any other content.
     profile_id = uuid4().hex
     profile_dir = profiles_dir / profile_id
     profile_dir.mkdir(parents=True, exist_ok=True)
