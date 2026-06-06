@@ -556,8 +556,18 @@ def emit_discovery_events_for_host(
             if discovered_agents:
                 provider_name = discovered_agents[0].provider_name
             else:
-                provider_name = ProviderInstanceName("unknown")
-                logger.debug("Could not infer provider_name for host {} (no agents), using 'unknown'", host.id)
+                # We cannot determine which provider owns this host (none was passed and there
+                # are no agents to infer from). Emitting a host event with a fabricated provider
+                # name would poison the authoritative stream: downstream resolution keys off
+                # provider_name and would resolve this host to a non-existent provider. Skip the
+                # host emit -- the next full discovery snapshot records the host under its real
+                # provider. There are no agents to emit either, so nothing else is lost here.
+                logger.warning(
+                    "Skipping discovery host event for {}: provider could not be determined "
+                    "(no provider passed and host has no agents)",
+                    host.id,
+                )
+                return
 
         # Emit host event
         discovered_host = discovered_host_from_online_host(host, provider_name)

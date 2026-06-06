@@ -30,6 +30,7 @@ from imbue.mngr.api.discovery_events import discovered_host_from_agent_details
 from imbue.mngr.api.discovery_events import emit_agent_destroyed
 from imbue.mngr.api.discovery_events import emit_agent_discovered
 from imbue.mngr.api.discovery_events import emit_discovery_error_event
+from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.api.discovery_events import emit_host_destroyed
 from imbue.mngr.api.discovery_events import emit_host_discovered
 from imbue.mngr.api.discovery_events import emit_host_ssh_info
@@ -270,6 +271,29 @@ def test_build_ssh_info_from_host_returns_ssh_info_for_remote_host() -> None:
 def test_build_ssh_info_from_host_returns_none_for_local_host() -> None:
     result = _build_ssh_info_from_host(cast(OnlineHostInterface, _FakeLocalHost()))
     assert result is None
+
+
+class _FakeHostNoAgents:
+    """Online-host stub that reports no agents, so its provider cannot be inferred."""
+
+    def __init__(self) -> None:
+        self.id = HostId.generate()
+
+    def discover_agents(self) -> list[DiscoveredAgent]:
+        return []
+
+
+def test_emit_discovery_events_for_host_skips_when_provider_unknown(temp_config: MngrConfig) -> None:
+    """With no provider passed and no agents to infer from, skip emitting rather than fabricating 'unknown'."""
+    host = cast(OnlineHostInterface, _FakeHostNoAgents())
+
+    with capture_loguru(level="WARNING") as log_output:
+        emit_discovery_events_for_host(temp_config, host)
+
+    # No host event should have been written -- a fabricated 'unknown' provider would poison the stream.
+    events_path = get_discovery_events_path(temp_config)
+    assert not events_path.exists() or "HOST_DISCOVERED" not in events_path.read_text()
+    assert "provider could not be determined" in log_output.getvalue()
 
 
 def test_extract_agents_and_hosts_deduplicates_hosts() -> None:
