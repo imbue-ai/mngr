@@ -274,13 +274,16 @@ def push_per_env_modal_secret(
         raise ModalDeployError(f"`modal secret create {secret_name}` failed (exit {result.returncode}): {stderr}")
 
 
-def ensure_modal_env(name: DevEnvName, *, parent_cg: ConcurrencyGroup) -> None:
+def ensure_modal_env(name: DevEnvName, *, parent_cg: ConcurrencyGroup, modal_binary: str = "modal") -> None:
     """Create the Modal env if it doesn't already exist; otherwise no-op.
 
-    Modal's "already exists" failure has shifted wording across
-    versions; both known variants contain the substring ``exist``.
+    Matches the specific "already exists" phrase (as
+    :func:`providers.modal_env.create_modal_env` does). The bare substring
+    ``exist`` would also match "does not exist" / "nonexistent", silently
+    treating e.g. a "workspace does not exist" failure as success and
+    proceeding to deploy against an env that was never created.
     """
-    command = ["modal", "environment", "create", str(name)]
+    command = [modal_binary, "environment", "create", str(name)]
     cg = parent_cg.make_concurrency_group(name=f"modal-env-create-{name}")
     with cg:
         result = cg.run_process_to_completion(
@@ -292,7 +295,7 @@ def ensure_modal_env(name: DevEnvName, *, parent_cg: ConcurrencyGroup) -> None:
     if result.returncode == 0:
         return
     message = (result.stderr + result.stdout).lower()
-    if "exist" in message:
+    if "already exists" in message:
         return
     stderr = result.stderr.strip() or result.stdout.strip()
     raise ModalDeployError(f"`modal environment create {name}` failed (exit {result.returncode}): {stderr}")

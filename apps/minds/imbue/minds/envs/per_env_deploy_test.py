@@ -8,12 +8,55 @@ pool-host queries, the latter for the LiteLLM proxy's Prisma-managed
 backing store). Both DSNs come from the same per-env Neon project.
 """
 
+import stat
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
 from pydantic import SecretStr
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.envs.per_env_deploy import ModalDeployError
 from imbue.minds.envs.per_env_deploy import compute_per_env_overrides
+from imbue.minds.envs.per_env_deploy import ensure_modal_env
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.providers.neon_db import NeonProjectRecord
 from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
+
+
+@pytest.fixture
+def _root_cg() -> Iterator[ConcurrencyGroup]:
+    cg = ConcurrencyGroup(name="per-env-deploy-test-root")
+    with cg:
+        yield cg
+
+
+def _make_fake_modal_binary(tmp_path: Path, *, exit_code: int, stderr: str = "") -> Path:
+    stderr_path = tmp_path / "_fake_modal_stderr.txt"
+    stderr_path.write_text(stderr)
+    script = tmp_path / "modal"
+    script.write_text(f"#!/usr/bin/env bash\ncat {stderr_path} >&2\nexit {exit_code}\n")
+    script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return script
+
+
+def test_ensure_modal_env_succeeds_on_zero_exit(tmp_path: Path, _root_cg: ConcurrencyGroup) -> None:
+    fake = _make_fake_modal_binary(tmp_path, exit_code=0)
+    ensure_modal_env(DevEnvName("dev-josh"), parent_cg=_root_cg, modal_binary=str(fake))
+
+
+def test_ensure_modal_env_tolerates_already_exists(tmp_path: Path, _root_cg: ConcurrencyGroup) -> None:
+    fake = _make_fake_modal_binary(tmp_path, exit_code=1, stderr="Environment 'dev-josh' already exists")
+    ensure_modal_env(DevEnvName("dev-josh"), parent_cg=_root_cg, modal_binary=str(fake))
+
+
+def test_ensure_modal_env_raises_on_does_not_exist(tmp_path: Path, _root_cg: ConcurrencyGroup) -> None:
+    # The regression: a "does not exist" failure must NOT be swallowed by a
+    # bare "exist" substring match (which would proceed to deploy against an
+    # env that was never created).
+    fake = _make_fake_modal_binary(tmp_path, exit_code=1, stderr="Workspace 'minds-dev' does not exist")
+    with pytest.raises(ModalDeployError, match="does not exist"):
+        ensure_modal_env(DevEnvName("dev-josh"), parent_cg=_root_cg, modal_binary=str(fake))
 
 
 def _fake_neon_record() -> NeonProjectRecord:
