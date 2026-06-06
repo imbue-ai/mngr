@@ -2169,9 +2169,12 @@ def test_get_orphaned_source_dirs_deletes_clean_clone(
     _make_clone_with_remote(temp_git_repo, clone)
     register_generated_source_dir(local_host, clone)
 
-    deletable, kept = _get_orphaned_source_dirs(host=local_host, provider_name=local_provider.name)
+    deletable, kept_unpushed, kept_listing_failed = _get_orphaned_source_dirs(
+        host=local_host, provider_name=local_provider.name
+    )
     assert [info.path for info in deletable] == [clone]
-    assert kept == []
+    assert kept_unpushed == []
+    assert kept_listing_failed == []
 
 
 def test_get_orphaned_source_dirs_keeps_clone_with_unpushed_branch(
@@ -2182,9 +2185,30 @@ def test_get_orphaned_source_dirs_keeps_clone_with_unpushed_branch(
     _make_clone_with_remote(temp_git_repo, clone, extra_local_branches=("mngr/x",))
     register_generated_source_dir(local_host, clone)
 
-    deletable, kept = _get_orphaned_source_dirs(host=local_host, provider_name=local_provider.name)
+    deletable, kept_unpushed, kept_listing_failed = _get_orphaned_source_dirs(
+        host=local_host, provider_name=local_provider.name
+    )
     assert deletable == []
-    assert [info.path for info in kept] == [clone]
+    assert [info.path for info in kept_unpushed] == [clone]
+    assert kept_listing_failed == []
+
+
+@pytest.mark.allow_warnings(match=r"(?s)Failed to list local branches in .*; treating as possibly-unpushed")
+def test_get_orphaned_source_dirs_separates_branch_listing_failure(
+    local_host: Host, local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """A registered source dir whose branches can't be listed is kept, but reported as a listing
+    failure rather than as genuine unpushed branches, so the user-facing message is accurate."""
+    not_a_repo = tmp_path / "not-a-repo"
+    not_a_repo.mkdir()
+    register_generated_source_dir(local_host, not_a_repo)
+
+    deletable, kept_unpushed, kept_listing_failed = _get_orphaned_source_dirs(
+        host=local_host, provider_name=local_provider.name
+    )
+    assert deletable == []
+    assert kept_unpushed == []
+    assert [info.path for info in kept_listing_failed] == [not_a_repo]
 
 
 # (?s) so .* spans git's multi-line stderr (the "not a git repository" message can

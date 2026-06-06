@@ -80,6 +80,14 @@ class GcResult(MutableModel):
             "not present on any remote. Delete the branches (or push them) to allow future GC."
         ),
     )
+    source_dirs_kept_due_to_branch_listing_failure: list[WorkDirInfo] = Field(
+        default_factory=list,
+        description=(
+            "Source repositories left in place because their local branches could not be listed "
+            "(a git error), not because of genuine unpushed branches. Re-run GC once the repo is "
+            "readable; nothing was deleted, to avoid data loss."
+        ),
+    )
     machines_deleted: list[DiscoveredHost] = Field(
         default_factory=list,
         description="Machines that were deleted (removing records of old destroyed hosts)",
