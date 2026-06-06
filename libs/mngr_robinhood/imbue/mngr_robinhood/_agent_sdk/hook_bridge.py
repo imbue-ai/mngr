@@ -176,6 +176,9 @@ class HookBridge(MutableModel):
     record_denial: SkipValidation[Callable[[dict[str, Any]], None]] = Field(
         description="Sink for permission denials, surfaced in ResultMessage.permission_denials"
     )
+    preapproved_tools: frozenset[str] = Field(
+        description="Tools pre-approved via allowed_tools; can_use_tool is not consulted for these"
+    )
     settings_dir: Path = Field(description="Temp dir holding the hooks --settings file")
     settings_path: Path = Field(description="Path to the hooks --settings JSON file")
 
@@ -202,6 +205,10 @@ class HookBridge(MutableModel):
 
     def _dispatch_permission(self, callback: Callable[..., Any], payload: dict[str, Any]) -> dict[str, Any]:
         tool_name = payload.get("tool_name", "")
+        # A tool pre-approved via allowed_tools must run without consulting can_use_tool (the real SDK
+        # only consults the callback for non-pre-approved tools); allow it without calling the callback.
+        if tool_name in self.preapproved_tools:
+            return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow"}}
         raw_tool_input = payload.get("tool_input")
         tool_input = raw_tool_input if isinstance(raw_tool_input, dict) else {}
         tool_use_id = payload.get("tool_use_id")
@@ -265,6 +272,7 @@ def start_hook_bridge(
         portal_context=portal_context,
         registry=registry,
         record_denial=record_denial,
+        preapproved_tools=frozenset(options.allowed_tools or ()),
         settings_dir=settings_dir,
         settings_path=settings_path,
     )

@@ -178,3 +178,23 @@ def test_bridge_dispatch_unknown_hook_id_returns_empty() -> None:
     finally:
         bridge.stop()
     assert result == {}
+
+
+def test_bridge_preapproved_tool_allows_without_consulting_callback() -> None:
+    consulted: list[str] = []
+
+    async def can_use_tool(
+        name: str, tool_input: dict[str, Any], context: ToolPermissionContext
+    ) -> PermissionResultAllow | PermissionResultDeny:
+        consulted.append(name)
+        return PermissionResultDeny(behavior="deny", message="should not be consulted", interrupt=False)
+
+    options = ClaudeAgentOptions(can_use_tool=can_use_tool, allowed_tools=["Bash"])
+    bridge = start_hook_bridge(options, _discard_denial)
+    try:
+        result = _post_to_bridge(bridge, _only_hook_id(bridge), {"tool_name": "Bash", "tool_input": {"command": "x"}})
+    finally:
+        bridge.stop()
+    # A pre-approved tool is allowed without ever calling the callback.
+    assert consulted == []
+    assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
