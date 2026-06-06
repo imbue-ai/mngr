@@ -22,6 +22,7 @@ from collections.abc import Iterator
 from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
+from typing import assert_never
 
 from loguru import logger
 from pydantic import Field
@@ -239,7 +240,8 @@ def _handle_uncommitted_changes(
             logger.debug("Clobbering uncommitted changes")
             git_ctx.git_reset_hard(path)
             return False
-    raise MngrError(f"Unhandled UncommittedChangesMode: {uncommitted_changes}")
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 @contextmanager
