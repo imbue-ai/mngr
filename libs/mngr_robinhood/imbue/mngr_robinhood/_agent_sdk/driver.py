@@ -472,13 +472,19 @@ def _baseline_seen_bytes_after_adoption(session: LiveSession) -> None:
     events_target = session.events_target
     if agent is None or events_target is None:
         return
-    poll_until(
+    is_ready = poll_until(
         lambda: agent.get_lifecycle_state() == AgentLifecycleState.WAITING,
         timeout=AGENT_READY_TIMEOUT_SECONDS,
         poll_interval=POLL_INTERVAL_SECONDS,
     )
+    if not is_ready:
+        logger.warning("Forked SDK agent {} did not reach WAITING within timeout; baselining anyway", agent.name)
     checker = _TranscriptStabilityChecker(events_target=events_target)
-    poll_until(checker.is_stable, timeout=AGENT_READY_TIMEOUT_SECONDS, poll_interval=_ADOPTION_SETTLE_POLL_SECONDS)
+    is_settled = poll_until(
+        checker.is_stable, timeout=AGENT_READY_TIMEOUT_SECONDS, poll_interval=_ADOPTION_SETTLE_POLL_SECONDS
+    )
+    if not is_settled:
+        logger.warning("Forked SDK agent {} transcript did not settle within timeout; baselining anyway", agent.name)
     session.seen_bytes = checker.last_length
 
 
