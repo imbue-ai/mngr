@@ -1205,6 +1205,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         if options.git and options.git.base_branch:
             base_branch_name = options.git.base_branch
         else:
+            # Default to the source repo's current branch. "main" is a deliberate
+            # convenience fallback for the rare case where the branch cannot be read
+            # (empty/failed rev-parse); callers whose source default branch differs
+            # (e.g. "master") should pass an explicit base_branch.
             base_branch_name = (
                 _git_command_stdout(source_host, "git rev-parse --abbrev-ref HEAD", source_path) or "main"
             )
