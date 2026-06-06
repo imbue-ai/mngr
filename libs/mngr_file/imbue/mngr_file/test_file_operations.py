@@ -19,7 +19,7 @@ def test_list_files_on_localhost(temp_mngr_ctx: MngrContext) -> None:
     )
     entries = list_files_on_host(
         host=resolved.host,
-        directory=resolved.base_path,
+        directory=resolved.host_base_path,
         is_recursive=False,
     )
     # The host dir should contain at least some standard files/dirs
@@ -38,7 +38,7 @@ def test_put_and_get_file_on_localhost(temp_mngr_ctx: MngrContext, tmp_path: Pat
     # Write a test file
     test_content = b"integration test content 82749"
     test_file_name = "test-file-integration-82749.txt"
-    test_path = resolved.base_path / test_file_name
+    test_path = resolved.host_base_path / test_file_name
     resolved.host.write_file(test_path, test_content)
 
     # Read it back
@@ -48,7 +48,7 @@ def test_put_and_get_file_on_localhost(temp_mngr_ctx: MngrContext, tmp_path: Pat
     # List the directory and verify the file appears
     entries = list_files_on_host(
         host=resolved.host,
-        directory=resolved.base_path,
+        directory=resolved.host_base_path,
         is_recursive=False,
     )
     names = {e.name for e in entries}
@@ -72,14 +72,14 @@ def test_list_files_recursive_on_localhost(temp_mngr_ctx: MngrContext) -> None:
     )
 
     # Create a nested structure
-    nested_dir = resolved.base_path / "test-nested-dir-83921"
+    nested_dir = resolved.host_base_path / "test-nested-dir-83921"
     nested_dir.mkdir(exist_ok=True)
     nested_file = nested_dir / "nested-file.txt"
     nested_file.write_text("nested content")
 
     entries = list_files_on_host(
         host=resolved.host,
-        directory=resolved.base_path,
+        directory=resolved.host_base_path,
         is_recursive=True,
     )
     names = {e.name for e in entries}

@@ -102,7 +102,7 @@ def file_get(ctx: click.Context, **kwargs: Any) -> None:
     # Read file -- prefer online host, fall back to volume
     with log_span("Reading file"):
         if resolved.is_online:
-            full_path = resolve_full_path(resolved.base_path, opts.path)
+            full_path = resolve_full_path(resolved.host_base_path, opts.path)
             content = resolved.host.read_file(full_path)
             display_path = full_path
         else:

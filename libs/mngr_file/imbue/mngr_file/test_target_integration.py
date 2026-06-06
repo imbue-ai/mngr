@@ -26,7 +26,7 @@ def test_resolve_file_target_resolves_local_host(temp_mngr_ctx: MngrContext) -> 
     )
     assert result.is_online
     assert not result.is_agent
-    assert result.base_path.is_dir()
+    assert result.host_base_path.is_dir()
 
 
 def test_resolve_file_target_host_rejects_relative_to_state(temp_mngr_ctx: MngrContext) -> None:

@@ -41,12 +41,15 @@ def resolve_full_path(base_path: Path, user_path: str) -> Path:
 @pure
 def _compute_agent_base_path(
     relative_to: PathRelativeTo,
-    work_dir: Path,
+    work_dir: Path | None,
     host_dir: Path,
     agent_id: AgentId,
 ) -> Path:
     match relative_to:
         case PathRelativeTo.WORK:
+            # Callers guarantee a work_dir before requesting a WORK-relative base path
+            # (resolve raises UserInputError when it is missing); STATE/HOST never read it.
+            assert work_dir is not None, "work_dir is required for WORK-relative paths"
             return work_dir
         case PathRelativeTo.STATE:
             return get_agent_state_dir_path(host_dir, agent_id)
@@ -109,7 +112,11 @@ class ResolveFileTargetResult(FrozenModel):
 
     online_host: OnlineHostInterface | None = Field(default=None, description="Online host for direct access")
     volume: Volume | None = Field(default=None, description="Volume for offline access")
-    base_path: Path = Field(description="Base path for resolving relative paths")
+    base_path: Path | None = Field(
+        default=None,
+        description="Base path for resolving host-relative paths. None when the host is offline, "
+        "since no host-relative base path exists (offline access goes through compute_volume_path).",
+    )
     is_agent: bool = Field(description="Whether the target is an agent (vs a host)")
     agent_id: AgentId | None = Field(default=None, description="Agent ID if target is an agent")
     relative_to: PathRelativeTo = Field(description="Path resolution mode")
@@ -123,6 +130,16 @@ class ResolveFileTargetResult(FrozenModel):
                 "Use --relative-to state or --relative-to host for offline access."
             )
         return self.online_host
+
+    @property
+    def host_base_path(self) -> Path:
+        """Get the host-relative base path, raising if the host is offline (no such path exists)."""
+        if self.base_path is None:
+            raise MngrError(
+                "Host is offline and this operation requires a host-relative base path. "
+                "Use --relative-to state or --relative-to host for offline access."
+            )
+        return self.base_path
 
     @property
     def is_online(self) -> bool:
@@ -231,9 +248,7 @@ def _resolve_agent_target(
 
     # When online, get work_dir from the host's agent list
     work_dir: Path | None = None
-    host_dir: Path | None = None
     if online_host is not None:
-        host_dir = online_host.host_dir
         for agent_ref in online_host.discover_agents():
             if agent_ref.agent_id == discovered_agent.agent_id:
                 work_dir = agent_ref.work_dir
@@ -253,25 +268,17 @@ def _resolve_agent_target(
             "Use --relative-to state or --relative-to host for offline access."
         )
 
-    # Compute a synthetic host_dir for path computation when offline. NOTE: the resulting
-    # base_path sentinel never affects offline behavior. get/put read base_path only inside
-    # their `if resolved.is_online` branch; list reads it unconditionally to build a
-    # `directory`, but discards that value when offline and instead resolves the location via
-    # compute_volume_path(). So this sentinel is never observed downstream; it exists only to
-    # satisfy _compute_agent_base_path's non-None signature. Do not start trusting it as a
-    # real path.
-    if host_dir is None:
-        host_dir = Path("/mngr-host-dir")
-
-    # The work_dir sentinel below is likewise never observed: for relative_to == WORK a None
-    # work_dir has already raised above, and for STATE/HOST _compute_agent_base_path does not
-    # read work_dir at all. The fallback only satisfies the non-None signature.
-    base_path = _compute_agent_base_path(
-        relative_to=relative_to,
-        work_dir=work_dir if work_dir is not None else Path("/unknown"),
-        host_dir=host_dir,
-        agent_id=discovered_agent.agent_id,
-    )
+    # A host-relative base_path only exists when the host is online. Offline access never reads
+    # it (get/put gate on is_online; list resolves via compute_volume_path()), so leave it None
+    # rather than fabricating a fake path that could silently flow downstream.
+    base_path: Path | None = None
+    if online_host is not None:
+        base_path = _compute_agent_base_path(
+            relative_to=relative_to,
+            work_dir=work_dir,
+            host_dir=online_host.host_dir,
+            agent_id=discovered_agent.agent_id,
+        )
     logger.debug("Resolved agent target: base_path={}, is_online={}", base_path, online_host is not None)
 
     return ResolveFileTargetResult(
@@ -297,12 +304,8 @@ def _resolve_host_target(
         target_display_name=f"Host '{discovered_host.host_name}'",
     )
 
-    if online_host is not None:
-        base_path = online_host.host_dir
-    else:
-        # Sentinel: this base_path never affects offline behavior (see note in
-        # _resolve_agent_target); offline host listing resolves via compute_volume_path().
-        base_path = Path("/mngr-host-dir")
+    # base_path only exists when online; offline host listing resolves via compute_volume_path().
+    base_path = online_host.host_dir if online_host is not None else None
 
     logger.debug("Resolved host target: base_path={}, is_online={}", base_path, online_host is not None)
 

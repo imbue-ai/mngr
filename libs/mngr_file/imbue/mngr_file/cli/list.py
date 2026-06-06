@@ -382,12 +382,6 @@ def file_list(ctx: click.Context, **kwargs: Any) -> None:
             relative_to=relative_to,
         )
 
-    # Determine directory to list
-    if opts.path is not None:
-        directory = resolve_full_path(resolved.base_path, opts.path)
-    else:
-        directory = resolved.base_path
-
     # Determine fields
     if opts.fields is not None:
         fields = tuple(f.strip() for f in opts.fields.split(","))
@@ -405,6 +399,10 @@ def file_list(ctx: click.Context, **kwargs: Any) -> None:
 
     # List files -- prefer online host, fall back to volume
     if resolved.is_online:
+        if opts.path is not None:
+            directory = resolve_full_path(resolved.host_base_path, opts.path)
+        else:
+            directory = resolved.host_base_path
         entries = list_files_on_host(
             host=resolved.host,
             directory=directory,

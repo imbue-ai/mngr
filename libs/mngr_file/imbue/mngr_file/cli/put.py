@@ -125,7 +125,7 @@ def file_put(ctx: click.Context, **kwargs: Any) -> None:
     # Write file -- prefer online host, fall back to volume
     with log_span("Writing file"):
         if resolved.is_online:
-            full_path = resolve_full_path(resolved.base_path, opts.path)
+            full_path = resolve_full_path(resolved.host_base_path, opts.path)
             resolved.host.write_file(full_path, content, mode=opts.mode)
             display_path = full_path
         else:

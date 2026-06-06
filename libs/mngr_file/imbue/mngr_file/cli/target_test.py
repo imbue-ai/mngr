@@ -131,3 +131,28 @@ def test_resolve_file_target_result_is_online_false_when_no_host() -> None:
         relative_to=PathRelativeTo.HOST,
     )
     assert result.is_online is False
+
+
+def test_resolve_file_target_result_host_base_path_raises_when_none() -> None:
+    result = ResolveFileTargetResult(
+        online_host=None,
+        volume=None,
+        base_path=None,
+        is_agent=False,
+        agent_id=None,
+        relative_to=PathRelativeTo.HOST,
+    )
+    with pytest.raises(MngrError, match="offline"):
+        _ = result.host_base_path
+
+
+def test_resolve_file_target_result_host_base_path_returns_path_when_set() -> None:
+    result = ResolveFileTargetResult(
+        online_host=None,
+        volume=None,
+        base_path=Path("/test"),
+        is_agent=False,
+        agent_id=None,
+        relative_to=PathRelativeTo.HOST,
+    )
+    assert result.host_base_path == Path("/test")
