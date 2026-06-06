@@ -965,7 +965,12 @@ def _parse_commands(raw_commands: dict[str, dict[str, Any]]) -> dict[str, Comman
     return commands
 
 
-def _parse_create_templates(raw_templates: dict[str, dict[str, Any]]) -> dict[CreateTemplateName, CreateTemplate]:
+def _parse_create_templates(
+    raw_templates: dict[str, dict[str, Any]],
+    *,
+    strict: bool = True,
+    silent: bool = False,
+) -> dict[CreateTemplateName, CreateTemplate]:
     """Parse create templates from config.
 
     Format: create_templates.{template_name}.{param_name} = value
@@ -984,16 +989,30 @@ def _parse_create_templates(raw_templates: dict[str, dict[str, Any]]) -> dict[Cr
 
     for template_name, raw_options in raw_templates.items():
         raw_options = _normalize_field_keys(raw_options, f"create_templates.{template_name}")
-        # make sure the options don't define anything that cannot be handled
-        # (an ``__extend`` suffix is a valid operator on any CLI option key, so
-        # strip it before checking against the CreateCliOptions schema).
-        for field in raw_options.keys():
-            base_field = bare_key(field) if is_extend_key(field) else field
-            if base_field not in CreateCliOptions.model_fields:
-                raise ConfigParseError(
-                    f"Unknown field '{field}' in create_templates.{template_name}. Valid fields: {sorted(CreateCliOptions.model_fields.keys())}"
-                )
-        # fine, add the template
+        # Make sure the options don't define anything that cannot be handled.
+        # An ``__extend`` suffix is a valid operator on any CLI option key, so
+        # strip it before checking against the CreateCliOptions schema. Honor the
+        # same forward-compat policy the other sub-parsers use: under strict=True
+        # an unknown option is fatal (catches typos in ``config set``), but under
+        # strict=False (MNGR_ALLOW_UNKNOWN_CONFIG) it is warned-and-dropped so a
+        # config written for a newer mngr that adds a ``create`` option doesn't
+        # break an older mngr; silent=True suppresses the warning entirely.
+        unknown_fields = {
+            field
+            for field in raw_options
+            if (bare_key(field) if is_extend_key(field) else field) not in CreateCliOptions.model_fields
+        }
+        if unknown_fields:
+            msg = (
+                f"Unknown fields in create_templates.{template_name}: {sorted(unknown_fields)}. "
+                f"Valid fields: {sorted(CreateCliOptions.model_fields.keys())}"
+            )
+            if strict:
+                raise ConfigParseError(msg)
+            if not silent:
+                logger.warning(msg)
+            for field in unknown_fields:
+                del raw_options[field]
         templates[CreateTemplateName(template_name)] = CreateTemplate.model_construct(options=raw_options)
 
     return templates
@@ -1042,7 +1061,9 @@ def parse_config(
     )
     kwargs["commands"] = _parse_commands(raw.pop("commands", {})) if "commands" in raw else {}
     kwargs["create_templates"] = (
-        _parse_create_templates(raw.pop("create_templates", {})) if "create_templates" in raw else {}
+        _parse_create_templates(raw.pop("create_templates", {}), strict=strict, silent=silent)
+        if "create_templates" in raw
+        else {}
     )
     kwargs["retry"] = (
         _parse_retry_config(raw.pop("retry", {}), strict=strict, silent=silent) if "retry" in raw else None
