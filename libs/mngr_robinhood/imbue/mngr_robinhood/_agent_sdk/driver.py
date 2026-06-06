@@ -135,13 +135,24 @@ def start_session(options: ClaudeAgentOptions) -> LiveSession:
     """Build the mngr context + concurrency group for a session (the agent is created lazily)."""
     normalize_credentials_env()
     concurrency_group = open_sdk_concurrency_group()
-    mngr_ctx = apply_unattended_settings(build_sdk_mngr_context(concurrency_group))
-    return LiveSession(
-        options=options,
-        cwd=resolve_cwd(options),
-        mngr_ctx=mngr_ctx,
-        concurrency_group=concurrency_group,
-    )
+    # The concurrency group owns subprocesses and must always be exited; if building the rest of
+    # the session fails, tear it down before propagating so its processes are not leaked. A
+    # success flag (rather than a broad ``except``) keeps the teardown unconditional on every
+    # failure path without swallowing or narrowing the propagating exception.
+    is_session_built = False
+    try:
+        mngr_ctx = apply_unattended_settings(build_sdk_mngr_context(concurrency_group))
+        session = LiveSession(
+            options=options,
+            cwd=resolve_cwd(options),
+            mngr_ctx=mngr_ctx,
+            concurrency_group=concurrency_group,
+        )
+        is_session_built = True
+        return session
+    finally:
+        if not is_session_built:
+            concurrency_group.__exit__(None, None, None)
 
 
 def _system_prompt_args(system_prompt: str | Mapping[str, Any] | None) -> list[str]:
