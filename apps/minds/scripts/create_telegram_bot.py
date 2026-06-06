@@ -144,19 +144,31 @@ def _try_latchkey_auth_get() -> str | None:
             text=True,
             timeout=10,
         )
-        if result.returncode != 0:
-            return None
-
-        creds = json.loads(result.stdout)
-        if creds.get("objectType") != "telegramUser":
-            return None
-
-        dc_id = creds["dcId"]
-        auth_key_hex = creds["authKeyHex"]
-        sys.stderr.write(f"Read credentials from latchkey (user={creds.get('firstName', '?')}, DC={dc_id})\n")
-        return _auth_key_to_string_session(dc_id, auth_key_hex)
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, KeyError):
+    except subprocess.TimeoutExpired:
         return None
+    if result.returncode != 0:
+        return None
+
+    try:
+        creds = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    if creds.get("objectType") != "telegramUser":
+        return None
+
+    # A telegramUser record missing these keys is malformed latchkey output, not an
+    # absent credential source. Surface it as our own error instead of swallowing a
+    # KeyError and silently falling through to the next source (which would mislead
+    # the user into thinking they have no stored credentials at all).
+    if "dcId" not in creds or "authKeyHex" not in creds:
+        raise TelegramCredentialError(
+            "latchkey returned a telegramUser record missing 'dcId'/'authKeyHex'; the "
+            "stored credentials are malformed. Re-run 'latchkey auth browser telegram'."
+        )
+    dc_id = creds["dcId"]
+    auth_key_hex = creds["authKeyHex"]
+    sys.stderr.write(f"Read credentials from latchkey (user={creds.get('firstName', '?')}, DC={dc_id})\n")
+    return _auth_key_to_string_session(dc_id, auth_key_hex)
 
 
 def _get_string_session() -> str:
