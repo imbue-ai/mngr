@@ -32,6 +32,7 @@ from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.bootstrap import root_name_for_env_name
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.primitives import InvalidDevEnvNameError
+from imbue.minds.errors import MindError
 
 _CLIENT_FILENAME = "client.toml"
 _SECRETS_FILENAME = "secrets.toml"
@@ -80,7 +81,14 @@ def list_env_root_dirs() -> tuple[Path, ...]:
     """
     home = Path.home()
     if not home.is_dir():
-        return ()
+        # A missing / non-directory $HOME is a broken operator environment,
+        # not a legitimate "zero envs" state. Returning () here would make
+        # `minds env list` show nothing and could mislead an operator into
+        # thinking their envs are gone (and re-provisioning). Surface it.
+        raise MindError(
+            f"Home directory {home} is not a directory; cannot enumerate minds envs. "
+            "Check that $HOME points at a valid directory."
+        )
     matches: list[Path] = []
     for child in home.iterdir():
         if not child.is_dir():
