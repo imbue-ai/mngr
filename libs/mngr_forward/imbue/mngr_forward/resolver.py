@@ -41,7 +41,10 @@ def _new_discarded_envelope_writer() -> EnvelopeWriter:
     on emission can omit the argument. Emissions go to an in-memory buffer that
     is never read, which keeps ``envelope_writer`` non-optional -- the type
     checker proves it is always present, so the mutation paths need no
-    ``is not None`` guard -- without printing test noise to stdout.
+    ``is not None`` guard -- without printing test noise to stdout. (A bare
+    ``io.TextIOBase`` discard sink is not assignable to ``IO[str]`` under the
+    type checker, and the buffer only ever fills in tests, where resolvers are
+    short-lived, so ``StringIO`` is the pragmatic choice.)
     """
     return EnvelopeWriter(output=io.StringIO())
 
