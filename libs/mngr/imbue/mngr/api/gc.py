@@ -709,14 +709,16 @@ def _get_orphaned_work_dirs(host: OnlineHostInterface, provider_name: ProviderIn
             # If we can't get the size, use 0
             pass
 
-        # Get creation time from the directory
-        created_at = datetime.now(timezone.utc)
-        try:
-            stat_result = host.execute_idempotent_command(f"stat -c %Y {shlex.quote(str(work_dir_path))}")
-            if stat_result.success and stat_result.stdout.strip():
+        # Get creation time from the directory. Leave it unknown (None) on failure rather than
+        # fabricating a 'now' timestamp, which would misrepresent a dir whose mtime we could not
+        # read as freshly created.
+        created_at: datetime | None = None
+        stat_result = host.execute_idempotent_command(f"stat -c %Y {shlex.quote(str(work_dir_path))}")
+        if stat_result.success and stat_result.stdout.strip():
+            try:
                 created_at = datetime.fromtimestamp(int(stat_result.stdout.strip()), tz=timezone.utc)
-        except (ValueError, OSError):
-            pass
+            except ValueError:
+                logger.debug("Could not parse mtime {!r} for {}", stat_result.stdout, work_dir_path)
 
         work_dir_infos.append(
             WorkDirInfo(
@@ -912,13 +914,14 @@ def _build_source_dir_info(
     except (ValueError, OSError):
         pass
 
-    created_at = datetime.now(timezone.utc)
-    try:
-        stat_result = host.execute_idempotent_command(f"stat -c %Y {shlex.quote(str(source_path))}")
-        if stat_result.success and stat_result.stdout.strip():
+    # Leave creation time unknown (None) on failure rather than fabricating a 'now' timestamp.
+    created_at: datetime | None = None
+    stat_result = host.execute_idempotent_command(f"stat -c %Y {shlex.quote(str(source_path))}")
+    if stat_result.success and stat_result.stdout.strip():
+        try:
             created_at = datetime.fromtimestamp(int(stat_result.stdout.strip()), tz=timezone.utc)
-    except (ValueError, OSError):
-        pass
+        except ValueError:
+            logger.debug("Could not parse mtime {!r} for {}", stat_result.stdout, source_path)
 
     return WorkDirInfo(
         path=source_path,

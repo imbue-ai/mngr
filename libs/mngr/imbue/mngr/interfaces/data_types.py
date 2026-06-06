@@ -468,7 +468,10 @@ class WorkDirInfo(FrozenModel):
     host_id: HostId = Field(description="Host ID this work dir belongs to")
     provider_name: ProviderInstanceName = Field(description="Provider that owns the host")
     is_local: bool = Field(description="Whether this resource is on the local host")
-    created_at: datetime = Field(description="When the work directory was created")
+    created_at: datetime | None = Field(
+        default=None,
+        description="When the work directory was created, or None if its mtime could not be determined",
+    )
 
 
 class LogFileInfo(FrozenModel):
