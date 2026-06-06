@@ -917,8 +917,14 @@ class OuterHost(OuterHostInterface):
             try:
                 mtime = int(result.stdout.strip())
                 return datetime.fromtimestamp(mtime, tz=timezone.utc)
-            except ValueError:
-                pass
+            except ValueError as e:
+                # Unparseable stat output: should not happen, so log it rather than
+                # silently treating the file as absent.
+                logger.debug("Unparseable stat output for {} on host {}: {!r} ({})", path, self.id, result.stdout, e)
+        # NOTE: remote None conflates "file absent" with "stat failed" -- the 2>/dev/null
+        # in the command hides stderr, so we cannot distinguish them here. Callers must
+        # treat None as "mtime unknown", not strictly "file does not exist" (unlike the
+        # local branch above, which only maps FileNotFoundError to None).
         return None
 
     def get_file_mtime(self, path: Path) -> datetime | None:
