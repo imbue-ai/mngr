@@ -1,0 +1,8 @@
+Hardened suspicious edge-case handling in the agents layer:
+
+- `get_lifecycle_state` now reports `UNKNOWN` (not `STOPPED`) when the host is unreachable. A normally-stopped agent on a reachable host is still detected as `STOPPED`; the connection-error branch only fires when the host itself cannot be reached, where the codebase's own host-state logic never equates "unreachable" with "stopped". `is_running` already treats `UNKNOWN` as not-running, so callers see no behavior change beyond the more accurate state.
+- `get_command` now logs a warning when it falls back to `"bash"` because `data.json` is missing/corrupt (the fabricated command otherwise silently flowed into the command display and lifecycle process-name detection).
+- `get_reported_start_time` no longer crashes on a malformed `status/start_time` file: it falls back to `None` and logs a warning instead of propagating an uncaught `ValueError`.
+- `list_reported_plugin_files` now logs (at warning for host/OS errors, debug for a non-zero `ls`) so a failed listing is no longer indistinguishable from a confirmed-empty directory.
+- Registering an agent type with neither a class nor a config now fails loudly instead of being a silent no-op, and `load_agents_from_plugins` no longer silently drops malformed (non-tuple) plugin registrations.
+- Documented the empty-probe short-circuit in the TUI paste-visibility check and named the previously magic `5.0` wait-for-signal floor constant.
