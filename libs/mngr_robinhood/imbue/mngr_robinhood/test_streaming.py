@@ -102,12 +102,10 @@ def test_stream_json_emits_partials_before_final_assistant(
         cwd=streaming_work_dir,
         env=streaming_env,
     )
-    events: list[dict[str, object]] = []
-    for line in stdout.splitlines():
-        if line.strip():
-            events.append(json.loads(line))
+    # json.loads returns Any, so events are loosely typed; this is test-only.
+    events = [json.loads(line) for line in stdout.splitlines() if line.strip()]
 
-    types_in_order = [event.get("type") for event in events]
+    types_in_order = [event["type"] for event in events]
     assert "stream_event" in types_in_order, f"expected at least one partial stream_event; got {types_in_order}"
     assert "assistant" in types_in_order, f"expected a final assistant message; got {types_in_order}"
 
@@ -117,12 +115,9 @@ def test_stream_json_emits_partials_before_final_assistant(
     assert first_partial < first_assistant, "partial text_delta events must precede the final assistant message"
 
     # Every partial carries a text_delta.
-    for event in events:
-        if event.get("type") == "stream_event":
-            inner = event.get("event")
-            assert isinstance(inner, dict)
-            delta = inner.get("delta")
-            assert isinstance(delta, dict) and delta.get("type") == "text_delta"
+    partials = [event for event in events if event["type"] == "stream_event"]
+    for partial in partials:
+        assert partial["event"]["delta"]["type"] == "text_delta"
 
 
 def test_stream_plain_text_streams_once_without_duplication(
