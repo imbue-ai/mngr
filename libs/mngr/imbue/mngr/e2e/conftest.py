@@ -678,8 +678,12 @@ def e2e(
     # subprocess) and delete (below) agree without either side re-deriving it.
     test_modal_env_name = truncate_modal_name(f"{test_prefix}{test_user_id}", max_length=MODAL_NAME_MAX_LENGTH)
 
-    # Add the e2e bin directory to PATH so the connect script is available
-    env["PATH"] = f"{_BIN_DIR}:{env.get('PATH', '')}"
+    # Add the e2e bin directory to PATH so the connect script is available.
+    # env is a copy of os.environ, where PATH is always present, so index it
+    # directly: a truly missing PATH should crash here rather than silently
+    # build a PATH containing only the bin dir (which would make mngr/tmux/etc.
+    # unfindable and fail later with a confusing error).
+    env["PATH"] = f"{_BIN_DIR}:{env['PATH']}"
 
     # Configure connect_command for create/start.
     # Remote providers (Modal, Docker) are left enabled so that e2e tests
