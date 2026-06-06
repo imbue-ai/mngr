@@ -198,6 +198,7 @@ class _StreamBufferConsumer(MutableModel):
     buffer_path: Path = Field(description="Absolute path to the agent's stream_buffer file")
     writer: StreamingOutputWriter = Field(description="Writer that renders the deltas")
     emitted_body: str = Field(default="", description="Body text already emitted as deltas")
+    last_content: str = Field(default="", description="Most recent non-empty buffer content (for the final flush)")
 
     def poll(self) -> None:
         try:
@@ -205,27 +206,73 @@ class _StreamBufferConsumer(MutableModel):
         except (FileNotFoundError, OSError, MngrError):
             # The buffer may not exist yet (watcher still starting up); benign.
             return
-        delta, self.emitted_body = compute_stream_delta(content, self.emitted_body)
+        if _buffer_body(content).strip():
+            self.last_content = content
+        # During streaming, only emit complete lines; the still-streaming last
+        # line is held back because its rendering churns as it grows (e.g. an
+        # emphasis span's closing marker shifts), which would otherwise force a
+        # re-emit and duplicate text.
+        delta, self.emitted_body = compute_stream_delta(content, self.emitted_body, is_flush=False)
+        if delta:
+            self.writer.emit_partial_text(delta)
+
+    def flush(self) -> None:
+        """Emit any remaining (held-back) text from the last non-empty buffer.
+
+        Called at turn end (the watcher empties the buffer when the agent goes
+        idle), so the final line -- never emitted during streaming because it was
+        the volatile last line -- is delivered exactly once.
+        """
+        delta, self.emitted_body = compute_stream_delta(self.last_content, self.emitted_body, is_flush=True)
         if delta:
             self.writer.emit_partial_text(delta)
 
 
 @pure
-def compute_stream_delta(buffer_content: str, emitted_body: str) -> tuple[str, str]:
+def _buffer_body(buffer_content: str) -> str:
+    """Return the body (everything after the id line) of a stream_buffer snapshot."""
+    lines = buffer_content.split("\n")
+    return "\n".join(lines[1:]) if len(lines) > 1 else ""
+
+
+@pure
+def compute_stream_delta(buffer_content: str, emitted_body: str, is_flush: bool) -> tuple[str, str]:
     """Compute the new assistant-text delta from a stream_buffer snapshot.
 
     The buffer's first line is the last-complete-assistant id; the remaining
-    lines are the in-progress body. Returns ``(delta, new_emitted_body)`` where
-    ``delta`` is the text to emit. A prefix-extension of ``emitted_body`` yields
-    just the appended suffix; anything else (a reset to a new message) yields the
-    whole new body.
+    lines are the in-progress body. Returns ``(delta, new_emitted_body)``.
+
+    When ``is_flush`` is False, only the *complete* lines are considered (the
+    last, still-streaming line is withheld) so the churning tail is never emitted
+    mid-stream. When ``is_flush`` is True (turn end), the whole body is considered
+    so the final line is delivered. A prefix-extension of ``emitted_body`` yields
+    just the appended suffix; a non-prefix body (a new message) yields the whole
+    new body.
     """
-    lines = buffer_content.split("\n")
-    body = "\n".join(lines[1:]) if len(lines) > 1 else ""
-    if body == emitted_body:
+    body = _buffer_body(buffer_content)
+    visible = body if is_flush else _complete_lines_prefix(body)
+    if visible == "" or visible == emitted_body:
         return "", emitted_body
-    delta = body[len(emitted_body) :] if body.startswith(emitted_body) else body
-    return delta, body
+    if visible.startswith(emitted_body):
+        return visible[len(emitted_body) :], visible
+    # A stale, shorter snapshot that the emitted text already covers: keep going.
+    if emitted_body.startswith(visible):
+        return "", emitted_body
+    # Otherwise this is a new message: emit it whole.
+    return visible, visible
+
+
+@pure
+def _complete_lines_prefix(body: str) -> str:
+    """Return ``body`` up to and including its last newline (the complete lines).
+
+    The text after the last newline is the still-streaming line and is withheld.
+    Returns "" when there is no newline (only a single, in-progress line so far).
+    """
+    last_newline = body.rfind("\n")
+    if last_newline == -1:
+        return ""
+    return body[: last_newline + 1]
 
 
 def _normalize_credentials_env() -> None:
@@ -431,6 +478,8 @@ def _run_with_agent(
             final_state, seen_bytes = _wait_for_turn_end(
                 agent, events_target, writer, parser, read_failure_warner, seen_bytes, stream_consumer
             )
+            if stream_consumer is not None:
+                stream_consumer.flush()
             for next_prompt in remaining_prompts:
                 if final_state != AgentLifecycleState.WAITING:
                     # Agent already terminated; sending another prompt would just
@@ -449,6 +498,8 @@ def _run_with_agent(
                 final_state, seen_bytes = _wait_for_turn_end(
                     agent, events_target, writer, parser, read_failure_warner, seen_bytes, stream_consumer
                 )
+                if stream_consumer is not None:
+                    stream_consumer.flush()
         except MngrError as exc:
             logger.error("Run failed: {}", exc)
             _finalize_run(writer, start_time, agent_id=str(agent.id), error_text=str(exc), turn_count=turn_count)

@@ -511,9 +511,16 @@ def convert_block_to_markdown(block_lines: list[str]) -> BlockConversion:
 
 
 def _convert_body_lines(block_lines: list[str]) -> list[str]:
-    """Convert the non-trailing-table portion of a block into markdown lines."""
+    """Convert the non-trailing-table portion of a block into markdown lines.
+
+    Each prose line is rendered with a fresh emphasis state (no state carried
+    across lines). This is essential for streaming stability: a finalized line's
+    markdown must depend only on its own ANSI, so it does not flip (e.g.
+    plain->bold) between polls as a neighbouring line's emphasis streams in. The
+    terminal already re-asserts the active SGR at the start of each rendered line,
+    so per-line rendering reproduces the same emphasis.
+    """
     out: list[str] = []
-    state = _InlineState()
     index = 0
     length = len(block_lines)
     while index < length:
@@ -533,7 +540,6 @@ def _convert_body_lines(block_lines: list[str]) -> list[str]:
                     table_run.append(block_lines[index])
                 index += 1
             out.extend(convert_table(table_run))
-            state = _InlineState()
             continue
 
         # A run of syntax-highlighted lines becomes a fenced code block.
@@ -545,7 +551,6 @@ def _convert_body_lines(block_lines: list[str]) -> list[str]:
             out.append("```")
             out.extend(code_run)
             out.append("```")
-            state = _InlineState()
             continue
 
         # Blockquote: a dim left-bar glyph followed by the quoted text.
@@ -553,11 +558,10 @@ def _convert_body_lines(block_lines: list[str]) -> list[str]:
         if bar_index != -1 and stripped[:bar_index].strip() == "":
             quote_text = stripped[bar_index + len(_BLOCKQUOTE_BAR) :].strip()
             out.append(f"> {quote_text}")
-            state = _InlineState()
             index += 1
             continue
 
-        out.append(render_inline_line(line, state).rstrip())
+        out.append(render_inline_line(line, _InlineState()).rstrip())
         index += 1
 
     return out
@@ -684,22 +688,54 @@ def _read_last_complete_assistant_id(transcript_path: Path) -> str:
     return last_uuid
 
 
-def _capture_pane(session_name: str) -> str | None:
-    """Capture the agent's tmux pane with ANSI codes and rejoined wrapped lines."""
+# Scrollback depths (in lines, measured back from the end) to try in order when
+# capturing the pane. The first (0) is the visible pane; the rest progressively
+# reach further into the scrollback so the assistant's `●` marker can still be
+# found after a long message has scrolled it off the top. None means the full
+# scrollback ("-S -"). They are tried smallest-first so the common short-message
+# case stays cheap.
+_SCROLLBACK_DEPTHS: tuple[int | None, ...] = (0, 500, 2000, None)
+
+
+def _capture_pane(session_name: str, scrollback_lines: int | None) -> str | None:
+    """Capture the agent's tmux pane with ANSI codes and rejoined wrapped lines.
+
+    ``scrollback_lines`` controls how far back into the scrollback to capture:
+    0 captures only the visible pane; a positive N captures from N lines back;
+    None captures the entire scrollback.
+    """
     target = f"={session_name}:0"
+    command = ["tmux", "capture-pane", "-e", "-J", "-p"]
+    if scrollback_lines is None:
+        command += ["-S", "-"]
+    elif scrollback_lines > 0:
+        command += ["-S", f"-{scrollback_lines}"]
+    command += ["-t", target]
     try:
-        result = subprocess.run(
-            ["tmux", "capture-pane", "-e", "-J", "-p", "-t", target],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+        result = subprocess.run(command, capture_output=True, text=True, timeout=10)
     except (subprocess.SubprocessError, OSError) as exc:
         _log(f"capture-pane failed: {exc}")
         return None
     if result.returncode != 0:
         return None
     return result.stdout
+
+
+def _capture_block_with_marker(session_name: str) -> list[str] | None:
+    """Capture the pane at progressively larger scrollback until the marker is found.
+
+    Returns the extracted assistant block (from the last assistant `●` marker to
+    the end of the message), or None if no assistant marker is present even in the
+    full scrollback.
+    """
+    for scrollback in _SCROLLBACK_DEPTHS:
+        pane = _capture_pane(session_name, scrollback)
+        if pane is None:
+            continue
+        block = extract_latest_assistant_block(pane)
+        if block is not None:
+            return block
+    return None
 
 
 def _write_buffer_atomically(buffer_path: Path, contents: str) -> None:
@@ -740,11 +776,9 @@ def _run_one_poll(
         _write_buffer_atomically(buffer_path, format_buffer(last_id, state.body_lines))
         return
 
-    pane = _capture_pane(session_name)
-    if pane is None:
-        return
-
-    block = extract_latest_assistant_block(pane)
+    # Capture the message, reaching progressively further into the scrollback so
+    # the assistant marker is found even after a long message has scrolled it off.
+    block = _capture_block_with_marker(session_name)
     if block is None:
         _write_buffer_atomically(buffer_path, format_buffer(last_id, state.body_lines))
         return

@@ -26,42 +26,57 @@ def test_build_agent_name_has_robinhood_prefix() -> None:
     assert len(str(name)) > len("robinhood-")
 
 
-def test_compute_stream_delta_first_emission() -> None:
-    delta, emitted = compute_stream_delta("uuid-1\nHello world", "")
-    assert delta == "Hello world"
-    assert emitted == "Hello world"
-
-
-def test_compute_stream_delta_prefix_extension() -> None:
-    delta, emitted = compute_stream_delta("uuid-1\nHello world, more", "Hello world")
-    assert delta == ", more"
-    assert emitted == "Hello world, more"
-
-
-def test_compute_stream_delta_no_change() -> None:
-    delta, emitted = compute_stream_delta("uuid-1\nHello", "Hello")
-    assert delta == ""
-    assert emitted == "Hello"
-
-
-def test_compute_stream_delta_new_message_resets() -> None:
-    # A non-prefix body means a new message scrolled in: emit the whole new body.
-    delta, emitted = compute_stream_delta("uuid-2\nA brand new reply", "An old reply")
-    assert delta == "A brand new reply"
-    assert emitted == "A brand new reply"
-
-
-def test_compute_stream_delta_empty_body_after_idle() -> None:
-    # When the watcher empties the body at turn end, only the id line remains.
-    delta, emitted = compute_stream_delta("uuid-1", "previous text")
+def test_compute_stream_delta_single_partial_line_held_back() -> None:
+    # A single, still-streaming line (no newline yet) is withheld during streaming.
+    delta, emitted = compute_stream_delta("uuid-1\nHello world", "", is_flush=False)
     assert delta == ""
     assert emitted == ""
 
 
-def test_compute_stream_delta_multiline_body() -> None:
-    delta, emitted = compute_stream_delta("uuid-1\nline one\nline two", "line one")
-    assert delta == "\nline two"
+def test_compute_stream_delta_emits_complete_lines_only() -> None:
+    # Only the complete line (up to the last newline) is emitted; "line two" held.
+    delta, emitted = compute_stream_delta("uuid-1\nline one\nline two", "", is_flush=False)
+    assert delta == "line one\n"
+    assert emitted == "line one\n"
+
+
+def test_compute_stream_delta_prefix_extension_complete_lines() -> None:
+    delta, emitted = compute_stream_delta("uuid-1\nline one\nline two\nline three", "line one\n", is_flush=False)
+    assert delta == "line two\n"
+    assert emitted == "line one\nline two\n"
+
+
+def test_compute_stream_delta_no_change() -> None:
+    delta, emitted = compute_stream_delta("uuid-1\nline one\nstreaming", "line one\n", is_flush=False)
+    assert delta == ""
+    assert emitted == "line one\n"
+
+
+def test_compute_stream_delta_flush_emits_final_line() -> None:
+    # At flush (turn end) the withheld last line is delivered.
+    delta, emitted = compute_stream_delta("uuid-1\nline one\nline two", "line one\n", is_flush=True)
+    assert delta == "line two"
     assert emitted == "line one\nline two"
+
+
+def test_compute_stream_delta_new_message_resets() -> None:
+    # A non-prefix body means a new message: emit the whole new (complete) body.
+    delta, emitted = compute_stream_delta("uuid-2\nA brand new reply\n", "An old reply\n", is_flush=False)
+    assert delta == "A brand new reply\n"
+    assert emitted == "A brand new reply\n"
+
+
+def test_compute_stream_delta_empty_body_after_idle() -> None:
+    # When the watcher empties the body at turn end, only the id line remains.
+    delta, emitted = compute_stream_delta("uuid-1", "previous text", is_flush=False)
+    assert delta == ""
+    assert emitted == "previous text"
+
+
+def test_compute_stream_delta_stale_shorter_snapshot_ignored() -> None:
+    delta, emitted = compute_stream_delta("uuid-1\nline one\n", "line one\nline two\n", is_flush=True)
+    assert delta == ""
+    assert emitted == "line one\nline two\n"
 
 
 def test_build_pass_env_vars_is_populated() -> None:
