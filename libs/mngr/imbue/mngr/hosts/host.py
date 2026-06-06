@@ -49,6 +49,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import AgentStartError
+from imbue.mngr.errors import CorruptedAgentDataError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostDataSchemaError
 from imbue.mngr.errors import InvalidActivityTypeError
@@ -3132,7 +3133,9 @@ def _parse_uptime_output(stdout: str) -> float:
             return float(uptime_str)
         else:
             return 0.0
-    except (ValueError, OSError):
+    except ValueError:
+        # Only int()/float() parsing can fail here; both raise ValueError (no I/O,
+        # so no OSError). Unparseable output means "uptime unknown" -> 0.0.
         return 0.0
 
 
