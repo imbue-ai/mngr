@@ -646,9 +646,14 @@ def apply_config_defaults(
             elif isinstance(config_value, (list, tuple)):
                 updated_params[param_name] = tuple(config_value)
             else:
-                # Shape mismatch (config gave a non-aggregate for a tuple param);
-                # pass it through so downstream validation can catch it.
-                updated_params[param_name] = config_value
+                # Shape mismatch: config gave a non-aggregate for a tuple/list
+                # param. Fail at the point of detection with a precise message
+                # rather than passing the scalar downstream where it surfaces as
+                # an opaque pydantic error (or is silently coerced).
+                raise ConfigParseError(
+                    f"Parameter '{param_name}' in commands.{command_name} config expects a list, "
+                    f"but got {type(config_value).__name__}: {config_value!r}"
+                )
             continue
 
         # Scalar params: only DEFAULT-source values are overridden by config.

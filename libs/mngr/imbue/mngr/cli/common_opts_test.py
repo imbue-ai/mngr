@@ -210,6 +210,20 @@ def test_apply_config_defaults_non_empty_string_replaces_tuple_param(mngr_test_p
     assert result["extra_window"] == ("cmd1", "cmd2")
 
 
+def test_apply_config_defaults_scalar_for_tuple_param_raises(mngr_test_prefix: str) -> None:
+    """apply_config_defaults should raise on a scalar config value for a tuple/list param."""
+    ctx = _make_click_context(
+        params={"extra_window": (), "other_param": "value"},
+    )
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        commands={"create": CommandDefaults(defaults={"extra_window": "not-a-list"})},
+    )
+
+    with pytest.raises(ConfigParseError):
+        apply_config_defaults(ctx, config, "create")
+
+
 def test_apply_config_defaults_substitutes_config_base_for_cli_tuple_params(mngr_test_prefix: str) -> None:
     """apply_config_defaults now substitutes the config value as the BASE for every
     tuple/list param, regardless of CLI source.
