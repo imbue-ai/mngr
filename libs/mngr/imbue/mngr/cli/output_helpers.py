@@ -134,8 +134,12 @@ def emit_event(
     """Emit an event in the appropriate format."""
     match output_format:
         case OutputFormat.HUMAN:
-            if "message" in data:
-                write_human_line(str(data["message"]))
+            # Every HUMAN-format event must carry a "message" (see the data param
+            # doc). A missing key is a caller contract violation; fail loudly
+            # rather than silently emit no line for the event.
+            if "message" not in data:
+                raise SwitchError(f"HUMAN-format event {event_type!r} is missing a 'message' field")
+            write_human_line(str(data["message"]))
         case OutputFormat.JSONL:
             event = {"event": event_type, **data}
             write_json_line(event)

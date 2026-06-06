@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from imbue.imbue_common.errors import SwitchError
 from imbue.mngr.api.rsync import RsyncResult
 from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.output_helpers import emit_error_event
@@ -88,10 +89,10 @@ def test_emit_event_human_format_with_message(capsys: pytest.CaptureFixture[str]
     assert "Agent destroyed" in captured.out
 
 
-def test_emit_event_human_format_without_message(capsys: pytest.CaptureFixture[str]) -> None:
-    """emit_event with HUMAN format without message should not output."""
-    emit_event("destroyed", {"other": "data"}, OutputFormat.HUMAN)
-    # No exception should be raised
+def test_emit_event_human_format_without_message() -> None:
+    """emit_event with HUMAN format and no message should raise rather than silently emit nothing."""
+    with pytest.raises(SwitchError):
+        emit_event("destroyed", {"other": "data"}, OutputFormat.HUMAN)
 
 
 def test_emit_event_jsonl_format(capsys: pytest.CaptureFixture[str]) -> None:
