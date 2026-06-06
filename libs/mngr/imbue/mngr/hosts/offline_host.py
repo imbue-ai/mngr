@@ -96,7 +96,10 @@ def apply_rename_to_agent_data(
     updated = dict(data)
     updated["name"] = str(new_name)
     if labels_to_merge:
-        current_labels = dict(updated.get("labels") or {})
+        # Default only the missing-key case to {}; a present-but-wrong-typed "labels"
+        # value should surface loudly at dict(...) rather than be silently discarded
+        # by an `or {}` that also swallows falsy values.
+        current_labels = dict(updated.get("labels", {}))
         updated["labels"] = {**current_labels, **dict(labels_to_merge)}
     return updated
 
