@@ -294,6 +294,22 @@ jobs:
             echo "- URL: $URL"
             echo "- Source: $SRC"
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: precheck runner disk space (need >=200GB free for Lima diffdisks)
+        # Lima allocates up to 100GB per VM as a sparse diffdisk. We provision
+        # at least two VMs per run (W1 + W2); without ~200GB free the second
+        # boot fails with "no space left on device" 15 min into the test --
+        # surface that here so the operator gets a fast, actionable error.
+        # See runs 27060995662, 27061606544, 27062222443 for the symptom.
+        run: |
+          AVAIL_KB=$(df -k "$HOME" | awk 'NR==2 {print $4}')
+          AVAIL_GB=$((AVAIL_KB / 1024 / 1024))
+          echo "Available on $HOME: ${AVAIL_GB}GB"
+          df -h "$HOME" /
+          if [[ "$AVAIL_GB" -lt 200 ]]; then
+            echo "::error::runner disk has only ${AVAIL_GB}GB free; Lima diffdisks need ~100GB each. Free space (ToDesktop builds in ~/actions-runner/_work, npm/uv caches, etc.) before retrying."
+            exit 1
+          fi
+
       - name: reset to clean state and install fresh app
         run: bash apps/minds/scripts/mac-runner-reset.sh "${{ steps.url.outputs.url }}"
 
