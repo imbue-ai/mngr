@@ -7,6 +7,7 @@ import pytest
 from imbue.minds.envs.primitives import VaultReadError
 from imbue.minds.envs.primitives import VaultSecretNotFoundError
 from imbue.minds.envs.vault_reader import VaultPath
+from imbue.minds.envs.vault_reader import delete_vault_kv
 from imbue.minds.envs.vault_reader import read_vault_kv
 
 
@@ -98,3 +99,22 @@ def test_read_vault_kv_malformed_data_shape(tmp_path: Path) -> None:
     fake = _make_fake_vault_binary(tmp_path, stdout='{"data": "not a dict"}')
     with pytest.raises(VaultReadError, match="no data.data dict"):
         read_vault_kv(VaultPath("secrets/minds/dev/cloudflare"), vault_binary=str(fake))
+
+
+def test_delete_vault_kv_idempotent_on_absent_entry(tmp_path: Path) -> None:
+    # `vault kv metadata delete` returns the same "no value here" exit code
+    # as `kv get` for an absent path -> treated as success so re-running
+    # destroy after a partial failure is safe.
+    fake = _make_fake_vault_binary(tmp_path, stdout="", exit_code=2, stderr="No value found at secrets/...")
+    delete_vault_kv(VaultPath("secrets/minds/dev/generation"), vault_binary=str(fake))
+
+
+def test_delete_vault_kv_propagates_real_failure_even_if_text_says_not_found(tmp_path: Path) -> None:
+    # A non-2 exit is a genuine failure (auth/connectivity/permission). It
+    # must surface even if its message happens to contain "not found" -- the
+    # exact masking the old substring match allowed.
+    fake = _make_fake_vault_binary(
+        tmp_path, stdout="", exit_code=1, stderr="permission denied: secret path not found in policy"
+    )
+    with pytest.raises(VaultReadError, match="failed"):
+        delete_vault_kv(VaultPath("secrets/minds/dev/generation"), vault_binary=str(fake))
