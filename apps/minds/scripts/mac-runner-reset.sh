@@ -30,14 +30,36 @@ fi
 # the `command -v` guard above silently skips when missing, leaving
 # 6.4GB diffdisk + supporting files per past run pinned forever. On the
 # self-hosted mac runner this accumulated to 70 zombie VMs / 446GB
-# (verified 2026-06-06) before catching it. Direct rm -rf is safe --
-# any minds-e2e* still present at reset time is by definition orphaned
-# (the e2e's normal destroy-lifecycle handles in-flight VMs).
+# (verified 2026-06-06) before catching it.
+#
+# limactl delete differs from rm -rf in two ways: (1) it stops the VM's
+# hypervisor process first, (2) it deregisters from limactl's index.
+# The index is rebuilt by scanning ~/.lima/ each invocation, so (2) is
+# bookkeeping. The hypervisor stop matters for a LIVE VM. Preserve that
+# semantic without depending on limactl: for each minds-e2e* dir, check
+# ha.pid -- if the hypervisor is still alive, SIGTERM (then SIGKILL on
+# 2s grace) before rm -rf so we never orphan a running VM.
 if [[ -d "$HOME/.lima" ]]; then
   zombie_count=$(find "$HOME/.lima" -maxdepth 1 -type d -name 'minds-e2e*' 2>/dev/null | wc -l | tr -d ' ')
   if [[ "$zombie_count" -gt 0 ]]; then
-    log "wiping $zombie_count orphan minds-e2e* dir(s) under ~/.lima"
-    find "$HOME/.lima" -maxdepth 1 -type d -name 'minds-e2e*' -exec rm -rf {} + 2>/dev/null || true
+    log "cleaning $zombie_count minds-e2e* dir(s) under ~/.lima"
+    for vm_dir in "$HOME/.lima"/minds-e2e*; do
+      [[ -d "$vm_dir" ]] || continue
+      pid_file="$vm_dir/ha.pid"
+      if [[ -f "$pid_file" ]]; then
+        pid=$(cat "$pid_file" 2>/dev/null || true)
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+          log "  $(basename "$vm_dir"): hypervisor pid=$pid alive, SIGTERM then SIGKILL"
+          kill "$pid" 2>/dev/null || true
+          for _ in 1 2 3 4; do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.5
+          done
+          kill -9 "$pid" 2>/dev/null || true
+        fi
+      fi
+      rm -rf "$vm_dir" 2>/dev/null || true
+    done
   fi
 fi
 
