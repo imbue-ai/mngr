@@ -8,6 +8,7 @@ keeps these unit tests fast and free of any real SSH/Docker dependency.
 
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from typing import cast
 
@@ -15,39 +16,44 @@ import pytest
 from pydantic import ConfigDict
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
+from imbue.concurrency_group.errors import ProcessTimeoutError
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import HostId
+from imbue.mngr_vps_docker.container_setup import LABEL_HOST_ID
+from imbue.mngr_vps_docker.container_setup import build_image_on_outer
+from imbue.mngr_vps_docker.container_setup import build_ssh_transport_for_outer
+from imbue.mngr_vps_docker.container_setup import check_directory_exists_on_outer
+from imbue.mngr_vps_docker.container_setup import check_file_exists_on_outer
+from imbue.mngr_vps_docker.container_setup import commit_container
+from imbue.mngr_vps_docker.container_setup import create_bind_volume_on_outer
+from imbue.mngr_vps_docker.container_setup import delete_btrfs_subvolume_on_outer
+from imbue.mngr_vps_docker.container_setup import docker_inspect_running
+from imbue.mngr_vps_docker.container_setup import exec_in_container
+from imbue.mngr_vps_docker.container_setup import get_outer_free_disk_gb
+from imbue.mngr_vps_docker.container_setup import install_btrfs_progs_on_outer
+from imbue.mngr_vps_docker.container_setup import is_btrfs_progs_installed_on_outer
+from imbue.mngr_vps_docker.container_setup import is_fstab_entry_present_on_outer
+from imbue.mngr_vps_docker.container_setup import is_path_mounted_on_outer
+from imbue.mngr_vps_docker.container_setup import is_retryable_rsync_error
+from imbue.mngr_vps_docker.container_setup import prepare_btrfs_on_outer
+from imbue.mngr_vps_docker.container_setup import pull_image
+from imbue.mngr_vps_docker.container_setup import redact_secret_env
+from imbue.mngr_vps_docker.container_setup import remove_container
+from imbue.mngr_vps_docker.container_setup import remove_volume
+from imbue.mngr_vps_docker.container_setup import run_container
+from imbue.mngr_vps_docker.container_setup import run_docker
+from imbue.mngr_vps_docker.container_setup import seed_host_volume_layout_on_outer
+from imbue.mngr_vps_docker.container_setup import start_container
+from imbue.mngr_vps_docker.container_setup import stop_container
+from imbue.mngr_vps_docker.container_setup import translate_outer_concurrency_errors
+from imbue.mngr_vps_docker.errors import ContainerSetupError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
-from imbue.mngr_vps_docker.instance import LABEL_HOST_ID
-from imbue.mngr_vps_docker.instance import _build_image_on_outer
-from imbue.mngr_vps_docker.instance import _check_directory_exists_on_outer
-from imbue.mngr_vps_docker.instance import _check_file_exists_on_outer
-from imbue.mngr_vps_docker.instance import _commit_container
-from imbue.mngr_vps_docker.instance import _create_bind_volume_on_outer
-from imbue.mngr_vps_docker.instance import _delete_btrfs_subvolume_on_outer
-from imbue.mngr_vps_docker.instance import _docker_inspect_running
-from imbue.mngr_vps_docker.instance import _exec_in_container
-from imbue.mngr_vps_docker.instance import _get_outer_free_disk_gb
-from imbue.mngr_vps_docker.instance import _install_btrfs_progs_on_outer
-from imbue.mngr_vps_docker.instance import _is_btrfs_progs_installed_on_outer
-from imbue.mngr_vps_docker.instance import _is_fstab_entry_present_on_outer
-from imbue.mngr_vps_docker.instance import _is_path_mounted_on_outer
-from imbue.mngr_vps_docker.instance import _is_retryable_rsync_error
-from imbue.mngr_vps_docker.instance import _pull_image
 from imbue.mngr_vps_docker.instance import _read_host_id_label_from_vps
-from imbue.mngr_vps_docker.instance import _redact_secret_env
-from imbue.mngr_vps_docker.instance import _remove_container
-from imbue.mngr_vps_docker.instance import _remove_volume
-from imbue.mngr_vps_docker.instance import _run_container
-from imbue.mngr_vps_docker.instance import _run_docker
-from imbue.mngr_vps_docker.instance import _seed_host_volume_layout_on_outer
-from imbue.mngr_vps_docker.instance import _start_container
-from imbue.mngr_vps_docker.instance import _stop_container
-from imbue.mngr_vps_docker.instance import prepare_btrfs_on_outer
 
 
 class _Recorded(MutableModel):
@@ -125,72 +131,72 @@ def _stub(outer: OuterHostInterface) -> _StubOuter:
 
 
 def test_redact_secret_env_replaces_depot_token() -> None:
-    redacted = _redact_secret_env("DEPOT_TOKEN=abc123 docker build .")
+    redacted = redact_secret_env("DEPOT_TOKEN=abc123 docker build .")
     assert "abc123" not in redacted
     assert "DEPOT_TOKEN=<redacted>" in redacted
 
 
 def test_redact_secret_env_passes_through_when_no_secret() -> None:
     cmd = "docker build -t my-image ."
-    assert _redact_secret_env(cmd) == cmd
+    assert redact_secret_env(cmd) == cmd
 
 
 def test_is_retryable_rsync_error_matches_known_patterns() -> None:
-    assert _is_retryable_rsync_error("rsync: write error: Broken pipe")
-    assert _is_retryable_rsync_error("ssh: connect to host 1.2.3.4 port 22: Connection refused")
-    assert _is_retryable_rsync_error("client_loop: send disconnect: Broken pipe")
+    assert is_retryable_rsync_error("rsync: write error: Broken pipe")
+    assert is_retryable_rsync_error("ssh: connect to host 1.2.3.4 port 22: Connection refused")
+    assert is_retryable_rsync_error("client_loop: send disconnect: Broken pipe")
 
 
 def test_is_retryable_rsync_error_returns_false_for_other_errors() -> None:
-    assert not _is_retryable_rsync_error("unexpected EOF in tar header")
+    assert not is_retryable_rsync_error("unexpected EOF in tar header")
 
 
 # =============================================================================
-# _docker_inspect_running
+# docker_inspect_running
 # =============================================================================
 
 
 def test_docker_inspect_running_returns_true_when_running() -> None:
     outer = _outer(CommandResult(stdout="true\n", stderr="", success=True))
-    assert _docker_inspect_running(outer, "my-container") is True
+    assert docker_inspect_running(outer, "my-container") is True
     assert "docker inspect --format" in _stub(outer).recorded[0].command
     assert "my-container" in _stub(outer).recorded[0].command
 
 
 def test_docker_inspect_running_returns_false_when_not_running() -> None:
     outer = _outer(CommandResult(stdout="false\n", stderr="", success=True))
-    assert _docker_inspect_running(outer, "my-container") is False
+    assert docker_inspect_running(outer, "my-container") is False
 
 
 def test_docker_inspect_running_returns_false_when_command_fails() -> None:
     outer = _outer(CommandResult(stdout="", stderr="no such container", success=False))
-    assert _docker_inspect_running(outer, "missing-container") is False
+    assert docker_inspect_running(outer, "missing-container") is False
 
 
 # =============================================================================
-# _check_file_exists_on_outer
+# check_file_exists_on_outer
 # =============================================================================
 
 
 def test_check_file_exists_returns_true_when_test_succeeds() -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
-    assert _check_file_exists_on_outer(outer, Path("/tmp/some-file")) is True
+    assert check_file_exists_on_outer(outer, Path("/tmp/some-file")) is True
     assert _stub(outer).recorded[0].command.startswith("test -f")
 
 
 def test_check_file_exists_returns_false_when_test_fails() -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=False))
-    assert _check_file_exists_on_outer(outer, Path("/tmp/missing")) is False
+    assert check_file_exists_on_outer(outer, Path("/tmp/missing")) is False
 
 
 # =============================================================================
-# _exec_in_container / _run_docker
+# exec_in_container / run_docker
 # =============================================================================
 
 
 def test_exec_in_container_runs_docker_exec_with_quoted_command() -> None:
     outer = _outer(CommandResult(stdout="hello\n", stderr="", success=True))
-    output = _exec_in_container(outer, "my-container", "echo hello")
+    output = exec_in_container(outer, "my-container", "echo hello")
     assert output == "hello\n"
     cmd = _stub(outer).recorded[0].command
     assert "docker exec" in cmd
@@ -202,19 +208,19 @@ def test_exec_in_container_runs_docker_exec_with_quoted_command() -> None:
 def test_exec_in_container_raises_on_failure() -> None:
     outer = _outer(CommandResult(stdout="", stderr="permission denied", success=False))
     with pytest.raises(MngrError, match="docker exec"):
-        _exec_in_container(outer, "c1", "rm /etc/foo")
+        exec_in_container(outer, "c1", "rm /etc/foo")
 
 
 def test_run_docker_quotes_each_arg_separately() -> None:
     outer = _outer(CommandResult(stdout="ok\n", stderr="", success=True))
-    _run_docker(outer, ["volume", "inspect", "my-vol"])
+    run_docker(outer, ["volume", "inspect", "my-vol"])
     assert _stub(outer).recorded[0].command == "docker volume inspect my-vol"
 
 
 def test_run_docker_raises_on_failure() -> None:
     outer = _outer(CommandResult(stdout="", stderr="boom", success=False))
     with pytest.raises(MngrError, match="docker"):
-        _run_docker(outer, ["volume", "inspect", "missing-vol"])
+        run_docker(outer, ["volume", "inspect", "missing-vol"])
 
 
 # =============================================================================
@@ -224,56 +230,56 @@ def test_run_docker_raises_on_failure() -> None:
 
 def test_commit_container_returns_stripped_image_id() -> None:
     outer = _outer(CommandResult(stdout="sha256:abc123\n", stderr="", success=True))
-    image_id = _commit_container(outer, "my-container", "my-image:v1")
+    image_id = commit_container(outer, "my-container", "my-image:v1")
     assert image_id == "sha256:abc123"
     assert _stub(outer).recorded[0].command == "docker commit my-container my-image:v1"
 
 
 def test_stop_container_includes_timeout_arg() -> None:
     outer = _outer()
-    _stop_container(outer, "my-container", timeout_seconds=5)
+    stop_container(outer, "my-container", timeout_seconds=5)
     assert _stub(outer).recorded[0].command == "docker stop -t 5 my-container"
 
 
 def test_start_container_uses_docker_start() -> None:
     outer = _outer()
-    _start_container(outer, "my-container")
+    start_container(outer, "my-container")
     assert _stub(outer).recorded[0].command == "docker start my-container"
 
 
 def test_remove_container_without_force() -> None:
     outer = _outer()
-    _remove_container(outer, "my-container", force=False)
+    remove_container(outer, "my-container", force=False)
     assert _stub(outer).recorded[0].command == "docker rm my-container"
 
 
 def test_remove_container_with_force() -> None:
     outer = _outer()
-    _remove_container(outer, "my-container", force=True)
+    remove_container(outer, "my-container", force=True)
     assert _stub(outer).recorded[0].command == "docker rm -f my-container"
 
 
 def test_remove_volume_uses_docker_volume_rm_force() -> None:
     outer = _outer()
-    _remove_volume(outer, "my-vol")
+    remove_volume(outer, "my-vol")
     assert _stub(outer).recorded[0].command == "docker volume rm -f my-vol"
 
 
 def test_pull_image_uses_docker_pull_with_timeout() -> None:
     outer = _outer()
-    _pull_image(outer, "alpine:latest", timeout_seconds=120.0)
+    pull_image(outer, "alpine:latest", timeout_seconds=120.0)
     assert _stub(outer).recorded[0].command == "docker pull alpine:latest"
     assert _stub(outer).recorded[0].timeout_seconds == 120.0
 
 
 # =============================================================================
-# _run_container
+# run_container
 # =============================================================================
 
 
 def test_run_container_returns_stripped_container_id() -> None:
     outer = _outer(CommandResult(stdout="abc123def\n", stderr="", success=True))
-    container_id = _run_container(
+    container_id = run_container(
         outer,
         image="alpine:latest",
         name="test-container",
@@ -288,7 +294,7 @@ def test_run_container_returns_stripped_container_id() -> None:
 
 def test_run_container_command_includes_all_pieces() -> None:
     outer = _outer(CommandResult(stdout="cid\n", stderr="", success=True))
-    _run_container(
+    run_container(
         outer,
         image="my-image:tag",
         name="my-container",
@@ -308,14 +314,14 @@ def test_run_container_command_includes_all_pieces() -> None:
 
 
 # =============================================================================
-# _build_image_on_outer
+# build_image_on_outer
 # =============================================================================
 
 
 def test_build_image_on_outer_with_docker_builder_streams_output() -> None:
     outer = _outer(CommandResult(stdout="step 1/2: FROM alpine\nstep 2/2: RUN ls\n", stderr="", success=True))
     received: list[str] = []
-    tag = _build_image_on_outer(
+    tag = build_image_on_outer(
         outer,
         tag="my-image:v1",
         build_context_path="/tmp/build",
@@ -334,7 +340,7 @@ def test_build_image_on_outer_with_docker_builder_streams_output() -> None:
 def test_build_image_on_outer_raises_on_build_failure() -> None:
     outer = _outer(CommandResult(stdout="", stderr="error: failed to fetch base image", success=False))
     with pytest.raises(MngrError, match="Remote docker build failed"):
-        _build_image_on_outer(
+        build_image_on_outer(
             outer,
             tag="bad-image",
             build_context_path="/tmp/build",
@@ -349,7 +355,7 @@ def test_build_image_on_outer_with_depot_requires_token(monkeypatch: pytest.Monk
     monkeypatch.delenv("DEPOT_TOKEN", raising=False)
     outer = _outer()
     with pytest.raises(MngrError, match="DEPOT_TOKEN"):
-        _build_image_on_outer(
+        build_image_on_outer(
             outer,
             tag="my-image",
             build_context_path="/tmp/build",
@@ -364,7 +370,7 @@ def test_build_image_on_outer_with_depot_uses_depot_build(monkeypatch: pytest.Mo
     monkeypatch.setenv("DEPOT_TOKEN", "my-secret-token")
     monkeypatch.delenv("DEPOT_PROJECT_ID", raising=False)
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
-    tag = _build_image_on_outer(
+    tag = build_image_on_outer(
         outer,
         tag="depot-image",
         build_context_path="/tmp/build",
@@ -432,18 +438,18 @@ def test_read_host_id_label_raises_when_docker_ps_fails() -> None:
 
 def test_is_btrfs_progs_installed_returns_true_when_command_v_succeeds() -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
-    assert _is_btrfs_progs_installed_on_outer(outer) is True
+    assert is_btrfs_progs_installed_on_outer(outer) is True
     assert "command -v mkfs.btrfs" in _stub(outer).recorded[0].command
 
 
 def test_is_btrfs_progs_installed_returns_false_when_command_v_fails() -> None:
     outer = _outer(CommandResult(stdout="", stderr="not found", success=False))
-    assert _is_btrfs_progs_installed_on_outer(outer) is False
+    assert is_btrfs_progs_installed_on_outer(outer) is False
 
 
 def test_install_btrfs_progs_runs_apt_get_update_then_install() -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
-    _install_btrfs_progs_on_outer(outer)
+    install_btrfs_progs_on_outer(outer)
     cmd = _stub(outer).recorded[0].command
     assert "apt-get update" in cmd
     assert "apt-get install -y btrfs-progs" in cmd
@@ -453,7 +459,7 @@ def test_install_btrfs_progs_runs_apt_get_update_then_install() -> None:
 def test_install_btrfs_progs_raises_on_apt_failure() -> None:
     outer = _outer(CommandResult(stdout="", stderr="E: Unable to locate package btrfs-progs", success=False))
     with pytest.raises(VpsProvisioningError, match="btrfs-progs"):
-        _install_btrfs_progs_on_outer(outer)
+        install_btrfs_progs_on_outer(outer)
 
 
 def test_get_outer_free_disk_gb_parses_df_output() -> None:
@@ -461,7 +467,7 @@ def test_get_outer_free_disk_gb_parses_df_output() -> None:
     # 37 GiB + 500 MiB of free bytes must floor-divide to 37 (NOT round up to 38).
     free_bytes = 37 * (1024**3) + 500 * (1024**2)
     outer = _outer(CommandResult(stdout=f"     {free_bytes}\n", stderr="", success=True))
-    free = _get_outer_free_disk_gb(outer, Path("/"))
+    free = get_outer_free_disk_gb(outer, Path("/"))
     assert free == 37
     cmd = _stub(outer).recorded[0].command
     assert "df --output=avail -B 1 " in cmd
@@ -473,7 +479,7 @@ def test_get_outer_free_disk_gb_uses_pipefail_so_df_failure_is_surfaced() -> Non
     # whatever ``tail -n 1`` returned (zero), masking a failing ``df`` and
     # routing the failure into the wrong VpsProvisioningError branch.
     outer = _outer(CommandResult(stdout="0\n", stderr="", success=True))
-    _get_outer_free_disk_gb(outer, Path("/"))
+    get_outer_free_disk_gb(outer, Path("/"))
     cmd = _stub(outer).recorded[0].command
     assert "set -o pipefail" in cmd
     # The pipeline must run under bash so ``set -o pipefail`` is honored
@@ -486,35 +492,35 @@ def test_get_outer_free_disk_gb_floors_to_whole_gib() -> None:
     # ``free_gb - reserved_gb`` math never over-allocates.
     free_bytes = (1024**3) - 1
     outer = _outer(CommandResult(stdout=f"{free_bytes}\n", stderr="", success=True))
-    assert _get_outer_free_disk_gb(outer, Path("/")) == 0
+    assert get_outer_free_disk_gb(outer, Path("/")) == 0
 
 
 def test_get_outer_free_disk_gb_raises_on_shell_failure() -> None:
     outer = _outer(CommandResult(stdout="", stderr="df: /: No such file", success=False))
     with pytest.raises(VpsProvisioningError, match="free disk space"):
-        _get_outer_free_disk_gb(outer, Path("/"))
+        get_outer_free_disk_gb(outer, Path("/"))
 
 
 def test_get_outer_free_disk_gb_raises_on_unparseable_output() -> None:
     outer = _outer(CommandResult(stdout="totally not an integer\n", stderr="", success=True))
     with pytest.raises(VpsProvisioningError, match="Could not parse"):
-        _get_outer_free_disk_gb(outer, Path("/"))
+        get_outer_free_disk_gb(outer, Path("/"))
 
 
 def test_is_path_mounted_returns_true_when_mountpoint_q_succeeds() -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
-    assert _is_path_mounted_on_outer(outer, Path("/mngr-btrfs")) is True
+    assert is_path_mounted_on_outer(outer, Path("/mngr-btrfs")) is True
     assert "mountpoint -q" in _stub(outer).recorded[0].command
 
 
 def test_is_path_mounted_returns_false_when_mountpoint_q_fails() -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=False))
-    assert _is_path_mounted_on_outer(outer, Path("/mngr-btrfs")) is False
+    assert is_path_mounted_on_outer(outer, Path("/mngr-btrfs")) is False
 
 
 def test_is_fstab_entry_present_returns_true_when_grep_succeeds() -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
-    assert _is_fstab_entry_present_on_outer(outer, Path("/var/lib/mngr-btrfs.img")) is True
+    assert is_fstab_entry_present_on_outer(outer, Path("/var/lib/mngr-btrfs.img")) is True
     cmd = _stub(outer).recorded[0].command
     # grep -qE for the path anchored at line start and followed by whitespace;
     # re.escape escapes both the dot and the hyphen in the path.
@@ -525,23 +531,23 @@ def test_is_fstab_entry_present_returns_true_when_grep_succeeds() -> None:
 
 def test_is_fstab_entry_present_returns_false_when_grep_fails() -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=False))
-    assert _is_fstab_entry_present_on_outer(outer, Path("/var/lib/mngr-btrfs.img")) is False
+    assert is_fstab_entry_present_on_outer(outer, Path("/var/lib/mngr-btrfs.img")) is False
 
 
 def test_check_directory_exists_uses_test_dash_d() -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
-    assert _check_directory_exists_on_outer(outer, Path("/some/dir")) is True
+    assert check_directory_exists_on_outer(outer, Path("/some/dir")) is True
     assert _stub(outer).recorded[0].command == "test -d /some/dir"
 
 
 def test_check_directory_exists_returns_false_when_missing() -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=False))
-    assert _check_directory_exists_on_outer(outer, Path("/missing")) is False
+    assert check_directory_exists_on_outer(outer, Path("/missing")) is False
 
 
 def test_create_bind_volume_runs_docker_volume_create_with_bind_opts() -> None:
     outer = _outer(CommandResult(stdout="my-vol\n", stderr="", success=True))
-    _create_bind_volume_on_outer(outer, volume_name="my-vol", device_path=Path("/mngr-btrfs/abcd"))
+    create_bind_volume_on_outer(outer, volume_name="my-vol", device_path=Path("/mngr-btrfs/abcd"))
     cmd = _stub(outer).recorded[0].command
     assert "docker volume create" in cmd
     assert "--driver local" in cmd
@@ -554,12 +560,12 @@ def test_create_bind_volume_runs_docker_volume_create_with_bind_opts() -> None:
 def test_create_bind_volume_raises_on_docker_failure() -> None:
     outer = _outer(CommandResult(stdout="", stderr="volume already exists", success=False))
     with pytest.raises(MngrError, match="docker"):
-        _create_bind_volume_on_outer(outer, volume_name="my-vol", device_path=Path("/mngr-btrfs/abcd"))
+        create_bind_volume_on_outer(outer, volume_name="my-vol", device_path=Path("/mngr-btrfs/abcd"))
 
 
 def test_seed_host_volume_layout_mkdirs_host_dir_and_agents() -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
-    _seed_host_volume_layout_on_outer(outer, Path("/mngr-btrfs/abcd"))
+    seed_host_volume_layout_on_outer(outer, Path("/mngr-btrfs/abcd"))
     cmd = _stub(outer).recorded[0].command
     assert cmd.startswith("mkdir -p")
     assert "/mngr-btrfs/abcd/host_dir" in cmd
@@ -569,13 +575,13 @@ def test_seed_host_volume_layout_mkdirs_host_dir_and_agents() -> None:
 def test_seed_host_volume_layout_raises_on_mkdir_failure() -> None:
     outer = _outer(CommandResult(stdout="", stderr="permission denied", success=False))
     with pytest.raises(MngrError, match="seed host volume"):
-        _seed_host_volume_layout_on_outer(outer, Path("/mngr-btrfs/abcd"))
+        seed_host_volume_layout_on_outer(outer, Path("/mngr-btrfs/abcd"))
 
 
 def test_delete_btrfs_subvolume_is_noop_when_path_missing() -> None:
     # test -d returns failure -> the helper short-circuits without running the delete.
     outer = _outer(CommandResult(stdout="", stderr="", success=False))
-    _delete_btrfs_subvolume_on_outer(outer, Path("/mngr-btrfs/missing"))
+    delete_btrfs_subvolume_on_outer(outer, Path("/mngr-btrfs/missing"))
     # Only one command was issued (the existence check); the delete was skipped.
     assert len(_stub(outer).recorded) == 1
     assert _stub(outer).recorded[0].command.startswith("test -d")
@@ -587,7 +593,7 @@ def test_delete_btrfs_subvolume_runs_btrfs_delete_when_path_exists() -> None:
         CommandResult(stdout="", stderr="", success=True),
         CommandResult(stdout="", stderr="", success=True),
     )
-    _delete_btrfs_subvolume_on_outer(outer, Path("/mngr-btrfs/abcd"))
+    delete_btrfs_subvolume_on_outer(outer, Path("/mngr-btrfs/abcd"))
     assert len(_stub(outer).recorded) == 2
     assert "btrfs subvolume delete" in _stub(outer).recorded[1].command
     assert "/mngr-btrfs/abcd" in _stub(outer).recorded[1].command
@@ -600,7 +606,7 @@ def test_delete_btrfs_subvolume_raises_on_delete_failure() -> None:
         CommandResult(stdout="", stderr="ERROR: Could not destroy subvolume", success=False),
     )
     with pytest.raises(MngrError, match="btrfs subvolume delete"):
-        _delete_btrfs_subvolume_on_outer(outer, Path("/mngr-btrfs/abcd"))
+        delete_btrfs_subvolume_on_outer(outer, Path("/mngr-btrfs/abcd"))
 
 
 # =============================================================================
@@ -805,3 +811,84 @@ def test_prepare_btrfs_on_outer_skips_free_space_check_when_loop_file_present() 
     )
     joined = "\n".join(cast(_ScriptedOuter, outer).recorded)
     assert "df --output=avail" not in joined
+
+
+# =========================================================================
+# build_ssh_transport_for_outer
+# =========================================================================
+
+
+class _SshTransportOuter(MutableModel):
+    """Minimal outer exposing only what build_ssh_transport_for_outer reads:
+    get_ssh_connection_info() and connector.host.data."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    info: tuple[str, str, int, Path] | None = Field(description="(user, hostname, port, key_path) or None")
+    known_hosts_file: str = Field(default="", description="value for host.data['ssh_known_hosts_file']")
+
+    def get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
+        return self.info
+
+    @property
+    def connector(self) -> Any:
+        return SimpleNamespace(host=SimpleNamespace(data={"ssh_known_hosts_file": self.known_hosts_file}))
+
+
+def test_build_ssh_transport_passes_the_ssh_port() -> None:
+    # Regression: the lima docker-mode outer is reached via a Lima-forwarded
+    # port on 127.0.0.1, so the rsync ssh transport must pass -p <port>;
+    # without it ssh hits 127.0.0.1:22 and strict host-key checking fails.
+    outer = _SshTransportOuter(info=("root", "127.0.0.1", 38519, Path("/k/key")), known_hosts_file="/k/known_hosts")
+    ssh_cmd, user, hostname, port, key = build_ssh_transport_for_outer(cast(OuterHostInterface, outer))
+    assert "-p 38519" in ssh_cmd
+    assert "-o UserKnownHostsFile=/k/known_hosts" in ssh_cmd
+    assert "-o StrictHostKeyChecking=yes" in ssh_cmd
+    assert (user, hostname, port) == ("root", "127.0.0.1", 38519)
+
+
+def test_build_ssh_transport_raises_for_local_outer() -> None:
+    outer = _SshTransportOuter(info=None)
+    with pytest.raises(MngrError):
+        build_ssh_transport_for_outer(cast(OuterHostInterface, outer))
+
+
+def test_translate_outer_concurrency_errors_wraps_concurrency_exception_group() -> None:
+    # Regression for the leaked-lima-VM bug: a build/upload failure inside a
+    # ConcurrencyGroup surfaces as ConcurrencyExceptionGroup, which is NOT a
+    # MngrError and so escapes provider `except MngrError` cleanup clauses. The
+    # boundary must convert it into a ContainerSetupError (a MngrError subclass).
+    inner = MngrError("Upload failed: host key verification failed")
+    with pytest.raises(ContainerSetupError) as exc_info:
+        with translate_outer_concurrency_errors("upload the build context to the host"):
+            raise ConcurrencyExceptionGroup("group", [inner], main_exception=inner)
+    assert isinstance(exc_info.value, MngrError)
+    assert "upload the build context to the host" in str(exc_info.value)
+    assert "host key verification failed" in str(exc_info.value)
+    assert exc_info.value.__cause__ is not None
+
+
+def test_translate_outer_concurrency_errors_wraps_process_timeout_error() -> None:
+    with pytest.raises(ContainerSetupError) as exc_info:
+        with translate_outer_concurrency_errors("build the image"):
+            raise ProcessTimeoutError(command=("docker", "build"), stdout="", stderr="")
+    assert isinstance(exc_info.value, MngrError)
+    assert "build the image" in str(exc_info.value)
+
+
+def test_translate_outer_concurrency_errors_passes_mngr_error_through_unwrapped() -> None:
+    # A plain MngrError raised directly (not inside a ConcurrencyGroup) must not
+    # be double-wrapped -- callers already handle MngrError.
+    sentinel = MngrError("already a mngr error")
+    with pytest.raises(MngrError) as exc_info:
+        with translate_outer_concurrency_errors("do a thing"):
+            raise sentinel
+    assert exc_info.value is sentinel
+    assert not isinstance(exc_info.value, ContainerSetupError)
+
+
+def test_translate_outer_concurrency_errors_is_noop_on_success() -> None:
+    results: list[int] = []
+    with translate_outer_concurrency_errors("do a thing"):
+        results.append(1)
+    assert results == [1]

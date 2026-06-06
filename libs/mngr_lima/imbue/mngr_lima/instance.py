@@ -1,10 +1,13 @@
 import json
 import shutil
+import socket
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from functools import cached_property
 from pathlib import Path
 from typing import Any
+from typing import Iterator
 from typing import Mapping
 from typing import Sequence
 
@@ -14,6 +17,7 @@ from pydantic import PrivateAttr
 from pyinfra.api import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import HostNotFoundError
@@ -22,6 +26,7 @@ from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
@@ -30,6 +35,7 @@ from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -46,13 +52,16 @@ from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
+from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import format_as_known_hosts_address
 from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
+from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr_lima.config import LimaProviderConfig
 from imbue.mngr_lima.constants import CLOUD_INIT_TIMEOUT_SECONDS
+from imbue.mngr_lima.constants import lima_host_data_disk_mount_path
 from imbue.mngr_lima.constants import lima_host_data_disk_name
 from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_lima.errors import LimaHostCreationError
@@ -76,6 +85,29 @@ from imbue.mngr_lima.limactl import limactl_show_ssh
 from imbue.mngr_lima.limactl import limactl_start_existing
 from imbue.mngr_lima.limactl import limactl_start_new
 from imbue.mngr_lima.limactl import limactl_stop
+from imbue.mngr_vps_docker.container_setup import CONTAINER_ENTRYPOINT_CMD
+from imbue.mngr_vps_docker.container_setup import HOST_DIR_SUBPATH
+from imbue.mngr_vps_docker.container_setup import HOST_VOLUME_MOUNT_PATH
+from imbue.mngr_vps_docker.container_setup import LABEL_HOST_ID
+from imbue.mngr_vps_docker.container_setup import LABEL_HOST_NAME
+from imbue.mngr_vps_docker.container_setup import LABEL_PROVIDER
+from imbue.mngr_vps_docker.container_setup import LABEL_TAGS
+from imbue.mngr_vps_docker.container_setup import SNAPSHOT_READ_MOUNT_PATH
+from imbue.mngr_vps_docker.container_setup import SNAPSHOT_TRIGGER_MOUNT_PATH
+from imbue.mngr_vps_docker.container_setup import build_image_on_outer_from_build_args
+from imbue.mngr_vps_docker.container_setup import create_bind_volume_on_outer
+from imbue.mngr_vps_docker.container_setup import ensure_btrfs_subvolume_on_outer
+from imbue.mngr_vps_docker.container_setup import exec_in_container
+from imbue.mngr_vps_docker.container_setup import host_volume_name_for
+from imbue.mngr_vps_docker.container_setup import provision_snapshot_helper_on_outer
+from imbue.mngr_vps_docker.container_setup import pull_image
+from imbue.mngr_vps_docker.container_setup import remove_host_from_known_hosts
+from imbue.mngr_vps_docker.container_setup import run_container
+from imbue.mngr_vps_docker.container_setup import seed_host_volume_layout_on_outer
+from imbue.mngr_vps_docker.container_setup import setup_container_ssh
+from imbue.mngr_vps_docker.container_setup import snapshot_trigger_volume_name_for
+from imbue.mngr_vps_docker.container_setup import start_container
+from imbue.mngr_vps_docker.container_setup import start_container_sshd
 
 # Lima instance status values mapped to mngr HostState
 _LIMA_STATUS_TO_HOST_STATE: dict[str, HostState] = {
@@ -365,6 +397,37 @@ sudo poweroff
         with log_span("Saving failed host record for host_id={}", host_id):
             self._host_store.write_host_record(host_record)
 
+    def _cleanup_failed_lima_instance(
+        self,
+        *,
+        instance_name: str,
+        host_data_disk_name: str | None,
+        container_host_port: int | None,
+    ) -> None:
+        """Best-effort teardown of a half-created Lima VM, its btrfs disk, and forwarded-port known_hosts entry.
+
+        Tolerates already-absent resources so it is safe to call from a `finally`
+        on any failure path. Also swallows concurrency-group ``ProcessError``s
+        (e.g. a limactl timeout) so a slow cleanup never masks the original
+        creation failure that triggered it.
+        """
+        try:
+            limactl_delete(self.mngr_ctx.concurrency_group, instance_name, force=True)
+        except (LimaCommandError, OSError, ProcessError) as cleanup_err:
+            logger.debug("Failed to clean up Lima instance {} during error recovery: {}", instance_name, cleanup_err)
+        if host_data_disk_name is not None:
+            try:
+                limactl_disk_delete(self.mngr_ctx.concurrency_group, host_data_disk_name, force=True)
+            except (LimaCommandError, OSError, ProcessError) as cleanup_err:
+                logger.debug(
+                    "Failed to clean up Lima disk {} during error recovery: {}", host_data_disk_name, cleanup_err
+                )
+        if container_host_port is not None:
+            try:
+                remove_host_from_known_hosts(self._container_known_hosts_path(), "127.0.0.1", container_host_port)
+            except OSError as cleanup_err:
+                logger.trace("Failed to clean up container known_hosts during error recovery: {}", cleanup_err)
+
     def _wait_for_cloud_init(self, instance_name: str) -> None:
         """Wait for cloud-init to complete inside the VM."""
         with log_span("Waiting for cloud-init to complete in {}", instance_name):
@@ -376,6 +439,433 @@ sudo poweroff
             )
             if exit_code != 0:
                 logger.debug("cloud-init wait returned non-zero (may not be installed): {}", stderr)
+
+    # =========================================================================
+    # Docker-in-VM helpers (is_host_in_docker mode)
+    # =========================================================================
+
+    def _ensure_keys_dir(self) -> Path:
+        """Create (if needed) and return the provider-wide keys directory."""
+        self._keys_dir.mkdir(parents=True, exist_ok=True)
+        return self._keys_dir
+
+    def _outer_ssh_keypair(self) -> tuple[Path, str]:
+        """Client keypair mngr uses to reach the VM as root (the outer)."""
+        return load_or_create_ssh_keypair(self._ensure_keys_dir(), "outer_ssh_key")
+
+    def _container_ssh_keypair(self) -> tuple[Path, str]:
+        """Client keypair mngr uses to reach the agent container (the host)."""
+        return load_or_create_ssh_keypair(self._ensure_keys_dir(), "container_ssh_key")
+
+    def _container_host_keypair(self) -> tuple[Path, str]:
+        """Ed25519 host keypair installed as the container sshd's host key."""
+        return load_or_create_host_keypair(self._ensure_keys_dir(), "container_host_key")
+
+    def _container_known_hosts_path(self) -> Path:
+        return self._ensure_keys_dir() / "container_known_hosts"
+
+    @contextmanager
+    def _make_outer_for_vm(self, host_id: HostId, ssh_config: LimaSshConfig) -> Iterator[OuterHostInterface]:
+        """Open a root outer host on the VM so we can drive docker / btrfs / systemctl."""
+        # Re-run on every open because Lima reassigns the forwarded port across restarts.
+        self._record_pre_injected_host_key(host_id, ssh_config.hostname, ssh_config.port)
+        outer_key_path, _outer_public_key = self._outer_ssh_keypair()
+        pyinfra_host = create_pyinfra_host(
+            hostname=ssh_config.hostname,
+            port=ssh_config.port,
+            private_key_path=outer_key_path,
+            known_hosts_path=self._host_known_hosts_path(host_id),
+            ssh_user="root",
+        )
+        outer = OuterHost(id=HostId.generate(), connector=PyinfraConnector(pyinfra_host), mngr_ctx=self.mngr_ctx)
+        try:
+            yield outer
+        finally:
+            outer.disconnect()
+
+    def _create_container_host_object(self, host_id: HostId, host_name: HostName, container_host_port: int) -> Host:
+        """Create a Host object with direct SSH to the agent container via the Lima-forwarded port."""
+        container_key_path, _container_public_key = self._container_ssh_keypair()
+        pyinfra_host = create_pyinfra_host(
+            hostname="127.0.0.1",
+            port=container_host_port,
+            private_key_path=container_key_path,
+            known_hosts_path=self._container_known_hosts_path(),
+            ssh_user="root",
+        )
+        connector = PyinfraConnector(pyinfra_host)
+        return Host(
+            id=host_id,
+            host_name=host_name,
+            connector=connector,
+            provider_instance=self,
+            mngr_ctx=self.mngr_ctx,
+            on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
+                callback_host_id, certified_data
+            ),
+        )
+
+    def _create_docker_shutdown_script(self, host: Host) -> None:
+        """Write the shutdown script that stops the agent container on idle (kill -TERM 1)."""
+        shutdown_script = "#!/bin/bash\nkill -TERM 1\n"
+        commands_dir = host.host_dir / "commands"
+        host.execute_idempotent_command(f"mkdir -p {commands_dir}")
+        host.write_file(commands_dir / "shutdown.sh", shutdown_script.encode())
+        host.execute_idempotent_command(f"chmod +x {commands_dir / 'shutdown.sh'}")
+
+    def _create_docker_host(
+        self,
+        name: HostName,
+        image: ImageReference | None,
+        tags: Mapping[str, str] | None,
+        build_args: Sequence[str] | None,
+        start_args: Sequence[str] | None,
+        lifecycle: HostLifecycleOptions | None,
+        known_hosts: Sequence[str] | None,
+        authorized_keys: Sequence[str] | None,
+    ) -> Host:
+        """Create a Lima VM that runs the agent inside a Docker container (is_host_in_docker mode)."""
+        if self.config.is_host_data_volume_exposed:
+            raise LimaHostCreationError(
+                self.name,
+                "is_host_in_docker=True requires the btrfs additional-disk layout; set "
+                "providers.lima.is_host_data_volume_exposed=false.",
+            )
+        host_id = HostId.generate()
+        instance_name = lima_instance_name(name, self.mngr_ctx.config.prefix)
+        logger.info("Creating Lima docker host {} ({}) ...", name, instance_name)
+
+        host_data_disk_name = lima_host_data_disk_name(host_id)
+        container_host_port = _allocate_free_host_port()
+        container_ssh_port = self.config.container_ssh_port
+
+        host_private_key_pem, host_public_key_openssh = self._ensure_host_keypair(host_id)
+        _outer_key_path, outer_public_key = self._outer_ssh_keypair()
+        # Materialize the container keypairs now so they exist when we set up the container later.
+        self._container_ssh_keypair()
+        self._container_host_keypair()
+
+        lima_config = generate_default_lima_yaml(
+            volume_host_path=None,
+            host_dir=str(self.host_dir),
+            custom_image_url=str(image) if image else None,
+            config_image_url_aarch64=self.config.default_image_url_aarch64,
+            config_image_url_x86_64=self.config.default_image_url_x86_64,
+            host_private_key_pem=host_private_key_pem,
+            host_public_key_openssh=host_public_key_openssh,
+            host_data_disk_name=host_data_disk_name,
+            host_data_disk_size=self.config.host_data_disk_size,
+            is_docker_mode=True,
+            outer_authorized_public_key=outer_public_key,
+            container_forward_guest_port=container_ssh_port,
+            container_forward_host_port=container_host_port,
+            install_gvisor_runtime=self.config.install_gvisor_runtime,
+        )
+        yaml_path = write_lima_yaml(lima_config)
+        effective_start_args = tuple(self.config.default_start_args) + tuple(start_args or ())
+
+        # Tracked so the `finally` can tear down a half-built VM + disk on ANY
+        # failure -- including ConcurrencyExceptionGroup / ProcessTimeoutError /
+        # KeyboardInterrupt, which are not MngrError/OSError and would otherwise
+        # escape the `except` below leaving an orphaned, untracked VM behind.
+        is_creation_successful = False
+        failure_reason = "Lima docker host creation was interrupted by an unexpected error"
+        try:
+            limactl_disk_create(self.mngr_ctx.concurrency_group, host_data_disk_name, self.config.host_data_disk_size)
+            limactl_start_new(
+                self.mngr_ctx.concurrency_group,
+                instance_name,
+                yaml_path,
+                start_args=effective_start_args,
+                timeout=self.config.vm_start_timeout_seconds,
+            )
+            self._wait_for_cloud_init(instance_name)
+            ssh_config = self._get_ssh_config(instance_name)
+            with log_span("Waiting for VM SSH to be ready..."):
+                wait_for_sshd(ssh_config.hostname, ssh_config.port, self.config.ssh_connect_timeout)
+
+            with self._make_outer_for_vm(host_id, ssh_config) as outer:
+                base_image, container_name = self._provision_docker_container(
+                    outer=outer,
+                    host_id=host_id,
+                    name=name,
+                    host_data_disk_name=host_data_disk_name,
+                    base_image=str(image) if image else self.config.default_image,
+                    build_args=tuple(build_args or ()),
+                    container_ssh_port=container_ssh_port,
+                    container_host_port=container_host_port,
+                    tags=tags,
+                    known_hosts=known_hosts,
+                    authorized_keys=authorized_keys,
+                )
+                host = self._finalize_docker_host(
+                    outer=outer,
+                    host_id=host_id,
+                    name=name,
+                    instance_name=instance_name,
+                    container_name=container_name,
+                    container_host_port=container_host_port,
+                    base_image=base_image,
+                    host_data_disk_name=host_data_disk_name,
+                    effective_start_args=effective_start_args,
+                    image=image,
+                    lifecycle=lifecycle,
+                    tags=tags,
+                    lima_config=lima_config,
+                )
+            is_creation_successful = True
+        except (MngrError, OSError) as e:
+            failure_reason = str(e)
+            raise LimaHostCreationError(self.name, failure_reason) from e
+        finally:
+            yaml_path.unlink(missing_ok=True)
+            if not is_creation_successful:
+                logger.error("Lima docker host creation failed; tearing down {}: {}", instance_name, failure_reason)
+                self._cleanup_failed_lima_instance(
+                    instance_name=instance_name,
+                    host_data_disk_name=host_data_disk_name,
+                    container_host_port=container_host_port,
+                )
+                try:
+                    self._save_failed_host_record(
+                        host_id=host_id, host_name=name, tags=tags, failure_reason=failure_reason, build_log=""
+                    )
+                except (MngrError, OSError) as record_err:
+                    logger.warning("Failed to write failed-host record for {}: {}", host_id, record_err)
+
+        self._evict_cached_host(host_id, replacement=host)
+        return host
+
+    def _provision_docker_container(
+        self,
+        *,
+        outer: OuterHostInterface,
+        host_id: HostId,
+        name: HostName,
+        host_data_disk_name: str,
+        base_image: str,
+        build_args: tuple[str, ...],
+        container_ssh_port: int,
+        container_host_port: int,
+        tags: Mapping[str, str] | None,
+        known_hosts: Sequence[str] | None,
+        authorized_keys: Sequence[str] | None,
+    ) -> tuple[str, str]:
+        """Set up the btrfs subvolume, snapshot helper, image, and agent container in the VM.
+
+        Returns ``(resolved_image, container_name)``.
+        """
+        btrfs_mount = Path(lima_host_data_disk_mount_path(host_data_disk_name))
+        subvolume_path = btrfs_mount / host_id.get_uuid().hex
+        volume_name = host_volume_name_for(host_id)
+        trigger_volume_name = snapshot_trigger_volume_name_for(host_id)
+
+        with log_span("Provisioning host volume on btrfs subvolume in VM"):
+            ensure_btrfs_subvolume_on_outer(outer, subvolume_path)
+            seed_host_volume_layout_on_outer(outer, subvolume_path)
+            create_bind_volume_on_outer(outer, volume_name=volume_name, device_path=subvolume_path)
+
+        provision_snapshot_helper_on_outer(
+            outer,
+            self.mngr_ctx.concurrency_group,
+            host_id=host_id,
+            btrfs_mount_path=btrfs_mount,
+            subvolume_path=subvolume_path,
+            trigger_volume_name=trigger_volume_name,
+        )
+
+        if build_args:
+            resolved_image = build_image_on_outer_from_build_args(
+                outer,
+                self.mngr_ctx.concurrency_group,
+                host_id=host_id,
+                docker_build_args=build_args,
+                git_depth=None,
+                builder=self.config.builder,
+                build_timeout_seconds=self.config.image_build_timeout_seconds,
+            )
+        else:
+            with log_span("Pulling container image {} in VM", base_image):
+                pull_image(outer, base_image, timeout_seconds=self.config.docker_install_timeout)
+            resolved_image = base_image
+
+        container_name = f"{self.mngr_ctx.config.prefix}{name}"
+        labels = {
+            LABEL_HOST_ID: str(host_id),
+            LABEL_HOST_NAME: str(name),
+            LABEL_PROVIDER: str(self.name),
+            LABEL_TAGS: json.dumps(dict(tags) if tags else {}),
+        }
+        snapshots_dir = btrfs_mount / "snapshots"
+        with log_span("Starting agent container in VM"):
+            run_container(
+                outer,
+                image=resolved_image,
+                name=container_name,
+                # Publish the container's sshd onto the VM's loopback; Lima forwards
+                # that guest port out to 127.0.0.1:container_host_port on the host.
+                port_mappings={f"127.0.0.1:{container_ssh_port}": "22"},
+                volumes=[
+                    f"{volume_name}:{HOST_VOLUME_MOUNT_PATH}:rw",
+                    f"{trigger_volume_name}:{SNAPSHOT_TRIGGER_MOUNT_PATH}:rw",
+                    f"{snapshots_dir}:{SNAPSHOT_READ_MOUNT_PATH}:ro",
+                ],
+                labels=labels,
+                # Select a non-default container runtime (e.g. 'runsc' for gVisor) when
+                # configured; absent by default. The runtime must be registered in the VM.
+                extra_args=(
+                    ["--runtime", self.config.docker_runtime] if self.config.docker_runtime is not None else []
+                ),
+                entrypoint_cmd=CONTAINER_ENTRYPOINT_CMD,
+            )
+
+        _container_key_path, container_public_key = self._container_ssh_keypair()
+        container_host_key_path, container_host_public_key = self._container_host_keypair()
+        with log_span("Setting up SSH in container"):
+            setup_container_ssh(
+                outer,
+                container_name,
+                mngr_host_dir=str(self.host_dir),
+                host_volume_mount_path=f"{HOST_VOLUME_MOUNT_PATH}/{HOST_DIR_SUBPATH}",
+                container_public_key=container_public_key,
+                container_host_private_key=container_host_key_path.read_text(),
+                container_host_public_key=container_host_public_key,
+                known_hosts_entries=tuple(known_hosts or ()),
+                authorized_keys_entries=tuple(authorized_keys or ()),
+            )
+        add_host_to_known_hosts(
+            known_hosts_path=self._container_known_hosts_path(),
+            hostname="127.0.0.1",
+            port=container_host_port,
+            public_key=container_host_public_key,
+        )
+        with log_span("Waiting for container SSH to be ready..."):
+            wait_for_sshd("127.0.0.1", container_host_port, self.config.container_ssh_connect_timeout)
+
+        return resolved_image, container_name
+
+    def _finalize_docker_host(
+        self,
+        *,
+        outer: OuterHostInterface,
+        host_id: HostId,
+        name: HostName,
+        instance_name: str,
+        container_name: str,
+        container_host_port: int,
+        base_image: str,
+        host_data_disk_name: str,
+        effective_start_args: tuple[str, ...],
+        image: ImageReference | None,
+        lifecycle: HostLifecycleOptions | None,
+        tags: Mapping[str, str] | None,
+        lima_config: dict[str, Any],
+    ) -> Host:
+        """Build the container Host object, configure activity watching, and persist the host record."""
+        host = self._create_container_host_object(host_id, name, container_host_port)
+
+        lifecycle_options = lifecycle if lifecycle is not None else HostLifecycleOptions()
+        activity_config = lifecycle_options.to_activity_config(
+            default_idle_timeout_seconds=self.config.default_idle_timeout,
+            default_idle_mode=self.config.default_idle_mode,
+            default_activity_sources=self.config.default_activity_sources,
+        )
+        now = datetime.now(timezone.utc)
+        host_data = CertifiedHostData(
+            idle_timeout_seconds=activity_config.idle_timeout_seconds,
+            activity_sources=activity_config.activity_sources,
+            host_id=str(host_id),
+            host_name=str(name),
+            image=base_image,
+            user_tags=dict(tags) if tags else {},
+            snapshots=[],
+            tmux_session_prefix=self.mngr_ctx.config.prefix,
+            created_at=now,
+            updated_at=now,
+        )
+        # Persist the host record *before* set_certified_data: that call fires
+        # the on_updated_host_data callback, which reads the record back from
+        # the store (and raises HostNotFoundError if it isn't there yet).
+        lima_config_record = LimaHostConfig(
+            instance_name=instance_name,
+            start_args=effective_start_args,
+            image_url=str(image) if image else None,
+            is_host_data_volume_exposed=False,
+            host_data_disk_name=host_data_disk_name,
+            is_host_in_docker=True,
+            container_name=container_name,
+            container_host_port=container_host_port,
+            base_image=base_image,
+        )
+        resources = self._read_resources_from_config(lima_config)
+        host_record = HostRecord(
+            certified_host_data=host_data,
+            ssh_hostname="127.0.0.1",
+            ssh_port=container_host_port,
+            ssh_user="root",
+            ssh_identity_file=str(self._container_ssh_keypair()[0]),
+            config=lima_config_record,
+            resources=resources,
+        )
+        self._host_store.write_host_record(host_record)
+
+        host.record_activity(ActivitySource.BOOT)
+        host.set_certified_data(host_data)
+
+        self._create_docker_shutdown_script(host)
+        with log_span("Starting activity watcher in container"):
+            exec_in_container(outer, container_name, build_start_activity_watcher_command(str(self.host_dir)))
+        if tags:
+            self._write_tags(host_id, dict(tags))
+        return host
+
+    def _start_docker_host(self, host_record: HostRecord) -> Host:
+        """Start a stopped docker-mode host: boot the VM, then relaunch the container."""
+        config = host_record.config
+        host_id = HostId(host_record.certified_host_data.host_id)
+        if config is None or config.container_name is None or config.container_host_port is None:
+            raise MngrError(
+                f"Host {host_id} is missing docker-mode configuration "
+                "(container_name/container_host_port) and cannot be started."
+            )
+        container_host_port = config.container_host_port
+
+        try:
+            limactl_start_existing(self.mngr_ctx.concurrency_group, config.instance_name)
+        except LimaCommandError as e:
+            raise MngrError(f"Failed to start Lima VM {host_id}: {e}") from e
+
+        ssh_config = self._get_ssh_config(config.instance_name)
+        with log_span("Waiting for VM SSH to be ready..."):
+            wait_for_sshd(ssh_config.hostname, ssh_config.port, self.config.ssh_connect_timeout)
+
+        with self._make_outer_for_vm(host_id, ssh_config) as outer:
+            with log_span("Starting agent container in VM"):
+                start_container(outer, config.container_name)
+            # sshd was launched via `docker exec` at create time and does not
+            # survive the container going down with the VM, so relaunch it.
+            start_container_sshd(outer, config.container_name)
+            with log_span("Waiting for container SSH to be ready..."):
+                wait_for_sshd("127.0.0.1", container_host_port, self.config.container_ssh_connect_timeout)
+            host_obj = self._create_container_host_object(
+                host_id, HostName(host_record.certified_host_data.host_name), container_host_port
+            )
+            host_obj.record_activity(ActivitySource.BOOT)
+            with log_span("Restarting activity watcher in container"):
+                exec_in_container(
+                    outer, config.container_name, build_start_activity_watcher_command(str(self.host_dir))
+                )
+
+        updated_certified = host_record.certified_host_data.model_copy_update(
+            to_update(host_record.certified_host_data.field_ref().stop_reason, None),
+        )
+        self._host_store.write_host_record(
+            host_record.model_copy_update(
+                to_update(host_record.field_ref().certified_host_data, updated_certified),
+            )
+        )
+        self._evict_cached_host(host_id, replacement=host_obj)
+        return host_obj
 
     # =========================================================================
     # Core Lifecycle Methods
@@ -395,6 +885,17 @@ sudo poweroff
     ) -> Host:
         """Create a new Lima VM host."""
         self._ensure_lima_available()
+        if self.config.is_host_in_docker:
+            return self._create_docker_host(
+                name=name,
+                image=image,
+                tags=tags,
+                build_args=build_args,
+                start_args=start_args,
+                lifecycle=lifecycle,
+                known_hosts=known_hosts,
+                authorized_keys=authorized_keys,
+            )
         host_id = HostId.generate()
         instance_name = lima_instance_name(name, self.mngr_ctx.config.prefix)
         logger.info("Creating Lima VM host {} ({}) ...", name, instance_name)
@@ -451,6 +952,12 @@ sudo poweroff
 
         effective_start_args = tuple(self.config.default_start_args) + tuple(start_args or ())
 
+        # Tracked so the `finally` can tear down a half-built VM + disk on ANY
+        # failure -- including ConcurrencyExceptionGroup / ProcessTimeoutError /
+        # KeyboardInterrupt, which are not MngrError/OSError and would otherwise
+        # escape the `except` below leaving an orphaned, untracked VM behind.
+        is_creation_successful = False
+        failure_reason = "Lima host creation was interrupted by an unexpected error"
         try:
             # Pre-create the Lima-managed additional disk in btrfs mode.
             # `additionalDisks` with `format: true` only auto-formats an
@@ -484,39 +991,29 @@ sudo poweroff
 
             # Create the Host object
             host = self._create_host_object(host_id, name, ssh_config)
+            is_creation_successful = True
 
         except (MngrError, OSError) as e:
             failure_reason = str(e)
-            logger.error("Lima host creation failed: {}", failure_reason)
-            # Clean up the Lima instance
-            try:
-                limactl_delete(self.mngr_ctx.concurrency_group, instance_name, force=True)
-            except (LimaCommandError, OSError) as cleanup_err:
-                logger.debug(
-                    "Failed to clean up Lima instance {} during error recovery: {}", instance_name, cleanup_err
-                )
-            # Also clean up the orphaned btrfs additional disk so a retry with
-            # the same host_id can re-create it without colliding.
-            if host_data_disk_name is not None:
-                try:
-                    limactl_disk_delete(self.mngr_ctx.concurrency_group, host_data_disk_name, force=True)
-                except (LimaCommandError, OSError) as cleanup_err:
-                    logger.debug(
-                        "Failed to clean up Lima disk {} during error recovery: {}",
-                        host_data_disk_name,
-                        cleanup_err,
-                    )
-            self._save_failed_host_record(
-                host_id=host_id,
-                host_name=name,
-                tags=tags,
-                failure_reason=failure_reason,
-                build_log="",
-            )
             raise LimaHostCreationError(self.name, failure_reason) from e
         finally:
             # Clean up the temporary YAML config file
             yaml_path.unlink(missing_ok=True)
+            if not is_creation_successful:
+                logger.error("Lima host creation failed; tearing down {}: {}", instance_name, failure_reason)
+                # Tear down the VM (and the orphaned btrfs additional disk so a
+                # retry with the same host_id can re-create it without colliding).
+                self._cleanup_failed_lima_instance(
+                    instance_name=instance_name,
+                    host_data_disk_name=host_data_disk_name,
+                    container_host_port=None,
+                )
+                try:
+                    self._save_failed_host_record(
+                        host_id=host_id, host_name=name, tags=tags, failure_reason=failure_reason, build_log=""
+                    )
+                except (MngrError, OSError) as record_err:
+                    logger.warning("Failed to write failed-host record for {}: {}", host_id, record_err)
 
         # Build lifecycle config
         lifecycle_options = lifecycle if lifecycle is not None else HostLifecycleOptions()
@@ -670,6 +1167,9 @@ sudo poweroff
                 f"Reason: {host_record.certified_host_data.failure_reason}"
             )
 
+        if host_record.config.is_host_in_docker:
+            return self._start_docker_host(host_record)
+
         instance_name = host_record.config.instance_name
 
         try:
@@ -740,6 +1240,17 @@ sudo poweroff
                     )
                 except LimaCommandError as e:
                     logger.warning("Error deleting Lima additional disk: {}", e)
+
+            # Drop the forwarded-port entry from the container known_hosts file
+            # so a later host that happens to reuse the same host port doesn't
+            # trip a host-key mismatch. The container itself is gone with the VM.
+            if host_record.config.is_host_in_docker and host_record.config.container_host_port is not None:
+                try:
+                    remove_host_from_known_hosts(
+                        self._container_known_hosts_path(), "127.0.0.1", host_record.config.container_host_port
+                    )
+                except OSError as e:
+                    logger.trace("Failed to clean up container known_hosts: {}", e)
 
         # Mark as destroyed in host record
         if host_record is not None:
@@ -834,7 +1345,17 @@ sudo poweroff
         if not is_running:
             return self._create_offline_host(host_record)
 
-        # Instance is running -- create online host
+        # Instance is running -- create online host.
+        if host_record.config.is_host_in_docker:
+            if host_record.config.container_host_port is None:
+                raise MngrError(f"Host {host_id} is in docker mode but its record is missing container_host_port.")
+            host_obj = self._create_container_host_object(
+                host_id,
+                HostName(host_record.certified_host_data.host_name),
+                host_record.config.container_host_port,
+            )
+            self._evict_cached_host(host_id, replacement=host_obj)
+            return host_obj
         ssh_config = self._get_ssh_config(instance_name)
         host_obj = self._create_host_object(host_id, HostName(host_record.certified_host_data.host_name), ssh_config)
         self._evict_cached_host(host_id, replacement=host_obj)
@@ -920,6 +1441,24 @@ sudo poweroff
                     provider_name=self.name,
                     host_state=host_state,
                 )
+            )
+
+        # Surface orphaned Lima VMs: prefix-matched instances that no host record
+        # claims (whatever is left in instance_status after the loop above popped
+        # every recorded host). These are leftovers from a create that failed
+        # before its record was written -- e.g. a build-time error that escaped
+        # cleanup -- so they are invisible to the record-driven discovery above
+        # and are never reaped by gc. Warn loudly with the manual cleanup command.
+        # We deliberately do not emit synthetic DiscoveredHosts for them: gc would
+        # call get_host(), which raises HostNotFoundError for an id with no record.
+        for orphan_instance_name, orphan_status in instance_status.items():
+            logger.warning(
+                "Found orphaned Lima VM {!r} (status={}) with no mngr host record -- likely a failed or "
+                "interrupted create. mngr cannot manage or garbage-collect it; remove it manually with "
+                "`limactl delete --force {}`.",
+                orphan_instance_name,
+                orphan_status,
+                orphan_instance_name,
             )
 
         return discovered
@@ -1085,6 +1624,20 @@ sudo poweroff
 
     def remove_persisted_agent_data(self, host_id: HostId, agent_id: AgentId) -> None:
         self._host_store.remove_persisted_agent_data(host_id, agent_id)
+
+
+def _allocate_free_host_port() -> int:
+    """Return a currently-free TCP port on the host's loopback.
+
+    Used to pick the unique host-side port Lima forwards to a docker-mode
+    container's sshd. Binding to port 0 lets the OS choose a free port; we
+    immediately release it and bake the number into the Lima portForwards
+    config, so a brief TOCTOU window is acceptable (Lima fails loudly if the
+    port is taken, and each host gets its own number).
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as temp_socket:
+        temp_socket.bind(("127.0.0.1", 0))
+        return temp_socket.getsockname()[1]
 
 
 def _parse_size_to_gb(size_str: str) -> float:

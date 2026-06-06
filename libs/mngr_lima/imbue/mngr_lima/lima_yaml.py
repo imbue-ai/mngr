@@ -63,6 +63,26 @@ def _disable_port_forwards_rules() -> list[dict]:
     ]
 
 
+def _docker_port_forward_rules(guest_port: int, host_port: int) -> list[dict]:
+    """Lima portForwards that expose the container's sshd on the host's loopback.
+
+    The single allow rule forwards the VM's loopback ``guest_port`` (where the
+    agent container publishes its sshd) to ``127.0.0.1:host_port`` on the host
+    machine. It is placed *before* the catch-all disable rules so it wins the
+    first-match evaluation; every other guest port stays unforwarded.
+    """
+    return [
+        {
+            "guestIP": "127.0.0.1",
+            "guestPortRange": [guest_port, guest_port],
+            "hostIP": "127.0.0.1",
+            "hostPortRange": [host_port, host_port],
+            "proto": "tcp",
+        },
+        *_disable_port_forwards_rules(),
+    ]
+
+
 def generate_default_lima_yaml(
     volume_host_path: Path | None,
     host_dir: str,
@@ -73,6 +93,11 @@ def generate_default_lima_yaml(
     host_public_key_openssh: str | None = None,
     host_data_disk_name: str | None = None,
     host_data_disk_size: str | None = None,
+    is_docker_mode: bool = False,
+    outer_authorized_public_key: str | None = None,
+    container_forward_guest_port: int | None = None,
+    container_forward_host_port: int | None = None,
+    install_gvisor_runtime: bool = False,
 ) -> dict:
     """Generate the default Lima YAML configuration.
 
@@ -100,6 +125,25 @@ def generate_default_lima_yaml(
     image_url = custom_image_url or _get_default_image_url(config_image_url_aarch64, config_image_url_x86_64)
     arch = _get_arch_string()
 
+    if is_docker_mode:
+        if container_forward_guest_port is None or container_forward_host_port is None:
+            raise MngrError("container forward ports are required when is_docker_mode is True")
+        port_forwards = _docker_port_forward_rules(container_forward_guest_port, container_forward_host_port)
+        provision_script = _build_docker_provisioning_script(
+            host_private_key_pem,
+            host_public_key_openssh,
+            outer_authorized_public_key=outer_authorized_public_key,
+            install_gvisor_runtime=install_gvisor_runtime,
+        )
+    else:
+        port_forwards = _disable_port_forwards_rules()
+        provision_script = _build_provisioning_script(
+            host_private_key_pem,
+            host_public_key_openssh,
+            host_dir=host_dir,
+            host_data_disk_name=host_data_disk_name,
+        )
+
     config: dict = {
         "images": [
             {
@@ -107,17 +151,12 @@ def generate_default_lima_yaml(
                 "arch": arch,
             },
         ],
-        "portForwards": _disable_port_forwards_rules(),
+        "portForwards": port_forwards,
         # Provision required packages if not in the image
         "provision": [
             {
                 "mode": "system",
-                "script": _build_provisioning_script(
-                    host_private_key_pem,
-                    host_public_key_openssh,
-                    host_dir=host_dir,
-                    host_data_disk_name=host_data_disk_name,
-                ),
+                "script": provision_script,
             },
         ],
     }
@@ -207,6 +246,115 @@ fi
 # below is the inert comment placeholder.
 {host_data_disk_block}
 """
+
+
+# Idempotent block that installs and registers the gVisor `runsc` runtime with the
+# in-VM Docker daemon via gVisor's official APT repository, then re-registers it
+# with `runsc install` and restarts Docker. Guarded so it is a no-op when runsc is
+# already registered (e.g. baked into the VM image).
+_GVISOR_RUNSC_INSTALL_BLOCK = """\
+if ! docker info 2>/dev/null | grep -q runsc; then
+    curl -fsSL https://gvisor.dev/archive.key | gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" > /etc/apt/sources.list.d/gvisor.list
+    apt-get update && apt-get install -y runsc
+    runsc install
+    systemctl restart docker
+fi"""
+
+
+def _build_docker_provisioning_script(
+    host_private_key_pem: str | None,
+    host_public_key_openssh: str | None,
+    outer_authorized_public_key: str | None,
+    install_gvisor_runtime: bool,
+) -> str:
+    """Build the Lima ``provision[mode=system]`` script for is_host_in_docker mode.
+
+    Unlike the default script, this does not install the in-VM agent toolchain
+    or symlink host_dir -- the agent runs inside a Docker container instead.
+    The VM only needs Docker, btrfs-progs, and the snapshot-helper's runtime
+    deps (inotify-tools, jq), plus key-based root SSH so mngr's "outer" can
+    drive docker/btrfs/systemctl as root. The injected ed25519 host key gives
+    the VM a known sshd identity (no TOFU). When ``install_gvisor_runtime`` is
+    True, an idempotent block installs and registers the gVisor ``runsc`` runtime.
+    """
+    host_key_block = _build_host_key_block(host_private_key_pem, host_public_key_openssh)
+    root_authorized_keys_block = _build_root_authorized_keys_block(outer_authorized_public_key)
+    gvisor_install_block = (
+        f"\n# Install and register the gVisor runsc runtime (idempotent).\n{_GVISOR_RUNSC_INSTALL_BLOCK}\n"
+        if install_gvisor_runtime
+        else ""
+    )
+    # The gVisor install block dearmors the archive key with `gpg`, which is not
+    # guaranteed to be present on minimal images; install gnupg when needed.
+    gvisor_pkg_line = (
+        '\ncommand -v gpg >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL gnupg"'
+        if install_gvisor_runtime
+        else ""
+    )
+    return f"""\
+#!/bin/bash
+set -eux -o pipefail
+
+# Install Docker plus the runtime deps the per-host btrfs snapshot helper needs.
+export DEBIAN_FRONTEND=noninteractive
+PKGS_TO_INSTALL=""
+command -v docker >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL docker.io"
+command -v mkfs.btrfs >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL btrfs-progs"
+command -v inotifywait >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL inotify-tools"
+command -v jq >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL jq"
+command -v rsync >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL rsync"
+command -v curl >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL curl"
+test -x /usr/sbin/sshd || PKGS_TO_INSTALL="$PKGS_TO_INSTALL openssh-server"
+test -f /etc/ssl/certs/ca-certificates.crt || PKGS_TO_INSTALL="$PKGS_TO_INSTALL ca-certificates"{gvisor_pkg_line}
+
+if [ -n "$PKGS_TO_INSTALL" ]; then
+    apt-get update -qq && apt-get install -y -qq $PKGS_TO_INSTALL
+fi
+
+systemctl enable --now docker
+{gvisor_install_block}
+mkdir -p /run/sshd
+
+# Install the caller-provided sshd host key (when given).
+SSH_KEY_CHANGED=0
+{host_key_block}
+
+# Allow key-based root login and raise SSH limits so mngr's outer (root) can
+# open enough concurrent channels during provisioning. The defaults
+# (MaxSessions=10) cause "no more sessions" errors under pyinfra concurrency.
+SSHD_CONFIG_CHANGED=0
+if ! grep -q '^MaxSessions' /etc/ssh/sshd_config 2>/dev/null; then
+    cat >> /etc/ssh/sshd_config <<SSHD_EOF
+MaxSessions 100
+MaxStartups 100:30:200
+PermitRootLogin prohibit-password
+SSHD_EOF
+    SSHD_CONFIG_CHANGED=1
+fi
+
+# Authorize mngr's outer client key for root so the outer host can run
+# docker / btrfs / systemctl as root over SSH.
+{root_authorized_keys_block}
+
+if [ "$SSH_KEY_CHANGED" = "1" ] || [ "$SSHD_CONFIG_CHANGED" = "1" ]; then
+    systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null || true
+fi
+"""
+
+
+def _build_root_authorized_keys_block(outer_authorized_public_key: str | None) -> str:
+    """Return a bash block that authorizes ``outer_authorized_public_key`` for root, or an inert comment."""
+    if outer_authorized_public_key is None:
+        return "# (no outer client key to authorize for root)"
+    return f"""\
+mkdir -p /root/.ssh
+chmod 700 /root/.ssh
+cat > /root/.ssh/authorized_keys <<'MNGR_LIMA_OUTER_KEY'
+{outer_authorized_public_key.strip()}
+MNGR_LIMA_OUTER_KEY
+chmod 600 /root/.ssh/authorized_keys
+chown -R root:root /root/.ssh"""
 
 
 def _build_host_data_disk_block(host_data_disk_name: str | None, host_dir: str) -> str:
