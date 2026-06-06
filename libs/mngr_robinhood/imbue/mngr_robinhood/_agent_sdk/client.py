@@ -11,9 +11,12 @@ raise :class:`AgentSdkNotImplementedError` (``interrupt``, ``get_server_info``);
 ``set_permission_mode`` are accepted but do not retroactively change the running agent.
 """
 
+import asyncio
+import queue
 from collections.abc import AsyncIterator
 from collections.abc import Mapping
 from typing import Any
+from typing import Final
 from typing import Self
 
 from anyio import to_thread
@@ -29,10 +32,15 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr_robinhood._agent_sdk.driver import LiveSession
 from imbue.mngr_robinhood._agent_sdk.driver import deliver_turn
 from imbue.mngr_robinhood._agent_sdk.driver import drain_turn
+from imbue.mngr_robinhood._agent_sdk.driver import interrupt_session
+from imbue.mngr_robinhood._agent_sdk.driver import reconfigure_session
 from imbue.mngr_robinhood._agent_sdk.driver import start_session
 from imbue.mngr_robinhood._agent_sdk.driver import stop_session
 from imbue.mngr_robinhood.errors import AgentSdkNotImplementedError
 from imbue.mngr_robinhood.errors import RobinhoodError
+
+# Sentinel pushed onto the message queue by the drain worker to signal end-of-turn.
+_DRAIN_SENTINEL: Final[object] = object()
 
 # Prompt accepted by ``query`` / ``ClaudeSDKClient.query``: either a single string turn or the
 # documented streaming-input form (an async iterable of user-message dicts).
@@ -127,11 +135,34 @@ class ClaudeSDKClient(MutableModel):
         await to_thread.run_sync(deliver_turn, self.session, prompt_text)
 
     async def receive_messages(self) -> AsyncIterator[Message]:
-        """Low-level stream of all messages for the current turn (does not stop on its own)."""
-        if self.session is None:
+        """Stream the current turn's messages as they arrive (init, content, terminal result).
+
+        The synchronous transcript-polling drain runs in a worker thread and pushes each parsed
+        message onto a queue; this coroutine yields them as they appear. Streaming (rather than
+        batching the whole turn) is what lets ``interrupt()``, called from the consumer between
+        yields, stop the in-flight turn -- the drain then observes the agent's death and finalizes.
+        """
+        session = self.session
+        if session is None:
             raise RobinhoodError("ClaudeSDKClient.receive_messages called before connect()")
-        for message in await to_thread.run_sync(drain_turn, self.session):
-            yield message
+        message_queue: queue.Queue[Any] = queue.Queue()
+
+        def _run_drain() -> None:
+            try:
+                drain_turn(session, message_queue.put)
+            finally:
+                message_queue.put(_DRAIN_SENTINEL)
+
+        drain_task = asyncio.ensure_future(to_thread.run_sync(_run_drain))
+        try:
+            while True:
+                item = await to_thread.run_sync(message_queue.get)
+                if item is _DRAIN_SENTINEL:
+                    break
+                yield item
+        finally:
+            # Propagate any drain-worker exception and ensure the worker is finished.
+            await drain_task
 
     async def receive_response(self) -> AsyncIterator[Message]:
         """Stream the current turn's messages, terminating at (and including) the ResultMessage."""
@@ -141,23 +172,33 @@ class ClaudeSDKClient(MutableModel):
                 return
 
     async def set_model(self, model: str | None = None) -> None:
-        """Accept a mid-session model change request and keep the session usable.
+        """Apply a mid-session model change by restarting the agent on the resumed session.
 
-        mngr cannot swap the model of an already-running claude agent over its transport, so this
-        is a no-op against the live agent (it does not break the session); a model change only
-        takes effect for a freshly-created agent.
+        mngr cannot swap a running claude process's model, so the current session is adopted into a
+        fresh agent that resumes it under the new model (the old agent is stopped). The session
+        stays usable for the next turn.
         """
-        logger.debug("set_model requested ({}); not applied to the already-running mngr agent", model)
+        if not self.is_connected or self.session is None:
+            raise RobinhoodError("ClaudeSDKClient.set_model called before connect()")
+        logger.debug("Applying set_model ({}) by recreating the mngr agent on the resumed session", model)
+        await to_thread.run_sync(reconfigure_session, self.session, model, None)
 
     async def set_permission_mode(self, mode: str) -> None:
-        """Accept a mid-session permission-mode change request (see :meth:`set_model` for the caveat)."""
-        logger.debug("set_permission_mode requested ({}); not applied to the already-running mngr agent", mode)
+        """Apply a mid-session permission-mode change (see :meth:`set_model` for the mechanism)."""
+        if not self.is_connected or self.session is None:
+            raise RobinhoodError("ClaudeSDKClient.set_permission_mode called before connect()")
+        logger.debug("Applying set_permission_mode ({}) by recreating the mngr agent on the resumed session", mode)
+        await to_thread.run_sync(reconfigure_session, self.session, None, mode)
 
     async def interrupt(self) -> None:
-        """Interrupt the in-flight turn. Not yet supported by the mngr-backed transport."""
-        raise AgentSdkNotImplementedError(
-            "ClaudeSDKClient.interrupt is not supported by the mngr-backed transport yet."
-        )
+        """Interrupt the in-flight turn by stopping the agent; the response stream then ends.
+
+        The agent is left stopped (not destroyed); a subsequent ``query()`` restarts it with
+        ``--resume`` so the conversation continues.
+        """
+        if not self.is_connected or self.session is None:
+            raise RobinhoodError("ClaudeSDKClient.interrupt called before connect()")
+        await to_thread.run_sync(interrupt_session, self.session)
 
     async def get_server_info(self) -> dict[str, Any]:
         """Return server info (commands / output style). Not surfaced by the mngr transport yet."""

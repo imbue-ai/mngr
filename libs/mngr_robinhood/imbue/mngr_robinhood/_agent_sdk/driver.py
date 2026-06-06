@@ -13,8 +13,10 @@ an agent's lifetime (compaction, ``/clear``, resume, fork), which is why mngr ke
 append-only ``claude_session_id_history``.
 """
 
+import dataclasses
 import json
 import time
+from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
@@ -36,6 +38,7 @@ from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.api.events import read_event_content
 from imbue.mngr.api.events import try_build_events_target_for_agent
 from imbue.mngr.api.find import find_one_agent
+from imbue.mngr.api.find import resolve_to_started_host_and_agent
 from imbue.mngr.api.find import resolve_to_started_host_and_running_agent
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.api.message import send_message_to_agents
@@ -49,6 +52,7 @@ from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentNameStyle
 from imbue.mngr.primitives import AgentTypeName
@@ -58,6 +62,8 @@ from imbue.mngr.primitives import TransferMode
 from imbue.mngr.utils.jsonl_warn import split_complete_lines
 from imbue.mngr.utils.name_generator import generate_agent_name
 from imbue.mngr.utils.polling import poll_for_value
+from imbue.mngr.utils.polling import poll_until
+from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_robinhood._agent_sdk.context import build_sdk_mngr_context
 from imbue.mngr_robinhood._agent_sdk.context import open_sdk_concurrency_group
@@ -77,7 +83,7 @@ from imbue.mngr_robinhood.agent_runtime import build_events_target
 from imbue.mngr_robinhood.agent_runtime import build_pass_env_vars
 from imbue.mngr_robinhood.agent_runtime import normalize_credentials_env
 from imbue.mngr_robinhood.agent_runtime import stop_agent
-from imbue.mngr_robinhood.errors import AgentSdkNotImplementedError
+from imbue.mngr_robinhood.errors import ForkSessionError
 from imbue.mngr_robinhood.errors import RobinhoodError
 from imbue.mngr_robinhood.raw_transcript import RAW_TRANSCRIPT_PATH
 
@@ -124,6 +130,9 @@ class LiveSession(MutableModel):
     latest_usage: dict[str, Any] | None = Field(default=None, description="Most recent assistant usage block")
     turn_usage_totals: dict[str, int] = Field(
         default_factory=dict, description="Token usage accumulated across the current turn (for cost)"
+    )
+    turn_permission_denials: list[dict[str, Any]] = Field(
+        default_factory=list, description="Permission denials recorded by the hook bridge this turn"
     )
     is_init_emitted: bool = Field(default=False, description="Whether the system/init message was emitted")
     turn_count: int = Field(default=0, description="Number of user turns delivered so far")
@@ -229,20 +238,32 @@ def _build_agent_name() -> AgentName:
     return AgentName(f"robinhood-{base}")
 
 
-def _create_agent(session: LiveSession, initial_message: str | None) -> None:
-    """Create the mngr claude agent for this session (optionally with an initial turn)."""
+def _create_agent(
+    session: LiveSession,
+    initial_message: str | None,
+    extra_agent_args: tuple[str, ...],
+    adopt_session_path: str | None,
+) -> None:
+    """Create the mngr claude agent for this session (optionally with an initial turn).
+
+    ``extra_agent_args`` are appended to the translated option args (e.g. ``--fork-session``);
+    ``adopt_session_path`` (when set) adopts an existing claude session JSONL into the new agent
+    via mngr_claude's ``--adopt-session`` machinery before it boots.
+    """
     local_host = get_local_host(session.mngr_ctx)
     source_location = HostLocation(host=local_host, path=session.cwd)
+    plugin_data = {"adopt_session": (adopt_session_path,)} if adopt_session_path is not None else {}
     options = CreateAgentOptions(
         agent_type=AgentTypeName("claude"),
         name=_build_agent_name(),
         target_path=session.cwd,
         transfer_mode=TransferMode.NONE,
         initial_message=initial_message,
-        agent_args=map_options_to_agent_args(session.options),
+        agent_args=map_options_to_agent_args(session.options) + extra_agent_args,
         label_options=AgentLabelOptions(labels=dict(SDK_CREATED_BY_LABEL)),
         environment=_build_environment(session.options),
         ready_timeout_seconds=AGENT_READY_TIMEOUT_SECONDS,
+        plugin_data=plugin_data,
     )
     result = api_create(
         source_location=source_location,
@@ -355,26 +376,99 @@ def _reuse_agent(session: LiveSession, detail: AgentDetails) -> None:
         session.latest_session_id = session.options.resume
 
 
+def _latest_session_id_in_transcript(mngr_ctx: MngrContext, detail: AgentDetails) -> str | None:
+    """Return the most recent claude ``sessionId`` referenced by an agent's raw transcript."""
+    events_target = try_build_events_target_for_agent(
+        mngr_ctx=mngr_ctx,
+        agent_id=detail.id,
+        agent_name=str(detail.name),
+        host_id=detail.host.id,
+        provider_name=LOCAL_PROVIDER_NAME,
+    )
+    if events_target is None:
+        return None
+    try:
+        content = read_event_content(events_target, RAW_TRANSCRIPT_PATH)
+    except MngrError:
+        return None
+    latest: str | None = None
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        session_id = parsed.get("sessionId") if isinstance(parsed, dict) else None
+        if isinstance(session_id, str) and session_id:
+            latest = session_id
+    return latest
+
+
+def _claude_session_jsonl_path(agent: ClaudeAgent, session_id: str) -> str:
+    """On-disk path of an agent's claude session JSONL (for ``--adopt-session``)."""
+    project_dir_name = encode_claude_project_dir_name(agent.work_dir)
+    return str(agent.get_claude_config_dir() / "projects" / project_dir_name / f"{session_id}.jsonl")
+
+
+def _source_session_jsonl_path(session: LiveSession, source_detail: AgentDetails, source_session_id: str) -> str:
+    """Resolve the on-disk path of a source agent's claude session JSONL (for ``--adopt-session``)."""
+    host_ref, agent_ref = find_one_agent(source_detail.address, session.mngr_ctx)
+    agent, _host = resolve_to_started_host_and_agent(
+        host_ref, agent_ref, allow_auto_start=False, mngr_ctx=session.mngr_ctx
+    )
+    if not isinstance(agent, ClaudeAgent):
+        raise ForkSessionError(f"Cannot fork non-claude agent {agent.name!r}")
+    return _claude_session_jsonl_path(agent, source_session_id)
+
+
+def _fork_agent(session: LiveSession, prompt: str) -> None:
+    """Create a fresh agent that adopts the resume/continue source session and forks it.
+
+    ``--fork-session`` makes claude resume the adopted session under a NEW session id, so the
+    forked turn does not collide with the source session.
+    """
+    options = session.options
+    if not (options.resume or options.continue_conversation):
+        raise ForkSessionError("fork_session requires a resume or continue_conversation source session")
+    source_detail = _find_reuse_target(session)
+    if source_detail is None:
+        raise ForkSessionError("fork_session found no source SDK session to fork in this directory")
+    source_session_id = options.resume or _latest_session_id_in_transcript(session.mngr_ctx, source_detail)
+    if source_session_id is None:
+        raise ForkSessionError("fork_session could not determine the source claude session id")
+    source_path = _source_session_jsonl_path(session, source_detail, source_session_id)
+    _create_agent(
+        session, initial_message=prompt, extra_agent_args=("--fork-session",), adopt_session_path=source_path
+    )
+
+
 def deliver_turn(session: LiveSession, prompt: str) -> None:
     """Deliver one user turn.
 
-    On the first turn, either reuses the agent that owns the requested ``resume`` /
-    ``continue_conversation`` session (restarting it so claude resumes), or creates a fresh agent
-    with the prompt as its initial message. Subsequent turns message the running agent.
-    ``fork_session`` is not yet supported.
+    On the first turn: if ``fork_session`` is set, create a fresh agent that adopts and forks the
+    resume/continue source session; otherwise either reuse the agent that owns the requested
+    ``resume`` / ``continue_conversation`` session (restarting it so claude resumes), or create a
+    fresh agent with the prompt as its initial message. Subsequent turns message the running agent.
     """
-    if session.options.fork_session:
-        raise AgentSdkNotImplementedError("fork_session is not yet supported by the mngr-backed Agent SDK")
-    # Reset the per-turn usage accumulator so computed cost reflects only this turn's tokens.
+    # Reset the per-turn accumulators so computed cost / denials reflect only this turn.
     session.turn_usage_totals = {}
+    session.turn_permission_denials = []
     if session.agent is None:
-        reuse_target = _find_reuse_target(session)
-        if reuse_target is not None:
-            _reuse_agent(session, reuse_target)
-            _send_message(session, prompt)
+        if session.options.fork_session:
+            _fork_agent(session, prompt)
         else:
-            _create_agent(session, initial_message=prompt)
+            reuse_target = _find_reuse_target(session)
+            if reuse_target is not None:
+                _reuse_agent(session, reuse_target)
+                _send_message(session, prompt)
+            else:
+                _create_agent(session, initial_message=prompt, extra_agent_args=(), adopt_session_path=None)
     else:
+        # A prior interrupt() stops the agent; restart-with-resume so this turn continues the session.
+        if session.agent.get_lifecycle_state() in AGENT_DEAD_STATES:
+            restart_agent_with_resume(session)
         _send_message(session, prompt)
     session.turn_count += 1
 
@@ -435,19 +529,40 @@ def _absorb_event_metadata(session: LiveSession, raw_event: Mapping[str, Any]) -
     return stop_reason if isinstance(stop_reason, str) else None
 
 
+MessageSink = Callable[[Message], None]
+
+
+def _emit_init_if_needed(session: LiveSession, sink: MessageSink) -> None:
+    """Emit the synthesized ``system``/``init`` message once per session, with the known metadata."""
+    if session.is_init_emitted:
+        return
+    model = session.latest_model or (session.options.model or "")
+    sink(
+        build_system_init_message(
+            session_id=session.latest_session_id or "",
+            model=model,
+            cwd=str(session.cwd),
+            tools=_DEFAULT_REPORTED_TOOLS,
+        )
+    )
+    session.is_init_emitted = True
+
+
 class _TurnDrainTicker(MutableModel):
-    """Per-iteration drainer for one turn: accumulates SDK messages, signals end-of-turn.
+    """Per-iteration drainer for one turn: pushes SDK messages to a sink, signals end-of-turn.
 
     Polled by :func:`poll_for_value`. ``tick`` returns ``True`` once the turn has demonstrably
-    ended (terminal ``stop_reason`` past this turn's new transcript bytes, agent death, or a
-    no-progress safety timeout) and ``None`` otherwise; the accumulated :attr:`messages` are read
-    back by the caller afterward.
+    ended (terminal ``stop_reason``, agent death -- e.g. after ``interrupt()`` stops the agent --
+    or a no-progress safety timeout) and ``None`` otherwise. Each parsed message is pushed to
+    :attr:`sink` as it arrives so the async client can yield it immediately (rather than batching
+    the whole turn), which is what lets ``interrupt()`` end a turn mid-flight.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     session: LiveSession = Field(description="The live session whose transcript is being drained")
-    messages: list[Message] = Field(default_factory=list, description="SDK messages parsed this turn")
+    sink: SkipValidation[MessageSink] = Field(description="Callback invoked with each parsed message in order")
+    messages: list[Message] = Field(default_factory=list, description="SDK messages parsed this turn (for result)")
     last_progress_at: float = Field(
         default_factory=time.monotonic, description="``time.monotonic()`` of the last forward progress"
     )
@@ -461,7 +576,9 @@ class _TurnDrainTicker(MutableModel):
             stop_reason = _absorb_event_metadata(self.session, raw_event)
             message = parse_transcript_event(raw_event)
             if message is not None:
+                _emit_init_if_needed(self.session, self.sink)
                 self.messages.append(message)
+                self.sink(message)
             if stop_reason in TERMINAL_STOP_REASONS:
                 has_terminal_stop = True
         if has_terminal_stop:
@@ -474,15 +591,16 @@ class _TurnDrainTicker(MutableModel):
         return None
 
 
-def drain_turn(session: LiveSession) -> list[Message]:
-    """Poll the transcript until the turn's terminal assistant message arrives; return SDK messages.
+def drain_turn(session: LiveSession, sink: MessageSink) -> None:
+    """Poll the transcript until the turn ends, pushing each message (init, content, result) to ``sink``.
 
-    Prepends a synthesized ``system``/``init`` message on the first turn and appends a synthesized
-    terminal ``ResultMessage``. End-of-turn is an assistant event with a terminal ``stop_reason``;
-    agent death and a no-progress safety timeout are the fallback exits.
+    Emits a synthesized ``system``/``init`` message before the first content message of the session
+    and a synthesized terminal ``ResultMessage`` last. End-of-turn is a terminal ``stop_reason``;
+    agent death (including an ``interrupt()``-driven stop) and a no-progress safety timeout are the
+    fallback exits.
     """
     turn_start = time.monotonic()
-    ticker = _TurnDrainTicker(session=session)
+    ticker = _TurnDrainTicker(session=session, sink=sink)
     # The ticker owns the real stop decision (including its no-progress safety check); the outer
     # timeout is deliberately oversized so it only trips in pathological cases.
     outer_timeout_seconds = TURN_END_NO_PROGRESS_TIMEOUT_SECONDS * 10
@@ -496,19 +614,22 @@ def drain_turn(session: LiveSession) -> list[Message]:
             outer_timeout_seconds,
             len(ticker.messages),
         )
+    # If the turn produced no surfaced content (e.g. interrupted before the first message), still
+    # emit the init message before the terminal result so ordering is consistent.
+    _emit_init_if_needed(session, sink)
     duration_ms = max(1, int((time.monotonic() - turn_start) * 1000))
-    return _finalize_turn_messages(session, ticker.messages, duration_ms)
+    sink(_build_turn_result_message(session, ticker.messages, duration_ms))
 
 
-def _finalize_turn_messages(session: LiveSession, turn_messages: Sequence[Message], duration_ms: int) -> list[Message]:
-    """Wrap a turn's parsed messages with a leading system/init (first turn) and trailing result."""
+def _build_turn_result_message(session: LiveSession, turn_messages: Sequence[Message], duration_ms: int) -> Message:
+    """Build the synthesized terminal ``ResultMessage`` for a turn from accumulated session state."""
     session_id = session.latest_session_id or ""
     model = session.latest_model or (session.options.model or "")
     result_text = collect_assistant_text(turn_messages) or None
     model_usage = {model: session.latest_usage} if (model and session.latest_usage is not None) else None
     # Cost is computed from the turn's accumulated token usage (the session JSONL has no cost field).
     total_cost_usd = compute_total_cost_usd(model, session.turn_usage_totals) if model else None
-    result_message = build_result_message(
+    return build_result_message(
         session_id=session_id,
         is_error=False,
         result_text=result_text,
@@ -518,23 +639,102 @@ def _finalize_turn_messages(session: LiveSession, turn_messages: Sequence[Messag
         usage=session.latest_usage,
         total_cost_usd=total_cost_usd,
         model_usage=model_usage,
-        permission_denials=[],
+        permission_denials=list(session.turn_permission_denials),
         result_uuid=str(uuid4()),
     )
-    finalized: list[Message] = []
-    if not session.is_init_emitted:
-        finalized.append(
-            build_system_init_message(
-                session_id=session_id,
-                model=model,
-                cwd=str(session.cwd),
-                tools=_DEFAULT_REPORTED_TOOLS,
-            )
-        )
-        session.is_init_emitted = True
-    finalized.extend(turn_messages)
-    finalized.append(result_message)
-    return finalized
+
+
+def restart_agent_with_resume(session: LiveSession) -> None:
+    """Stop then restart the agent so claude relaunches resuming its session.
+
+    Used by ``interrupt()`` continuation and ``set_model`` / ``set_permission_mode``: the launch
+    command re-reads on-disk settings and resumes ``$MAIN_CLAUDE_SESSION_ID``, so a settings
+    rewrite before the restart takes effect on the next turn. The raw transcript is append-only and
+    reconciled by ``stream_transcript.sh`` across restarts, so ``seen_bytes`` stays valid.
+    """
+    agent = session.agent
+    host = session.host
+    if agent is None or host is None:
+        raise TurnDeliveryError("Cannot restart the agent before it is created")
+    host.stop_agents([agent.id])
+    host.start_agents([agent.id])
+    is_ready = poll_until(
+        lambda: agent.get_lifecycle_state() == AgentLifecycleState.WAITING,
+        timeout=AGENT_READY_TIMEOUT_SECONDS,
+        poll_interval=POLL_INTERVAL_SECONDS,
+    )
+    if not is_ready:
+        logger.warning("Restarted SDK agent {} did not reach WAITING within timeout; proceeding", agent.name)
+
+
+def interrupt_session(session: LiveSession) -> None:
+    """Interrupt the in-flight turn by stopping the agent; the drain loop then finalizes the turn.
+
+    Stopping the agent's tmux process ends the current generation. The running drain ticker observes
+    the agent's dead lifecycle state and emits the terminal ``ResultMessage``, so the response stream
+    terminates. The client stays connected; the next ``query()`` restarts-with-resume.
+    """
+    if session.agent is not None and session.host is not None:
+        stop_agent(session.agent, session.host)
+
+
+def _options_with_overrides(
+    options: ClaudeAgentOptions, model: str | None, permission_mode: str | None
+) -> ClaudeAgentOptions:
+    """Return a copy of ``options`` with ``model`` / ``permission_mode`` overridden where provided."""
+    updates: dict[str, Any] = {}
+    if model is not None:
+        updates["model"] = model
+    if permission_mode is not None:
+        updates["permission_mode"] = permission_mode
+    if not updates:
+        return options
+    return dataclasses.replace(options, **updates)
+
+
+def _baseline_seen_bytes_after_ready(session: LiveSession) -> None:
+    """After recreating the agent, wait for readiness then skip the re-mirrored history bytes."""
+    agent = session.agent
+    events_target = session.events_target
+    if agent is None or events_target is None:
+        return
+    poll_until(
+        lambda: agent.get_lifecycle_state() == AgentLifecycleState.WAITING,
+        timeout=AGENT_READY_TIMEOUT_SECONDS,
+        poll_interval=POLL_INTERVAL_SECONDS,
+    )
+    try:
+        content = read_event_content(events_target, RAW_TRANSCRIPT_PATH)
+    except MngrError:
+        content = ""
+    session.seen_bytes = len(content.encode("utf-8"))
+
+
+def reconfigure_session(session: LiveSession, model: str | None, permission_mode: str | None) -> None:
+    """Apply a mid-session ``set_model`` / ``set_permission_mode`` by recreating the agent.
+
+    mngr cannot reconfigure a live claude process and its launch command bakes in ``--model`` /
+    ``--permission-mode``, so a genuine change requires relaunching with new args. The current
+    session is adopted into a fresh agent that resumes it (same session id, no fork) under the new
+    configuration; the old agent is stopped. If there is no live, resumable agent yet, the new
+    values are simply recorded for the next agent created.
+    """
+    new_options = _options_with_overrides(session.options, model, permission_mode)
+    if new_options is session.options:
+        return
+    agent = session.agent
+    source_session_id = session.latest_session_id
+    if agent is None or source_session_id is None:
+        session.options = new_options
+        return
+    source_path = _claude_session_jsonl_path(agent, source_session_id)
+    if session.host is not None:
+        stop_agent(agent, session.host)
+    session.options = new_options
+    session.agent = None
+    session.host = None
+    _create_agent(session, initial_message=None, extra_agent_args=(), adopt_session_path=source_path)
+    _baseline_seen_bytes_after_ready(session)
 
 
 def stop_session(session: LiveSession) -> None:
