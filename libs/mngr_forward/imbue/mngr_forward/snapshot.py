@@ -111,15 +111,18 @@ def _parse_snapshot(json_output: str) -> ForwardListSnapshot:
     return ForwardListSnapshot(agents=tuple(agents))
 
 
-def _parse_str_field(raw: dict[str, Any] | Any, key: str) -> str:
+def _parse_str_field(raw: dict[str, Any], key: str) -> str:
     """Pull ``key`` out of ``raw`` as a string, defaulting to empty.
 
-    Tolerates missing keys, non-dict containers, and non-string values so a
-    partial ``mngr list --format json`` payload (e.g. an older mngr version
-    that doesn't carry one of these fields) doesn't break snapshot parsing.
+    Tolerates missing keys and non-string values so a partial
+    ``mngr list --format json`` payload (e.g. an older mngr version that
+    doesn't carry one of these fields) doesn't break snapshot parsing. An
+    empty string therefore means "field absent from this mngr version's
+    output", which matters because these values feed client-side CEL
+    ``--agent-include``/``--agent-exclude`` filtering: a silently-empty
+    ``host_id``/``provider_name`` can change which agents match a filter.
+    Callers guarantee ``raw`` is a dict, so no container type-check here.
     """
-    if not isinstance(raw, dict):
-        return ""
     value = raw.get(key)
     return str(value) if value is not None else ""
 
