@@ -34,7 +34,12 @@ def register_agent_config(
 def get_agent_config_class(agent_type: str) -> type[AgentTypeConfig]:
     """Get the config class for an agent type.
 
-    Returns the base AgentTypeConfig if no specific type is registered.
+    Returns the base AgentTypeConfig if no specific type is registered. This
+    fall-back-instead-of-raise behavior is intentional and differs from
+    get_agent_class (which raises UnknownAgentTypeError on unknown names):
+    an [agent_types.<name>] block may reference a type whose providing plugin
+    is not installed yet, and the base AgentTypeConfig carries the
+    universally-valid fields needed to represent it until then.
     """
     key = AgentTypeName(agent_type)
     if key not in _agent_config_registry:

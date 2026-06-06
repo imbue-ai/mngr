@@ -19,7 +19,13 @@ def register_plugin_config(
 def get_plugin_config_class(plugin_name: str) -> type[PluginConfig]:
     """Get the config class for a plugin.
 
-    Returns the base PluginConfig if no specific type is registered.
+    Returns the base PluginConfig if no specific type is registered. This
+    fall-back-instead-of-raise behavior is intentional and differs from
+    get_provider_config_class / get_agent_class (which raise on unknown names):
+    a [plugins.<name>] block may legitimately reference a plugin whose package
+    is not installed yet (e.g. when the disabled-plugins pre-reader or
+    _apply_plugin_overrides constructs a config for a not-yet-installed plugin),
+    and the base PluginConfig carries the universally-valid fields needed there.
     """
     key = PluginName(plugin_name)
     if key not in _plugin_config_registry:
