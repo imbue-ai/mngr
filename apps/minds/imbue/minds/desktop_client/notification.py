@@ -209,6 +209,10 @@ def _run_tkinter_toast(
 
         root.mainloop()
     except (tk.TclError, OSError, RuntimeError) as e:
+        # Toasts are best-effort and run on a daemon thread, so a display
+        # failure should warn-and-continue rather than crash the thread. The
+        # broad types are required, not lazy: tkinter raises RuntimeError for
+        # off-main-thread Tcl access and OSError for display/connection issues.
         logger.warning("Failed to show tkinter notification: {}", e)
 
 
@@ -238,6 +242,10 @@ def _run_macos_notification_subprocess(script: str) -> None:
                 is_checked_after=False,
             )
     except (OSError, ExceptionGroup) as e:
+        # Native notifications are best-effort and run on a daemon thread, so a
+        # failure should warn-and-continue rather than crash. The broad types
+        # are required: OSError covers osascript launch failures, and
+        # ConcurrencyGroup surfaces process failures wrapped in an ExceptionGroup.
         logger.warning("Failed to show macOS notification: {}", e)
 
 
