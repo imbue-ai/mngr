@@ -234,7 +234,10 @@ def _converse_with_botfather(
 
         bot_token = token_match.group(1)
 
-        # Extract the actual username from the response
+        # Extract the actual username from the response. A bot token was already
+        # extracted above, so BotFather created the bot under exactly the username
+        # we sent; if the confirmation t.me/ link is absent, that requested
+        # bot_username is the authoritative value to fall back to.
         username_match = _BOT_USERNAME_PATTERN.search(response_text)
         actual_username = username_match.group(1) if username_match else bot_username
 
