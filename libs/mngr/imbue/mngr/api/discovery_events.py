@@ -545,44 +545,57 @@ def emit_discovery_events_for_host(
     agents (each DiscoveredAgent carries its provider_name).
 
     Errors are caught and logged at warning level so that event emission
-    never causes the parent command to fail.
+    never causes the parent command to fail. Each emit is guarded independently
+    so that one failing event (e.g. a single agent) does not drop the rest, and
+    so a failure is attributable to the specific step rather than the whole batch.
     """
+    # Read agent data once and reuse for both provider_name inference and event emission.
     try:
-        # Read agent data once and reuse for both provider_name inference and event emission
         discovered_agents = host.discover_agents()
+    except (MngrError, OSError, ValueError) as e:
+        logger.warning("Failed to read agents from host {} for discovery emit: {}", host.id, e)
+        return
 
-        # Infer provider_name from the host's agents if not provided
-        if provider_name is None:
-            if discovered_agents:
-                provider_name = discovered_agents[0].provider_name
-            else:
-                # We cannot determine which provider owns this host (none was passed and there
-                # are no agents to infer from). Emitting a host event with a fabricated provider
-                # name would poison the authoritative stream: downstream resolution keys off
-                # provider_name and would resolve this host to a non-existent provider. Skip the
-                # host emit -- the next full discovery snapshot records the host under its real
-                # provider. There are no agents to emit either, so nothing else is lost here.
-                logger.warning(
-                    "Skipping discovery host event for {}: provider could not be determined "
-                    "(no provider passed and host has no agents)",
-                    host.id,
-                )
-                return
+    # Infer provider_name from the host's agents if not provided
+    if provider_name is None:
+        if discovered_agents:
+            provider_name = discovered_agents[0].provider_name
+        else:
+            # We cannot determine which provider owns this host (none was passed and there
+            # are no agents to infer from). Emitting a host event with a fabricated provider
+            # name would poison the authoritative stream: downstream resolution keys off
+            # provider_name and would resolve this host to a non-existent provider. Skip the
+            # host emit -- the next full discovery snapshot records the host under its real
+            # provider. There are no agents to emit either, so nothing else is lost here.
+            logger.warning(
+                "Skipping discovery host event for {}: provider could not be determined "
+                "(no provider passed and host has no agents)",
+                host.id,
+            )
+            return
 
-        # Emit host event
+    # Emit host event
+    try:
         discovered_host = discovered_host_from_online_host(host, provider_name)
         emit_host_discovered(config, discovered_host)
+    except (MngrError, OSError, ValueError) as e:
+        logger.warning("Failed to emit host discovery event for {}: {}", host.id, e)
 
-        # Emit SSH info event if this is a remote host
+    # Emit SSH info event if this is a remote host
+    try:
         ssh_info = _build_ssh_info_from_host(host)
         if ssh_info is not None:
             emit_host_ssh_info(config, host.id, ssh_info)
-
-        # Emit agent events with full certified_data from the host's filesystem
-        for discovered_agent in discovered_agents:
-            emit_agent_discovered(config, discovered_agent)
     except (MngrError, OSError, ValueError) as e:
-        logger.warning("Failed to emit discovery events: {}", e)
+        logger.warning("Failed to emit host SSH info event for {}: {}", host.id, e)
+
+    # Emit agent events with full certified_data from the host's filesystem. Each agent is
+    # emitted independently so one bad agent does not drop the others.
+    for discovered_agent in discovered_agents:
+        try:
+            emit_agent_discovered(config, discovered_agent)
+        except (MngrError, OSError, ValueError) as e:
+            logger.warning("Failed to emit agent discovery event for {}: {}", discovered_agent.agent_name, e)
 
 
 def write_full_discovery_snapshot(
