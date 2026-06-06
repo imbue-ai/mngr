@@ -294,7 +294,11 @@ def supertokens_app_exists(*, name: DevEnvName, core_base_url: str, api_key: Sec
     if resp.status_code == 200:
         return True
     body = resp.text.lower()
-    if resp.status_code in (401, 404) or "app does not exist" in body or "not found" in body:
+    # Only treat 401/404 or the specific SuperTokens "app does not exist" error as absence.
+    # A generic "not found" substring is too broad -- an unrelated 404 (a misrouted proxy
+    # response, an error mentioning some other missing resource) would be misread as "app
+    # absent" and could mask a real state in the deploy/destroy round-trip assertions.
+    if resp.status_code in (401, 404) or "app does not exist" in body:
         return False
     raise MindError(
         f"SuperTokens probe for app {str(name)!r} returned an unexpected response: "
