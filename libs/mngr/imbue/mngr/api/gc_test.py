@@ -1335,23 +1335,33 @@ def test_clean_work_dir_removes_git_worktree(local_host: Host, temp_git_repo: Pa
 # =========================================================================
 
 
-@pytest.mark.allow_warnings(
-    # Match git's stable prefix only: the parenthetical after "not a git repository"
-    # is environment-dependent (e.g. "(or any of the parent directories): .git" vs
-    # "(or any parent up to mount point /)" when the temp dir is on a separate mount).
-    match=r"^git worktree remove failed, falling back to directory removal: fatal: not a git repository"
-)
-def test_remove_git_worktree_without_parseable_git_file_falls_back_to_rm(local_host: Host, tmp_path: Path) -> None:
-    """_remove_git_worktree falls back to rm -rf when the .git file cannot be parsed."""
+def test_remove_git_worktree_raises_on_malformed_git_file(local_host: Host, tmp_path: Path) -> None:
+    """A .git file that exists but doesn't parse is corruption: raise rather than silently rm -rf.
+
+    Falling back to a no-``-C`` 'git worktree remove' would delete the files but leave the
+    worktree registered in the source repo, so we surface the problem instead of degrading.
+    """
     work_dir = tmp_path / "pseudo_worktree"
     work_dir.mkdir()
     # Write a .git file with unparseable content so parse_worktree_git_file returns None.
     (work_dir / ".git").write_text("not a valid gitdir line")
     (work_dir / "some_file.py").write_text("code")
 
+    with pytest.raises(MngrError, match="malformed"):
+        _remove_git_worktree(local_host, work_dir)
+
+    # The directory is left intact: we did not (and must not) silently delete it.
+    assert work_dir.exists()
+
+
+def test_remove_git_worktree_removes_directory_when_git_file_missing(local_host: Host, tmp_path: Path) -> None:
+    """If the .git file is gone (e.g. a race), remove the directory directly rather than run a no-C git command."""
+    work_dir = tmp_path / "no_git_file"
+    work_dir.mkdir()
+    (work_dir / "some_file.py").write_text("code")
+
     _remove_git_worktree(local_host, work_dir)
 
-    # The directory should have been removed via rm -rf fallback.
     assert not work_dir.exists()
 
 

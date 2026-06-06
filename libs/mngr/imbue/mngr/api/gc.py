@@ -761,19 +761,25 @@ def _remove_git_worktree(host: OnlineHostInterface, work_dir_path: Path) -> None
     Reads the .git file to find the main repo and runs the removal from there,
     which is required for git to properly unregister the worktree.
     """
-    main_repo: Path | None = None
     git_file = work_dir_path / ".git"
     try:
         content = host.read_text_file(git_file)
-        main_repo = parse_worktree_git_file(content)
-    except (FileNotFoundError, OSError):
-        pass
+    except (FileNotFoundError, OSError) as e:
+        # The .git file is gone or unreadable: we cannot locate the worktree's parent repo, and a
+        # `git worktree remove` with no -C would run from the wrong cwd and fail anyway. Remove the
+        # directory directly instead of issuing a git command that is never going to be correct.
+        logger.debug("Could not read .git file for worktree {} ({}); removing directory directly", work_dir_path, e)
+        _remove_directory(host, work_dir_path)
+        return
 
-    if main_repo is not None:
-        cmd = f"git -C {shlex.quote(str(main_repo))} worktree remove --force {shlex.quote(str(work_dir_path))}"
-    else:
-        cmd = f"git worktree remove --force {shlex.quote(str(work_dir_path))}"
+    main_repo = parse_worktree_git_file(content)
+    if main_repo is None:
+        # The .git file exists but does not have the expected `gitdir:` form. Do not paper over this
+        # by running git with no -C (which would fail to find the parent repo and silently degrade to
+        # a plain directory delete, leaving a dangling worktree registration in the source repo).
+        raise MngrError(f"Worktree .git file at {git_file} is malformed; cannot determine its source repo")
 
+    cmd = f"git -C {shlex.quote(str(main_repo))} worktree remove --force {shlex.quote(str(work_dir_path))}"
     result = host.execute_idempotent_command(cmd)
 
     if not result.success:
