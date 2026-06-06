@@ -1098,11 +1098,20 @@ class ImbueCloudProvider(BaseProviderInstance):
         for entry in leased:
             if entry.host_id == str(host.id):
                 attrs = entry.attributes
-                cpus = int(attrs.get("cpus", 1)) if isinstance(attrs.get("cpus"), int) else 1
+                # Accept int OR float for cpus to match _build_host_details_from_raw
+                # (line ~888): a lease whose cpus came back as a JSON float (e.g.
+                # 4.0) must not silently fall through to the default 1.
+                cpus = int(attrs.get("cpus", 1)) if isinstance(attrs.get("cpus"), (int, float)) else 1
                 memory = (
                     float(attrs.get("memory_gb", 1.0)) if isinstance(attrs.get("memory_gb"), (int, float)) else 1.0
                 )
                 return HostResources(cpu=CpuResources(count=cpus), memory_gb=memory, disk_gb=None, gpu=None)
+        # Not in the lease list: return the deliberate "limits unknown" default
+        # rather than raising. This provider only learns resources from the
+        # lease's requested attributes, so a default HostResources is the
+        # honest answer (the docker provider returns the same default
+        # unconditionally). Unlike get_host, get_host_resources has no
+        # not-found contract, so a missing host maps to unknown-limits here.
         return HostResources(cpu=CpuResources(count=1), memory_gb=1.0, disk_gb=None, gpu=None)
 
     # ------------------------------------------------------------------
