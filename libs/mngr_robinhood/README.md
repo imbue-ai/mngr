@@ -70,18 +70,21 @@ Supported control surfaces and how they map onto mngr:
   in `ResultMessage.permission_denials`.
 - `interrupt()` — stops the agent mid-turn; the response stream ends at a `ResultMessage` and the
   next `query()` restarts-with-resume.
-- `set_model` / `set_permission_mode` — restart the agent on the resumed session under the new
-  configuration.
-- `fork_session` — adopts the resumed session into a fresh agent launched with `--fork-session`
-  (new session id).
+- `set_model` / `set_permission_mode` — rewrite the agent's stored launch command with the new
+  configuration and restart it on the resumed session.
 - `get_server_info()` — runs a one-shot `claude` stream-json probe for the real commands / output
   style, cached per session.
 - `total_cost_usd` — computed from per-turn token usage times a per-model price table (approximate).
 
-Documented limitation: partial-message streaming (`include_partial_messages` -> `StreamEvent`) is
-not available (mngr mirrors message-level session JSONL, not claude's token-level stream). The
-agent is also not hermetic from the host's claude config -- it must load real settings to
-authenticate -- whereas the real SDK with `setting_sources=[]` is hermetic.
+Documented limitations (real-SDK-only):
+
+- `fork_session` raises `AgentSdkNotImplementedError`. claude's `--fork-session` does not assign a
+  new session id when driven interactively over an adopted, resumed session (the forked turn is
+  written under the source id), so a faithful fork cannot be produced on this transport.
+- Partial-message streaming (`include_partial_messages` -> `StreamEvent`) is not available (mngr
+  mirrors message-level session JSONL, not claude's token-level stream).
+- The agent is not hermetic from the host's claude config -- it must load real settings to
+  authenticate -- whereas the real SDK with `setting_sources=[]` is hermetic.
 
 ## Running the live SDK tests
 

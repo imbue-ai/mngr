@@ -48,10 +48,12 @@ async def test_resume_preserves_conversation_memory(sdk: ModuleType, sdk_live_mo
     assert "FALCONXYZ" in collect_assistant_text(messages).upper()
 
 
-@pytest.mark.rsync
 async def test_fork_session_creates_new_session_id(
-    sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path, _sdk_rsync_guard: None
+    sdk: ModuleType, requires_native_sdk: None, sdk_live_model: str, sdk_cwd: Path
 ) -> None:
+    # fork_session is real-SDK-only: claude's --fork-session does not assign a new session id when
+    # driven interactively over an adopted, resumed session (the mngr transport), so the mngr-backed
+    # SDK raises AgentSdkNotImplementedError for it instead of producing a wrong/duplicate id.
     session_id = await _seed_session(sdk, sdk_live_model, sdk_cwd, "Reply with OK.")
     messages = await collect_query_messages(
         sdk, "Reply with OK.", make_sdk_options(sdk_live_model, sdk_cwd, resume=session_id, fork_session=True)

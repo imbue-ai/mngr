@@ -64,20 +64,6 @@ def _sdk_tmux_guard() -> None:
 
 
 @pytest.fixture
-@fixture_uses_resources("rsync")
-def _sdk_rsync_guard() -> None:
-    """Satisfy the rsync resource guard for SDK tests whose mngr target copies session files.
-
-    The mngr target's ``fork_session`` / ``set_model`` / ``set_permission_mode`` adopt a session
-    into a fresh agent via mngr_claude's ``--adopt-session`` machinery, which rsyncs the session
-    files. Those tests carry ``@pytest.mark.rsync``; like ``_sdk_tmux_guard`` does for tmux, this
-    fixture touches rsync once so the guard treats it as legitimately exercised even on the
-    real-SDK target (which does not rsync).
-    """
-    subprocess.run(["rsync", "--version"], check=False, capture_output=True, timeout=10.0)
-
-
-@pytest.fixture
 def is_mngr_sdk(sdk: ModuleType) -> bool:
     """True when the current ``sdk`` target is the mngr-backed implementation."""
     return sdk is mngr_agent_sdk

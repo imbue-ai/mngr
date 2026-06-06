@@ -18,5 +18,5 @@ class MissingPromptError(RobinhoodError, UserInputError):
     """Raised when neither a positional prompt nor stdin content is provided."""
 
 
-class ForkSessionError(RobinhoodError, ValueError):
-    """Raised when a ``fork_session`` turn cannot be satisfied (no source session to fork)."""
+class AgentSdkNotImplementedError(RobinhoodError, NotImplementedError):
+    """Raised by mngr-backed Agent SDK surfaces the transport cannot support (e.g. fork_session)."""

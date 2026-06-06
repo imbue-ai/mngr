@@ -38,7 +38,6 @@ from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.api.events import read_event_content
 from imbue.mngr.api.events import try_build_events_target_for_agent
 from imbue.mngr.api.find import find_one_agent
-from imbue.mngr.api.find import resolve_to_started_host_and_agent
 from imbue.mngr.api.find import resolve_to_started_host_and_running_agent
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.api.message import send_message_to_agents
@@ -63,7 +62,6 @@ from imbue.mngr.utils.jsonl_warn import split_complete_lines
 from imbue.mngr.utils.name_generator import generate_agent_name
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.polling import poll_until
-from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_robinhood._agent_sdk.context import build_sdk_mngr_context
 from imbue.mngr_robinhood._agent_sdk.context import open_sdk_concurrency_group
@@ -84,7 +82,7 @@ from imbue.mngr_robinhood.agent_runtime import build_events_target
 from imbue.mngr_robinhood.agent_runtime import build_pass_env_vars
 from imbue.mngr_robinhood.agent_runtime import normalize_credentials_env
 from imbue.mngr_robinhood.agent_runtime import stop_agent
-from imbue.mngr_robinhood.errors import ForkSessionError
+from imbue.mngr_robinhood.errors import AgentSdkNotImplementedError
 from imbue.mngr_robinhood.errors import RobinhoodError
 from imbue.mngr_robinhood.raw_transcript import RAW_TRANSCRIPT_PATH
 
@@ -107,11 +105,6 @@ _DEFAULT_REPORTED_TOOLS: Final[tuple[str, ...]] = (
     "WebSearch",
     "TodoWrite",
 )
-
-
-# Poll cadence for waiting on a freshly-adopted agent's transcript to stop growing. Must exceed
-# ``stream_transcript.sh``'s ~1s mirror cadence so two consecutive equal reads mean it has settled.
-_ADOPTION_SETTLE_POLL_SECONDS: Final[float] = 1.5
 
 
 class TurnDeliveryError(RobinhoodError):
@@ -250,21 +243,10 @@ def _build_agent_name() -> AgentName:
     return AgentName(f"robinhood-{base}")
 
 
-def _create_agent(
-    session: LiveSession,
-    initial_message: str | None,
-    extra_agent_args: tuple[str, ...],
-    adopt_session_path: str | None,
-) -> None:
-    """Create the mngr claude agent for this session (optionally with an initial turn).
-
-    ``extra_agent_args`` are appended to the translated option args (e.g. ``--fork-session``);
-    ``adopt_session_path`` (when set) adopts an existing claude session JSONL into the new agent
-    via mngr_claude's ``--adopt-session`` machinery before it boots.
-    """
+def _create_agent(session: LiveSession, initial_message: str | None) -> None:
+    """Create the mngr claude agent for this session (optionally with an initial turn)."""
     local_host = get_local_host(session.mngr_ctx)
     source_location = HostLocation(host=local_host, path=session.cwd)
-    plugin_data = {"adopt_session": (adopt_session_path,)} if adopt_session_path is not None else {}
     # When can_use_tool / hooks are configured, point claude at the bridge's hooks settings file so
     # its hook commands call back into the in-process callbacks.
     options = CreateAgentOptions(
@@ -273,11 +255,10 @@ def _create_agent(
         target_path=session.cwd,
         transfer_mode=TransferMode.NONE,
         initial_message=initial_message,
-        agent_args=map_options_to_agent_args(session.options) + extra_agent_args + _bridge_settings_args(session),
+        agent_args=map_options_to_agent_args(session.options) + _bridge_settings_args(session),
         label_options=AgentLabelOptions(labels=dict(SDK_CREATED_BY_LABEL)),
         environment=_build_environment(session.options),
         ready_timeout_seconds=AGENT_READY_TIMEOUT_SECONDS,
-        plugin_data=plugin_data,
     )
     result = api_create(
         source_location=source_location,
@@ -390,146 +371,33 @@ def _reuse_agent(session: LiveSession, detail: AgentDetails) -> None:
         session.latest_session_id = session.options.resume
 
 
-def _latest_session_id_in_transcript(mngr_ctx: MngrContext, detail: AgentDetails) -> str | None:
-    """Return the most recent claude ``sessionId`` referenced by an agent's raw transcript."""
-    events_target = try_build_events_target_for_agent(
-        mngr_ctx=mngr_ctx,
-        agent_id=detail.id,
-        agent_name=str(detail.name),
-        host_id=detail.host.id,
-        provider_name=LOCAL_PROVIDER_NAME,
-    )
-    if events_target is None:
-        return None
-    try:
-        content = read_event_content(events_target, RAW_TRANSCRIPT_PATH)
-    except MngrError:
-        return None
-    latest: str | None = None
-    for line in content.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        try:
-            parsed = json.loads(stripped)
-        except json.JSONDecodeError as exc:
-            logger.warning("Skipping malformed transcript line while resolving fork source: {}", exc)
-            continue
-        session_id = parsed.get("sessionId") if isinstance(parsed, dict) else None
-        if isinstance(session_id, str) and session_id:
-            latest = session_id
-    return latest
-
-
-def _claude_session_jsonl_path(agent: ClaudeAgent, session_id: str) -> str:
-    """On-disk path of an agent's claude session JSONL (for ``--adopt-session``)."""
-    project_dir_name = encode_claude_project_dir_name(agent.work_dir)
-    return str(agent.get_claude_config_dir() / "projects" / project_dir_name / f"{session_id}.jsonl")
-
-
-def _source_session_jsonl_path(session: LiveSession, source_detail: AgentDetails, source_session_id: str) -> str:
-    """Resolve the on-disk path of a source agent's claude session JSONL (for ``--adopt-session``)."""
-    host_ref, agent_ref = find_one_agent(source_detail.address, session.mngr_ctx)
-    agent, _host = resolve_to_started_host_and_agent(
-        host_ref, agent_ref, allow_auto_start=False, mngr_ctx=session.mngr_ctx
-    )
-    if not isinstance(agent, ClaudeAgent):
-        raise ForkSessionError(f"Cannot fork non-claude agent {agent.name!r}")
-    return _claude_session_jsonl_path(agent, source_session_id)
-
-
-class _TranscriptStabilityChecker(MutableModel):
-    """Polled until an agent's raw transcript stops growing (the adopted-history re-mirror settled)."""
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    events_target: EventsTarget = Field(description="Where the raw transcript is read")
-    last_length: int = Field(default=-1, description="Transcript byte length seen on the previous poll")
-
-    def _current_length(self) -> int:
-        try:
-            content = read_event_content(self.events_target, RAW_TRANSCRIPT_PATH)
-        except MngrError:
-            return self.last_length if self.last_length >= 0 else 0
-        return len(content.encode("utf-8"))
-
-    def is_stable(self) -> bool:
-        length = self._current_length()
-        is_unchanged = length == self.last_length and length > 0
-        self.last_length = length
-        return is_unchanged
-
-
-def _baseline_seen_bytes_after_adoption(session: LiveSession) -> None:
-    """Skip a freshly-adopting agent's re-mirrored history so the next turn's drain reads only new events.
-
-    A fresh agent that adopts a session re-mirrors the adopted (and forked) history -- including its
-    old terminal ``stop_reason`` -- into its transcript over the mirror's ~1s cadence. Wait for the
-    agent to be ready and the transcript to settle, then baseline ``seen_bytes`` past it.
-    """
-    agent = session.agent
-    events_target = session.events_target
-    if agent is None or events_target is None:
-        return
-    is_ready = poll_until(
-        lambda: agent.get_lifecycle_state() == AgentLifecycleState.WAITING,
-        timeout=AGENT_READY_TIMEOUT_SECONDS,
-        poll_interval=POLL_INTERVAL_SECONDS,
-    )
-    if not is_ready:
-        logger.warning("Forked SDK agent {} did not reach WAITING within timeout; baselining anyway", agent.name)
-    checker = _TranscriptStabilityChecker(events_target=events_target)
-    is_settled = poll_until(
-        checker.is_stable, timeout=AGENT_READY_TIMEOUT_SECONDS, poll_interval=_ADOPTION_SETTLE_POLL_SECONDS
-    )
-    if not is_settled:
-        logger.warning("Forked SDK agent {} transcript did not settle within timeout; baselining anyway", agent.name)
-    session.seen_bytes = checker.last_length
-
-
-def _fork_agent(session: LiveSession, prompt: str) -> None:
-    """Create a fresh agent that adopts the resume/continue source session and forks it.
-
-    ``--fork-session`` makes claude resume the adopted session under a NEW session id. The prompt is
-    delivered only after the adopted history has been re-mirrored and skipped, so the drained turn
-    contains the forked turn (new session id), not the replayed source history.
-    """
-    options = session.options
-    if not (options.resume or options.continue_conversation):
-        raise ForkSessionError("fork_session requires a resume or continue_conversation source session")
-    source_detail = _find_reuse_target(session)
-    if source_detail is None:
-        raise ForkSessionError("fork_session found no source SDK session to fork in this directory")
-    source_session_id = options.resume or _latest_session_id_in_transcript(session.mngr_ctx, source_detail)
-    if source_session_id is None:
-        raise ForkSessionError("fork_session could not determine the source claude session id")
-    source_path = _source_session_jsonl_path(session, source_detail, source_session_id)
-    _create_agent(session, initial_message=None, extra_agent_args=("--fork-session",), adopt_session_path=source_path)
-    _baseline_seen_bytes_after_adoption(session)
-    _send_message(session, prompt)
-
-
 def deliver_turn(session: LiveSession, prompt: str) -> None:
     """Deliver one user turn.
 
-    On the first turn: if ``fork_session`` is set, create a fresh agent that adopts and forks the
-    resume/continue source session; otherwise either reuse the agent that owns the requested
-    ``resume`` / ``continue_conversation`` session (restarting it so claude resumes), or create a
-    fresh agent with the prompt as its initial message. Subsequent turns message the running agent.
+    On the first turn either reuse the agent that owns the requested ``resume`` /
+    ``continue_conversation`` session (restarting it so claude resumes), or create a fresh agent
+    with the prompt as its initial message. Subsequent turns message the running agent.
+
+    ``fork_session`` is not supported by the mngr transport: claude's ``--fork-session`` does not
+    assign a new session id when driven interactively over an adopted, resumed session (the forked
+    turn is written under the source id), so a faithful fork cannot be produced. It is therefore
+    real-SDK-only.
     """
+    if session.options.fork_session:
+        raise AgentSdkNotImplementedError(
+            "fork_session is not supported by the mngr-backed Agent SDK transport "
+            "(claude --fork-session does not assign a new session id when driven interactively)."
+        )
     # Reset the per-turn accumulators so computed cost / denials reflect only this turn.
     session.turn_usage_totals = {}
     session.turn_permission_denials = []
     if session.agent is None:
-        if session.options.fork_session:
-            _fork_agent(session, prompt)
+        reuse_target = _find_reuse_target(session)
+        if reuse_target is not None:
+            _reuse_agent(session, reuse_target)
+            _send_message(session, prompt)
         else:
-            reuse_target = _find_reuse_target(session)
-            if reuse_target is not None:
-                _reuse_agent(session, reuse_target)
-                _send_message(session, prompt)
-            else:
-                _create_agent(session, initial_message=prompt, extra_agent_args=(), adopt_session_path=None)
+            _create_agent(session, initial_message=prompt)
     else:
         _restart_agent_if_dead(session)
         _send_message(session, prompt)
