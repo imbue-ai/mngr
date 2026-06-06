@@ -9,13 +9,14 @@ once and only when ``get_server_info()`` is actually called.
 """
 
 import json
-import subprocess
 from pathlib import Path
 from typing import Any
 from typing import Final
 
 from loguru import logger
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.pure import pure
 
 # Generous hard timeout for the probe subprocess; the init event is emitted near-immediately but
@@ -27,7 +28,6 @@ _SYSTEM_EVENT_TYPE: Final[str] = "system"
 _INIT_SUBTYPE: Final[str] = "init"
 
 
-@pure
 def find_init_event(stream_json_stdout: str) -> dict[str, Any] | None:
     """Return the first ``system``/``init`` event object in a ``--output-format stream-json`` stream."""
     for line in stream_json_stdout.splitlines():
@@ -36,7 +36,8 @@ def find_init_event(stream_json_stdout: str) -> dict[str, Any] | None:
             continue
         try:
             parsed = json.loads(stripped)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            logger.warning("Skipping non-JSON line in get_server_info probe output: {}", exc)
             continue
         if (
             isinstance(parsed, dict)
@@ -69,23 +70,24 @@ def build_server_info(init_event: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def probe_server_info(cwd: Path, model: str | None) -> dict[str, Any]:
+def probe_server_info(concurrency_group: ConcurrencyGroup, cwd: Path, model: str | None) -> dict[str, Any]:
     """Run a one-shot ``claude`` probe in ``cwd`` and return its parsed server info.
 
-    Returns documented-shape defaults (empty commands, ``default`` output style) if the probe fails,
-    so ``get_server_info()`` always returns a usable dict rather than raising.
+    The probe runs through the session's ``ConcurrencyGroup`` so the subprocess is tracked and
+    cleaned up. Returns documented-shape defaults (empty commands, ``default`` output style) if the
+    probe fails, so ``get_server_info()`` always returns a usable dict rather than raising.
     """
-    args = ["claude", "-p", _PROBE_PROMPT, "--output-format", "stream-json", "--verbose"]
+    command = ["claude", "-p", _PROBE_PROMPT, "--output-format", "stream-json", "--verbose"]
     if model:
-        args.extend(["--model", model])
+        command.extend(["--model", model])
     try:
-        result = subprocess.run(
-            args, cwd=str(cwd), capture_output=True, text=True, timeout=_PROBE_TIMEOUT_SECONDS, check=False
+        finished = concurrency_group.run_process_to_completion(
+            command=command, timeout=_PROBE_TIMEOUT_SECONDS, is_checked_after=False, cwd=cwd
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except (OSError, ProcessError) as exc:
         logger.warning("get_server_info probe failed to run claude: {}", exc)
         return build_server_info(None)
-    init_event = find_init_event(result.stdout)
+    init_event = find_init_event(finished.stdout)
     if init_event is None:
-        logger.warning("get_server_info probe produced no system/init event (exit {})", result.returncode)
+        logger.warning("get_server_info probe produced no system/init event (exit {})", finished.returncode)
     return build_server_info(init_event)

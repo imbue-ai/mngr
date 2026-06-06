@@ -12,15 +12,16 @@ Control-surface methods are mapped onto mngr mechanisms: ``interrupt`` stops the
 the one documented surface the session-JSONL transport cannot provide.
 """
 
-import asyncio
-import queue
 from collections.abc import AsyncIterator
 from collections.abc import Mapping
 from typing import Any
 from typing import Final
 from typing import Self
 
+import anyio
+from anyio import from_thread
 from anyio import to_thread
+from anyio.streams.memory import MemoryObjectSendStream
 from claude_agent_sdk import ClaudeAgentOptions
 from claude_agent_sdk import Message
 from claude_agent_sdk import ResultMessage
@@ -42,12 +43,36 @@ from imbue.mngr_robinhood._agent_sdk.hook_bridge import start_hook_bridge
 from imbue.mngr_robinhood._agent_sdk.server_info import probe_server_info
 from imbue.mngr_robinhood.errors import RobinhoodError
 
-# Sentinel pushed onto the message queue by the drain worker to signal end-of-turn.
+# Sentinel pushed onto the message stream by the drain worker to signal end-of-turn.
 _DRAIN_SENTINEL: Final[object] = object()
 
 # Prompt accepted by ``query`` / ``ClaudeSDKClient.query``: either a single string turn or the
 # documented streaming-input form (an async iterable of user-message dicts).
 PromptInput = str | AsyncIterator[dict[str, Any]]
+
+
+def _drain_into_stream(session: LiveSession, send_stream: MemoryObjectSendStream[Any]) -> None:
+    """Run the (blocking) turn drain in a worker thread, pushing each message onto the anyio stream.
+
+    Runs inside an ``anyio.to_thread`` worker, so ``from_thread.run_sync`` schedules each
+    ``send_nowait`` onto the event loop. The stream is unbounded so ``send_nowait`` never blocks.
+    """
+    try:
+        drain_turn(session, lambda message: from_thread.run_sync(send_stream.send_nowait, message))
+    finally:
+        from_thread.run_sync(send_stream.send_nowait, _DRAIN_SENTINEL)
+
+
+async def _stream_turn_messages(session: LiveSession) -> AsyncIterator[Message]:
+    """Yield one turn's messages from a worker-thread drain, ending at (and excluding) the sentinel."""
+    send_stream, receive_stream = anyio.create_memory_object_stream[Any](max_buffer_size=float("inf"))
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(to_thread.run_sync, _drain_into_stream, session, send_stream)
+        async with receive_stream:
+            async for item in receive_stream:
+                if item is _DRAIN_SENTINEL:
+                    break
+                yield item
 
 
 async def query(
@@ -133,9 +158,8 @@ class ClaudeSDKClient(MutableModel):
         session = self.session
         if session is None or not is_hook_bridge_needed(self.options):
             return
-        loop = asyncio.get_running_loop()
         session.hook_bridge = start_hook_bridge(
-            self.options, loop, lambda denial: session.turn_permission_denials.append(denial)
+            self.options, lambda denial: session.turn_permission_denials.append(denial)
         )
 
     async def disconnect(self) -> None:
@@ -160,31 +184,16 @@ class ClaudeSDKClient(MutableModel):
         """Stream the current turn's messages as they arrive (init, content, terminal result).
 
         The synchronous transcript-polling drain runs in a worker thread and pushes each parsed
-        message onto a queue; this coroutine yields them as they appear. Streaming (rather than
-        batching the whole turn) is what lets ``interrupt()``, called from the consumer between
-        yields, stop the in-flight turn -- the drain then observes the agent's death and finalizes.
+        message onto an anyio memory stream; this coroutine yields them as they appear. Streaming
+        (rather than batching the whole turn) is what lets ``interrupt()``, called from the consumer
+        between yields, stop the in-flight turn -- the drain then observes the agent's death and
+        finalizes.
         """
         session = self.session
         if session is None:
             raise RobinhoodError("ClaudeSDKClient.receive_messages called before connect()")
-        message_queue: queue.Queue[Any] = queue.Queue()
-
-        def _run_drain() -> None:
-            try:
-                drain_turn(session, message_queue.put)
-            finally:
-                message_queue.put(_DRAIN_SENTINEL)
-
-        drain_task = asyncio.ensure_future(to_thread.run_sync(_run_drain))
-        try:
-            while True:
-                item = await to_thread.run_sync(message_queue.get)
-                if item is _DRAIN_SENTINEL:
-                    break
-                yield item
-        finally:
-            # Propagate any drain-worker exception and ensure the worker is finished.
-            await drain_task
+        async for message in _stream_turn_messages(session):
+            yield message
 
     async def receive_response(self) -> AsyncIterator[Message]:
         """Stream the current turn's messages, terminating at (and including) the ResultMessage."""
@@ -233,7 +242,7 @@ class ClaudeSDKClient(MutableModel):
             raise RobinhoodError("ClaudeSDKClient.get_server_info called before connect()")
         if self.session.server_info is None:
             self.session.server_info = await to_thread.run_sync(
-                probe_server_info, self.session.cwd, self.options.model
+                probe_server_info, self.session.concurrency_group, self.session.cwd, self.options.model
             )
         return dict(self.session.server_info)
 

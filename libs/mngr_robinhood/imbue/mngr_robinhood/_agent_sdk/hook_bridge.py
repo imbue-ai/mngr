@@ -4,7 +4,7 @@ The real Agent SDK consults ``can_use_tool`` and ``hooks`` over claude's stdio c
 The mngr transport drives claude interactively in tmux, so instead this bridge runs a tiny
 ``127.0.0.1`` HTTP server inside the SDK process and configures the mngr claude agent (via a
 ``--settings`` file) with hook commands that POST each hook event to the bridge. The bridge looks
-up the registered Python callback, runs it on the client's event loop, and returns claude's hook
+up the registered Python callback, runs it on a dedicated anyio portal, and returns claude's hook
 JSON output -- so ``can_use_tool`` (allow / deny / ``updated_input``) and the
 ``PreToolUse`` / ``PostToolUse`` / ``UserPromptSubmit`` hooks fire in-process, the same observable
 contract as the real SDK.
@@ -13,13 +13,13 @@ contract as the real SDK.
 the tool (claude's PreToolUse hooks can allow / deny / rewrite a tool call before it runs).
 """
 
-import asyncio
 import inspect
 import json
 import shlex
 import shutil
 import tempfile
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from enum import auto
 from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
@@ -30,6 +30,8 @@ from typing import Final
 from urllib.parse import parse_qs
 from urllib.parse import urlparse
 
+from anyio.from_thread import BlockingPortal
+from anyio.from_thread import start_blocking_portal
 from claude_agent_sdk import ClaudeAgentOptions
 from claude_agent_sdk import PermissionResultAllow
 from claude_agent_sdk import PermissionResultDeny
@@ -67,6 +69,14 @@ class _Registration(FrozenModel):
     callback: SkipValidation[Callable[..., Any]] = Field(description="The user's async (or sync) callback")
 
 
+async def _invoke_callback(callback: Callable[..., Any], args: tuple[Any, ...]) -> Any:
+    """Call the (async or sync) callback and await it if needed; runs on the bridge's anyio portal."""
+    outcome = callback(*args)
+    if inspect.isawaitable(outcome):
+        return await outcome
+    return outcome
+
+
 def _hook_command(url: str, hook_id: str) -> str:
     """Build the shell command claude runs for one hook: POST stdin to the bridge, echo its reply.
 
@@ -75,13 +85,13 @@ def _hook_command(url: str, hook_id: str) -> str:
     agent mid-turn.
     """
     script = (
-        "import sys,urllib.request\n"
+        "import sys,urllib.request,urllib.error\n"
         "try:\n"
         "    body=sys.stdin.buffer.read()\n"
         f"    req=urllib.request.Request({url!r}+'?hook_id='+{hook_id!r},data=body,"
         "headers={'Content-Type':'application/json'})\n"
         f"    sys.stdout.write(urllib.request.urlopen(req,timeout={_CALLBACK_TIMEOUT_SECONDS!r}).read().decode())\n"
-        "except Exception:\n"
+        "except (urllib.error.URLError, OSError, ValueError):\n"
         "    pass\n"
     )
     return f"python3 -c {shlex.quote(script)}"
@@ -122,6 +132,12 @@ def _build_registry_and_settings_hooks(
     return registry, settings_hooks
 
 
+class _BridgeServer(ThreadingHTTPServer):
+    """A threading HTTP server carrying a reference to its owning :class:`HookBridge`."""
+
+    bridge: "HookBridge"
+
+
 class _BridgeHandler(BaseHTTPRequestHandler):
     """Per-request handler that delegates to the owning :class:`HookBridge` on its server."""
 
@@ -131,7 +147,7 @@ class _BridgeHandler(BaseHTTPRequestHandler):
         query = parse_qs(urlparse(self.path).query)
         hook_id_values = query.get("hook_id", [])
         hook_id = hook_id_values[0] if hook_id_values else ""
-        bridge: HookBridge = self.server.bridge  # type: ignore[attr-defined]
+        bridge = self.server.bridge  # ty: ignore[unresolved-attribute]
         response = bridge.dispatch(hook_id, raw_body)
         encoded = json.dumps(response).encode("utf-8")
         self.send_response(200)
@@ -146,13 +162,16 @@ class _BridgeHandler(BaseHTTPRequestHandler):
 
 
 class HookBridge(MutableModel):
-    """Owns the localhost HTTP server, the callback registry, and the temp ``--settings`` file."""
+    """Owns the localhost HTTP server, the anyio portal, the registry, and the temp settings file."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    server: SkipValidation[ThreadingHTTPServer] = Field(description="The bound localhost HTTP server")
+    server: SkipValidation[_BridgeServer] = Field(description="The bound localhost HTTP server")
     server_thread: SkipValidation[Thread] = Field(description="Thread running the server's serve_forever loop")
-    loop: SkipValidation[asyncio.AbstractEventLoop] = Field(description="Event loop the callbacks run on")
+    portal: SkipValidation[BlockingPortal] = Field(description="anyio portal the callbacks run on")
+    portal_context: SkipValidation[AbstractContextManager[BlockingPortal]] = Field(
+        description="Context manager owning the portal's event-loop thread"
+    )
     registry: dict[str, _Registration] = Field(description="hook id -> registered callback")
     record_denial: SkipValidation[Callable[[dict[str, Any]], None]] = Field(
         description="Sink for permission denials, surfaced in ResultMessage.permission_denials"
@@ -176,7 +195,7 @@ class HookBridge(MutableModel):
             if registration.kind == _HookKind.CAN_USE_TOOL:
                 return self._dispatch_permission(registration.callback, payload)
             return self._dispatch_hook(registration.callback, payload)
-        except (TimeoutError, RuntimeError) as exc:
+        except (TimeoutError, RuntimeError, OSError) as exc:
             # Fail open so a callback error never wedges the agent's turn.
             logger.opt(exception=exc).warning("Hook bridge callback failed for {}; failing open", hook_id)
             return {}
@@ -187,7 +206,7 @@ class HookBridge(MutableModel):
         tool_input = raw_tool_input if isinstance(raw_tool_input, dict) else {}
         tool_use_id = payload.get("tool_use_id")
         context = ToolPermissionContext(suggestions=[], tool_use_id=tool_use_id)
-        result = self._run_callback(callback, tool_name, tool_input, context)
+        result = self.portal.call(_invoke_callback, callback, (tool_name, tool_input, context))
         if isinstance(result, PermissionResultDeny):
             self.record_denial({"tool_name": tool_name, "tool_use_id": tool_use_id, "tool_input": tool_input})
             return {
@@ -207,26 +226,15 @@ class HookBridge(MutableModel):
     def _dispatch_hook(self, callback: Callable[..., Any], payload: dict[str, Any]) -> dict[str, Any]:
         tool_use_id = payload.get("tool_use_id")
         hook_context: dict[str, Any] = {"signal": None}
-        result = self._run_callback(callback, payload, tool_use_id, hook_context)
+        result = self.portal.call(_invoke_callback, callback, (payload, tool_use_id, hook_context))
         return result if isinstance(result, dict) else {}
 
-    def _run_callback(self, callback: Callable[..., Any], *args: Any) -> Any:
-        """Invoke the (async or sync) callback on the client's event loop and wait for its result."""
-
-        async def _runner() -> Any:
-            outcome = callback(*args)
-            if inspect.isawaitable(outcome):
-                return await outcome
-            return outcome
-
-        future = asyncio.run_coroutine_threadsafe(_runner(), self.loop)
-        return future.result(timeout=_CALLBACK_TIMEOUT_SECONDS)
-
     def stop(self) -> None:
-        """Shut down the server, join its thread, and remove the temp settings dir."""
+        """Shut down the server, stop the portal loop, and remove the temp settings dir."""
         self.server.shutdown()
         self.server.server_close()
         self.server_thread.join(timeout=5.0)
+        self.portal_context.__exit__(None, None, None)
         shutil.rmtree(self.settings_dir, ignore_errors=True)
 
 
@@ -237,27 +245,29 @@ def is_hook_bridge_needed(options: ClaudeAgentOptions) -> bool:
 
 def start_hook_bridge(
     options: ClaudeAgentOptions,
-    loop: asyncio.AbstractEventLoop,
     record_denial: Callable[[dict[str, Any]], None],
 ) -> HookBridge:
-    """Bind the localhost server, write the ``--settings`` hooks file, and start serving."""
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _BridgeHandler)
+    """Bind the localhost server, start the anyio portal, write the ``--settings`` file, and serve."""
+    server = _BridgeServer(("127.0.0.1", 0), _BridgeHandler)
     port = server.server_address[1]
     url = f"http://127.0.0.1:{port}{_BRIDGE_PATH}"
     registry, settings_hooks = _build_registry_and_settings_hooks(options, url)
     settings_dir = Path(tempfile.mkdtemp(prefix="mngr-sdk-hooks-"))
     settings_path = settings_dir / "hook_settings.json"
     settings_path.write_text(json.dumps({"hooks": settings_hooks}, indent=2) + "\n")
+    portal_context = start_blocking_portal()
+    portal = portal_context.__enter__()
     server_thread = Thread(target=server.serve_forever, name="mngr-sdk-hook-bridge", daemon=True)
     bridge = HookBridge(
         server=server,
         server_thread=server_thread,
-        loop=loop,
+        portal=portal,
+        portal_context=portal_context,
         registry=registry,
         record_denial=record_denial,
         settings_dir=settings_dir,
         settings_path=settings_path,
     )
-    server.bridge = bridge  # type: ignore[attr-defined]
+    server.bridge = bridge
     server_thread.start()
     return bridge

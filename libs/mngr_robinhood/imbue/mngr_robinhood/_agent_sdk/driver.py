@@ -13,7 +13,7 @@ an agent's lifetime (compaction, ``/clear``, resume, fork), which is why mngr ke
 append-only ``claude_session_id_history``.
 """
 
-import dataclasses
+import copy
 import json
 import time
 from collections.abc import Callable
@@ -408,7 +408,8 @@ def _latest_session_id_in_transcript(mngr_ctx: MngrContext, detail: AgentDetails
             continue
         try:
             parsed = json.loads(stripped)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            logger.warning("Skipping malformed transcript line while resolving fork source: {}", exc)
             continue
         session_id = parsed.get("sessionId") if isinstance(parsed, dict) else None
         if isinstance(session_id, str) and session_id:
@@ -476,11 +477,15 @@ def deliver_turn(session: LiveSession, prompt: str) -> None:
             else:
                 _create_agent(session, initial_message=prompt, extra_agent_args=(), adopt_session_path=None)
     else:
-        # A prior interrupt() stops the agent; restart-with-resume so this turn continues the session.
-        if session.agent.get_lifecycle_state() in AGENT_DEAD_STATES:
-            restart_agent_with_resume(session)
+        _restart_agent_if_dead(session)
         _send_message(session, prompt)
     session.turn_count += 1
+
+
+def _restart_agent_if_dead(session: LiveSession) -> None:
+    """Restart-with-resume a stopped agent (e.g. after ``interrupt()``) so the next turn continues."""
+    if session.agent is not None and session.agent.get_lifecycle_state() in AGENT_DEAD_STATES:
+        restart_agent_with_resume(session)
 
 
 def _read_new_raw_events(session: LiveSession) -> list[dict[str, Any]]:
@@ -691,15 +696,19 @@ def interrupt_session(session: LiveSession) -> None:
 def _options_with_overrides(
     options: ClaudeAgentOptions, model: str | None, permission_mode: str | None
 ) -> ClaudeAgentOptions:
-    """Return a copy of ``options`` with ``model`` / ``permission_mode`` overridden where provided."""
-    updates: dict[str, Any] = {}
-    if model is not None:
-        updates["model"] = model
-    if permission_mode is not None:
-        updates["permission_mode"] = permission_mode
-    if not updates:
+    """Return a copy of ``options`` with ``model`` / ``permission_mode`` overridden where provided.
+
+    ``ClaudeAgentOptions`` is an external (non-frozen) dataclass; a shallow copy with the two fields
+    reassigned mirrors the requested change without sharing identity with the original options.
+    """
+    if model is None and permission_mode is None:
         return options
-    return dataclasses.replace(options, **updates)
+    updated_options = copy.copy(options)
+    if model is not None:
+        updated_options.model = model
+    if permission_mode is not None:
+        updated_options.permission_mode = permission_mode
+    return updated_options
 
 
 def _baseline_seen_bytes_after_ready(session: LiveSession) -> None:
