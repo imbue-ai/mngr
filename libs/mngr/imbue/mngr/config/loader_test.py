@@ -1172,6 +1172,18 @@ def test_get_or_create_profile_dir_handles_config_without_profile_key(tmp_path: 
     assert result.parent == base_dir / "profiles"
 
 
+def test_get_or_create_profile_dir_raises_on_non_string_profile(tmp_path: Path) -> None:
+    """A present-but-non-string 'profile' value should raise a clear ConfigParseError."""
+    base_dir = tmp_path / "mngr"
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    config_path = base_dir / "config.toml"
+    config_path.write_text("profile = 12345\n")
+
+    with pytest.raises(ConfigParseError, match="'profile' in .* must be a non-empty string"):
+        get_or_create_profile_dir(base_dir)
+
+
 def test_get_or_create_profile_dir_returns_same_profile_on_subsequent_calls(tmp_path: Path) -> None:
     """get_or_create_profile_dir should return the same profile on subsequent calls."""
     base_dir = tmp_path / "mngr"
