@@ -128,12 +128,18 @@ class MailtmInbox(MutableModel):
             )
             response.raise_for_status()
             for raw in response.json().get("hydra:member", []):
+                # Skip entries with no id (malformed per mail.tm's schema) or already seen.
+                # Dropping an entry here is harmless: the outer loop keeps polling until the
+                # email arrives or the timeout fires, so a transient bad entry just delays a
+                # match rather than producing a wrong result.
                 message_id = raw.get("id")
                 if not message_id or message_id in self._seen_message_ids:
                     continue
                 to_addresses = tuple(addr.get("address", "") for addr in raw.get("to", []) if addr.get("address"))
                 if str(self.address) not in to_addresses:
                     continue
+                # A missing subject defaults to "" which can never contain the filter substring,
+                # so the message is correctly skipped rather than spuriously matched.
                 subject = raw.get("subject", "")
                 if subject_substring.lower() not in subject.lower():
                     continue
