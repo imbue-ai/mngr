@@ -352,6 +352,10 @@ def make_jsonl_file_sink(
                 try:
                     actual_size = path.stat().st_size
                 except OSError:
+                    # The file is gone -- another process renamed it away as part of
+                    # its own rotation. Treating size as 0 (< bound_max_size) routes
+                    # us into the "already rotated, reopen our handle" branch below,
+                    # which is exactly the correct response.
                     actual_size = 0
                 if actual_size < bound_max_size:
                     # Already rotated by another process -- reopen our handle
