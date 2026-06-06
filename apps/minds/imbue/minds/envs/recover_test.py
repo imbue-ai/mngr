@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from imbue.minds.envs.recover import NeonRecoverInfo
 from imbue.minds.envs.recover import NotInMonorepoError
 from imbue.minds.envs.recover import RecoverTarget
 from imbue.minds.envs.recover import RecoverTargetAlreadyExistsError
@@ -29,9 +30,11 @@ def _sample_target(env_name: str = _ENV_NAME) -> RecoverTarget:
         modal_env=env_name,
         modal_workspace="minds-dev",
         vault_path_prefix="secrets/minds/dev",
-        neon_project_id="proj-fake-123",
-        neon_branch_id="br-main-1",
-        neon_snapshot_branch_id="br-snap-pre-deploy",
+        neon_restore=NeonRecoverInfo(
+            project_id="proj-fake-123",
+            branch_id="br-main-1",
+            snapshot_branch_id="br-snap-pre-deploy",
+        ),
         app_versions_to_restore={"rsc-dev": "v17", "llm-dev": None},
     )
 
@@ -121,3 +124,22 @@ def test_app_versions_to_restore_may_carry_none(tmp_path: Path) -> None:
     parsed = read_recover_target(repo_root=tmp_path, env_name=_ENV_NAME)
     assert parsed.app_versions_to_restore["llm-dev"] is None
     assert parsed.app_versions_to_restore["rsc-dev"] == "v17"
+
+
+def test_neon_restore_round_trips_as_nested_object(tmp_path: Path) -> None:
+    # The three Neon ids are one all-or-nothing sub-object; a partial capture
+    # is unrepresentable. Confirm the nested object survives the JSON round-trip.
+    target = _sample_target()
+    parsed = RecoverTarget.from_json_bytes(target.to_json_bytes())
+    assert parsed.neon_restore is not None
+    assert parsed.neon_restore.project_id == "proj-fake-123"
+    assert parsed.neon_restore.branch_id == "br-main-1"
+    assert parsed.neon_restore.snapshot_branch_id == "br-snap-pre-deploy"
+
+
+def test_neon_restore_may_be_absent(tmp_path: Path) -> None:
+    # A deploy with no Neon-restore configuration carries neon_restore=None;
+    # recover skips the Neon step for it.
+    target = _sample_target().model_copy(update={"neon_restore": None})
+    parsed = RecoverTarget.from_json_bytes(target.to_json_bytes())
+    assert parsed.neon_restore is None

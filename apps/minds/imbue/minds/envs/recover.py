@@ -92,6 +92,37 @@ class RecoverFailedError(MindError):
     """
 
 
+class NeonRecoverInfo(FrozenModel):
+    """All-or-nothing Neon instant-restore inputs captured at deploy start.
+
+    Modeled as one sub-object (rather than three independent optionals on
+    :class:`RecoverTarget`) so a partially-populated capture is
+    unrepresentable: ``recover_env`` either has a complete Neon restore
+    target or none at all. Present on ``RecoverTarget.neon_restore`` when the
+    deploy captured a Neon snapshot; absent (``None``) for a deploy with no
+    Neon-restore configuration.
+    """
+
+    project_id: str = Field(
+        description=(
+            "Neon project id the snapshot branch was created in. For dev (creates_resources=true) "
+            "it's the just-provisioned per-env project; for shared tiers (creates_resources=false) "
+            "it's the operator-managed project id from "
+            "``secrets/minds/<tier>/neon-admin.NEON_PROJECT_ID``."
+        ),
+    )
+    branch_id: str = Field(
+        description="Default branch id on the Neon project (parent of the snapshot branch).",
+    )
+    snapshot_branch_id: str = Field(
+        description=(
+            "Branch id of the snapshot branch created at deploy start (off the default branch, "
+            "named ``pre-deploy-<deploy_id>``). Recover restores the default branch from this "
+            "snapshot via Neon's ``POST .../branches/{main}/restore`` with ``source_branch_id``."
+        ),
+    )
+
+
 class RecoverTarget(FrozenModel):
     """Captured "where to get back to" state, written atomically at deploy start.
 
@@ -108,27 +139,13 @@ class RecoverTarget(FrozenModel):
     modal_env: str = Field(description="The Modal env the deploy targeted.")
     modal_workspace: str
     vault_path_prefix: str
-    neon_project_id: str | None = Field(
+    neon_restore: NeonRecoverInfo | None = Field(
         default=None,
         description=(
-            "Neon project id the snapshot branch was created in. For dev (creates_resources=true) "
-            "it's the just-provisioned per-env project; for shared tiers (creates_resources=false) "
-            "it's the operator-managed project id from "
-            "``secrets/minds/<tier>/neon-admin.NEON_PROJECT_ID``."
-        ),
-    )
-    neon_branch_id: str | None = Field(
-        default=None,
-        description="Default branch id on the Neon project (parent of the snapshot branch).",
-    )
-    neon_snapshot_branch_id: str | None = Field(
-        default=None,
-        description=(
-            "Branch id of the snapshot branch created at deploy start (off the default branch, "
-            "named ``pre-deploy-<deploy_id>``). Recover restores the default branch from this "
-            "snapshot via Neon's ``POST .../branches/{main}/restore`` with ``source_branch_id``. "
-            "``None`` if the deploy is for a tier without Neon-restore configuration (missing "
-            "``NEON_PROJECT_ID`` in Vault for a shared tier)."
+            "Neon instant-restore inputs (project / default-branch / snapshot-branch ids), or "
+            "``None`` for a deploy with no Neon-restore configuration. All-or-nothing: a partial "
+            "capture is unrepresentable, so recover never has to reconcile three independent "
+            "optionals."
         ),
     )
     app_versions_to_restore: dict[str, str | None] = Field(
@@ -292,13 +309,12 @@ def recover_env(
     Reversal order (matches the deploy order in reverse):
 
     1. ``modal app rollback`` each app to its captured pre-deploy version.
-    2. Neon: restore ``target.neon_branch_id`` (the project's default
-       branch) from ``target.neon_snapshot_branch_id`` (the pre-deploy
-       child branch the deploy created), capturing the pre-restore
-       state under ``pre-rollback-<deploy_id>`` so the operator can
-       inspect the broken state via the Neon console if needed. Only
-       runs when all three of ``neon_snapshot_branch_id``,
-       ``neon_project_id``, and ``neon_branch_id`` are populated.
+    2. Neon: restore the project's default branch from the pre-deploy
+       child branch the deploy created, capturing the pre-restore state
+       under ``pre-rollback-<deploy_id>`` so the operator can inspect the
+       broken state via the Neon console if needed. Only runs when
+       ``target.neon_restore`` is present (the deploy captured a Neon
+       snapshot).
     3. ``modal secret delete <svc>-<tier>-<deploy_id>`` for every
        service in ``deploy_config.secrets.services``.
     4. Delete the recover-target file.
@@ -361,14 +377,14 @@ def _recover_env_locked(
             errors.append(f"modal app rollback {app_name} {version}: {exc}")
 
     # Step 2: Neon instant restore from the captured snapshot branch.
-    if target.neon_snapshot_branch_id and target.neon_project_id and target.neon_branch_id:
+    if target.neon_restore is not None:
         try:
             with info_span(
                 "Restoring Neon branch {!r} from snapshot branch {!r}",
-                target.neon_branch_id,
-                target.neon_snapshot_branch_id,
+                target.neon_restore.branch_id,
+                target.neon_restore.snapshot_branch_id,
             ):
-                _restore_neon(target=target, credentials=credentials)
+                _restore_neon(neon=target.neon_restore, deploy_id=target.deploy_id, credentials=credentials)
         except NeonProviderError as exc:
             logger.warning("Recover: Neon restore failed: {}", exc)
             errors.append(f"neon restore_branch_from_snapshot: {exc}")
@@ -403,21 +419,20 @@ def _recover_env_locked(
     )
 
 
-def _restore_neon(*, target: RecoverTarget, credentials) -> None:
+def _restore_neon(*, neon: NeonRecoverInfo, deploy_id: DeployId, credentials) -> None:
     """Adapter that calls ``restore_branch_from_snapshot`` with credential lookup.
 
+    Takes the (guaranteed-complete) :class:`NeonRecoverInfo` directly, so
+    the three ids are present by type -- no None-narrowing asserts needed.
     The ``preserve_under_name`` argument captures the broken pre-restore
     state under ``pre-rollback-<deploy_id>`` so the operator can inspect
     it later via the Neon console.
     """
-    assert target.neon_project_id is not None
-    assert target.neon_branch_id is not None
-    assert target.neon_snapshot_branch_id is not None
     restore_branch_from_snapshot(
-        target.neon_project_id,
-        target.neon_branch_id,
-        target.neon_snapshot_branch_id,
-        preserve_under_name=f"pre-rollback-{target.deploy_id}",
+        neon.project_id,
+        neon.branch_id,
+        neon.snapshot_branch_id,
+        preserve_under_name=f"pre-rollback-{deploy_id}",
         api_token=credentials.neon_api_token,
     )
 
@@ -443,6 +458,7 @@ def make_neon_snapshot_branch_name(deploy_id: DeployId) -> str:
 
 
 __all__ = [
+    "NeonRecoverInfo",
     "NotInMonorepoError",
     "RecoverFailedError",
     "RecoverTarget",

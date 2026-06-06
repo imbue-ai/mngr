@@ -89,6 +89,7 @@ from imbue.minds.envs.providers.neon_db import NeonProjectRecord
 from imbue.minds.envs.providers.ovh_tags import OvhCredentials
 from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
 from imbue.minds.envs.providers.supertokens_app import app_id_from_connection_uri
+from imbue.minds.envs.recover import NeonRecoverInfo
 from imbue.minds.envs.recover import RecoverTarget
 from imbue.minds.envs.recover import delete_recover_target
 from imbue.minds.envs.recover import find_monorepo_root
@@ -725,9 +726,11 @@ def _deploy_env_locked(
         modal_env=modal_env,
         modal_workspace=modal_workspace,
         vault_path_prefix=tier_vault_prefix,
-        neon_project_id=neon_project_id_for_snapshot,
-        neon_branch_id=neon_branch_id_for_snapshot,
-        neon_snapshot_branch_id=neon_snapshot_branch_id,
+        neon_restore=NeonRecoverInfo(
+            project_id=neon_project_id_for_snapshot,
+            branch_id=neon_branch_id_for_snapshot,
+            snapshot_branch_id=neon_snapshot_branch_id,
+        ),
         app_versions_to_restore=app_versions_to_restore,
     )
     try:
