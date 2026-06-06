@@ -6,20 +6,20 @@ connection, the lower-level ``receive_messages`` iterator, and the ``set_model``
 """
 
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 from claude_agent_sdk import AssistantMessage
-from claude_agent_sdk import ClaudeSDKClient
 from claude_agent_sdk import ResultMessage
 
 from imbue.mngr_robinhood.testing import collect_assistant_text
 from imbue.mngr_robinhood.testing import make_sdk_options
 
-pytestmark = [pytest.mark.sdk_live, pytest.mark.asyncio, pytest.mark.timeout(600)]
+pytestmark = [pytest.mark.sdk_live, pytest.mark.tmux, pytest.mark.asyncio, pytest.mark.timeout(600)]
 
 
-async def test_client_context_manager_receive_response(sdk_live_model: str, sdk_cwd: Path) -> None:
-    async with ClaudeSDKClient(options=make_sdk_options(sdk_live_model, sdk_cwd)) as client:
+async def test_client_context_manager_receive_response(sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path) -> None:
+    async with sdk.ClaudeSDKClient(options=make_sdk_options(sdk_live_model, sdk_cwd)) as client:
         await client.query("Reply with exactly the word ALPHATOKEN.")
         messages = [message async for message in client.receive_response()]
 
@@ -31,9 +31,9 @@ async def test_client_context_manager_receive_response(sdk_live_model: str, sdk_
     assert "ALPHATOKEN" in collect_assistant_text(messages).upper()
 
 
-async def test_client_explicit_connect_and_disconnect(sdk_live_model: str, sdk_cwd: Path) -> None:
+async def test_client_explicit_connect_and_disconnect(sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path) -> None:
     # The documented manual lifecycle: construct, connect(), query, then disconnect().
-    client = ClaudeSDKClient(options=make_sdk_options(sdk_live_model, sdk_cwd))
+    client = sdk.ClaudeSDKClient(options=make_sdk_options(sdk_live_model, sdk_cwd))
     await client.connect()
     try:
         await client.query("Reply with exactly the word BETATOKEN.")
@@ -45,8 +45,10 @@ async def test_client_explicit_connect_and_disconnect(sdk_live_model: str, sdk_c
     assert "BETATOKEN" in collect_assistant_text(messages).upper()
 
 
-async def test_client_supports_multiple_turns_on_one_connection(sdk_live_model: str, sdk_cwd: Path) -> None:
-    async with ClaudeSDKClient(options=make_sdk_options(sdk_live_model, sdk_cwd)) as client:
+async def test_client_supports_multiple_turns_on_one_connection(
+    sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path
+) -> None:
+    async with sdk.ClaudeSDKClient(options=make_sdk_options(sdk_live_model, sdk_cwd)) as client:
         await client.query("Reply with exactly the word FIRSTTOKEN.")
         first_turn = [message async for message in client.receive_response()]
 
@@ -62,10 +64,10 @@ async def test_client_supports_multiple_turns_on_one_connection(sdk_live_model: 
     assert first_result.session_id == second_result.session_id
 
 
-async def test_client_receive_messages_iterator(sdk_live_model: str, sdk_cwd: Path) -> None:
+async def test_client_receive_messages_iterator(sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path) -> None:
     # receive_messages() is the lower-level stream; it does not stop on its own, so we break
     # at the ResultMessage that terminates the turn.
-    async with ClaudeSDKClient(options=make_sdk_options(sdk_live_model, sdk_cwd)) as client:
+    async with sdk.ClaudeSDKClient(options=make_sdk_options(sdk_live_model, sdk_cwd)) as client:
         await client.query("Reply with exactly the word GAMMATOKEN.")
         collected: list[object] = []
         async for message in client.receive_messages():
@@ -77,8 +79,8 @@ async def test_client_receive_messages_iterator(sdk_live_model: str, sdk_cwd: Pa
     assert "GAMMATOKEN" in collect_assistant_text(collected).upper()
 
 
-async def test_client_set_model_then_continues(sdk_live_model: str, sdk_cwd: Path) -> None:
-    async with ClaudeSDKClient(options=make_sdk_options(sdk_live_model, sdk_cwd)) as client:
+async def test_client_set_model_then_continues(sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path) -> None:
+    async with sdk.ClaudeSDKClient(options=make_sdk_options(sdk_live_model, sdk_cwd)) as client:
         await client.query("Reply with exactly the word PREMODEL.")
         _ = [message async for message in client.receive_response()]
 
@@ -93,8 +95,8 @@ async def test_client_set_model_then_continues(sdk_live_model: str, sdk_cwd: Pat
     assert "POSTMODEL" in collect_assistant_text(after).upper()
 
 
-async def test_client_set_permission_mode_then_continues(sdk_live_model: str, sdk_cwd: Path) -> None:
-    async with ClaudeSDKClient(options=make_sdk_options(sdk_live_model, sdk_cwd)) as client:
+async def test_client_set_permission_mode_then_continues(sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path) -> None:
+    async with sdk.ClaudeSDKClient(options=make_sdk_options(sdk_live_model, sdk_cwd)) as client:
         await client.query("Reply with exactly the word PREMODE.")
         _ = [message async for message in client.receive_response()]
 

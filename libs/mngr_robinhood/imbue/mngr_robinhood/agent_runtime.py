@@ -113,16 +113,31 @@ def apply_unattended_settings(mngr_ctx: MngrContext) -> MngrContext:
     return mngr_ctx.model_copy_update(to_update(mngr_ctx.field_ref().config, updated_config))
 
 
+def _is_forwardable_env_var(key: str, value: str) -> bool:
+    """True if this process env var is safe to write into the agent's sourced env file.
+
+    Drops the per-agent ``MNGR_*`` / ``LLM_USER_PATH`` vars that mngr sets itself, and exported
+    bash function definitions (``BASH_FUNC_*`` keys, whose multi-line ``() { ... }`` values
+    corrupt the agent's env file when it is sourced).
+    """
+    if key in PER_AGENT_ENV_VARS_TO_DROP:
+        return False
+    if key.startswith("BASH_FUNC_"):
+        return False
+    if "\n" in value:
+        return False
+    return True
+
+
 def build_pass_env_vars() -> AgentEnvironmentOptions:
     """Forward variables from the current process environment to the agent.
 
-    Filters out the per-agent ``MNGR_*`` / ``LLM_USER_PATH`` env vars that mngr's base
-    ``_collect_agent_env_vars`` sets specifically for the new agent. Everything else (auth,
-    locale, model overrides, etc.) is passed through -- including ``ANTHROPIC_API_KEY``, without
-    which the spawned claude boots unauthenticated and only emits synthetic error messages.
+    Everything safe is passed through -- including ``ANTHROPIC_API_KEY``, without which the
+    spawned claude boots unauthenticated and only emits synthetic error messages. See
+    :func:`_is_forwardable_env_var` for what is filtered out and why.
     """
     pairs = tuple(
-        EnvVar(key=key, value=value) for key, value in os.environ.items() if key not in PER_AGENT_ENV_VARS_TO_DROP
+        EnvVar(key=key, value=value) for key, value in os.environ.items() if _is_forwardable_env_var(key, value)
     )
     return AgentEnvironmentOptions(env_vars=pairs)
 

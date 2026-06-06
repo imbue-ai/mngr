@@ -41,10 +41,12 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr_robinhood._agent_sdk.context import build_sdk_mngr_context
 from imbue.mngr_robinhood._agent_sdk.context import open_sdk_concurrency_group
 from imbue.mngr_robinhood._agent_sdk.driver import SDK_CREATED_BY_LABEL
+from imbue.mngr_robinhood.agent_runtime import destroy_agent
 from imbue.mngr_robinhood.errors import RobinhoodError
 from imbue.mngr_robinhood.raw_transcript import RAW_TRANSCRIPT_PATH
 
@@ -298,9 +300,15 @@ def _set_session_label(session_id: str, directory: str | None, key: str, value: 
         concurrency_group.__exit__(None, None, None)
 
 
-def _resolve_live_agent(mngr_ctx: MngrContext, detail: AgentDetails) -> AgentInterface:
+def _resolve_live_agent_and_host(
+    mngr_ctx: MngrContext, detail: AgentDetails
+) -> tuple[AgentInterface, OnlineHostInterface]:
     host_ref, agent_ref = find_one_agent(detail.address, mngr_ctx)
-    agent, _host = resolve_to_started_host_and_agent(host_ref, agent_ref, allow_auto_start=False, mngr_ctx=mngr_ctx)
+    return resolve_to_started_host_and_agent(host_ref, agent_ref, allow_auto_start=False, mngr_ctx=mngr_ctx)
+
+
+def _resolve_live_agent(mngr_ctx: MngrContext, detail: AgentDetails) -> AgentInterface:
+    agent, _host = _resolve_live_agent_and_host(mngr_ctx, detail)
     return agent
 
 
@@ -312,3 +320,22 @@ def rename_session(session_id: str, title: str, directory: str | None = None) ->
 def tag_session(session_id: str, tag: str | None, directory: str | None = None) -> None:
     """Set or clear a session's tag (stored as a mngr agent label). Raises if the session is unknown."""
     _set_session_label(session_id, directory, _TAG_LABEL_KEY, tag)
+
+
+def destroy_sessions_in_directory(directory: str | None = None) -> None:
+    """Destroy every SDK session (mngr agent) in ``directory``. Best-effort cleanup utility.
+
+    Intended for test teardown and explicit housekeeping; the normal SDK lifecycle only *stops*
+    agents (leaving sessions readable), so leaked sessions accumulate without an explicit sweep.
+    """
+    mngr_ctx, concurrency_group = _build_mngr_ctx()
+    try:
+        for session_agent in _list_sdk_session_agents(mngr_ctx, directory):
+            try:
+                agent, host = _resolve_live_agent_and_host(mngr_ctx, session_agent.detail)
+            except (MngrError, RuntimeError) as exc:
+                logger.warning("Failed to resolve SDK agent {} for cleanup: {}", session_agent.detail.name, exc)
+                continue
+            destroy_agent(agent, host)
+    finally:
+        concurrency_group.__exit__(None, None, None)

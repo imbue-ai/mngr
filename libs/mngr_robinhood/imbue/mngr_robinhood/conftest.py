@@ -1,7 +1,10 @@
 import os
+from collections.abc import Iterator
 from collections.abc import Sequence
 from pathlib import Path
+from types import ModuleType
 
+import claude_agent_sdk
 import pytest
 
 from imbue.mngr.hosts.host import Host
@@ -9,6 +12,9 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
+from imbue.mngr.utils.testing import setup_claude_trust_config_for_subprocess
+from imbue.mngr_robinhood import agent_sdk as mngr_agent_sdk
+from imbue.mngr_robinhood._agent_sdk.sessions import destroy_sessions_in_directory
 
 register_plugin_test_fixtures(globals())
 
@@ -27,15 +33,57 @@ def sdk_live_model() -> str:
     return SDK_LIVE_MODEL
 
 
+@pytest.fixture(params=[claude_agent_sdk, mngr_agent_sdk], ids=["real_sdk", "mngr_sdk"])
+def sdk(request: pytest.FixtureRequest) -> ModuleType:
+    """The SDK implementation module under test.
+
+    Parametrized over the real ``claude_agent_sdk`` and the mngr-backed
+    ``imbue.mngr_robinhood.agent_sdk`` so every test that uses ``sdk.query`` / ``sdk.ClaudeSDKClient``
+    / the session functions runs against both targets and asserts the same documented contract.
+    The message/block/option *types* are identical objects across both (the mngr module
+    re-exports them), so tests keep importing those directly from ``claude_agent_sdk``.
+    """
+    return request.param
+
+
 @pytest.fixture
-def sdk_cwd(tmp_path: Path) -> Path:
+def is_mngr_sdk(sdk: ModuleType) -> bool:
+    """True when the current ``sdk`` target is the mngr-backed implementation."""
+    return sdk is mngr_agent_sdk
+
+
+@pytest.fixture
+def requires_native_sdk(is_mngr_sdk: bool) -> None:
+    """Skip a test for the mngr target when it exercises a surface the mngr transport cannot support.
+
+    Used by tests of features that are inherently unavailable through mngr's transcript-based
+    transport (e.g. in-process ``can_use_tool`` / ``hooks`` callbacks, ``interrupt``, partial
+    ``StreamEvent`` streaming, live ``get_server_info``). These still run against the real SDK.
+    """
+    if is_mngr_sdk:
+        pytest.skip("not supported by the mngr-backed Agent SDK transport")
+
+
+@pytest.fixture
+def sdk_cwd(tmp_path: Path, is_mngr_sdk: bool) -> Iterator[Path]:
     """An isolated working directory for live SDK tests.
 
     Running the agent in a fresh temp dir (combined with ``setting_sources=[]``) keeps the
     tests hermetic: the agent does not pick up this repo's CLAUDE.md, .claude/ hooks, or git
-    state, which would otherwise derail the prompts.
+    state, which would otherwise derail the prompts. For the mngr target, any SDK agents created
+    under this directory are destroyed on teardown (the SDK only *stops* them by default).
+
+    The mngr target runs claude *interactively* (in tmux), so -- unlike the real SDK's
+    ``--print`` transport -- it would otherwise hang on claude's first-run TUI prompts (trust
+    dialog, custom-API-key confirmation). ``setup_claude_trust_config_for_subprocess`` writes a
+    ``~/.claude.json`` (in the autouse temp HOME) that pre-accepts onboarding, trusts the cwd,
+    and approves the ``ANTHROPIC_API_KEY`` so the agent boots non-interactively.
     """
-    return tmp_path
+    if is_mngr_sdk:
+        setup_claude_trust_config_for_subprocess(trusted_paths=[tmp_path])
+    yield tmp_path
+    if is_mngr_sdk:
+        destroy_sessions_in_directory(str(tmp_path))
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: Sequence[pytest.Item]) -> None:

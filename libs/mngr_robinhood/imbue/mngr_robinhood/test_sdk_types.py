@@ -9,26 +9,25 @@ tests assert.
 """
 
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
 from claude_agent_sdk import AssistantMessage
-from claude_agent_sdk import ClaudeSDKClient
 from claude_agent_sdk import ResultMessage
 from claude_agent_sdk import TextBlock
 from claude_agent_sdk import ToolResultBlock
 from claude_agent_sdk import ToolUseBlock
 from claude_agent_sdk import UserMessage
-from claude_agent_sdk import query
 
 from imbue.mngr_robinhood.testing import make_sdk_options
 
-pytestmark = [pytest.mark.sdk_live, pytest.mark.asyncio, pytest.mark.timeout(600)]
+pytestmark = [pytest.mark.sdk_live, pytest.mark.tmux, pytest.mark.asyncio, pytest.mark.timeout(600)]
 
 
-async def test_text_and_result_message_shapes(sdk_live_model: str, sdk_cwd: Path) -> None:
+async def test_text_and_result_message_shapes(sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path) -> None:
     options = make_sdk_options(sdk_live_model, sdk_cwd)
-    messages = [message async for message in query(prompt="Reply with exactly the word SHAPEOK.", options=options)]
+    messages = [message async for message in sdk.query(prompt="Reply with exactly the word SHAPEOK.", options=options)]
 
     assistant_messages = [m for m in messages if isinstance(m, AssistantMessage)]
     assert len(assistant_messages) >= 1
@@ -56,10 +55,10 @@ async def test_text_and_result_message_shapes(sdk_live_model: str, sdk_cwd: Path
     assert result.usage is None or isinstance(result.usage, dict)
 
 
-async def test_tool_use_and_tool_result_block_shapes(sdk_live_model: str, sdk_cwd: Path) -> None:
+async def test_tool_use_and_tool_result_block_shapes(sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path) -> None:
     options = make_sdk_options(sdk_live_model, sdk_cwd, permission_mode="bypassPermissions")
     collected: list[Any] = []
-    async with ClaudeSDKClient(options=options) as client:
+    async with sdk.ClaudeSDKClient(options=options) as client:
         await client.query("Use the Bash tool to run exactly: echo TYPECHECKTOKEN")
         async for message in client.receive_response():
             collected.append(message)

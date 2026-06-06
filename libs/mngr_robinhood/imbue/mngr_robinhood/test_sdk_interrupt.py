@@ -5,20 +5,26 @@ interrupt lands), so this test is marked flaky to absorb timing variance.
 """
 
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 from claude_agent_sdk import AssistantMessage
-from claude_agent_sdk import ClaudeSDKClient
 from claude_agent_sdk import ResultMessage
 
 from imbue.mngr_robinhood.testing import make_sdk_options
 
-pytestmark = [pytest.mark.sdk_live, pytest.mark.asyncio, pytest.mark.flaky, pytest.mark.timeout(600)]
+pytestmark = [pytest.mark.sdk_live, pytest.mark.tmux, pytest.mark.asyncio, pytest.mark.flaky, pytest.mark.timeout(600)]
 
 
-async def test_interrupt_ends_an_in_flight_turn(sdk_live_model: str, sdk_cwd: Path) -> None:
+@pytest.fixture(autouse=True)
+def _skip_unsupported_on_mngr(requires_native_sdk: None) -> None:
+    """Every test here exercises a surface the mngr-backed transport cannot support
+    (in-process can_use_tool / hooks callbacks, or interrupt); they run against the real SDK only."""
+
+
+async def test_interrupt_ends_an_in_flight_turn(sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path) -> None:
     options = make_sdk_options(sdk_live_model, sdk_cwd, permission_mode="bypassPermissions")
-    async with ClaudeSDKClient(options=options) as client:
+    async with sdk.ClaudeSDKClient(options=options) as client:
         # Kick off a genuinely long-running turn so the interrupt has something to stop.
         await client.query(
             "Use the Bash tool to run exactly this command and wait for it to finish: "

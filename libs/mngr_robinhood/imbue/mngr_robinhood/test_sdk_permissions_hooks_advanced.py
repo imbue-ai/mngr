@@ -7,11 +7,11 @@ tool must NOT be pre-approved via ``allowed_tools``.
 """
 
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
 from claude_agent_sdk import ClaudeAgentOptions
-from claude_agent_sdk import ClaudeSDKClient
 from claude_agent_sdk import HookContext
 from claude_agent_sdk import HookInput
 from claude_agent_sdk import HookJSONOutput
@@ -25,16 +25,24 @@ from imbue.mngr_robinhood.testing import drain_response
 from imbue.mngr_robinhood.testing import find_result_message
 from imbue.mngr_robinhood.testing import make_sdk_options
 
-pytestmark = [pytest.mark.sdk_live, pytest.mark.asyncio, pytest.mark.timeout(600)]
+pytestmark = [pytest.mark.sdk_live, pytest.mark.tmux, pytest.mark.asyncio, pytest.mark.timeout(600)]
 
 
-async def _run_client(options: ClaudeAgentOptions, prompt: str) -> list[object]:
-    async with ClaudeSDKClient(options=options) as client:
+@pytest.fixture(autouse=True)
+def _skip_unsupported_on_mngr(requires_native_sdk: None) -> None:
+    """Every test here exercises a surface the mngr-backed transport cannot support
+    (in-process can_use_tool / hooks callbacks, or interrupt); they run against the real SDK only."""
+
+
+async def _run_client(sdk: ModuleType, options: ClaudeAgentOptions, prompt: str) -> list[object]:
+    async with sdk.ClaudeSDKClient(options=options) as client:
         await client.query(prompt)
         return await drain_response(client)
 
 
-async def test_can_use_tool_updated_input_rewrites_command(sdk_live_model: str, sdk_cwd: Path) -> None:
+async def test_can_use_tool_updated_input_rewrites_command(
+    sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path
+) -> None:
     redirected = sdk_cwd / "redirected.txt"
     original = sdk_cwd / "original.txt"
 
@@ -46,13 +54,15 @@ async def test_can_use_tool_updated_input_rewrites_command(sdk_live_model: str, 
         return PermissionResultAllow(behavior="allow", updated_input=rewritten)
 
     options = make_sdk_options(sdk_live_model, sdk_cwd, permission_mode="default", can_use_tool=can_use_tool)
-    await _run_client(options, f"Use the Bash tool to run exactly: echo ORIGINAL > {original}")
+    await _run_client(sdk, options, f"Use the Bash tool to run exactly: echo ORIGINAL > {original}")
 
     assert redirected.exists()
     assert not original.exists()
 
 
-async def test_can_use_tool_deny_without_interrupt_completes_run(sdk_live_model: str, sdk_cwd: Path) -> None:
+async def test_can_use_tool_deny_without_interrupt_completes_run(
+    sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path
+) -> None:
     marker = sdk_cwd / "denied_noint.txt"
 
     async def can_use_tool(
@@ -61,14 +71,16 @@ async def test_can_use_tool_deny_without_interrupt_completes_run(sdk_live_model:
         return PermissionResultDeny(behavior="deny", message="not allowed", interrupt=False)
 
     options = make_sdk_options(sdk_live_model, sdk_cwd, permission_mode="default", can_use_tool=can_use_tool)
-    messages = await _run_client(options, f"Use the Bash tool to run exactly: echo x > {marker}")
+    messages = await _run_client(sdk, options, f"Use the Bash tool to run exactly: echo x > {marker}")
 
     # A plain deny lets the run finish normally; the side effect must not happen.
     assert find_result_message(messages).subtype == "success"
     assert not marker.exists()
 
 
-async def test_can_use_tool_receives_command_input_and_context(sdk_live_model: str, sdk_cwd: Path) -> None:
+async def test_can_use_tool_receives_command_input_and_context(
+    sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path
+) -> None:
     seen_inputs: list[dict[str, Any]] = []
     seen_context_types: list[bool] = []
 
@@ -82,14 +94,16 @@ async def test_can_use_tool_receives_command_input_and_context(sdk_live_model: s
     # A file-writing command requires permission, so the callback is consulted (a bare side-effect-free
     # echo would be auto-approved and never reach can_use_tool).
     options = make_sdk_options(sdk_live_model, sdk_cwd, permission_mode="default", can_use_tool=can_use_tool)
-    await _run_client(options, f"Use the Bash tool to run exactly: echo CONTEXTCHECK > {sdk_cwd / 'ctx.txt'}")
+    await _run_client(sdk, options, f"Use the Bash tool to run exactly: echo CONTEXTCHECK > {sdk_cwd / 'ctx.txt'}")
 
     assert len(seen_inputs) >= 1
     assert any("command" in tool_input for tool_input in seen_inputs)
     assert all(seen_context_types)
 
 
-async def test_can_use_tool_consulted_once_for_single_command(sdk_live_model: str, sdk_cwd: Path) -> None:
+async def test_can_use_tool_consulted_once_for_single_command(
+    sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path
+) -> None:
     bash_calls: list[str] = []
 
     async def can_use_tool(
@@ -100,12 +114,14 @@ async def test_can_use_tool_consulted_once_for_single_command(sdk_live_model: st
         return PermissionResultAllow(behavior="allow")
 
     options = make_sdk_options(sdk_live_model, sdk_cwd, permission_mode="default", can_use_tool=can_use_tool)
-    await _run_client(options, f"Use the Bash tool exactly once to run: echo ONCE > {sdk_cwd / 'once.txt'}")
+    await _run_client(sdk, options, f"Use the Bash tool exactly once to run: echo ONCE > {sdk_cwd / 'once.txt'}")
 
     assert len(bash_calls) == 1
 
 
-async def test_pre_tool_use_hook_receives_tool_name_and_input(sdk_live_model: str, sdk_cwd: Path) -> None:
+async def test_pre_tool_use_hook_receives_tool_name_and_input(
+    sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path
+) -> None:
     seen: list[dict[str, Any]] = []
 
     async def pre_hook(input_data: HookInput, tool_use_id: str | None, context: HookContext) -> HookJSONOutput:
@@ -118,13 +134,13 @@ async def test_pre_tool_use_hook_receives_tool_name_and_input(sdk_live_model: st
         permission_mode="bypassPermissions",
         hooks={"PreToolUse": [HookMatcher(matcher="Bash", hooks=[pre_hook])]},
     )
-    await _run_client(options, "Use the Bash tool to run exactly: echo HOOKINPUT")
+    await _run_client(sdk, options, "Use the Bash tool to run exactly: echo HOOKINPUT")
 
     assert any(entry.get("tool_name") == "Bash" for entry in seen)
     assert any("tool_input" in entry for entry in seen)
 
 
-async def test_post_tool_use_hook_fires_after_tool(sdk_live_model: str, sdk_cwd: Path) -> None:
+async def test_post_tool_use_hook_fires_after_tool(sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path) -> None:
     seen: list[str] = []
 
     async def post_hook(input_data: HookInput, tool_use_id: str | None, context: HookContext) -> HookJSONOutput:
@@ -137,12 +153,12 @@ async def test_post_tool_use_hook_fires_after_tool(sdk_live_model: str, sdk_cwd:
         permission_mode="bypassPermissions",
         hooks={"PostToolUse": [HookMatcher(matcher="Bash", hooks=[post_hook])]},
     )
-    await _run_client(options, "Use the Bash tool to run exactly: echo POSTHOOK")
+    await _run_client(sdk, options, "Use the Bash tool to run exactly: echo POSTHOOK")
 
     assert "Bash" in seen
 
 
-async def test_pre_and_post_hooks_both_fire(sdk_live_model: str, sdk_cwd: Path) -> None:
+async def test_pre_and_post_hooks_both_fire(sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path) -> None:
     events: list[str] = []
 
     async def pre_hook(input_data: HookInput, tool_use_id: str | None, context: HookContext) -> HookJSONOutput:
@@ -162,13 +178,15 @@ async def test_pre_and_post_hooks_both_fire(sdk_live_model: str, sdk_cwd: Path) 
             "PostToolUse": [HookMatcher(matcher="Bash", hooks=[post_hook])],
         },
     )
-    await _run_client(options, "Use the Bash tool to run exactly: echo BOTHHOOKS")
+    await _run_client(sdk, options, "Use the Bash tool to run exactly: echo BOTHHOOKS")
 
     assert "pre" in events
     assert "post" in events
 
 
-async def test_hook_matcher_does_not_fire_for_non_matching_tool(sdk_live_model: str, sdk_cwd: Path) -> None:
+async def test_hook_matcher_does_not_fire_for_non_matching_tool(
+    sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path
+) -> None:
     seen: list[str] = []
 
     async def pre_hook(input_data: HookInput, tool_use_id: str | None, context: HookContext) -> HookJSONOutput:
@@ -182,12 +200,14 @@ async def test_hook_matcher_does_not_fire_for_non_matching_tool(sdk_live_model: 
         permission_mode="bypassPermissions",
         hooks={"PreToolUse": [HookMatcher(matcher="WebFetch", hooks=[pre_hook])]},
     )
-    await _run_client(options, "Use the Bash tool to run exactly: echo NOMATCH")
+    await _run_client(sdk, options, "Use the Bash tool to run exactly: echo NOMATCH")
 
     assert seen == []
 
 
-async def test_pre_tool_use_hook_can_deny_via_permission_decision(sdk_live_model: str, sdk_cwd: Path) -> None:
+async def test_pre_tool_use_hook_can_deny_via_permission_decision(
+    sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path
+) -> None:
     marker = sdk_cwd / "hook_denied.txt"
 
     async def deny_hook(input_data: HookInput, tool_use_id: str | None, context: HookContext) -> HookJSONOutput:
@@ -205,13 +225,13 @@ async def test_pre_tool_use_hook_can_deny_via_permission_decision(sdk_live_model
         permission_mode="default",
         hooks={"PreToolUse": [HookMatcher(matcher="Bash", hooks=[deny_hook])]},
     )
-    messages = await _run_client(options, f"Use the Bash tool to run exactly: echo x > {marker}")
+    messages = await _run_client(sdk, options, f"Use the Bash tool to run exactly: echo x > {marker}")
 
     assert find_result_message(messages).subtype == "success"
     assert not marker.exists()
 
 
-async def test_user_prompt_submit_hook_fires_with_prompt(sdk_live_model: str, sdk_cwd: Path) -> None:
+async def test_user_prompt_submit_hook_fires_with_prompt(sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path) -> None:
     seen: list[dict[str, Any]] = []
 
     async def prompt_hook(input_data: HookInput, tool_use_id: str | None, context: HookContext) -> HookJSONOutput:
@@ -221,13 +241,13 @@ async def test_user_prompt_submit_hook_fires_with_prompt(sdk_live_model: str, sd
     options = make_sdk_options(
         sdk_live_model, sdk_cwd, hooks={"UserPromptSubmit": [HookMatcher(matcher=None, hooks=[prompt_hook])]}
     )
-    await collect_query_messages("Reply with UNIQUEPROMPTTOKEN.", options)
+    await collect_query_messages(sdk, "Reply with UNIQUEPROMPTTOKEN.", options)
 
     assert any(entry.get("hook_event_name") == "UserPromptSubmit" for entry in seen)
     assert any("UNIQUEPROMPTTOKEN" in str(entry.get("prompt", "")) for entry in seen)
 
 
-async def test_two_hook_matchers_in_one_event_both_fire(sdk_live_model: str, sdk_cwd: Path) -> None:
+async def test_two_hook_matchers_in_one_event_both_fire(sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path) -> None:
     fired: list[str] = []
 
     async def hook_a(input_data: HookInput, tool_use_id: str | None, context: HookContext) -> HookJSONOutput:
@@ -249,22 +269,24 @@ async def test_two_hook_matchers_in_one_event_both_fire(sdk_live_model: str, sdk
             ]
         },
     )
-    await _run_client(options, "Use the Bash tool to run exactly: echo TWOMATCHERS")
+    await _run_client(sdk, options, "Use the Bash tool to run exactly: echo TWOMATCHERS")
 
     assert "a" in fired and "b" in fired
 
 
-async def test_plan_mode_prevents_tool_execution(sdk_live_model: str, sdk_cwd: Path) -> None:
+async def test_plan_mode_prevents_tool_execution(sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path) -> None:
     marker = sdk_cwd / "plan_should_not_exist.txt"
     options = make_sdk_options(sdk_live_model, sdk_cwd, permission_mode="plan")
     messages = await collect_query_messages(
-        f"Use the Bash tool to create a file by running: echo x > {marker}", options
+        sdk, f"Use the Bash tool to create a file by running: echo x > {marker}", options
     )
     assert find_result_message(messages).subtype == "success"
     assert not marker.exists()
 
 
-async def test_can_use_tool_deny_records_permission_denial(sdk_live_model: str, sdk_cwd: Path) -> None:
+async def test_can_use_tool_deny_records_permission_denial(
+    sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path
+) -> None:
     async def can_use_tool(
         name: str, tool_input: dict[str, Any], context: ToolPermissionContext
     ) -> PermissionResultDeny:
@@ -272,14 +294,16 @@ async def test_can_use_tool_deny_records_permission_denial(sdk_live_model: str, 
 
     options = make_sdk_options(sdk_live_model, sdk_cwd, permission_mode="default", can_use_tool=can_use_tool)
     messages = await _run_client(
-        options, f"Use the Bash tool to run exactly: echo DENYRECORD > {sdk_cwd / 'deny.txt'}"
+        sdk, options, f"Use the Bash tool to run exactly: echo DENYRECORD > {sdk_cwd / 'deny.txt'}"
     )
     result = find_result_message(messages)
     assert result.permission_denials is not None
     assert any(denial.get("tool_name") == "Bash" for denial in result.permission_denials)
 
 
-async def test_user_prompt_submit_hook_with_null_matcher_fires(sdk_live_model: str, sdk_cwd: Path) -> None:
+async def test_user_prompt_submit_hook_with_null_matcher_fires(
+    sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path
+) -> None:
     fired: list[bool] = []
 
     async def prompt_hook(input_data: HookInput, tool_use_id: str | None, context: HookContext) -> HookJSONOutput:
@@ -289,11 +313,13 @@ async def test_user_prompt_submit_hook_with_null_matcher_fires(sdk_live_model: s
     options = make_sdk_options(
         sdk_live_model, sdk_cwd, hooks={"UserPromptSubmit": [HookMatcher(matcher=None, hooks=[prompt_hook])]}
     )
-    await collect_query_messages("Say hi.", options)
+    await collect_query_messages(sdk, "Say hi.", options)
     assert len(fired) >= 1
 
 
-async def test_pre_tool_use_hook_observes_command_in_input(sdk_live_model: str, sdk_cwd: Path) -> None:
+async def test_pre_tool_use_hook_observes_command_in_input(
+    sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path
+) -> None:
     seen_commands: list[str] = []
 
     async def pre_hook(input_data: HookInput, tool_use_id: str | None, context: HookContext) -> HookJSONOutput:
@@ -308,11 +334,13 @@ async def test_pre_tool_use_hook_observes_command_in_input(sdk_live_model: str, 
         permission_mode="bypassPermissions",
         hooks={"PreToolUse": [HookMatcher(matcher="Bash", hooks=[pre_hook])]},
     )
-    await _run_client(options, "Use the Bash tool to run exactly: echo COMMANDINHOOK")
+    await _run_client(sdk, options, "Use the Bash tool to run exactly: echo COMMANDINHOOK")
     assert any("COMMANDINHOOK" in command for command in seen_commands)
 
 
-async def test_can_use_tool_allow_lets_multiple_distinct_tools_run(sdk_live_model: str, sdk_cwd: Path) -> None:
+async def test_can_use_tool_allow_lets_multiple_distinct_tools_run(
+    sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path
+) -> None:
     first = sdk_cwd / "multi_a.txt"
     second = sdk_cwd / "multi_b.txt"
     allowed_tools_seen: list[str] = []
@@ -325,6 +353,7 @@ async def test_can_use_tool_allow_lets_multiple_distinct_tools_run(sdk_live_mode
 
     options = make_sdk_options(sdk_live_model, sdk_cwd, permission_mode="default", can_use_tool=can_use_tool)
     await _run_client(
+        sdk,
         options,
         f"Use the Bash tool to run `echo a > {first}` and then `echo b > {second}`.",
     )

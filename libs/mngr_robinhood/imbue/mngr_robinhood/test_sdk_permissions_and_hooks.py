@@ -7,6 +7,7 @@ the tool in ``allowed_tools``. Allow/deny is verified by an observable filesyste
 """
 
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -22,7 +23,13 @@ from claude_agent_sdk import ToolPermissionContext
 
 from imbue.mngr_robinhood.testing import make_sdk_options
 
-pytestmark = [pytest.mark.sdk_live, pytest.mark.asyncio, pytest.mark.timeout(600)]
+pytestmark = [pytest.mark.sdk_live, pytest.mark.tmux, pytest.mark.asyncio, pytest.mark.timeout(600)]
+
+
+@pytest.fixture(autouse=True)
+def _skip_unsupported_on_mngr(requires_native_sdk: None) -> None:
+    """Every test here exercises a surface the mngr-backed transport cannot support
+    (in-process can_use_tool / hooks callbacks, or interrupt); they run against the real SDK only."""
 
 
 async def _drain_to_result(client: ClaudeSDKClient) -> ResultMessage:
@@ -35,7 +42,7 @@ async def _drain_to_result(client: ClaudeSDKClient) -> ResultMessage:
     return result
 
 
-async def test_can_use_tool_allow_lets_the_tool_run(sdk_live_model: str, sdk_cwd: Path) -> None:
+async def test_can_use_tool_allow_lets_the_tool_run(sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path) -> None:
     observed_tool_names: list[str] = []
     marker_file = sdk_cwd / "ALLOW_MARKER.txt"
 
@@ -51,7 +58,7 @@ async def test_can_use_tool_allow_lets_the_tool_run(sdk_live_model: str, sdk_cwd
         permission_mode="default",
         can_use_tool=can_use_tool,
     )
-    async with ClaudeSDKClient(options=options) as client:
+    async with sdk.ClaudeSDKClient(options=options) as client:
         await client.query(f"Use the Bash tool to run exactly: echo allowed > {marker_file}")
         result = await _drain_to_result(client)
 
@@ -61,7 +68,7 @@ async def test_can_use_tool_allow_lets_the_tool_run(sdk_live_model: str, sdk_cwd
     assert marker_file.exists()
 
 
-async def test_can_use_tool_deny_blocks_the_tool(sdk_live_model: str, sdk_cwd: Path) -> None:
+async def test_can_use_tool_deny_blocks_the_tool(sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path) -> None:
     observed_tool_names: list[str] = []
     marker_file = sdk_cwd / "DENY_MARKER.txt"
 
@@ -77,7 +84,7 @@ async def test_can_use_tool_deny_blocks_the_tool(sdk_live_model: str, sdk_cwd: P
         permission_mode="default",
         can_use_tool=can_use_tool,
     )
-    async with ClaudeSDKClient(options=options) as client:
+    async with sdk.ClaudeSDKClient(options=options) as client:
         await client.query(f"Use the Bash tool to run exactly: echo denied > {marker_file}")
         result = await _drain_to_result(client)
 
@@ -88,7 +95,7 @@ async def test_can_use_tool_deny_blocks_the_tool(sdk_live_model: str, sdk_cwd: P
     assert len(result.permission_denials) >= 1
 
 
-async def test_pre_tool_use_hook_observes_tool_call(sdk_live_model: str, sdk_cwd: Path) -> None:
+async def test_pre_tool_use_hook_observes_tool_call(sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path) -> None:
     observed_tool_names: list[str] = []
     marker_file = sdk_cwd / "HOOK_MARKER.txt"
 
@@ -105,7 +112,7 @@ async def test_pre_tool_use_hook_observes_tool_call(sdk_live_model: str, sdk_cwd
         permission_mode="bypassPermissions",
         hooks={"PreToolUse": [HookMatcher(matcher="Bash", hooks=[pre_tool_use_hook])]},
     )
-    async with ClaudeSDKClient(options=options) as client:
+    async with sdk.ClaudeSDKClient(options=options) as client:
         await client.query(f"Use the Bash tool to run exactly: echo hooked > {marker_file}")
         result = await _drain_to_result(client)
 

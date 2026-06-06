@@ -9,6 +9,7 @@ project's testing conventions) rather than in conftest.py.
 
 from collections.abc import Iterable
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 from claude_agent_sdk import AssistantMessage
@@ -16,7 +17,6 @@ from claude_agent_sdk import ClaudeAgentOptions
 from claude_agent_sdk import ClaudeSDKClient
 from claude_agent_sdk import ResultMessage
 from claude_agent_sdk import TextBlock
-from claude_agent_sdk import query
 
 
 def make_sdk_options(model: str, cwd: Path, **overrides: Any) -> ClaudeAgentOptions:
@@ -44,9 +44,14 @@ def collect_assistant_text(messages: Iterable[object]) -> str:
     return "\n".join(texts)
 
 
-async def collect_query_messages(prompt: str, options: ClaudeAgentOptions) -> list[object]:
-    """Run ``query()`` to completion and return every message it yields."""
-    return [message async for message in query(prompt=prompt, options=options)]
+async def collect_query_messages(sdk: ModuleType, prompt: str, options: ClaudeAgentOptions) -> list[object]:
+    """Run the given SDK's ``query()`` to completion and return every message it yields.
+
+    ``sdk`` is the implementation module under test -- either ``claude_agent_sdk`` or
+    ``imbue.mngr_robinhood.agent_sdk`` -- supplied by the parametrized ``sdk`` fixture so each
+    test runs against both targets.
+    """
+    return [message async for message in sdk.query(prompt=prompt, options=options)]
 
 
 async def drain_response(client: ClaudeSDKClient) -> list[object]:
