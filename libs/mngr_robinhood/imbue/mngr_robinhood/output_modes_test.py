@@ -254,3 +254,78 @@ def test_stream_json_writer_replays_user_messages_when_enabled() -> None:
     writer.finalize(ResultMeta(session_id="session-1", duration_ms=10, is_error=False, error_text=None), turn_count=1)
     types = [json.loads(line)["type"] for line in stdout.getvalue().splitlines()]
     assert types == ["system", "user", "assistant", "result"]
+
+
+def test_emit_partial_text_stream_json_writes_text_delta_after_init() -> None:
+    stdout = io.StringIO()
+    writer = StreamingOutputWriter(
+        output_format=OutputFormat.STREAM_JSON,
+        session_id="session-1",
+        stdout=stdout,
+    )
+    writer.emit_partial_text("Hello")
+    writer.emit_partial_text(", world")
+    lines = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    # The system/init envelope is emitted before the first delta.
+    assert lines[0]["type"] == "system"
+    assert lines[1] == {
+        "type": "stream_event",
+        "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hello"}},
+        "session_id": "session-1",
+    }
+    assert lines[2]["event"]["delta"]["text"] == ", world"
+    assert writer.has_streamed_partials
+
+
+def test_emit_partial_text_plain_text_writes_raw_when_enabled() -> None:
+    stdout = io.StringIO()
+    writer = StreamingOutputWriter(
+        output_format=OutputFormat.TEXT,
+        session_id="session-1",
+        stdout=stdout,
+        stream_plain_text=True,
+    )
+    writer.emit_partial_text("Hello")
+    writer.emit_partial_text(" there")
+    assert stdout.getvalue() == "Hello there"
+
+
+def test_emit_partial_text_text_mode_noop_without_flag() -> None:
+    stdout = io.StringIO()
+    writer = StreamingOutputWriter(
+        output_format=OutputFormat.TEXT,
+        session_id="session-1",
+        stdout=stdout,
+        stream_plain_text=False,
+    )
+    writer.emit_partial_text("Hello")
+    assert stdout.getvalue() == ""
+    assert not writer.has_streamed_partials
+
+
+def test_finalize_text_suppresses_dump_after_streaming() -> None:
+    stdout = io.StringIO()
+    writer = StreamingOutputWriter(
+        output_format=OutputFormat.TEXT,
+        session_id="session-1",
+        stdout=stdout,
+        stream_plain_text=True,
+    )
+    writer.emit_partial_text("streamed body")
+    writer.emit_events([_assistant_event("streamed body")])
+    writer.finalize(ResultMeta(session_id="session-1", duration_ms=10, is_error=False, error_text=None), turn_count=1)
+    # The streamed text appears once, followed only by a trailing newline.
+    assert stdout.getvalue() == "streamed body\n"
+
+
+def test_finalize_text_dumps_normally_without_streaming() -> None:
+    stdout = io.StringIO()
+    writer = StreamingOutputWriter(
+        output_format=OutputFormat.TEXT,
+        session_id="session-1",
+        stdout=stdout,
+        stream_plain_text=False,
+    )
+    writer.emit_events([_assistant_event("the answer")])
+    writer.finalize(ResultMeta(session_id="session-1", duration_ms=10, is_error=False, error_text=None), turn_count=1)
+    assert stdout.getvalue() == "the answer\n"

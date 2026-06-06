@@ -72,6 +72,20 @@ if [ -x "$COMMON_TRANSCRIPT_SCRIPT" ]; then
     log_info "Started common transcript converter (PID: $_COMMON_TRANSCRIPT_PID)"
 fi
 
+# Optionally start the response-streaming watcher. Like the common transcript
+# converter, this script is only on disk when ClaudeAgent.provision() decided to
+# enable streaming (streaming_snapshot_interval_seconds > 0), so its presence is
+# the single gate. It reads the poll interval from the stream_interval file under
+# $MNGR_AGENT_STATE_DIR/plugin/claude/ (env-var propagation into this subshell is
+# unreliable, so the interval is passed via a file instead).
+STREAM_SNAPSHOT_SCRIPT="$MNGR_AGENT_STATE_DIR/commands/stream_snapshot.py"
+_STREAM_SNAPSHOT_PID=""
+if [ -f "$STREAM_SNAPSHOT_SCRIPT" ]; then
+    python3 "$STREAM_SNAPSHOT_SCRIPT" "$SESSION_NAME" &
+    _STREAM_SNAPSHOT_PID=$!
+    log_info "Started response stream snapshot watcher (PID: $_STREAM_SNAPSHOT_PID)"
+fi
+
 _cleanup() {
     # Stop the transcript streaming process
     if [ -n "$_STREAM_PID" ] && kill -0 "$_STREAM_PID" 2>/dev/null; then
@@ -82,6 +96,11 @@ _cleanup() {
     if [ -n "$_COMMON_TRANSCRIPT_PID" ] && kill -0 "$_COMMON_TRANSCRIPT_PID" 2>/dev/null; then
         kill "$_COMMON_TRANSCRIPT_PID" 2>/dev/null
         wait "$_COMMON_TRANSCRIPT_PID" 2>/dev/null || true
+    fi
+    # Stop the response stream snapshot watcher
+    if [ -n "$_STREAM_SNAPSHOT_PID" ] && kill -0 "$_STREAM_SNAPSHOT_PID" 2>/dev/null; then
+        kill "$_STREAM_SNAPSHOT_PID" 2>/dev/null
+        wait "$_STREAM_SNAPSHOT_PID" 2>/dev/null || true
     fi
     rm -f "$_MNGR_ACT_LOCK"
 }
@@ -115,6 +134,16 @@ while tmux has-session -t "=$SESSION_NAME" 2>/dev/null; do
             bash "$COMMON_TRANSCRIPT_SCRIPT" &
             _COMMON_TRANSCRIPT_PID=$!
             log_info "Restarted common transcript converter (PID: $_COMMON_TRANSCRIPT_PID)"
+        fi
+    fi
+
+    # Restart the response stream snapshot watcher if it died unexpectedly
+    if [ -n "$_STREAM_SNAPSHOT_PID" ] && ! kill -0 "$_STREAM_SNAPSHOT_PID" 2>/dev/null; then
+        log_warn "Response stream snapshot watcher died, restarting"
+        if [ -f "$STREAM_SNAPSHOT_SCRIPT" ]; then
+            python3 "$STREAM_SNAPSHOT_SCRIPT" "$SESSION_NAME" &
+            _STREAM_SNAPSHOT_PID=$!
+            log_info "Restarted response stream snapshot watcher (PID: $_STREAM_SNAPSHOT_PID)"
         fi
     fi
 

@@ -27,6 +27,14 @@ class ArgPartition(FrozenModel):
     input_format: InputFormat = Field(description="Resolved --input-format")
     output_format: OutputFormat = Field(description="Resolved --output-format")
     replay_user_messages: bool = Field(description="Resolved --replay-user-messages")
+    include_partial_messages: bool = Field(
+        default=False,
+        description="Emit claude-native text_delta partial events from the agent's stream_buffer (stream-json only)",
+    )
+    stream_plain_text: bool = Field(
+        default=False,
+        description="Stream the assistant's text to stdout incrementally (text output only)",
+    )
     pass_through_agent_args: tuple[str, ...] = Field(description="Args to forward to the spawned claude")
     positional_prompt: str | None = Field(description="The positional prompt, if any")
 
