@@ -27,6 +27,7 @@ from imbue.mngr.api.git import GitContextInterface
 from imbue.mngr.api.git import LocalGitContext
 from imbue.mngr.api.git import RemoteGitContext
 from imbue.mngr.api.git import stash_guard
+from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import build_ssh_transport_command
@@ -199,7 +200,8 @@ def _do_rsync(
             # ssh is optional, so surface a clear error if it's absent.
             SSH.require()
             ssh_info = remote_host.get_ssh_connection_info()
-            assert ssh_info is not None, "Remote host must provide SSH connection info"
+            if ssh_info is None:
+                raise HostConnectionError(f"Remote host {remote_host.id} did not provide SSH connection info")
             user, hostname, port, key_path = ssh_info
             ssh_transport = build_ssh_transport_command(key_path, port, get_ssh_known_hosts_file(remote_host))
             remote_uri = f"{user}@{hostname}:{remote_str}"
