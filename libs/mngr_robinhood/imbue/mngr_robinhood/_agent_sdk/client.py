@@ -1,15 +1,14 @@
 """mngr-backed ``query()`` and ``ClaudeSDKClient``.
 
 These mirror the documented ``claude_agent_sdk`` async surface but drive a ``robinhood-``
-prefixed mngr claude agent instead of a directly-spawned ``claude`` subprocess. The async
-methods bridge to mngr's synchronous in-process API by running the blocking turn-driver in a
-worker thread via ``asyncio.to_thread`` (the SDK surface is async; the mngr API and the
-transcript-polling turn-driver are synchronous).
+prefixed mngr claude agent (via :mod:`._agent_sdk.driver`) instead of a directly-spawned
+``claude`` subprocess. The async methods bridge to mngr's synchronous in-process API by running
+the blocking turn-driver in a worker thread via ``anyio.to_thread`` (the SDK surface is async;
+the mngr API and the transcript-polling turn-driver are synchronous).
 
-Status: the lifecycle/streaming/multi-turn structure here is complete; the single private
-hook that actually creates the agent and drives a turn (``_drain_turn_messages``) is the live-wiring seam
-that is built out and verified against a real claude agent in the next phase. It currently
-raises :class:`AgentSdkNotImplementedError` with the precise intended wiring documented inline.
+A few control-surface methods are not expressible over mngr's transcript-based transport and
+raise :class:`AgentSdkNotImplementedError` (``interrupt``, ``get_server_info``); ``set_model`` /
+``set_permission_mode`` are accepted but do not retroactively change the running agent.
 """
 
 from collections.abc import AsyncIterator
@@ -32,12 +31,8 @@ from imbue.mngr_robinhood._agent_sdk.driver import deliver_turn
 from imbue.mngr_robinhood._agent_sdk.driver import drain_turn
 from imbue.mngr_robinhood._agent_sdk.driver import start_session
 from imbue.mngr_robinhood._agent_sdk.driver import stop_session
+from imbue.mngr_robinhood.errors import AgentSdkNotImplementedError
 from imbue.mngr_robinhood.errors import RobinhoodError
-
-
-class AgentSdkNotImplementedError(RobinhoodError, NotImplementedError):
-    """Raised by mngr-backed SDK surfaces that are designed but not yet wired to a live agent."""
-
 
 # Prompt accepted by ``query`` / ``ClaudeSDKClient.query``: either a single string turn or the
 # documented streaming-input form (an async iterable of user-message dicts).

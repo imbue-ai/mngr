@@ -34,11 +34,16 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.api.create import create as api_create
 from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.api.events import read_event_content
+from imbue.mngr.api.events import try_build_events_target_for_agent
+from imbue.mngr.api.find import find_one_agent
+from imbue.mngr.api.find import resolve_to_started_host_and_running_agent
+from imbue.mngr.api.list import list_agents
 from imbue.mngr.api.message import send_message_to_agents
 from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
+from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -48,6 +53,7 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentNameStyle
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import ErrorBehavior
+from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.utils.jsonl_warn import split_complete_lines
 from imbue.mngr.utils.name_generator import generate_agent_name
@@ -69,6 +75,7 @@ from imbue.mngr_robinhood.agent_runtime import build_events_target
 from imbue.mngr_robinhood.agent_runtime import build_pass_env_vars
 from imbue.mngr_robinhood.agent_runtime import normalize_credentials_env
 from imbue.mngr_robinhood.agent_runtime import stop_agent
+from imbue.mngr_robinhood.errors import AgentSdkNotImplementedError
 from imbue.mngr_robinhood.errors import RobinhoodError
 from imbue.mngr_robinhood.raw_transcript import RAW_TRANSCRIPT_PATH
 
@@ -174,18 +181,18 @@ def map_options_to_agent_args(options: ClaudeAgentOptions) -> tuple[str, ...]:
         args.extend(["--add-dir", str(directory)])
     if options.settings:
         args.extend(["--settings", options.settings])
-    # ``setting_sources`` is intentionally NOT translated to ``--setting-sources``. Under mngr,
-    # claude runs as an interactive agent and mngr writes the unattended trust/bypass acceptance
-    # into the project/local settings sources; passing ``--setting-sources=`` (the value the SDK
-    # emits for an empty list) would make claude ignore those, leaving it stuck on a trust dialog
-    # at startup. Hermeticity from the repo's CLAUDE.md/hooks instead comes from running the
-    # agent in an isolated ``cwd`` (see ``resolve_cwd``).
-    if options.continue_conversation:
-        args.append("--continue")
-    if options.resume:
-        args.extend(["--resume", options.resume])
-    if options.fork_session:
-        args.append("--fork-session")
+    # ``setting_sources`` is intentionally NOT translated to ``--setting-sources``: under mngr,
+    # claude runs as an interactive agent and the unattended trust/bypass acceptance it needs to
+    # boot lives in the project/local settings sources that mngr writes; passing
+    # ``--setting-sources=`` (the value the SDK emits for an empty list) makes claude ignore those
+    # and hang on the startup trust dialog. Hermeticity from the repo's CLAUDE.md/hooks instead
+    # comes from running the agent in an isolated ``cwd`` (see ``resolve_cwd``).
+    #
+    # ``resume`` / ``continue_conversation`` / ``fork_session`` are deliberately NOT translated to
+    # claude flags: each mngr agent has its own claude config dir, so a fresh agent's ``--resume``
+    # would not find another agent's session file. Continuation is instead handled by reusing (and
+    # restarting) the agent that already owns the session -- see ``deliver_turn`` -- and forking is
+    # not yet supported.
     return tuple(args)
 
 
@@ -258,10 +265,97 @@ def _send_message(session: LiveSession, prompt: str) -> None:
         raise TurnDeliveryError(f"Failed to deliver prompt to {agent.name}: {errors}")
 
 
+def _list_sdk_agent_details(mngr_ctx: MngrContext, cwd: Path) -> list[AgentDetails]:
+    """List this SDK's agents (by label) whose working directory is ``cwd``, newest first."""
+    result = list_agents(mngr_ctx, is_streaming=False)
+    created_by = SDK_CREATED_BY_LABEL["created-by"]
+    matching = [
+        detail
+        for detail in result.agents
+        if detail.labels.get("created-by") == created_by and Path(detail.work_dir).resolve() == cwd.resolve()
+    ]
+    return sorted(matching, key=lambda detail: detail.create_time, reverse=True)
+
+
+def _agent_transcript_contains_session(mngr_ctx: MngrContext, detail: AgentDetails, session_id: str) -> bool:
+    """True if the agent's raw transcript references ``session_id`` (i.e. it owns that session)."""
+    events_target = try_build_events_target_for_agent(
+        mngr_ctx=mngr_ctx,
+        agent_id=detail.id,
+        agent_name=str(detail.name),
+        host_id=detail.host.id,
+        provider_name=LOCAL_PROVIDER_NAME,
+    )
+    if events_target is None:
+        return False
+    try:
+        content = read_event_content(events_target, RAW_TRANSCRIPT_PATH)
+    except MngrError:
+        return False
+    return session_id in content
+
+
+def _find_reuse_target(session: LiveSession) -> AgentDetails | None:
+    """Find the existing SDK agent to reuse for a ``resume`` / ``continue_conversation`` turn."""
+    options = session.options
+    if not (options.resume or options.continue_conversation):
+        return None
+    details = _list_sdk_agent_details(session.mngr_ctx, session.cwd)
+    if not details:
+        return None
+    if options.resume:
+        for detail in details:
+            if _agent_transcript_contains_session(session.mngr_ctx, detail, options.resume):
+                return detail
+        return None
+    # continue_conversation: reuse the most-recently-created session in this directory.
+    return details[0]
+
+
+def _reuse_agent(session: LiveSession, detail: AgentDetails) -> None:
+    """Restart (resuming its claude session) and attach the existing agent to ``session``.
+
+    Baselines ``seen_bytes`` to the current transcript end so the upcoming turn's drain only
+    reads the new events (the resumed transcript already contains prior turns' terminal stops).
+    """
+    host_ref, agent_ref = find_one_agent(detail.address, session.mngr_ctx)
+    agent, host = resolve_to_started_host_and_running_agent(
+        host_ref, agent_ref, allow_auto_start=True, mngr_ctx=session.mngr_ctx
+    )
+    if not isinstance(agent, ClaudeAgent):
+        raise TurnDeliveryError(f"Cannot reuse non-claude agent {agent.name!r}")
+    session.agent = agent
+    session.host = host
+    events_target = build_events_target(session.mngr_ctx, agent)
+    if events_target is None:
+        raise TurnDeliveryError(f"Cannot read events for reused agent {agent.name}")
+    session.events_target = events_target
+    try:
+        existing_content = read_event_content(events_target, RAW_TRANSCRIPT_PATH)
+    except MngrError:
+        existing_content = ""
+    session.seen_bytes = len(existing_content.encode("utf-8"))
+    if session.options.resume:
+        session.latest_session_id = session.options.resume
+
+
 def deliver_turn(session: LiveSession, prompt: str) -> None:
-    """Deliver one user turn: create the agent with it if first, else message the running agent."""
+    """Deliver one user turn.
+
+    On the first turn, either reuses the agent that owns the requested ``resume`` /
+    ``continue_conversation`` session (restarting it so claude resumes), or creates a fresh agent
+    with the prompt as its initial message. Subsequent turns message the running agent.
+    ``fork_session`` is not yet supported.
+    """
+    if session.options.fork_session:
+        raise AgentSdkNotImplementedError("fork_session is not yet supported by the mngr-backed Agent SDK")
     if session.agent is None:
-        _create_agent(session, initial_message=prompt)
+        reuse_target = _find_reuse_target(session)
+        if reuse_target is not None:
+            _reuse_agent(session, reuse_target)
+            _send_message(session, prompt)
+        else:
+            _create_agent(session, initial_message=prompt)
     else:
         _send_message(session, prompt)
     session.turn_count += 1
