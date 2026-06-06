@@ -491,11 +491,17 @@ def create_neon_project(
         if not project_was_pre_existing:
             try:
                 _neon_request("DELETE", f"/projects/{project_id}", api_token=api_token)
-            except NeonProviderError:
-                # Swallow cleanup errors; the original failure is what
-                # the caller needs to see. A leaked project will be
-                # picked up by the next deploy via the by-name lookup.
-                pass
+            except NeonProviderError as cleanup_exc:
+                # Swallow cleanup errors; the original failure is what the
+                # caller needs to see. But log it -- a project we could not
+                # delete is leaked until the next deploy's by-name lookup
+                # surfaces it, which an operator should be able to see.
+                logger.warning(
+                    "Failed to delete Neon project {} during rollback; it may be leaked "
+                    "(the next deploy's by-name lookup will surface it): {}",
+                    project_id,
+                    cleanup_exc,
+                )
         raise
 
     return NeonProjectRecord(
