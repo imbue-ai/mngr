@@ -745,7 +745,13 @@ def _run_post_destroy_gc(
     try:
         _output("Garbage collecting...", output_opts)
 
-        providers = get_all_provider_instances(mngr_ctx)
+        provider_result = get_all_provider_instances(mngr_ctx)
+        if provider_result.unavailable_provider_names:
+            logger.warning(
+                "Garbage collection is degraded: could not reach providers {}; their resources are not collected",
+                ", ".join(str(name) for name in provider_result.unavailable_provider_names),
+            )
+        providers = list(provider_result.instances)
 
         resource_types = GcResourceTypes(
             is_machines=True,

@@ -92,7 +92,13 @@ def _run_discovery(
     agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
     results_lock = Lock()
 
-    providers = get_all_provider_instances(mngr_ctx, provider_names)
+    provider_result = get_all_provider_instances(mngr_ctx, provider_names)
+    providers = list(provider_result.instances)
+    if provider_result.unavailable_provider_names:
+        logger.warning(
+            "Discovery is degraded: could not reach providers {}; agents managed by them are not included",
+            ", ".join(str(name) for name in provider_result.unavailable_provider_names),
+        )
     logger.trace("Found {} provider instances", len(providers))
 
     if reset_caches:
