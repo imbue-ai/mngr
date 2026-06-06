@@ -129,6 +129,15 @@ class CleanupResult(MutableModel):
         default_factory=list,
         description="Names of agents that were stopped",
     )
+    already_absent_agents: list[AgentName] = Field(
+        default_factory=list,
+        description=(
+            "Agents that list_agents reported but that were not present on the live host when we "
+            "went to destroy them (likely already cleaned up, but possibly a discovery/identity "
+            "mismatch). Reported distinctly rather than counted as destroyed, which would have been "
+            "a false success."
+        ),
+    )
     errors: list[str] = Field(
         default_factory=list,
         description="Errors encountered during cleanup",

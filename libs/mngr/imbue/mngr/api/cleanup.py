@@ -115,12 +115,19 @@ def _execute_destroy(
                                         emit_discovery_events_for_host(mngr_ctx.config, online_host)
                                         break
                                 else:
-                                    # Agent not found on host (likely already cleaned up)
-                                    logger.debug(
-                                        "Agent {} not found on host, treating as already destroyed",
+                                    # list_agents reported this agent, but it is not on the live
+                                    # host now. Most likely it was already cleaned up, but it could
+                                    # also be a discovery/identity mismatch or a transient
+                                    # get_agents() failure -- so record it as a distinct outcome
+                                    # rather than counting it as a successful destroy (a false
+                                    # success that would hide a real "agent vanished").
+                                    logger.warning(
+                                        "Agent {} was reported by discovery but is absent from host {}; "
+                                        "recording as already-absent rather than destroyed",
                                         agent_details.name,
+                                        host_id,
                                     )
-                                    result.destroyed_agents.append(agent_details.name)
+                                    result.already_absent_agents.append(agent_details.name)
                             except MngrError as e:
                                 error_msg = f"Error destroying agent {agent_details.name}: {e}"
                                 logger.warning(error_msg)
