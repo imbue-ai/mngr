@@ -323,7 +323,7 @@ def test_write_host_env_vars_later_env_file_overrides_earlier(
 
 
 # =============================================================================
-# _destroy_new_host_on_create_failure -- a host we just created for a --new-host
+# destroy_new_host_on_create_failure -- a host we just created for a --new-host
 # create must be torn down if a later step fails, so we never leak it (and, for
 # non-idle-shutdown providers like imbue_cloud, its lease). Gated by the debug
 # retain flag.
