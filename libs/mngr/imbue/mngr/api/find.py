@@ -15,6 +15,7 @@ from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundError
+from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -606,9 +607,9 @@ def resolve_to_started_host_and_agent(
     instead.
 
     Raises :class:`UserInputError` when the host is offline and
-    ``allow_auto_start`` is False. Raises :class:`RuntimeError` if the
-    agent was found during discovery but is missing on the live host (a
-    stale-cache / host state inconsistency case).
+    ``allow_auto_start`` is False. Raises :class:`AgentNotFoundOnHostError`
+    if the agent was found during discovery but is missing on the live host
+    (a stale-cache / host state inconsistency case).
     """
     provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
     host = provider.get_host(host_ref.host_id)
@@ -616,11 +617,15 @@ def resolve_to_started_host_and_agent(
     for live_agent in online_host.get_agents():
         if live_agent.id == agent_ref.agent_id:
             return live_agent, online_host
-    raise RuntimeError(
-        f"Agent '{agent_ref.agent_name}' (ID: {agent_ref.agent_id}) was found during discovery but is "
-        f"no longer present on host {host_ref.host_name}.{host_ref.provider_name}. "
-        "This indicates a stale discovery cache or host state inconsistency."
+    logger.warning(
+        "Agent '{}' (ID: {}) was found during discovery but is no longer present on host {}.{}. "
+        "This indicates a stale discovery cache or host state inconsistency.",
+        agent_ref.agent_name,
+        agent_ref.agent_id,
+        host_ref.host_name,
+        host_ref.provider_name,
     )
+    raise AgentNotFoundOnHostError(agent_ref.agent_id, host_ref.host_id)
 
 
 def resolve_to_started_host_and_running_agent(
@@ -637,8 +642,8 @@ def resolve_to_started_host_and_running_agent(
 
     Raises :class:`UserInputError` when the host is offline or the agent
     is stopped and ``allow_auto_start`` is False. Raises
-    :class:`RuntimeError` if the agent was found during discovery but is
-    missing on the live host.
+    :class:`AgentNotFoundOnHostError` if the agent was found during discovery
+    but is missing on the live host.
     """
     agent, online_host = resolve_to_started_host_and_agent(host_ref, agent_ref, allow_auto_start, mngr_ctx)
     ensure_agent_started(agent, online_host, is_start_desired=allow_auto_start)
