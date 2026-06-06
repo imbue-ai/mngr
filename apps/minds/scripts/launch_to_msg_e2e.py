@@ -1300,6 +1300,12 @@ async def amain() -> int:
             # and that the canonical name set is correctly populated by
             # backend_resolver.list_known_workspace_ids().
             logger.info("=== conflict 409: re-create with HOST_NAME already taken ===")
+            # win is currently on W1's chat URL (agent-<hex>.localhost,
+            # served by mngr_forward to the in-VM system_interface). The
+            # /api/create-agent endpoint is on the MINDS backend (origin),
+            # so the fetch needs to land there. Easiest: navigate win to
+            # the minds origin first so the relative fetch resolves there.
+            await win.goto(origin + "/")
             conflict_resp = await win.evaluate(
                 """async (host_name) => {
                     const r = await fetch('/api/create-agent', {
