@@ -1206,8 +1206,8 @@ def test_get_or_create_profile_dir_regenerates_on_empty_profile(tmp_path: Path) 
 
     assert result.exists()
     assert result.parent == base_dir / "profiles"
-    # config.toml is rewritten with the freshly minted profile id.
-    assert config_path.read_text().strip() != 'profile = ""'
+    # config.toml is rewritten to point at the freshly minted profile id.
+    assert config_path.read_text().strip() == f'profile = "{result.name}"'
 
 
 def test_get_or_create_profile_dir_returns_same_profile_on_subsequent_calls(tmp_path: Path) -> None:
