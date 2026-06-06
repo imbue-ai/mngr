@@ -36,6 +36,10 @@ def load_telegram_user_credentials(data_dir: Path) -> TelegramUserCredentials | 
     if not creds_path.exists():
         return None
 
+    # Corrupt internal state (these files are written by us, not user-authored
+    # config) is intentionally treated the same as "absent": return None so the
+    # caller self-heals by re-acquiring credentials. The warning log is the
+    # visibility mechanism required by the style guide for swallowed parse errors.
     try:
         raw = json.loads(creds_path.read_text())
     except (json.JSONDecodeError, OSError) as exc:
@@ -69,6 +73,10 @@ def load_agent_bot_credentials(
     if not creds_path.exists():
         return None
 
+    # As with user credentials, a corrupt internal-state file is treated as
+    # "absent" (return None) so setup re-runs and rebuilds it; the warning log
+    # makes the corruption visible. start_setup branches on this loaded value
+    # rather than file existence so a corrupt file is never reported as DONE.
     try:
         raw = json.loads(creds_path.read_text())
     except (json.JSONDecodeError, OSError) as exc:
