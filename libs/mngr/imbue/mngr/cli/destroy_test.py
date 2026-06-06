@@ -76,6 +76,7 @@ def test_destroy_cli_options_can_be_instantiated() -> None:
         agents=("agent1",),
         agent_list=(),
         force=False,
+        on_error="abort",
         gc=True,
         remove_created_branch=False,
         allow_worktree_removal=True,
@@ -207,11 +208,16 @@ def test_destroy_accepts_address_syntax(
     assert "my-agent" in result.output
 
 
-def test_destroy_address_force_nonexistent_agent(
+def test_destroy_address_force_alone_aborts_on_nonexistent_agent(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Destroy with --force should not crash when address doesn't match any agent."""
+    """--force alone (without --on-error continue) now aborts when no agent matches.
+
+    --force is confirmation-skip only; missing-agent tolerance is controlled by
+    --on-error continue. So a stale address with only --force surfaces the
+    not-found error (non-zero exit).
+    """
     result = cli_runner.invoke(
         destroy,
         ["nonexistent@host.modal", "--force"],
@@ -219,24 +225,41 @@ def test_destroy_address_force_nonexistent_agent(
         catch_exceptions=False,
     )
 
-    # --force swallows AgentNotFoundError and returns 0
+    assert result.exit_code != 0
+
+
+def test_destroy_address_force_continue_nonexistent_agent(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--on-error continue should not crash when an address doesn't match any agent."""
+    result = cli_runner.invoke(
+        destroy,
+        ["nonexistent@host.modal", "--force", "--on-error", "continue"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    # In continue mode, the missing agent is warned about and the command exits 0.
     assert result.exit_code == 0
+    assert "no agent(s) found matching" in result.output
 
 
-def test_destroy_plain_name_still_works(
+def test_destroy_plain_name_continue_still_works(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Plain agent names (no @) continue to work with the address-aware destroy."""
     result = cli_runner.invoke(
         destroy,
-        ["plain-agent-name", "--force"],
+        ["plain-agent-name", "--force", "--on-error", "continue"],
         obj=plugin_manager,
         catch_exceptions=False,
     )
 
-    # --force swallows the not-found error
+    # In continue mode the not-found identifier is warned about, exits 0.
     assert result.exit_code == 0
+    assert "no agent(s) found matching" in result.output
 
 
 # =============================================================================
@@ -251,13 +274,14 @@ def test_destroy_dash_reads_agent_names(
     """Test that '-' reads agent names from stdin and passes them as identifiers."""
     result = cli_runner.invoke(
         destroy,
-        ["-", "--force"],
+        ["-", "--force", "--on-error", "continue"],
         input="agent-from-stdin\n",
         obj=plugin_manager,
         catch_exceptions=False,
     )
-    # --force swallows the not-found error, exits 0
+    # In continue mode the not-found identifier is warned about, exits 0.
     assert result.exit_code == 0
+    assert "no agent(s) found matching" in result.output
 
 
 def test_destroy_dash_empty_input_is_noop(
@@ -275,11 +299,15 @@ def test_destroy_dash_empty_input_is_noop(
     assert result.exit_code == 0
 
 
-def test_destroy_dash_multiple_names(
+def test_destroy_dash_multiple_names_force_alone_aborts(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that '-' reads multiple agent names from stdin."""
+    """A stdin batch with --force but no --on-error continue aborts if any id is stale.
+
+    This pins the new default: --force is confirmation-skip only, so the whole
+    batch aborts (rather than silently destroying nothing) when an id is missing.
+    """
     result = cli_runner.invoke(
         destroy,
         ["-", "--force"],
@@ -287,8 +315,24 @@ def test_destroy_dash_multiple_names(
         obj=plugin_manager,
         catch_exceptions=False,
     )
-    # --force swallows the not-found error
+    assert result.exit_code != 0
+
+
+def test_destroy_dash_multiple_names(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Test that '-' reads multiple agent names from stdin."""
+    result = cli_runner.invoke(
+        destroy,
+        ["-", "--force", "--on-error", "continue"],
+        input="agent-one\nagent-two\nagent-three\n",
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    # In continue mode the not-found identifiers are warned about, exits 0.
     assert result.exit_code == 0
+    assert "no agent(s) found matching" in result.output
 
 
 def test_destroy_dash_strips_whitespace(
@@ -298,12 +342,13 @@ def test_destroy_dash_strips_whitespace(
     """Test that '-' strips whitespace from names."""
     result = cli_runner.invoke(
         destroy,
-        ["-", "--force"],
+        ["-", "--force", "--on-error", "continue"],
         input="  agent-padded  \n\n  \n",
         obj=plugin_manager,
         catch_exceptions=False,
     )
     assert result.exit_code == 0
+    assert "no agent(s) found matching" in result.output
 
 
 # =============================================================================
