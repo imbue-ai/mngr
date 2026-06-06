@@ -120,11 +120,16 @@ def fetch_telegram_web_api_credentials() -> tuple[int, str]:
 
 
 def _fetch_url_text(url: str) -> str | None:
-    """Fetch a URL and return its decoded body, or None if the request fails."""
+    """Fetch a URL and return its decoded body, or None if the request fails.
+
+    A body that cannot be UTF-8 decoded is treated the same as a network
+    failure (an unusable fetch), not as a parsing bug in our own logic, so the
+    caller degrades to the public default credentials rather than crashing.
+    """
     try:
         with urllib.request.urlopen(url, timeout=_HTTP_TIMEOUT_SECONDS) as resp:
             return resp.read().decode()
-    except (urllib.error.URLError, OSError):
+    except (urllib.error.URLError, OSError, UnicodeDecodeError):
         return None
 
 
