@@ -299,9 +299,15 @@ def create_bot(bot_display_name: str, bot_username: str) -> tuple[str, str]:
 
             bot_token = token_match.group(1)
 
-            # Extract the actual username from the response
+            # Extract the actual username from the response. A successful BotFather
+            # creation always echoes the new bot as a t.me/<username> link, so its
+            # absence means the response format drifted -- fail loudly (like the other
+            # unexpected-response guards above) rather than reporting the requested
+            # username as if BotFather had confirmed it against this token.
             username_match = re.search(r"t\.me/(\w+)", response_text)
-            actual_username = username_match.group(1) if username_match else bot_username
+            if username_match is None:
+                raise BotCreationError(f"Could not extract bot username from BotFather response:\n{response_text}")
+            actual_username = username_match.group(1)
 
     finally:
         client.disconnect()
