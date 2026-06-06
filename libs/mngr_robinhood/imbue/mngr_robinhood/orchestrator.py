@@ -186,10 +186,15 @@ class _StreamBufferConsumer(MutableModel):
 
     The buffer's first line is the last-complete-assistant-message id and the
     remaining lines are the in-progress assistant text (strict-append within a
-    message, reset across messages). We diff the body against what we last
-    emitted: a prefix-extension is a same-message delta; anything else is a new
-    message and the whole body is emitted. Best-effort previews -- the
-    authoritative assistant message still arrives via the transcript path.
+    message, reset across messages). Streaming is line-buffered: ``poll()`` emits
+    only the *complete* lines (everything up to the last newline), holding back
+    the still-streaming final line because its rendering churns as it grows.
+    ``flush()`` is called at turn end to deliver that withheld final line exactly
+    once, using the most recent non-empty buffer content. We diff the considered
+    text against what we last emitted: a prefix-extension is a same-message delta;
+    a non-prefix body is a new message and the whole body is emitted. Best-effort
+    previews -- the authoritative assistant message still arrives via the
+    transcript path.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
