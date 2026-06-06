@@ -160,6 +160,9 @@ def run(
     client_config_path = config_file
     client_env_config = load_client_config(client_config_path)
     connector_url_str = str(client_env_config.connector_url).rstrip("/")
+    # The parent `cli` group always sets ctx.obj["output_format"] (cli_entry.py)
+    # before any subcommand runs, so the HUMAN default is reached only when this
+    # command is invoked directly with an empty obj -- the unit-test path.
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
 
     logger.info("Starting `minds run`...")

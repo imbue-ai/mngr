@@ -1078,6 +1078,10 @@ def env_deactivate() -> None:
 def env_list(ctx: click.Context) -> None:
     """List every minds env on disk (every ``~/.minds*/`` dir)."""
     _refuse_if_any_recover_target_exists()
+    # The parent `cli` group always sets ctx.obj["output_format"] (cli_entry.py)
+    # before any subcommand runs, so the HUMAN default here is reached only when a
+    # subgroup is invoked directly with an empty obj -- i.e. the unit-test path,
+    # never production.
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
     summaries = list_dev_envs()
     active = active_env_name_or_none()
@@ -1197,6 +1201,7 @@ def env_deploy(
     for shared tiers with no migration (staging / production prefer
     zero-downtime when nothing risky happened).
     """
+    # HUMAN default only reached via the empty-obj test path; see env_list.
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
     env_name = require_activated_env_name()
     tier = _tier_for_env_name(env_name)
@@ -1322,6 +1327,7 @@ def env_destroy(ctx: click.Context, keep_agents: bool, yes_i_mean_staging: bool)
     resources) and the generation-id removal (only for shared tiers
     that use generation tracking).
     """
+    # HUMAN default only reached via the empty-obj test path; see env_list.
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
     env_name = require_activated_env_name()
     tier = _tier_for_env_name(env_name)
