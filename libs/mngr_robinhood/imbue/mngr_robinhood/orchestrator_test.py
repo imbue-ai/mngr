@@ -8,11 +8,11 @@ from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
+from imbue.mngr_robinhood.agent_runtime import build_pass_env_vars
 from imbue.mngr_robinhood.data_types import OutputFormat
 from imbue.mngr_robinhood.orchestrator import _TranscriptReadFailureWarner
 from imbue.mngr_robinhood.orchestrator import _TurnEndTicker
 from imbue.mngr_robinhood.orchestrator import _build_agent_name
-from imbue.mngr_robinhood.orchestrator import _build_pass_env_vars
 from imbue.mngr_robinhood.orchestrator import _build_result_meta
 from imbue.mngr_robinhood.orchestrator import monotonic_ms_since
 from imbue.mngr_robinhood.output_modes import StreamingOutputWriter
@@ -26,7 +26,7 @@ def test_build_agent_name_has_robinhood_prefix() -> None:
 
 
 def test_build_pass_env_vars_is_populated() -> None:
-    options = _build_pass_env_vars()
+    options = build_pass_env_vars()
     assert len(options.env_vars) > 0
 
 
