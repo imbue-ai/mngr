@@ -267,14 +267,13 @@ def _create_agent(
     plugin_data = {"adopt_session": (adopt_session_path,)} if adopt_session_path is not None else {}
     # When can_use_tool / hooks are configured, point claude at the bridge's hooks settings file so
     # its hook commands call back into the in-process callbacks.
-    bridge_args = ("--settings", str(session.hook_bridge.settings_path)) if session.hook_bridge is not None else ()
     options = CreateAgentOptions(
         agent_type=AgentTypeName("claude"),
         name=_build_agent_name(),
         target_path=session.cwd,
         transfer_mode=TransferMode.NONE,
         initial_message=initial_message,
-        agent_args=map_options_to_agent_args(session.options) + extra_agent_args + bridge_args,
+        agent_args=map_options_to_agent_args(session.options) + extra_agent_args + _bridge_settings_args(session),
         label_options=AgentLabelOptions(labels=dict(SDK_CREATED_BY_LABEL)),
         environment=_build_environment(session.options),
         ready_timeout_seconds=AGENT_READY_TIMEOUT_SECONDS,
@@ -767,21 +766,53 @@ def _options_with_overrides(
     return updated_options
 
 
+def _bridge_settings_args(session: LiveSession) -> tuple[str, ...]:
+    """The ``--settings`` args pointing claude at the hook bridge, if one is active."""
+    if session.hook_bridge is None:
+        return ()
+    return ("--settings", str(session.hook_bridge.settings_path))
+
+
+def _rewrite_agent_launch_command(session: LiveSession) -> None:
+    """Rebuild the agent's stored launch command from the current options.
+
+    The fully-assembled launch command (including ``--model`` / ``--permission-mode``) is frozen in
+    the agent's ``data.json`` at create time and re-run verbatim on restart. To make a mid-session
+    ``set_model`` / ``set_permission_mode`` actually take effect, rebuild the command from the
+    updated options and overwrite that stored command so the next restart relaunches claude with it.
+    """
+    agent = session.agent
+    host = session.host
+    if agent is None or host is None:
+        return
+    new_command = agent.assemble_command(
+        host=host,
+        agent_args=map_options_to_agent_args(session.options) + _bridge_settings_args(session),
+        command_override=None,
+        initial_message=None,
+    )
+    data_path = host.host_dir / "agents" / str(agent.id) / "data.json"
+    data = json.loads(host.read_text_file(data_path))
+    data["command"] = str(new_command)
+    serialized = json.dumps(data, indent=2)
+    host.write_file(data_path, serialized.encode("utf-8"), is_atomic=True)
+    host.save_agent_data(agent.id, data)
+
+
 def reconfigure_session(session: LiveSession, model: str | None, permission_mode: str | None) -> None:
-    """Apply a mid-session ``set_model`` / ``set_permission_mode`` and keep the session usable.
+    """Apply a mid-session ``set_model`` / ``set_permission_mode`` to the live agent.
 
     mngr cannot hot-swap a running claude process's model / permission mode, so the new values are
-    recorded on the session options (used by any agent created afterward) and the live agent is
-    restarted on its resumed session. The agent's transcript is append-only and reconciled across
-    restarts, so the next turn is read correctly. (A mid-session change to a *different* model is
-    best-effort: the relaunch resumes the same session, and the new model applies to subsequently
-    created agents.)
+    recorded on the session options and baked into the agent's stored launch command, then the agent
+    is restarted on its resumed session under the new configuration. The transcript is append-only
+    and reconciled across restarts, so the next turn is read correctly.
     """
     new_options = _options_with_overrides(session.options, model, permission_mode)
     if new_options is session.options:
         return
     session.options = new_options
     if session.agent is not None:
+        _rewrite_agent_launch_command(session)
         restart_agent_with_resume(session)
 
 
