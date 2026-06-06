@@ -683,7 +683,7 @@ async def _create_workspace_and_first_message(
             raise RuntimeError(f"[{label}] creation FAILED: {payload.get('error', stat['body'])}")
         if (
             state == "CREATING_WORKSPACE"
-            and not any(SCREENSHOT_DIR.glob(f"{snaps.creating_mid}-*"))
+            and not any(SCREENSHOT_DIR.glob(f"{snaps.creating_mid}.*"))
             and time.monotonic() - phase_started_at >= 60
         ):
             await snap_page(win, snaps.creating_mid)
@@ -1121,6 +1121,20 @@ async def amain() -> int:
                 snap_reply="16-w2-followup-reply",
                 label="w2-followup",
             )
+
+            # Navigate back to the landing page and assert BOTH workspace
+            # tiles render. The chat-URL-direct checks above bypass discovery,
+            # so they would still pass even if a regression hid one tile from
+            # the landing page; this catches that.
+            logger.info("=== home page: verify both workspace tiles render ===")
+            await win.goto(origin + "/")
+            await win.wait_for_function(
+                f"document.body.innerText.includes({HOST_NAME!r}) && "
+                f"document.body.innerText.includes({HOST_NAME_2!r})",
+                timeout=30_000,
+            )
+            await snap_page(win, "17-home-both-tiles")
+            logger.info("home page shows both tiles: {} and {}", HOST_NAME, HOST_NAME_2)
 
         # Persist combined per-workspace timings as one artifact JSON
         # rather than two -- one file is easier to embed in the run

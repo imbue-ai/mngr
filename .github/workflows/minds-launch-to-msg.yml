@@ -448,14 +448,17 @@ jobs:
           # summary so creation time is visible at a glance.
           timings_json="$shots_dir/launch-to-msg-timings.json"
           if [ -f "$timings_json" ]; then
-            total=$(jq -r '.total_create_s' "$timings_json")
-            mm=$(awk -v t="$total" 'BEGIN{printf "%d", t/60}')
-            ss=$(awk -v t="$total" 'BEGIN{printf "%02d", int(t)%60}')
-            phases=$(jq -r '.phase_durations_s | to_entries | map("\(.key)=\(.value)s") | join(" | ")' "$timings_json")
+            # The 2-workspace e2e nests timings under per-workspace keys
+            # (`.w1`, `.w2`, ...); each entry has its own
+            # `total_create_s` + `phase_durations_s`. Emit one row per
+            # workspace so the run summary shows both creation times at
+            # a glance.
             {
               echo "## Agent creation timings"
               echo ""
-              echo "**Total agent creation: ${total}s (${mm}:${ss})** -- ${phases}"
+              echo "| Workspace | Host name | Total | Phases |"
+              echo "|---|---|---|---|"
+              jq -r 'to_entries[] | "| \(.key) | \(.value.host_name // "?") | \(.value.total_create_s // 0)s | \(.value.phase_durations_s // {} | to_entries | map("\(.key)=\(.value)s") | join(" | ")) |"' "$timings_json"
               echo ""
               echo '```json'
               # The e2e-written JSON may lack a trailing newline; ensure
@@ -488,7 +491,7 @@ jobs:
             echo "| Milestone | Per-window (.win.png) | Full-desktop (.desktop.png) |"
             echo "|---|---|---|"
           } >> "$GITHUB_STEP_SUMMARY"
-          for prefix in 00 01 02 03 04 04b 05 06 07 07a 07b 07c 07d 08 09 10 10b 11 12 13 14 15 16 99; do
+          for prefix in 00 01 02 03 04 04b 05 06 07 07a 07b 07c 07d 08 09 10 10b 11 12 13 14 15 16 17 99; do
             for win in "$shots_dir"/${prefix}-*.win.png; do
               [ -f "$win" ] || continue
               base=$(basename "$win" .win.png)
