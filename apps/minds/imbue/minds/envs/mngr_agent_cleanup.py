@@ -109,39 +109,61 @@ def real_destroy_mngr_agents(
     mngr_host_dir: Path,
     mngr_prefix: str,
     parent_concurrency_group: ConcurrencyGroup,
+    *,
+    mngr_binary: str = "mngr",
 ) -> None:
-    """Shell out to a single ``mngr destroy -f <ids...>`` with the env's MNGR_* vars set.
+    """Shell out to ``mngr destroy -f <id>`` once per agent, with the env's MNGR_* vars set.
 
     The CLI side wires this into the Providers bundle as the
-    ``destroy_mngr_agents`` callable. Subprocess runs under the
+    ``destroy_mngr_agents`` callable. Each subprocess runs under the
     parent ConcurrencyGroup so its lifetime is tracked alongside the
     rest of the destroy flow.
+
+    We destroy one id at a time rather than passing the whole list to a
+    single ``mngr destroy`` call. A single call returns one combined exit
+    status + output for the whole batch, so the "already gone" tolerance
+    below could only be applied to the batch as a whole: a batch where
+    agent A failed for a real reason but agent B was merely already-gone
+    would contain "not found" *somewhere* and be swallowed as success,
+    leaving A's cloud resources stranded. Destroying per-id scopes the
+    not-found check to the single id it came from, so a genuine failure
+    of one agent can never be masked by another agent being absent.
+    Destroying one agent still tears down its host-mates in the same
+    pass, so a host-mate processed later in the loop simply reports
+    "not found" -- which is correctly tolerated.
     """
     if not agent_ids:
         return
     subprocess_env = dict(os.environ)
     subprocess_env["MNGR_HOST_DIR"] = str(mngr_host_dir)
     subprocess_env["MNGR_PREFIX"] = mngr_prefix
-    command = ["mngr", "destroy", "-f", *agent_ids]
-    cg = parent_concurrency_group.make_concurrency_group(name="mngr-destroy-batch")
-    with cg:
-        result = cg.run_process_to_completion(
-            command=command,
-            timeout=_MNGR_DESTROY_TIMEOUT_SECONDS,
-            is_checked_after=False,
-            env=subprocess_env,
+
+    failures: list[str] = []
+    for agent_id in agent_ids:
+        cg = parent_concurrency_group.make_concurrency_group(name=f"mngr-destroy-{agent_id}")
+        with cg:
+            result = cg.run_process_to_completion(
+                command=[mngr_binary, "destroy", "-f", agent_id],
+                timeout=_MNGR_DESTROY_TIMEOUT_SECONDS,
+                is_checked_after=False,
+                env=subprocess_env,
+            )
+        if result.returncode == 0:
+            continue
+        # mngr's "no such agent" wording: "Agent <id> not found". Because
+        # this output is scoped to exactly one id, an already-gone agent
+        # (destroyed manually, or torn down as a host-mate of an earlier
+        # id in this loop) is safe to treat as a no-op.
+        message = (result.stderr + result.stdout).lower()
+        if "not found" in message or "does not exist" in message:
+            logger.debug("mngr agent {} already gone; treating as destroyed", agent_id)
+            continue
+        stderr = result.stderr.strip() or result.stdout.strip()
+        failures.append(f"{agent_id} (exit {result.returncode}): {stderr}")
+
+    if failures:
+        raise MngrAgentCleanupError(
+            "`mngr destroy` failed for {} agent(s): {}. ".format(len(failures), "; ".join(failures))
+            + "The env root has NOT been removed; re-run `minds env destroy` once the underlying "
+            "issue is fixed."
         )
-    if result.returncode == 0:
-        return
-    # mngr's "no such agent" wording: "Agent <id> not found". Treat a
-    # batch that only tripped on already-gone agents as a no-op (someone
-    # destroyed them manually).
-    message = (result.stderr + result.stdout).lower()
-    if "not found" in message or "does not exist" in message:
-        return
-    stderr = result.stderr.strip() or result.stdout.strip()
-    raise MngrAgentCleanupError(
-        f"`mngr destroy {' '.join(agent_ids)}` failed (exit {result.returncode}): {stderr}. "
-        "The env root has NOT been removed; re-run `minds env destroy` once the underlying "
-        "issue is fixed."
-    )
