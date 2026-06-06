@@ -119,13 +119,15 @@ class TelegramSetupOrchestrator(MutableModel):
         """
         aid = str(agent_id)
 
-        # Check if already has credentials
-        if has_agent_bot_credentials(self.paths.data_dir, agent_id):
-            existing = load_agent_bot_credentials(self.paths.data_dir, agent_id)
+        # If the agent already has loadable bot credentials, setup is already done.
+        # Branch on the loaded value rather than mere file existence: a present-but-
+        # corrupt file loads as None and must fall through to a fresh setup that
+        # rebuilds it, instead of being reported as DONE with no usable bot.
+        existing_bot_credentials = load_agent_bot_credentials(self.paths.data_dir, agent_id)
+        if existing_bot_credentials is not None:
             with self._lock:
                 self._statuses[aid] = TelegramSetupStatus.DONE
-                if existing is not None:
-                    self._bot_usernames[aid] = existing.bot_username
+                self._bot_usernames[aid] = existing_bot_credentials.bot_username
             return
 
         with self._lock:
