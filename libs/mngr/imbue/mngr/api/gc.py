@@ -615,7 +615,7 @@ def gc_logs(
 
             result.logs_destroyed.append(log_file_info)
 
-        except MngrError as e:
+        except OSError as e:
             error_msg = f"Failed to delete log {log_file}: {e}"
             result.errors.append(error_msg)
             _handle_error(error_msg, error_behavior, exc=e)
@@ -679,7 +679,7 @@ def gc_build_cache(
 
                 result.build_cache_destroyed.append(build_cache_info)
 
-            except MngrError as e:
+            except OSError as e:
                 error_msg = f"Failed to delete cache entry {cache_entry}: {e}"
                 result.errors.append(error_msg)
                 _handle_error(error_msg, error_behavior, exc=e)
