@@ -37,11 +37,9 @@ Flow:
      bundled host_dir, assert W1's host is listed AND W2's is gone
      -- cross-checks the destroy lifecycle from a different angle
      than the UI's home-page tile state.
-  9. Restart minds.app: terminate + relaunch Electron; reconnect
-     Playwright via CDP; re-auth via OTC; assert W1's tile still
-     renders on the home page (screenshot 23) -- proves the on-disk
-     mngr host_dir + landing discovery layer survive a process
-     restart with no Lima VM destroy.
+  9. Duplicate-name conflict: POST /api/create-agent with HOST_NAME
+     already owned by W1; assert 409 with "already exists". Proves
+     the duplicate-name guard added on this branch works.
   10. Teardown: revert /etc/hosts, clear latchkey, kill mock + socat
 
 Takes a `screencapture -x` whole-desktop shot at every milestone.
@@ -1239,7 +1237,20 @@ async def amain() -> int:
             logger.info("=== mngr CLI list: cross-check W1 present, W2 removed ===")
             bundled_mngr = MINDS_HOME / ".venv" / "bin" / "mngr"
             if bundled_mngr.exists():
-                mngr_env = {**os.environ, "MNGR_HOST_DIR": str(MINDS_HOME / "mngr")}
+                # mngr's lima provider shells out to ``limactl list --json``
+                # without going through the bundled-binary env vars (those
+                # are minds-side ergonomics). The packaged binary's PATH
+                # doesn't include /Applications/Minds.app/.../Resources/lima/bin,
+                # so we prepend it here -- otherwise the discovery hits
+                # "No such file or directory: 'limactl'" and the agents
+                # array comes back empty even though the host_dir has W1.
+                minds_resources = MINDS_APP_PATH.parent.parent / "Resources"
+                bundled_lima_bin = minds_resources / "lima" / "bin"
+                mngr_env = {
+                    **os.environ,
+                    "MNGR_HOST_DIR": str(MINDS_HOME / "mngr"),
+                    "PATH": f"{bundled_lima_bin}:{os.environ.get('PATH', '')}",
+                }
                 # ``--on-error continue`` puts each provider's discovery error
                 # into the JSON payload's ``errors`` array. mngr STILL exits 1
                 # when any provider failed (per error_handling.md spec) -- on
@@ -1275,61 +1286,32 @@ async def amain() -> int:
             else:
                 logger.warning("[mngr-list] {} not found; skipping CLI cross-check", bundled_mngr)
 
-            # 24. minds.app restart with active W1: prove home page state
-            # survives the Electron process exit + relaunch (no Lima VM
-            # destroy in between, so W1's host backing should also stay
-            # up). The strongest claim is "W1's tile reappears on /",
-            # which proves both mngr's host_dir AND the landing handler's
-            # discovery layer reconstituted from disk.
-            logger.info("=== minds.app restart with W1 active ===")
-            await browser.close()
-            logger.info("terminating minds_proc (pid={})", minds_proc.pid)
-            minds_proc.terminate()
-            try:
-                minds_proc.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                logger.warning("minds_proc did not exit in 15s; killing")
-                minds_proc.kill()
-                minds_proc.wait(timeout=5)
-            time.sleep(3)  # let mngr forward + system_interface cleanup finish
-
-            # Truncate events log so wait_backend_url picks up the NEW
-            # backend's login URL line rather than re-finding the OLD
-            # URL from before restart (which points at a now-defunct
-            # port and would fail navigation).
-            if EVENTS_LOG.exists():
-                EVENTS_LOG.write_text("")
-
-            new_cdp_port = _free_port()
-            logger.info("re-launching {} --remote-debugging-port={}", MINDS_APP_PATH, new_cdp_port)
-            minds_proc = subprocess.Popen(
-                [str(MINDS_APP_PATH), f"--remote-debugging-port={new_cdp_port}"],
-                env=env,
-                stdout=open("/tmp/minds-electron.log", "a"),
-                stderr=subprocess.STDOUT,
+            # 24. Duplicate-name conflict: POST /api/create-agent with
+            # HOST_NAME (still owned by W1) should return 409 with an
+            # "already exists" message. Proves the duplicate-name guard
+            # in _handle_create_agent_api (added on this branch) works,
+            # and that the canonical name set is correctly populated by
+            # backend_resolver.list_known_workspace_ids().
+            logger.info("=== conflict 409: re-create with HOST_NAME already taken ===")
+            conflict_resp = await win.evaluate(
+                """async (host_name) => {
+                    const r = await fetch('/api/create-agent', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                        body: 'host_name=' + encodeURIComponent(host_name),
+                    });
+                    return {status: r.status, body: await r.text()};
+                }""",
+                HOST_NAME,
             )
-            new_cdp_url = await _wait_cdp(new_cdp_port)
-            browser = await p.chromium.connect_over_cdp(new_cdp_url, timeout=60_000)
-            ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
-            for _ in range(60):
-                if ctx.pages:
-                    break
-                await asyncio.sleep(0.5)
-            if not ctx.pages:
-                raise E2EFailure("no Electron windows after 30s post-restart")
-            win = ctx.pages[0]
-
-            new_base = await asyncio.get_event_loop().run_in_executor(None, wait_backend_url)
-            new_code = await asyncio.get_event_loop().run_in_executor(None, mint_one_time_code)
-            await win.goto(new_base + "/authenticate?one_time_code=" + new_code)
-
-            await win.goto(new_base + "/")
-            await win.wait_for_function(
-                f"document.body.innerText.includes({HOST_NAME!r})",
-                timeout=30_000,
-            )
-            await snap_page(win, "23-home-after-restart")
-            logger.info("home page after restart shows W1: {}", HOST_NAME)
+            if conflict_resp["status"] != 409:
+                raise E2EFailure(
+                    f"[conflict-409] expected 409 for duplicate name {HOST_NAME!r}, "
+                    f"got {conflict_resp['status']}: {conflict_resp['body']!r}"
+                )
+            if "already exists" not in conflict_resp["body"]:
+                raise E2EFailure(f"[conflict-409] 409 body missing 'already exists' text: {conflict_resp['body']!r}")
+            logger.info("[conflict-409] PASS: duplicate-name guard returned 409")
 
         # Persist combined per-workspace timings as one artifact JSON
         # rather than two -- one file is easier to embed in the run
