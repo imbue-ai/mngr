@@ -221,6 +221,36 @@ def test_base_agent_get_reported_start_time_none(
     assert start_time is None
 
 
+def test_base_agent_get_reported_start_time_parses_valid(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_work_dir: Path,
+) -> None:
+    """A well-formed reported start_time file is parsed into a datetime."""
+    agent = _create_test_agent(local_provider, temp_mngr_ctx, "test-valid-start", temp_work_dir)
+    expected = datetime(2026, 6, 5, 12, 30, 0, tzinfo=timezone.utc)
+    status_path = agent._get_agent_dir() / "status" / "start_time"
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(expected.isoformat())
+
+    assert agent.get_reported_start_time() == expected
+
+
+@pytest.mark.allow_warnings
+def test_base_agent_get_reported_start_time_malformed_returns_none(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_work_dir: Path,
+) -> None:
+    """A corrupt reported start_time falls back to None rather than raising."""
+    agent = _create_test_agent(local_provider, temp_mngr_ctx, "test-bad-start", temp_work_dir)
+    status_path = agent._get_agent_dir() / "status" / "start_time"
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text("not-a-timestamp")
+
+    assert agent.get_reported_start_time() is None
+
+
 def test_base_agent_get_reported_activity_time_none(
     local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,

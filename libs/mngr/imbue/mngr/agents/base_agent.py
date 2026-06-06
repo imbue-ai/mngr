@@ -448,8 +448,16 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         status_path = self._get_agent_dir() / "status" / "start_time"
         try:
             content = self.host.read_text_file(status_path).strip()
-            return datetime.fromisoformat(content)
         except FileNotFoundError:
+            return None
+        try:
+            return datetime.fromisoformat(content)
+        except ValueError:
+            # The reported start_time file is written by the running agent, so a
+            # malformed timestamp is corrupt *reported* (non-config) input: per
+            # the style guide we fall back to "unknown" but log loudly rather
+            # than crashing a read path (e.g. `mngr list`) on a bad value.
+            logger.warning("Agent {} has a malformed reported start_time {!r} at {}", self.name, content, status_path)
             return None
 
     # =========================================================================
