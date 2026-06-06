@@ -29,6 +29,7 @@ import os
 import re
 from pathlib import Path
 from typing import Final
+from typing import cast
 
 from loguru import logger
 from pydantic import AnyUrl
@@ -821,12 +822,14 @@ def _select_app_id_from_rows(rows: object, *, app_name: str) -> str | None:
         if not isinstance(row, dict):
             logger.warning("`modal app list --json` returned a non-dict row; skipping it: {!r}", row)
             continue
-        name_value = row.get("Name") or row.get("name") or row.get("App")
-        state_value = (row.get("State") or row.get("state") or "").lower()
+        row_map = cast("dict[str, object]", row)
+        name_value = row_map.get("Name") or row_map.get("name") or row_map.get("App")
+        state_raw = row_map.get("State") or row_map.get("state")
+        state_value = state_raw.lower() if isinstance(state_raw, str) else ""
         if name_value != app_name or "stop" in state_value:
             continue
         for id_key in ("App ID", "app_id", "AppID", "ID", "id"):
-            id_value = row.get(id_key)
+            id_value = row_map.get(id_key)
             if isinstance(id_value, str) and id_value:
                 return id_value
         logger.warning(
@@ -878,8 +881,9 @@ def _extract_container_ids_from_rows(rows: object) -> tuple[str, ...]:
         if not isinstance(row, dict):
             logger.warning("`modal container list --json` returned a non-dict row; skipping it: {!r}", row)
             continue
+        row_map = cast("dict[str, object]", row)
         for id_key in ("Container ID", "container_id", "ID", "id"):
-            value = row.get(id_key)
+            value = row_map.get(id_key)
             if isinstance(value, str) and value:
                 ids.append(value)
                 break

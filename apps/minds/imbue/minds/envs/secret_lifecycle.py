@@ -23,6 +23,7 @@ from datetime import datetime
 from datetime import timezone
 from typing import Final
 from typing import Self
+from typing import cast
 
 from loguru import logger
 from pydantic import GetCoreSchemaHandler
@@ -184,16 +185,22 @@ def _extract_secret_names_from_rows(rows: object) -> tuple[str, ...]:
         raise ModalDeployError(f"`modal secret list --json` returned a non-list payload: {rows!r}")
     names: list[str] = []
     for row in rows:
-        if isinstance(row, dict) and isinstance(row.get("Name"), str):
-            names.append(row["Name"])
-        elif isinstance(row, dict) and isinstance(row.get("name"), str):
-            names.append(row["name"])
-        else:
+        name: str | None = None
+        if isinstance(row, dict):
+            row_map = cast("dict[str, object]", row)
+            candidate = row_map.get("Name")
+            if not isinstance(candidate, str):
+                candidate = row_map.get("name")
+            if isinstance(candidate, str):
+                name = candidate
+        if name is None:
             logger.warning(
                 "`modal secret list --json` row had no usable Name/name field; skipping it in GC "
                 "(Modal output shape may have shifted): {!r}",
                 row,
             )
+            continue
+        names.append(name)
     return tuple(names)
 
 
