@@ -655,7 +655,7 @@ def _parse_connector_list(
     body: Any,
     exc_cls: type[ImbueCloudError],
     what: str,
-    parse_one: Callable[[dict[str, Any]], _T],
+    parse_one: Callable[[Any], _T],
 ) -> list[_T]:
     """Validate a connector list response and parse each entry, or raise ``exc_cls``.
 
