@@ -455,13 +455,29 @@ def _process_new_events(
 
 
 def _current_transcript_size(runtime: _WaitRuntime) -> int:
-    """Return the current size of the target's transcript file in bytes, or 0 if unavailable."""
+    """Return the current size of the target's transcript file in bytes, or 0 if unavailable.
+
+    The 0 sentinel is deliberately the SAFE value for both callers. In the
+    permission-gate comparison (_check_permissions_newly_waiting), ``0 <=
+    watermark`` holds, so a transient stat failure keeps the gate CLOSED and
+    errs toward NOT re-firing a permission dialog. When persisted as a fresh
+    watermark on PERMISSION_REQUIRED, 0 is the smallest possible size, so it
+    cannot spuriously re-open the gate either.
+
+    Failures are still logged so they are not invisible: a not-yet-created
+    transcript (FileNotFoundError) is expected early in the wait and stays
+    quiet, while any other OSError is unexpected and logged at warning --
+    mirroring read_new_jsonl_lines' handling of the same stat call.
+    """
     path = runtime.tail_state.path
     if path is None:
         return 0
     try:
         return path.stat().st_size
-    except OSError:
+    except FileNotFoundError:
+        return 0
+    except OSError as e:
+        logger.warning("Failed to stat transcript {} for permission gate: {}", path, e)
         return 0
 
 
