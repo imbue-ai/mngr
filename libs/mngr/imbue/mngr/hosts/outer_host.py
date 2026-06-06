@@ -192,7 +192,13 @@ def _sftp_walk(sftp: SFTPClient, dir_path: str, recursive: bool) -> list[VolumeF
 
 
 def _is_transient_ssh_error(exception: BaseException) -> bool:
-    """Check if the exception is a transient SSH connection error worth retrying."""
+    """Check if the exception is a transient SSH connection error worth retrying.
+
+    The "Socket is closed" classification (here and at the other ``str(e)`` checks
+    in this module) deliberately depends on paramiko's exception *message* text:
+    paramiko surfaces a closed transport as a bare ``OSError`` with no stable errno
+    or dedicated type to key off. Revisit these substrings on paramiko upgrades.
+    """
     if isinstance(exception, OSError) and "Socket is closed" in str(exception):
         return True
     if isinstance(exception, SSHException):
