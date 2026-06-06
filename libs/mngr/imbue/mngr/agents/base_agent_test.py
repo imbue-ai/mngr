@@ -602,11 +602,12 @@ def test_get_command_returns_command_from_data(
     assert test_agent.get_command() == CommandString("sleep 1000")
 
 
+@pytest.mark.allow_warnings
 def test_get_command_returns_bash_when_no_command(
     test_agent: BaseAgent,
     local_provider: LocalProviderInstance,
 ) -> None:
-    """Test that get_command returns 'bash' when no command is in data.json."""
+    """Test that get_command falls back to 'bash' (and warns) when no command is in data.json."""
     # Remove the command from data.json
     data_path = local_provider.host_dir / "agents" / str(test_agent.id) / "data.json"
     data = json.loads(data_path.read_text())
