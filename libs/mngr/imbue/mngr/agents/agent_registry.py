@@ -52,14 +52,15 @@ def load_agents_from_plugins(pm: pluggy.PluginManager) -> None:
     pm.register(command_agent, name="command")
     pm.register(headless_command_agent, name="headless_command")
 
-    # Call the hook to get all agent type registrations
-    # Each implementation returns a single tuple
+    # Call the hook to get all agent type registrations. pluggy's hook caller
+    # already drops any hookimpl that returns None, and the hook is typed to
+    # return a (name, class, config) tuple, so every registration is a 3-tuple.
+    # Unpacking directly means a plugin that violates that contract fails loudly
+    # here instead of being silently skipped.
     all_registrations = pm.hook.register_agent_type()
 
-    for registration in all_registrations:
-        if registration is not None:
-            agent_type_name, agent_class, config_class = registration
-            _register_agent_internal(agent_type_name, agent_class, config_class)
+    for agent_type_name, agent_class, config_class in all_registrations:
+        _register_agent_internal(agent_type_name, agent_class, config_class)
 
     _registry_state["agents_loaded"] = True
 
