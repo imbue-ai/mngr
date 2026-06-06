@@ -75,7 +75,9 @@ fi
 # Optionally start the response-streaming watcher. Like the common transcript
 # converter, this script is only on disk when ClaudeAgent.provision() decided to
 # enable streaming (streaming_snapshot_interval_seconds > 0), so its presence is
-# the single gate. It reads the poll interval from the environment.
+# the single gate. It reads the poll interval from the stream_interval file under
+# $MNGR_AGENT_STATE_DIR/plugin/claude/ (env-var propagation into this subshell is
+# unreliable, so the interval is passed via a file instead).
 STREAM_SNAPSHOT_SCRIPT="$MNGR_AGENT_STATE_DIR/commands/stream_snapshot.py"
 _STREAM_SNAPSHOT_PID=""
 if [ -f "$STREAM_SNAPSHOT_SCRIPT" ]; then
