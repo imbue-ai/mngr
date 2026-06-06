@@ -291,8 +291,13 @@ def test_provider_instance_config_merge_replaces_dicts() -> None:
     assert merged.options == {"key2": "override_val", "key3": "val3"}
 
 
-def test_provider_instance_config_merge_handles_none_list_override() -> None:
-    """ProviderInstanceConfig.merge_with should keep base list when override is None."""
+def test_provider_instance_config_merge_keeps_unset_list() -> None:
+    """ProviderInstanceConfig.merge_with keeps the base list when the override never set it.
+
+    "Never set" is expressed by omitting the field from the override (so it is
+    absent from ``model_fields_set``), matching how a real config layer that
+    doesn't mention the key is parsed.
+    """
     base = _TestProviderConfigWithListAndDict(
         backend=ProviderBackendName("local"),
         tags=["tag1"],
@@ -300,7 +305,6 @@ def test_provider_instance_config_merge_handles_none_list_override() -> None:
     )
     override = _TestProviderConfigWithListAndDict.model_construct(
         backend=ProviderBackendName("local"),
-        tags=None,
         options={},
     )
     merged = base.merge_with(override)
@@ -308,8 +312,8 @@ def test_provider_instance_config_merge_handles_none_list_override() -> None:
     assert merged.tags == ["tag1"]
 
 
-def test_provider_instance_config_merge_handles_none_dict_override() -> None:
-    """ProviderInstanceConfig.merge_with should keep base dict when override is None."""
+def test_provider_instance_config_merge_keeps_unset_dict() -> None:
+    """ProviderInstanceConfig.merge_with keeps the base dict when the override never set it."""
     base = _TestProviderConfigWithListAndDict(
         backend=ProviderBackendName("local"),
         tags=[],
@@ -318,11 +322,41 @@ def test_provider_instance_config_merge_handles_none_dict_override() -> None:
     override = _TestProviderConfigWithListAndDict.model_construct(
         backend=ProviderBackendName("local"),
         tags=[],
-        options=None,
     )
     merged = base.merge_with(override)
     assert isinstance(merged, _TestProviderConfigWithListAndDict)
     assert merged.options == {"key1": "val1"}
+
+
+class _TestProviderConfigWithBoolAndTuple(ProviderInstanceConfig):
+    """Test config with non-None-default fields (a bool and a tuple)."""
+
+    is_special: bool = Field(default=False)
+    extra_args: tuple[str, ...] = Field(default=())
+
+
+def test_provider_instance_config_merge_keeps_unset_non_none_default_fields() -> None:
+    """An override that sets only one field must not reset other fields to their defaults.
+
+    Regression test: a create template applies ``providers.<name>.is_enabled=true``
+    as a single-key override. The parsed override carries every other field at its
+    model default (``is_special=False``, ``extra_args=()``), but only ``is_enabled``
+    is in ``model_fields_set``. The merge must preserve the base's non-default values
+    rather than clobbering them with the override's defaults.
+    """
+    base = _TestProviderConfigWithBoolAndTuple(
+        backend=ProviderBackendName("local"),
+        is_enabled=False,
+        is_special=True,
+        extra_args=("--workdir=/",),
+    )
+    # Mirror how parse_config builds a single-key --setting override.
+    override = _TestProviderConfigWithBoolAndTuple.model_construct(is_enabled=True)
+    merged = base.merge_with(override)
+    assert isinstance(merged, _TestProviderConfigWithBoolAndTuple)
+    assert merged.is_enabled is True
+    assert merged.is_special is True
+    assert merged.extra_args == ("--workdir=/",)
 
 
 # =============================================================================
