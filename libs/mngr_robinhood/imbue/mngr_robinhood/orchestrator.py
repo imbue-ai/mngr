@@ -16,6 +16,7 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.pure import pure
 from imbue.mngr.api.create import create as api_create
 from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.api.events import read_event_content
@@ -63,6 +64,20 @@ _UNATTENDED_SETTINGS: Final[tuple[str, ...]] = (
     "agent_types.claude.auto_allow_permissions=true",
     "agent_types.claude.settings_overrides.skipDangerousModePermissionPrompt=true",
     "agent_types.claude.settings_overrides.bypassPermissionsModeAccepted=true",
+)
+
+# Extra settings applied when the caller requests live streaming (via
+# --include-partial-messages or --stream-plain-text). These enable the
+# tmux-based response-streaming watcher on the spawned claude agent, default the
+# model to sonnet (so fast mode is off and streaming is observable -- a
+# user-passed --model still overrides this default), and force fast mode off.
+# They are merged into the SAME apply_settings_to_config call as the unattended
+# settings so the settings_overrides dict is assembled in one shot (a second
+# merge over the non-empty dict would trip the settings-narrowing guard).
+_STREAMING_SETTINGS: Final[tuple[str, ...]] = (
+    "agent_types.claude.streaming_snapshot_interval_seconds=0.25",
+    "agent_types.claude.settings_overrides.model=sonnet",
+    "agent_types.claude.settings_overrides.fastMode=false",
 )
 
 # Env var prefixes that mngr's own ``_collect_agent_env_vars`` sets per-agent
@@ -166,6 +181,53 @@ class _TranscriptReadFailureWarner(MutableModel):
         self.has_warned = True
 
 
+class _StreamBufferConsumer(MutableModel):
+    """Polls the agent's stream_buffer and emits incremental assistant-text deltas.
+
+    The buffer's first line is the last-complete-assistant-message id and the
+    remaining lines are the in-progress assistant text (strict-append within a
+    message, reset across messages). We diff the body against what we last
+    emitted: a prefix-extension is a same-message delta; anything else is a new
+    message and the whole body is emitted. Best-effort previews -- the
+    authoritative assistant message still arrives via the transcript path.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    host: OnlineHostInterface = Field(description="Host to read the buffer file from")
+    buffer_path: Path = Field(description="Absolute path to the agent's stream_buffer file")
+    writer: StreamingOutputWriter = Field(description="Writer that renders the deltas")
+    emitted_body: str = Field(default="", description="Body text already emitted as deltas")
+
+    def poll(self) -> None:
+        try:
+            content = self.host.read_text_file(self.buffer_path)
+        except (FileNotFoundError, OSError, MngrError):
+            # The buffer may not exist yet (watcher still starting up); benign.
+            return
+        delta, self.emitted_body = compute_stream_delta(content, self.emitted_body)
+        if delta:
+            self.writer.emit_partial_text(delta)
+
+
+@pure
+def compute_stream_delta(buffer_content: str, emitted_body: str) -> tuple[str, str]:
+    """Compute the new assistant-text delta from a stream_buffer snapshot.
+
+    The buffer's first line is the last-complete-assistant id; the remaining
+    lines are the in-progress body. Returns ``(delta, new_emitted_body)`` where
+    ``delta`` is the text to emit. A prefix-extension of ``emitted_body`` yields
+    just the appended suffix; anything else (a reset to a new message) yields the
+    whole new body.
+    """
+    lines = buffer_content.split("\n")
+    body = "\n".join(lines[1:]) if len(lines) > 1 else ""
+    if body == emitted_body:
+        return "", emitted_body
+    delta = body[len(emitted_body) :] if body.startswith(emitted_body) else body
+    return delta, body
+
+
 def _normalize_credentials_env() -> None:
     """Unset ``ORIGINAL_CLAUDE_CONFIG_DIR`` so mngr_claude reads credentials
     from the live ``$CLAUDE_CONFIG_DIR``.
@@ -206,7 +268,8 @@ def run(
     Returns the integer exit code the caller should pass to ``ctx.exit()``.
     """
     _normalize_credentials_env()
-    mngr_ctx = _apply_unattended_settings(mngr_ctx)
+    is_streaming_requested = partition.include_partial_messages or partition.stream_plain_text
+    mngr_ctx = _apply_unattended_settings(mngr_ctx, _STREAMING_SETTINGS if is_streaming_requested else ())
 
     try:
         prompts = iter_user_prompts(
@@ -240,11 +303,15 @@ def run(
     return exit_code
 
 
-def _apply_unattended_settings(mngr_ctx: MngrContext) -> MngrContext:
-    """Inject the claude agent-type config overrides for unattended operation."""
+def _apply_unattended_settings(mngr_ctx: MngrContext, extra_settings: tuple[str, ...] = ()) -> MngrContext:
+    """Inject the claude agent-type config overrides for unattended operation.
+
+    ``extra_settings`` (e.g. streaming overrides) are merged in the same call so
+    the ``settings_overrides`` dict is assembled in one shot.
+    """
     updated_config = apply_settings_to_config(
         mngr_ctx.config,
-        _UNATTENDED_SETTINGS,
+        _UNATTENDED_SETTINGS + extra_settings,
         mngr_ctx.config.disabled_plugins,
     )
     return mngr_ctx.model_copy_update(to_update(mngr_ctx.field_ref().config, updated_config))
@@ -316,7 +383,19 @@ def _run_with_agent(
         session_id=str(agent.id),
         stdout=stdout,
         replay_user_messages=partition.replay_user_messages,
+        stream_plain_text=partition.stream_plain_text,
     )
+
+    # When streaming is requested, consume the agent's stream_buffer so we can
+    # surface incremental assistant-text deltas as they are produced.
+    stream_consumer: _StreamBufferConsumer | None = None
+    if partition.include_partial_messages or partition.stream_plain_text:
+        stream_consumer = _StreamBufferConsumer(
+            host=host,
+            buffer_path=agent.get_stream_buffer_path(),
+            writer=writer,
+        )
+
     state = _RunState(agent=agent, host=host, writer=writer)
     # Publish the state to the caller's holder before any failable work so
     # that the caller's ``finally`` clause can destroy the agent if anything
@@ -350,7 +429,7 @@ def _run_with_agent(
     with _DestroyOnSignal(state=state):
         try:
             final_state, seen_bytes = _wait_for_turn_end(
-                agent, events_target, writer, parser, read_failure_warner, seen_bytes
+                agent, events_target, writer, parser, read_failure_warner, seen_bytes, stream_consumer
             )
             for next_prompt in remaining_prompts:
                 if final_state != AgentLifecycleState.WAITING:
@@ -368,7 +447,7 @@ def _run_with_agent(
                 _send_user_turn(mngr_ctx, agent, next_prompt)
                 turn_count += 1
                 final_state, seen_bytes = _wait_for_turn_end(
-                    agent, events_target, writer, parser, read_failure_warner, seen_bytes
+                    agent, events_target, writer, parser, read_failure_warner, seen_bytes, stream_consumer
                 )
         except MngrError as exc:
             logger.error("Run failed: {}", exc)
@@ -485,6 +564,10 @@ class _TurnEndTicker(MutableModel):
     read_failure_warner: _TranscriptReadFailureWarner = Field(
         description="Throttler for transcript-read failure warnings"
     )
+    stream_consumer: _StreamBufferConsumer | None = Field(
+        default=None,
+        description="Optional consumer that emits incremental stream_buffer deltas each tick",
+    )
     baseline_assistant_count: int = Field(
         description="``writer.assistant_message_count`` snapshot taken before the current turn"
     )
@@ -507,6 +590,8 @@ class _TurnEndTicker(MutableModel):
     )
 
     def tick(self) -> AgentLifecycleState | None:
+        if self.stream_consumer is not None:
+            self.stream_consumer.poll()
         self.seen_bytes = _drain_new_events(
             self.events_target,
             self.writer,
@@ -546,6 +631,7 @@ def _wait_for_turn_end(
     parser: RawTranscriptParser,
     read_failure_warner: _TranscriptReadFailureWarner,
     seen_bytes: int,
+    stream_consumer: _StreamBufferConsumer | None = None,
 ) -> tuple[AgentLifecycleState, int]:
     """Poll the raw transcript until the turn's terminal assistant message arrives.
 
@@ -584,6 +670,7 @@ def _wait_for_turn_end(
         baseline_assistant_count=writer.assistant_message_count,
         seen_bytes=seen_bytes,
         last_progress_count=writer.assistant_message_count,
+        stream_consumer=stream_consumer,
     )
     # ``poll_for_value`` requires a finite ``timeout``; we want the ticker
     # itself to decide when to stop (via the no-progress safety check), so

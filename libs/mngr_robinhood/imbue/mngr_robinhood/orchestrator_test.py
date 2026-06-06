@@ -14,6 +14,7 @@ from imbue.mngr_robinhood.orchestrator import _TurnEndTicker
 from imbue.mngr_robinhood.orchestrator import _build_agent_name
 from imbue.mngr_robinhood.orchestrator import _build_pass_env_vars
 from imbue.mngr_robinhood.orchestrator import _build_result_meta
+from imbue.mngr_robinhood.orchestrator import compute_stream_delta
 from imbue.mngr_robinhood.orchestrator import monotonic_ms_since
 from imbue.mngr_robinhood.output_modes import StreamingOutputWriter
 from imbue.mngr_robinhood.raw_transcript import RawTranscriptParser
@@ -23,6 +24,44 @@ def test_build_agent_name_has_robinhood_prefix() -> None:
     name = _build_agent_name()
     assert str(name).startswith("robinhood-")
     assert len(str(name)) > len("robinhood-")
+
+
+def test_compute_stream_delta_first_emission() -> None:
+    delta, emitted = compute_stream_delta("uuid-1\nHello world", "")
+    assert delta == "Hello world"
+    assert emitted == "Hello world"
+
+
+def test_compute_stream_delta_prefix_extension() -> None:
+    delta, emitted = compute_stream_delta("uuid-1\nHello world, more", "Hello world")
+    assert delta == ", more"
+    assert emitted == "Hello world, more"
+
+
+def test_compute_stream_delta_no_change() -> None:
+    delta, emitted = compute_stream_delta("uuid-1\nHello", "Hello")
+    assert delta == ""
+    assert emitted == "Hello"
+
+
+def test_compute_stream_delta_new_message_resets() -> None:
+    # A non-prefix body means a new message scrolled in: emit the whole new body.
+    delta, emitted = compute_stream_delta("uuid-2\nA brand new reply", "An old reply")
+    assert delta == "A brand new reply"
+    assert emitted == "A brand new reply"
+
+
+def test_compute_stream_delta_empty_body_after_idle() -> None:
+    # When the watcher empties the body at turn end, only the id line remains.
+    delta, emitted = compute_stream_delta("uuid-1", "previous text")
+    assert delta == ""
+    assert emitted == ""
+
+
+def test_compute_stream_delta_multiline_body() -> None:
+    delta, emitted = compute_stream_delta("uuid-1\nline one\nline two", "line one")
+    assert delta == "\nline two"
+    assert emitted == "line one\nline two"
 
 
 def test_build_pass_env_vars_is_populated() -> None:
