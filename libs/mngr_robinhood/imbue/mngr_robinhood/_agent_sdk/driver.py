@@ -65,6 +65,8 @@ from imbue.mngr_robinhood._agent_sdk.message_parser import build_result_message
 from imbue.mngr_robinhood._agent_sdk.message_parser import build_system_init_message
 from imbue.mngr_robinhood._agent_sdk.message_parser import collect_assistant_text
 from imbue.mngr_robinhood._agent_sdk.message_parser import parse_transcript_event
+from imbue.mngr_robinhood._agent_sdk.pricing import accumulate_usage_totals
+from imbue.mngr_robinhood._agent_sdk.pricing import compute_total_cost_usd
 from imbue.mngr_robinhood.agent_runtime import AGENT_DEAD_STATES
 from imbue.mngr_robinhood.agent_runtime import AGENT_READY_TIMEOUT_SECONDS
 from imbue.mngr_robinhood.agent_runtime import POLL_INTERVAL_SECONDS
@@ -120,6 +122,9 @@ class LiveSession(MutableModel):
     latest_session_id: str | None = Field(default=None, description="Most recent claude session id seen")
     latest_model: str | None = Field(default=None, description="Most recent assistant model id seen")
     latest_usage: dict[str, Any] | None = Field(default=None, description="Most recent assistant usage block")
+    turn_usage_totals: dict[str, int] = Field(
+        default_factory=dict, description="Token usage accumulated across the current turn (for cost)"
+    )
     is_init_emitted: bool = Field(default=False, description="Whether the system/init message was emitted")
     turn_count: int = Field(default=0, description="Number of user turns delivered so far")
 
@@ -360,6 +365,8 @@ def deliver_turn(session: LiveSession, prompt: str) -> None:
     """
     if session.options.fork_session:
         raise AgentSdkNotImplementedError("fork_session is not yet supported by the mngr-backed Agent SDK")
+    # Reset the per-turn usage accumulator so computed cost reflects only this turn's tokens.
+    session.turn_usage_totals = {}
     if session.agent is None:
         reuse_target = _find_reuse_target(session)
         if reuse_target is not None:
@@ -423,6 +430,7 @@ def _absorb_event_metadata(session: LiveSession, raw_event: Mapping[str, Any]) -
     usage = message.get("usage")
     if isinstance(usage, Mapping):
         session.latest_usage = dict(usage)
+        session.turn_usage_totals = accumulate_usage_totals(session.turn_usage_totals, usage)
     stop_reason = message.get("stop_reason")
     return stop_reason if isinstance(stop_reason, str) else None
 
@@ -498,6 +506,8 @@ def _finalize_turn_messages(session: LiveSession, turn_messages: Sequence[Messag
     model = session.latest_model or (session.options.model or "")
     result_text = collect_assistant_text(turn_messages) or None
     model_usage = {model: session.latest_usage} if (model and session.latest_usage is not None) else None
+    # Cost is computed from the turn's accumulated token usage (the session JSONL has no cost field).
+    total_cost_usd = compute_total_cost_usd(model, session.turn_usage_totals) if model else None
     result_message = build_result_message(
         session_id=session_id,
         is_error=False,
@@ -506,7 +516,7 @@ def _finalize_turn_messages(session: LiveSession, turn_messages: Sequence[Messag
         duration_api_ms=duration_ms,
         turn_count=session.turn_count,
         usage=session.latest_usage,
-        total_cost_usd=None,
+        total_cost_usd=total_cost_usd,
         model_usage=model_usage,
         permission_denials=[],
         result_uuid=str(uuid4()),
