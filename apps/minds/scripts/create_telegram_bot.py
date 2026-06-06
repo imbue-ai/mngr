@@ -100,7 +100,12 @@ def _fetch_telegram_web_api_credentials() -> tuple[int, str]:
 
         raise ValueError("Credential pattern not found in any bundle chunk")
 
-    except (urllib.error.URLError, OSError, ValueError) as exc:
+    except (OSError, ValueError) as exc:
+        # The three `raise ValueError(...)` above are deliberate "extraction failed"
+        # signals, and urlopen network failures arrive as OSError (urllib's URLError
+        # subclasses it, so listing it separately would be redundant). Either way we
+        # fall back to the public Telegram Web app credentials; the stderr warning is
+        # the loud-failure surface so a broken scrape is still noticed.
         sys.stderr.write(
             f"Warning: could not extract api credentials from Telegram Web bundle ({exc}), using known defaults\n"
         )
