@@ -37,7 +37,12 @@ Flow:
      bundled host_dir, assert W1's host is listed AND W2's is gone
      -- cross-checks the destroy lifecycle from a different angle
      than the UI's home-page tile state.
-  9. Teardown: revert /etc/hosts, clear latchkey, kill mock + socat
+  9. Restart minds.app: terminate + relaunch Electron; reconnect
+     Playwright via CDP; re-auth via OTC; assert W1's tile still
+     renders on the home page (screenshot 23) -- proves the on-disk
+     mngr host_dir + landing discovery layer survive a process
+     restart with no Lima VM destroy.
+  10. Teardown: revert /etc/hosts, clear latchkey, kill mock + socat
 
 Takes a `screencapture -x` whole-desktop shot at every milestone.
 Files land in /tmp/launch-to-msg-screenshots/ and the workflow
@@ -1235,8 +1240,13 @@ async def amain() -> int:
             bundled_mngr = MINDS_HOME / ".venv" / "bin" / "mngr"
             if bundled_mngr.exists():
                 mngr_env = {**os.environ, "MNGR_HOST_DIR": str(MINDS_HOME / "mngr")}
+                # ``--on-error continue`` keeps mngr's exit 0 when individual
+                # provider discoveries fail (the CI runner has no modal
+                # credentials, so the modal provider hard-fails by default).
+                # Errors still land in the ``errors`` array of the JSON
+                # payload, so we don't lose visibility.
                 cli_result = subprocess.run(
-                    [str(bundled_mngr), "list", "--format", "json", "--quiet"],
+                    [str(bundled_mngr), "list", "--format", "json", "--quiet", "--on-error", "continue"],
                     capture_output=True,
                     text=True,
                     env=mngr_env,
@@ -1260,6 +1270,62 @@ async def amain() -> int:
                 logger.info("[mngr-list] PASS: W1 present, W2 cleanly removed from mngr")
             else:
                 logger.warning("[mngr-list] {} not found; skipping CLI cross-check", bundled_mngr)
+
+            # 24. minds.app restart with active W1: prove home page state
+            # survives the Electron process exit + relaunch (no Lima VM
+            # destroy in between, so W1's host backing should also stay
+            # up). The strongest claim is "W1's tile reappears on /",
+            # which proves both mngr's host_dir AND the landing handler's
+            # discovery layer reconstituted from disk.
+            logger.info("=== minds.app restart with W1 active ===")
+            await browser.close()
+            logger.info("terminating minds_proc (pid={})", minds_proc.pid)
+            minds_proc.terminate()
+            try:
+                minds_proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                logger.warning("minds_proc did not exit in 15s; killing")
+                minds_proc.kill()
+                minds_proc.wait(timeout=5)
+            time.sleep(3)  # let mngr forward + system_interface cleanup finish
+
+            # Truncate events log so wait_backend_url picks up the NEW
+            # backend's login URL line rather than re-finding the OLD
+            # URL from before restart (which points at a now-defunct
+            # port and would fail navigation).
+            if EVENTS_LOG.exists():
+                EVENTS_LOG.write_text("")
+
+            new_cdp_port = _free_port()
+            logger.info("re-launching {} --remote-debugging-port={}", MINDS_APP_PATH, new_cdp_port)
+            minds_proc = subprocess.Popen(
+                [str(MINDS_APP_PATH), f"--remote-debugging-port={new_cdp_port}"],
+                env=env,
+                stdout=open("/tmp/minds-electron.log", "a"),
+                stderr=subprocess.STDOUT,
+            )
+            new_cdp_url = await _wait_cdp(new_cdp_port)
+            browser = await p.chromium.connect_over_cdp(new_cdp_url, timeout=60_000)
+            ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
+            for _ in range(60):
+                if ctx.pages:
+                    break
+                await asyncio.sleep(0.5)
+            if not ctx.pages:
+                raise E2EFailure("no Electron windows after 30s post-restart")
+            win = ctx.pages[0]
+
+            new_base = await asyncio.get_event_loop().run_in_executor(None, wait_backend_url)
+            new_code = await asyncio.get_event_loop().run_in_executor(None, mint_one_time_code)
+            await win.goto(new_base + "/authenticate?one_time_code=" + new_code)
+
+            await win.goto(new_base + "/")
+            await win.wait_for_function(
+                f"document.body.innerText.includes({HOST_NAME!r})",
+                timeout=30_000,
+            )
+            await snap_page(win, "23-home-after-restart")
+            logger.info("home page after restart shows W1: {}", HOST_NAME)
 
         # Persist combined per-workspace timings as one artifact JSON
         # rather than two -- one file is easier to embed in the run
