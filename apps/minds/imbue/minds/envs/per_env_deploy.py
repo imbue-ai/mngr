@@ -486,20 +486,27 @@ def deploy_remote_service_connector(
         )
 
 
-def _parse_deploy_url_from_stdout(stdout: str) -> AnyUrl | None:
+def _parse_deploy_url_from_stdout(stdout: str, *, app_name: str, modal_env: str) -> AnyUrl:
     """Extract the deployed function URL from ``modal deploy`` stdout.
 
     Modal wraps long URLs across lines in TTY-style output; collapsing
     whitespace before matching catches both wrapped and inline forms.
     Returns the last ``.modal.run`` URL seen (the deployed function);
     earlier matches may be Modal dashboard URLs that aren't useful here.
-    Returns ``None`` if no URL is present (the caller decides whether
-    that's fatal).
+
+    Raises :class:`ModalDeployError` if no URL is present. A successful
+    ``modal deploy`` that emits no ``.modal.run`` URL is always fatal --
+    the sole caller cannot proceed without the deployed URL -- so the
+    failure is raised here rather than handed back as an optional the
+    caller is forced to re-check.
     """
     collapsed = re.sub(r"\s+", "", stdout)
     matches = _MODAL_DEPLOY_URL_PATTERN.findall(collapsed)
     if not matches:
-        return None
+        raise ModalDeployError(
+            f"`modal deploy --name {app_name} --env {modal_env}` succeeded but no .modal.run URL "
+            f"appeared in its stdout. Captured tail: {stdout[-500:]}"
+        )
     return AnyUrl(matches[-1])
 
 
@@ -559,13 +566,7 @@ def _deploy_modal_app(
         raise ModalDeployError(
             f"`modal deploy --name {app_name} --env {modal_env}` failed (exit {result.returncode}): {stderr}"
         )
-    url = _parse_deploy_url_from_stdout(result.stdout)
-    if url is None:
-        raise ModalDeployError(
-            f"`modal deploy --name {app_name} --env {modal_env}` succeeded but no .modal.run URL "
-            f"appeared in its stdout. Captured tail: {result.stdout[-500:]}"
-        )
-    return url
+    return _parse_deploy_url_from_stdout(result.stdout, app_name=app_name, modal_env=modal_env)
 
 
 def _modal_subprocess_env() -> dict[str, str]:

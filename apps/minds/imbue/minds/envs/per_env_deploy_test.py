@@ -17,6 +17,7 @@ from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.envs.per_env_deploy import ModalDeployError
+from imbue.minds.envs.per_env_deploy import _parse_deploy_url_from_stdout
 from imbue.minds.envs.per_env_deploy import compute_per_env_overrides
 from imbue.minds.envs.per_env_deploy import ensure_modal_env
 from imbue.minds.envs.primitives import DevEnvName
@@ -38,6 +39,26 @@ def _make_fake_modal_binary(tmp_path: Path, *, exit_code: int, stderr: str = "")
     script.write_text(f"#!/usr/bin/env bash\ncat {stderr_path} >&2\nexit {exit_code}\n")
     script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return script
+
+
+def test_parse_deploy_url_returns_last_modal_run_url() -> None:
+    # The deployed function URL is the last .modal.run URL (earlier ones may
+    # be dashboard links); wrapped/inline whitespace is collapsed first.
+    stdout = (
+        "View Deployment: https://modal.com/apps/minds-dev/dev-josh\n"
+        "https://minds-dev-dev-josh--rsc-dev-a\npi.modal.run\n"
+    )
+    url = _parse_deploy_url_from_stdout(stdout, app_name="rsc-dev", modal_env="dev-josh")
+    assert str(url).rstrip("/") == "https://minds-dev-dev-josh--rsc-dev-api.modal.run"
+
+
+def test_parse_deploy_url_raises_when_no_url_present() -> None:
+    # A modal deploy with no .modal.run URL is always fatal; the parser
+    # raises rather than returning an optional the caller must re-check.
+    with pytest.raises(ModalDeployError, match="no .modal.run URL"):
+        _parse_deploy_url_from_stdout(
+            "Deployment complete, nothing useful here", app_name="rsc-dev", modal_env="dev-josh"
+        )
 
 
 def test_ensure_modal_env_succeeds_on_zero_exit(tmp_path: Path, _root_cg: ConcurrencyGroup) -> None:
