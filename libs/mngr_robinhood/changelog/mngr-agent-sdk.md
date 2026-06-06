@@ -34,7 +34,8 @@ Implemented and verified live against the real API:
 Known limitations on the mngr transport (the tests skip the mngr target for these and still run
 them against the real SDK): in-process `can_use_tool` / `hooks` callbacks, `interrupt`,
 partial-message `StreamEvent` streaming, live `get_server_info`, `fork_session`, and
-`total_cost_usd` (absent from claude's native session JSONL).
+`total_cost_usd` (absent from claude's native session JSONL). `set_model` / `set_permission_mode`
+are accepted but do not retroactively re-configure the already-running agent.
 
 Test suite: the existing `test_sdk_*.py` live suite is parameterized over an `sdk` fixture so each
 test runs against both the real `claude_agent_sdk` and the mngr implementation.

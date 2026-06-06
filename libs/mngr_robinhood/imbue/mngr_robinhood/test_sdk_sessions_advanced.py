@@ -36,21 +36,13 @@ async def test_resume_continues_same_session_id(sdk: ModuleType, sdk_live_model:
     assert find_result_message(messages).session_id == session_id
 
 
-async def test_resume_preserves_conversation_memory(
-    sdk: ModuleType, is_mngr_sdk: bool, sdk_live_model: str, sdk_cwd: Path
-) -> None:
-    if is_mngr_sdk:
-        # The mngr agent runs claude in a non-hermetic interactive context and declines
-        # "remember this secret word"-shaped prompts as prompt injection, so it never echoes the
-        # planted token back. The resume *continuity* mechanism itself is covered by
-        # test_resume_continues_same_session_id and the two-turn session_functions tests.
-        pytest.skip("mngr agent declines the 'remember a secret' prompt; resume continuity is covered elsewhere")
+async def test_resume_preserves_conversation_memory(sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path) -> None:
     session_id = await _seed_session(
-        sdk, sdk_live_model, sdk_cwd, "Remember that the secret word is FALCONXYZ. Reply OK."
+        sdk, sdk_live_model, sdk_cwd, "Remember that the important word for this session is FALCONXYZ. Reply OK."
     )
     messages = await collect_query_messages(
         sdk,
-        "What is the secret word? Reply with just the word.",
+        "What is the important word? Reply with just the word.",
         make_sdk_options(sdk_live_model, sdk_cwd, resume=session_id),
     )
     assert "FALCONXYZ" in collect_assistant_text(messages).upper()
@@ -66,18 +58,13 @@ async def test_fork_session_creates_new_session_id(
     assert find_result_message(messages).session_id != session_id
 
 
-async def test_continue_conversation_preserves_memory(
-    sdk: ModuleType, is_mngr_sdk: bool, sdk_live_model: str, sdk_cwd: Path
-) -> None:
-    if is_mngr_sdk:
-        # See test_resume_preserves_conversation_memory: the non-hermetic mngr agent declines the
-        # "remember a secret number" prompt; continue_conversation continuity is exercised by the
-        # two-turn session_functions tests (message counts grow across the resumed turn).
-        pytest.skip("mngr agent declines the 'remember a secret' prompt; continue continuity is covered elsewhere")
-    await _seed_session(sdk, sdk_live_model, sdk_cwd, "Remember that the secret number is 73519. Reply OK.")
+async def test_continue_conversation_preserves_memory(sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path) -> None:
+    await _seed_session(
+        sdk, sdk_live_model, sdk_cwd, "Remember that the important number for this session is 73519. Reply OK."
+    )
     messages = await collect_query_messages(
         sdk,
-        "What is the secret number? Reply with just the number.",
+        "What is the important number? Reply with just the number.",
         make_sdk_options(sdk_live_model, sdk_cwd, continue_conversation=True),
     )
     assert "73519" in collect_assistant_text(messages)
