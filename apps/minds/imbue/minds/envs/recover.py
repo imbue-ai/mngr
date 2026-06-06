@@ -46,6 +46,7 @@ from typing import Self
 from loguru import logger
 from pydantic import Field
 from pydantic import SecretStr
+from pydantic import ValidationError
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -161,10 +162,51 @@ class RecoverTarget(FrozenModel):
             data = json.loads(raw)
         except (ValueError, json.JSONDecodeError) as exc:
             raise MindError(f"Recover-target file is not valid JSON: {exc}") from exc
-        return cls.model_validate(data)
+        if isinstance(data, dict):
+            data = _migrate_legacy_neon_fields(data)
+        try:
+            return cls.model_validate(data)
+        except ValidationError as exc:
+            # The JSON parsed but doesn't match the model (e.g. a future /
+            # foreign shape). Distinguish this from a genuine JSON-syntax
+            # error so the operator isn't told "not valid JSON" about a file
+            # that is valid JSON.
+            raise MindError(f"Recover-target file has an unexpected shape: {exc}") from exc
 
     def to_json_bytes(self) -> bytes:
         return json.dumps(self.model_dump(mode="json"), indent=2, sort_keys=True).encode("utf-8")
+
+
+# Maps the pre-NeonRecoverInfo flat field names to their place inside the
+# collapsed ``neon_restore`` sub-object. Used only by the back-compat reader.
+_LEGACY_NEON_FIELD_MAP: Final[dict[str, str]] = {
+    "neon_project_id": "project_id",
+    "neon_branch_id": "branch_id",
+    "neon_snapshot_branch_id": "snapshot_branch_id",
+}
+
+
+def _migrate_legacy_neon_fields(data: dict[str, object]) -> dict[str, object]:
+    """Lift a pre-``NeonRecoverInfo`` recover-target's flat Neon ids into ``neon_restore``.
+
+    Recover-target files written before the three flat ``neon_*`` fields were
+    collapsed into the ``neon_restore`` sub-object carry the old top-level
+    keys. Since :class:`RecoverTarget` is ``extra="forbid"``, such a file would
+    otherwise fail validation when read back by a newer ``minds env recover``
+    -- exactly the mid-recovery wall this subsystem exists to avoid. Fold the
+    legacy keys into a ``neon_restore`` object (all three present + non-empty)
+    or ``None`` (a legacy no-Neon deploy). A file already in the new shape
+    (``neon_restore`` present, or no legacy keys at all) is returned untouched.
+    """
+    if "neon_restore" in data or not any(key in data for key in _LEGACY_NEON_FIELD_MAP):
+        return data
+    migrated = {key: value for key, value in data.items() if key not in _LEGACY_NEON_FIELD_MAP}
+    legacy_values = {new: data.get(old) for old, new in _LEGACY_NEON_FIELD_MAP.items()}
+    if all(isinstance(value, str) and value for value in legacy_values.values()):
+        migrated["neon_restore"] = legacy_values
+    else:
+        migrated["neon_restore"] = None
+    return migrated
 
 
 def find_monorepo_root(*, cwd: Path | None = None) -> Path:
