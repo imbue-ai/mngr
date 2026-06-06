@@ -167,6 +167,19 @@ def list_modal_secrets(*, modal_env: str, parent_cg: ConcurrencyGroup) -> tuple[
         rows = json.loads(result.stdout)
     except (ValueError, json.JSONDecodeError) as exc:
         raise ModalDeployError(f"`modal secret list --json` returned non-JSON: {exc}") from exc
+    return _extract_secret_names_from_rows(rows)
+
+
+def _extract_secret_names_from_rows(rows: object) -> tuple[str, ...]:
+    """Pull the secret names out of ``modal secret list --json`` rows.
+
+    Raises :class:`ModalDeployError` on a non-list payload (genuinely
+    unexpected given ``returncode == 0``). Skips -- and warns about -- rows
+    with no usable ``Name`` / ``name`` field, since Modal's output shape has
+    shifted across versions; warning makes such a shift detectable rather
+    than silently dropping still-live secrets from the GC. Pure function so
+    the parsing is unit-testable without a fake CLI.
+    """
     if not isinstance(rows, list):
         raise ModalDeployError(f"`modal secret list --json` returned a non-list payload: {rows!r}")
     names: list[str] = []
@@ -176,11 +189,11 @@ def list_modal_secrets(*, modal_env: str, parent_cg: ConcurrencyGroup) -> tuple[
         elif isinstance(row, dict) and isinstance(row.get("name"), str):
             names.append(row["name"])
         else:
-            # Modal CLI's output shape has shifted across versions; skip
-            # rows that don't carry a usable Name / name field instead of
-            # raising (we lose visibility into them in the GC, but the
-            # operator can still inspect the env via the Modal dashboard).
-            continue
+            logger.warning(
+                "`modal secret list --json` row had no usable Name/name field; skipping it in GC "
+                "(Modal output shape may have shifted): {!r}",
+                row,
+            )
     return tuple(names)
 
 

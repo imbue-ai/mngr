@@ -800,13 +800,26 @@ def _find_modal_app_id(*, app_name: str, modal_env: str, parent_cg: ConcurrencyG
         rows = json.loads(result.stdout)
     except (ValueError, json.JSONDecodeError) as exc:
         raise ModalDeployError(f"`modal app list --json` returned non-JSON: {exc}") from exc
+    return _select_app_id_from_rows(rows, app_name=app_name)
+
+
+def _select_app_id_from_rows(rows: object, *, app_name: str) -> str | None:
+    """Find the running app id for ``app_name`` in ``modal app list --json`` rows.
+
+    Raises :class:`ModalDeployError` on a non-list payload (genuinely
+    unexpected given ``returncode == 0``; consistent with the other Modal-
+    list parsers). Modal's column names have shifted across versions, so the
+    common shapes for both name and id are checked; stopped apps are skipped
+    so we don't try to stop containers for an already-terminated app. A row
+    that matches our app but carries no recognized id key is a shape shift
+    that would otherwise look like "app not found" -- it warns rather than
+    silently returning None. Pure function so the parsing is unit-testable.
+    """
     if not isinstance(rows, list):
-        return None
-    # Modal's column names have shifted across versions; check the common shapes
-    # for both name and id. Skip stopped apps so we don't try to stop containers
-    # for an already-terminated app.
+        raise ModalDeployError(f"`modal app list --json` returned a non-list payload: {rows!r}")
     for row in rows:
         if not isinstance(row, dict):
+            logger.warning("`modal app list --json` returned a non-dict row; skipping it: {!r}", row)
             continue
         name_value = row.get("Name") or row.get("name") or row.get("App")
         state_value = (row.get("State") or row.get("state") or "").lower()
@@ -816,6 +829,12 @@ def _find_modal_app_id(*, app_name: str, modal_env: str, parent_cg: ConcurrencyG
             id_value = row.get(id_key)
             if isinstance(id_value, str) and id_value:
                 return id_value
+        logger.warning(
+            "`modal app list --json` row matched app {!r} but carried no recognized id key "
+            "(Modal output shape may have shifted): {!r}",
+            app_name,
+            row,
+        )
     return None
 
 
@@ -839,17 +858,37 @@ def _list_modal_app_container_ids(*, app_id: str, modal_env: str, parent_cg: Con
         rows = json.loads(result.stdout)
     except (ValueError, json.JSONDecodeError) as exc:
         raise ModalDeployError(f"`modal container list --json` returned non-JSON: {exc}") from exc
+    return _extract_container_ids_from_rows(rows)
+
+
+def _extract_container_ids_from_rows(rows: object) -> tuple[str, ...]:
+    """Pull the container ids out of ``modal container list --json`` rows.
+
+    Raises :class:`ModalDeployError` on a non-list payload (genuinely
+    unexpected given ``returncode == 0``; consistent with the other Modal-
+    list parsers), so a silently-empty container list never masks a shape
+    shift that would leave containers running. Warns about -- and skips --
+    non-dict rows and rows with no recognized id key. Pure function so the
+    parsing is unit-testable.
+    """
     if not isinstance(rows, list):
-        return ()
+        raise ModalDeployError(f"`modal container list --json` returned a non-list payload: {rows!r}")
     ids: list[str] = []
     for row in rows:
         if not isinstance(row, dict):
+            logger.warning("`modal container list --json` returned a non-dict row; skipping it: {!r}", row)
             continue
         for id_key in ("Container ID", "container_id", "ID", "id"):
             value = row.get(id_key)
             if isinstance(value, str) and value:
                 ids.append(value)
                 break
+        else:
+            logger.warning(
+                "`modal container list --json` row carried no recognized id key "
+                "(Modal output shape may have shifted); skipping it: {!r}",
+                row,
+            )
     return tuple(ids)
 
 

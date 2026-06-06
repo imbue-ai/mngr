@@ -17,7 +17,9 @@ from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.envs.per_env_deploy import ModalDeployError
+from imbue.minds.envs.per_env_deploy import _extract_container_ids_from_rows
 from imbue.minds.envs.per_env_deploy import _parse_deploy_url_from_stdout
+from imbue.minds.envs.per_env_deploy import _select_app_id_from_rows
 from imbue.minds.envs.per_env_deploy import compute_per_env_overrides
 from imbue.minds.envs.per_env_deploy import ensure_modal_env
 from imbue.minds.envs.primitives import DevEnvName
@@ -59,6 +61,41 @@ def test_parse_deploy_url_raises_when_no_url_present() -> None:
         _parse_deploy_url_from_stdout(
             "Deployment complete, nothing useful here", app_name="rsc-dev", modal_env="dev-josh"
         )
+
+
+def test_select_app_id_from_rows_finds_running_app() -> None:
+    # Column-name variants are tolerated; stopped apps + non-matching names
+    # are skipped; the running match's id is returned.
+    rows = [
+        {"Name": "rsc-dev", "State": "stopped", "App ID": "ap-old"},
+        {"name": "other-app", "state": "deployed", "app_id": "ap-other"},
+        {"Name": "rsc-dev", "State": "deployed", "App ID": "ap-live"},
+    ]
+    assert _select_app_id_from_rows(rows, app_name="rsc-dev") == "ap-live"
+
+
+def test_select_app_id_from_rows_returns_none_when_absent() -> None:
+    assert _select_app_id_from_rows([{"Name": "other", "State": "deployed", "ID": "x"}], app_name="rsc-dev") is None
+
+
+def test_select_app_id_from_rows_raises_on_non_list_payload() -> None:
+    # returncode == 0 with non-list JSON is unexpected -> raise, not return None.
+    with pytest.raises(ModalDeployError, match="non-list payload"):
+        _select_app_id_from_rows({"unexpected": "object"}, app_name="rsc-dev")
+
+
+def test_extract_container_ids_collects_ids_across_key_variants() -> None:
+    rows = [
+        {"Container ID": "ta-1"},
+        {"container_id": "ta-2"},
+        {"unrecognized": "skip-me"},  # warned + skipped, not fatal
+    ]
+    assert _extract_container_ids_from_rows(rows) == ("ta-1", "ta-2")
+
+
+def test_extract_container_ids_raises_on_non_list_payload() -> None:
+    with pytest.raises(ModalDeployError, match="non-list payload"):
+        _extract_container_ids_from_rows("not a list")
 
 
 def test_ensure_modal_env_succeeds_on_zero_exit(tmp_path: Path, _root_cg: ConcurrencyGroup) -> None:
