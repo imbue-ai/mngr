@@ -624,18 +624,22 @@ def parse_discovery_event_line(line: str) -> DiscoveryEvent | None:
         raise DiscoverySchemaChangedError(str(event_type), str(e)) from e
 
 
-def find_latest_full_snapshot_offset(events_path: Path) -> int:
+def find_latest_full_snapshot_offset(events_path: Path) -> int | None:
     """Scan the events file to find the byte offset of the latest DISCOVERY_FULL event.
 
-    Returns 0 if no full snapshot event is found (meaning the entire file should be read).
+    Returns the byte offset of the latest full snapshot, or ``None`` if no full
+    snapshot event is found. ``None`` is distinct from an offset of ``0``: a
+    snapshot can legitimately sit at offset 0 (e.g. when it is the first line
+    after a truncation/rotation), and returning ``0`` for "no snapshot" would
+    misclassify that valid snapshot as absent.
     """
     if not events_path.exists():
-        return 0
+        return None
 
     # Read all lines and find the last DISCOVERY_FULL line byte offset.
     # Use f.tell() to track byte positions rather than len(line) which counts
     # characters and would be wrong for multi-byte UTF-8 content.
-    last_full_offset = 0
+    last_full_offset: int | None = None
     warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
     with open(events_path, "rb") as f:
         for raw_line in f:
@@ -706,7 +710,8 @@ def _replay_discovery_events_into_maps(events_path: Path) -> _ResolutionMaps:
 
     warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
     with open(events_path) as f:
-        f.seek(offset)
+        # No snapshot found -> replay the whole file from the start.
+        f.seek(offset if offset is not None else 0)
         for line in f:
             parsed = warner.parse(line)
             if parsed is None:
@@ -1067,7 +1072,7 @@ def _emit_latest_cached_snapshot(
     if not events_path.exists():
         return 0, False
     snapshot_offset = find_latest_full_snapshot_offset(events_path)
-    if snapshot_offset <= 0:
+    if snapshot_offset is None:
         return events_path.stat().st_size, False
     consumed_offset = _emit_lines_from_offset(
         events_path, snapshot_offset, warner, emitted_event_ids, emit_lock, on_line
@@ -1097,15 +1102,21 @@ def tail_discovery_events_file(
     emit_lock = Lock()
     warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
     # Emit from the latest full snapshot on disk so a consumer attaching mid-stream
-    # is populated immediately. ``find_latest_full_snapshot_offset`` returns 0 when
-    # the file is absent or holds no snapshot yet *and* when the snapshot is the very
-    # first line; reading from that offset covers all three (the dedup set keeps a
-    # later real snapshot from double-emitting), so unlike ``run_discovery_stream``'s
+    # is populated immediately. ``find_latest_full_snapshot_offset`` returns ``None``
+    # when the file is absent or holds no snapshot yet, and a real byte offset (which
+    # may be 0 when the snapshot is the very first line) otherwise; reading from offset
+    # 0 in the ``None`` case covers reading the whole file (the dedup set keeps a later
+    # real snapshot from double-emitting), so unlike ``run_discovery_stream``'s
     # writer-side fast path we never skip an offset-0 snapshot.
     if events_path.exists():
         snapshot_offset = find_latest_full_snapshot_offset(events_path)
         initial_offset = _emit_lines_from_offset(
-            events_path, snapshot_offset, warner, emitted_event_ids, emit_lock, on_line
+            events_path,
+            snapshot_offset if snapshot_offset is not None else 0,
+            warner,
+            emitted_event_ids,
+            emit_lock,
+            on_line,
         )
     else:
         initial_offset = 0
@@ -1230,7 +1241,16 @@ def run_discovery_stream(
         # and tracking its own offset, and dedup via emitted_event_ids covers any overlap.
         if events_path.exists():
             snapshot_offset = find_latest_full_snapshot_offset(events_path)
-            _emit_lines_from_offset(events_path, snapshot_offset, warner, emitted_event_ids, emit_lock, on_line)
+            # The sync just wrote a snapshot, so one normally exists; fall back to the
+            # file start if for some reason it does not.
+            _emit_lines_from_offset(
+                events_path,
+                snapshot_offset if snapshot_offset is not None else 0,
+                warner,
+                emitted_event_ids,
+                emit_lock,
+                on_line,
+            )
 
     # Phase 4: periodically re-poll (unfiltered) and write full snapshots
     try:

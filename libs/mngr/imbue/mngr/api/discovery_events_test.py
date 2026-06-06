@@ -509,17 +509,36 @@ def test_resolve_provider_names_recovers_after_schema_mismatch(temp_mngr_ctx: Mn
 # === find_latest_full_snapshot_offset Tests ===
 
 
-def test_find_latest_full_snapshot_offset_returns_zero_when_no_file(tmp_path: Path) -> None:
-    assert find_latest_full_snapshot_offset(tmp_path / "nonexistent.jsonl") == 0
+def test_find_latest_full_snapshot_offset_returns_none_when_no_file(tmp_path: Path) -> None:
+    assert find_latest_full_snapshot_offset(tmp_path / "nonexistent.jsonl") is None
 
 
-def test_find_latest_full_snapshot_offset_returns_zero_when_no_full_events(temp_config: MngrConfig) -> None:
+def test_find_latest_full_snapshot_offset_returns_none_when_no_full_events(temp_config: MngrConfig) -> None:
     # Write only agent events
     emit_agent_discovered(temp_config, make_test_discovered_agent())
     emit_agent_discovered(temp_config, make_test_discovered_agent())
 
     events_path = get_discovery_events_path(temp_config)
-    assert find_latest_full_snapshot_offset(events_path) == 0
+    # None (not 0) distinguishes "no snapshot" from "snapshot at offset 0".
+    assert find_latest_full_snapshot_offset(events_path) is None
+
+
+def test_find_latest_full_snapshot_offset_returns_zero_for_snapshot_at_start(tmp_path: Path) -> None:
+    """A snapshot that is the first line sits at offset 0; that is a real snapshot, not 'absent'."""
+    events_path = tmp_path / "events.jsonl"
+    full_first = (
+        '{"timestamp":"2026-01-01T00:00:00Z","type":"DISCOVERY_FULL","event_id":"evt-x",'
+        '"source":"mngr/discovery","agents":[],"hosts":[]}'
+    )
+    agent_after = (
+        '{"timestamp":"2026-01-02T00:00:00Z","type":"AGENT_DISCOVERED","event_id":"evt-y",'
+        '"source":"mngr/discovery","agent":{}}'
+    )
+    events_path.write_text(f"{full_first}\n{agent_after}\n")
+
+    offset = find_latest_full_snapshot_offset(events_path)
+
+    assert offset == 0
 
 
 def test_find_latest_full_snapshot_offset_warns_on_mid_file_corruption(tmp_path: Path) -> None:
