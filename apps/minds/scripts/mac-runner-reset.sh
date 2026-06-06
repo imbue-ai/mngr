@@ -20,9 +20,25 @@ for pid in $pids; do
 done
 
 if command -v limactl >/dev/null 2>&1; then
-  log "stopping and deleting Lima VM instances"
+  log "stopping and deleting Lima VM instances via limactl"
   limactl stop --all >/dev/null 2>&1 || true
   limactl delete --all >/dev/null 2>&1 || true
+fi
+
+# Belt and suspenders for the CI runner: rm any minds-e2e* dirs still
+# under ~/.lima/. limactl on the GitHub Actions PATH isn't reliable and
+# the `command -v` guard above silently skips when missing, leaving
+# 6.4GB diffdisk + supporting files per past run pinned forever. On the
+# self-hosted mac runner this accumulated to 70 zombie VMs / 446GB
+# (verified 2026-06-06) before catching it. Direct rm -rf is safe --
+# any minds-e2e* still present at reset time is by definition orphaned
+# (the e2e's normal destroy-lifecycle handles in-flight VMs).
+if [[ -d "$HOME/.lima" ]]; then
+  zombie_count=$(find "$HOME/.lima" -maxdepth 1 -type d -name 'minds-e2e*' 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "$zombie_count" -gt 0 ]]; then
+    log "wiping $zombie_count orphan minds-e2e* dir(s) under ~/.lima"
+    find "$HOME/.lima" -maxdepth 1 -type d -name 'minds-e2e*' -exec rm -rf {} + 2>/dev/null || true
+  fi
 fi
 
 # Local Time Machine snapshots hold deleted-file blocks until purged.
