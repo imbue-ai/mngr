@@ -176,8 +176,13 @@ _RESOURCE_TYPE_MESSAGES: dict[str, str] = {
 
 def _emit_resource_type_start(resource_type: str, output_format: OutputFormat) -> None:
     """Emit an info message when starting to GC a specific resource type."""
-    msg = _RESOURCE_TYPE_MESSAGES.get(resource_type, f"Cleaning {resource_type}...")
-    emit_info(msg, output_format)
+    # The resource_type values are a fixed internal set produced by
+    # destroy_resources() (api/gc.py). A missing key means this message map has
+    # drifted out of sync with that set, so fail loudly rather than emit a
+    # synthesized generic message that hides the drift.
+    if resource_type not in _RESOURCE_TYPE_MESSAGES:
+        raise SwitchError(f"Unknown GC resource type: {resource_type!r}")
+    emit_info(_RESOURCE_TYPE_MESSAGES[resource_type], output_format)
 
 
 @pure
