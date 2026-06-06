@@ -6,13 +6,8 @@ on:
       commit_sha:
         description: 'REQUIRED. Commit SHA (or branch / tag) to verify. The build job looks for an existing ToDesktop build for this SHA and reuses it; otherwise it packages a fresh one. Verify always runs against a bundle built from THIS SHA -- no implicit fallback to released or arbitrary URLs.'
         required: true
-      skip_first_message:
-        description: 'Skip the first-message round-trip step (smoke-only: install + launch + backend-ready).'
-        type: boolean
-        required: false
-        default: false
       skip_slack_flow:
-        description: 'Skip the slack-permission-flow Playwright step. Implied true when skip_first_message is true.'
+        description: 'Skip the slack-permission-flow Playwright step.'
         type: boolean
         required: false
         default: false
@@ -23,11 +18,6 @@ on:
         description: 'Override the FCT git URL (forks). Empty -> https://github.com/imbue-ai/forever-claude-template.'
         required: false
         default: ''
-      wipe_lima_caches:
-        description: 'Cold-cache benchmark mode: wipe ~/.lima (Ubuntu cloudimg cache, ~600MB) before the run. Simulates fresh-install user experience.'
-        type: boolean
-        required: false
-        default: false
 
 concurrency:
   group: mac-runner
@@ -240,12 +230,13 @@ jobs:
             exit 0
           }
       - name: upload build log
-        if: always()
+        if: always() && steps.existing.outputs.url == ''
         uses: actions/upload-artifact@v7
         with:
           name: minds-dist-log-${{ github.run_id }}
           path: /tmp/minds-dist.log
           retention-days: 7
+          if-no-files-found: ignore
 
   verify:
     needs: [build]
@@ -266,19 +257,15 @@ jobs:
             echo "ANTHROPIC_API_KEY is empty — secret not reaching the runner"; exit 1
           fi
           echo "ANTHROPIC_API_KEY present, length=${#ANTHROPIC_API_KEY}"
-      - name: setup node 24
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24.15.0'
       - name: setup uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v7
         with:
           version: latest
       - name: setup Python via uv
         run: uv python install 3.12
       - name: install minds workspace + playwright python
         run: |
-          uv sync --package minds --frozen 2>&1 | tail -5 || uv sync --all-packages --frozen
+          uv sync --package minds --frozen
           uv run --package minds python -c "from playwright.async_api import async_playwright; print('playwright imports OK')"
       - name: resolve build URL
         id: url
@@ -308,8 +295,6 @@ jobs:
             echo "- Source: $SRC"
           } >> "$GITHUB_STEP_SUMMARY"
       - name: reset to clean state and install fresh app
-        env:
-          WIPE_LIMA_CACHES: ${{ inputs.wipe_lima_caches && '1' || '0' }}
         run: bash apps/minds/scripts/mac-runner-reset.sh "${{ steps.url.outputs.url }}"
 
       - name: ensure socat (slack mock TLS terminator)
@@ -324,18 +309,6 @@ jobs:
           for D in /opt/homebrew/bin /usr/local/bin; do
             if [[ -d "$D" ]]; then echo "$D" >> "$GITHUB_PATH"; fi
           done
-
-      - name: wipe stale launch-to-msg state
-        # mac-runner-reset.sh cleans Minds state + Lima but not the
-        # /tmp screenshot/log dirs that launch_to_msg_e2e.py reads at
-        # start. Without this the artifact-collection step bundles in
-        # files from prior runs (visible as e2e-stdout.log content
-        # that references a different creation_id than the current
-        # run, etc.). Run AFTER the app reset so we don't race with
-        # Minds writing to /tmp during quit.
-        run: |
-          rm -rf /tmp/launch-to-msg-screenshots /tmp/launch-to-msg-logs
-          rm -f /tmp/launch-to-msg-* /tmp/slack-mock-* 2>/dev/null || true
 
       - name: install Google Chrome + prime latchkey browser config
         # The bundled latchkey's "ensure-browser" iterates four sources
@@ -400,13 +373,7 @@ jobs:
 
       - name: launch-to-msg + slack flow (Python)
         env:
-          # GIT_BRANCH gets the resolved SHA, not the input ref, so the
-          # agent's clone is reproducible. The script logs the value, so
-          # the artifact's e2e-stdout.log also names the FCT commit.
-          GIT_BRANCH:         ${{ steps.fct_sha.outputs.sha }}
-          GIT_URL:            ${{ inputs.template_url }}
-          SKIP_FIRST_MESSAGE: ${{ inputs.skip_first_message && '1' || '0' }}
-          SKIP_SLACK_FLOW:    ${{ inputs.skip_slack_flow    && '1' || '0' }}
+          SKIP_SLACK_FLOW:    ${{ inputs.skip_slack_flow && '1' || '0' }}
         run: |
           # pipefail is REQUIRED: without it, the pipeline below exits
           # with tee's status (always 0), so an e2e failure (exit 1) is
@@ -443,10 +410,6 @@ jobs:
           log show --process Minds --last 5m 2>/dev/null > artifacts/macos-console.log || true
           ls -la "$HOME/.minds" > artifacts/minds-dir-listing.txt 2>&1 || true
           [ -f /tmp/minds-electron.log ] && cp /tmp/minds-electron.log artifacts/ || true
-          for f in /tmp/first-message-*.json /tmp/first-message-*.txt /tmp/first-message-*.html; do
-            [ -f "$f" ] && cp "$f" artifacts/ 2>/dev/null || true
-          done
-          [ -f /tmp/post-slack-delete.json ] && cp /tmp/post-slack-delete.json artifacts/ 2>/dev/null || true
           [ -d /tmp/slack-mock ] && cp -R /tmp/slack-mock artifacts/ 2>/dev/null || true
           # Latchkey gateway state (encryption_key excluded by directory selection).
           if [ -d "$HOME/.minds/latchkey" ]; then
@@ -455,7 +418,6 @@ jobs:
             cp "$HOME/.minds/latchkey/latchkey_gateway.log" artifacts/latchkey/ 2>/dev/null || true
             cp "$HOME/.minds/latchkey/latchkey_ensure_browser.log" artifacts/latchkey/ 2>/dev/null || true
           fi
-          [ -d apps/minds/test-results ] && cp -R apps/minds/test-results artifacts/playwright-test-results 2>/dev/null || true
       - uses: actions/upload-artifact@v7
         # Always upload: this branch's verify step relies on downloading
         # the artifact every run to inspect screenshots + timings, even

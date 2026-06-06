@@ -25,28 +25,11 @@ if command -v limactl >/dev/null 2>&1; then
   limactl delete --all >/dev/null 2>&1 || true
 fi
 
-if [[ "${WIPE_LIMA_CACHES:-}" == "1" ]]; then
-  # Cold-cache benchmark mode: wipe everything a fresh-install user
-  # wouldn't have. Without these wipes the runner stays warm across
-  # CI runs and our numbers are useless for the cold-start UX.
-  #   ~/.lima            - per-VM state (cleaned by limactl delete anyway)
-  #   ~/Library/Caches/lima/download - Lima's by-url-sha256 cloudimg cache (~600MB)
-  #   ~/.minds/template-cache         - first_launch_prefetch's FCT mirror
-  #   /tmp/minds-clone-*              - per-create-agent staging clones
-  log "WIPE_LIMA_CACHES=1 set; nuking ~/.lima + lima image cache + prefetch state"
-  rm -rf "$HOME/.lima" 2>/dev/null || true
-  rm -rf "$HOME/Library/Caches/lima" 2>/dev/null || true
-  rm -rf "$HOME/.minds/template-cache" 2>/dev/null || true
-  rm -rf /tmp/minds-clone-* 2>/dev/null || true
-fi
-
 log "wiping leftover /tmp diagnostic artifacts from prior runs"
-# The CI verify job's "collect diagnostic artifacts" step copies
-# /tmp/first-message-*.{txt,json,html} and /tmp/minds-electron.log
-# into the uploaded bundle. Without this, stale files from prior
-# runs get mixed in with the current run's output and obscure the
-# real failure signal.
-rm -f /tmp/first-message-*.txt /tmp/first-message-*.json /tmp/first-message-*.html /tmp/minds-electron.log 2>/dev/null || true
+# Only /tmp/minds-electron.log persists across runs (re-written each
+# launch); the deleted first-message-* artifacts were produced by
+# scripts that no longer exist.
+rm -f /tmp/minds-electron.log 2>/dev/null || true
 
 log "removing ~/.minds and /Applications/minds.app"
 # `rm -rf` can race against a not-yet-fully-dead Minds backend process that

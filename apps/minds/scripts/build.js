@@ -541,9 +541,6 @@ function stageRuntimePyproject(wheelByPackage) {
   fs.mkdirSync(destDir, { recursive: true });
 
   const pyprojectSrc = path.join(srcDir, 'pyproject.toml');
-  if (!fs.existsSync(pyprojectSrc)) {
-    throw new Error(`Source pyproject.toml not found at ${pyprojectSrc}`);
-  }
   let content = fs.readFileSync(pyprojectSrc, 'utf-8');
 
   const sourceLines = ['[tool.uv.sources]'];
