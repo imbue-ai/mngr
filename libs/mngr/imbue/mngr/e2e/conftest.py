@@ -587,9 +587,15 @@ def _load_modal_credentials(env: dict[str, str]) -> None:
     if not modal_toml_path.exists():
         return
     for value in tomlkit.loads(modal_toml_path.read_text()).values():
+        # A profile without an `active` key is simply not the active one, so the
+        # falsy default correctly skips it. The active profile, however, always
+        # carries both tokens -- index them directly so a malformed ~/.modal.toml
+        # crashes loudly here instead of silently propagating empty credentials
+        # into every Modal-backed subprocess (where they would surface much later
+        # as a confusing authentication failure).
         if isinstance(value, dict) and value.get("active", ""):
-            env["MODAL_TOKEN_ID"] = value.get("token_id", "")
-            env["MODAL_TOKEN_SECRET"] = value.get("token_secret", "")
+            env["MODAL_TOKEN_ID"] = value["token_id"]
+            env["MODAL_TOKEN_SECRET"] = value["token_secret"]
             break
 
 
