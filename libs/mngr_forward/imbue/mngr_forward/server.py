@@ -87,7 +87,10 @@ def _is_loopback_url(url: str) -> bool:
     try:
         parsed = urlsplit(url)
     except ValueError:
-        return False
+        # This is a safety guard, so fail closed on an unparseable URL: treat
+        # it as loopback so the no-tunnel callers refuse to dial it, rather
+        # than fail open and proxy to a URL we could not even parse.
+        return True
     raw_host = parsed.hostname
     if raw_host is None:
         return False
