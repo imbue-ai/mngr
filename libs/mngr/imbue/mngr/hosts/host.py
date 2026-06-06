@@ -692,8 +692,6 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         data_path = self.host_dir / "data.json"
         try:
             content = self.read_text_file(data_path)
-            data = json.loads(content)
-            return CertifiedHostData(**data)
         except FileNotFoundError:
             now = datetime.now(timezone.utc)
             # FIXME: this is suss--we should probably just explode if data.json is missing
@@ -706,6 +704,14 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 created_at=now,
                 updated_at=now,
             )
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError as e:
+            # A corrupt (non-JSON) data.json is a schema problem like an invalid one;
+            # map it to the same domain error instead of leaking a raw JSONDecodeError.
+            raise HostDataSchemaError(str(data_path), str(e)) from e
+        try:
+            return CertifiedHostData(**data)
         except ValidationError as e:
             raise HostDataSchemaError(str(data_path), str(e)) from e
 
