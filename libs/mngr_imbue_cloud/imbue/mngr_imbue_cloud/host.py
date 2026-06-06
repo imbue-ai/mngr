@@ -196,11 +196,21 @@ class ImbueCloudHost(Host):
         # host now). ``options.name`` is the minds-supplied default agent
         # name ("system-services"), kept around for non-imbue_cloud modes;
         # for adoption we ignore it.
-        agent_type = AgentTypeName(str(existing.get("type", "claude")))
+        # ``name`` and ``type`` are hard-required: a bake healthy enough to
+        # adopt always wrote them, so a missing value means a corrupt data.json
+        # we want to fail on loudly rather than silently substitute a guess. A
+        # defaulted ``type`` in particular would mistype the agent and drive
+        # ``resolve_agent_type``, the assembled command, and provisioning down
+        # the wrong path.
+        baked_name = AgentName(str(existing["name"]))
+        agent_type = AgentTypeName(str(existing["type"]))
         resolved = resolve_agent_type(agent_type, self.mngr_ctx.config)
+        # ``work_dir`` is intentionally allowed to fall back to the freshly
+        # computed ``work_dir_path``: this mirrors ``create_agent_work_dir``
+        # above, which deliberately tolerates a missing recorded work_dir by
+        # delegating to the standard transfer path. Keeping the two consistent.
         baked_work_dir = Path(str(existing.get("work_dir", str(work_dir_path))))
         create_time = _parse_create_time(existing.get("create_time"))
-        baked_name = AgentName(str(existing["name"]))
 
         agent = resolved.agent_class(
             id=self.pre_baked_agent_id,
