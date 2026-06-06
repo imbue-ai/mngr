@@ -4,6 +4,7 @@ from claude_agent_sdk import ClaudeAgentOptions
 
 from imbue.mngr_robinhood._agent_sdk.driver import _build_agent_name
 from imbue.mngr_robinhood._agent_sdk.driver import _build_environment
+from imbue.mngr_robinhood._agent_sdk.driver import _options_with_overrides
 from imbue.mngr_robinhood._agent_sdk.driver import _system_prompt_args
 from imbue.mngr_robinhood._agent_sdk.driver import map_options_to_agent_args
 from imbue.mngr_robinhood._agent_sdk.driver import resolve_cwd
@@ -101,3 +102,18 @@ def test_build_agent_name_has_robinhood_prefix() -> None:
     name = _build_agent_name()
     assert str(name).startswith("robinhood-")
     assert len(str(name)) > len("robinhood-")
+
+
+def test_options_with_overrides_copies_and_sets_only_given_fields() -> None:
+    base = ClaudeAgentOptions(model="haiku", permission_mode="default")
+    updated = _options_with_overrides(base, "sonnet", None)
+    assert updated is not base
+    assert updated.model == "sonnet"
+    assert updated.permission_mode == "default"
+    # The original is untouched.
+    assert base.model == "haiku"
+
+
+def test_options_with_overrides_returns_same_object_when_no_change() -> None:
+    base = ClaudeAgentOptions(model="haiku")
+    assert _options_with_overrides(base, None, None) is base
