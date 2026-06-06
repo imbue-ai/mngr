@@ -148,6 +148,10 @@ def _parse_list_output_line(line: str) -> FileEntry | None:
         try:
             parsed_size = int(size_str)
         except ValueError:
+            # _LIST_SCRIPT always emits st.st_size (an int), so a non-integer here means the
+            # output framing is corrupt (same class as the malformed-line case above). Fall
+            # back to None but log at warning so the corruption is visible, not silent.
+            logger.warning("Could not parse size {!r} for list entry {!r}; reporting as unknown", size_str, name)
             parsed_size = None
 
     return FileEntry(
