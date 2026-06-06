@@ -527,6 +527,11 @@ class _StreamedPermissionRequestHandler(FrozenModel):
     model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
 
     def __call__(self, event: RequestEvent) -> None:
+        # ``app.state.request_inbox`` is ``| None`` only because
+        # ``create_desktop_client`` defaults its ``request_inbox`` parameter to
+        # None for test-built apps. The `minds run` wiring always constructs a
+        # real RequestInbox and passes it in, so this guard is defensive against
+        # the factory default rather than any state reachable here.
         current: RequestInbox | None = self.app.state.request_inbox
         if current is None:
             return
