@@ -73,7 +73,7 @@ def _build_provider(profile_dir: Path) -> tuple[LimaProviderInstance, Concurrenc
 
 
 def _verify_container_is_host(host: Host) -> None:
-    """Prove that ssh lands inside the debian container (not the ubuntu VM) and host_dir is btrfs."""
+    """Prove that ssh lands inside the debian container (not the host VM) and host_dir is btrfs."""
     os_release = host.execute_idempotent_command("cat /etc/os-release")
     if "debian" not in os_release.stdout.lower():
         raise AssertionError(f"Expected to be inside the debian container, got: {os_release.stdout!r}")
