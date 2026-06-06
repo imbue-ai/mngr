@@ -178,9 +178,10 @@ def _resolve_snapshot_hosts(
             else:
                 seen_hosts[host_id_str] = (provider_name, agent_names)
 
-    # Resolve from host addresses. These addresses already failed agent
-    # lookup in _classify_mixed_identifiers, so if host lookup also fails,
-    # the error should mention both.
+    # Resolve from host addresses. These addresses were text-classified as
+    # hosts by _bucketize_mixed_identifiers (by their @/host- prefix), not by a
+    # failed agent lookup, so a failed host lookup is reported as "Agent or host
+    # not found" to cover both interpretations of the ambiguous token.
     for host_address in host_addresses:
         matches = filter_all_hosts(host_address, all_hosts)
         if not matches:
