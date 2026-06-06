@@ -221,8 +221,10 @@ def map_options_to_agent_args(options: ClaudeAgentOptions) -> tuple[str, ...]:
     # ``resume`` / ``continue_conversation`` / ``fork_session`` are deliberately NOT translated to
     # claude flags: each mngr agent has its own claude config dir, so a fresh agent's ``--resume``
     # would not find another agent's session file. Continuation is instead handled by reusing (and
-    # restarting) the agent that already owns the session -- see ``deliver_turn`` -- and forking is
-    # not yet supported.
+    # restarting) the agent that already owns the session -- see ``deliver_turn``. ``fork_session``
+    # is not supported on the mngr transport at all: ``deliver_turn`` raises
+    # ``AgentSdkNotImplementedError`` because claude's ``--fork-session`` does not assign a new
+    # session id when driven interactively over an adopted, resumed session.
     return tuple(args)
 
 
