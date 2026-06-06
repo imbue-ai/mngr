@@ -8,9 +8,11 @@ turns a list of matching Neon projects into "adopt", "create", or
 
 import pytest
 
+from imbue.minds.envs.providers.neon_db import NeonBranchSummary
 from imbue.minds.envs.providers.neon_db import NeonProjectSummary
 from imbue.minds.envs.providers.neon_db import NeonProviderError
 from imbue.minds.envs.providers.neon_db import _format_multi_match_message
+from imbue.minds.envs.providers.neon_db import _select_default_branch
 from imbue.minds.envs.providers.neon_db import _select_one_or_raise_multi_match
 
 
@@ -27,6 +29,34 @@ def test_neon_provider_error_carries_status_code() -> None:
 def test_neon_provider_error_status_code_defaults_to_none() -> None:
     # Transport errors / shape mismatches have no HTTP status.
     assert NeonProviderError("transport blew up").status_code is None
+
+
+def test_select_default_branch_prefers_the_default_flag() -> None:
+    # The default-flagged branch wins even when another branch is named "main".
+    branches = [
+        NeonBranchSummary(id="b-main", name="main", default=False),
+        NeonBranchSummary(id="b-real", name="renamed-root", default=True),
+    ]
+    assert _select_default_branch(branches, project_id="p1").id == "b-real"
+
+
+def test_select_default_branch_falls_back_to_name_main() -> None:
+    # No branch is flagged default (unexpected) -> fall back to name "main".
+    branches = [
+        NeonBranchSummary(id="b-child", name="snapshot-xyz", default=False),
+        NeonBranchSummary(id="b-main", name="main", default=False),
+    ]
+    assert _select_default_branch(branches, project_id="p1").id == "b-main"
+
+
+def test_select_default_branch_raises_when_no_default_or_main() -> None:
+    # Neither signal present -> refuse to guess (don't return an arbitrary branch).
+    branches = [
+        NeonBranchSummary(id="b-1", name="snapshot-a", default=False),
+        NeonBranchSummary(id="b-2", name="snapshot-b", default=False),
+    ]
+    with pytest.raises(NeonProviderError, match="cannot determine the default branch"):
+        _select_default_branch(branches, project_id="p1")
 
 
 def test_select_one_or_raise_returns_none_when_no_projects_match() -> None:

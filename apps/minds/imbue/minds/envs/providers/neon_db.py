@@ -100,6 +100,10 @@ class NeonBranchSummary(FrozenModel):
 
     id: str
     name: str
+    # Neon flags exactly one branch per project as the default. This is the
+    # authoritative "which branch is the root" signal -- far more reliable
+    # than matching on the name "main" (which can be renamed).
+    default: bool = False
 
 
 class NeonProjectRecord(FrozenModel):
@@ -336,10 +340,32 @@ def _resolve_default_branch(project_id: str, *, api_token: SecretStr) -> NeonBra
         branches = _BRANCH_LIST_ADAPTER.validate_python(branches_raw)
     except ValidationError as exc:
         raise NeonProviderError(f"Neon /projects/{project_id}/branches returned an unexpected shape: {exc}") from exc
+    return _select_default_branch(branches, project_id=project_id)
+
+
+def _select_default_branch(branches: list[NeonBranchSummary], *, project_id: str) -> NeonBranchSummary:
+    """Pick the default branch from a project's branch list.
+
+    Prefers Neon's authoritative ``default`` flag. Falls back to the
+    conventional name "main" only if (unexpectedly) no branch is flagged,
+    since minds always creates its projects with a default "main" branch.
+    Refuses to guess when neither signal is present: returning an arbitrary
+    branch (the previous ``branches[0]`` behaviour) could silently restore /
+    migrate against a snapshot child branch rather than the true default.
+
+    Pure function -- lives next to its only caller so the selection logic
+    can be unit-tested without standing up a Neon stub.
+    """
+    for branch in branches:
+        if branch.default:
+            return branch
     for branch in branches:
         if branch.name == "main":
             return branch
-    return branches[0]
+    raise NeonProviderError(
+        f"Neon project {project_id} has no branch flagged `default` and none named 'main'; "
+        f"cannot determine the default branch (branches: {[b.name for b in branches]})."
+    )
 
 
 def _ensure_database(
