@@ -12,17 +12,28 @@ Invoked from .github/workflows/minds-launch-to-msg.yml as the single
 test step. NOT a pytest test (no markers, no collection).
 
 Flow:
-  1. Launch minds.app via Playwright Electron
-  2. UI auth via /authenticate?one_time_code=... (minted on disk)
-  3. Click Create, fill form, wait for agent DONE
-  4. Send first message ("pong"), wait for reply
-  5. (if slack flow enabled) stand up local slack mock HTTPS server on
-     :443 via sudo socat TLS-terminator, patch /etc/hosts, pre-seed
-     latchkey slack credential, send slack prompt
-  6. Click Requests -> entry -> Approve, kick agent to retry
-  7. Verify canned MESSAGE_BODY appears in chat
-  8. Teardown: destroy agent, revert /etc/hosts, clear latchkey, kill
-     mock + socat
+  1. Launch minds.app via Playwright Electron, UI auth via
+     /authenticate?one_time_code=... (minted on disk)
+  2. Workspace 1 (W1): click Create, fill form with HOST_NAME, wait for
+     agent DONE, send first message ("pong"), wait for reply (screenshots
+     03-06)
+  3. Slack flow on W1 (if enabled): stand up local slack mock HTTPS
+     server on :443 via sudo socat TLS-terminator, patch /etc/hosts,
+     pre-seed latchkey slack credential, send slack prompt; click
+     Requests -> entry -> Approve, kick agent to retry; verify canned
+     MESSAGE_BODY appears (screenshots 07-08)
+  4. (if WORKSPACE_COUNT >= 2) Workspace 2 (W2): same create-form
+     flow with HOST_NAME_2, send first message, wait for reply
+     (screenshots 09-12)
+  5. Cross-workspace follow-up: navigate back to W1's chat URL, send
+     a unique-token prompt (bing), wait for reply; then to W2's
+     (bong) (screenshots 13-16)
+  6. Home-page tiles check: navigate to /, assert BOTH tiles render
+     (screenshot 17)
+  7. Destroy W2 via /api/destroy-agent, poll until done, assert home
+     drops W2 tile; send a unique-token follow-up to W1 (bink), verify
+     reply (screenshots 18-22)
+  8. Teardown: revert /etc/hosts, clear latchkey, kill mock + socat
 
 Takes a `screencapture -x` whole-desktop shot at every milestone.
 Files land in /tmp/launch-to-msg-screenshots/ and the workflow
@@ -1135,6 +1146,80 @@ async def amain() -> int:
             )
             await snap_page(win, "17-home-both-tiles")
             logger.info("home page shows both tiles: {} and {}", HOST_NAME, HOST_NAME_2)
+
+            # 18-22. Destroy W2 via /api/destroy-agent, poll status to
+            # completion, then assert (a) the landing page drops W2's tile
+            # while keeping W1's, and (b) W1 stays responsive afterward.
+            # Exercises the destroy lifecycle end-to-end and proves a
+            # destroy of one workspace doesn't cascade into another.
+            logger.info("=== destroy W2 via /api/destroy-agent ===")
+            m = re.search(r"//(agent-[a-f0-9]+)\.localhost", w2_chat_url)
+            if not m:
+                raise E2EFailure(f"[w2-destroy] could not extract agent_id from {w2_chat_url!r}")
+            w2_agent_id = m.group(1)
+            logger.info("[w2-destroy] agent_id={}", w2_agent_id)
+
+            destroy_resp = await win.evaluate(
+                """async (aid) => {
+                    const r = await fetch('/api/destroy-agent/' + aid, {method: 'POST'});
+                    return {status: r.status, body: await r.text()};
+                }""",
+                w2_agent_id,
+            )
+            if destroy_resp["status"] not in (200, 202):
+                raise E2EFailure(f"[w2-destroy] POST returned {destroy_resp['status']}: {destroy_resp['body']!r}")
+            await snap_page(win, "18-w2-destroy-initiated")
+
+            # Poll /api/destroying/<id>/status until the record either
+            # moves past 'running' or returns 404 (cleanup). Lima VM
+            # stop+delete typically takes 30-90s; 4-min budget gives
+            # comfortable headroom.
+            destroy_deadline = time.time() + 240
+            while time.time() < destroy_deadline:
+                resp = await win.evaluate(
+                    """async (aid) => {
+                        const r = await fetch('/api/destroying/' + aid + '/status');
+                        return {status: r.status, body: await r.text()};
+                    }""",
+                    w2_agent_id,
+                )
+                if resp["status"] == 404:
+                    logger.info("[w2-destroy] DONE (record cleaned up)")
+                    break
+                body = {}
+                with contextlib.suppress(Exception):
+                    body = json.loads(resp["body"])
+                state = body.get("status", "")
+                if state == "failed":
+                    raise E2EFailure(f"[w2-destroy] destroy reported FAILED: {body}")
+                if state and state != "running":
+                    logger.info("[w2-destroy] state={}", state)
+                    break
+                await asyncio.sleep(3)
+            else:
+                raise E2EFailure("[w2-destroy] did not complete within 240s")
+            await snap_page(win, "19-w2-destroy-done")
+
+            logger.info("=== home page after W2 destroyed ===")
+            await win.goto(origin + "/")
+            await win.wait_for_function(
+                f"document.body.innerText.includes({HOST_NAME!r}) && "
+                f"!document.body.innerText.includes({HOST_NAME_2!r})",
+                timeout=60_000,
+            )
+            await snap_page(win, "20-home-only-w1")
+            logger.info("home page after destroy shows only W1: {}", HOST_NAME)
+
+            logger.info("=== W1 still alive after W2 destroyed ===")
+            await _send_followup_and_verify(
+                win,
+                chat_url=w1_chat_url,
+                prompt="Reply with exactly the four characters: bink",
+                expect_token="bink",
+                snap_sent="21-w1-after-w2-destroy-sent",
+                snap_reply="22-w1-after-w2-destroy-reply",
+                label="w1-after-w2-destroy",
+            )
 
         # Persist combined per-workspace timings as one artifact JSON
         # rather than two -- one file is easier to embed in the run
