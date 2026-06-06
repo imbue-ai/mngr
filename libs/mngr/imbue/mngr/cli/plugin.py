@@ -580,11 +580,13 @@ def _plugin_add_impl(ctx: click.Context) -> None:
         match source:
             case _PathSource(path=path):
                 resolved_path = str(Path(path).expanduser().resolve())
+                # A missing/invalid pyproject is a real user error; surface it
+                # (matching _plugin_remove_impl) rather than papering over it with
+                # the raw filesystem path masquerading as a package name.
                 try:
                     package_name = _read_package_name_from_pyproject(path)
-                except PluginSpecifierError:
-                    logger.debug("Could not read package name from pyproject.toml at '{}', using raw path", path)
-                    package_name = path
+                except PluginSpecifierError as e:
+                    raise AbortError(str(e)) from e
                 new_requirements.append(ToolRequirement(name=package_name, editable=resolved_path))
                 source_info.append((path, package_name, False))
             case _GitSource(url=url):
