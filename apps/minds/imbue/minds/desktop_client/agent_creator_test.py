@@ -227,11 +227,26 @@ def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
         assert "LATCHKEY_DISABLE_COUNTING" not in joined
 
 
-def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() -> None:
+@pytest.mark.parametrize("launch_mode", [LaunchMode.DOCKER, LaunchMode.LIMA, LaunchMode.CLOUD])
+def test_build_mngr_create_command_non_imbue_cloud_passes_new_host_without_reuse(
+    launch_mode: LaunchMode,
+) -> None:
+    """Non-IMBUE_CLOUD modes express "fresh host" via ``--new-host`` and never pass ``--reuse`` / ``--update``.
+
+    mngr's ``--reuse`` matches on agent name only (``system-services``
+    here) without scoping to a host, so passing it from the create-form
+    would adopt the wrong host's agent whenever any other workspace
+    shared the constant agent name. ``--new-host`` already encodes
+    fresh-host intent; ``--reuse`` is reserved for IMBUE_CLOUD where the
+    pool host comes pre-baked with a ``system-services`` agent.
+    """
     command = _build_mngr_create_command(
-        launch_mode=LaunchMode.DOCKER,
+        launch_mode=launch_mode,
         host_name=HostName("hello"),
     )
+    assert "--new-host" in command
+    assert "--reuse" not in command
+    assert "--update" not in command
     assert "--template" in command
     assert "main" in command
     # The /welcome message now lives in forever-claude-template's
@@ -240,13 +255,6 @@ def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() ->
     # minds no longer pre-generates an agent id; mngr generates one and we
     # parse it out of the JSONL ``created`` event in run_mngr_create.
     assert "--id" not in command
-    # Non-IMBUE_CLOUD modes pass neither ``--reuse`` nor ``--update``:
-    # the create form is "give me a new agent on a new host", and
-    # ``--reuse`` matches only on agent name (``system-services``)
-    # without scoping to host, so it collides across hosts. The
-    # ``--new-host`` flag below already covers fresh-host intent.
-    assert "--reuse" not in command
-    assert "--update" not in command
     # We always emit JSONL so the canonical agent id can be parsed from the
     # trailing ``"event": "created"`` line.
     assert "--format" in command

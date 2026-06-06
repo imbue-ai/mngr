@@ -498,11 +498,11 @@ def _build_mngr_create_command(
     Every mode creates a separate host, so the agent address uses
     ``system-services@<host_name>`` -- the agent name is constant across
     every minds workspace; the host name (the user's input from the
-    create-project form) is the workspace identifier. ``--reuse`` and
-    ``--update`` are passed for the non-IMBUE_CLOUD modes so re-deploying
-    resets the agent on the same host instead of failing on a duplicate
-    name (IMBUE_CLOUD's lease flow is one-shot per pool host, so reuse
-    is not meaningful there).
+    create-project form) is the workspace identifier. Only IMBUE_CLOUD
+    passes ``--reuse`` (to satisfy the pre-baked services-agent on the
+    pool host); the other modes rely on ``--new-host`` for fresh-host
+    intent and pass neither ``--reuse`` nor ``--update`` because
+    mngr's ``--reuse`` matches on agent name without host scope.
 
     Secrets (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``) are forwarded by
     the FCT template's own ``pass_(host_)env`` declarations, not by inline
