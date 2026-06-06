@@ -253,10 +253,18 @@ def _resolve_agent_target(
             "Use --relative-to state or --relative-to host for offline access."
         )
 
-    # Compute a synthetic host_dir for path computation when offline
+    # Compute a synthetic host_dir for path computation when offline. NOTE: base_path is
+    # only ever read by consumers (get/put/list) inside their `if resolved.is_online`
+    # branch -- when offline they recompute the location via compute_volume_path() and
+    # never touch base_path. So this sentinel is intentionally unreachable downstream; it
+    # exists only to satisfy _compute_agent_base_path's non-None signature. Do not start
+    # trusting it as a real path.
     if host_dir is None:
         host_dir = Path("/mngr-host-dir")
 
+    # The work_dir sentinel below is likewise never observed: for relative_to == WORK a None
+    # work_dir has already raised above, and for STATE/HOST _compute_agent_base_path does not
+    # read work_dir at all. The fallback only satisfies the non-None signature.
     base_path = _compute_agent_base_path(
         relative_to=relative_to,
         work_dir=work_dir if work_dir is not None else Path("/unknown"),
@@ -291,6 +299,8 @@ def _resolve_host_target(
     if online_host is not None:
         base_path = online_host.host_dir
     else:
+        # Sentinel: base_path is only read when is_online (see note in _resolve_agent_target);
+        # offline host listing goes through compute_volume_path(). Intentionally unreachable.
         base_path = Path("/mngr-host-dir")
 
     logger.debug("Resolved host target: base_path={}, is_online={}", base_path, online_host is not None)
