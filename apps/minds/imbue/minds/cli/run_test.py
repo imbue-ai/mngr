@@ -1,10 +1,15 @@
-"""Unit tests for ``minds run`` helpers (currently the
-``_StreamedPermissionRequestHandler`` private class).
+"""Unit tests for ``minds run`` helpers (the
+``_StreamedPermissionRequestHandler`` private class and the mngr-host-dir
+resolution).
 """
+
+from pathlib import Path
 
 from fastapi import FastAPI
 
+from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.cli.run import _StreamedPermissionRequestHandler
+from imbue.minds.cli.run import _resolve_mngr_host_dir
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import create_latchkey_predefined_permission_request_event
@@ -104,3 +109,30 @@ def test_streamed_permission_handler_noop_when_inbox_not_initialised() -> None:
 
     assert app.state.request_inbox is None
     assert notify_counts == []
+
+
+# -- _resolve_mngr_host_dir ------------------------------------------------
+
+
+def test_resolve_mngr_host_dir_honors_explicit_override() -> None:
+    """A set MNGR_HOST_DIR is used verbatim (with ~ expansion), ignoring root_name."""
+    resolved = _resolve_mngr_host_dir("/custom/mngr/host", "minds")
+    assert resolved == Path("/custom/mngr/host")
+
+
+def test_resolve_mngr_host_dir_expands_user_in_override() -> None:
+    resolved = _resolve_mngr_host_dir("~/explicit-mngr", "minds")
+    assert resolved == Path.home() / "explicit-mngr"
+
+
+def test_resolve_mngr_host_dir_falls_back_to_root_name_derived_dir() -> None:
+    """When MNGR_HOST_DIR is unset the fallback is the root-name-derived dir, not ~/.mngr."""
+    fallback = _resolve_mngr_host_dir(None, "minds")
+    assert fallback == mngr_host_dir_for("minds")
+    # Specifically NOT mngr's bare default, which would point `mngr forward` at
+    # a different agent topology than the rest of `run` reads.
+    assert fallback != Path.home() / ".mngr"
+
+
+def test_resolve_mngr_host_dir_empty_string_is_treated_as_unset() -> None:
+    assert _resolve_mngr_host_dir("", "dev-alice") == mngr_host_dir_for("dev-alice")

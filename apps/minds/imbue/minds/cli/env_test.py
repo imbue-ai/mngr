@@ -23,8 +23,10 @@ from click.testing import CliRunner
 
 from imbue.minds.cli._activated_env import MODAL_PROFILE_ENV_VAR
 from imbue.minds.cli.env import _destroy_agents_and_state_container_for_wipe
+from imbue.minds.cli.env import _reject_partial_ovh_secret
 from imbue.minds.cli.env import env
 from imbue.minds.envs.primitives import InvalidDevEnvNameError
+from imbue.minds.envs.primitives import VaultReadError
 
 
 def test_wipe_teardown_is_noop_without_profile_or_agents(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -256,3 +258,42 @@ def test_deactivate_unsets_modal_profile(_isolated_env: Path) -> None:
     assert "unset MNGR_HOST_DIR" in result.output
     assert "unset MNGR_PREFIX" in result.output
     assert "unset MINDS_CLIENT_CONFIG_PATH" in result.output
+
+
+# -- _reject_partial_ovh_secret --------------------------------------------
+
+
+def test_reject_partial_ovh_secret_allows_fully_absent_entry() -> None:
+    """An empty mapping (the caller's stand-in for a missing entry) is allowed."""
+    # Must not raise; a tier with no OVH provisioning proceeds with empty creds.
+    _reject_partial_ovh_secret({}, "secrets/minds/dev")
+
+
+def test_reject_partial_ovh_secret_allows_complete_entry() -> None:
+    complete = {
+        "OVH_APPLICATION_KEY": "ak",
+        "OVH_APPLICATION_SECRET": "as",
+        "OVH_CONSUMER_KEY": "ck",
+    }
+    _reject_partial_ovh_secret(complete, "secrets/minds/dev")
+
+
+def test_reject_partial_ovh_secret_raises_when_a_required_key_is_missing() -> None:
+    partial = {"OVH_APPLICATION_KEY": "ak", "OVH_APPLICATION_SECRET": "as"}
+    with pytest.raises(VaultReadError) as exc_info:
+        _reject_partial_ovh_secret(partial, "secrets/minds/staging")
+    message = str(exc_info.value)
+    assert "OVH_CONSUMER_KEY" in message
+    assert "secrets/minds/staging/ovh" in message
+
+
+def test_reject_partial_ovh_secret_raises_when_a_required_key_is_empty() -> None:
+    """A present-but-empty value is as broken as a missing key (would yield SecretStr(''))."""
+    present_but_empty = {
+        "OVH_APPLICATION_KEY": "ak",
+        "OVH_APPLICATION_SECRET": "",
+        "OVH_CONSUMER_KEY": "ck",
+    }
+    with pytest.raises(VaultReadError) as exc_info:
+        _reject_partial_ovh_secret(present_but_empty, "secrets/minds/production")
+    assert "OVH_APPLICATION_SECRET" in str(exc_info.value)

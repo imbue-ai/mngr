@@ -106,6 +106,21 @@ MINDS_API_PROXY_URL_ENV_VAR: Final[str] = "LATCHKEY_EXTENSION_MINDS_API_URL"
 MINDS_API_PROXY_KEY_ENV_VAR: Final[str] = "LATCHKEY_EXTENSION_MINDS_API_KEY"
 
 
+def _resolve_mngr_host_dir(mngr_host_dir_str: str | None, root_name: str) -> Path:
+    """Resolve the mngr host dir for the ``mngr forward`` subprocess.
+
+    Honor an explicit ``MNGR_HOST_DIR`` override (set by ``apply_bootstrap`` and
+    the bundled Electron build). When unset, fall back to the value derived from
+    the already-resolved ``root_name`` -- ``mngr_host_dir_for(root_name)``
+    (``~/.{root_name}/mngr``) -- so the fallback agrees with the rest of `run`.
+    A bare ``~/.mngr`` fallback would point ``mngr forward`` at a different
+    (likely empty) agent topology than the rest of minds reads.
+    """
+    if mngr_host_dir_str:
+        return Path(mngr_host_dir_str).expanduser()
+    return mngr_host_dir_for(root_name)
+
+
 @click.command()
 @click.option(
     "--host",
@@ -274,14 +289,7 @@ def run(
     # Minds API: agents reach it through the latchkey gateway's bundled
     # ``minds-api-proxy`` extension instead, so no ``--reverse`` specs
     # are needed here.
-    # Honor an explicit MNGR_HOST_DIR override (set by apply_bootstrap and the
-    # bundled Electron build). The fallback must agree with the rest of `run`,
-    # which derives everything from ``root_name`` -- the canonical host dir is
-    # ``mngr_host_dir_for(root_name)`` (~/.{root_name}/mngr), not mngr's bare
-    # ~/.mngr default, so a fallback to ~/.mngr would point `mngr forward` at a
-    # different (likely empty) agent topology than the rest of minds reads.
-    mngr_host_dir_str = os.environ.get("MNGR_HOST_DIR")
-    mngr_host_dir = Path(mngr_host_dir_str).expanduser() if mngr_host_dir_str else mngr_host_dir_for(root_name)
+    mngr_host_dir = _resolve_mngr_host_dir(os.environ.get("MNGR_HOST_DIR"), root_name)
     forward_config = ForwardSubprocessConfig(
         mngr_host_dir=mngr_host_dir,
     )

@@ -40,6 +40,7 @@ from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.bootstrap import root_name_for_env_name
 from imbue.minds.cli._activated_env import MODAL_PROFILE_ENV_VAR
+from imbue.minds.cli._activated_env import OVH_REQUIRED_ENV_VARS
 from imbue.minds.cli._activated_env import PRODUCTION_ENV_NAME as _PRODUCTION_ENV_NAME
 from imbue.minds.cli._activated_env import STAGING_ENV_NAME as _STAGING_ENV_NAME
 from imbue.minds.cli._activated_env import modal_profile_for_tier_or_none
@@ -380,6 +381,28 @@ def _build_real_providers() -> Providers:
     )
 
 
+def _reject_partial_ovh_secret(ovh_secret: dict[str, str], vault_prefix: str) -> None:
+    """Reject a present-but-partial ``<vault_prefix>/ovh`` Vault entry.
+
+    A fully-absent entry (the caller passes an empty mapping) is allowed: a tier
+    with no OVH provisioning yet may legitimately leave it unpopulated, and the
+    deploy proceeds with empty OVH credentials. But when the entry *is* present,
+    every required OVH key must be non-empty -- otherwise the ``.get(..., "")``
+    defaults in the caller would silently turn a missing key into ``SecretStr("")``
+    and push a broken ``ovh`` Modal Secret (the same failure the surrounding
+    ``VaultReadError`` guard avoids). Mirrors ``pool.py``'s ``resolve_ovh_env_from_vault``
+    and the Neon/SuperTokens completeness checks in ``_load_dev_credentials_from_vault``.
+    """
+    if not ovh_secret:
+        return
+    missing = [key for key in OVH_REQUIRED_ENV_VARS if not ovh_secret.get(key)]
+    if missing:
+        raise VaultReadError(
+            f"Vault entry {vault_prefix}/ovh is missing required key(s) {missing}; "
+            "see apps/minds/docs/host-pool-setup.md step 3 for the schema."
+        )
+
+
 def _load_dev_credentials_from_vault(vault_prefix: str, *, cg: ConcurrencyGroup) -> ProviderCredentials:
     """Read every per-provider dev-tier credential `minds env` needs from Vault.
 
@@ -416,23 +439,7 @@ def _load_dev_credentials_from_vault(vault_prefix: str, *, cg: ConcurrencyGroup)
     except VaultSecretNotFoundError as exc:
         logger.warning("No ovh Vault entry at {}/ovh ({}); proceeding with empty OVH credentials.", vault_prefix, exc)
         ovh_secret = {}
-    # If the entry *is* present, every required OVH key must be non-empty:
-    # a present-but-partial entry that silently became empty SecretStr creds
-    # would push a broken `ovh` Modal Secret (the same failure the VaultReadError
-    # case above guards against). Only a fully-absent entry proceeds with empty
-    # creds. Mirrors pool.py's resolve_ovh_env_from_vault and the Neon/SuperTokens
-    # checks below.
-    if ovh_secret:
-        missing_ovh_keys = [
-            key
-            for key in ("OVH_APPLICATION_KEY", "OVH_APPLICATION_SECRET", "OVH_CONSUMER_KEY")
-            if not ovh_secret.get(key)
-        ]
-        if missing_ovh_keys:
-            raise VaultReadError(
-                f"Vault entry {vault_prefix}/ovh is missing required key(s) {missing_ovh_keys}; "
-                "see apps/minds/docs/host-pool-setup.md step 3 for the schema."
-            )
+    _reject_partial_ovh_secret(ovh_secret, vault_prefix)
 
     org_id = neon_admin.get("NEON_ORG_ID", "")
     api_token = neon_admin.get("NEON_API_TOKEN", "")
