@@ -640,6 +640,25 @@ def test_create_form_submit_rejects_empty_git_url(tmp_path: Path) -> None:
     assert response.status_code == 400
 
 
+def test_create_form_submit_rejects_invalid_enum(tmp_path: Path) -> None:
+    """POST /create with an invalid enum value re-renders with an inline error
+    rather than silently substituting a default. The enum fields are backed by
+    <select> dropdowns, so a bad value means a tampered request or a front-end
+    bug -- it should surface, not quietly create a misconfigured workspace.
+    """
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/create",
+        data={"git_url": "file:///nonexistent-repo", "launch_mode": "NOT_A_REAL_MODE"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 400
+    assert "Invalid launch mode" in response.text
+    # No workspace should have been created from the rejected submission.
+    agent_creator.wait_for_all()
+
+
 def test_create_form_submit_passes_host_name(tmp_path: Path) -> None:
     """POST /create passes host_name to the creator."""
     client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)

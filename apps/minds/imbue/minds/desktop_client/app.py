@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Annotated
 from typing import Any
 from typing import Final
+from typing import TypeVar
 from typing import assert_never
 from urllib.parse import urlparse
 
@@ -876,6 +877,27 @@ def _build_backup_request_or_error(
     )
 
 
+_FormEnumT = TypeVar("_FormEnumT", bound=UpperCaseStrEnum)
+
+
+def _parse_form_enum(
+    enum_cls: type[_FormEnumT], raw: str, default: _FormEnumT, label: str
+) -> tuple[_FormEnumT, str | None]:
+    """Parse a ``<select>``-backed form value into its enum member.
+
+    Returns ``(member, None)`` on success, or ``(default, error_message)`` when
+    the value is not a valid member. The default lets the caller re-render the
+    form; a non-None error message signals it to reject the submission with an
+    inline error rather than silently creating a workspace with settings the
+    user did not choose. An invalid value can only come from a tampered request
+    or a front-end bug, since these fields are populated from dropdowns.
+    """
+    try:
+        return enum_cls(raw), None
+    except ValueError:
+        return default, f"Invalid {label}: {raw!r}."
+
+
 async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep) -> Response:
     """Handle form submission to create a new agent."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
@@ -889,26 +911,26 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
     git_url = str(form.get("git_url", "")).strip()
     host_name = str(form.get("host_name", "")).strip()
     branch = str(form.get("branch", "")).strip()
-    try:
-        launch_mode = LaunchMode(str(form.get("launch_mode", LaunchMode.DOCKER.value)))
-    except ValueError:
-        launch_mode = LaunchMode.DOCKER
-    try:
-        ai_provider = AIProvider(str(form.get("ai_provider", AIProvider.SUBSCRIPTION.value)))
-    except ValueError:
-        ai_provider = AIProvider.SUBSCRIPTION
+    launch_mode, launch_mode_error = _parse_form_enum(
+        LaunchMode, str(form.get("launch_mode", LaunchMode.DOCKER.value)), LaunchMode.DOCKER, "launch mode"
+    )
+    ai_provider, ai_provider_error = _parse_form_enum(
+        AIProvider, str(form.get("ai_provider", AIProvider.SUBSCRIPTION.value)), AIProvider.SUBSCRIPTION, "AI provider"
+    )
     account_id = str(form.get("account_id", "")).strip()
     anthropic_api_key = str(form.get("anthropic_api_key", "")).strip()
-    try:
-        backup_provider = BackupProvider(str(form.get("backup_provider", BackupProvider.CONFIGURE_LATER.value)))
-    except ValueError:
-        backup_provider = BackupProvider.CONFIGURE_LATER
-    try:
-        backup_encryption_method = BackupEncryptionMethod(
-            str(form.get("backup_encryption_method", BackupEncryptionMethod.NO_PASSWORD.value))
-        )
-    except ValueError:
-        backup_encryption_method = BackupEncryptionMethod.NO_PASSWORD
+    backup_provider, backup_provider_error = _parse_form_enum(
+        BackupProvider,
+        str(form.get("backup_provider", BackupProvider.CONFIGURE_LATER.value)),
+        BackupProvider.CONFIGURE_LATER,
+        "backup provider",
+    )
+    backup_encryption_method, backup_encryption_method_error = _parse_form_enum(
+        BackupEncryptionMethod,
+        str(form.get("backup_encryption_method", BackupEncryptionMethod.NO_PASSWORD.value)),
+        BackupEncryptionMethod.NO_PASSWORD,
+        "backup encryption method",
+    )
     backup_master_password = str(form.get("backup_master_password", ""))
     is_save_backup_password = str(form.get("backup_save_password", "")).strip() != ""
     backup_api_key_env = str(form.get("backup_api_key_env", ""))
@@ -942,6 +964,15 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
             error_message=message,
         )
         return HTMLResponse(content=html_body, status_code=status)
+
+    # Reject an invalid enum the same way the text fields are validated, rather
+    # than silently substituting a default. The JSON create-agent API already
+    # returns 400 on a bad enum; this keeps the form handler consistent and
+    # surfaces front-end bugs instead of creating a workspace the user did not
+    # configure. The first error wins (matters only for tampered/buggy input).
+    enum_error = launch_mode_error or ai_provider_error or backup_provider_error or backup_encryption_method_error
+    if enum_error is not None:
+        return _re_render_with_error(enum_error)
 
     if not git_url:
         return _re_render_with_error("Repository URL is required.")
