@@ -80,9 +80,11 @@ def _parse_snapshot(json_output: str) -> ForwardListSnapshot:
     agents: list[ForwardAgentSnapshot] = []
     for raw in raw_agents:
         if not isinstance(raw, dict):
+            logger.warning("Skipping non-dict agent row in `mngr list` output: {!r}", raw)
             continue
         agent_id_str = raw.get("id")
         if agent_id_str is None:
+            logger.warning("Skipping agent row with no id in `mngr list` output: {!r}", raw)
             continue
         try:
             agent_id = AgentId(agent_id_str)
