@@ -412,8 +412,13 @@ def main() -> None:
         shell = args[1]
         if shell == "zsh":
             sys.stdout.write(generate_zsh_script() + "\n")
-        else:
+        elif shell == "bash":
             sys.stdout.write(generate_bash_script() + "\n")
+        else:
+            # Only zsh and bash completion scripts exist; fail loudly rather than
+            # silently emitting a bash script for an unsupported/typo'd shell.
+            sys.stderr.write(f"Unsupported shell: {shell!r}. Supported shells: zsh, bash.\n")
+            sys.exit(2)
         return
 
     completions = _get_completions()
