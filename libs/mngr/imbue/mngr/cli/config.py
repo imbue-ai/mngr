@@ -75,11 +75,9 @@ class ConfigCliOptions(CommonCliOptions):
 
 
 def get_config_path(scope: ConfigScope, root_name: str, profile_dir: Path, cg: ConcurrencyGroup) -> Path:
-    """Get the config file path for the given scope. The profile_dir is required for USER scope."""
+    """Get the config file path for the given scope."""
     match scope:
         case ConfigScope.USER:
-            if profile_dir is None:
-                raise ConfigNotFoundError("profile_dir is required for USER scope")
             return get_user_config_path(profile_dir)
         case ConfigScope.PROJECT:
             project_dir = resolve_project_config_dir(root_name, cg)
