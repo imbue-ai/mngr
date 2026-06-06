@@ -462,7 +462,10 @@ def _stop_asciinema_processes(test_output_dir: Path) -> None:
     if not pids:
         return
 
-    # Send SIGINT so asciinema flushes the recording and exits
+    # Send SIGINT so asciinema flushes the recording and exits. The pids were
+    # read just above, so a recorder may have already exited in between
+    # (ProcessLookupError); signaling is best-effort during teardown, so an
+    # already-gone process is the expected case and safely ignored.
     for pid in pids:
         try:
             os.kill(pid, signal.SIGINT)
