@@ -371,7 +371,7 @@ class AgentObserver(MutableModel):
 
     _concurrency_group: ConcurrencyGroup = PrivateAttr(default_factory=lambda: ConcurrencyGroup(name="agent-observer"))
     _known_hosts: dict[str, _KnownHost] = PrivateAttr(default_factory=dict)
-    _discovery_stream_process: RunningProcess = PrivateAttr(default_factory=dict)
+    _discovery_stream_process: RunningProcess | None = PrivateAttr(default=None)
     _events_processes: dict[str, RunningProcess] = PrivateAttr(default_factory=dict)
     _last_tracked_state_by_id: dict[str, _TrackedState] = PrivateAttr(default_factory=dict)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
@@ -609,7 +609,9 @@ class AgentObserver(MutableModel):
         while not self._stop_event.is_set():
             # make sure that none of our processes crashed
             with self._lock:
-                self._discovery_stream_process.check()
+                # None until run() Phase 2 starts the discovery stream; only check it once started.
+                if self._discovery_stream_process is not None:
+                    self._discovery_stream_process.check()
                 for _host_id_str, event_process in self._events_processes.items():
                     event_process.check()
 
