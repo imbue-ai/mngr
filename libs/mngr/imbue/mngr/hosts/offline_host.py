@@ -54,7 +54,9 @@ def validate_and_create_discovered_agent(
         return None
     try:
         agent_id = AgentId(agent_id_str)
-    except ValueError as e:
+    except (ValueError, TypeError) as e:
+        # TypeError covers a non-str id (e.g. an int/dict from corrupt JSON), which would
+        # otherwise escape this "tolerate malformed records" path and crash discovery.
         logger.opt(exception=e).warning(
             "Skipping malformed agent record for host {}: invalid 'id': {}", host_id, agent_data
         )
@@ -66,7 +68,8 @@ def validate_and_create_discovered_agent(
         return None
     try:
         agent_name = AgentName(agent_name_str)
-    except ValueError as e:
+    except (ValueError, TypeError) as e:
+        # TypeError covers a non-str name; see the 'id' handling above.
         logger.opt(exception=e).warning(
             "Skipping malformed agent record for host {}: invalid 'name': {}", host_id, agent_data
         )
