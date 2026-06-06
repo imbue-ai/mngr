@@ -24,6 +24,7 @@ from imbue.mngr.config.data_types import get_or_create_user_id
 from imbue.mngr.config.data_types import split_cli_args_string
 from imbue.mngr.config.data_types import would_assignment_narrow
 from imbue.mngr.config.loader import parse_config
+from imbue.mngr.errors import ConfigError
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import ParseSpecError
 from imbue.mngr.primitives import AgentTypeName
@@ -1480,7 +1481,7 @@ def test_get_or_create_user_id_uses_env_var_when_file_missing(tmp_path: Path, mo
 def test_get_or_create_user_id_validates_env_var_matches_existing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """get_or_create_user_id should assert when MNGR_USER_ID doesn't match existing file."""
+    """get_or_create_user_id should raise a typed ConfigError when MNGR_USER_ID doesn't match existing file."""
     profile_dir = tmp_path / "profile"
     profile_dir.mkdir()
     existing_id = "b" * 32
@@ -1489,7 +1490,7 @@ def test_get_or_create_user_id_validates_env_var_matches_existing(
 
     monkeypatch.setenv("MNGR_USER_ID", "c" * 32)
 
-    with pytest.raises(AssertionError, match="MNGR_USER_ID environment variable does not match"):
+    with pytest.raises(ConfigError, match="MNGR_USER_ID environment variable"):
         get_or_create_user_id(profile_dir)
 
 
