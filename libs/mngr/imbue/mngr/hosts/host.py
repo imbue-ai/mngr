@@ -608,6 +608,9 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             try:
                 yield
             except BaseException:
+                # BaseException (not Exception) is intentional: the lock must be released
+                # even on KeyboardInterrupt/SystemExit so the remote host can still
+                # idle-shutdown. The original exception is always re-raised below.
                 # On error, remove the lock file so the host can idle-shutdown normally,
                 # unless the user wants to retain it for debugging
                 is_retain_lock = os.environ.get("MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE") == "1"
