@@ -547,7 +547,10 @@ def _delete_modal_environment(environment_name: str, env: dict[str, str], cwd: P
             logger.warning("Failed to delete Modal environment {}: {}", environment_name, result.stderr.strip())
         else:
             logger.info("Deleted Modal environment: {}", environment_name)
-    except (FileNotFoundError, OSError) as exc:
+    # run_command returns exit_code 124 on timeout rather than raising (handled
+    # above), so the only thing this guards is a Popen-spawn OSError. OSError
+    # already covers FileNotFoundError, so we do not list it separately.
+    except OSError as exc:
         logger.warning("Error deleting Modal environment {}: {}", environment_name, exc)
 
 
