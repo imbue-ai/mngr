@@ -364,12 +364,25 @@ def reconcile_imbue_cloud_providers_from_sessions(connector_url: str, *, root_na
         return
     entries = data.get("entries") if isinstance(data, dict) else None
     if not isinstance(entries, list):
+        # The plugin always writes ``{"entries": [...]}`` (see
+        # ``mngr_imbue_cloud.session_store.SessionStore._save_index``), so a
+        # decoded-but-wrong-shape index means schema drift, not "no accounts".
+        # Warn instead of returning silently: a silent skip here would
+        # reconcile nothing and leave the user unable to ``mngr create``,
+        # reproducing the exact drift this function exists to repair.
+        logger.warning(
+            'imbue_cloud accounts index {} is not in the expected {{"entries": [...]}} '
+            "shape; skipping provider reconciliation",
+            accounts_path,
+        )
         return
     for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        email = entry.get("email")
+        email = entry.get("email") if isinstance(entry, dict) else None
         if not isinstance(email, str) or not email:
+            # Same rationale: the plugin only ever writes entries with a
+            # non-empty ``email`` string, so a malformed entry is an anomaly
+            # worth surfacing rather than silently dropping.
+            logger.warning("Skipping malformed entry in imbue_cloud accounts index {}: {!r}", accounts_path, entry)
             continue
         try:
             # Reconcile only fills in missing blocks; it must not re-enable a
