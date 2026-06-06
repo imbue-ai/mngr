@@ -224,6 +224,10 @@ def convert():
                         "source": "antigravity/common_transcript",
                         "role": "assistant",
                         "model": None,
+                        # PLANNER_RESPONSE.content is always a string in agy
+                        # 1.0.0; the isinstance guard defends against a future
+                        # non-string shape by degrading to empty text rather
+                        # than crashing the whole converter on a single event.
                         "text": text if isinstance(text, str) else "",
                         "tool_calls": tool_calls,
                         "stop_reason": None,
