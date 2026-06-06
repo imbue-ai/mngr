@@ -5,6 +5,7 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
+from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.data_types import GcResourceTypes
 from imbue.mngr.api.data_types import GcResult
@@ -197,7 +198,7 @@ def _format_destroyed_message(resource_type: str, resource: Any, dry_run: bool) 
         return f"{action} log: {resource.path}"
     if resource_type == "build_cache":
         return f"{action} build cache: {resource.path}"
-    return f"{action} {resource_type}: {resource}"
+    raise SwitchError(f"Unknown GC resource type: {resource_type!r}")
 
 
 def _emit_destroyed(
