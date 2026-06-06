@@ -2779,7 +2779,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         except FileNotFoundError as e:
             raise NoCommandDefinedError(f"No data.json file for agent {agent.name} ({agent.id})") from e
 
-        data = json.loads(content)
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError as e:
+            raise CorruptedAgentDataError(agent.id, data_path, e) from e
         try:
             return data["command"]
         except KeyError as e:
@@ -2793,7 +2796,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         except FileNotFoundError:
             return []
 
-        data = json.loads(content)
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError as e:
+            raise CorruptedAgentDataError(agent.id, data_path, e) from e
         raw_commands = data.get("additional_commands", [])
 
         # Handle both old format (list of strings) and new format (list of dicts).
