@@ -10,6 +10,7 @@ from typing import Final
 from typing import Self
 from typing import TypeVar
 
+from loguru import logger
 from pydantic import Field
 from pydantic import GetCoreSchemaHandler
 from pydantic_core import CoreSchema
@@ -183,11 +184,19 @@ def _read_file_contents(file_path: Path) -> str:
 
 @lru_cache(maxsize=None)
 def _parse_file_ast(file_path: Path) -> ast.Module | None:
-    """Parse and cache the AST for a Python file. Returns None if parsing fails."""
+    """Parse and cache the AST for a Python file. Returns None if parsing fails.
+
+    A file that fails to parse is skipped by all AST-based ratchet checks. We do
+    not raise, because a scanned-but-not-executed file may legitimately use syntax
+    newer than the interpreter running the tests. We do log a warning so the skip
+    is never silent (a real ratchet violation in an unparseable file would
+    otherwise go unnoticed). The lru_cache keeps the warning to once per file.
+    """
     contents = _read_file_contents(file_path)
     try:
         return ast.parse(contents, filename=str(file_path))
-    except SyntaxError:
+    except SyntaxError as e:
+        logger.warning("Skipping unparseable file in ratchet AST scan: {} ({})", file_path, e)
         return None
 
 

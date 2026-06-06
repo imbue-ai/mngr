@@ -1,3 +1,4 @@
+import ast
 import os
 import subprocess
 from pathlib import Path
@@ -12,8 +13,10 @@ from imbue.imbue_common.ratchet_testing.core import RatchetMatchChunk
 from imbue.imbue_common.ratchet_testing.core import RegexPattern
 from imbue.imbue_common.ratchet_testing.core import _get_all_files_with_extension
 from imbue.imbue_common.ratchet_testing.core import _get_non_ignored_files_with_extension
+from imbue.imbue_common.ratchet_testing.core import _parse_file_ast
 from imbue.imbue_common.ratchet_testing.core import _read_file_contents
 from imbue.imbue_common.ratchet_testing.core import format_ratchet_failure_message
+from imbue.imbue_common.ratchet_testing.core import get_ast_nodes_of_type
 from imbue.imbue_common.ratchet_testing.core import get_ratchet_failures
 
 
@@ -245,6 +248,26 @@ def test_read_file_contents_caches_results(tmp_path: Path) -> None:
 
     assert content1 == "original content"
     assert content1 is content2
+
+
+def test_parse_file_ast_returns_none_for_unparseable_file(tmp_path: Path) -> None:
+    """An unparseable file degrades to None (and empty AST node lookups) rather than raising,
+    so a single broken file cannot crash a ratchet scan."""
+    bad_file = tmp_path / "broken.py"
+    bad_file.write_text("def foo(:\n    pass\n")
+
+    assert _parse_file_ast(bad_file) is None
+    # AST-based ratchet lookups degrade to an empty list instead of raising.
+    assert get_ast_nodes_of_type(bad_file, ast.FunctionDef) == []
+
+
+def test_parse_file_ast_parses_valid_file(tmp_path: Path) -> None:
+    good_file = tmp_path / "good.py"
+    good_file.write_text("def foo():\n    pass\n")
+
+    tree = _parse_file_ast(good_file)
+    assert tree is not None
+    assert [n.name for n in get_ast_nodes_of_type(good_file, ast.FunctionDef)] == ["foo"]
 
 
 def test_get_ratchet_failures_finds_matches_in_git_repo(git_repo: Path) -> None:
