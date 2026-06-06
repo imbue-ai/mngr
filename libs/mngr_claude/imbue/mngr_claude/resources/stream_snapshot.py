@@ -655,10 +655,11 @@ class StreamBufferState:
         ``has_marker`` is True when the captured region was anchored at the
         assistant ``●`` marker (the start of the message is visible), and False
         when it is a marker-less continuation (the message has scrolled the marker
-        off the top, so only its tail is visible). A marker-less region is only
-        ever appended when it overlaps the accumulated body; it never resets the
-        body, because without the marker we cannot be sure unrelated content is a
-        new message.
+        off the top, so only its tail is visible). A marker-less region is aligned
+        onto the accumulated body by overlap (tolerating a few re-wrapped volatile
+        trailing rows) and replaces the body from the alignment point; it never
+        resets or shrinks the body, nor starts one from nothing, because without
+        the marker we cannot be sure unrelated content is a new message.
         """
         self._merge_prose(list(conversion.lines), has_marker)
 
