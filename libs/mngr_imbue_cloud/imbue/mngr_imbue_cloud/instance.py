@@ -1615,7 +1615,10 @@ class ImbueCloudProvider(BaseProviderInstance):
             host_id=lease_result.host_id,
             host_name=lease_result.host_name,
             attributes=lease_result.attributes,
-            leased_at="",
+            # A fresh LeaseResult carries no timestamp; None means "not known
+            # yet" rather than smuggling an invalid empty string through a field
+            # typed as a real ISO-8601 timestamp.
+            leased_at=None,
         )
 
     def _resolve_container_id_on_outer(self, outer: OuterHostInterface, host_id: HostId) -> str | None:
