@@ -33,7 +33,11 @@ Flow:
   7. Destroy W2 via /api/destroy-agent, poll until done, assert home
      drops W2 tile; send a unique-token follow-up to W1 (bink), verify
      reply (screenshots 18-22)
-  8. Teardown: revert /etc/hosts, clear latchkey, kill mock + socat
+  8. mngr CLI from host: run `mngr list --format json` against the
+     bundled host_dir, assert W1's host is listed AND W2's is gone
+     -- cross-checks the destroy lifecycle from a different angle
+     than the UI's home-page tile state.
+  9. Teardown: revert /etc/hosts, clear latchkey, kill mock + socat
 
 Takes a `screencapture -x` whole-desktop shot at every milestone.
 Files land in /tmp/launch-to-msg-screenshots/ and the workflow
@@ -1220,6 +1224,42 @@ async def amain() -> int:
                 snap_reply="22-w1-after-w2-destroy-reply",
                 label="w1-after-w2-destroy",
             )
+
+            # 23. Cross-check with mngr CLI from the host: confirms W1 is in
+            # mngr's canonical agent set and W2 is gone. A regression where
+            # /api/destroy-agent returns 200 but mngr's host_dir still
+            # records the agent would slip past the UI-driven home-page
+            # tile check above (which scrapes the same discovery layer the
+            # destroy handler does).
+            logger.info("=== mngr CLI list: cross-check W1 present, W2 removed ===")
+            bundled_mngr = MINDS_HOME / ".venv" / "bin" / "mngr"
+            if bundled_mngr.exists():
+                mngr_env = {**os.environ, "MNGR_HOST_DIR": str(MINDS_HOME / "mngr")}
+                cli_result = subprocess.run(
+                    [str(bundled_mngr), "list", "--format", "json", "--quiet"],
+                    capture_output=True,
+                    text=True,
+                    env=mngr_env,
+                    timeout=30,
+                )
+                # Stash for post-mortem regardless of pass/fail.
+                (SCREENSHOT_DIR / "mngr-list-output.json").write_text(cli_result.stdout or "")
+                if cli_result.returncode != 0:
+                    raise E2EFailure(f"[mngr-list] returned {cli_result.returncode}: stderr={cli_result.stderr!r}")
+                try:
+                    listing = json.loads(cli_result.stdout)
+                except json.JSONDecodeError as exc:
+                    raise E2EFailure(f"[mngr-list] non-JSON output: {exc}\n{cli_result.stdout[:500]}") from exc
+                agents = listing.get("agents", []) if isinstance(listing, dict) else []
+                host_names = {a.get("host", {}).get("name", "") for a in agents if isinstance(a, dict)}
+                logger.info("[mngr-list] {} agents; hosts: {}", len(agents), host_names)
+                if HOST_NAME not in host_names:
+                    raise E2EFailure(f"[mngr-list] W1 ({HOST_NAME!r}) absent from {host_names}")
+                if HOST_NAME_2 in host_names:
+                    raise E2EFailure(f"[mngr-list] W2 ({HOST_NAME_2!r}) still present after destroy: {host_names}")
+                logger.info("[mngr-list] PASS: W1 present, W2 cleanly removed from mngr")
+            else:
+                logger.warning("[mngr-list] {} not found; skipping CLI cross-check", bundled_mngr)
 
         # Persist combined per-workspace timings as one artifact JSON
         # rather than two -- one file is easier to embed in the run
