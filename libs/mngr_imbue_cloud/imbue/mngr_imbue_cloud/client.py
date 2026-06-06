@@ -378,6 +378,10 @@ class ImbueCloudConnectorClient(MutableModel):
             timeout=self.timeout_seconds,
         )
         body_json = self._check(response, ImbueCloudTunnelError)
+        # The missing-name case raises ImbueCloudTunnelError from inside
+        # _parse_tunnel_info and passes straight through; this catch handles a
+        # residual pydantic ValidationError (a ValueError) from TunnelInfo
+        # construction, mirroring _parse_connector_list's per-entry wrapping.
         try:
             return _parse_tunnel_info(body_json)
         except ValueError as exc:
@@ -414,6 +418,9 @@ class ImbueCloudConnectorClient(MutableModel):
             timeout=self.timeout_seconds,
         )
         body = self._check(response, ImbueCloudTunnelError)
+        # As in create_tunnel: the missing-name case raises a typed error that
+        # passes through; this catch handles a residual pydantic ValidationError
+        # from ServiceInfo construction.
         try:
             return _parse_service_info(body)
         except ValueError as exc:
@@ -718,9 +725,11 @@ def _parse_paid_list_entry(raw: dict[str, Any], value_key: str) -> PaidListEntry
 def _parse_tunnel_info(raw: dict[str, Any]) -> TunnelInfo:
     """Coerce a connector tunnel dict into our TunnelInfo.
 
-    Raises ``ValueError`` when ``tunnel_name`` is missing/empty: the name is a
-    URL path segment for delete/service operations, so a blank one would
-    silently target the wrong resource.
+    Raises ``ImbueCloudTunnelError`` when ``tunnel_name`` is missing/empty: the
+    name is a URL path segment for delete/service operations, so a blank one
+    would silently target the wrong resource. (In the list path the typed error
+    is the same class ``_parse_connector_list`` would re-raise, so it passes
+    straight through that helper's per-entry catch.)
     """
     services = raw.get("services") or ()
     if isinstance(services, list):
@@ -746,8 +755,9 @@ def _parse_tunnel_info(raw: dict[str, Any]) -> TunnelInfo:
 def _parse_service_info(raw: dict[str, Any]) -> ServiceInfo:
     """Coerce a connector service dict into our ServiceInfo.
 
-    Raises ``ValueError`` when ``service_name`` is missing/empty: like the
-    tunnel name, it is used as a URL path segment for remove/auth operations.
+    Raises ``ImbueCloudTunnelError`` when ``service_name`` is missing/empty:
+    like the tunnel name, it is used as a URL path segment for remove/auth
+    operations.
     """
     return ServiceInfo(
         service_name=_require_str_field(raw, "service_name", "name", "service", ImbueCloudTunnelError),
