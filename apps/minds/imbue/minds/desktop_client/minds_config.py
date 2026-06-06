@@ -133,9 +133,19 @@ class MindsConfig(MutableModel):
         with self._lock:
             data = self._read_raw()
             value = data.get("auto_open_requests_panel")
-            if isinstance(value, bool):
-                return value
-            return True
+            # An absent key is the common case (no preference set yet): use the
+            # default. But a present-but-wrong-typed value (e.g. a hand-edit of
+            # auto_open_requests_panel = "yes") is config corruption -- raise
+            # rather than silently coerce it to the default, mirroring the
+            # no-silent-fallback contract _read_raw documents above.
+            if value is None:
+                return True
+            if not isinstance(value, bool):
+                raise MindsConfigError(
+                    f"auto_open_requests_panel in {self._config_path} must be a boolean, "
+                    f"got {type(value).__name__}: {value!r}"
+                )
+            return value
 
     def set_auto_open_requests_panel(self, enabled: bool) -> None:
         """Set whether the inbox should auto-open on new pending requests.
