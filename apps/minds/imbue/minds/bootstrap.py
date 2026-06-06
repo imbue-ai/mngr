@@ -612,7 +612,20 @@ def is_imbue_cloud_provider_enabled_for_account(email: str, *, root_name: str | 
         provider_name = imbue_cloud_provider_name_for_account(email)
     except BootstrapError:
         return True
-    parsed = tomllib.loads(settings_path.read_text())
+    # Every other branch here biases toward "enabled" so the UI never wrongly
+    # shows "Signed out". A read/parse failure (e.g. a hand-corrupted
+    # settings.toml) is no different -- fall back to the same default rather
+    # than letting a raw OSError/TOMLDecodeError crash the chip-rendering path.
+    try:
+        raw_settings = settings_path.read_text()
+    except OSError as e:
+        logger.warning("Could not read mngr settings {} for provider-enabled check: {}", settings_path, e)
+        return True
+    try:
+        parsed = tomllib.loads(raw_settings)
+    except tomllib.TOMLDecodeError as e:
+        logger.warning("Malformed mngr settings {} for provider-enabled check: {}", settings_path, e)
+        return True
     providers = parsed.get("providers")
     if not isinstance(providers, dict):
         return True
