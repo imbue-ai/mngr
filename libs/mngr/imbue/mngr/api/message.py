@@ -98,11 +98,20 @@ def send_message_to_agents(
     ) as executor:
         for host_ref, agent_refs in agents_by_host.items():
             provider = provider_map.get(host_ref.provider_name)
-            if not provider:
+            if provider is None:
                 exception = ProviderInstanceNotFoundError(host_ref.provider_name)
                 if error_behavior == ErrorBehavior.ABORT:
                     raise exception
                 logger.warning("Provider not found: {}", host_ref.provider_name)
+                # Both agents_by_host and providers come from the same discovery call, so a
+                # missing provider is an internal inconsistency. Mirror the offline-host path
+                # and record each affected agent as failed rather than silently dropping them
+                # (which would leave them in neither successful_agents nor failed_agents).
+                for agent_ref in agent_refs:
+                    with result_lock:
+                        result.failed_agents.append((str(agent_ref.agent_name), str(exception)))
+                    if on_error:
+                        on_error(str(agent_ref.agent_name), str(exception))
                 continue
 
             futures.append(
