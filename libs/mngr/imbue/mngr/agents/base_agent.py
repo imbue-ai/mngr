@@ -526,11 +526,20 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         plugin_dir = self._get_agent_dir() / "plugin" / plugin_name
         try:
             result = self.host.execute_idempotent_command(f"ls -1 '{plugin_dir}'", timeout_seconds=5.0)
-            if result.success:
-                return [f.strip() for f in result.stdout.split("\n") if f.strip()]
+        except (OSError, HostConnectionError) as e:
+            # A failed listing is not the same as an empty directory: the host
+            # was unreachable, so we genuinely do not know which files exist.
+            # Log loudly rather than masking the failure as "no files reported".
+            logger.warning("Failed to list plugin files for agent {} (plugin {}): {}", self.name, plugin_name, e)
             return []
-        except (OSError, HostConnectionError):
-            return []
+        if result.success:
+            return [f.strip() for f in result.stdout.split("\n") if f.strip()]
+        # A non-zero `ls` here is overwhelmingly the routine case where the
+        # plugin directory has not been created yet (the plugin reported
+        # nothing), which is a legitimate empty result; surface anything else
+        # (e.g. a permissions error) at debug since the empty-dir case is normal.
+        logger.debug("ls of plugin dir {} returned non-zero: {}", plugin_dir, result.stderr.strip())
+        return []
 
     # =========================================================================
     # Environment
