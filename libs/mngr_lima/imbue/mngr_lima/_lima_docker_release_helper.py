@@ -48,7 +48,7 @@ def _build_provider(profile_dir: Path) -> tuple[LimaProviderInstance, Concurrenc
         host_data_disk_size="3GiB",
         default_image=_BASE_IMAGE,
         default_idle_timeout=3600,
-        # Cold boot of an Ubuntu cloud image, even with KVM, plus an in-VM
+        # Cold boot of a Debian cloud image, even with KVM, plus an in-VM
         # apt install of Docker, can take a few minutes.
         vm_start_timeout_seconds=1500.0,
         docker_install_timeout=900.0,
