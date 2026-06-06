@@ -268,6 +268,9 @@ def derive_offline_host_state(
         # None means the host crashed (no controlled shutdown recorded).
         if stop_reason is None:
             return HostState.CRASHED
+        # stop_reason holds a HostState member name (PAUSED/STOPPED/DESTROYED -- see
+        # CertifiedHostData.stop_reason). HostState(...) validates it, raising ValueError
+        # on any string that is not a HostState member rather than silently inventing a state.
         return HostState(stop_reason)
 
     # Provider does not support shutdown (e.g. Modal). stop_reason may be
@@ -281,6 +284,7 @@ def derive_offline_host_state(
     # Has snapshots -- use stop_reason if set, otherwise CRASHED.
     if stop_reason is None:
         return HostState.CRASHED
+    # See note above: stop_reason is a HostState member name; HostState(...) validates it.
     return HostState(stop_reason)
 
 
