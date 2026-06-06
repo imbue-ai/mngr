@@ -36,17 +36,24 @@ class _CompletionContext(NamedTuple):
 
 
 def _read_cache() -> CompletionCacheData:
-    """Read the command completions cache file. Returns defaults on any error."""
+    """Read the command completions cache file. Returns defaults on any error.
+
+    This is a deliberate fail-soft: a TAB press must never crash the shell, so a
+    missing/corrupt/stale cache yields empty completions rather than raising. Do
+    not "fix" this into a raise.
+    """
+    path = get_completion_cache_dir() / COMPLETION_CACHE_FILENAME
+    if not path.is_file():
+        return CompletionCacheData()
     try:
-        path = get_completion_cache_dir() / COMPLETION_CACHE_FILENAME
-        if not path.is_file():
-            return CompletionCacheData()
         data = json.loads(path.read_text())
-        if isinstance(data, dict):
-            return CompletionCacheData(**{k: v for k, v in data.items() if k in CompletionCacheData._fields})
     except (json.JSONDecodeError, OSError):
-        pass
-    return CompletionCacheData()
+        return CompletionCacheData()
+    if not isinstance(data, dict):
+        # A non-dict JSON value (e.g. a bare list/number) is a corrupt cache;
+        # treat it as empty rather than letting the **-unpack below explode.
+        return CompletionCacheData()
+    return CompletionCacheData(**{k: v for k, v in data.items() if k in CompletionCacheData._fields})
 
 
 def _read_host_names() -> list[str]:
