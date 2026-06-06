@@ -5,8 +5,13 @@ from inline_snapshot import snapshot
 
 from imbue.imbue_common.ratchet_testing import standard_ratchet_checks as rc
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BARE_PRINT
+from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_INIT_IN_NON_EXCEPTION_CLASSES
+from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_SILENT_DECODE_ERROR_CATCH
+from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_TIME_SLEEP
 from imbue.imbue_common.ratchet_testing.common_ratchets import check_ratchet_rule
 from imbue.imbue_common.ratchet_testing.ratchets import TEST_FILE_PATTERNS
+from imbue.imbue_common.ratchet_testing.ratchets import find_init_methods_in_non_exception_classes
+from imbue.imbue_common.ratchet_testing.ratchets import find_silent_decode_error_catches
 
 _DIR = Path(__file__).parent.parent.parent
 
@@ -38,7 +43,11 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    rc.check_time_sleep(_DIR, snapshot(0))
+    # Standalone resource scripts are long-running poll-loop daemons that must
+    # sleep between polls and cannot use mngr's wait helpers.
+    excluded = _RATCHET_SELF_EXCLUSION + _STANDALONE_RESOURCE_SCRIPTS
+    chunks = check_ratchet_rule(PREVENT_TIME_SLEEP, _DIR, excluded)
+    assert len(chunks) <= snapshot(0), PREVENT_TIME_SLEEP.format_failure(chunks)
 
 
 def test_prevent_global_keyword() -> None:
@@ -71,7 +80,10 @@ def test_prevent_builtin_exception_raises() -> None:
 
 
 def test_prevent_silent_decode_error_catches() -> None:
-    rc.check_silent_decode_error_catches(_DIR, snapshot(1))
+    # Standalone resource scripts (stdlib only) cannot use loguru; they skip
+    # malformed JSONL transcript lines silently rather than spamming stderr.
+    chunks = find_silent_decode_error_catches(_DIR, TEST_FILE_PATTERNS + _STANDALONE_RESOURCE_SCRIPTS)
+    assert len(chunks) <= snapshot(1), PREVENT_SILENT_DECODE_ERROR_CATCH.format_failure(chunks)
 
 
 # --- Import style ---
@@ -266,7 +278,10 @@ def test_prevent_underscore_imports() -> None:
 
 
 def test_prevent_init_methods_in_non_exception_classes() -> None:
-    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(0))
+    # Standalone resource scripts (stdlib only) cannot use pydantic models, so
+    # their small state classes legitimately define __init__.
+    chunks = find_init_methods_in_non_exception_classes(_DIR, _STANDALONE_RESOURCE_SCRIPTS)
+    assert len(chunks) <= snapshot(0), PREVENT_INIT_IN_NON_EXCEPTION_CLASSES.format_failure(chunks)
 
 
 def test_prevent_cast_usage() -> None:
