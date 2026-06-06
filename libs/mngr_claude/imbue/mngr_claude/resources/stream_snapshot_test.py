@@ -16,7 +16,7 @@ def _render_full(fixture_name: str, ingest_count: int) -> str:
     state = stream_snapshot.StreamBufferState()
     conversion = stream_snapshot.convert_block_to_markdown(block)
     for _ in range(ingest_count):
-        state.ingest_block(conversion)
+        state.ingest_block(conversion, has_marker=True)
     return stream_snapshot.format_buffer("uuid-test", state.body_lines)
 
 
@@ -87,6 +87,38 @@ def test_convert_table_to_pipes() -> None:
     ]
 
 
+def test_extract_message_region_marker_anchored() -> None:
+    pane = "\x1b[38;5;231m\x1b[49m●\x1b[39m First line.\n  Second line.\n\n────────\n❯ "
+    result = stream_snapshot.extract_message_region(pane)
+    assert result is not None
+    lines, has_marker = result
+    assert has_marker is True
+    assert [stream_snapshot.strip_ansi(line) for line in lines] == ["First line.", "Second line."]
+
+
+def test_extract_message_region_markerless_tail() -> None:
+    # A scrolled message: no marker visible, just the indented tail above the footer.
+    pane = (
+        "  40. the tunnel led down.\n"
+        "  41. cold air poured out.\n"
+        "  42. they walked in silence.\n"
+        "\n"
+        "✻ Thinking…\n"
+        "────────\n"
+        "❯ \n"
+        "  [12:00 user@host /x] branch\n"
+    )
+    result = stream_snapshot.extract_message_region(pane)
+    assert result is not None
+    lines, has_marker = result
+    assert has_marker is False
+    assert [stream_snapshot.strip_ansi(line) for line in lines] == [
+        "40. the tunnel led down.",
+        "41. cold air poured out.",
+        "42. they walked in silence.",
+    ]
+
+
 def test_compute_overlap() -> None:
     assert stream_snapshot.compute_overlap(["a", "b", "c"], ["b", "c", "d"]) == 2
     assert stream_snapshot.compute_overlap(["a", "b"], ["a", "b", "c", "d"]) == 2
@@ -96,15 +128,31 @@ def test_compute_overlap() -> None:
 def test_stitch_appends_revealed_tail() -> None:
     state = stream_snapshot.StreamBufferState()
     state._prose_lines = ["a", "b", "c"]
-    state._merge_prose(["b", "c", "d", "e"])
+    state._merge_prose(["b", "c", "d", "e"], has_marker=False)
     assert state.body_lines == ["a", "b", "c", "d", "e"]
 
 
-def test_stitch_no_overlap_resets_to_new_message() -> None:
+def test_stitch_marker_no_overlap_resets_to_new_message() -> None:
     state = stream_snapshot.StreamBufferState()
     state._prose_lines = ["old", "message"]
-    state._merge_prose(["brand", "new"])
+    state._merge_prose(["brand", "new"], has_marker=True)
     assert state.body_lines == ["brand", "new"]
+
+
+def test_stitch_markerless_no_overlap_keeps_body() -> None:
+    # A marker-less region with no overlap is lost continuity (or unrelated
+    # content); it must NOT reset the accumulated body.
+    state = stream_snapshot.StreamBufferState()
+    state._prose_lines = ["old", "message"]
+    state._merge_prose(["unrelated", "tail"], has_marker=False)
+    assert state.body_lines == ["old", "message"]
+
+
+def test_stitch_markerless_does_not_start_empty_body() -> None:
+    # Without a marker and with nothing to overlap, there is no anchor to start.
+    state = stream_snapshot.StreamBufferState()
+    state._merge_prose(["some", "tail"], has_marker=False)
+    assert state.body_lines == []
 
 
 def test_stitch_ignores_stale_shorter_prefix_snapshot() -> None:
@@ -112,7 +160,7 @@ def test_stitch_ignores_stale_shorter_prefix_snapshot() -> None:
     # not shrink the body (which would cause downstream consumers to re-emit).
     state = stream_snapshot.StreamBufferState()
     state._prose_lines = ["a", "b", "c", "d"]
-    state._merge_prose(["a", "b"])
+    state._merge_prose(["a", "b"], has_marker=True)
     assert state.body_lines == ["a", "b", "c", "d"]
 
 
@@ -129,15 +177,15 @@ def test_table_render_is_monotonic_as_rows_arrive() -> None:
     )
     state = stream_snapshot.StreamBufferState()
     # First sighting of the table is deferred.
-    state.ingest_block(header_only)
+    state.ingest_block(header_only, has_marker=True)
     assert "| A | B |" not in "\n".join(state.body_lines)
     # Stable across two polls: the header-only table resolves.
-    state.ingest_block(header_only)
+    state.ingest_block(header_only, has_marker=True)
     after_header = state.body_lines
     assert "| A | B |" in "\n".join(after_header)
     # The table grew (new signature), so it defers again, then resolves when stable.
-    state.ingest_block(full)
-    state.ingest_block(full)
+    state.ingest_block(full, has_marker=True)
+    state.ingest_block(full, has_marker=True)
     after_full = state.body_lines
     # Body grew monotonically: the header-only render is a prefix of the full render.
     assert after_full[: len(after_header)] == after_header
@@ -180,13 +228,13 @@ def test_table_deferred_until_stable_across_polls() -> None:
     assert conversion.pending_table is not None
 
     state = stream_snapshot.StreamBufferState()
-    state.ingest_block(conversion)
+    state.ingest_block(conversion, has_marker=True)
     first = stream_snapshot.format_buffer("id", state.body_lines)
     # First poll: the (possibly still-growing) table is withheld.
     assert "| Name |" not in first
     assert "Call `foo()` inline." in first
 
-    state.ingest_block(conversion)
+    state.ingest_block(conversion, has_marker=True)
     second = stream_snapshot.format_buffer("id", state.body_lines)
     # Second identical poll: the table is stable and is appended.
     assert "| Name | Type | Value |" in second
@@ -202,7 +250,7 @@ def test_streaming_sequence_appends_without_reset() -> None:
     ):
         block = stream_snapshot.extract_latest_assistant_block(_read_fixture(fixture))
         assert block is not None
-        state.ingest_block(stream_snapshot.convert_block_to_markdown(block))
+        state.ingest_block(stream_snapshot.convert_block_to_markdown(block), has_marker=True)
     rendered = stream_snapshot.format_buffer("final-id", state.body_lines)
     # The heading from the first snapshot survives all the way through.
     assert rendered.count("**Markdown Demo**") == 1

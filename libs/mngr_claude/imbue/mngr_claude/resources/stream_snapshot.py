@@ -236,12 +236,10 @@ def _strip_marker_prefix(line: str) -> str:
     return "".join(result)
 
 
-def extract_latest_assistant_block(pane_text: str) -> list[str] | None:
-    """Extract the most recent assistant-text block from a captured pane.
+def _collect_region_lines(lines: list[str], start_index: int, strip_first_marker: bool) -> list[str]:
+    """Collect a de-indented content region starting at ``start_index``.
 
-    Returns the block's logical lines (ANSI preserved, de-indented), or None if
-    no assistant block is present. The block starts at the last achromatic marker
-    line and runs until the end of the message, which is detected by any of:
+    The region runs until the end of the message, detected by any of:
 
     - a run of two or more consecutive blank lines (the TUI pads the viewport
       with blank rows below the message before the footer; the message itself
@@ -250,47 +248,85 @@ def extract_latest_assistant_block(pane_text: str) -> list[str] | None:
     - a non-empty line that is not two-space indented (a column-0 footer such as
       the input-box border).
 
-    Detecting the end via the blank-line run is what keeps footer/status/tmux
-    overlay lines below the viewport gap (which are themselves indented and would
-    otherwise look like continuation lines) out of the captured message.
+    ``strip_first_marker`` controls whether the first line is treated as a marker
+    line (strip the ``●`` prefix) or a plain continuation line (de-indent).
     """
-    lines = pane_text.split("\n")
-
-    # Find the last assistant marker line.
-    marker_line_index: int | None = None
-    for index in range(len(lines) - 1, -1, -1):
-        if _line_is_any_marker(lines[index]) and _marker_prefix_is_assistant(lines[index]):
-            marker_line_index = index
-            break
-    if marker_line_index is None:
-        return None
-
-    block: list[str] = [_strip_marker_prefix(lines[marker_line_index])]
+    if strip_first_marker:
+        first = _strip_marker_prefix(lines[start_index])
+    else:
+        first = _deindent_continuation(lines[start_index])
+    region: list[str] = [first]
     consecutive_blanks = 0
-    for index in range(marker_line_index + 1, len(lines)):
+    for index in range(start_index + 1, len(lines)):
         line = lines[index]
         stripped = strip_ansi(line)
         if stripped.strip() == "":
             consecutive_blanks += 1
-            # Two blank lines in a row mark the gap between the message and the
-            # viewport padding / footer below it: the message has ended.
             if consecutive_blanks >= 2:
                 break
-            block.append("")
+            region.append("")
             continue
         consecutive_blanks = 0
-        # A new marker line (e.g. the next tool call or status) ends the block.
         if _line_is_any_marker(line):
             break
-        # A non-indented, non-empty line is a footer and ends the block.
         if not stripped.startswith("  "):
             break
-        block.append(_deindent_continuation(line))
+        region.append(_deindent_continuation(line))
 
-    # Trim trailing blank lines.
-    while block and block[-1] == "":
-        block.pop()
-    return block
+    while region and region[-1] == "":
+        region.pop()
+    return region
+
+
+def extract_message_region(pane_text: str) -> tuple[list[str], bool] | None:
+    """Extract the current assistant message region from a captured pane.
+
+    Returns ``(de_indented_lines, has_marker)`` or None if no plausible message
+    region is present. ``has_marker`` is True when the region is anchored at the
+    assistant ``●`` marker (the message start is visible); False when only the
+    message tail is visible (a long message has scrolled the marker off the top),
+    in which case the topmost two-space-indented content region is returned for
+    overlap-stitching against the accumulated body.
+
+    Claude's TUI redraws within the viewport rather than scrolling content into
+    tmux's scrollback, so scrolled-off lines cannot be recovered by capturing
+    more scrollback -- the marker-less continuation path is what allows streaming
+    to continue past the point where the marker scrolls off.
+    """
+    lines = pane_text.split("\n")
+
+    # Prefer the marker-anchored region: find the last assistant marker line.
+    for index in range(len(lines) - 1, -1, -1):
+        if _line_is_any_marker(lines[index]) and _marker_prefix_is_assistant(lines[index]):
+            return _collect_region_lines(lines, index, strip_first_marker=True), True
+
+    # No marker visible: take the topmost two-space-indented content region (the
+    # scrolled message tail). Stop scanning at any marker line -- content below a
+    # (tool-call) marker is not assistant prose.
+    for index, line in enumerate(lines):
+        stripped = strip_ansi(line)
+        if stripped.strip() == "":
+            continue
+        if _line_is_any_marker(line):
+            break
+        if stripped.startswith("  "):
+            region = _collect_region_lines(lines, index, strip_first_marker=False)
+            return (region, False) if region else None
+        break
+    return None
+
+
+def extract_latest_assistant_block(pane_text: str) -> list[str] | None:
+    """Return the marker-anchored assistant block, or None if no marker is visible.
+
+    Thin wrapper over :func:`extract_message_region` that yields only the
+    marker-anchored block (used by tests and callers that require the message
+    start to be present).
+    """
+    result = extract_message_region(pane_text)
+    if result is None or not result[1]:
+        return None
+    return result[0]
 
 
 # =============================================================================
@@ -612,9 +648,18 @@ class StreamBufferState:
         self._pending_table_signature = None
         self._resolved_table_lines = []
 
-    def ingest_block(self, conversion: BlockConversion) -> None:
-        """Merge a converted block into the body, handling table deferral and resets."""
-        self._merge_prose(list(conversion.lines))
+    def ingest_block(self, conversion: BlockConversion, has_marker: bool) -> None:
+        """Merge a converted block into the body, handling table deferral and resets.
+
+        ``has_marker`` is True when the captured region was anchored at the
+        assistant ``●`` marker (the start of the message is visible), and False
+        when it is a marker-less continuation (the message has scrolled the marker
+        off the top, so only its tail is visible). A marker-less region is only
+        ever appended when it overlaps the accumulated body; it never resets the
+        body, because without the marker we cannot be sure unrelated content is a
+        new message.
+        """
+        self._merge_prose(list(conversion.lines), has_marker)
 
         # The table is kept out of the prose body until its raw form is stable
         # across two polls, then rendered. Keeping the last render while it is
@@ -627,22 +672,28 @@ class StreamBufferState:
         else:
             self._pending_table_signature = list(conversion.pending_table)
 
-    def _merge_prose(self, incoming: list[str]) -> None:
+    def _merge_prose(self, incoming: list[str], has_marker: bool) -> None:
         if not incoming:
             return
         if not self._prose_lines:
-            self._prose_lines = list(incoming)
+            # Only start accumulating from a marker-anchored region; a marker-less
+            # region with nothing to overlap against has no reliable anchor.
+            if has_marker:
+                self._prose_lines = list(incoming)
             return
         overlap = compute_overlap(self._prose_lines, incoming)
         if overlap > 0:
             self._prose_lines.extend(incoming[overlap:])
             return
         # No overlap. A stale/shorter snapshot that is a prefix of what we already
-        # have is ignored (keep the longer accumulated prose); anything else is a
-        # genuinely new message that scrolled in, so reset to it.
+        # have is ignored (keep the longer accumulated prose).
         if _is_prefix(incoming, self._prose_lines):
             return
-        self._prose_lines = list(incoming)
+        # A marker-anchored region with no overlap is a genuinely new message; a
+        # marker-less region with no overlap is lost continuity (or unrelated
+        # content) and is ignored rather than dropping/replacing the body.
+        if has_marker:
+            self._prose_lines = list(incoming)
 
 
 def format_buffer(last_complete_id: str, body_lines: list[str]) -> str:
@@ -688,54 +739,28 @@ def _read_last_complete_assistant_id(transcript_path: Path) -> str:
     return last_uuid
 
 
-# Scrollback depths (in lines, measured back from the end) to try in order when
-# capturing the pane. The first (0) is the visible pane; the rest progressively
-# reach further into the scrollback so the assistant's `●` marker can still be
-# found after a long message has scrolled it off the top. None means the full
-# scrollback ("-S -"). They are tried smallest-first so the common short-message
-# case stays cheap.
-_SCROLLBACK_DEPTHS: tuple[int | None, ...] = (0, 500, 2000, None)
+def _capture_pane(session_name: str) -> str | None:
+    """Capture the agent's visible tmux pane with ANSI codes and rejoined wrapped lines.
 
-
-def _capture_pane(session_name: str, scrollback_lines: int | None) -> str | None:
-    """Capture the agent's tmux pane with ANSI codes and rejoined wrapped lines.
-
-    ``scrollback_lines`` controls how far back into the scrollback to capture:
-    0 captures only the visible pane; a positive N captures from N lines back;
-    None captures the entire scrollback.
+    Only the visible pane is captured: Claude's TUI redraws within the viewport
+    rather than scrolling content into tmux's scrollback, so capturing scrollback
+    yields no extra message content. Continuation past the point where the marker
+    scrolls off is handled by overlap-stitching successive visible captures.
     """
     target = f"={session_name}:0"
-    command = ["tmux", "capture-pane", "-e", "-J", "-p"]
-    if scrollback_lines is None:
-        command += ["-S", "-"]
-    elif scrollback_lines > 0:
-        command += ["-S", f"-{scrollback_lines}"]
-    command += ["-t", target]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+        result = subprocess.run(
+            ["tmux", "capture-pane", "-e", "-J", "-p", "-t", target],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
     except (subprocess.SubprocessError, OSError) as exc:
         _log(f"capture-pane failed: {exc}")
         return None
     if result.returncode != 0:
         return None
     return result.stdout
-
-
-def _capture_block_with_marker(session_name: str) -> list[str] | None:
-    """Capture the pane at progressively larger scrollback until the marker is found.
-
-    Returns the extracted assistant block (from the last assistant `●` marker to
-    the end of the message), or None if no assistant marker is present even in the
-    full scrollback.
-    """
-    for scrollback in _SCROLLBACK_DEPTHS:
-        pane = _capture_pane(session_name, scrollback)
-        if pane is None:
-            continue
-        block = extract_latest_assistant_block(pane)
-        if block is not None:
-            return block
-    return None
 
 
 def _write_buffer_atomically(buffer_path: Path, contents: str) -> None:
@@ -776,15 +801,20 @@ def _run_one_poll(
         _write_buffer_atomically(buffer_path, format_buffer(last_id, state.body_lines))
         return
 
-    # Capture the message, reaching progressively further into the scrollback so
-    # the assistant marker is found even after a long message has scrolled it off.
-    block = _capture_block_with_marker(session_name)
-    if block is None:
+    pane = _capture_pane(session_name)
+    if pane is None:
+        return
+
+    # Extract the message region (marker-anchored when the start is visible, or
+    # the scrolled tail otherwise) and stitch it onto the accumulated body.
+    region_result = extract_message_region(pane)
+    if region_result is None:
         _write_buffer_atomically(buffer_path, format_buffer(last_id, state.body_lines))
         return
 
-    conversion = convert_block_to_markdown(block)
-    state.ingest_block(conversion)
+    region_lines, has_marker = region_result
+    conversion = convert_block_to_markdown(region_lines)
+    state.ingest_block(conversion, has_marker)
     _write_buffer_atomically(buffer_path, format_buffer(last_id, state.body_lines))
 
 
