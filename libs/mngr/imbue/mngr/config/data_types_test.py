@@ -940,14 +940,15 @@ def test_provider_instance_config_merge_overrides_destroyed_host_persisted_secon
     assert merged.destroyed_host_persisted_seconds == 7200.0
 
 
-def test_provider_instance_config_merge_keeps_base_when_override_is_none() -> None:
+def test_provider_instance_config_merge_keeps_base_when_override_unset() -> None:
+    # An override that does not set the field (absent from model_fields_set, as a
+    # real config layer that omits the key is parsed) leaves the base value intact.
     base = ProviderInstanceConfig(
         backend=ProviderBackendName("local"),
         destroyed_host_persisted_seconds=3600.0,
     )
     override = ProviderInstanceConfig.model_construct(
         backend=ProviderBackendName("local"),
-        destroyed_host_persisted_seconds=None,
     )
     merged = base.merge_with(override)
     assert merged.destroyed_host_persisted_seconds == 3600.0
@@ -994,9 +995,11 @@ def test_provider_instance_config_merge_overrides_min_online_host_age_seconds() 
     assert merged.min_online_host_age_seconds == 600.0
 
 
-def test_provider_instance_config_merge_keeps_base_min_online_host_age_seconds_when_override_none() -> None:
+def test_provider_instance_config_merge_keeps_base_min_online_host_age_seconds_when_override_unset() -> None:
+    # The override omits the field, so it stays out of model_fields_set and the
+    # base value is preserved (the real parse path never sets a field to None).
     base = ProviderInstanceConfig(backend=ProviderBackendName("test"), min_online_host_age_seconds=300.0)
-    override = ProviderInstanceConfig(backend=ProviderBackendName("test"), min_online_host_age_seconds=None)
+    override = ProviderInstanceConfig.model_construct(backend=ProviderBackendName("test"))
     merged = base.merge_with(override)
     assert merged.min_online_host_age_seconds == 300.0
 
