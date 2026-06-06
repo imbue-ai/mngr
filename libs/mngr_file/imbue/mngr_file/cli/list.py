@@ -130,7 +130,10 @@ def _parse_list_output_line(line: str) -> FileEntry | None:
     """Parse a single tab-separated line from the list script output."""
     parts = line.split("\t", 5)
     if len(parts) != 6:
-        logger.trace("Skipping malformed list output line: {}", line)
+        # Subprocess output corruption (truncation, an embedded tab/newline breaking the
+        # line framing). Per the style guide, corrupt subprocess output may fall back but
+        # must log at warning+ so the dropped entry is visible -- never silently swallowed.
+        logger.warning("Skipping malformed list output line ({} fields, expected 6): {}", len(parts), line)
         return None
 
     name, size_str, modified, type_char, permissions, full_path = parts
