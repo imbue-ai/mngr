@@ -260,15 +260,20 @@ def load_base_state_from_history(
     last_state_by_id: dict[str, _TrackedState] = {}
     for agent_dict in latest_agents_data:
         agent_id = agent_dict.get("id")
-        if agent_id is not None:
-            state = agent_dict.get("state")
-            host_dict = agent_dict.get("host", {})
-            host_state = host_dict.get("state") if isinstance(host_dict, dict) else None
-            if state is not None:
-                last_state_by_id[str(agent_id)] = _TrackedState(
-                    agent_state=str(state),
-                    host_state=str(host_state) if host_state is not None else None,
-                )
+        state = agent_dict.get("state")
+        # These dicts come from AGENTS_FULL_STATE events this module wrote from AgentDetails,
+        # where id and state are required, non-optional fields. A missing key therefore means
+        # structurally corrupt history, not a benign case -- warn rather than silently dropping
+        # the record (which would leave the agent untracked for state-change detection).
+        if agent_id is None or state is None:
+            logger.warning("Skipping observe-history agent record missing required id/state: {}", agent_dict)
+            continue
+        host_dict = agent_dict.get("host", {})
+        host_state = host_dict.get("state") if isinstance(host_dict, dict) else None
+        last_state_by_id[str(agent_id)] = _TrackedState(
+            agent_state=str(state),
+            host_state=str(host_state) if host_state is not None else None,
+        )
 
     return last_state_by_id
 
