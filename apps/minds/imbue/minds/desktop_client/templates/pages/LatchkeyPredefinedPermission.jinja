@@ -36,7 +36,7 @@
         <p class="text-sm text-zinc-700 mb-3">
           Approving will grant {{ ws_name or agent_id }} and its sibling agents the following permissions:
         </p>
-        <div class="bg-white border border-zinc-200 rounded-xl p-4 space-y-3">
+        <Card extra="space-y-3">
           {% for permission in permission_schemas %}
             {% if permission in checked_permissions %}
               <div>
@@ -54,7 +54,7 @@
                 </div>
                 {% set permission_description = description_by_permission_name.get(permission) %}
                 {% if permission_description %}
-                  <span class="block text-sm text-zinc-600 mt-0.5 ml-[26px]">{{ permission_description }}</span>
+                  <span class="block text-sm text-zinc-700 mt-0.5 ml-[26px]">{{ permission_description }}</span>
                 {% endif %}
               </div>
             {% endif %}
@@ -63,24 +63,24 @@
              affordance rather than another permission row. A faint top
              border separates it from the permission list above. #}
           <div class="flex justify-end border-t border-zinc-100 pt-2">
-            <button type="button" id="permissions-adjust-link"
+            <Button variant="ghost" id="permissions-adjust-link"
                     onclick="showPermissionEditor()"
-                    class="text-xs text-blue-600 hover:underline cursor-pointer bg-transparent border-0 p-0">
+                    extra="!p-0 !bg-transparent !text-xs !font-normal !text-blue-600 hover:!bg-transparent hover:underline hover:!text-blue-700">
               Adjust
-            </button>
+            </Button>
           </div>
-        </div>
+        </Card>
       {% else %}
         <Notice variant="warn">
           The agent did not request any specific permissions. Click
           <span class="font-medium">Adjust</span> below to choose what to grant.
         </Notice>
         <div class="flex justify-end mt-3">
-          <button type="button" id="permissions-adjust-link"
+          <Button variant="ghost" id="permissions-adjust-link"
                   onclick="showPermissionEditor()"
-                  class="text-xs text-blue-600 hover:underline cursor-pointer bg-transparent border-0 p-0">
+                  extra="!p-0 !bg-transparent !text-xs !font-normal !text-blue-600 hover:!bg-transparent hover:underline hover:!text-blue-700">
             Adjust
-          </button>
+          </Button>
         </div>
       {% endif %}
     </div>
@@ -90,7 +90,7 @@
        generic submit handler can read the checked set. #}
     <div id="permissions-editor-view" class="hidden">
       <h2 class="text-sm font-medium text-zinc-700 mb-2">Permissions to grant:</h2>
-      <div class="bg-white border border-zinc-200 rounded-xl p-4 space-y-3">
+      <Card extra="space-y-3">
         {% for permission in permission_schemas %}
           <label class="flex items-start gap-2.5 cursor-pointer">
             <input type="checkbox" name="permissions" value="{{ permission }}"
@@ -100,12 +100,12 @@
               <code class="text-sm font-mono text-zinc-900">{{ permission }}</code>
               {% set permission_description = description_by_permission_name.get(permission) %}
               {% if permission_description %}
-                <span class="block text-sm text-zinc-600 mt-0.5">{{ permission_description }}</span>
+                <span class="block text-sm text-zinc-700 mt-0.5">{{ permission_description }}</span>
               {% endif %}
             </span>
           </label>
         {% endfor %}
-      </div>
+      </Card>
     </div>
   </PermissionsForm>
 

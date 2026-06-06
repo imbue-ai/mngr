@@ -17,7 +17,7 @@
     {% if accounts %}
       {% for acct in accounts %}
         {% set acct_enabled = enabled_by_user_id.get(acct.user_id | string, True) %}
-        <CardRow>
+        <Card layout="row-spread">
           <div>
             <div class="font-medium">
               {{ acct.email }}
@@ -46,7 +46,7 @@
               <ButtonSubmit variant="danger">Log out</ButtonSubmit>
             </form>
           </div>
-        </CardRow>
+        </Card>
       {% endfor %}
     {% else %}
       <p class="text-zinc-500">No accounts logged in.</p>
@@ -55,6 +55,6 @@
     <div class="mt-4">
       <ButtonLink href="/auth/login" variant="primary">Add account</ButtonLink>
     </div>
-    <div class="mt-4"><a href="/" class="text-blue-600 hover:underline">&larr; Back to projects</a></div>
+    <div class="mt-4"><Link href="/">&larr; Back to projects</Link></div>
   </PageContainer>
 </Base>

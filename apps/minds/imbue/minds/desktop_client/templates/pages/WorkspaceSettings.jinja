@@ -70,7 +70,7 @@
       <div id="account-section">
       {% if current_account %}
         <p>Associated with: <strong>{{ current_account.email }}</strong></p>
-        <Notice variant="warn" extra="my-3">
+        <Notice variant="warn">
           Disassociating will remove all sharing (tunnels) for this workspace.
           You will need to set up sharing again after re-associating.
         </Notice>
@@ -83,10 +83,10 @@
 
       <SectionHeader divider>Sharing</SectionHeader>
       {% for server in servers %}
-        <CardRow>
+        <Card layout="row-spread">
           <span class="font-medium">{{ server }}</span>
           <ButtonLink href={{ "/sharing/" ~ agent_id ~ "/" ~ server }} variant="secondary">Manage sharing</ButtonLink>
-        </CardRow>
+        </Card>
       {% else %}
         <p class="text-zinc-500">No servers discovered for this workspace.</p>
       {% endfor %}
@@ -107,7 +107,7 @@
 
       <Modal id="destroy-dialog">
         <h2 class="text-lg font-semibold text-zinc-900 mb-3">Destroy project?</h2>
-        <p class="text-sm text-zinc-600 mb-4">This will permanently destroy <strong>{{ ws_name }}</strong> and all its data. This action cannot be undone.</p>
+        <p class="text-sm text-zinc-700 mb-4">This will permanently destroy <strong>{{ ws_name }}</strong> and all its data. This action cannot be undone.</p>
         <div class="flex justify-end gap-3">
           <Button variant="secondary" id="destroy-cancel-btn">Cancel</Button>
           <Button variant="danger" id="destroy-confirm-btn">Destroy</Button>
@@ -115,7 +115,7 @@
       </Modal>
 
       <div class="mt-8">
-        <a href="/" class="text-blue-600 hover:underline">&larr; Back to projects</a>
+        <Link href="/">&larr; Back to projects</Link>
       </div>
     </div>
   </PageContainer>

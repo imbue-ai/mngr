@@ -17,9 +17,9 @@
       scripts={{ _scripts }}>
   <PageContainer>
     <h1 id="page-heading" class="text-2xl font-semibold text-zinc-900 leading-tight">
-      Share <code class="bg-zinc-100 rounded px-1.5 py-0.5 font-mono text-[0.95em]">{{ service_name }}</code>
-      in <a href="{{ mngr_forward_origin }}/goto/{{ agent_id }}/" class="text-blue-600 hover:underline">{{ ws_name or agent_id }}</a>
-      {% if account_email %}(<a href="/accounts" class="text-blue-600 hover:underline">{{ account_email }}</a>){% endif %}?
+      Share <code class="code-pill">{{ service_name }}</code>
+      in <Link href="{{ mngr_forward_origin }}/goto/{{ agent_id }}/">{{ ws_name or agent_id }}</Link>
+      {% if account_email %}(<Link href="/accounts">{{ account_email }}</Link>){% endif %}?
     </h1>
 
     {% if not has_account %}
@@ -50,12 +50,11 @@
           </div>
         </div>
 
-        <h2 class="text-sm font-medium text-zinc-600 mt-6 mb-3">Access List</h2>
+        <h2 class="text-sm font-medium text-zinc-500 mt-6 mb-3">Access List</h2>
         <div id="email-list"></div>
         <div class="flex gap-2 items-center mt-2">
-          <input type="email" id="new-email" placeholder="Add email address"
-                 class="flex-1 px-3 py-2.5 text-sm rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15"
-                 onkeydown="if (event.key === 'Enter') { event.preventDefault(); addEmail(); }">
+          <TextInput type="email" name="new_email" id="new-email" placeholder="Add email address" extra="flex-1"
+                     onkeydown="if (event.key === 'Enter') { event.preventDefault(); addEmail(); }" />
           <Button variant="secondary" onclick="addEmail()">Add</Button>
         </div>
 
