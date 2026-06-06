@@ -540,6 +540,12 @@ class ForwardStreamManager(MutableModel):
             # envelope; the plugin doesn't consume them itself.
             return
 
+        # Every services-source event carries an explicit "type" by contract:
+        # the registering side always writes "service_registered" or
+        # "service_deregistered" (see mngr_ttyd's emitter and the hello-world
+        # example), and minds' backend_resolver defaults the same way. The
+        # default-to-registered is therefore only a belt-and-suspenders guard
+        # for a field that is, in practice, always present.
         event_type = raw.get("type", "service_registered")
         service = raw.get("service")
         if not isinstance(service, str) or not service:
