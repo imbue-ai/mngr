@@ -961,7 +961,11 @@ def _run_single_script(script: str, cg: ConcurrencyGroup, cwd: Path | None) -> t
             ["sh", "-c", script],
             cwd=cwd,
         )
-        return (script, result.returncode if result.returncode is not None else 0, result.stdout, result.stderr)
+        # A None returncode means the exit status is unknown (check() passes None
+        # through without raising). Treat unknown as failure (-1, matching the
+        # error path below), never as success: these scripts gate the command, so
+        # an unknown status must block rather than silently pass the gate.
+        return (script, result.returncode if result.returncode is not None else -1, result.stdout, result.stderr)
     except ProcessError as e:
         return (script, e.returncode if e.returncode is not None else -1, e.stdout, e.stderr)
 
