@@ -2,6 +2,7 @@ from collections.abc import Callable
 from concurrent.futures import Future
 from threading import Lock
 from typing import Any
+from typing import assert_never
 
 from loguru import logger
 from pydantic import Field
@@ -238,6 +239,28 @@ def _process_host_for_messaging(
         logger.warning("Error accessing host {}: {}", host_ref.host_id, e)
 
 
+def _record_unmessageable_agent(
+    agent_name: str,
+    error_msg: str,
+    *,
+    result: MessageResult,
+    result_lock: Lock,
+    error_behavior: ErrorBehavior,
+    on_error: Callable[[str, str], None] | None,
+) -> None:
+    """Record an agent that cannot receive a message in its current lifecycle state.
+
+    Mirrors the offline-host / agent-not-found handling: the failure is appended to
+    ``result.failed_agents`` and forwarded to ``on_error``; in ABORT mode it is re-raised.
+    """
+    with result_lock:
+        result.failed_agents.append((agent_name, error_msg))
+    if on_error:
+        on_error(agent_name, error_msg)
+    if error_behavior == ErrorBehavior.ABORT:
+        raise MngrError(f"Cannot send message to {agent_name}: {error_msg}")
+
+
 def _send_message_to_agent(
     agent: AgentInterface,
     host: OnlineHostInterface,
@@ -257,20 +280,46 @@ def _send_message_to_agent(
     """
     agent_name = str(agent.name)
 
-    # Check if agent has a tmux session (only STOPPED agents cannot receive messages)
+    # Only agents with a live session can receive a message. RUNNING/WAITING/REPLACED/UNKNOWN
+    # may all have a session we can write to, so we attempt delivery and let send_message surface
+    # any failure. STOPPED has no session (start one first if requested, else fail). DONE (process
+    # exited) and RUNNING_UNKNOWN_AGENT_TYPE (running but we can't identify its session/process)
+    # have no session we can reliably target, so they are reported as failures rather than written
+    # into a possibly-stale or wrong session.
     lifecycle_state = agent.get_lifecycle_state()
-    if lifecycle_state == AgentLifecycleState.STOPPED:
-        if is_start_desired:
-            ensure_agent_started(agent, host, is_start_desired=True)
-        else:
-            error_msg = f"Agent has no tmux session (state: {lifecycle_state.value})"
-            with result_lock:
-                result.failed_agents.append((agent_name, error_msg))
-            if on_error:
-                on_error(agent_name, error_msg)
-            if error_behavior == ErrorBehavior.ABORT:
-                raise MngrError(f"Cannot send message to {agent_name}: {error_msg}")
+    match lifecycle_state:
+        case (
+            AgentLifecycleState.RUNNING
+            | AgentLifecycleState.WAITING
+            | AgentLifecycleState.REPLACED
+            | AgentLifecycleState.UNKNOWN
+        ):
+            pass
+        case AgentLifecycleState.STOPPED:
+            if is_start_desired:
+                ensure_agent_started(agent, host, is_start_desired=True)
+            else:
+                _record_unmessageable_agent(
+                    agent_name,
+                    f"Agent has no tmux session (state: {lifecycle_state.value})",
+                    result=result,
+                    result_lock=result_lock,
+                    error_behavior=error_behavior,
+                    on_error=on_error,
+                )
+                return
+        case AgentLifecycleState.DONE | AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE:
+            _record_unmessageable_agent(
+                agent_name,
+                f"Agent is not in a messageable state (state: {lifecycle_state.value})",
+                result=result,
+                result_lock=result_lock,
+                error_behavior=error_behavior,
+                on_error=on_error,
+            )
             return
+        case _ as unreachable:
+            assert_never(unreachable)
 
     try:
         with log_span("Sending message to agent {}", agent_name):

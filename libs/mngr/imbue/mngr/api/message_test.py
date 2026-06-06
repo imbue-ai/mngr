@@ -1,4 +1,5 @@
 from pathlib import Path
+from threading import Lock
 
 import pytest
 
@@ -6,8 +7,10 @@ from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.api.cel_context import agent_to_cel_context
 from imbue.mngr.api.create import CreateAgentOptions
 from imbue.mngr.api.message import MessageResult
+from imbue.mngr.api.message import _record_unmessageable_agent
 from imbue.mngr.api.message import send_message_to_agents
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.primitives import AgentLifecycleState
@@ -322,3 +325,38 @@ def test_send_message_one_agent_failure_does_not_prevent_other_agents(
 
     # The other agent must still have succeeded
     assert "will-succeed" in result.successful_agents
+
+
+def test_record_unmessageable_agent_continue_records_failure_and_calls_on_error() -> None:
+    """In CONTINUE mode, an unmessageable agent is appended to failed_agents and on_error is called."""
+    result = MessageResult()
+    errors: list[tuple[str, str]] = []
+
+    _record_unmessageable_agent(
+        "done-agent",
+        "Agent is not in a messageable state (state: DONE)",
+        result=result,
+        result_lock=Lock(),
+        error_behavior=ErrorBehavior.CONTINUE,
+        on_error=lambda name, err: errors.append((name, err)),
+    )
+
+    assert result.failed_agents == [("done-agent", "Agent is not in a messageable state (state: DONE)")]
+    assert errors == [("done-agent", "Agent is not in a messageable state (state: DONE)")]
+
+
+def test_record_unmessageable_agent_abort_raises_after_recording() -> None:
+    """In ABORT mode, the failure is still recorded but an MngrError is raised."""
+    result = MessageResult()
+
+    with pytest.raises(MngrError, match="Cannot send message to done-agent"):
+        _record_unmessageable_agent(
+            "done-agent",
+            "Agent is not in a messageable state (state: DONE)",
+            result=result,
+            result_lock=Lock(),
+            error_behavior=ErrorBehavior.ABORT,
+            on_error=None,
+        )
+
+    assert result.failed_agents == [("done-agent", "Agent is not in a messageable state (state: DONE)")]
