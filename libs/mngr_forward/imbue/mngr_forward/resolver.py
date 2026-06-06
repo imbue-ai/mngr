@@ -21,7 +21,6 @@ from typing import assert_never
 from pydantic import Field
 from pydantic import PrivateAttr
 
-from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_forward.data_types import BackendUrl
@@ -173,4 +172,3 @@ class ForwardResolver(MutableModel):
                 return ProxyTarget(url=BackendUrl(url), ssh_info=ssh_info)
             case _ as unreachable:  # pragma: no cover
                 assert_never(unreachable)
-                raise SwitchError(f"Unknown forwarding strategy: {unreachable}")
