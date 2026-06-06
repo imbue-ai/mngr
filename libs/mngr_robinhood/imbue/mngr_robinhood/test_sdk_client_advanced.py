@@ -22,9 +22,7 @@ from imbue.mngr_robinhood.testing import make_sdk_options
 pytestmark = [pytest.mark.sdk_live, pytest.mark.tmux, pytest.mark.asyncio, pytest.mark.timeout(600)]
 
 
-async def test_get_server_info_returns_a_dict(
-    sdk: ModuleType, requires_native_sdk: None, sdk_live_model: str, sdk_cwd: Path
-) -> None:
+async def test_get_server_info_returns_a_dict(sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path) -> None:
     async with sdk.ClaudeSDKClient(options=make_sdk_options(sdk_live_model, sdk_cwd)) as client:
         await client.query("Say hi.")
         await drain_response(client)

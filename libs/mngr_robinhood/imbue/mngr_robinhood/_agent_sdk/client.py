@@ -6,9 +6,10 @@ prefixed mngr claude agent (via :mod:`._agent_sdk.driver`) instead of a directly
 the blocking turn-driver in a worker thread via ``anyio.to_thread`` (the SDK surface is async;
 the mngr API and the transcript-polling turn-driver are synchronous).
 
-A few control-surface methods are not expressible over mngr's transcript-based transport and
-raise :class:`AgentSdkNotImplementedError` (``interrupt``, ``get_server_info``); ``set_model`` /
-``set_permission_mode`` are accepted but do not retroactively change the running agent.
+Control-surface methods are mapped onto mngr mechanisms: ``interrupt`` stops the agent mid-turn,
+``set_model`` / ``set_permission_mode`` restart it on the resumed session under new options, and
+``get_server_info`` runs a one-shot ``claude`` probe. Partial-message ``StreamEvent`` streaming is
+the one documented surface the session-JSONL transport cannot provide.
 """
 
 import asyncio
@@ -36,7 +37,9 @@ from imbue.mngr_robinhood._agent_sdk.driver import interrupt_session
 from imbue.mngr_robinhood._agent_sdk.driver import reconfigure_session
 from imbue.mngr_robinhood._agent_sdk.driver import start_session
 from imbue.mngr_robinhood._agent_sdk.driver import stop_session
-from imbue.mngr_robinhood.errors import AgentSdkNotImplementedError
+from imbue.mngr_robinhood._agent_sdk.hook_bridge import is_hook_bridge_needed
+from imbue.mngr_robinhood._agent_sdk.hook_bridge import start_hook_bridge
+from imbue.mngr_robinhood._agent_sdk.server_info import probe_server_info
 from imbue.mngr_robinhood.errors import RobinhoodError
 
 # Sentinel pushed onto the message queue by the drain worker to signal end-of-turn.
@@ -102,6 +105,7 @@ class ClaudeSDKClient(MutableModel):
         blocked (the documented SDK surface is async; the mngr API is synchronous).
         """
         self.session = await to_thread.run_sync(start_session, self.options)
+        self._start_hook_bridge_if_needed()
         self.is_connected = True
         if prompt is None:
             return
@@ -119,12 +123,30 @@ class ClaudeSDKClient(MutableModel):
             if not is_first_turn_delivered:
                 await self.disconnect()
 
+    def _start_hook_bridge_if_needed(self) -> None:
+        """Start the in-process can_use_tool / hooks bridge when the options request callbacks.
+
+        The bridge runs callbacks on this client's event loop and records permission denials into
+        the live session (surfaced in ResultMessage.permission_denials). Started here (in the async
+        context) because it needs the running loop.
+        """
+        session = self.session
+        if session is None or not is_hook_bridge_needed(self.options):
+            return
+        loop = asyncio.get_running_loop()
+        session.hook_bridge = start_hook_bridge(
+            self.options, loop, lambda denial: session.turn_permission_denials.append(denial)
+        )
+
     async def disconnect(self) -> None:
         """Stop the underlying mngr claude agent, leaving its session readable for later."""
         if not self.is_connected:
             return
         if self.session is not None:
             await to_thread.run_sync(stop_session, self.session)
+            if self.session.hook_bridge is not None:
+                await to_thread.run_sync(self.session.hook_bridge.stop)
+                self.session.hook_bridge = None
         self.is_connected = False
 
     async def query(self, prompt: PromptInput, session_id: str | None = None) -> None:
@@ -201,8 +223,19 @@ class ClaudeSDKClient(MutableModel):
         await to_thread.run_sync(interrupt_session, self.session)
 
     async def get_server_info(self) -> dict[str, Any]:
-        """Return server info (commands / output style). Not surfaced by the mngr transport yet."""
-        raise AgentSdkNotImplementedError("ClaudeSDKClient.get_server_info is not surfaced by the mngr transport.")
+        """Return server info (available slash commands / output style), via a one-shot probe.
+
+        The data comes from claude's ``system``/``init`` event, captured by running a single
+        ``claude -p ... --output-format stream-json`` probe in the session's cwd and cached, since
+        mngr's session-JSONL transport never sees the control-protocol initialize response.
+        """
+        if self.session is None:
+            raise RobinhoodError("ClaudeSDKClient.get_server_info called before connect()")
+        if self.session.server_info is None:
+            self.session.server_info = await to_thread.run_sync(
+                probe_server_info, self.session.cwd, self.options.model
+            )
+        return dict(self.session.server_info)
 
     async def get_mcp_status(self) -> Mapping[str, Any]:
         """Return MCP server status. The SDK configures no MCP servers, so the list is empty."""

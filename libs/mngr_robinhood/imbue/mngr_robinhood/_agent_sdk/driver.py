@@ -67,6 +67,7 @@ from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_robinhood._agent_sdk.context import build_sdk_mngr_context
 from imbue.mngr_robinhood._agent_sdk.context import open_sdk_concurrency_group
+from imbue.mngr_robinhood._agent_sdk.hook_bridge import HookBridge
 from imbue.mngr_robinhood._agent_sdk.message_parser import build_result_message
 from imbue.mngr_robinhood._agent_sdk.message_parser import build_system_init_message
 from imbue.mngr_robinhood._agent_sdk.message_parser import collect_assistant_text
@@ -123,6 +124,9 @@ class LiveSession(MutableModel):
     concurrency_group: ConcurrencyGroup = Field(description="Owns subprocesses for this session")
     agent: ClaudeAgent | None = Field(default=None, description="The live mngr claude agent, once created")
     host: OnlineHostInterface | None = Field(default=None, description="The agent's host, once created")
+    hook_bridge: HookBridge | None = Field(
+        default=None, description="Local HTTP bridge serving can_use_tool / hooks callbacks, when configured"
+    )
     events_target: EventsTarget | None = Field(default=None, description="Where the raw transcript is read")
     seen_bytes: int = Field(default=0, description="Bytes of the raw transcript already consumed")
     latest_session_id: str | None = Field(default=None, description="Most recent claude session id seen")
@@ -136,6 +140,9 @@ class LiveSession(MutableModel):
     )
     is_init_emitted: bool = Field(default=False, description="Whether the system/init message was emitted")
     turn_count: int = Field(default=0, description="Number of user turns delivered so far")
+    server_info: dict[str, Any] | None = Field(
+        default=None, description="Cached get_server_info() probe result (commands / output style)"
+    )
 
 
 def resolve_cwd(options: ClaudeAgentOptions) -> Path:
@@ -253,13 +260,16 @@ def _create_agent(
     local_host = get_local_host(session.mngr_ctx)
     source_location = HostLocation(host=local_host, path=session.cwd)
     plugin_data = {"adopt_session": (adopt_session_path,)} if adopt_session_path is not None else {}
+    # When can_use_tool / hooks are configured, point claude at the bridge's hooks settings file so
+    # its hook commands call back into the in-process callbacks.
+    bridge_args = ("--settings", str(session.hook_bridge.settings_path)) if session.hook_bridge is not None else ()
     options = CreateAgentOptions(
         agent_type=AgentTypeName("claude"),
         name=_build_agent_name(),
         target_path=session.cwd,
         transfer_mode=TransferMode.NONE,
         initial_message=initial_message,
-        agent_args=map_options_to_agent_args(session.options) + extra_agent_args,
+        agent_args=map_options_to_agent_args(session.options) + extra_agent_args + bridge_args,
         label_options=AgentLabelOptions(labels=dict(SDK_CREATED_BY_LABEL)),
         environment=_build_environment(session.options),
         ready_timeout_seconds=AGENT_READY_TIMEOUT_SECONDS,

@@ -28,12 +28,6 @@ from imbue.mngr_robinhood.testing import make_sdk_options
 pytestmark = [pytest.mark.sdk_live, pytest.mark.tmux, pytest.mark.asyncio, pytest.mark.timeout(600)]
 
 
-@pytest.fixture(autouse=True)
-def _skip_unsupported_on_mngr(requires_native_sdk: None) -> None:
-    """Every test here exercises a surface the mngr-backed transport cannot support
-    (in-process can_use_tool / hooks callbacks, or interrupt); they run against the real SDK only."""
-
-
 async def _run_client(sdk: ModuleType, options: ClaudeAgentOptions, prompt: str) -> list[object]:
     async with sdk.ClaudeSDKClient(options=options) as client:
         await client.query(prompt)
