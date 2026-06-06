@@ -1510,6 +1510,20 @@ def test_get_or_create_user_id_accepts_env_var_matching_existing(
     assert result == existing_id
 
 
+def test_get_or_create_user_id_regenerates_empty_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty/whitespace-only user_id file is treated as missing and regenerated, not crashed on."""
+    monkeypatch.delenv("MNGR_USER_ID", raising=False)
+    profile_dir = tmp_path / "profile"
+    profile_dir.mkdir()
+    user_id_file = profile_dir / "user_id"
+    user_id_file.write_text("   \n")
+
+    result = get_or_create_user_id(profile_dir)
+    assert len(result) == 32
+    # The regenerated ID should have been persisted back to the file.
+    assert user_id_file.read_text().strip() == result
+
+
 def test_mngr_context_get_profile_user_id(temp_mngr_ctx: MngrContext) -> None:
     """MngrContext.get_profile_user_id should return a non-empty user ID."""
     user_id = temp_mngr_ctx.get_profile_user_id()
