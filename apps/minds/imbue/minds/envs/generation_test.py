@@ -114,19 +114,19 @@ def test_read_generation_id_returns_none_when_entry_missing(tmp_path: Path, _roo
     )
 
 
-def test_read_generation_id_returns_none_when_key_absent_from_entry(
+def test_read_generation_id_raises_when_key_absent_from_present_entry(
     tmp_path: Path, _root_cg: ConcurrencyGroup
 ) -> None:
-    # The entry exists but has no MINDS_TIER_GENERATION_ID key.
+    # The entry exists but has no MINDS_TIER_GENERATION_ID key (a partial
+    # write / corruption). This must surface, NOT be treated as "no id yet"
+    # (which would mint a fresh id over the malformed entry).
     fake = _make_fake_vault_binary(tmp_path, get_stdout=_kv_get_payload(generation_id=None))
-    assert (
+    with pytest.raises(VaultReadError, match="malformed"):
         read_generation_id(
             "secrets/minds/staging",
             parent_concurrency_group=_root_cg,
             vault_binary=str(fake),
         )
-        is None
-    )
 
 
 def test_read_generation_id_propagates_unexpected_vault_error(tmp_path: Path, _root_cg: ConcurrencyGroup) -> None:

@@ -31,6 +31,7 @@ from typing import Final
 from uuid import uuid4
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.envs.primitives import VaultReadError
 from imbue.minds.envs.primitives import VaultSecretNotFoundError
 from imbue.minds.envs.vault_reader import VAULT_BINARY
 from imbue.minds.envs.vault_reader import VaultPath
@@ -75,7 +76,19 @@ def read_generation_id(
         # transient / auth ``VaultReadError`` (other exit codes), which
         # must propagate so the operator notices Vault problems early.
         return None
-    return values.get(GENERATION_ID_KEY)
+    generation_id = values.get(GENERATION_ID_KEY)
+    if generation_id is None:
+        # The secret exists but lacks the generation key (a partial write /
+        # corruption). This is NOT the same as "no secret yet": returning
+        # None here would make ``ensure_generation_id`` mint + write a fresh
+        # id over the malformed entry, silently masking the corruption.
+        # Surface it so an operator fixes the Vault entry instead.
+        raise VaultReadError(
+            f"Vault entry {_generation_vault_path(tier_vault_prefix)!r} exists but has no "
+            f"{GENERATION_ID_KEY!r} key; the tier generation secret is malformed. Inspect / repair "
+            "it (or delete it so the next deploy re-mints one)."
+        )
+    return generation_id
 
 
 def ensure_generation_id(
