@@ -253,8 +253,16 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             logger.trace("Determined agent {} lifecycle state: {}", self.name, state)
             return state
         except HostConnectionError:
-            logger.trace("Determined agent {} lifecycle state: STOPPED (host connection error)", self.name)
-            return AgentLifecycleState.STOPPED
+            # The host became unreachable while we were probing it, so we could
+            # not actually determine the agent's state. We deliberately do NOT
+            # report STOPPED: a normally-stopped agent on a reachable host is
+            # detected via the tmux-empty path above, and the host-state logic
+            # itself never equates "unreachable" with "stopped" (an unreachable
+            # host with no recorded stop_reason is CRASHED, not STOPPED). UNKNOWN
+            # is the honest answer; the host's own get_state() carries the
+            # authoritative stopped/crashed verdict from recorded data.
+            logger.trace("Determined agent {} lifecycle state: UNKNOWN (host connection error)", self.name)
+            return AgentLifecycleState.UNKNOWN
 
     def _get_command_basename(self, command: CommandString) -> str:
         """Extract the basename from a command string.

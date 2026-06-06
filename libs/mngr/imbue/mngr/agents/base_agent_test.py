@@ -14,6 +14,7 @@ from imbue.mngr.cli.testing import create_test_agent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
@@ -1016,6 +1017,28 @@ def _create_agent_with_stub_host(
     **kwargs: Any,
 ) -> BaseAgent:
     return _create_named_agent_with_stub_host(temp_mngr_ctx, stub, AgentName("stub-agent"), cls, **kwargs)
+
+
+class _ConnectionFailingHost(_StubHost):
+    """Stub host whose command execution always raises HostConnectionError."""
+
+    def execute_idempotent_command(self, command: str, **kwargs: object) -> CommandResult:
+        raise HostConnectionError("simulated unreachable host")
+
+
+def test_lifecycle_state_unknown_when_host_unreachable(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """An unreachable host yields UNKNOWN, not STOPPED.
+
+    A normally-stopped agent on a reachable host is detected via the
+    tmux-empty path; the connection-error branch fires only when the host
+    itself cannot be reached, in which case we genuinely cannot determine
+    the agent's state and must not assert it is stopped.
+    """
+    agent = _create_agent_with_stub_host(temp_mngr_ctx, _ConnectionFailingHost())
+
+    assert agent.get_lifecycle_state() == AgentLifecycleState.UNKNOWN
 
 
 def test_send_tmux_literal_keys_short_message_uses_send_keys(
