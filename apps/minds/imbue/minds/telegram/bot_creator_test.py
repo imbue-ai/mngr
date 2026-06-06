@@ -9,6 +9,7 @@ from imbue.minds.telegram.bot_creator import _BOT_TOKEN_PATTERN
 from imbue.minds.telegram.bot_creator import _BOT_USERNAME_PATTERN
 from imbue.minds.telegram.bot_creator import _FALLBACK_API_HASH
 from imbue.minds.telegram.bot_creator import _FALLBACK_API_ID
+from imbue.minds.telegram.bot_creator import _find_api_credentials_in_js
 from imbue.minds.telegram.bot_creator import auth_key_to_string_session
 
 
@@ -88,3 +89,12 @@ def test_bot_username_pattern_matches_tme_links() -> None:
 def test_fallback_api_credentials_are_valid() -> None:
     assert _FALLBACK_API_ID > 0
     assert len(_FALLBACK_API_HASH) == 32
+
+
+def test_find_api_credentials_in_js_extracts_id_and_hash() -> None:
+    js_source = 'foo,bar=Number("2496"),"8da85b0d5bfe62527e5b244c209159c3",baz'
+    assert _find_api_credentials_in_js(js_source) == snapshot((2496, "8da85b0d5bfe62527e5b244c209159c3"))
+
+
+def test_find_api_credentials_in_js_returns_none_when_pattern_absent() -> None:
+    assert _find_api_credentials_in_js("no credentials embedded in this bundle") is None

@@ -48,6 +48,13 @@ _BOT_TOKEN_PATTERN: Final[re.Pattern[str]] = re.compile(r"(\d+:[A-Za-z0-9_-]+)")
 
 _BOT_USERNAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"t\.me/(\w+)")
 
+# Matches the (api_id, api_hash) pair as embedded in the minified Telegram Web bundle.
+_API_CREDENTIAL_PATTERN: Final[re.Pattern[str]] = re.compile(r'Number\("(\d+)"\),"([a-f0-9]{32})"')
+
+_MAIN_BUNDLE_PATTERN: Final[re.Pattern[str]] = re.compile(r"(main\.[a-f0-9]+\.js)")
+
+_CHUNK_REFERENCE_PATTERN: Final[re.Pattern[str]] = re.compile(r'(\d+):"([a-f0-9]{16,})"')
+
 
 def auth_key_to_string_session(dc_id: int, auth_key_hex: str) -> str:
     """Convert a dc_id + auth_key_hex to a Telethon StringSession string.
@@ -79,43 +86,62 @@ def fetch_telegram_web_api_credentials() -> tuple[int, str]:
     These are public application identifiers embedded in the minified
     JavaScript. Falls back to known defaults if extraction fails.
     """
+    # Fetch the entry HTML and locate the main JS bundle. A network failure or a
+    # missing pattern is an expected "scraping didn't work" outcome that degrades
+    # to the public defaults; it must not be conflated with an unexpected bug, so
+    # only the network call is wrapped and "not found" is explicit control flow.
+    html = _fetch_url_text(TELEGRAM_WEB_URL)
+    if html is None:
+        return _log_and_use_fallback_api_credentials("Could not fetch Telegram Web HTML")
+
+    main_match = _MAIN_BUNDLE_PATTERN.search(html)
+    if main_match is None:
+        return _log_and_use_fallback_api_credentials("Could not find main bundle in Telegram Web HTML")
+
+    # Fetch the main bundle and look for the credential pattern directly.
+    main_js = _fetch_url_text(TELEGRAM_WEB_URL + main_match.group(1))
+    if main_js is None:
+        return _log_and_use_fallback_api_credentials("Could not fetch Telegram Web main bundle")
+
+    main_credentials = _find_api_credentials_in_js(main_js)
+    if main_credentials is not None:
+        return main_credentials
+
+    # Search the webpack chunks referenced by the main bundle if not found there.
+    for chunk_id, chunk_hash in _CHUNK_REFERENCE_PATTERN.findall(main_js):
+        chunk_js = _fetch_url_text(f"{TELEGRAM_WEB_URL}{chunk_id}.{chunk_hash}.js")
+        if chunk_js is None:
+            continue
+        chunk_credentials = _find_api_credentials_in_js(chunk_js)
+        if chunk_credentials is not None:
+            return chunk_credentials
+
+    return _log_and_use_fallback_api_credentials("Credential pattern not found in any bundle chunk")
+
+
+def _fetch_url_text(url: str) -> str | None:
+    """Fetch a URL and return its decoded body, or None if the request fails."""
     try:
-        with urllib.request.urlopen(TELEGRAM_WEB_URL, timeout=_HTTP_TIMEOUT_SECONDS) as resp:
-            html = resp.read().decode()
+        with urllib.request.urlopen(url, timeout=_HTTP_TIMEOUT_SECONDS) as resp:
+            return resp.read().decode()
+    except (urllib.error.URLError, OSError):
+        return None
 
-        main_match = re.search(r"(main\.[a-f0-9]+\.js)", html)
-        if not main_match:
-            raise ValueError("Could not find main bundle in Telegram Web HTML")
 
-        main_js_url = TELEGRAM_WEB_URL + main_match.group(1)
-        with urllib.request.urlopen(main_js_url, timeout=_HTTP_TIMEOUT_SECONDS) as resp:
-            main_js = resp.read().decode()
+def _find_api_credentials_in_js(js_source: str) -> tuple[int, str] | None:
+    """Find the (api_id, api_hash) pair embedded in a Telegram Web JS bundle, or None if absent."""
+    cred_match = _API_CREDENTIAL_PATTERN.search(js_source)
+    if cred_match is None:
+        return None
+    return int(cred_match.group(1)), cred_match.group(2)
 
-        cred_match = re.search(r'Number\("(\d+)"\),"([a-f0-9]{32})"', main_js)
-        if cred_match:
-            return int(cred_match.group(1)), cred_match.group(2)
 
-        # Search webpack chunks if not found in main bundle
-        chunk_entries = re.findall(r'(\d+):"([a-f0-9]{16,})"', main_js)
-        for chunk_id, chunk_hash in chunk_entries:
-            chunk_url = f"{TELEGRAM_WEB_URL}{chunk_id}.{chunk_hash}.js"
-            try:
-                with urllib.request.urlopen(chunk_url, timeout=_HTTP_TIMEOUT_SECONDS) as resp:
-                    chunk_js = resp.read().decode()
-            except (urllib.error.URLError, urllib.error.HTTPError):
-                continue
-            cred_match = re.search(r'Number\("(\d+)"\),"([a-f0-9]{32})"', chunk_js)
-            if cred_match:
-                return int(cred_match.group(1)), cred_match.group(2)
-
-        raise ValueError("Credential pattern not found in any bundle chunk")
-
-    except (urllib.error.URLError, OSError, ValueError) as exc:
-        logger.warning(
-            "Could not extract API credentials from Telegram Web bundle ({}), using known defaults",
-            exc,
-        )
-        return _FALLBACK_API_ID, _FALLBACK_API_HASH
+def _log_and_use_fallback_api_credentials(reason: str) -> tuple[int, str]:
+    logger.warning(
+        "Could not extract API credentials from Telegram Web bundle ({}), using known defaults",
+        reason,
+    )
+    return _FALLBACK_API_ID, _FALLBACK_API_HASH
 
 
 def create_telegram_bot(
