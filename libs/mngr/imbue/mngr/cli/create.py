@@ -1818,8 +1818,20 @@ def _ensure_clean_work_dir(location: HostLocation) -> None:
     """Verify the source work_dir has no uncommitted changes."""
     result = location.host.execute_idempotent_command("git status --porcelain", cwd=location.path)
     if not result.success:
-        # Not a git repo or git command failed, skip the check
-        logger.debug("Failed to check git status: {}", result.stderr)
+        if "not a git repository" in result.stderr.lower():
+            # Source is not a git repo: there is nothing to verify, skip silently.
+            logger.debug("Source at {} is not a git repository, skipping clean-tree check", location.path)
+            return
+        # git status failed for some other reason (git missing, permissions, a
+        # transient host error). We could not verify the tree is clean, so warn
+        # loudly rather than silently skip the safety check the user opted into.
+        # (Pass --no-ensure-clean to bypass the check intentionally.)
+        logger.warning(
+            "Could not verify the working tree at {} is clean (git status failed: {}); "
+            "proceeding without the clean-tree check",
+            location.path,
+            result.stderr.strip(),
+        )
         return
 
     if result.stdout.strip():
