@@ -756,7 +756,8 @@ def _options_with_overrides(
     if model is not None:
         updated_options.model = model
     if permission_mode is not None:
-        updated_options.permission_mode = permission_mode
+        # The caller passes a plain str (the SDK's set_permission_mode signature); claude validates it.
+        updated_options.permission_mode = permission_mode  # ty: ignore[invalid-assignment]
     return updated_options
 
 

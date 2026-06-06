@@ -20,6 +20,20 @@ from imbue.mngr_robinhood._agent_sdk.hook_bridge import start_hook_bridge
 _URL = "http://127.0.0.1:12345/hook"
 
 
+async def _allow_can_use_tool(
+    name: str, tool_input: dict[str, Any], context: ToolPermissionContext
+) -> PermissionResultAllow | PermissionResultDeny:
+    return PermissionResultAllow(behavior="allow")
+
+
+async def _noop_hook(input_data: HookInput, tool_use_id: str | None, context: HookContext) -> HookJSONOutput:
+    return {}
+
+
+def _discard_denial(denial: dict[str, Any]) -> None:
+    return None
+
+
 def _post_to_bridge(bridge: HookBridge, hook_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     """POST a hook payload to a running bridge exactly as the agent's hook command would."""
     port = bridge.server.server_address[1]
@@ -35,34 +49,33 @@ def _only_hook_id(bridge: HookBridge) -> str:
 
 def test_is_hook_bridge_needed() -> None:
     assert is_hook_bridge_needed(ClaudeAgentOptions()) is False
-    assert is_hook_bridge_needed(ClaudeAgentOptions(can_use_tool=lambda *a: None)) is True
+    assert is_hook_bridge_needed(ClaudeAgentOptions(can_use_tool=_allow_can_use_tool)) is True
     assert (
         is_hook_bridge_needed(
-            ClaudeAgentOptions(hooks={"PreToolUse": [HookMatcher(matcher="Bash", hooks=[lambda: None])]})
+            ClaudeAgentOptions(hooks={"PreToolUse": [HookMatcher(matcher="Bash", hooks=[_noop_hook])]})
         )
         is True
     )
 
 
 def test_build_registry_maps_can_use_tool_to_catch_all_pre_tool_use() -> None:
-    async def can_use_tool(name: str, tool_input: dict[str, Any], context: ToolPermissionContext) -> None:
-        return None
-
-    registry, settings_hooks = _build_registry_and_settings_hooks(ClaudeAgentOptions(can_use_tool=can_use_tool), _URL)
+    registry, settings_hooks = _build_registry_and_settings_hooks(
+        ClaudeAgentOptions(can_use_tool=_allow_can_use_tool), _URL
+    )
     assert list(settings_hooks.keys()) == ["PreToolUse"]
     entry = settings_hooks["PreToolUse"][0]
     assert entry["matcher"] == "*"
     assert len(registry) == 1
     (registration,) = registry.values()
     assert registration.kind == _HookKind.CAN_USE_TOOL
-    assert registration.callback is can_use_tool
+    assert registration.callback is _allow_can_use_tool
 
 
 def test_build_registry_preserves_matcher_and_registers_each_hook() -> None:
-    async def hook_a() -> dict[str, Any]:
+    async def hook_a(input_data: HookInput, tool_use_id: str | None, context: HookContext) -> HookJSONOutput:
         return {}
 
-    async def hook_b() -> dict[str, Any]:
+    async def hook_b(input_data: HookInput, tool_use_id: str | None, context: HookContext) -> HookJSONOutput:
         return {}
 
     options = ClaudeAgentOptions(
@@ -81,20 +94,16 @@ def test_build_registry_preserves_matcher_and_registers_each_hook() -> None:
 
 
 def test_build_registry_omits_matcher_key_when_none() -> None:
-    async def prompt_hook() -> dict[str, Any]:
-        return {}
-
-    options = ClaudeAgentOptions(hooks={"UserPromptSubmit": [HookMatcher(matcher=None, hooks=[prompt_hook])]})
+    options = ClaudeAgentOptions(hooks={"UserPromptSubmit": [HookMatcher(matcher=None, hooks=[_noop_hook])]})
     _registry, settings_hooks = _build_registry_and_settings_hooks(options, _URL)
     entry = settings_hooks["UserPromptSubmit"][0]
     assert "matcher" not in entry
 
 
 def test_hook_command_is_valid_and_embeds_url_and_id() -> None:
-    async def can_use_tool(name: str, tool_input: dict[str, Any], context: ToolPermissionContext) -> None:
-        return None
-
-    _registry, settings_hooks = _build_registry_and_settings_hooks(ClaudeAgentOptions(can_use_tool=can_use_tool), _URL)
+    _registry, settings_hooks = _build_registry_and_settings_hooks(
+        ClaudeAgentOptions(can_use_tool=_allow_can_use_tool), _URL
+    )
     command = settings_hooks["PreToolUse"][0]["hooks"][0]["command"]
     assert command.startswith("python3 -c ")
     assert _URL in command
@@ -105,7 +114,9 @@ def test_hook_command_is_valid_and_embeds_url_and_id() -> None:
 def test_bridge_round_trip_can_use_tool_deny_records_denial() -> None:
     denials: list[dict[str, Any]] = []
 
-    async def can_use_tool(name: str, tool_input: dict[str, Any], context: ToolPermissionContext) -> object:
+    async def can_use_tool(
+        name: str, tool_input: dict[str, Any], context: ToolPermissionContext
+    ) -> PermissionResultAllow | PermissionResultDeny:
         assert isinstance(context, ToolPermissionContext)
         return PermissionResultDeny(behavior="deny", message="blocked", interrupt=False)
 
@@ -122,12 +133,14 @@ def test_bridge_round_trip_can_use_tool_deny_records_denial() -> None:
 
 
 def test_bridge_round_trip_can_use_tool_allow_with_updated_input() -> None:
-    async def can_use_tool(name: str, tool_input: dict[str, Any], context: ToolPermissionContext) -> object:
+    async def can_use_tool(
+        name: str, tool_input: dict[str, Any], context: ToolPermissionContext
+    ) -> PermissionResultAllow | PermissionResultDeny:
         rewritten = dict(tool_input)
         rewritten["command"] = "echo rewritten"
         return PermissionResultAllow(behavior="allow", updated_input=rewritten)
 
-    bridge = start_hook_bridge(ClaudeAgentOptions(can_use_tool=can_use_tool), lambda denial: None)
+    bridge = start_hook_bridge(ClaudeAgentOptions(can_use_tool=can_use_tool), _discard_denial)
     try:
         result = _post_to_bridge(
             bridge, _only_hook_id(bridge), {"tool_name": "Bash", "tool_input": {"command": "echo original"}}
@@ -147,7 +160,7 @@ def test_bridge_round_trip_hook_callback_returns_output() -> None:
         return {}
 
     options = ClaudeAgentOptions(hooks={"PreToolUse": [HookMatcher(matcher="Bash", hooks=[pre_hook])]})
-    bridge = start_hook_bridge(options, lambda denial: None)
+    bridge = start_hook_bridge(options, _discard_denial)
     try:
         result = _post_to_bridge(
             bridge, _only_hook_id(bridge), {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}}
@@ -159,7 +172,7 @@ def test_bridge_round_trip_hook_callback_returns_output() -> None:
 
 
 def test_bridge_dispatch_unknown_hook_id_returns_empty() -> None:
-    bridge = start_hook_bridge(ClaudeAgentOptions(can_use_tool=lambda *args: None), lambda denial: None)
+    bridge = start_hook_bridge(ClaudeAgentOptions(can_use_tool=_allow_can_use_tool), _discard_denial)
     try:
         result = _post_to_bridge(bridge, "does-not-exist", {"tool_name": "Bash"})
     finally:
