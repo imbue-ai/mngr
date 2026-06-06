@@ -9,8 +9,9 @@ Completed the previously-stubbed control surfaces of the mngr-backed Agent SDK
   `ResultMessage.permission_denials`.
 - `ClaudeSDKClient.interrupt()` now ends an in-flight turn (the response stream is streamed
   incrementally and terminates at a `ResultMessage`); the next `query()` continues the conversation.
-- `set_model` / `set_permission_mode` now take effect by restarting the agent on the resumed
-  session under the new configuration (previously a no-op).
+- `set_model` / `set_permission_mode` now take effect by rewriting the agent's stored launch
+  command with the new configuration (via the agent's `set_command` API) and restarting it on the
+  resumed session (previously a no-op).
 - `fork_session` is implemented via mngr_claude's session-adoption machinery (new session id).
 - `get_server_info()` returns real commands / output style from a one-shot `claude` stream-json probe.
 - `ResultMessage.total_cost_usd` is computed from per-turn token usage and a per-model price table.

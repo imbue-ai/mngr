@@ -46,7 +46,6 @@ from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
-from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
@@ -792,12 +791,7 @@ def _rewrite_agent_launch_command(session: LiveSession) -> None:
         command_override=None,
         initial_message=None,
     )
-    data_path = get_agent_state_dir_path(host.host_dir, agent.id) / "data.json"
-    data = json.loads(host.read_text_file(data_path))
-    data["command"] = str(new_command)
-    serialized = json.dumps(data, indent=2)
-    host.write_file(data_path, serialized.encode("utf-8"), is_atomic=True)
-    host.save_agent_data(agent.id, data)
+    agent.set_command(new_command)
 
 
 def reconfigure_session(session: LiveSession, model: str | None, permission_mode: str | None) -> None:
