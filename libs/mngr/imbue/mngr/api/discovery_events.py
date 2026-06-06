@@ -13,6 +13,7 @@ from threading import Lock
 from typing import Annotated
 from typing import Final
 from typing import Literal
+from typing import assert_never
 
 from loguru import logger
 from pydantic import Discriminator
@@ -712,21 +713,32 @@ def _replay_discovery_events_into_maps(events_path: Path) -> _ResolutionMaps:
                 continue
             _data, stripped_line = parsed
             event = parse_discovery_event_line(stripped_line)
-            if isinstance(event, FullDiscoverySnapshotEvent):
-                # Reset maps -- this snapshot supersedes everything before it
-                maps.reset()
-                for agent in event.agents:
-                    _record_agent(maps, agent)
-            elif isinstance(event, AgentDiscoveryEvent):
-                _record_agent(maps, event.agent)
-            elif isinstance(event, AgentDestroyedEvent):
-                maps.destroyed_agent_ids.add(str(event.agent_id))
-            else:
-                # Host, SSH info, and error events are not relevant for
-                # resolution. A host's continued existence (and its name) come
-                # from provider.get_host when the caller fetches the host to
-                # stop it, so there is no need to replay host events here.
-                pass
+            if event is None:
+                # Empty / whitespace-only line (the warner already filtered these, but the
+                # return type permits None); nothing to replay.
+                continue
+            match event:
+                case FullDiscoverySnapshotEvent():
+                    # Reset maps -- this snapshot supersedes everything before it
+                    maps.reset()
+                    for agent in event.agents:
+                        _record_agent(maps, agent)
+                case AgentDiscoveryEvent():
+                    _record_agent(maps, event.agent)
+                case AgentDestroyedEvent():
+                    maps.destroyed_agent_ids.add(str(event.agent_id))
+                case HostDiscoveryEvent() | HostDestroyedEvent() | HostSSHInfoEvent() | DiscoveryErrorEvent():
+                    # Host, SSH info, and error events are not relevant for agent->host
+                    # resolution. A host's continued existence (and its name) come from
+                    # provider.get_host when the caller fetches the host to stop it, so there
+                    # is no need to replay host events here. HostDestroyedEvent is intentionally
+                    # a no-op: any stale agent->host entries for a destroyed host are harmless
+                    # because the caller re-fetches the host before acting on it. Listing each
+                    # irrelevant type explicitly forces a typecheck decision if a new discovery
+                    # event is added to the union.
+                    pass
+                case _ as unreachable:
+                    assert_never(unreachable)
 
     return maps
 
