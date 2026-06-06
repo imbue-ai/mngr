@@ -1,13 +1,10 @@
 from __future__ import annotations
 
 import json
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
-from typing import Iterator
 
 import pytest
-from loguru import logger
 
 from imbue.mngr.api.preservation import get_preserved_agent_dir
 from imbue.mngr.primitives import AgentId
@@ -27,22 +24,7 @@ from imbue.mngr_claude_subagent_proxy.subagent_wait import is_real_user_event
 from imbue.mngr_claude_subagent_proxy.subagent_wait import read_new_jsonl_lines
 from imbue.mngr_claude_subagent_proxy.subagent_wait import resolve_destroyed_result
 from imbue.mngr_claude_subagent_proxy.subagent_wait import truncate_result_text
-
-
-@contextmanager
-def _capture_loguru_messages() -> Iterator[list[str]]:
-    """Install a loguru sink that appends formatted messages to a list."""
-    captured: list[str] = []
-
-    def sink(message: Any) -> None:
-        captured.append(message.record["message"])
-
-    handler_id = logger.add(sink, level="TRACE", format="{message}")
-    try:
-        yield captured
-    finally:
-        logger.remove(handler_id)
-
+from imbue.mngr_claude_subagent_proxy.testing import capture_loguru_messages as _capture_loguru_messages
 
 # is_end_turn_event must accept pure-text terminal events (end_turn,
 # stop_sequence, max_tokens) and reject tool-call / malformed events.

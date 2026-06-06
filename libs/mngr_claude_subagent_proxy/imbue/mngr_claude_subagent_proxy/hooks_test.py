@@ -25,6 +25,7 @@ from imbue.mngr_claude_subagent_proxy.hook_io import parse_int_env
 from imbue.mngr_claude_subagent_proxy.hooks import cleanup as cleanup_hook
 from imbue.mngr_claude_subagent_proxy.hooks import reap as reap_hook
 from imbue.mngr_claude_subagent_proxy.hooks import spawn as spawn_hook
+from imbue.mngr_claude_subagent_proxy.testing import capture_loguru_messages
 
 
 def _fake_list_with_state(target_name: str, state: AgentLifecycleState) -> dict[str, AgentDetails]:
@@ -774,6 +775,21 @@ def test_spawn_env_vars_from_real_os_env(clean_env: pytest.MonkeyPatch) -> None:
     assert parse_int_env("__DOES_NOT_EXIST__", 42) == 42
     clean_env.setenv("__SPAWN_TEST_INT__", "7")
     assert parse_int_env("__SPAWN_TEST_INT__", 0) == 7
+
+
+def test_parse_int_env_logs_warning_on_malformed_value(clean_env: pytest.MonkeyPatch) -> None:
+    """A present-but-unparseable value falls back to the default AND logs a warning.
+
+    The depth env vars (MNGR_SUBAGENT_DEPTH / MNGR_MAX_SUBAGENT_DEPTH) are
+    plugin-set, so a malformed value is unexpected; silently resetting it to
+    the default could mask a depth-limit miscalculation. The warning makes
+    such a value diagnosable instead of vanishing.
+    """
+    clean_env.setenv("MNGR_MAX_SUBAGENT_DEPTH", "three")
+    with capture_loguru_messages() as captured:
+        result = parse_int_env("MNGR_MAX_SUBAGENT_DEPTH", 3)
+    assert result == 3
+    assert any("MNGR_MAX_SUBAGENT_DEPTH" in msg and "three" in msg for msg in captured)
 
 
 # guard_per_agent_plugin_cache wraps every Stop / SubagentStop command in
