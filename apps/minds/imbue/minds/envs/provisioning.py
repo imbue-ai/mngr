@@ -498,7 +498,8 @@ class DevEnvSummary(FrozenModel):
         default=None,
         description=(
             "Where the client.toml lives: 'env_root' for dev envs, 'in_repo' for "
-            "reserved tiers (staging / production). None when there's no client.toml."
+            "reserved tiers (staging / production), 'in_repo_malformed' when that "
+            "committed file is present but fails to parse. None when there's no client.toml."
         ),
     )
     connector_url: AnyUrl | None = Field(
@@ -1462,7 +1463,11 @@ def list_dev_envs() -> tuple[DevEnvSummary, ...]:
     (``client_config_source``), and the ``connector_url`` parsed out
     of it. Rows that have no client.toml anywhere (an unprovisioned
     dev env) leave ``connector_url`` / ``client_config_path`` /
-    ``client_config_source`` as ``None``.
+    ``client_config_source`` as ``None``. A reserved tier whose committed
+    in-repo client.toml is present but unparseable gets
+    ``client_config_source="in_repo_malformed"`` (with ``connector_url``
+    None) so the breakage is visible rather than indistinguishable from an
+    unprovisioned env.
     """
     summaries: list[DevEnvSummary] = []
     for env_root in list_env_root_dirs():
@@ -1481,12 +1486,14 @@ def list_dev_envs() -> tuple[DevEnvSummary, ...]:
                 client_config_source = "in_repo"
                 try:
                     connector_url = load_client_config(repo_path).connector_url
-                except EnvConfigError:
-                    # Malformed in-repo file: leave connector_url None
-                    # rather than blowing up the whole list. The CLI
-                    # surfaces "no client.toml" which prompts the
-                    # operator to fix the committed file.
-                    pass
+                except EnvConfigError as exc:
+                    # The committed in-repo file is present but does not parse.
+                    # Don't blow up the whole list, but DON'T leave it looking
+                    # like a healthy "in_repo" row with a mysteriously-missing
+                    # connector either: mark the source distinctly so the CLI
+                    # shows the file is broken, and warn so it's visible in logs.
+                    client_config_source = "in_repo_malformed"
+                    logger.warning("Malformed committed client.toml for tier {!r} at {}: {}", env_name, repo_path, exc)
         else:
             dev_env_name = DevEnvName(env_name)
             if client_config_exists(dev_env_name):
