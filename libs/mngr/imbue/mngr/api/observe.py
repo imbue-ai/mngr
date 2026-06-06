@@ -9,6 +9,7 @@ from datetime import timezone
 from enum import auto
 from pathlib import Path
 from typing import Final
+from typing import assert_never
 
 from loguru import logger
 from pydantic import Field
@@ -29,9 +30,13 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.api.discovery_events import AgentDestroyedEvent
+from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
+from imbue.mngr.api.discovery_events import HostDiscoveryEvent
+from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.config.data_types import MngrConfig
@@ -469,15 +474,22 @@ class AgentObserver(MutableModel):
             return
 
         event = parse_discovery_event_line(stripped)
+        if event is None:
+            return
 
-        if isinstance(event, FullDiscoverySnapshotEvent):
-            self._handle_full_snapshot(event)
-        elif isinstance(event, HostDestroyedEvent):
-            self._handle_host_destroyed(event)
-        elif isinstance(event, DiscoveryErrorEvent):
-            self._handle_discovery_error_event(event)
-        else:
-            pass
+        match event:
+            case FullDiscoverySnapshotEvent():
+                self._handle_full_snapshot(event)
+            case HostDestroyedEvent():
+                self._handle_host_destroyed(event)
+            case DiscoveryErrorEvent():
+                self._handle_discovery_error_event(event)
+            case AgentDiscoveryEvent() | HostDiscoveryEvent() | AgentDestroyedEvent() | HostSSHInfoEvent():
+                # Not consumed by the observe UI's host/error tracking. Listed explicitly (rather
+                # than a catch-all else) so adding a discovery event type forces a decision here.
+                logger.trace("observe: ignoring discovery event type {}", type(event).__name__)
+            case _ as unreachable:
+                assert_never(unreachable)
 
     def _handle_full_snapshot(self, event: FullDiscoverySnapshotEvent) -> None:
         """Update known hosts and provider error state from a full discovery snapshot."""
