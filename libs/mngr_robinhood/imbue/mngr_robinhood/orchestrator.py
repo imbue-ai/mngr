@@ -227,10 +227,18 @@ class _StreamBufferConsumer(MutableModel):
         Called at turn end (the watcher empties the buffer when the agent goes
         idle), so the final line -- never emitted during streaming because it was
         the volatile last line -- is delivered exactly once.
+
+        The emitted/last-content state is then cleared so the next turn diffs
+        against an empty baseline. Each turn is an independent message, so without
+        this reset a new message that happens to share a leading prefix with the
+        previous one would have that prefix stripped by ``compute_stream_delta``'s
+        divergence path and be emitted truncated.
         """
         delta, self.emitted_body = compute_stream_delta(self.last_content, self.emitted_body, is_flush=True)
         if delta:
             self.writer.emit_partial_text(delta)
+        self.emitted_body = ""
+        self.last_content = ""
 
 
 @pure

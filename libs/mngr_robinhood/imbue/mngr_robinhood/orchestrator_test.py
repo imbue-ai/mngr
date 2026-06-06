@@ -9,6 +9,7 @@ from imbue.mngr.hosts.host import Host
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 from imbue.mngr_robinhood.data_types import OutputFormat
+from imbue.mngr_robinhood.orchestrator import _StreamBufferConsumer
 from imbue.mngr_robinhood.orchestrator import _TranscriptReadFailureWarner
 from imbue.mngr_robinhood.orchestrator import _TurnEndTicker
 from imbue.mngr_robinhood.orchestrator import _build_agent_name
@@ -76,6 +77,57 @@ def test_compute_stream_delta_divergence_does_not_reemit_common_prefix() -> None
     )
     assert delta == "For years he kept the light.\n"
     assert new_emitted == "Title\n\n---\nFor years he kept the light.\n"
+
+
+class _FakeBufferHost:
+    """Minimal host stand-in whose read_text_file returns a settable buffer."""
+
+    def __init__(self) -> None:
+        self.content = ""
+
+    def read_text_file(self, _path: Path) -> str:
+        return self.content
+
+
+def _drive_consumer_turn(consumer: _StreamBufferConsumer, host: _FakeBufferHost, snapshots: list[str]) -> None:
+    """Feed a turn's buffer snapshots through poll(), then empty + flush()."""
+    for snapshot in snapshots:
+        host.content = snapshot
+        consumer.poll()
+    host.content = "id\n"  # watcher empties the body at idle (id line only)
+    consumer.poll()
+    consumer.flush()
+
+
+def test_stream_consumer_emits_full_new_message_sharing_prefix_across_turns() -> None:
+    # A new turn's message that shares a leading prefix with the previous turn's
+    # message must be emitted whole, not truncated to the diverging suffix. The
+    # consumer resets its emitted/last-content state at flush() so each turn diffs
+    # from an empty baseline.
+    stdout = io.StringIO()
+    writer = StreamingOutputWriter(
+        output_format=OutputFormat.TEXT, session_id="agent-x", stdout=stdout, stream_plain_text=True
+    )
+    host = _FakeBufferHost()
+    consumer = _StreamBufferConsumer.model_construct(
+        host=host, buffer_path=Path("/buffer"), writer=writer, emitted_body="", last_content=""
+    )
+
+    _drive_consumer_turn(consumer, host, ["id1\nThe answer is\n", "id1\nThe answer is 42.\nx"])
+    assert stdout.getvalue() == "The answer is\n 42.\nx"
+
+    stdout.truncate(0)
+    stdout.seek(0)
+    _drive_consumer_turn(consumer, host, ["id2\nThe answer is\n", "id2\nThe answer is right.\nx"])
+    # The full new message is emitted; the shared "The answer is " prefix is not
+    # stripped (which would have produced "\n right.\nx").
+    assert stdout.getvalue() == "The answer is\n right.\nx"
+
+    # A subsequent turn with no new output must not re-emit the prior content.
+    stdout.truncate(0)
+    stdout.seek(0)
+    _drive_consumer_turn(consumer, host, [])
+    assert stdout.getvalue() == ""
 
 
 def test_compute_stream_delta_empty_body_after_idle() -> None:
