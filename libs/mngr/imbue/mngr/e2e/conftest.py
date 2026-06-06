@@ -415,6 +415,8 @@ def _is_pid_alive(pid: int) -> bool:
     except ProcessLookupError:
         return False
     except OSError:
+        # PermissionError (EPERM): the process exists but is owned by another
+        # user, so we cannot signal it. It is still alive, hence return True.
         return True
 
 
