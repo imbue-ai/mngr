@@ -543,6 +543,7 @@ def _check_unknown_fields(
     strict: bool = True,
     silent: bool = False,
     extra_hint: str | None = None,
+    field_for_key: Callable[[str], str] = lambda key: key,
 ) -> None:
     """Check for unknown fields in raw_config and either raise or warn.
 
@@ -556,9 +557,15 @@ def _check_unknown_fields(
 
     `extra_hint` is appended to the error/warning message after the field listing
     when there are unknown fields. Used to suggest causes (e.g. a missing plugin).
+
+    `field_for_key` maps a raw key to the field name used for the membership check;
+    it defaults to the identity. Callers whose keys carry an operator suffix (e.g.
+    the ``__extend`` suffix on create_templates options) pass a mapper that strips
+    it, so the suffixed key validates against the bare field while still being
+    reported and removed under its original spelling.
     """
     known_fields = set(model_class.model_fields.keys())
-    unknown = set(raw_config.keys()) - known_fields
+    unknown = {key for key in raw_config if field_for_key(key) not in known_fields}
     if unknown:
         base_msg = f"Unknown fields in {context}: {sorted(unknown)}. Valid fields: {sorted(known_fields)}"
         full_msg = f"{base_msg}\n{extra_hint}" if extra_hint else base_msg
@@ -989,30 +996,22 @@ def _parse_create_templates(
 
     for template_name, raw_options in raw_templates.items():
         raw_options = _normalize_field_keys(raw_options, f"create_templates.{template_name}")
-        # Make sure the options don't define anything that cannot be handled.
-        # An ``__extend`` suffix is a valid operator on any CLI option key, so
-        # strip it before checking against the CreateCliOptions schema. Honor the
-        # same forward-compat policy the other sub-parsers use: under strict=True
-        # an unknown option is fatal (catches typos in ``config set``), but under
-        # strict=False (MNGR_ALLOW_UNKNOWN_CONFIG) it is warned-and-dropped so a
-        # config written for a newer mngr that adds a ``create`` option doesn't
-        # break an older mngr; silent=True suppresses the warning entirely.
-        unknown_fields = {
-            field
-            for field in raw_options
-            if (bare_key(field) if is_extend_key(field) else field) not in CreateCliOptions.model_fields
-        }
-        if unknown_fields:
-            msg = (
-                f"Unknown fields in create_templates.{template_name}: {sorted(unknown_fields)}. "
-                f"Valid fields: {sorted(CreateCliOptions.model_fields.keys())}"
-            )
-            if strict:
-                raise ConfigParseError(msg)
-            if not silent:
-                logger.warning(msg)
-            for field in unknown_fields:
-                del raw_options[field]
+        # Make sure the options don't define anything that cannot be handled, using
+        # the same forward-compat policy the other sub-parsers go through: under
+        # strict=True an unknown option is fatal (catches typos in ``config set``),
+        # but under strict=False (MNGR_ALLOW_UNKNOWN_CONFIG) it is warned-and-dropped
+        # so a config written for a newer mngr that adds a ``create`` option doesn't
+        # break an older mngr; silent=True suppresses the warning entirely. An
+        # ``__extend`` suffix is a valid operator on any CLI option key, so it is
+        # stripped before checking membership against the CreateCliOptions schema.
+        _check_unknown_fields(
+            raw_options,
+            CreateCliOptions,
+            f"create_templates.{template_name}",
+            strict=strict,
+            silent=silent,
+            field_for_key=lambda key: bare_key(key) if is_extend_key(key) else key,
+        )
         templates[CreateTemplateName(template_name)] = CreateTemplate.model_construct(options=raw_options)
 
     return templates
