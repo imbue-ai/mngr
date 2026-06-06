@@ -212,7 +212,7 @@ def _emit_destroyed(
     event_data = {
         "message": _format_destroyed_message(resource_type, resource, dry_run),
         "resource_type": resource_type,
-        "resource": resource.model_dump(mode="json") if hasattr(resource, "model_dump") else str(resource),
+        "resource": resource.model_dump(mode="json"),
         "dry_run": dry_run,
     }
     emit_event("destroyed", event_data, output_format)
