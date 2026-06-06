@@ -36,7 +36,8 @@ Ideally we end up making it similar to whatever we're using in the ovh provider.
 
 - Lima hosts created from FCT (docker-in-Lima mode) run the agent container under gVisor: the VM provisions `runsc` at first boot and the agent `docker run` uses `--runtime runsc`, `--workdir=/`, and `--security-opt=no-new-privileges`.
 - Vultr and OVH hosts created from FCT run their agent containers under gVisor: provisioning installs `runsc` (cloud-init for Vultr, bootstrap path for OVH) and the agent `docker run` adds `--runtime runsc`, `--workdir=/`, and `--security-opt=no-new-privileges`.
-- `imbue_cloud` pool hosts inherit runsc through the OVH-backed bake; the slow/rebuild path also gets the hardening run args via the `imbue_cloud` template. Already-baked pool hosts continue running as-is (no runsc) until their next bake — no migration.
+- `imbue_cloud` *fast path* (the common case) inherits runsc through the OVH-backed bake — the adopted pre-baked container was built under runsc. Already-baked pool hosts continue running as-is (no runsc) until their next bake — no migration.
+- `imbue_cloud` *slow/rebuild path* is NOT covered by this change: it cannot be done via the `imbue_cloud` template (adding `start_arg` there breaks the fast path, which minds attempts first and which rejects `--start-arg`), and the slow path builds its delegated vps_docker provider with default config (no `docker_runtime`/run-args). Full coverage needs a code change in `mngr_imbue_cloud` (+ minds bootstrap) — deferred as a follow-up.
 - Lima VMs boot a pinned Debian 12 genericcloud image instead of Ubuntu 24.04; provisioning installs the same toolchain via apt, so direct-in-VM Lima behavior is unchanged aside from the lighter base OS.
 - Any Lima user can now inject arbitrary extra `docker run` args into the agent container via the new config field (empty by default, so no behavior change unless set).
 - When `docker_runtime="runsc"` is set but `runsc` is not registered on the host/VM, container creation fails with Docker's native "unknown runtime" error (unchanged existing behavior). With `install_gvisor_runtime=true`, provisioning registers it first, so this should not occur on a clean bring-up.
@@ -60,7 +61,7 @@ Ideally we end up making it similar to whatever we're using in the ovh provider.
 - `[providers.lima]`: enable `install_gvisor_runtime`, set `docker_runtime="runsc"`, and set the new extra-container-run-args field to `["--workdir=/", "--security-opt=no-new-privileges"]`.
 - Add `[providers.vultr]` and `[providers.ovh]` blocks: enable `install_gvisor_runtime` and set `docker_runtime="runsc"`.
 - `[create_templates.vultr]` and `[create_templates.ovh]`: add `start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/"]`; replace the existing "not enabled here yet" comments with the now-active rationale.
-- `[create_templates.imbue_cloud]`: add the same `start_arg__extend` so the slow/rebuild (vps_docker-backed) path runs the agent container under runsc with the hardening args.
+- `[create_templates.imbue_cloud]`: intentionally left unchanged — adding `start_arg` here would break the fast path (minds tries `fast_mode=require` first, which rejects `--start-arg`). The fast path gets runsc from the OVH bake instead.
 - Leave the existing `[providers.docker]` block unchanged (already on runsc).
 
 ### Validation (required before "done")
@@ -74,3 +75,4 @@ Ideally we end up making it similar to whatever we're using in the ovh provider.
 - Syncing the updated mngr into FCT's `vendor/mngr` (normal release-minds flow).
 - Migrating or draining existing pre-baked `imbue_cloud` pool hosts.
 - Alpine or any non-apt base image (would require rewriting the apt-based provisioning).
+- The `imbue_cloud` slow/rebuild path under runsc (see Overview) — needs a `mngr_imbue_cloud` + minds-bootstrap code change to propagate `docker_runtime` + run-args into the delegated vps_docker provider; deferred as a follow-up. The fast path (the common case) is covered.

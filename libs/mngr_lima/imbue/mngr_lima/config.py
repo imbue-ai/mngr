@@ -113,6 +113,16 @@ class LimaProviderConfig(ProviderInstanceConfig):
         default=(),
         description="Default limactl start arguments applied to all VMs",
     )
+    default_container_run_args: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Extra arguments appended to the `docker run` that starts the agent container in "
+            "is_host_in_docker mode (e.g. '--workdir=/' and '--security-opt=no-new-privileges' when "
+            "running under gVisor). These reach the inner container only; the VM-level "
+            "`default_start_args` go to `limactl start` instead. Empty by default (no change to the "
+            "`docker run`). Ignored when is_host_in_docker is False (no container is run)."
+        ),
+    )
     docker_runtime: str | None = Field(
         default=None,
         description=(

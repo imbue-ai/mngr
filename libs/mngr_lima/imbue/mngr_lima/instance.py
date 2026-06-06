@@ -712,9 +712,13 @@ sudo poweroff
                 ],
                 labels=labels,
                 # Select a non-default container runtime (e.g. 'runsc' for gVisor) when
-                # configured; absent by default. The runtime must be registered in the VM.
-                extra_args=(
-                    ["--runtime", self.config.docker_runtime] if self.config.docker_runtime is not None else []
+                # configured, plus any further `docker run` flags that runtime needs
+                # (e.g. '--workdir=/' + '--security-opt=no-new-privileges' under runsc),
+                # which can't otherwise be injected from config. See
+                # `_build_agent_container_extra_args`.
+                extra_args=_build_agent_container_extra_args(
+                    self.config.docker_runtime,
+                    self.config.default_container_run_args,
                 ),
                 entrypoint_cmd=CONTAINER_ENTRYPOINT_CMD,
             )
@@ -1638,6 +1642,20 @@ def _allocate_free_host_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as temp_socket:
         temp_socket.bind(("127.0.0.1", 0))
         return temp_socket.getsockname()[1]
+
+
+def _build_agent_container_extra_args(
+    docker_runtime: str | None,
+    default_container_run_args: Sequence[str],
+) -> list[str]:
+    """Assemble the extra ``docker run`` args for the in-VM agent container.
+
+    Prepends ``--runtime <value>`` when a non-default runtime is configured (e.g.
+    'runsc' for gVisor), then appends any configured passthrough run args (e.g.
+    '--workdir=/' + '--security-opt=no-new-privileges' the runtime needs).
+    """
+    runtime_args = ["--runtime", docker_runtime] if docker_runtime is not None else []
+    return [*runtime_args, *default_container_run_args]
 
 
 def _parse_size_to_gb(size_str: str) -> float:
