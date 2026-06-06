@@ -4,9 +4,10 @@ Strengthened several weak tests in the remote_service_connector test suite:
   round-trip is exercised for real; the service-token round-trip tests now assert the created
   token is surfaced by the listing (and that the client secret is omitted on listings) instead
   of asserting an always-empty list.
-- Migration schema-drift guards now match column names on word boundaries so a dropped column
-  (e.g. the bare `access` column, previously masked by the `access_key_id` substring) fails the
-  test.
+- Migration schema-drift guards now match column names on word boundaries, against
+  comment-stripped SQL, so a dropped column fails the test even when the column name still
+  appears in the migration's header comment prose (e.g. `is_paid = true`) or as a substring of
+  another identifier (e.g. the bare `access` column inside `access_key_id`).
 - Split the mislabeled `make_tunnel_name` truncation test into a prefix-strip test plus a new
   test that actually exercises truncation to 16 characters.
 - The KV "create namespace when missing" test now asserts the namespace create POST fired

@@ -1109,25 +1109,37 @@ def test_derive_s3_secret_matches_sha256() -> None:
     assert derive_s3_secret_access_key("hello") == hashlib.sha256(b"hello").hexdigest()
 
 
+def _strip_sql_comments(sql: str) -> str:
+    """Drop ``--`` line comments so column-name guards match real declarations, not prose.
+
+    Several migrations mention their own column names in the header comment (e.g.
+    ``is_paid = true``), so a guard that searches the whole file would stay green even if
+    the column were dropped from the ``CREATE TABLE`` body. Stripping comments first means
+    the search only sees actual SQL.
+    """
+    return re.sub(r"--[^\n]*", "", sql)
+
+
 def test_r2_keys_migration_declares_all_persisted_columns() -> None:
     """Guard against the r2_keys schema and the PostgresKeyStore INSERT drifting apart."""
     migration_path = Path(__file__).parent.parent.parent / "migrations" / "004_r2_keys.sql"
-    migration_sql = migration_path.read_text()
+    migration_sql = _strip_sql_comments(migration_path.read_text())
     for column in ("access_key_id", "owner_user_id", "bucket_name", "access", "alias", "created_at"):
-        # Word-boundary match so e.g. the bare "access" column is not spuriously
-        # satisfied by the substring inside "access_key_id".
+        # Word-boundary match (against comment-stripped SQL) so e.g. the bare "access" column
+        # is not spuriously satisfied by the substring inside "access_key_id".
         assert re.search(rf"\b{re.escape(column)}\b", migration_sql), f"r2_keys migration is missing column {column!r}"
 
 
 def test_paid_lists_migration_declares_both_tables() -> None:
     """Guard against the paid_domains / paid_emails schema drifting from the gate queries."""
     migration_path = Path(__file__).parent.parent.parent / "migrations" / "005_paid_lists.sql"
-    migration_sql = migration_path.read_text().lower()
+    migration_sql = _strip_sql_comments(migration_path.read_text()).lower()
     assert "create table paid_domains" in migration_sql
     assert "create table paid_emails" in migration_sql
     for column in ("is_paid", "created_at", "updated_at"):
-        # Word-boundary match so a column is not spuriously satisfied by a substring of
-        # another identifier or of comment prose.
+        # Word-boundary match against comment-stripped SQL so a column is not spuriously
+        # satisfied by a substring of another identifier or by the header comment prose
+        # (e.g. "is_paid = true" / "bumps updated_at").
         assert re.search(rf"\b{re.escape(column)}\b", migration_sql), (
             f"paid-lists migration is missing column {column!r}"
         )
