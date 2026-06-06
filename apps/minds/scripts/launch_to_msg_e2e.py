@@ -1304,8 +1304,8 @@ async def amain() -> int:
                 """async (host_name) => {
                     const r = await fetch('/api/create-agent', {
                         method: 'POST',
-                        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-                        body: 'host_name=' + encodeURIComponent(host_name),
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({host_name}),
                     });
                     return {status: r.status, body: await r.text()};
                 }""",
