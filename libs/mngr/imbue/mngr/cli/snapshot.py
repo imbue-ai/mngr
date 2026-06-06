@@ -33,6 +33,8 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderEmptyError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.data_types import SnapshotInfo
@@ -121,7 +123,13 @@ def _bucketize_mixed_identifiers(
 
 
 def _discover_all_hosts(mngr_ctx: MngrContext) -> list[DiscoveredHost]:
-    """Discover all hosts; on provider errors, log and return an empty list."""
+    """Discover all hosts; on a skippable provider error, log and return an empty list.
+
+    Only ``ProviderUnavailableError``/``ProviderEmptyError`` are safe to skip on a
+    read path (see errors.py); other ``MngrError`` subclasses (auth, config, schema)
+    are real failures and must propagate so the user sees the actual cause rather than
+    a misleading "host not found".
+    """
     try:
         agents_by_host, _ = discover_hosts_and_agents(
             mngr_ctx,
@@ -130,7 +138,7 @@ def _discover_all_hosts(mngr_ctx: MngrContext) -> list[DiscoveredHost]:
             include_destroyed=False,
             reset_caches=False,
         )
-    except MngrError as e:
+    except (ProviderUnavailableError, ProviderEmptyError) as e:
         logger.warning("Failed to discover hosts: {}", e)
         return []
     return list(agents_by_host.keys())
