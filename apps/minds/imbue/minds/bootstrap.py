@@ -74,6 +74,15 @@ def resolve_minds_root_name() -> str:
             MINDS_ROOT_NAME_PATTERN,
             DEFAULT_MINDS_ROOT_NAME,
         )
+        # Intentional: a set-but-invalid value (including a typo'd dev/ci env
+        # name) falls back to production (~/.minds/) rather than raising. This
+        # keeps every caller pointed at *some* consistent host_dir, but it does
+        # mean a mistyped env name silently resolves to the production data dir.
+        # That blast radius is accepted because the warning above surfaces it and
+        # because callers for whom landing on production would be destructive
+        # (`minds env deploy/destroy`, `minds run`) gate on the stricter
+        # is_minds_root_name_set_to_active_env (which treats invalid as "not
+        # activated") instead of trusting this fallback.
         return DEFAULT_MINDS_ROOT_NAME
     return value
 
