@@ -195,8 +195,10 @@ def setup_command_context(
     else:
         try:
             is_interactive = sys.stdout.isatty()
-        except (ValueError, AttributeError):
-            # Handle cases where stdout is uninitialized (e.g., xdist workers)
+        except ValueError:
+            # stdout is a closed/detached stream (e.g., xdist workers). An
+            # AttributeError would instead mean stdout was replaced by an object
+            # lacking isatty -- a real bug -- so let that propagate.
             is_interactive = False
 
     # Update MngrContext with the resolved is_interactive and safe mode

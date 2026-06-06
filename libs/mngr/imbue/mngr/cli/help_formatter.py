@@ -135,8 +135,10 @@ def is_interactive_terminal() -> bool:
     """
     try:
         return sys.stdout.isatty()
-    except (ValueError, AttributeError):
-        # Handle cases where stdout is uninitialized (e.g., xdist workers)
+    except ValueError:
+        # stdout is a closed/detached stream (e.g., xdist workers). An
+        # AttributeError would instead mean stdout was replaced by an object
+        # lacking isatty -- a real bug -- so let that propagate.
         return False
 
 
