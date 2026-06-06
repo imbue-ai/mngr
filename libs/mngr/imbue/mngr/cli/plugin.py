@@ -15,6 +15,7 @@ from pydantic import Field
 from tabulate import tabulate
 
 from imbue.concurrency_group.errors import ProcessError
+from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
@@ -169,7 +170,9 @@ def _get_field_value(plugin: PluginInfo, field: str) -> str:
         case "enabled":
             return str(plugin.is_enabled).lower()
         case _:
-            return "-"
+            # Field names are validated against DEFAULT_FIELDS in _parse_fields,
+            # so an unknown field here is a programming error, not user input.
+            raise SwitchError(f"Unknown plugin field: {field!r}")
 
 
 def _emit_plugin_list(
@@ -222,10 +225,19 @@ def _emit_plugin_list_jsonl(plugins: list[PluginInfo], fields: tuple[str, ...]) 
 
 @pure
 def _parse_fields(fields_str: str | None) -> tuple[str, ...]:
-    """Parse a comma-separated fields string into a tuple of field names."""
+    """Parse a comma-separated fields string into a tuple of field names.
+
+    Raises AbortError if any field name is not one of DEFAULT_FIELDS, so a typo'd
+    --fields value (e.g. 'enbaled') errors instead of silently rendering a blank
+    column.
+    """
     if fields_str is None:
         return DEFAULT_FIELDS
-    return tuple(f.strip() for f in fields_str.split(",") if f.strip())
+    fields = tuple(f.strip() for f in fields_str.split(",") if f.strip())
+    unknown = [f for f in fields if f not in DEFAULT_FIELDS]
+    if unknown:
+        raise AbortError(f"Unknown plugin field(s): {', '.join(unknown)}. Valid fields: {', '.join(DEFAULT_FIELDS)}")
+    return fields
 
 
 @pure
