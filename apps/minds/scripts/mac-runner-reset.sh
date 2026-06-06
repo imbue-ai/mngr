@@ -25,6 +25,18 @@ if command -v limactl >/dev/null 2>&1; then
   limactl delete --all >/dev/null 2>&1 || true
 fi
 
+# Local Time Machine snapshots hold deleted-file blocks until purged.
+# After a sequence of CI runs that each create+destroy a Lima VM (whose
+# diffdisk is up to 100GB), those snapshots can pin ~50-100GB even after
+# limactl delete --all reclaims the user-visible files. Free them so the
+# next Lima diffdisk conversion ("no space left on device" -- run
+# 27060995662) has room.
+log "freeing local Time Machine snapshots (best effort)"
+sudo tmutil deletelocalsnapshots / 2>/dev/null || true
+
+log "disk usage after cleanup:"
+df -h "$HOME" / 2>&1 | sed 's/^/[reset]   /' >&2
+
 log "wiping leftover /tmp diagnostic artifacts from prior runs"
 # Only /tmp/minds-electron.log persists across runs (re-written each
 # launch); the deleted first-message-* artifacts were produced by
