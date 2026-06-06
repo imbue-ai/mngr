@@ -1240,11 +1240,14 @@ async def amain() -> int:
             bundled_mngr = MINDS_HOME / ".venv" / "bin" / "mngr"
             if bundled_mngr.exists():
                 mngr_env = {**os.environ, "MNGR_HOST_DIR": str(MINDS_HOME / "mngr")}
-                # ``--on-error continue`` keeps mngr's exit 0 when individual
-                # provider discoveries fail (the CI runner has no modal
-                # credentials, so the modal provider hard-fails by default).
-                # Errors still land in the ``errors`` array of the JSON
-                # payload, so we don't lose visibility.
+                # ``--on-error continue`` puts each provider's discovery error
+                # into the JSON payload's ``errors`` array. mngr STILL exits 1
+                # when any provider failed (per error_handling.md spec) -- on
+                # the CI runner this is normal because the modal provider has
+                # no token -- but the ``agents`` array still lists every agent
+                # discovered by providers that DID work, which is what we
+                # actually check. So: parse stdout regardless of exit code;
+                # only fail if the JSON itself is unusable.
                 cli_result = subprocess.run(
                     [str(bundled_mngr), "list", "--format", "json", "--quiet", "--on-error", "continue"],
                     capture_output=True,
@@ -1252,14 +1255,15 @@ async def amain() -> int:
                     env=mngr_env,
                     timeout=30,
                 )
-                # Stash for post-mortem regardless of pass/fail.
                 (SCREENSHOT_DIR / "mngr-list-output.json").write_text(cli_result.stdout or "")
-                if cli_result.returncode != 0:
-                    raise E2EFailure(f"[mngr-list] returned {cli_result.returncode}: stderr={cli_result.stderr!r}")
+                (SCREENSHOT_DIR / "mngr-list-stderr.txt").write_text(cli_result.stderr or "")
                 try:
-                    listing = json.loads(cli_result.stdout)
+                    listing = json.loads(cli_result.stdout or "{}")
                 except json.JSONDecodeError as exc:
-                    raise E2EFailure(f"[mngr-list] non-JSON output: {exc}\n{cli_result.stdout[:500]}") from exc
+                    raise E2EFailure(
+                        f"[mngr-list] non-JSON output (returncode={cli_result.returncode}): "
+                        f"{exc}\nstdout={cli_result.stdout[:500]!r}\nstderr={cli_result.stderr[:500]!r}"
+                    ) from exc
                 agents = listing.get("agents", []) if isinstance(listing, dict) else []
                 host_names = {a.get("host", {}).get("name", "") for a in agents if isinstance(a, dict)}
                 logger.info("[mngr-list] {} agents; hosts: {}", len(agents), host_names)
