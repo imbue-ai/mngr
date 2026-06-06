@@ -1020,8 +1020,12 @@ def _check_generation_id_and_wipe_local_state_on_mismatch(
 
     current = payload.get("generation_id") if isinstance(payload, dict) else None
     if not isinstance(current, str) or not current:
-        # Connector exposed an empty id, meaning the deploy never pushed
-        # one (e.g. pre-generation-lifecycle deploy). Skip the wipe;
+        # No usable generation id, so skip the wipe (this whole check is
+        # best-effort and non-blocking, like the network/parse guard above).
+        # Two ways to land here: the connector returned a well-formed but
+        # non-object JSON body (a list/string/number -> not a dict), or it
+        # exposed an empty/missing id because the deploy never pushed one
+        # (e.g. a pre-generation-lifecycle deploy). In either case the
         # operator can re-deploy to start tracking generations.
         return
 
