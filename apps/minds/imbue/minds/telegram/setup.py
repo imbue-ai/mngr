@@ -242,3 +242,15 @@ class TelegramSetupOrchestrator(MutableModel):
             with self._lock:
                 self._statuses[aid] = TelegramSetupStatus.FAILED
                 self._errors[aid] = str(exc)
+        finally:
+            # Guarantee the status reaches a terminal value on every path. The
+            # flow drives telethon and Playwright, which can raise error types
+            # outside the handled set above; without this guard such an escape
+            # would kill this daemon thread with the status stuck mid-flow,
+            # leaving UI pollers waiting forever. We record FAILED here but do
+            # not swallow the exception -- it still propagates to the threading
+            # excepthook so the underlying bug stays visible.
+            with self._lock:
+                if self._statuses.get(aid) not in (TelegramSetupStatus.DONE, TelegramSetupStatus.FAILED):
+                    self._statuses[aid] = TelegramSetupStatus.FAILED
+                    self._errors[aid] = "Telegram setup failed unexpectedly; see logs for details."
