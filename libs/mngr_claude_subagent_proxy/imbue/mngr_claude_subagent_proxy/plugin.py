@@ -548,16 +548,16 @@ def _check_project_settings_stop_hooks_guarded(host: OnlineHostInterface, work_d
     )
 
 
-def _resolve_plugin_mode(mngr_ctx: MngrContext | None) -> SubagentProxyMode:
+def _resolve_plugin_mode(mngr_ctx: MngrContext) -> SubagentProxyMode:
     """Resolve the plugin's mode from mngr_ctx, falling back to PROXY.
 
-    ``mngr_ctx`` is None in unit tests (which pass it explicitly to keep
-    the hookimpl signature satisfied without standing up a full MngrContext).
-    Treat that case as "use defaults" -- equivalent to a user who never
-    configured the plugin.
+    A context with no subagent-proxy plugin config resolves to the
+    ``SubagentProxyPluginConfig`` defaults (PROXY mode) -- equivalent to a
+    user who never configured the plugin. ``mngr_ctx`` is non-optional:
+    ``on_after_provisioning`` is always called by pluggy with a real context,
+    and tests pass a real (fixture-built) context too, so there is no
+    test-only None path to special-case here.
     """
-    if mngr_ctx is None:
-        return SubagentProxyPluginConfig().mode
     config = mngr_ctx.get_plugin_config(CLAUDE_SUBAGENT_PROXY_PLUGIN_NAME, SubagentProxyPluginConfig)
     return config.mode
 
