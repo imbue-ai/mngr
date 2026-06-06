@@ -18,12 +18,16 @@ from imbue.mngr_imbue_cloud.client import _parse_auth_policy
 from imbue.mngr_imbue_cloud.data_types import AuthPolicy
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketExistsError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketLimitError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotEmptyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotFoundError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudKeyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudPaidListError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudTunnelError
 
 
 def _make_client(handler) -> tuple[ImbueCloudConnectorClient, httpx.MockTransport]:
@@ -437,3 +441,95 @@ def test_paid_list_unauthenticated_raises_auth_error(monkeypatch: pytest.MonkeyP
     client = _install_mock_httpx(monkeypatch, handler)
     with pytest.raises(ImbueCloudAuthError):
         client.list_paid_domains(SecretStr("wrong"), paid_only=False)
+
+
+# -- Strict connector list/parse handling --
+#
+# A non-list body, a non-dict entry, an unparseable entry, or a record with an
+# empty identity name is a connector contract violation. These must surface as
+# the endpoint's typed error rather than being coerced to an empty / shorter
+# list or a record with a blank name (which would target the wrong URL later).
+
+
+def test_list_hosts_non_list_body_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        # A dict that doesn't carry a "hosts" list -- e.g. an error envelope.
+        return httpx.Response(200, json={"unexpected": "shape"})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudConnectorError):
+        client.list_hosts(SecretStr("tok"))
+
+
+def test_list_hosts_unparseable_entry_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        # One good-looking entry is fine to omit; a row missing required fields
+        # must fail the whole call rather than silently vanish.
+        return httpx.Response(200, json={"hosts": [{"host_db_id": "only-this-field"}]})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudConnectorError):
+        client.list_hosts(SecretStr("tok"))
+
+
+def test_list_litellm_keys_non_list_body_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"error": "nope"})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudKeyError):
+        client.list_litellm_keys(SecretStr("tok"))
+
+
+def test_list_tunnels_non_dict_entry_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=["not-a-dict"])
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudTunnelError):
+        client.list_tunnels(SecretStr("tok"))
+
+
+def test_list_tunnels_empty_name_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[{"tunnel_id": "t1", "services": []}])
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudTunnelError):
+        client.list_tunnels(SecretStr("tok"))
+
+
+def test_create_tunnel_empty_name_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"tunnel_id": "t1"})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudTunnelError):
+        client.create_tunnel(SecretStr("tok"), "agent-1", None)
+
+
+def test_list_services_empty_name_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[{"service_url": "http://x", "hostname": "h"}])
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudTunnelError):
+        client.list_services(SecretStr("tok"), "my-tunnel")
+
+
+def test_list_paid_domains_missing_value_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[{"is_paid": True, "created_at": "t0", "updated_at": "t1"}])
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudPaidListError):
+        client.list_paid_domains(SecretStr("k"), paid_only=True)
+
+
+def test_list_buckets_non_list_body_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"buckets": "not-a-list"})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudBucketError):
+        client.list_buckets(SecretStr("tok"))

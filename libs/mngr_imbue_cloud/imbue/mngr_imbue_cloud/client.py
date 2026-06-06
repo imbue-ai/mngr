@@ -679,18 +679,20 @@ def _parse_connector_list(
     return result
 
 
-def _require_str_field(raw: dict[str, Any], primary_key: str, fallback_key: str, what: str) -> str:
-    """Return a non-empty identity string from ``raw``, or raise ``ValueError``.
+def _require_str_field(
+    raw: dict[str, Any], primary_key: str, fallback_key: str, what: str, exc_cls: type[ImbueCloudError]
+) -> str:
+    """Return a non-empty identity string from ``raw``, or raise ``exc_cls``.
 
     Connector records carry the value under ``primary_key`` (with an older
     ``fallback_key`` alias). These names are used as URL path segments in later
     operations (delete/remove/get_*_auth), so an empty one would silently
-    target the wrong URL. Treat a missing/empty value as a parse error rather
-    than defaulting to ``""``.
+    target the wrong URL. Treat a missing/empty value as a typed parse error
+    rather than defaulting to ``""``.
     """
     value = raw.get(primary_key, raw.get(fallback_key, ""))
     if not isinstance(value, str) or not value:
-        raise ValueError(f"connector {what} record is missing a usable {primary_key!r}: {raw!r}")
+        raise exc_cls(f"connector {what} record is missing a usable {primary_key!r}: {raw!r}")
     return value
 
 
@@ -704,7 +706,7 @@ def _parse_paid_list_entry(raw: dict[str, Any], value_key: str) -> PaidListEntry
     """
     value = raw.get(value_key, "")
     if not isinstance(value, str) or not value:
-        raise ValueError(f"connector paid-list row is missing a usable {value_key!r}: {raw!r}")
+        raise ImbueCloudPaidListError(f"connector paid-list row is missing a usable {value_key!r}: {raw!r}")
     return PaidListEntry(
         value=value,
         is_paid=bool(raw.get("is_paid", False)),
@@ -734,7 +736,7 @@ def _parse_tunnel_info(raw: dict[str, Any]) -> TunnelInfo:
         services_tuple = ()
     token_value = raw.get("token") or raw.get("tunnel_token")
     return TunnelInfo(
-        tunnel_name=_require_str_field(raw, "tunnel_name", "name", "tunnel"),
+        tunnel_name=_require_str_field(raw, "tunnel_name", "name", "tunnel", ImbueCloudTunnelError),
         tunnel_id=str(raw.get("tunnel_id", raw.get("id", ""))),
         token=SecretStr(str(token_value)) if token_value else None,
         services=services_tuple,
@@ -748,7 +750,7 @@ def _parse_service_info(raw: dict[str, Any]) -> ServiceInfo:
     tunnel name, it is used as a URL path segment for remove/auth operations.
     """
     return ServiceInfo(
-        service_name=_require_str_field(raw, "service_name", "name", "service"),
+        service_name=_require_str_field(raw, "service_name", "name", "service", ImbueCloudTunnelError),
         service_url=str(raw.get("service_url", raw.get("url", ""))),
         hostname=str(raw.get("hostname", "")),
     )
