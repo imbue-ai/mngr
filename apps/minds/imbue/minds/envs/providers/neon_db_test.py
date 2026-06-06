@@ -18,6 +18,17 @@ def _make_summary(*, id: str, created_at: str = "2026-01-01T00:00:00Z") -> NeonP
     return NeonProjectSummary(id=id, name="minds-dev-josh", created_at=created_at)
 
 
+def test_neon_provider_error_carries_status_code() -> None:
+    # Callers branch on .status_code (not message substrings) for idempotency.
+    err = NeonProviderError("Neon API returned 409 ...", status_code=409)
+    assert err.status_code == 409
+
+
+def test_neon_provider_error_status_code_defaults_to_none() -> None:
+    # Transport errors / shape mismatches have no HTTP status.
+    assert NeonProviderError("transport blew up").status_code is None
+
+
 def test_select_one_or_raise_returns_none_when_no_projects_match() -> None:
     assert _select_one_or_raise_multi_match([], "minds-dev-josh", org_id="org-x") is None
 
