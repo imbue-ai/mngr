@@ -17,6 +17,7 @@ from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_claude_subagent_proxy.data_types import SubagentProxyMode
 from imbue.mngr_claude_subagent_proxy.data_types import SubagentProxyPluginConfig
 from imbue.mngr_claude_subagent_proxy.plugin import CLAUDE_SUBAGENT_PROXY_PLUGIN_NAME
+from imbue.mngr_claude_subagent_proxy.plugin import MalformedAgentSettingsError
 from imbue.mngr_claude_subagent_proxy.plugin import SubagentProxyChildConfig
 from imbue.mngr_claude_subagent_proxy.plugin import UnguardedProjectStopHookError
 from imbue.mngr_claude_subagent_proxy.plugin import UnsupportedSubagentHookError
@@ -649,6 +650,43 @@ def test_deny_mode_merges_into_existing_settings_local_json(
     hooks = settings["hooks"]
     assert "UserPromptSubmit" in hooks
     assert "PreToolUse" in hooks
+
+
+@pytest.mark.parametrize("mode", [SubagentProxyMode.PROXY, SubagentProxyMode.DENY], ids=["proxy", "deny"])
+def test_malformed_settings_local_json_aborts_provisioning(
+    work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext, mode: SubagentProxyMode
+) -> None:
+    """A corrupt settings.local.json makes the merge (write) path fail loudly.
+
+    The file is written by mngr_claude provisioning, so malformed content
+    means real corruption. Both the PROXY and DENY merge paths must raise
+    MalformedAgentSettingsError rather than silently treating the file as
+    empty (which would clobber it on the subsequent write) or silently
+    skipping hook installation (which would leave the proxy disabled).
+    """
+    claude_dir = work_dir / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "settings.local.json").write_text("{not valid json")
+    ctx = _ctx_with_plugin_config(temp_mngr_ctx, SubagentProxyPluginConfig(mode=mode))
+    agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
+
+    with pytest.raises(MalformedAgentSettingsError):
+        _provision(agent, fake_host, ctx)
+
+
+def test_non_object_settings_local_json_aborts_provisioning(work_dir: Path, fake_host: FakeHost) -> None:
+    """settings.local.json that parses to a non-object (e.g. a JSON list) also fails loudly.
+
+    The merge path can only graft hooks onto a JSON object; a valid-but-wrong
+    shape is just as much a corruption signal as unparseable bytes.
+    """
+    claude_dir = work_dir / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "settings.local.json").write_text('["unexpectedly", "a", "list"]')
+    agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
+
+    with pytest.raises(MalformedAgentSettingsError):
+        _provision(agent, fake_host, None)
 
 
 def test_plugin_strip_hooks_is_safe_when_settings_missing(work_dir: Path, fake_host: FakeHost) -> None:
