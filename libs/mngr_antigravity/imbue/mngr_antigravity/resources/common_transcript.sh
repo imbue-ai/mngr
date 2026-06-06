@@ -242,6 +242,12 @@ def convert():
                 if event_id in existing_ids:
                     continue
                 output = _truncate(raw.get("content", ""), _MAX_OUTPUT_LENGTH)
+                # A CODE_ACTION always carries a `status` in agy 1.0.0 (observed
+                # value: DONE for a successful action); any other value means the
+                # action did not complete cleanly, so is_error is True. The
+                # "DONE" default only applies if the field is entirely absent --
+                # treat that unobserved shape as success rather than flagging an
+                # otherwise-normal result as a scary error in the transcript.
                 new_events.append((timestamp, {
                     "timestamp": timestamp,
                     "type": "tool_result",
