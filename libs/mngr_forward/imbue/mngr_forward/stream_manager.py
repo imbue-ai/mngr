@@ -400,16 +400,25 @@ class ForwardStreamManager(MutableModel):
         host_id_str = str(event.host_id)
         with self._lock:
             self._ssh_by_host_id[host_id_str] = ssh_info
-            agents_on_host = [AgentId(aid) for aid, hid in self._agent_host_map.items() if hid == host_id_str]
+            # Capture the provider name alongside the agent id under this single
+            # lock acquisition. _agent_host_map and _discovered_agents always
+            # carry identical key sets (written and removed together), so the
+            # indexing is safe here and avoids a second, racy lookup that a
+            # concurrent _destroy_agent could otherwise turn into a miss.
+            agents_on_host = [
+                (AgentId(aid), str(self._discovered_agents[aid].provider_name))
+                for aid, hid in self._agent_host_map.items()
+                if hid == host_id_str
+            ]
 
-        for agent_id in agents_on_host:
+        for agent_id, provider_name in agents_on_host:
             self.resolver.update_ssh_info(agent_id, ssh_info)
             for callback in self._on_agent_discovered_callbacks:
                 self._safely_call(
                     callback,
                     agent_id,
                     ssh_info,
-                    self._provider_name_for_agent(agent_id),
+                    provider_name,
                     name="on_agent_discovered (ssh-info-late)",
                 )
 
@@ -461,13 +470,6 @@ class ForwardStreamManager(MutableModel):
             if host_id is None:
                 return None
             return self._ssh_by_host_id.get(host_id)
-
-    def _provider_name_for_agent(self, agent_id: AgentId) -> str:
-        with self._lock:
-            agent = self._discovered_agents.get(str(agent_id))
-        if agent is None:
-            return "unknown"
-        return str(agent.provider_name)
 
     # -- per-agent events streams -----------------------------------------
 
