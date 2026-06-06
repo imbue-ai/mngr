@@ -478,7 +478,16 @@ def drain_turn(session: LiveSession) -> list[Message]:
     # The ticker owns the real stop decision (including its no-progress safety check); the outer
     # timeout is deliberately oversized so it only trips in pathological cases.
     outer_timeout_seconds = TURN_END_NO_PROGRESS_TIMEOUT_SECONDS * 10
-    poll_for_value(producer=ticker.tick, timeout=outer_timeout_seconds, poll_interval=POLL_INTERVAL_SECONDS)
+    end_of_turn, _, _ = poll_for_value(
+        producer=ticker.tick, timeout=outer_timeout_seconds, poll_interval=POLL_INTERVAL_SECONDS
+    )
+    if end_of_turn is None:
+        logger.warning(
+            "SDK turn drain hit the outer {:.0f}s timeout without a detected end-of-turn; "
+            "finalizing with the {} message(s) accumulated so far",
+            outer_timeout_seconds,
+            len(ticker.messages),
+        )
     duration_ms = max(1, int((time.monotonic() - turn_start) * 1000))
     return _finalize_turn_messages(session, ticker.messages, duration_ms)
 
