@@ -85,8 +85,11 @@ def _extract_credentials_from_page(page: Page) -> TelegramUserCredentials:
         })()"""
     )
 
-    dc_str = auth_data.get("dc")
-    user_auth_str = auth_data.get("userAuth")
+    # The injected JS always returns both keys (value or null), so index directly
+    # rather than using .get with an implicit default: the only case being handled
+    # is a null (not-yet-logged-in) value, not a missing key.
+    dc_str = auth_data["dc"]
+    user_auth_str = auth_data["userAuth"]
 
     if not dc_str or not user_auth_str:
         raise TelegramCredentialExtractionError(
