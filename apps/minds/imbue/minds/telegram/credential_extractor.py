@@ -131,7 +131,11 @@ def _extract_credentials_from_page(page: Page) -> TelegramUserCredentials:
             f"Auth key has unexpected length: {len(auth_key_hex)} hex chars (expected {_AUTH_KEY_HEX_LENGTH})"
         )
 
-    # Extract first name from account data
+    # Extract first name from account data. first_name is purely cosmetic (a log
+    # line and a display field), so an unparseable account1 should degrade to an
+    # empty name rather than abort the whole credential extraction. AttributeError
+    # is caught specifically because account1 may deserialize to a non-dict JSON
+    # value, on which .get would not exist.
     first_name = ""
     account_data = page.evaluate("localStorage.getItem('account1')")
     if account_data:
