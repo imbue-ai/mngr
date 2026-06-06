@@ -2779,15 +2779,21 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         data = json.loads(content)
         raw_commands = data.get("additional_commands", [])
 
-        # Handle both old format (list of strings) and new format (list of dicts)
+        # Handle both old format (list of strings) and new format (list of dicts).
+        # Anything else is corrupt data.json content, not a silently-tolerable shape:
+        # raise a clear error rather than letting an opaque KeyError/TypeError escape.
         result: list[NamedCommand] = []
         for cmd in raw_commands:
             if isinstance(cmd, str):
                 # Old format: plain string
                 result.append(NamedCommand(command=cmd, window_name=None))
-            else:
+            elif isinstance(cmd, dict) and "command" in cmd:
                 # New format: dict with command and window_name
                 result.append(NamedCommand(command=cmd["command"], window_name=cmd.get("window_name")))
+            else:
+                raise CorruptedAgentDataError(
+                    agent.id, data_path, ValueError(f"Malformed additional_commands entry: {cmd!r}")
+                )
         return result
 
     def get_agent_tmux_options(self, agent: AgentInterface) -> AgentTmuxOptions:
