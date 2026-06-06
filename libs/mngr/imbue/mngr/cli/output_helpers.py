@@ -8,6 +8,7 @@ from typing import assert_never
 
 from loguru import logger
 
+from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.rsync import RsyncResult
 from imbue.mngr.primitives import ErrorBehavior
@@ -212,7 +213,7 @@ def render_format_template(template: str, values: Mapping[str, str]) -> str:
         elif conversion == "a":
             value = ascii(value)
         else:
-            raise AssertionError(f"Unknown conversion: {conversion!r}")
+            raise SwitchError(f"Unknown conversion: {conversion!r}")
         if format_spec:
             value = format(value, format_spec)
         parts.append(value)

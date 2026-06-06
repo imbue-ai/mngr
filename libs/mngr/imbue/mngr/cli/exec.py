@@ -5,6 +5,7 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
+from imbue.imbue_common.errors import SwitchError
 from imbue.mngr.api.exec import ExecResult
 from imbue.mngr.api.exec import MissingOuterBehavior
 from imbue.mngr.api.exec import MultiExecResult
@@ -295,7 +296,7 @@ def _emit_outer_output(result: MultiExecResult, output_opts: OutputOptions) -> N
         case OutputFormat.JSON:
             _emit_json_outer_output(result)
         case OutputFormat.JSONL:
-            raise AssertionError("JSONL should be handled with streaming")
+            raise SwitchError("JSONL should be handled with streaming")
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -404,7 +405,7 @@ def _emit_output(result: MultiExecResult, output_opts: OutputOptions) -> None:
             _emit_json_output(result)
         case OutputFormat.JSONL:
             # JSONL is handled with streaming above, should not reach here
-            raise AssertionError("JSONL should be handled with streaming")
+            raise SwitchError("JSONL should be handled with streaming")
         case _ as unreachable:
             assert_never(unreachable)
 
