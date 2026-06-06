@@ -17,7 +17,6 @@ from uuid import uuid4
 
 import pluggy
 import pytest
-import tomlkit
 from loguru import logger
 
 from imbue.mngr.api.connect import CONNECT_COMMAND_ACTIVE_ENV_VAR
@@ -27,6 +26,7 @@ from imbue.mngr.config.data_types import USER_ID_FILENAME
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_modal.backend import MODAL_NAME_MAX_LENGTH
 from imbue.mngr_modal.backend import truncate_modal_name
+from imbue.mngr_modal.testing import load_active_modal_credentials
 from imbue.skitwright.data_types import CommandResult
 from imbue.skitwright.data_types import OutputLine
 from imbue.skitwright.data_types import OutputSource
@@ -593,24 +593,15 @@ _REAL_HOME = Path.home()
 def _load_modal_credentials(env: dict[str, str]) -> None:
     """Load Modal credentials from ~/.modal.toml into the env dict.
 
-    Mirrors the logic in mngr_modal's conftest, which uses monkeypatch for
-    in-process tests. E2e subprocesses need the vars set explicitly since
-    monkeypatch doesn't propagate to child processes.
+    Shares the parsing with mngr_modal's conftest (which sets the same vars via
+    monkeypatch for in-process tests) through load_active_modal_credentials.
+    E2e subprocesses need the vars set explicitly since monkeypatch doesn't
+    propagate to child processes.
     """
-    modal_toml_path = _REAL_HOME / ".modal.toml"
-    if not modal_toml_path.exists():
+    credentials = load_active_modal_credentials(_REAL_HOME / ".modal.toml")
+    if credentials is None:
         return
-    for value in tomlkit.loads(modal_toml_path.read_text()).values():
-        # A profile without an `active` key is simply not the active one, so the
-        # falsy default correctly skips it. The active profile, however, always
-        # carries both tokens -- index them directly so a malformed ~/.modal.toml
-        # crashes loudly here instead of silently propagating empty credentials
-        # into every Modal-backed subprocess (where they would surface much later
-        # as a confusing authentication failure).
-        if isinstance(value, dict) and value.get("active", ""):
-            env["MODAL_TOKEN_ID"] = value["token_id"]
-            env["MODAL_TOKEN_SECRET"] = value["token_secret"]
-            break
+    env["MODAL_TOKEN_ID"], env["MODAL_TOKEN_SECRET"] = credentials
 
 
 @pytest.fixture

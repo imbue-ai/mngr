@@ -8,6 +8,8 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 
+import tomlkit
+
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import ConfigStructureError
@@ -29,6 +31,30 @@ from imbue.modal_proxy.interface import SandboxInterface
 from imbue.modal_proxy.testing import FakeModalInterface
 
 _DEFAULT_SANDBOX_CONFIG = SandboxConfig()
+
+
+def load_active_modal_credentials(modal_toml_path: Path) -> tuple[str, str] | None:
+    """Return ``(token_id, token_secret)`` for the active profile in a modal.toml.
+
+    Tests need to propagate Modal credentials into isolated environments before
+    HOME is overridden: in-process tests via ``monkeypatch.setenv`` and e2e
+    subprocesses via an explicit env dict. Both read the same ``~/.modal.toml``,
+    so the parsing lives here once.
+
+    Returns ``None`` when the file does not exist or contains no active profile
+    (Modal credentials are optional for tests that do not hit Modal). The active
+    profile always carries both tokens, so they are indexed directly: a malformed
+    active profile raises ``KeyError`` here rather than silently yielding empty
+    credentials that would surface much later as a confusing auth failure.
+    """
+    if not modal_toml_path.exists():
+        return None
+    for value in tomlkit.loads(modal_toml_path.read_text()).values():
+        # A profile without an ``active`` key is simply not the active one, so
+        # the falsy default correctly skips it.
+        if isinstance(value, dict) and value.get("active", ""):
+            return str(value["token_id"]), str(value["token_secret"])
+    return None
 
 
 def make_testing_modal_interface(tmp_path: Path, cg: ConcurrencyGroup) -> FakeModalInterface:
