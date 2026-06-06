@@ -101,9 +101,11 @@ def test_update_services_emits_resolver_snapshot_envelope() -> None:
     )
 
 
-def test_update_services_without_envelope_writer_is_silent() -> None:
-    # No envelope writer => no emission, no failure. Tested for the path used by
-    # existing resolver-only tests and any code path that doesn't need the snapshot.
+def test_update_services_with_default_writer_does_not_emit_to_stdout() -> None:
+    # Constructed without an explicit writer, the resolver uses the no-op
+    # default sink: mutations succeed without raising and nothing reaches the
+    # real envelope stream. This is the path used by resolver-only tests and
+    # any code that doesn't need the snapshot.
     resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     resolver.add_known_agent(TEST_AGENT_ID_1)
     resolver.update_services(TEST_AGENT_ID_1, {"system_interface": "http://127.0.0.1:9100"})
