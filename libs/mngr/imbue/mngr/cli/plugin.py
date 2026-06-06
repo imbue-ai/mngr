@@ -271,18 +271,26 @@ def _read_package_name_from_pyproject(local_path: str) -> str:
 
 def _emit_plugin_add_result(
     specifier: str,
-    package_name: str,
+    # None when the installed package name could not be resolved (git sources only).
+    package_name: str | None,
     has_entry_points: bool,
     output_opts: OutputOptions,
 ) -> None:
     """Emit the result of a plugin add operation."""
     match output_opts.output_format:
         case OutputFormat.HUMAN:
-            write_human_line("Installed plugin package '{}'", package_name)
-            if not has_entry_points:
-                logger.warning(
-                    "Package installed but no mngr entry points found -- this package may not be a mngr plugin"
+            if package_name is None:
+                write_human_line(
+                    "Installed plugin from '{}' (could not determine the installed package name; "
+                    "skipped the mngr entry-point check)",
+                    specifier,
                 )
+            else:
+                write_human_line("Installed plugin package '{}'", package_name)
+                if not has_entry_points:
+                    logger.warning(
+                        "Package installed but no mngr entry points found -- this package may not be a mngr plugin"
+                    )
         case OutputFormat.JSON:
             write_json_line(
                 {
@@ -573,7 +581,9 @@ def _plugin_add_impl(ctx: click.Context) -> None:
     # For git sources, resolved_package_name is set to the URL initially and
     # updated after install by diffing the installed packages.
     new_requirements: list[ToolRequirement] = []
-    source_info: list[tuple[str, str, bool]] = []
+    # Each entry is (specifier, resolved_package_name, is_git). The name is None
+    # only for a git source whose package name could not be resolved after install.
+    source_info: list[tuple[str, str | None, bool]] = []
     has_git_source = False
 
     for source in sources:
@@ -623,19 +633,27 @@ def _plugin_add_impl(ctx: click.Context) -> None:
         assert packages_before is not None
         packages_after = _get_installed_package_names(mngr_ctx.concurrency_group)
         new_packages = packages_after - packages_before
-        # Best-effort: assign new package names to git sources in order.
-        # When multiple git sources are installed, we cannot reliably
-        # map each URL to its package name, so we assign in iteration order.
+        # Assign newly-installed package names to git sources in iteration order.
+        # When fewer new packages appear than git sources (e.g. a re-add/upgrade
+        # that adds no net-new package, or set ordering that doesn't line up with
+        # source order), the source's package name cannot be resolved -- record
+        # None rather than substituting the git URL as if it were a package name.
         new_names_iter = iter(new_packages)
         source_info = [
-            (spec, next(new_names_iter, url), is_git) if is_git else (spec, url, is_git)
-            for spec, url, is_git in source_info
+            (spec, next(new_names_iter, None), is_git) if is_git else (spec, name, is_git)
+            for spec, name, is_git in source_info
         ]
 
     # Report results for each source
     for specifier, resolved_package_name, _ in source_info:
-        has_entry_points = has_mngr_entry_points(resolved_package_name)
-        _emit_plugin_add_result(specifier, resolved_package_name, has_entry_points, output_opts)
+        if resolved_package_name is None:
+            # Could not resolve the installed package name for this git source;
+            # the entry-point check needs a real package name, so skip it and
+            # report the source as unresolved.
+            _emit_plugin_add_result(specifier, None, has_entry_points=False, output_opts=output_opts)
+        else:
+            has_entry_points = has_mngr_entry_points(resolved_package_name)
+            _emit_plugin_add_result(specifier, resolved_package_name, has_entry_points, output_opts)
 
 
 def _plugin_remove_impl(ctx: click.Context) -> None:
