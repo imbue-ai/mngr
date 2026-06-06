@@ -241,8 +241,18 @@ def extract_latest_assistant_block(pane_text: str) -> list[str] | None:
 
     Returns the block's logical lines (ANSI preserved, de-indented), or None if
     no assistant block is present. The block starts at the last achromatic marker
-    line and runs until the first non-empty line that is neither the marker line
-    nor two-space indented (a footer), skipping over blank lines.
+    line and runs until the end of the message, which is detected by any of:
+
+    - a run of two or more consecutive blank lines (the TUI pads the viewport
+      with blank rows below the message before the footer; the message itself
+      only ever uses single blank lines between paragraphs), or
+    - a new marker line (the next tool-call/status block), or
+    - a non-empty line that is not two-space indented (a column-0 footer such as
+      the input-box border).
+
+    Detecting the end via the blank-line run is what keeps footer/status/tmux
+    overlay lines below the viewport gap (which are themselves indented and would
+    otherwise look like continuation lines) out of the captured message.
     """
     lines = pane_text.split("\n")
 
@@ -256,12 +266,19 @@ def extract_latest_assistant_block(pane_text: str) -> list[str] | None:
         return None
 
     block: list[str] = [_strip_marker_prefix(lines[marker_line_index])]
+    consecutive_blanks = 0
     for index in range(marker_line_index + 1, len(lines)):
         line = lines[index]
         stripped = strip_ansi(line)
         if stripped.strip() == "":
+            consecutive_blanks += 1
+            # Two blank lines in a row mark the gap between the message and the
+            # viewport padding / footer below it: the message has ended.
+            if consecutive_blanks >= 2:
+                break
             block.append("")
             continue
+        consecutive_blanks = 0
         # A new marker line (e.g. the next tool call or status) ends the block.
         if _line_is_any_marker(line):
             break
@@ -523,7 +540,7 @@ def _convert_body_lines(block_lines: list[str]) -> list[str]:
         if _has_code_color(line):
             code_run: list[str] = []
             while index < length and _has_code_color(block_lines[index]):
-                code_run.append(strip_ansi(block_lines[index]))
+                code_run.append(strip_ansi(block_lines[index]).rstrip())
                 index += 1
             out.append("```")
             out.extend(code_run)
@@ -540,7 +557,7 @@ def _convert_body_lines(block_lines: list[str]) -> list[str]:
             index += 1
             continue
 
-        out.append(render_inline_line(line, state))
+        out.append(render_inline_line(line, state).rstrip())
         index += 1
 
     return out
