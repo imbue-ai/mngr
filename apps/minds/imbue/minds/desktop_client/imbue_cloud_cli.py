@@ -287,9 +287,8 @@ class ImbueCloudCli(MutableModel):
             cg_name="imbue-cloud-auth-list",
         )
         body = self._expect_success(result, "auth list")
-        if not isinstance(body, list):
-            return []
-        return [ImbueCloudAuthAccount.model_validate(entry) for entry in body if isinstance(entry, dict)]
+        entries = _expect_list_body(body, "auth list")
+        return [ImbueCloudAuthAccount.model_validate(entry) for entry in entries if isinstance(entry, dict)]
 
     def auth_refresh(self, account: str) -> dict[str, Any]:
         result = self._run(
@@ -308,13 +307,7 @@ class ImbueCloudCli(MutableModel):
             cg_name="imbue-cloud-hosts-list",
         )
         body = self._expect_success(result, "hosts list")
-        if isinstance(body, dict):
-            # If the CLI ever emits a wrapped shape, recover the list.
-            entries = body.get("hosts", [])
-        else:
-            entries = body
-        if not isinstance(entries, list):
-            return []
+        entries = _expect_list_body(body, "hosts list")
         return [LeasedHost.model_validate(entry) for entry in entries if isinstance(entry, dict)]
 
     def release_host(self, account: str, host_db_id: str) -> bool:
@@ -365,9 +358,7 @@ class ImbueCloudCli(MutableModel):
             timeout_seconds=_KEY_OP_TIMEOUT_SECONDS,
         )
         body = self._expect_success(result, "keys litellm list")
-        if isinstance(body, list):
-            return body
-        return []
+        return _expect_list_body(body, "keys litellm list")
 
     def delete_litellm_key(self, account: str, key_id: str) -> None:
         result = self._run(
@@ -424,9 +415,8 @@ class ImbueCloudCli(MutableModel):
             cg_name="imbue-cloud-tunnels-list",
         )
         body = self._expect_success(result, "tunnels list")
-        if isinstance(body, list):
-            return [TunnelInfo.model_validate(entry) for entry in body if isinstance(entry, dict)]
-        return []
+        entries = _expect_list_body(body, "tunnels list")
+        return [TunnelInfo.model_validate(entry) for entry in entries if isinstance(entry, dict)]
 
     def delete_tunnel(self, account: str, tunnel_name: str) -> None:
         result = self._run(
@@ -455,9 +445,7 @@ class ImbueCloudCli(MutableModel):
             cg_name="imbue-cloud-services-list",
         )
         body = self._expect_success(result, "tunnels services list")
-        if isinstance(body, list):
-            return body
-        return []
+        return _expect_list_body(body, "tunnels services list")
 
     def remove_service(self, account: str, tunnel_name: str, service_name: str) -> None:
         result = self._run(
@@ -617,6 +605,25 @@ def _parse_stdout_json(stdout: str, command_repr: str) -> Any:
         bad_json_exc.exit_code = 0
         bad_json_exc.stdout = stdout
         raise bad_json_exc from exc
+
+
+def _expect_list_body(body: Any, command_repr: str) -> list[Any]:
+    """Assert that a successful list invocation produced a JSON array.
+
+    The plugin contract is that ``list``-style commands emit a JSON array on
+    success (see ``_parse_stdout_json``). A non-list body after a zero exit is
+    malformed output we have no reason to tolerate: silently returning ``[]``
+    would turn a contract violation into a quiet "there are zero items" and
+    mislead every caller (e.g. "not shared", "nobody signed in", "no hosts").
+    So we raise instead of papering over it.
+    """
+    if isinstance(body, list):
+        return body
+    bad_shape_exc = ImbueCloudCliError(
+        f"{command_repr}: expected a JSON array but got {type(body).__name__}: {_short(repr(body))}"
+    )
+    bad_shape_exc.exit_code = 0
+    raise bad_shape_exc
 
 
 def _short(text: str, limit: int = 400) -> str:
