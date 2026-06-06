@@ -6,6 +6,7 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
+from imbue.imbue_common.errors import SwitchError
 from imbue.mngr.api.exec import ExecResult
 from imbue.mngr.api.exec import MultiExecResult
 from imbue.mngr.cli.exec import ExecCliOptions
@@ -232,10 +233,10 @@ def test_emit_output_dispatches_to_json(capsys: pytest.CaptureFixture[str]) -> N
 
 
 def test_emit_output_jsonl_raises() -> None:
-    """Test _emit_output raises AssertionError for JSONL (should use streaming)."""
+    """Test _emit_output raises SwitchError for JSONL (should use streaming)."""
     multi_result = MultiExecResult(successful_results=[], failed_agents=[])
     output_opts = OutputOptions(output_format=OutputFormat.JSONL)
-    with pytest.raises(AssertionError, match="JSONL should be handled with streaming"):
+    with pytest.raises(SwitchError, match="JSONL should be handled with streaming"):
         _emit_output(multi_result, output_opts)
 
 

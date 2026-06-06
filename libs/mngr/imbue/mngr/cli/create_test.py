@@ -446,6 +446,7 @@ def test_try_reuse_existing_agent_found_and_started(
         local_host.stop_agents([agent.id])
 
 
+@pytest.mark.allow_warnings(match=r"not found on host after starting, will create a new agent")
 def test_try_reuse_existing_agent_not_found_on_host(
     local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,
