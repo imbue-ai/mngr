@@ -4,4 +4,5 @@ test harnesses into a single `load_active_modal_credentials` helper in
 tokens directly, so a malformed `~/.modal.toml` fails loudly instead of
 silently substituting empty `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET`. The
 mngr_modal test fixture now uses this helper and no longer relies on the
-undeclared transitive `toml` dependency (it uses the workspace's `tomlkit`).
+undeclared transitive `toml` dependency; it uses `tomlkit`, which is now
+declared as a direct dependency of `mngr_modal`.
