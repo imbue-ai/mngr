@@ -30,6 +30,7 @@ from pydantic import Field
 from pydantic import SkipValidation
 
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.errors import MngrError
 from imbue.mngr_robinhood._agent_sdk.driver import LiveSession
 from imbue.mngr_robinhood._agent_sdk.driver import deliver_turn
 from imbue.mngr_robinhood._agent_sdk.driver import drain_turn
@@ -59,7 +60,7 @@ def _drain_worker(session: LiveSession, stream: "_TurnMessageStream") -> None:
     """
     try:
         drain_turn(session, stream.message_queue.put)
-    except Exception as exc:
+    except MngrError as exc:
         stream.drain_error = exc
     finally:
         stream.message_queue.put(_DRAIN_SENTINEL)
@@ -80,7 +81,7 @@ class _TurnMessageStream(MutableModel):
     worker_thread: SkipValidation[Thread | None] = Field(
         default=None, description="Background thread running the turn drain (set once started)"
     )
-    drain_error: SkipValidation["Exception | None"] = Field(
+    drain_error: SkipValidation["MngrError | None"] = Field(
         default=None, description="Exception raised by the drain thread, re-raised to the consumer at end-of-turn"
     )
 
