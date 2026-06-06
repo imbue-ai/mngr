@@ -95,8 +95,21 @@ class ClaudeSDKClient(MutableModel):
         """
         self.session = await to_thread.run_sync(start_session, self.options)
         self.is_connected = True
-        if prompt is not None:
+        if prompt is None:
+            return
+        # If the first turn fails the session is still live (the concurrency group is entered and
+        # an agent may have been created); disconnect it before propagating so it is not leaked.
+        # __aexit__ is not called when __aenter__/connect raises, and the module-level ``query``
+        # awaits connect() outside its try/finally, so cleanup has to happen here. A success flag
+        # (rather than a broad ``except``) keeps the teardown unconditional without narrowing the
+        # propagating exception.
+        is_first_turn_delivered = False
+        try:
             await self.query(prompt)
+            is_first_turn_delivered = True
+        finally:
+            if not is_first_turn_delivered:
+                await self.disconnect()
 
     async def disconnect(self) -> None:
         """Stop the underlying mngr claude agent, leaving its session readable for later."""
