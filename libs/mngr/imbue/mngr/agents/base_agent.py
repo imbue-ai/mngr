@@ -161,7 +161,16 @@ class BaseAgent(AgentInterface[AgentConfigT]):
     def get_command(self) -> CommandString:
         data = self._read_data()
         cmd = data.get("command")
-        return CommandString(cmd) if cmd else CommandString("bash")
+        if not cmd:
+            # A normally-created agent always has "command" written to data.json
+            # at creation, so a missing/empty value means the data is absent or
+            # corrupt. We fall back to "bash" to keep the non-optional contract,
+            # but this fabricated value flows into both the user-facing command
+            # display and lifecycle process-name detection, so log loudly rather
+            # than silently masking the bad state.
+            logger.warning("Agent {} has no command in {}; falling back to 'bash'", self.name, self._get_data_path())
+            return CommandString("bash")
+        return CommandString(cmd)
 
     def set_command(self, command: CommandString) -> None:
         data = self._read_data()

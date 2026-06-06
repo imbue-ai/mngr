@@ -76,12 +76,13 @@ def test_base_agent_get_command(
     assert command == CommandString("echo hello")
 
 
+@pytest.mark.allow_warnings
 def test_base_agent_get_command_default_bash(
     local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,
     temp_work_dir: Path,
 ) -> None:
-    """Test that get_command returns 'bash' when no command is set."""
+    """Test that get_command falls back to 'bash' (and warns) when no command is set."""
     agent = _create_test_agent(local_provider, temp_mngr_ctx, "test-no-cmd", temp_work_dir)
 
     # Write data.json without command
