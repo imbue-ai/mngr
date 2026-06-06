@@ -432,6 +432,10 @@ def _build_format_and_mount_data_disk_block(host_data_disk_name: str) -> str:
 if ! mountpoint -q {lima_mount}; then
     DATA_ROOT_SRC="$(findmnt -no SOURCE /)"
     DATA_ROOT_DISK="$(lsblk -no PKNAME "$DATA_ROOT_SRC" | head -1)"
+    if [ -z "$DATA_ROOT_DISK" ]; then
+        echo "ERROR: could not determine root disk for $DATA_ROOT_SRC; refusing to format data disk" >&2
+        exit 1
+    fi
     DATA_DISK=""
     for DATA_CANDIDATE in $(lsblk -dn -o NAME,TYPE | awk '$2=="disk"{{print $1}}'); do
         if [ "$DATA_CANDIDATE" != "$DATA_ROOT_DISK" ]; then
