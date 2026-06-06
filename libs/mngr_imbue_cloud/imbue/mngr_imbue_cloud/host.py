@@ -34,6 +34,7 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
 from pydantic import Field
 
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
@@ -51,16 +52,21 @@ from imbue.mngr.primitives import AgentTypeName
 def _parse_create_time(value: Any) -> datetime:
     """Parse a ``create_time`` ISO string from a serialized ``data.json``.
 
-    Returns the parsed datetime. Falls back to ``datetime.now()`` when the
-    field is missing or malformed; both cases are unexpected on a healthy
-    pool host but still leave us with a usable agent rather than crashing
-    create_agent_state.
+    Returns the parsed datetime. ``create_time`` is non-behavioral metadata
+    (the agent's recorded creation timestamp), so unlike the identity fields
+    ``name``/``type`` -- which the adopt path hard-requires -- a missing or
+    malformed value falls back to ``datetime.now()`` rather than crashing the
+    whole ``mngr create``. Both fallback cases are unexpected on a healthy pool
+    host, so we ``warning``-log them: a corrupt bake should be visible even
+    though it doesn't block adoption.
     """
     if isinstance(value, str) and value:
         try:
             return datetime.fromisoformat(value)
         except ValueError:
-            pass
+            logger.warning("imbue_cloud adopt: bake data.json has a malformed create_time {!r}; using now()", value)
+            return datetime.now(timezone.utc)
+    logger.warning("imbue_cloud adopt: bake data.json is missing create_time ({!r}); using now()", value)
     return datetime.now(timezone.utc)
 
 
