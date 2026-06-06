@@ -30,7 +30,13 @@ from imbue.minds.utils.logging import setup_logging
 def cli(ctx: click.Context, verbose: int, quiet: bool, output_format: str, log_file: str | None) -> None:
     """minds: run and manage your own persistent, specialized AI agents."""
     console_level = console_level_from_verbose_and_quiet(verbose, quiet)
-    command_name = ctx.invoked_subcommand or "unknown"
+    # This group has no ``invoke_without_command=True``, so click only runs this
+    # callback once it has resolved a subcommand (a bare ``minds`` with no
+    # subcommand prints help and exits before reaching here). The old
+    # ``or "unknown"`` fallback was therefore dead code that would silently
+    # mislabel logs if the invariant ever broke; assert it instead.
+    assert ctx.invoked_subcommand is not None, "cli group callback ran without a resolved subcommand"
+    command_name = ctx.invoked_subcommand
     log_file_path = Path(log_file) if log_file else None
     setup_logging(console_level, command=command_name, log_file=log_file_path)
     ctx.ensure_object(dict)
