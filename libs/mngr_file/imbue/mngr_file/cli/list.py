@@ -88,6 +88,10 @@ def emit(path):
     try:
         st = os.lstat(path)
     except OSError:
+        # Skip entries we cannot lstat: dangling symlinks, files that disappear mid-walk
+        # (races), or permission-denied on the entry itself. This is conventional ls-like
+        # behavior; note it means permission-denied entries are silently omitted from the
+        # listing rather than reported.
         return
     name = os.path.basename(path)
     if name == '.' or name == '':
