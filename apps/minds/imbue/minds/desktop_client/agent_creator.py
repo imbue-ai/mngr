@@ -759,6 +759,11 @@ class _CreateEventCapture(MutableModel):
         stripped = line.strip()
         if not stripped or not stripped.startswith("{"):
             return
+        # stdout from ``mngr create`` is a mixed stream: structured JSONL events
+        # interleaved with human-readable output (all of which we already
+        # forwarded to inner_on_output above). So a ``{``-prefixed line that
+        # fails to parse is ordinary human output that merely happens to start
+        # with a brace, not a corrupt event -- skip it rather than raising.
         try:
             event = json.loads(stripped)
         except json.JSONDecodeError:
