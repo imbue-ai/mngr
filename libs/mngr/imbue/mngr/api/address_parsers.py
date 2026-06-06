@@ -158,7 +158,14 @@ def parse_agent_or_host_address(s: str) -> AgentOrHostAddress:
     try:
         return parse_agent_address(s)
     except UserInputError:
-        return parse_host_address(s)
+        # parse_agent_address fails for many reasons (empty name, invalid agent name, invalid
+        # host part, invalid provider, ...). Only one legitimately means "this is actually a
+        # host": AgentName rejects dots, so a bare ``HOST.PROVIDER`` (no ``@``) fails agent
+        # parsing. Fall back to host parsing only for that case; every other agent-address
+        # error must propagate as-is rather than being re-reported as a confusing host error.
+        if "@" not in s and "." in s:
+            return parse_host_address(s)
+        raise
 
 
 @pure
