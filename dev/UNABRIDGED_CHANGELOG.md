@@ -6,6 +6,10 @@ For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
 ## 2026-06-05
 
+- Release tooling (`scripts/utils.py`): added `imbue-mngr-usage`, `imbue-mngr-claude-usage`, `imbue-mngr-forward`, `imbue-mngr-latchkey`, `imbue-mngr-imbue-cloud`, `imbue-mngr-ovh`, `imbue-mngr-schedule`, and `imbue-mngr-robinhood` to the hard-coded `PACKAGES` publish graph so they are version-bumped, pin-aligned, and offered for first publication by `scripts/release.py`. Their internal dependency pins were realigned to the current workspace versions to satisfy `test_internal_dep_pins_are_consistent`.
+
+## 2026-06-05
+
 `scripts/install.sh` now invokes the reworked dependencies command as `mngr dependencies --install interactive --scope core` (was `mngr dependencies -i`). The `--scope core` flag means the installer only treats a missing *core* dependency (`git`/`tmux`/`jq`) as a hard failure that triggers its warning; a missing optional dependency (`ssh`/`rsync`/`unison`/`claude`) no longer trips the warning. The interactive prompt is unchanged, so users can still choose to install everything.
 
 Updated root-level references for the `mngr_uncapped_claude` plugin rename to
