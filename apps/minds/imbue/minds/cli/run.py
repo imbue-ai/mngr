@@ -36,6 +36,7 @@ from pydantic import Field
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.bootstrap import minds_data_dir_for
+from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.bootstrap import reconcile_imbue_cloud_providers_from_sessions
 from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_HOST
@@ -270,8 +271,14 @@ def run(
     # Minds API: agents reach it through the latchkey gateway's bundled
     # ``minds-api-proxy`` extension instead, so no ``--reverse`` specs
     # are needed here.
+    # Honor an explicit MNGR_HOST_DIR override (set by apply_bootstrap and the
+    # bundled Electron build). The fallback must agree with the rest of `run`,
+    # which derives everything from ``root_name`` -- the canonical host dir is
+    # ``mngr_host_dir_for(root_name)`` (~/.{root_name}/mngr), not mngr's bare
+    # ~/.mngr default, so a fallback to ~/.mngr would point `mngr forward` at a
+    # different (likely empty) agent topology than the rest of minds reads.
     mngr_host_dir_str = os.environ.get("MNGR_HOST_DIR")
-    mngr_host_dir = Path(mngr_host_dir_str).expanduser() if mngr_host_dir_str else (Path.home() / ".mngr")
+    mngr_host_dir = Path(mngr_host_dir_str).expanduser() if mngr_host_dir_str else mngr_host_dir_for(root_name)
     forward_config = ForwardSubprocessConfig(
         mngr_host_dir=mngr_host_dir,
     )
