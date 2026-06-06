@@ -860,7 +860,14 @@ class OuterHost(OuterHostInterface):
         else:
             try:
                 is_success = self._put_file(io.BytesIO(content), str(write_path))
-            except IOError:
+            except IOError as e:
+                # The retry below (mkdir -p + re-put) targets the common
+                # missing-parent-directory case. Other IOErrors (permission, disk
+                # full) will fail the retry too; log the original cause here so it
+                # is not lost behind the generic "Failed to write file" error.
+                logger.debug(
+                    "Initial put of {} on host {} failed ({}); will mkdir -p and retry", write_path, self.id, e
+                )
                 is_success = False
             if not is_success:
                 parent_dir = str(write_path.parent)
