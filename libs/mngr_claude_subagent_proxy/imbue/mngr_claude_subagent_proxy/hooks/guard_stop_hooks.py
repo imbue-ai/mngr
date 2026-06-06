@@ -35,6 +35,9 @@ def run(stdin: TextIO) -> None:
     SessionStart hook that fires before the FIRST Stop hook -- closes
     that gap. The wrap is idempotent on subsequent SessionStarts.
     """
+    # Drain stdin so the hook runner's writer never blocks on a full pipe;
+    # the SessionStart payload is unused here, so a failed drain of an
+    # otherwise-ignored stream is harmless and intentionally swallowed.
     try:
         stdin.read()
     except OSError:
