@@ -17,7 +17,10 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import DuplicateAgentNameError
+from imbue.mngr.errors import HostConnectionError
+from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.data_types import ActivityConfig
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import FileType
@@ -530,8 +533,11 @@ def try_resolve_readable_host(
     """
     try:
         candidate: HostInterface | None = provider.get_host(host_id)
-    except MngrError as e:
-        logger.trace("Host {} is not available via get_host: {}", host_id, e)
+    except (HostConnectionError, HostNotFoundError, ProviderUnavailableError) as e:
+        # The host can't be reached directly (unreachable backend, missing host, or a
+        # connection/auth failure), so fall back to a volume-backed read. Config,
+        # registry, and programming errors surfaced as other MngrError subclasses propagate.
+        logger.debug("Host {} is not available via get_host: {}", host_id, e)
         candidate = None
 
     if isinstance(candidate, OnlineHostInterface):
