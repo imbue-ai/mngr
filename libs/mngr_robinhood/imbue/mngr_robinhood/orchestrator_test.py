@@ -94,7 +94,8 @@ def _drive_consumer_turn(consumer: _StreamBufferConsumer, host: _FakeBufferHost,
     for snapshot in snapshots:
         host.content = snapshot
         consumer.poll()
-    host.content = "id\n"  # watcher empties the body at idle (id line only)
+    # The watcher empties the body at idle (id line only).
+    host.content = "id\n"
     consumer.poll()
     consumer.flush()
 

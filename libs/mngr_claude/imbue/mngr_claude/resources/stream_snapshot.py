@@ -718,7 +718,8 @@ class StreamBufferState:
         # suffix==prefix overlap can fail; tolerate dropping a few volatile trailing
         # body rows when searching for the alignment (smallest drop first).
         if not self._prose_lines:
-            return  # no anchor to start a marker-less region from
+            # No anchor to start a marker-less region from.
+            return
         for drop in range(0, _MAX_VOLATILE_TAIL_LINES + 1):
             kept = self._prose_lines[: len(self._prose_lines) - drop]
             if not kept:
