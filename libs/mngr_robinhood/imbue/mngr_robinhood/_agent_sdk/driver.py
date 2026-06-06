@@ -109,6 +109,11 @@ _DEFAULT_REPORTED_TOOLS: Final[tuple[str, ...]] = (
 )
 
 
+# Poll cadence for waiting on a freshly-adopted agent's transcript to stop growing. Must exceed
+# ``stream_transcript.sh``'s ~1s mirror cadence so two consecutive equal reads mean it has settled.
+_ADOPTION_SETTLE_POLL_SECONDS: Final[float] = 1.5
+
+
 class TurnDeliveryError(RobinhoodError):
     """Raised when a turn cannot be delivered to the live agent."""
 
@@ -434,11 +439,55 @@ def _source_session_jsonl_path(session: LiveSession, source_detail: AgentDetails
     return _claude_session_jsonl_path(agent, source_session_id)
 
 
+class _TranscriptStabilityChecker(MutableModel):
+    """Polled until an agent's raw transcript stops growing (the adopted-history re-mirror settled)."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    events_target: EventsTarget = Field(description="Where the raw transcript is read")
+    last_length: int = Field(default=-1, description="Transcript byte length seen on the previous poll")
+
+    def _current_length(self) -> int:
+        try:
+            content = read_event_content(self.events_target, RAW_TRANSCRIPT_PATH)
+        except MngrError:
+            return self.last_length if self.last_length >= 0 else 0
+        return len(content.encode("utf-8"))
+
+    def is_stable(self) -> bool:
+        length = self._current_length()
+        is_unchanged = length == self.last_length and length > 0
+        self.last_length = length
+        return is_unchanged
+
+
+def _baseline_seen_bytes_after_adoption(session: LiveSession) -> None:
+    """Skip a freshly-adopting agent's re-mirrored history so the next turn's drain reads only new events.
+
+    A fresh agent that adopts a session re-mirrors the adopted (and forked) history -- including its
+    old terminal ``stop_reason`` -- into its transcript over the mirror's ~1s cadence. Wait for the
+    agent to be ready and the transcript to settle, then baseline ``seen_bytes`` past it.
+    """
+    agent = session.agent
+    events_target = session.events_target
+    if agent is None or events_target is None:
+        return
+    poll_until(
+        lambda: agent.get_lifecycle_state() == AgentLifecycleState.WAITING,
+        timeout=AGENT_READY_TIMEOUT_SECONDS,
+        poll_interval=POLL_INTERVAL_SECONDS,
+    )
+    checker = _TranscriptStabilityChecker(events_target=events_target)
+    poll_until(checker.is_stable, timeout=AGENT_READY_TIMEOUT_SECONDS, poll_interval=_ADOPTION_SETTLE_POLL_SECONDS)
+    session.seen_bytes = checker.last_length
+
+
 def _fork_agent(session: LiveSession, prompt: str) -> None:
     """Create a fresh agent that adopts the resume/continue source session and forks it.
 
-    ``--fork-session`` makes claude resume the adopted session under a NEW session id, so the
-    forked turn does not collide with the source session.
+    ``--fork-session`` makes claude resume the adopted session under a NEW session id. The prompt is
+    delivered only after the adopted history has been re-mirrored and skipped, so the drained turn
+    contains the forked turn (new session id), not the replayed source history.
     """
     options = session.options
     if not (options.resume or options.continue_conversation):
@@ -450,9 +499,9 @@ def _fork_agent(session: LiveSession, prompt: str) -> None:
     if source_session_id is None:
         raise ForkSessionError("fork_session could not determine the source claude session id")
     source_path = _source_session_jsonl_path(session, source_detail, source_session_id)
-    _create_agent(
-        session, initial_message=prompt, extra_agent_args=("--fork-session",), adopt_session_path=source_path
-    )
+    _create_agent(session, initial_message=None, extra_agent_args=("--fork-session",), adopt_session_path=source_path)
+    _baseline_seen_bytes_after_adoption(session)
+    _send_message(session, prompt)
 
 
 def deliver_turn(session: LiveSession, prompt: str) -> None:
@@ -711,49 +760,22 @@ def _options_with_overrides(
     return updated_options
 
 
-def _baseline_seen_bytes_after_ready(session: LiveSession) -> None:
-    """After recreating the agent, wait for readiness then skip the re-mirrored history bytes."""
-    agent = session.agent
-    events_target = session.events_target
-    if agent is None or events_target is None:
-        return
-    poll_until(
-        lambda: agent.get_lifecycle_state() == AgentLifecycleState.WAITING,
-        timeout=AGENT_READY_TIMEOUT_SECONDS,
-        poll_interval=POLL_INTERVAL_SECONDS,
-    )
-    try:
-        content = read_event_content(events_target, RAW_TRANSCRIPT_PATH)
-    except MngrError:
-        content = ""
-    session.seen_bytes = len(content.encode("utf-8"))
-
-
 def reconfigure_session(session: LiveSession, model: str | None, permission_mode: str | None) -> None:
-    """Apply a mid-session ``set_model`` / ``set_permission_mode`` by recreating the agent.
+    """Apply a mid-session ``set_model`` / ``set_permission_mode`` and keep the session usable.
 
-    mngr cannot reconfigure a live claude process and its launch command bakes in ``--model`` /
-    ``--permission-mode``, so a genuine change requires relaunching with new args. The current
-    session is adopted into a fresh agent that resumes it (same session id, no fork) under the new
-    configuration; the old agent is stopped. If there is no live, resumable agent yet, the new
-    values are simply recorded for the next agent created.
+    mngr cannot hot-swap a running claude process's model / permission mode, so the new values are
+    recorded on the session options (used by any agent created afterward) and the live agent is
+    restarted on its resumed session. The agent's transcript is append-only and reconciled across
+    restarts, so the next turn is read correctly. (A mid-session change to a *different* model is
+    best-effort: the relaunch resumes the same session, and the new model applies to subsequently
+    created agents.)
     """
     new_options = _options_with_overrides(session.options, model, permission_mode)
     if new_options is session.options:
         return
-    agent = session.agent
-    source_session_id = session.latest_session_id
-    if agent is None or source_session_id is None:
-        session.options = new_options
-        return
-    source_path = _claude_session_jsonl_path(agent, source_session_id)
-    if session.host is not None:
-        stop_agent(agent, session.host)
     session.options = new_options
-    session.agent = None
-    session.host = None
-    _create_agent(session, initial_message=None, extra_agent_args=(), adopt_session_path=source_path)
-    _baseline_seen_bytes_after_ready(session)
+    if session.agent is not None:
+        restart_agent_with_resume(session)
 
 
 def stop_session(session: LiveSession) -> None:

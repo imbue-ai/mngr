@@ -12,16 +12,15 @@ Control-surface methods are mapped onto mngr mechanisms: ``interrupt`` stops the
 the one documented surface the session-JSONL transport cannot provide.
 """
 
+import queue
 from collections.abc import AsyncIterator
 from collections.abc import Mapping
+from threading import Thread
 from typing import Any
 from typing import Final
 from typing import Self
 
-import anyio
-from anyio import from_thread
 from anyio import to_thread
-from anyio.streams.memory import MemoryObjectSendStream
 from claude_agent_sdk import ClaudeAgentOptions
 from claude_agent_sdk import Message
 from claude_agent_sdk import ResultMessage
@@ -51,28 +50,47 @@ _DRAIN_SENTINEL: Final[object] = object()
 PromptInput = str | AsyncIterator[dict[str, Any]]
 
 
-def _drain_into_stream(session: LiveSession, send_stream: MemoryObjectSendStream[Any]) -> None:
-    """Run the (blocking) turn drain in a worker thread, pushing each message onto the anyio stream.
-
-    Runs inside an ``anyio.to_thread`` worker, so ``from_thread.run_sync`` schedules each
-    ``send_nowait`` onto the event loop. The stream is unbounded so ``send_nowait`` never blocks.
-    """
+def _drain_worker(session: LiveSession, message_queue: "queue.Queue[Any]") -> None:
+    """Run the (blocking) turn drain in a background thread, pushing each message onto the queue."""
     try:
-        drain_turn(session, lambda message: from_thread.run_sync(send_stream.send_nowait, message))
+        drain_turn(session, message_queue.put)
     finally:
-        from_thread.run_sync(send_stream.send_nowait, _DRAIN_SENTINEL)
+        message_queue.put(_DRAIN_SENTINEL)
 
 
-async def _stream_turn_messages(session: LiveSession) -> AsyncIterator[Message]:
-    """Yield one turn's messages from a worker-thread drain, ending at (and excluding) the sentinel."""
-    send_stream, receive_stream = anyio.create_memory_object_stream[Any](max_buffer_size=float("inf"))
-    async with anyio.create_task_group() as task_group:
-        task_group.start_soon(to_thread.run_sync, _drain_into_stream, session, send_stream)
-        async with receive_stream:
-            async for item in receive_stream:
-                if item is _DRAIN_SENTINEL:
-                    break
-                yield item
+class _TurnMessageStream(MutableModel):
+    """Async iterator over one turn's messages, fed by a background drain thread via a queue.
+
+    The drain runs in a plain thread (not a task group) so this stream can be iterated from -- and
+    closed by -- an async generator without the cross-task cancel-scope errors that a task group
+    spanning a ``yield`` would cause. ``__anext__`` blocks a worker thread on ``queue.get`` so the
+    event loop stays free for ``interrupt()`` to land between messages.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    message_queue: SkipValidation["queue.Queue[Any]"] = Field(description="Queue the drain thread pushes onto")
+    worker_thread: SkipValidation[Thread] = Field(description="Background thread running the turn drain")
+
+    def __aiter__(self) -> "_TurnMessageStream":
+        return self
+
+    async def __anext__(self) -> Message:
+        item = await to_thread.run_sync(self.message_queue.get)
+        if item is _DRAIN_SENTINEL:
+            raise StopAsyncIteration
+        return item
+
+
+def _start_turn_message_stream(session: LiveSession) -> _TurnMessageStream:
+    """Start the background drain thread for one turn and return its async-iterable message stream."""
+    message_queue: queue.Queue[Any] = queue.Queue()
+    worker_thread = Thread(
+        target=_drain_worker, args=(session, message_queue), name="mngr-sdk-turn-drain", daemon=True
+    )
+    stream = _TurnMessageStream(message_queue=message_queue, worker_thread=worker_thread)
+    worker_thread.start()
+    return stream
 
 
 async def query(
@@ -192,7 +210,7 @@ class ClaudeSDKClient(MutableModel):
         session = self.session
         if session is None:
             raise RobinhoodError("ClaudeSDKClient.receive_messages called before connect()")
-        async for message in _stream_turn_messages(session):
+        async for message in _start_turn_message_stream(session):
             yield message
 
     async def receive_response(self) -> AsyncIterator[Message]:
