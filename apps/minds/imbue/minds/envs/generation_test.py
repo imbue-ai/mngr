@@ -130,9 +130,12 @@ def test_read_generation_id_returns_none_when_key_absent_from_entry(
 
 
 def test_read_generation_id_propagates_unexpected_vault_error(tmp_path: Path, _root_cg: ConcurrencyGroup) -> None:
+    # A non-2 exit is a transient / auth / connectivity failure (NOT
+    # "absent"). read_vault_kv raises a plain VaultReadError for it, which
+    # read_generation_id must let propagate rather than treat as "no id yet".
     fake = _make_fake_vault_binary(
         tmp_path,
-        get_exit_code=2,
+        get_exit_code=1,
         get_stderr="permission denied",
     )
     with pytest.raises(VaultReadError, match="permission denied"):
