@@ -218,6 +218,9 @@ _retry_on_transient_ssh_error = retry(
 def _get_ssh_transport(pyinfra_host: Any) -> Transport | None:
     """Extract the paramiko Transport from a pyinfra host, or None for non-SSH connectors."""
     try:
+        # Only the LocalConnector legitimately lacks `.connector.client`; that is the
+        # one expected AttributeError. (pyinfra_host is typed Any, so this duck-typed
+        # access is the available check.)
         client = pyinfra_host.connector.client
     except AttributeError:
         return None
