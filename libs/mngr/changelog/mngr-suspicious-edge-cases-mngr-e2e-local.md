@@ -5,6 +5,8 @@ which fails loudly on a malformed `~/.modal.toml` instead of silently
 substituting empty tokens; a missing `PATH` is no longer defaulted to an empty
 string; the redundant `FileNotFoundError` in the Modal-environment cleanup catch
 was dropped; `_is_pid_alive` now catches `PermissionError` specifically (EPERM
-means the process is alive) rather than all `OSError`; and the best-effort
-process-teardown handlers (asciinema pid reading, liveness checks, SIGINT
-delivery) now carry comments explaining why each catch is correct.
+means the process is alive) rather than all `OSError`; the SIGINT-delivery loop
+now ignores only the expected already-gone process (`ProcessLookupError`) and
+logs any other `os.kill` failure instead of silently swallowing it; and the
+best-effort process-teardown handlers (asciinema pid reading, liveness checks,
+SIGINT delivery) now carry comments explaining why each catch is correct.

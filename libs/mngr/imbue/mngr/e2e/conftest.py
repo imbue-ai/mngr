@@ -470,8 +470,12 @@ def _stop_asciinema_processes(test_output_dir: Path) -> None:
     for pid in pids:
         try:
             os.kill(pid, signal.SIGINT)
-        except (ProcessLookupError, OSError):
+        except ProcessLookupError:
             pass
+        except OSError as exc:
+            # Any other failure to signal means we may leak this recorder, so
+            # surface it (best-effort: still don't raise out of teardown).
+            logger.debug("Failed to SIGINT asciinema pid {}: {!r}", pid, exc)
 
     # Wait for all processes to terminate
     all_exited = poll_until(
