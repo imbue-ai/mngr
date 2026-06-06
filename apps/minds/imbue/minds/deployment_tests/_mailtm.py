@@ -148,6 +148,11 @@ class MailtmInbox(MutableModel):
             )
             response.raise_for_status()
             data = response.json()
+        # ``text``/``html`` may be absent or null on a message; coerce to empty so the
+        # concatenation below is well-typed. An empty body intentionally falls through to the
+        # caller (wait_for_*), whose regex then raises a MailtmFetchError reporting "no
+        # recognizable token/code" -- which is the correct outcome for a body we could not
+        # extract anything useful from.
         text = data.get("text") or ""
         html = data.get("html") or []
         if isinstance(html, list):
