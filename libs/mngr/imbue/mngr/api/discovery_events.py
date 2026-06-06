@@ -1146,8 +1146,10 @@ def _write_unfiltered_full_snapshot_logged(mngr_ctx: MngrContext) -> None:
                 source_name="discovery_poll",
                 provider_name=provider_name,
             )
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as emit_error:
+            # The error event is the only structured record of the original failure for the
+            # event-stream consumer (minds); if even that write fails, do not swallow it silently.
+            logger.opt(exception=emit_error).warning("Failed to emit discovery error event")
 
 
 def run_discovery_stream(
