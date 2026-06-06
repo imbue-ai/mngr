@@ -11,8 +11,6 @@ Strengthened several weak tests in the remote_service_connector test suite:
   test that actually exercises truncation to 16 characters.
 - The KV "create namespace when missing" test now asserts the namespace create POST fired
   exactly once.
-- `derive_s3_secret_access_key` is now pinned against a literal SHA-256 digest rather than
-  recomputing the production algorithm in the assertion.
 - Documented the intentional "returns without raising" contract for two no-positive-observable
   tests.
 - Moved the `TestClient`-driven end-to-end tests (routes, auth, host-lease, paid-list CRUD,

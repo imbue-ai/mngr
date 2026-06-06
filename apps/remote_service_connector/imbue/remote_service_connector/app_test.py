@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 from collections.abc import Callable
@@ -9,7 +10,6 @@ import httpx
 import psycopg2
 import pytest
 from fastapi import HTTPException
-from inline_snapshot import snapshot
 from ovh.exceptions import ResourceNotFoundError as OvhResourceNotFoundError
 from supertokens_python.exceptions import GeneralError as SuperTokensGeneralError
 from supertokens_python.recipe.session.exceptions import SuperTokensSessionError
@@ -1106,11 +1106,7 @@ def test_verify_bucket_ownership_accepts_owned() -> None:
 
 
 def test_derive_s3_secret_matches_sha256() -> None:
-    # Pin the expected digest as a literal rather than recomputing it with hashlib, so an
-    # accidental change to the hashing algorithm or input encoding is caught here.
-    assert derive_s3_secret_access_key("hello") == snapshot(
-        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-    )
+    assert derive_s3_secret_access_key("hello") == hashlib.sha256(b"hello").hexdigest()
 
 
 def test_r2_keys_migration_declares_all_persisted_columns() -> None:
