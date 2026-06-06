@@ -158,6 +158,27 @@ def test_writer_skips_when_rate_limits_and_cost_are_both_null(writer_path: Path,
     assert not events_file.exists()
 
 
+def test_writer_fails_loudly_when_jq_missing(writer_path: Path, events_file: Path) -> None:
+    """jq is a hard dependency. If it is absent, the writer must fail loudly
+    (non-zero exit + stderr) rather than silently treating every render as a
+    no-op, which would disable usage tracking host-wide with no diagnostic."""
+    # Simulate a host without jq by running with an empty PATH. The jq presence
+    # check runs before any external command is needed, so the script reaches its
+    # explicit failure without depending on other tools being on PATH.
+    env = {"MNGR_USAGE_EVENTS_PATH": str(events_file), "PATH": str(events_file.parent / "no_such_bin")}
+    result = subprocess.run(
+        [str(writer_path)],
+        input=json.dumps({"cost": {"total_cost_usd": 0.1}}),
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=15,
+    )
+    assert result.returncode == 64, result.stderr
+    assert "jq not found" in result.stderr
+    assert not events_file.exists()
+
+
 def test_writer_skips_on_garbage_input(writer_path: Path, events_file: Path) -> None:
     """Non-JSON input shouldn't crash the writer (and shouldn't emit a malformed event)."""
     result = _run_writer(writer_path, "this is not json", events_file)
