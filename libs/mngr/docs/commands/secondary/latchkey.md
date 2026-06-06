@@ -43,6 +43,7 @@ in tunneled mode and emits its result as a single JSON object on stdout:
 {
   "env": {
     "LATCHKEY_GATEWAY": "...",
+    "LATCHKEY_GATEWAY_SECONDARY": "...",
     "LATCHKEY_GATEWAY_PASSWORD": "...",
     "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE": "...",
     "LATCHKEY_DISABLE_COUNTING": "1"
