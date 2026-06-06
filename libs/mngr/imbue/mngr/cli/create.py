@@ -1255,9 +1255,12 @@ def _try_reuse_existing_agent(
             break
 
     if agent is None:
-        # Agent not found on online host - this could happen if the host came online
-        # but the agent data is stale. Return None to create a new agent.
-        logger.info("Agent {} not found on host after starting, will create new agent", agent_name)
+        # The agent was discovered but is not present on the host after it came
+        # online (e.g. stale agent data). --reuse is reuse-or-create, so fall
+        # back to creating a new agent rather than erroring -- but warn, since a
+        # transient inconsistency here means the user may unexpectedly get a
+        # second agent instead of reusing the existing one.
+        logger.warning("Agent {} not found on host after starting, will create a new agent", agent_name)
         return None
 
     # Ensure the agent is started (reusing shared logic from find.py)
