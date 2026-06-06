@@ -7,8 +7,6 @@ from imbue.imbue_common.ratchet_testing import standard_ratchet_checks as rc
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BARE_PRINT
 from imbue.imbue_common.ratchet_testing.common_ratchets import check_ratchet_rule
 from imbue.imbue_common.ratchet_testing.ratchets import TEST_FILE_PATTERNS
-from imbue.imbue_common.ratchet_testing.ratchets import check_no_ruff_errors
-from imbue.imbue_common.ratchet_testing.ratchets import check_no_type_errors
 
 _DIR = Path(__file__).parent.parent.parent
 
@@ -171,7 +169,7 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    rc.check_trailing_comments(_DIR, snapshot(4))
+    rc.check_trailing_comments(_DIR, snapshot(3))
 
 
 def test_prevent_init_docstrings() -> None:
@@ -265,7 +263,11 @@ def test_prevent_direct_subprocess() -> None:
     # spawn a detached child that outlives this process (fire-and-forget
     # mngr destroy / background reap). ConcurrencyGroup.run_process_* tracks
     # and cleans up children, which defeats the detached lifetime we need.
-    rc.check_direct_subprocess(_DIR, snapshot(4), TEST_FILE_PATTERNS)
+    rc.check_direct_subprocess(_DIR, snapshot(3), TEST_FILE_PATTERNS)
+
+
+def test_prevent_bare_tmux_targets() -> None:
+    rc.check_bare_tmux_targets(_DIR, snapshot(0))
 
 
 # --- AST-based ratchets ---
@@ -284,7 +286,7 @@ def test_prevent_underscore_imports() -> None:
 
 
 def test_prevent_init_methods_in_non_exception_classes() -> None:
-    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(2))
+    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(0))
 
 
 def test_prevent_cast_usage() -> None:
@@ -295,18 +297,12 @@ def test_prevent_assert_isinstance() -> None:
     rc.check_assert_isinstance(_DIR, snapshot(0))
 
 
+def test_prevent_per_file_host_upload() -> None:
+    rc.check_per_file_host_upload(_DIR, snapshot(0))
+
+
 # --- Project-level checks ---
 
 
 def test_prevent_code_in_init_files() -> None:
     rc.check_code_in_init_files(_DIR, snapshot(1))
-
-
-def test_no_type_errors() -> None:
-    """Ensure the codebase has zero type errors."""
-    check_no_type_errors(_DIR)
-
-
-def test_no_ruff_errors() -> None:
-    """Ensure the codebase has zero ruff linting errors."""
-    check_no_ruff_errors(_DIR)

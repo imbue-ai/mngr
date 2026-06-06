@@ -14,11 +14,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 
 
-class BaseMngrError(Exception):
-    """Base exception for all mngr errors."""
-
-
-class MngrError(ClickException, BaseMngrError):
+class MngrError(ClickException):
     """Base exception for all user-facing mngr errors.
 
     All MngrError subclasses can provide a user_help_text attribute that contains
@@ -52,8 +48,14 @@ class InvalidRelativePathError(MngrError, ValueError):
         super().__init__(f"Path must be relative, got absolute path: {path}")
 
 
-class HostError(BaseMngrError):
-    """Base class for host-related errors."""
+class HostError(MngrError):
+    """Base class for host-related errors.
+
+    As a MngrError subclass, host errors are ClickException instances: when they
+    reach the CLI they render as a clean ``Error: ...`` message (plus any
+    user_help_text) instead of a traceback, and ``except MngrError`` handlers
+    treat them as the user-facing errors they are.
+    """
 
 
 class InvalidActivityTypeError(HostError, ValueError):
@@ -113,15 +115,21 @@ class LockNotHeldError(HostError):
     """Raised when attempting to use a lock that is not held."""
 
 
-class AgentError(BaseMngrError):
-    """Base class for agent-related errors."""
+class AgentError(MngrError):
+    """Base class for agent-related errors.
+
+    As a MngrError subclass, agent errors are ClickException instances: when they
+    reach the CLI they render as a clean ``Error: ...`` message (plus any
+    user_help_text) instead of a traceback, and ``except MngrError`` handlers
+    treat them as the user-facing errors they are.
+    """
 
 
 class NoCommandDefinedError(AgentError, ValueError):
     """Raised when no command is defined for an agent type."""
 
 
-class AgentNotFoundError(AgentError, MngrError):
+class AgentNotFoundError(AgentError):
     """No agent with this ID exists."""
 
     user_help_text = "Use 'mngr list' to see available agents."
@@ -151,7 +159,7 @@ class SendMessageError(AgentError):
         super().__init__(f"Failed to send message to agent {agent_name}: {reason}")
 
 
-class DuplicateAgentNameError(AgentError, MngrError):
+class DuplicateAgentNameError(AgentError):
     """An agent with this name already exists on the host."""
 
     user_help_text = (
@@ -225,8 +233,8 @@ class ProviderDiscoveryError(ProviderError):
 
     The wrapped exception is preserved in ``__cause__``; ``provider_name``
     carries the ``ProviderInstanceName`` of the failing instance so error
-    handlers (e.g. minds' auto-disable on auth failure) don't have to
-    pattern-match the message string.
+    handlers (e.g. minds' providers panel surfacing per-provider error
+    badges) don't have to pattern-match the message string.
     """
 
     def __init__(self, provider_name: ProviderInstanceName, cause: BaseException) -> None:
@@ -381,7 +389,16 @@ class LocalHostNotDestroyableError(ProviderError):
         super().__init__(provider_name, "Cannot destroy the local host - it is your local computer")
 
 
-class PluginSpecifierError(BaseMngrError, ValueError):
+class HostShutdownNotSupportedError(ProviderError):
+    """Provider does not support stopping hosts."""
+
+    user_help_text = "Stop the agent without --stop-host, or use a provider that supports stopping hosts."
+
+    def __init__(self, provider_name: ProviderInstanceName) -> None:
+        super().__init__(provider_name, f"Provider {provider_name} does not support stopping hosts")
+
+
+class PluginSpecifierError(MngrError, ValueError):
     """Raised when a plugin specifier is invalid or cannot be resolved."""
 
 
@@ -474,7 +491,7 @@ class BinaryNotInstalledError(MngrError):
         super().__init__(f"{binary} is required for {purpose} but was not found on PATH")
 
 
-class DiscoverySchemaChangedError(BaseMngrError, ValueError):
+class DiscoverySchemaChangedError(MngrError, ValueError):
     """Raised when a discovery event line cannot be validated against the current schema.
 
     This typically means a field was added, removed, or renamed in a discovery event
@@ -490,7 +507,7 @@ class DiscoverySchemaChangedError(BaseMngrError, ValueError):
         super().__init__(f"Discovery event of type {event_type!r} does not match current schema: {validation_error}")
 
 
-class MalformedJsonlLineError(BaseMngrError, ValueError):
+class MalformedJsonlLineError(MngrError, ValueError):
     """Raised when a JSONL line is structurally invalid (e.g. not a JSON object, missing required envelope fields).
 
     The right fix is to track down whichever process is producing the bad line and stop it

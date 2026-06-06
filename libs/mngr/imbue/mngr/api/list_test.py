@@ -713,15 +713,19 @@ def test_maybe_write_full_discovery_snapshot_writes_when_unfiltered_and_error_fr
     assert "snapshot-agent" in content
 
 
-def test_maybe_write_full_discovery_snapshot_skips_when_errors_present(
+def test_maybe_write_full_discovery_snapshot_skips_when_non_provider_error_present(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """_maybe_write_full_discovery_snapshot does not write when errors are present."""
+    """Non-provider-attributable errors (plain ErrorInfo) skip the snapshot.
+
+    These come from the top-level `except MngrError` in list_agents and indicate
+    the result may be structurally incomplete in ways the snapshot cannot model.
+    """
     host_details = _make_host_details()
     agent = _make_agent_details("error-agent", host_details)
     result = ListResult()
     result.agents.append(agent)
-    result.errors.append(ErrorInfo.build(RuntimeError("provider failed")))
+    result.errors.append(ErrorInfo.build(RuntimeError("non-provider failure")))
 
     _maybe_write_full_discovery_snapshot(
         mngr_ctx=temp_mngr_ctx,
@@ -733,6 +737,36 @@ def test_maybe_write_full_discovery_snapshot_skips_when_errors_present(
 
     events_path = get_discovery_events_path(temp_mngr_ctx.config)
     assert not events_path.exists()
+
+
+def test_maybe_write_full_discovery_snapshot_emits_with_error_by_provider_name_for_provider_errors(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Per-provider errors emit a snapshot with error_by_provider_name populated."""
+    host_details = _make_host_details()
+    agent = _make_agent_details("ok-agent", host_details)
+    result = ListResult()
+    result.agents.append(agent)
+    failing_provider = ProviderInstanceName("modal")
+    result.errors.append(
+        ProviderErrorInfo.build_for_provider(RuntimeError("modal token missing"), failing_provider),
+    )
+
+    _maybe_write_full_discovery_snapshot(
+        mngr_ctx=temp_mngr_ctx,
+        result=result,
+        provider_names=None,
+        include_filters=(),
+        exclude_filters=(),
+    )
+
+    events_path = get_discovery_events_path(temp_mngr_ctx.config)
+    assert events_path.exists()
+    content = events_path.read_text()
+    assert "DISCOVERY_FULL" in content
+    assert "modal token missing" in content
+    assert "RuntimeError" in content
+    assert "modal" in content
 
 
 def test_maybe_write_full_discovery_snapshot_skips_when_provider_filter_set(
@@ -873,6 +907,8 @@ def test_list_agents_streaming_mode_on_agent_callback_is_called(
 
 
 @pytest.mark.tmux
+# real agent setup/teardown occasionally exceeds the 10s default.
+@pytest.mark.timeout(30)
 def test_list_agents_with_include_filter_excludes_non_matching(
     temp_work_dir: Path,
     temp_mngr_ctx: MngrContext,
@@ -1023,6 +1059,37 @@ class _NoneFieldGeneratorPlugin:
     @hookimpl
     def agent_field_generators(self) -> None:
         return None
+
+
+class _OfflineFieldGeneratorPlugin:
+    """Test plugin that registers offline field generators for agent listing."""
+
+    def __init__(self, plugin_name: str, generators: dict[str, Any]) -> None:
+        self._plugin_name = plugin_name
+        self._generators = generators
+
+    @hookimpl
+    def offline_agent_field_generators(self) -> tuple[str, dict[str, Any]] | None:
+        return (self._plugin_name, self._generators)
+
+
+def test_offline_agent_field_generators_hookspec_is_registered_and_collected(
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """The offline_agent_field_generators hookspec is registered and collects plugin results.
+
+    This mirrors the collection loop in list_agents, guarding against the hookspec
+    being missing (which would make the hook call silently return nothing)."""
+    # The plugin_manager fixture loads real setuptools entrypoints, so other installed
+    # plugins (e.g. kanpan) may also register this hook. Use a unique test-plugin name
+    # and assert membership rather than exact equality so the test stays correct
+    # regardless of which real plugins are present.
+    generators = {"flag": lambda ref, host: True}
+    plugin_manager.register(_OfflineFieldGeneratorPlugin("test_offline_fields", generators))
+
+    collected = [result for result in plugin_manager.hook.offline_agent_field_generators() if result is not None]
+
+    assert ("test_offline_fields", generators) in collected
 
 
 def _find_agent_by_name(result: ListResult, name: str) -> AgentDetails:
@@ -1248,6 +1315,7 @@ class _RaisingDetailProviderInstance(MockProviderInstance):
         host_ref: DiscoveredHost,
         agent_refs: Sequence[DiscoveredAgent],
         field_generators: Mapping[str, Any] | None = None,
+        offline_field_generators: Mapping[str, Any] | None = None,
         on_error: Any = None,
     ) -> tuple[HostDetails, list[AgentDetails]]:
         raise MngrError("simulated detail retrieval failure from test")
@@ -1408,6 +1476,7 @@ def _make_list_params(
     on_agent: Any = None,
     include_filters: tuple[str, ...] = (),
     exclude_filters: tuple[str, ...] = (),
+    offline_field_generators: dict[str, dict[str, Any]] | None = None,
 ) -> _ListAgentsParams:
     """Build a _ListAgentsParams for testing, with optional CEL filters."""
     compiled_include: list[Any] = []
@@ -1420,6 +1489,7 @@ def _make_list_params(
         error_behavior=error_behavior,
         on_agent=on_agent,
         on_error=on_error,
+        offline_field_generators=offline_field_generators or {},
     )
 
 
@@ -2010,6 +2080,58 @@ def test_collect_and_emit_details_for_host_include_filter_keeps_matching_agent(
     assert len(result.agents) == 1
     assert str(result.agents[0].name) == "target-agent"
     assert len(collected_agents) == 1
+
+
+def test_collect_and_emit_details_for_host_populates_offline_plugin_data(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """The offline field generators threaded through params populate plugin data for offline agents."""
+    host_id = HostId.generate()
+    provider_name = "test-local"
+    provider = _make_offline_test_provider(host_id, provider_name, temp_mngr_ctx)
+
+    host_ref = DiscoveredHost(
+        host_id=host_id,
+        host_name=HostName("test-host"),
+        provider_name=ProviderInstanceName(provider_name),
+    )
+    agent_ref = DiscoveredAgent(
+        host_id=host_id,
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("offline-agent"),
+        provider_name=ProviderInstanceName(provider_name),
+        certified_data={
+            "type": "generic",
+            "command": "sleep 1",
+            "work_dir": "/tmp",
+            "plugin": {"demo_plugin": {"flag": True}},
+        },
+    )
+
+    result = ListResult()
+    lock = Lock()
+    params = _make_list_params(
+        error_behavior=ErrorBehavior.CONTINUE,
+        offline_field_generators={
+            "demo_plugin": {
+                "flag": lambda ref, host: ref.certified_data.get("plugin", {})
+                .get("demo_plugin", {})
+                .get("flag", False),
+            }
+        },
+    )
+
+    _collect_and_emit_details_for_host(
+        host_ref=host_ref,
+        agent_refs=[agent_ref],
+        provider=provider,
+        params=params,
+        result=result,
+        results_lock=lock,
+    )
+
+    assert len(result.agents) == 1
+    assert result.agents[0].plugin == {"demo_plugin": {"flag": True}}
 
 
 def test_collect_and_emit_details_for_host_include_filter_drops_non_matching_agent(

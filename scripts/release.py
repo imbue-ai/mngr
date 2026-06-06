@@ -30,11 +30,13 @@ import json
 import subprocess
 import sys
 from collections import deque
+from datetime import date
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 from pathlib import Path
-from typing import Any
 from typing import Final
 from typing import TextIO
-from typing import cast
 
 import httpx
 import semver
@@ -57,7 +59,13 @@ from imbue.mngr.utils.polling import poll_for_value
 BUMP_KINDS: Final[tuple[str, ...]] = ("major", "minor", "patch")
 BUMP_LEVEL_ORDER: Final[dict[str, int]] = {"patch": 0, "minor": 1, "major": 2}
 
+# Supply-chain cooldown window: the resolver only adopts registry releases that
+# have been public at least this long. Enforced via the root `[tool.uv]
+# exclude-newer` cutoff, which a release advances to (release date - this window).
+DEPENDENCY_COOLDOWN: Final[timedelta] = timedelta(weeks=2)
+
 PUBLISH_WORKFLOW: Final[str] = "publish.yml"
+RELEASE_TESTS_WORKFLOW: Final[str] = "release-tests.yml"
 ACTIONS_URL: Final[str] = "https://github.com/imbue-ai/mngr/actions/workflows/publish.yml"
 POLL_INTERVAL_SECONDS: Final[int] = 10
 MAX_WAIT_FOR_RUN_SECONDS: Final[int] = 300
@@ -273,7 +281,7 @@ def _write_version(pkg_pypi_name: str, new_version: str) -> None:
     """Update the version field in a package's pyproject.toml."""
     pkg = PACKAGE_BY_PYPI_NAME[pkg_pypi_name]
     doc = tomlkit.loads(pkg.pyproject_path.read_text())
-    project = cast(dict[str, Any], doc["project"])
+    project = doc["project"]
     project["version"] = new_version
     pkg.pyproject_path.write_text(tomlkit.dumps(doc))
 
@@ -288,7 +296,7 @@ def update_internal_dep_pins(all_versions: dict[str, str]) -> list[str]:
         if not pkg.internal_deps:
             continue
         doc = tomlkit.loads(pkg.pyproject_path.read_text())
-        project = cast(dict[str, Any], doc["project"])
+        project = doc["project"]
         # Modify the tomlkit array in-place to preserve formatting and comments
         deps = project["dependencies"]
         is_changed = False
@@ -305,6 +313,39 @@ def update_internal_dep_pins(all_versions: dict[str, str]) -> list[str]:
             pkg.pyproject_path.write_text(tomlkit.dumps(doc))
             modified.append(pkg.pypi_name)
     return modified
+
+
+def update_exclude_newer(pyproject_path: Path, release_date: date) -> str | None:
+    """Advance the root ``[tool.uv] exclude-newer`` cutoff, forward-only.
+
+    The cutoff is the supply-chain cooldown boundary: uv refuses to consider any
+    package uploaded after it when resolving, so we only adopt registry releases
+    that have been public long enough for the community to flag malware. We move
+    it to ``release_date`` minus the cooldown window, but never backward -- if the
+    current cutoff is still younger than the window (e.g. it was set recently to
+    admit a freshly-pinned, deliberately-trusted dep), pushing it back would
+    re-exclude that dep and break resolution. So the new cutoff is the later
+    of the current value and ``release_date - DEPENDENCY_COOLDOWN``.
+
+    The cutoff is anchored at midnight UTC, matching the UTC upload-times uv
+    compares it against. The committed value is therefore identical regardless of
+    who cuts the release, and the time-of-day is immaterial for a two-week boundary.
+
+    Returns the new cutoff string if it changed, or ``None`` if the current cutoff
+    already wins (in which case no write is performed).
+    """
+    doc = tomlkit.loads(pyproject_path.read_text())
+    uv_config = doc["tool"]["uv"]
+    current = datetime.fromisoformat(str(uv_config["exclude-newer"]))
+    candidate_date = release_date - DEPENDENCY_COOLDOWN
+    candidate = datetime(candidate_date.year, candidate_date.month, candidate_date.day, tzinfo=timezone.utc)
+    new_cutoff = max(current, candidate)
+    if new_cutoff == current:
+        return None
+    new_value = new_cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
+    uv_config["exclude-newer"] = new_value
+    pyproject_path.write_text(tomlkit.dumps(doc))
+    return new_value
 
 
 def gh_is_available() -> bool:
@@ -764,6 +805,32 @@ def main() -> None:
         print("Run 'git pull' first.", file=sys.stderr)
         sys.exit(1)
 
+    # Advisory: surface whether the Release Tests workflow has passed on this
+    # exact commit. Release tests are not a hard publish gate, so this only
+    # warns -- the user decides at the confirmation prompt below.
+    if gh_is_available():
+        runs = json.loads(
+            run(
+                "gh",
+                "run",
+                "list",
+                "-w",
+                RELEASE_TESTS_WORKFLOW,
+                "-b",
+                "main",
+                "-L",
+                "20",
+                "--json",
+                "headSha,conclusion",
+            )
+        )
+        match = next((r for r in runs if r["headSha"] == local_sha), None)
+        if match is None:
+            print(f"\nWARNING: no Release Tests run found for this commit ({local_sha[:8]}).")
+            print(f"  Run them first: gh workflow run {RELEASE_TESTS_WORKFLOW} --ref main")
+        elif match["conclusion"] != "success":
+            print(f"\nWARNING: Release Tests for this commit concluded '{match['conclusion']}', not success.")
+
     confirm = input(f"\nProceed with release {tag}? [y/N] ")
     if confirm.lower() != "y":
         print("Aborted.")
@@ -781,6 +848,16 @@ def main() -> None:
     pin_modified = update_internal_dep_pins(all_versions_after)
     if pin_modified:
         print(f"Updated dependency pins in: {', '.join(pin_modified)}")
+
+    # Advance the supply-chain cooldown cutoff before re-locking so the
+    # regenerated uv.lock records the new `[options] exclude-newer`. Forward-only:
+    # a release run while the cutoff is still younger than the window leaves it
+    # untouched (see update_exclude_newer). Anchored to UTC (today's date) to match
+    # the UTC upload-times uv compares it against -- deliberately independent of the
+    # Pacific changelog date used below.
+    new_cutoff = update_exclude_newer(REPO_ROOT / "pyproject.toml", datetime.now(timezone.utc).date())
+    if new_cutoff is not None:
+        print(f"Advanced exclude-newer cooldown cutoff to {new_cutoff}")
 
     print("Regenerating uv.lock...")
     run("uv", "lock")
@@ -818,6 +895,9 @@ def main() -> None:
     commit_msg = f"Release {tag} ({', '.join(all_released_names)})"
 
     files_to_add = [
+        # Root pyproject.toml carries the `[tool.uv] exclude-newer` cutoff that
+        # update_exclude_newer may have advanced above.
+        "pyproject.toml",
         *[str(pkg.pyproject_path.relative_to(REPO_ROOT)) for pkg in PACKAGES],
         "uv.lock",
         *[str(p.relative_to(REPO_ROOT)) for p in finalized_paths],

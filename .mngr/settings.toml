@@ -35,6 +35,9 @@ target_path = "/code/mngr"
 parent_type = "claude"
 cli_args = """--settings '{"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "read INPUT; SID=$(echo \\"$INPUT\\" | jq -r \\".session_id // empty\\"); [ -n \\"$SID\\" ] && [ -n \\"${CLAUDE_ENV_FILE:-}\\" ] && echo \\"export MNGR_CLAUDE_SESSION_ID=$SID\\" >> \\"$CLAUDE_ENV_FILE\\" || true"}]}]}}'"""
 
+[providers.docker]
+isolate_host_volumes = true
+
 [providers.modal]
 is_enabled = true
 default_cpu = 4

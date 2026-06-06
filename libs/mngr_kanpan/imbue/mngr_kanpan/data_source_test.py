@@ -153,15 +153,15 @@ def test_pr_field_display() -> None:
 # === CiField ===
 
 
-def test_ci_field_display_passing() -> None:
-    cell = CiField(status=CiStatus.PASSING, created=datetime(2024, 1, 1, 0, 0, 7, tzinfo=timezone.utc)).display()
-    assert cell.text == "passing"
+def test_ci_field_display_success() -> None:
+    cell = CiField(status=CiStatus.SUCCESS, created=datetime(2024, 1, 1, 0, 0, 7, tzinfo=timezone.utc)).display()
+    assert cell.text == "success"
     assert cell.color == "light green"
 
 
-def test_ci_field_display_failing() -> None:
-    cell = CiField(status=CiStatus.FAILING, created=datetime(2024, 1, 1, 0, 0, 8, tzinfo=timezone.utc)).display()
-    assert cell.text == "failing"
+def test_ci_field_display_failure() -> None:
+    cell = CiField(status=CiStatus.FAILURE, created=datetime(2024, 1, 1, 0, 0, 8, tzinfo=timezone.utc)).display()
+    assert cell.text == "failure"
     assert cell.color == "light red"
 
 
@@ -273,7 +273,7 @@ def test_deserialize_fields_basic() -> None:
         },
         "ci": {
             "kind": "ci",
-            "status": "FAILING",
+            "status": "FAILURE",
             "created": datetime(2024, 1, 1, 0, 0, 22, tzinfo=timezone.utc).isoformat(),
         },
     }
@@ -282,7 +282,7 @@ def test_deserialize_fields_basic() -> None:
     assert isinstance(result["pr"], PrField)
     assert result["pr"].number == 42
     assert isinstance(result["ci"], CiField)
-    assert result["ci"].status == CiStatus.FAILING
+    assert result["ci"].status == CiStatus.FAILURE
 
 
 def test_deserialize_fields_unknown_keys_skipped() -> None:
@@ -347,11 +347,11 @@ def test_deserialize_fields_drops_invalid_payload_keeps_others() -> None:
         "pr": {},
         "ci": {
             "kind": "ci",
-            "status": "PASSING",
+            "status": "SUCCESS",
             "created": datetime(2024, 1, 1, 0, 0, 26, tzinfo=timezone.utc).isoformat(),
         },
     }
     result = deserialize_fields(raw, types)
     assert "pr" not in result
     assert isinstance(result["ci"], CiField)
-    assert result["ci"].status == CiStatus.PASSING
+    assert result["ci"].status == CiStatus.SUCCESS

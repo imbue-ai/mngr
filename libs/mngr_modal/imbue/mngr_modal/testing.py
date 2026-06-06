@@ -26,27 +26,27 @@ from imbue.mngr_modal.instance import TAG_HOST_ID
 from imbue.mngr_modal.instance import TAG_HOST_NAME
 from imbue.mngr_modal.instance import TAG_USER_PREFIX
 from imbue.modal_proxy.interface import SandboxInterface
-from imbue.modal_proxy.testing import TestingModalInterface
+from imbue.modal_proxy.testing import FakeModalInterface
 
 _DEFAULT_SANDBOX_CONFIG = SandboxConfig()
 
 
-def make_testing_modal_interface(tmp_path: Path, cg: ConcurrencyGroup) -> TestingModalInterface:
-    """Create a TestingModalInterface rooted in a temp directory."""
+def make_testing_modal_interface(tmp_path: Path, cg: ConcurrencyGroup) -> FakeModalInterface:
+    """Create a FakeModalInterface rooted in a temp directory."""
     root = tmp_path / "modal_testing"
     root.mkdir(parents=True, exist_ok=True)
-    return TestingModalInterface(root_dir=root, concurrency_group=cg)
+    return FakeModalInterface(root_dir=root, concurrency_group=cg)
 
 
 def make_testing_provider(
     mngr_ctx: MngrContext,
-    modal_interface: TestingModalInterface,
+    modal_interface: FakeModalInterface,
     app_name: str = "test-app",
     is_persistent: bool = False,
     is_snapshotted_after_create: bool = False,
     is_host_volume_created: bool = True,
 ) -> ModalProviderInstance:
-    """Create a ``ModalProviderInstance`` backed by ``TestingModalInterface``.
+    """Create a ``ModalProviderInstance`` backed by ``FakeModalInterface``.
 
     Calls ``ModalProviderBackend._construct_modal_provider`` (the shared
     factory body that production also uses) with the fake injected.
@@ -115,7 +115,7 @@ def make_host_record(
 
 
 def make_sandbox_with_tags(
-    modal_interface: TestingModalInterface,
+    modal_interface: FakeModalInterface,
     host_id: HostId,
     host_name: str,
     user_tags: dict[str, str] | None = None,
@@ -143,7 +143,7 @@ def make_sandbox_with_tags(
 
 def setup_host_with_sandbox(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
     host_name: str,
     user_tags: dict[str, str] | None = None,
 ) -> tuple[HostId, HostRecord, SandboxInterface]:

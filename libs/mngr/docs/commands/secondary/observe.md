@@ -58,14 +58,14 @@ mngr observe [OPTIONS]
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
-| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## Other Options
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--events-dir` | path | Base directory for event output files and lock. Defaults to MNGR_HOST_DIR (~/.mngr). | None |
+| `--events-dir` | path | Base directory for the full observer's event output files and lock. Defaults to MNGR_HOST_DIR (~/.mngr). Has no effect with --discovery-only (the discovery log always lives under the default host dir). | None |
 | `--discovery-only` | boolean | Stream only discovery events as JSONL (hosts and agents discovered/destroyed). Outputs a full snapshot, then tails the event file for updates. Periodically re-polls to catch any missed changes. Does not start activity streams or emit agent state events. | `False` |
 | `--daemonize`, `--no-daemonize` | boolean | When not daemonized (default), exit if the parent process dies. Use --daemonize to keep running independently. | `False` |
 

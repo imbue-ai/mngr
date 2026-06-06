@@ -31,7 +31,7 @@ from imbue.mngr.api.providers import reset_provider_instances
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import BaseMngrError
+from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.plugin_catalog import get_independent_entry_point_names
 from imbue.mngr.plugins import hookspecs
@@ -115,7 +115,7 @@ def cg() -> Generator[ConcurrencyGroup, None, None]:
 def stub_mngr_log_sh() -> str:
     """A no-op mngr_log.sh stub for testing shell scripts that source it.
 
-    Background scripts in mngr_claude/resources and mngr_gemini/resources
+    Background scripts in mngr_claude/resources and mngr_antigravity/resources
     source $MNGR_AGENT_STATE_DIR/commands/mngr_log.sh for logging helpers.
     In production the file is provisioned by Host.provision_agent(); tests
     write this stub to the same path so the script under test can source it
@@ -233,7 +233,9 @@ def disable_remote_providers_for_subprocesses(
     the test environment, or would create Docker state containers that leak.
     """
     settings_path = project_config_dir / "settings.local.toml"
-    settings_path.write_text("[providers.modal]\nis_enabled = false\n\n[providers.docker]\nis_enabled = false\n")
+    settings_path.write_text(
+        "is_allowed_in_pytest = true\n\n[providers.modal]\nis_enabled = false\n\n[providers.docker]\nis_enabled = false\n"
+    )
     monkeypatch.chdir(temp_git_repo)
     return settings_path
 
@@ -540,16 +542,16 @@ def minimal_install_env(
     The subprocess environment is intentionally minimal (not inherited from
     the parent process). PATH contains only the venv bin and the directories
     of mngr's declared system dependencies: CORE_DEPS from
-    libs/mngr/imbue/mngr/utils/deps.py (git, tmux, jq, ssh) plus two
+    libs/mngr/imbue/mngr/utils/deps.py (git, tmux, jq) plus three
     fixture-specific extras (curl, used by scripts/install.sh to bootstrap
-    uv, and rsync, an optional dep included so file-sync code paths are
-    exercised). This catches code that depends on tools from the developer's
-    environment (e.g. the modal CLI being on PATH).
+    uv, and rsync + ssh, optional deps included so file-sync and remote
+    code paths are exercised). This catches code that depends on tools from
+    the developer's environment (e.g. the modal CLI being on PATH).
     """
     # Pull the core binary names from CORE_DEPS so this list cannot drift
-    # away from what mngr actually requires. The two extras below are
+    # away from what mngr actually requires. The extras below are
     # fixture-specific (see docstring above).
-    system_deps = [dep.binary for dep in CORE_DEPS] + ["curl", "rsync"]
+    system_deps = [dep.binary for dep in CORE_DEPS] + ["curl", "rsync", "ssh"]
     dep_dirs: set[str] = set()
     for dep in system_deps:
         dep_path = shutil.which(dep)
@@ -806,7 +808,7 @@ def _remove_docker_containers(containers: list[tuple[str, str]]) -> None:
         client.close()
 
 
-class _DockerdStartupError(BaseMngrError):
+class _DockerdStartupError(MngrError):
     """Raised when the release-test session fixture cannot bring dockerd up."""
 
 

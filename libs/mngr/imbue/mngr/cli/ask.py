@@ -15,20 +15,20 @@ from loguru import logger
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr import resources as mngr_resources
+from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.headless_runner import accumulate_chunks
 from imbue.mngr.cli.headless_runner import ephemeral_work_location
-from imbue.mngr.cli.headless_runner import get_local_host
 from imbue.mngr.cli.headless_runner import headless_agent_output
 from imbue.mngr.cli.headless_runner import stream_or_accumulate_response
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.help_formatter import get_all_help_metadata
 from imbue.mngr.cli.output_helpers import AbortError
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_info
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
@@ -74,10 +74,10 @@ _QUERY_PREFIX: Final[str] = (
     "response: mngr pair my-agent\n\n"
     #
     "user: How do I pull an agent's git commits back to my local repo?\n"
-    "response: mngr pull my-agent --sync-mode git\n\n"
+    "response: mngr git pull my-agent\n\n"
     #
     "user: How do I push my local changes to a running agent?\n"
-    "response: mngr push my-agent\n\n"
+    "response: mngr rsync ./ my-agent\n\n"
     #
     "user: How do I clone an existing agent to try something risky?\n"
     "response: mngr clone my-agent experiment\n\n"
@@ -214,7 +214,7 @@ _EXECUTE_QUERY_PREFIX: Final[str] = (
     "response: mngr clone my-agent experiment\n\n"
     #
     "user: pull git commits from my-agent\n"
-    "response: mngr pull my-agent --sync-mode git\n\n"
+    "response: mngr git pull my-agent\n\n"
     #
     "user: create a local agent with opus\n"
     "response: mngr create -- --model opus\n\n"
@@ -330,10 +330,10 @@ def _show_command_summary(output_format: OutputFormat) -> None:
             write_human_line('\nAsk a question: mngr ask "how do I create an agent?"')
         case OutputFormat.JSON:
             commands = {name: meta.one_line_description for name, meta in metadata.items()}
-            emit_final_json({"commands": commands})
+            write_json_line({"commands": commands})
         case OutputFormat.JSONL:
             commands = {name: meta.one_line_description for name, meta in metadata.items()}
-            emit_final_json({"event": "commands", "commands": commands})
+            write_json_line({"event": "commands", "commands": commands})
         case _ as unreachable:
             assert_never(unreachable)
 

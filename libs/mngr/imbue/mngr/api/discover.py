@@ -69,7 +69,8 @@ def _discover_provider_hosts_and_agents(
     Wraps any provider-side exception in ``ProviderDiscoveryError`` so the
     snapshot/poll error path can attribute the failure to the exact provider
     instance (e.g. ``imbue_cloud_alice@example.com``) without parsing
-    messages -- minds uses this to auto-disable a stale account.
+    messages -- minds surfaces this in its providers panel so the user can
+    see which provider failed and Disable it themselves.
     """
     try:
         provider_results = provider.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)

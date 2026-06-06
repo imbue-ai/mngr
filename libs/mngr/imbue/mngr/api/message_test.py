@@ -206,7 +206,8 @@ def test_send_message_to_agents_starts_stopped_agent_when_start_desired(
 
 
 @pytest.mark.tmux
-@pytest.mark.flaky
+# real agent setup/teardown occasionally exceeds the 10s default.
+@pytest.mark.timeout(30)
 def test_send_message_to_agents_with_include_filter(
     temp_work_dir: Path,
     temp_mngr_ctx: MngrContext,
@@ -269,9 +270,9 @@ def test_send_message_one_agent_failure_does_not_prevent_other_agents(
 ) -> None:
     """One agent's SendMessageError must not kill the broadcast to other agents.
 
-    SendMessageError inherits from BaseMngrError (not MngrError). Before the switch
-    to concurrent sends, the serial loop only caught MngrError, so a SendMessageError
-    would propagate up and abort the entire broadcast.
+    SendMessageError is an AgentError, which inherits from MngrError. The per-agent
+    send is guarded by ``except MngrError`` so that, in CONTINUE mode, one
+    agent's failure is recorded without aborting the broadcast to the others.
     """
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)

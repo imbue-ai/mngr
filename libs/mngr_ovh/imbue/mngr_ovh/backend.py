@@ -1,5 +1,6 @@
 import os
 import uuid
+from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
@@ -24,6 +25,7 @@ from imbue.mngr_ovh import hookimpl
 from imbue.mngr_ovh.bootstrap import bootstrap_root_authorized_keys_via_user
 from imbue.mngr_ovh.bootstrap import install_required_outer_packages
 from imbue.mngr_ovh.bootstrap import pin_host_key_via_tofu
+from imbue.mngr_ovh.bootstrap import purge_qemu_packages
 from imbue.mngr_ovh.bootstrap import verify_root_ssh
 from imbue.mngr_ovh.bootstrap import wait_for_ssh_after_rebuild
 from imbue.mngr_ovh.catalog import resolve_image_id
@@ -50,7 +52,6 @@ from imbue.mngr_ovh.pending_orders import write_pending_order_marker
 from imbue.mngr_ovh.recycle import abort_recycle
 from imbue.mngr_ovh.recycle import finalize_recycle
 from imbue.mngr_ovh.recycle import try_recycle_cancelled_vps
-from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
@@ -139,12 +140,15 @@ class OvhProvider(VpsDockerProvider):
             # real credentials still surfaces through the except branch below.
             self._vps_iam_cache = []
             return []
-        try:
-            resources = list_vps_resources_for_provider(self.ovh_client, provider_name=str(self.name))
-        except (VpsApiError, MngrError) as e:
-            logger.warning("OVH IAM tag listing failed; treating as empty: {}", e)
-            self._vps_iam_cache = []
-            return []
+        # Deliberately do NOT catch IAM-listing errors here. Swallowing to an
+        # empty list would make a transient OVH outage / expired credentials
+        # look like "this provider has zero hosts" -- which the discovery layer
+        # cannot distinguish from a real empty result, and which defeats mngr's
+        # "mark hosts UNKNOWN when a provider's discovery fails" safeguard. We
+        # let it propagate so `mngr list --on-error continue` records the
+        # failure instead of silently dropping live hosts. (The genuinely-
+        # unconfigured case is the is_unconfigured early-return above.)
+        resources = list_vps_resources_for_provider(self.ovh_client, provider_name=str(self.name))
         hostnames = [r.name for r in resources if r.name]
         self._vps_iam_cache = hostnames
         return list(hostnames)
@@ -199,7 +203,7 @@ class OvhProvider(VpsDockerProvider):
                     order_id=record.order_id,
                     plan_code=record.plan_code,
                 )
-            except (VpsApiError, MngrError) as exc:
+            except MngrError as exc:
                 logger.warning(
                     "OVH pending-orders reconcile: poll for order {} failed ({}); keeping marker for next bake",
                     record.order_id,
@@ -219,7 +223,7 @@ class OvhProvider(VpsDockerProvider):
                     provider_name=provider_name,
                     region_code=region_code,
                 )
-            except (VpsApiError, MngrError) as exc:
+            except MngrError as exc:
                 logger.warning(
                     "OVH pending-orders reconcile: adoption of {} (order {}) failed ({}); keeping marker",
                     service_name,
@@ -285,6 +289,7 @@ class OvhProvider(VpsDockerProvider):
         new_host_id: HostId,
         requested_plan: str,
         requested_region: str,
+        extra_tags: Mapping[str, str],
     ) -> RecycleHandle | None:
         """Try to lock + re-tag a cancelled VPS; return the recycle handle or None.
 
@@ -306,6 +311,7 @@ class OvhProvider(VpsDockerProvider):
             requested_region=requested_region,
             safety_margin_hours=self.ovh_config.recycle_safety_margin_hours,
             max_candidates=self.ovh_config.recycle_max_candidates_considered,
+            extra_tags=extra_tags,
         )
 
     def _on_host_finalized(self, *, host_id: HostId, vps_ip: str) -> None:
@@ -333,7 +339,7 @@ class OvhProvider(VpsDockerProvider):
             return
         try:
             finalize_recycle(self.ovh_client, handle)
-        except (VpsApiError, MngrError) as e:
+        except MngrError as e:
             logger.error(
                 "OVH recycle: finalize_recycle raised for {} after host record was written; "
                 "the VPS may auto-decommission at end of month -- manual un-cancel may be needed. {}",
@@ -384,15 +390,14 @@ class OvhProvider(VpsDockerProvider):
         # IAM-key regex + the reserved-key list locally, so a 400 from
         # the IAM tag attach loop -- which would otherwise leak a freshly-
         # ordered month of billing -- cannot happen. (DEPLOY_SAFETY_AUDIT-
-        # style F1; spec required pre-order parsing.) The recycle path
-        # does not apply extra tags (the recycled VPS already carries
-        # whatever tags it had pre-cancellation, plus its mngr-host-id
-        # gets swapped by ``try_recycle_cancelled_vps``), so the parsed
-        # dict is only consumed in the fresh-order branch below. Parsing
-        # at the top still matters for the recycle path: if recycling
-        # falls through, the same provisioning call ends up ordering a
-        # fresh VPS, and we want to have already validated extra tags
-        # by that point.
+        # style F1; spec required pre-order parsing.) Both provisioning
+        # paths consume the parsed dict: the fresh-order branch attaches
+        # it alongside provider/host-id below, and the recycle path passes
+        # it to ``try_recycle_cancelled_vps`` (which (over)writes the tags
+        # so a VPS recycled across envs reflects the new owner's
+        # ``minds_env`` rather than the previous owner's). Parsing up front
+        # still matters either way: if recycling falls through to a fresh
+        # order, the extra tags have already been validated by that point.
         extra_tags = parse_extra_tags_env(os.environ.get("MNGR_VPS_EXTRA_TAGS", ""))
 
         with log_span("OVH provisioning for host {} ({})", name, host_id):
@@ -402,7 +407,7 @@ class OvhProvider(VpsDockerProvider):
             # this bake (no extra round-trip latency in the failure case).
             self._reconcile_pending_orders()
             recycle_handle = self._maybe_claim_recycled_vps(
-                new_host_id=host_id, requested_plan=plan, requested_region=region
+                new_host_id=host_id, requested_plan=plan, requested_region=region, extra_tags=extra_tags
             )
             # If `_provision_vps` raises before returning, the outer
             # cleanup in `_create_host_internal` never sees a vps_instance_id
@@ -467,9 +472,9 @@ class OvhProvider(VpsDockerProvider):
                 # orphan in `mngr list` and the create-cleanup path can
                 # clean it up by service name. The recycle path arrives
                 # already tagged -- `try_recycle_cancelled_vps` swapped
-                # `mngr-host-id` to the new host id under a cooperative
-                # lock -- so we skip the re-tag there to avoid two
-                # redundant POST /tag calls per recycled host.
+                # `mngr-host-id` to the new host id and (over)wrote the
+                # extra tags under a cooperative lock -- so we skip the
+                # re-tag here to avoid redundant POST /tag calls.
                 urn = vps_urn_for(service_name, region_code=iam_region_code_for_endpoint(self.ovh_config.endpoint))
                 if recycle_handle is None:
                     # F1: ``extra_tags`` was parsed at the very top of
@@ -554,6 +559,18 @@ class OvhProvider(VpsDockerProvider):
                     known_hosts_path=self._vps_known_hosts_path(),
                     timeout_seconds=self.config.ssh_connect_timeout,
                 )
+                # OVH automated backups freeze the guest filesystem (via the
+                # image's qemu-guest-agent) and cause serious runtime problems,
+                # so purge all qemu packages. Runs on both the fresh-order and
+                # recycle paths -- the recycle rebuild reinstalls the agent.
+                # A failure aborts provisioning so no host runs with backups on.
+                purge_qemu_packages(
+                    hostname=service_name,
+                    port=22,
+                    private_key_path=vps_private_key_path,
+                    known_hosts_path=self._vps_known_hosts_path(),
+                    timeout_seconds=self.config.ssh_connect_timeout,
+                )
                 # All post-claim steps succeeded. Ownership of both the
                 # recycle lock (recycle path) and the freshly-ordered
                 # VPS (fresh-order path) transfers to the caller -- on
@@ -587,7 +604,7 @@ class OvhProvider(VpsDockerProvider):
                 "OVH _provision_vps failed after fresh order delivered {}; requested termination to avoid a leaked month of billing",
                 service_name,
             )
-        except (VpsApiError, MngrError) as e:
+        except MngrError as e:
             logger.error(
                 "OVH _provision_vps cleanup: failed to terminate freshly-ordered VPS {} ({}); manual cleanup may be needed to avoid a leaked month of billing",
                 service_name,

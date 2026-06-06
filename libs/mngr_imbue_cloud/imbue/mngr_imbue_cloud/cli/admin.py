@@ -37,6 +37,14 @@ from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.mngr_imbue_cloud.cli._common import emit_json
 from imbue.mngr_imbue_cloud.cli._common import fail_with_json
+from imbue.mngr_ovh.client import build_ovh_client
+from imbue.mngr_ovh.config import OvhProviderConfig
+from imbue.mngr_ovh.iam_tags import MNGR_PROVIDER_TAG_KEY
+from imbue.mngr_ovh.iam_tags import delete_tag
+from imbue.mngr_ovh.iam_tags import get_vps_resource
+from imbue.mngr_ovh.iam_tags import iam_region_code_for_endpoint
+from imbue.mngr_ovh.iam_tags import vps_urn_for
+from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 # Env var name a minds-activated shell uses to flag the pool host DSN
 # for the activated env. Mirrors the field name written into
@@ -186,6 +194,41 @@ _INSERT_POOL_HOST_SQL: Final[str] = (
     "container_ssh_port, status, attributes, created_at) "
     "VALUES (%s, %s, %s, %s, %s, %s, 22, 'root', %s, 'available', %s::jsonb, NOW())"
 )
+
+
+def build_pool_host_insert_values(
+    *,
+    row_id: str,
+    vps_address: str,
+    agent_id: str,
+    host_id: str,
+    host_name: str,
+    container_ssh_port: int,
+    attributes_json: str,
+) -> tuple[str, str, str, str, str, str, int, str]:
+    """Build the value tuple for :data:`_INSERT_POOL_HOST_SQL`.
+
+    ``vps_instance_id`` MUST be the OVH service name -- it is what every
+    connector-side OVH teardown call keys on (``vps_urn_for`` and
+    ``set_delete_at_expiration`` in the connector's ``clean_up_pool_host_in_ovh``,
+    the release route, and the hourly cleanup sweep). For these OVH-backed pool
+    hosts the service name is the ``vps_address`` (the ``vps-xxxx.vps.ovh.us``
+    hostname). An earlier version wrote the mngr ``host_id`` (a ``host-...`` id)
+    here, which made every OVH cancellation silently 404 -- VPSes were never
+    cancelled and kept billing. Kept as a pure function so the column-to-value
+    mapping is pinned by a unit test without standing up a real bake.
+    """
+    return (
+        row_id,
+        vps_address,
+        # vps_instance_id: the OVH service name, NOT host_id (see docstring).
+        vps_address,
+        agent_id,
+        host_id,
+        host_name,
+        container_ssh_port,
+        attributes_json,
+    )
 
 
 @click.group(name="admin")
@@ -649,15 +692,14 @@ def _create_single_pool_host(
             with conn.cursor() as cur:
                 cur.execute(
                     _INSERT_POOL_HOST_SQL,
-                    (
-                        str(row_id),
-                        vps_address,
-                        host_id,
-                        agent_id,
-                        host_id,
-                        host_name,
-                        _CONTAINER_SSH_PORT,
-                        _json.dumps(attributes),
+                    build_pool_host_insert_values(
+                        row_id=str(row_id),
+                        vps_address=vps_address,
+                        agent_id=agent_id,
+                        host_id=host_id,
+                        host_name=host_name,
+                        container_ssh_port=_CONTAINER_SSH_PORT,
+                        attributes_json=_json.dumps(attributes),
                     ),
                 )
     finally:
@@ -845,6 +887,28 @@ def pool_list(database_url: str | None) -> None:
     )
 
 
+def _cancel_pool_host_vps(service_name: str) -> None:
+    """Strip per-lease OVH tags and cancel the VPS, leaving it blank + recyclable.
+
+    Mirrors the connector's release teardown so ``pool destroy`` can never strand
+    a still-billing VPS: strip every IAM tag except ``mngr-provider`` (so the next
+    bake can recycle the cancelled host), then set ``deleteAtExpiration=True`` via
+    ``OvhVpsClient.destroy_instance``. Reuses ``mngr_ovh`` (reachable through the
+    vps_docker dependency) with OVH AK/AS/CK read from the environment -- the minds
+    ``pool destroy`` wrapper injects them from Vault. Raises on any OVH failure, so
+    the caller does NOT delete the DB row while the VPS is still running.
+    """
+    client = build_ovh_client(OvhProviderConfig())
+    region = iam_region_code_for_endpoint(os.environ.get("OVH_ENDPOINT", "ovh-us"))
+    urn = vps_urn_for(service_name, region_code=region)
+    resource = get_vps_resource(client, urn)
+    if resource is not None:
+        for key in resource.tags:
+            if key != MNGR_PROVIDER_TAG_KEY:
+                delete_tag(client, urn, key)
+    client.destroy_instance(VpsInstanceId(service_name))
+
+
 @pool.command(name="destroy")
 @click.argument("pool_host_id")
 @click.option(
@@ -860,28 +924,53 @@ def pool_list(database_url: str | None) -> None:
     ),
 )
 @click.option("--force", is_flag=True, help="Drop the row even if status != 'released'")
-def pool_destroy(pool_host_id: str, database_url: str | None, force: bool) -> None:
-    """Remove a pool_hosts row.
+@click.option(
+    "--skip-vps-cancel",
+    is_flag=True,
+    default=False,
+    help=(
+        "Only drop the DB row; do NOT cancel the OVH VPS. Use exclusively when the "
+        "VPS is already gone/cancelled -- otherwise the default path cancels it so "
+        "no billing orphan is left behind."
+    ),
+)
+def pool_destroy(pool_host_id: str, database_url: str | None, force: bool, skip_vps_cancel: bool) -> None:
+    """Remove a pool_hosts row, cancelling its OVH VPS first (full teardown).
 
-    Note: this does NOT destroy the underlying OVH VPS; that is intentional
-    so an operator can use ``mngr destroy`` themselves and inspect the row
-    state first.
+    By default this cancels the underlying OVH VPS (strip per-lease tags +
+    ``deleteAtExpiration=True``) *before* deleting the row, so it leaves the host
+    in the same blank/cancelled/recyclable state a proper release does -- never a
+    stranded, still-billing VPS. Pass ``--skip-vps-cancel`` only when the VPS is
+    already gone. Cancellation needs OVH credentials in the environment (the minds
+    ``pool destroy`` wrapper injects them from Vault).
     """
     resolved_database_url = _resolve_pool_database_url(database_url)
     conn = psycopg2.connect(resolved_database_url)
     try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status, vps_address FROM pool_hosts WHERE id = %s", (pool_host_id,))
+            row = cur.fetchone()
+            if row is None:
+                fail_with_json(f"No pool_hosts row with id {pool_host_id}", error_class="NotFound")
+            status, vps_address = row
+            if status != "released" and not force:
+                fail_with_json(
+                    f"Row {pool_host_id} is in status '{status}'; pass --force to delete anyway",
+                    error_class="UnsafeDelete",
+                )
+        # Cancel the VPS BEFORE deleting the row: if the cancel fails we keep the
+        # row so the teardown stays retryable (no silent orphan).
+        if not skip_vps_cancel:
+            if not vps_address:
+                fail_with_json(
+                    f"Row {pool_host_id} has no vps_address; cannot cancel its VPS. "
+                    "Pass --skip-vps-cancel if the VPS is already gone.",
+                    error_class="UnsafeDelete",
+                )
+            _cancel_pool_host_vps(vps_address)
         with conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT status FROM pool_hosts WHERE id = %s", (pool_host_id,))
-                row = cur.fetchone()
-                if row is None:
-                    fail_with_json(f"No pool_hosts row with id {pool_host_id}", error_class="NotFound")
-                if row[0] != "released" and not force:
-                    fail_with_json(
-                        f"Row {pool_host_id} is in status '{row[0]}'; pass --force to delete anyway",
-                        error_class="UnsafeDelete",
-                    )
                 cur.execute("DELETE FROM pool_hosts WHERE id = %s", (pool_host_id,))
     finally:
         conn.close()
-    emit_json({"deleted": True, "pool_host_id": pool_host_id})
+    emit_json({"deleted": True, "pool_host_id": pool_host_id, "vps_cancelled": not skip_vps_cancel})

@@ -30,7 +30,9 @@ class ObserveCliOptions(CommonCliOptions):
     "--events-dir",
     type=click.Path(path_type=Path),
     default=None,
-    help="Base directory for event output files and lock. Defaults to MNGR_HOST_DIR (~/.mngr).",
+    help="Base directory for the full observer's event output files and lock. Defaults to "
+    "MNGR_HOST_DIR (~/.mngr). Has no effect with --discovery-only (the discovery log always "
+    "lives under the default host dir).",
 )
 @click.option(
     "--discovery-only",
@@ -61,13 +63,22 @@ def observe(ctx: click.Context, **kwargs: Any) -> None:
     if not opts.daemonize:
         start_parent_death_watcher(mngr_ctx.concurrency_group)
 
-    events_base_dir = opts.events_dir
-    if events_base_dir is None:
-        events_base_dir = get_default_events_base_dir(mngr_ctx.config)
+    # The discovery log always lives under the default host dir, so --events-dir
+    # (which only relocates the full observer's agent-state events and lock) has no
+    # effect in --discovery-only mode. Fail loudly rather than silently ignore it.
+    if opts.discovery_only and opts.events_dir is not None:
+        raise click.UsageError(
+            "--events-dir has no effect with --discovery-only (the discovery log always lives under "
+            "the default host dir); pass only one of them."
+        )
 
     if opts.discovery_only:
         run_discovery_stream(mngr_ctx=mngr_ctx)
         return
+
+    events_base_dir = opts.events_dir
+    if events_base_dir is None:
+        events_base_dir = get_default_events_base_dir(mngr_ctx.config)
 
     # Acquire an exclusive lock per output directory
     lock_fd = acquire_observe_lock(events_base_dir)

@@ -7,8 +7,6 @@ from imbue.imbue_common.ratchet_testing import standard_ratchet_checks as rc
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BARE_PRINT
 from imbue.imbue_common.ratchet_testing.common_ratchets import check_ratchet_rule
 from imbue.imbue_common.ratchet_testing.ratchets import TEST_FILE_PATTERNS
-from imbue.imbue_common.ratchet_testing.ratchets import check_no_ruff_errors
-from imbue.imbue_common.ratchet_testing.ratchets import check_no_type_errors
 
 _DIR = Path(__file__).parent.parent.parent
 
@@ -189,7 +187,7 @@ def test_prevent_typing_builtin_imports() -> None:
 
 
 def test_prevent_short_uuid_ids() -> None:
-    rc.check_short_uuid_ids(_DIR, snapshot(1))
+    rc.check_short_uuid_ids(_DIR, snapshot(0))
 
 
 # --- Pydantic / models ---
@@ -248,6 +246,10 @@ def test_prevent_direct_subprocess() -> None:
     rc.check_direct_subprocess(_DIR, snapshot(0), TEST_FILE_PATTERNS + _STANDALONE_RESOURCE_SCRIPTS)
 
 
+def test_prevent_bare_tmux_targets() -> None:
+    rc.check_bare_tmux_targets(_DIR, snapshot(0))
+
+
 # --- AST-based ratchets ---
 
 
@@ -275,18 +277,12 @@ def test_prevent_assert_isinstance() -> None:
     rc.check_assert_isinstance(_DIR, snapshot(0))
 
 
+def test_prevent_per_file_host_upload() -> None:
+    rc.check_per_file_host_upload(_DIR, snapshot(1))
+
+
 # --- Project-level checks ---
 
 
 def test_prevent_code_in_init_files() -> None:
     rc.check_code_in_init_files(_DIR, snapshot(1))
-
-
-def test_no_type_errors() -> None:
-    """Ensure the codebase has zero type errors."""
-    check_no_type_errors(_DIR)
-
-
-def test_no_ruff_errors() -> None:
-    """Ensure the codebase has zero ruff linting errors."""
-    check_no_ruff_errors(_DIR)

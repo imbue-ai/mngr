@@ -5,12 +5,16 @@ by inspecting only the option-validation phase via direct calls to the
 helpers. End-to-end CLI invocation is exercised by the acceptance test.
 """
 
+import socket
+
 import click
 import pytest
 
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.imbue_common.primitives import PositiveInt
 from imbue.mngr_forward.cli import ForwardCliOptions
+from imbue.mngr_forward.cli import _DEFAULT_PORT
+from imbue.mngr_forward.cli import _bind_listen_socket
 from imbue.mngr_forward.cli import _build_strategy
 from imbue.mngr_forward.cli import _filter_snapshot
 from imbue.mngr_forward.cli import _parse_reverse_specs
@@ -33,7 +37,7 @@ def _opts(**overrides: object) -> ForwardCliOptions:
         log_commands=None,
         plugin=(),
         disable_plugin=(),
-        **overrides,  # type: ignore[arg-type]
+        **overrides,  # ty: ignore[invalid-argument-type]
     )
 
 
@@ -54,6 +58,19 @@ def test_validation_rejects_no_observe_with_service() -> None:
 
 def test_validation_accepts_no_observe_with_forward_port() -> None:
     _validate_options(_opts(forward_port=8080, no_observe=True))
+
+
+def test_validation_rejects_observe_via_file_with_no_observe() -> None:
+    with pytest.raises(click.UsageError):
+        _validate_options(_opts(forward_port=8080, no_observe=True, observe_via_file=True))
+
+
+def test_validation_accepts_observe_via_file_with_service() -> None:
+    _validate_options(_opts(service="system_interface", observe_via_file=True))
+
+
+def test_validation_accepts_observe_via_file_with_forward_port() -> None:
+    _validate_options(_opts(forward_port=8080, observe_via_file=True))
 
 
 def test_build_strategy_service() -> None:
@@ -103,6 +120,44 @@ def test_parse_reverse_specs_rejects_negative() -> None:
 def test_parse_reverse_specs_rejects_non_integer() -> None:
     with pytest.raises(click.UsageError):
         _parse_reverse_specs(("abc:8420",))
+
+
+def test_bind_listen_socket_binds_requested_free_port() -> None:
+    """An explicitly-requested free port is bound exactly as requested."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        free_port = probe.getsockname()[1]
+    sock = _bind_listen_socket("127.0.0.1", free_port)
+    try:
+        assert sock.getsockname()[1] == free_port
+    finally:
+        sock.close()
+
+
+def test_bind_listen_socket_errors_when_requested_port_taken() -> None:
+    """An explicitly-requested port that is in use raises rather than moving silently."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupier:
+        occupier.bind(("127.0.0.1", 0))
+        occupier.listen()
+        taken_port = occupier.getsockname()[1]
+        with pytest.raises(click.ClickException):
+            _bind_listen_socket("127.0.0.1", taken_port)
+
+
+def test_bind_listen_socket_falls_back_when_default_port_taken() -> None:
+    """With no explicit port, a busy default falls back to an OS-assigned port."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupier:
+        try:
+            occupier.bind(("127.0.0.1", _DEFAULT_PORT))
+        except OSError:
+            pytest.skip(f"default port {_DEFAULT_PORT} is unavailable on this host")
+        occupier.listen()
+        sock = _bind_listen_socket("127.0.0.1", None)
+        try:
+            bound_port = sock.getsockname()[1]
+            assert bound_port not in (_DEFAULT_PORT, 0)
+        finally:
+            sock.close()
 
 
 def test_filter_snapshot_supports_provider_name_filter() -> None:

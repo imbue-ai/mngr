@@ -51,43 +51,78 @@ _MINDS_DEPLOY_ID = os.environ.get("MINDS_DEPLOY_ID", "MINDS_DEPLOY_ID_UNSET")
 # var gets the cheapest possible warm pool (cold start on first hit).
 _MIN_CONTAINERS = int(os.environ.get("MINDS_LITELLM_PROXY_MIN_CONTAINERS", "0"))
 
+# Idle-before-scaledown window (seconds). ``minds env deploy`` threads the
+# tier's ``[scaledown_window].litellm_proxy`` here as
+# ``MINDS_LITELLM_PROXY_SCALEDOWN_WINDOW`` at ``modal deploy`` time. Dev tiers
+# set this high (~10 min) so the no-warm-pool proxy stays hot across a dev
+# session; staging / production leave it unset and rely on ``min_containers``.
+# ``0`` (the default, and what the ci/test tier uses) means "don't pin it" --
+# Modal uses its own default. Modal requires the value > 0, so 0 is normalized
+# to ``None`` at the call site below.
+_SCALEDOWN_WINDOW = int(os.environ.get("MINDS_LITELLM_PROXY_SCALEDOWN_WINDOW", "0"))
+
+# Per-token USD pricing for each Anthropic model, mirrored verbatim from
+# litellm's model_prices_and_context_window map. We register pricing inline
+# (via litellm_params) rather than relying on litellm's bundled price map so
+# cost tracking stays correct even on litellm versions whose bundled map
+# predates a model (e.g. claude-opus-4-8 only landed in litellm's price map
+# in the 1.88.0 pre-release line). MUST stay in sync with
+# litellm_proxy/config.yaml -- config_drift_test.py enforces this.
+_OPUS_PRICING = {
+    "input_cost_per_token": 0.000005,
+    "output_cost_per_token": 0.000025,
+    "cache_creation_input_token_cost": 0.00000625,
+    "cache_read_input_token_cost": 0.0000005,
+}
+# Opus 4.1 and the original Opus 4 (claude-opus-4-20250514) predate the Opus
+# price drop and cost 3x the newer Opus models.
+_OPUS_LEGACY_PRICING = {
+    "input_cost_per_token": 0.000015,
+    "output_cost_per_token": 0.000075,
+    "cache_creation_input_token_cost": 0.00001875,
+    "cache_read_input_token_cost": 0.0000015,
+}
+_SONNET_PRICING = {
+    "input_cost_per_token": 0.000003,
+    "output_cost_per_token": 0.000015,
+    "cache_creation_input_token_cost": 0.00000375,
+    "cache_read_input_token_cost": 0.0000003,
+}
+_HAIKU_PRICING = {
+    "input_cost_per_token": 0.000001,
+    "output_cost_per_token": 0.000005,
+    "cache_creation_input_token_cost": 0.00000125,
+    "cache_read_input_token_cost": 0.0000001,
+}
+
+
+def _model_entry(model_name: str, pricing: dict[str, float]) -> dict[str, object]:
+    """Build a litellm model_list entry that forwards to the Anthropic API with inline pricing."""
+    litellm_params: dict[str, object] = {
+        "model": f"anthropic/{model_name}",
+        "api_key": "os.environ/ANTHROPIC_API_KEY",
+    }
+    litellm_params.update(pricing)
+    return {"model_name": model_name, "litellm_params": litellm_params}
+
+
 LITELLM_CONFIG = {
     "model_list": [
-        {
-            "model_name": "claude-opus-4-7",
-            "litellm_params": {
-                "model": "anthropic/claude-opus-4-7",
-                "api_key": "os.environ/ANTHROPIC_API_KEY",
-            },
-        },
-        {
-            "model_name": "claude-sonnet-4-6",
-            "litellm_params": {
-                "model": "anthropic/claude-sonnet-4-6",
-                "api_key": "os.environ/ANTHROPIC_API_KEY",
-            },
-        },
-        {
-            "model_name": "claude-sonnet-4-20250514",
-            "litellm_params": {
-                "model": "anthropic/claude-sonnet-4-20250514",
-                "api_key": "os.environ/ANTHROPIC_API_KEY",
-            },
-        },
-        {
-            "model_name": "claude-opus-4-20250514",
-            "litellm_params": {
-                "model": "anthropic/claude-opus-4-20250514",
-                "api_key": "os.environ/ANTHROPIC_API_KEY",
-            },
-        },
-        {
-            "model_name": "claude-haiku-4-5-20251001",
-            "litellm_params": {
-                "model": "anthropic/claude-haiku-4-5-20251001",
-                "api_key": "os.environ/ANTHROPIC_API_KEY",
-            },
-        },
+        # Current Opus line.
+        _model_entry("claude-opus-4-8", _OPUS_PRICING),
+        _model_entry("claude-opus-4-7", _OPUS_PRICING),
+        _model_entry("claude-opus-4-6", _OPUS_PRICING),
+        _model_entry("claude-opus-4-5", _OPUS_PRICING),
+        # Older Opus (higher price tier), still active on the Anthropic API.
+        _model_entry("claude-opus-4-1", _OPUS_LEGACY_PRICING),
+        _model_entry("claude-opus-4-20250514", _OPUS_LEGACY_PRICING),
+        # Sonnet line.
+        _model_entry("claude-sonnet-4-6", _SONNET_PRICING),
+        _model_entry("claude-sonnet-4-5", _SONNET_PRICING),
+        _model_entry("claude-sonnet-4-20250514", _SONNET_PRICING),
+        # Haiku line (bare alias + dated id both routable).
+        _model_entry("claude-haiku-4-5", _HAIKU_PRICING),
+        _model_entry("claude-haiku-4-5-20251001", _HAIKU_PRICING),
     ],
     "general_settings": {
         "database_url": "os.environ/DATABASE_URL",
@@ -129,6 +164,10 @@ app = modal.App(name=f"llm-{_DEPLOY_ENV}", image=image)
         modal.Secret.from_dict({"MNGR_DEPLOY_ENV": _DEPLOY_ENV, "MINDS_DEPLOY_ID": _MINDS_DEPLOY_ID}),
     ],
     min_containers=_MIN_CONTAINERS,
+    # Idle-before-scaledown window driven by ``_SCALEDOWN_WINDOW``. ``0``
+    # (default / ci) -> ``None`` so Modal uses its own default; dev pins this
+    # high so the no-warm-pool proxy stays hot across a dev session.
+    scaledown_window=_SCALEDOWN_WINDOW or None,
     timeout=600,
 )
 @modal.asgi_app()

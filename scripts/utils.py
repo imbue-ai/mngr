@@ -42,7 +42,7 @@ PACKAGES: Final[tuple[PackageInfo, ...]] = (
     PackageInfo(dir_name="mngr_claude", pypi_name="imbue-mngr-claude", internal_deps=("imbue-mngr",)),
     PackageInfo(dir_name="mngr_pair", pypi_name="imbue-mngr-pair", internal_deps=("imbue-mngr",)),
     PackageInfo(dir_name="mngr_opencode", pypi_name="imbue-mngr-opencode", internal_deps=("imbue-mngr",)),
-    PackageInfo(dir_name="mngr_gemini", pypi_name="imbue-mngr-gemini", internal_deps=("imbue-mngr",)),
+    PackageInfo(dir_name="mngr_antigravity", pypi_name="imbue-mngr-antigravity", internal_deps=("imbue-mngr",)),
     PackageInfo(dir_name="mngr_kanpan", pypi_name="imbue-mngr-kanpan", internal_deps=("imbue-mngr",)),
     PackageInfo(dir_name="mngr_tutor", pypi_name="imbue-mngr-tutor", internal_deps=("imbue-mngr",)),
     PackageInfo(dir_name="mngr_notifications", pypi_name="imbue-mngr-notifications", internal_deps=("imbue-mngr",)),
@@ -57,6 +57,42 @@ PACKAGES: Final[tuple[PackageInfo, ...]] = (
         dir_name="mngr_vultr",
         pypi_name="imbue-mngr-vultr",
         internal_deps=("imbue-mngr", "imbue-mngr-vps-docker"),
+    ),
+    PackageInfo(dir_name="mngr_usage", pypi_name="imbue-mngr-usage", internal_deps=("imbue-mngr",)),
+    PackageInfo(
+        dir_name="mngr_claude_usage",
+        pypi_name="imbue-mngr-claude-usage",
+        internal_deps=("imbue-mngr", "imbue-mngr-claude", "imbue-mngr-usage"),
+    ),
+    PackageInfo(
+        dir_name="mngr_forward",
+        pypi_name="imbue-mngr-forward",
+        internal_deps=("imbue-mngr", "imbue-common", "concurrency-group"),
+    ),
+    PackageInfo(
+        dir_name="mngr_latchkey",
+        pypi_name="imbue-mngr-latchkey",
+        internal_deps=("imbue-mngr", "imbue-mngr-forward", "imbue-common", "concurrency-group"),
+    ),
+    PackageInfo(
+        dir_name="mngr_imbue_cloud",
+        pypi_name="imbue-mngr-imbue-cloud",
+        internal_deps=("imbue-mngr", "imbue-mngr-vps-docker", "imbue-common"),
+    ),
+    PackageInfo(
+        dir_name="mngr_ovh",
+        pypi_name="imbue-mngr-ovh",
+        internal_deps=("imbue-mngr", "imbue-mngr-vps-docker"),
+    ),
+    PackageInfo(
+        dir_name="mngr_schedule",
+        pypi_name="imbue-mngr-schedule",
+        internal_deps=("imbue-mngr", "imbue-common", "imbue-mngr-modal"),
+    ),
+    PackageInfo(
+        dir_name="mngr_robinhood",
+        pypi_name="imbue-mngr-robinhood",
+        internal_deps=("imbue-mngr", "imbue-mngr-claude"),
     ),
 )
 

@@ -8,7 +8,8 @@
 # What this script does:
 #   1. Installs uv (https://docs.astral.sh/uv/) if not already present
 #   2. Installs mngr via: uv tool install imbue-mngr
-#   3. Runs: mngr dependencies -i  (interactively install system deps)
+#   3. Runs: mngr dependencies --install interactive --scope core
+#           (interactively install system deps; only warns if a *core* dep is missing)
 #   4. Runs: mngr extras -i        (optional: plugins, shell completion,
 #                                   Claude Code plugin, default agent type)
 #
@@ -71,7 +72,9 @@ fi
 
 # No stdin redirect needed: mngr commands read from /dev/tty directly
 # when they need interactive input, so they work even when stdin is piped.
-mngr dependencies -i || warn "Some dependencies could not be installed. Run 'mngr dependencies' to see what's missing."
+# --scope core: only treat a *core* dependency (git/tmux/jq) as a hard failure, so a
+# missing optional dep (ssh/rsync/unison/claude) does not trigger the warning below.
+mngr dependencies --install interactive --scope core || warn "Some dependencies could not be installed. Run 'mngr dependencies' to see what's missing."
 
 # ── Step 4: Optional extras (plugins, shell completion, Claude Code plugin, default agent type) ──
 

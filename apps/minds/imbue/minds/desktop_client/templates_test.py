@@ -1,9 +1,15 @@
+import re
+from pathlib import Path
+
 import pytest
 
 from imbue.imbue_common.ids import InvalidRandomIdError
+from imbue.minds.desktop_client import templates as _templates_module
+from imbue.minds.desktop_client.templates import CATALOG
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
+from imbue.minds.desktop_client.templates import render_dev_styleguide_page
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
@@ -13,6 +19,8 @@ from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.mngr.primitives import AgentId
+
+_TOKENS_CSS_PATH = Path(_templates_module.__file__).resolve().parent / "static" / "tokens.css"
 
 _AGENT_A: AgentId = AgentId("agent-00000000000000000000000000000001")
 _AGENT_B: AgentId = AgentId("agent-00000000000000000000000000000002")
@@ -91,17 +99,20 @@ def test_render_create_form_contains_all_launch_modes() -> None:
         assert mode.value.lower() in html
 
 
-def test_render_create_form_selects_local_by_default() -> None:
+def test_render_create_form_selects_lima_by_default_without_account() -> None:
+    # With no account selected the compute provider defaults to LIMA (the
+    # local self-served default); IMBUE_CLOUD is only the default when an
+    # account is present.
     html = render_create_form()
-    assert 'value="LOCAL" selected' in html
+    assert 'value="LIMA" selected' in html
 
 
 def test_render_create_form_selects_specified_launch_mode() -> None:
-    # CLOUD instead of the default LOCAL so the "selection honored over the
+    # CLOUD instead of the default LIMA so the "selection honored over the
     # default" assertion is meaningful.
     html = render_create_form(launch_mode=LaunchMode.CLOUD)
     assert 'value="CLOUD" selected' in html
-    assert 'value="LOCAL" selected' not in html
+    assert 'value="LIMA" selected' not in html
 
 
 def test_render_create_form_contains_ai_provider_options() -> None:
@@ -118,11 +129,6 @@ def test_render_create_form_defaults_ai_provider_to_subscription_without_account
 def test_render_create_form_omits_env_file_checkbox() -> None:
     html = render_create_form()
     assert "include_env_file" not in html
-
-
-def test_render_create_form_includes_gh_token_field() -> None:
-    html = render_create_form()
-    assert 'name="gh_token"' in html
 
 
 def test_render_create_form_shows_error_message_when_supplied() -> None:
@@ -232,23 +238,434 @@ def test_render_sidebar_page_contains_workspace_list() -> None:
 def test_render_recovery_page_includes_agent_id_and_return_to() -> None:
     html = render_recovery_page(
         agent_id=_AGENT_A,
-        ws_name="my-workspace",
         return_to="http://agent.localhost:8421/",
         initial_status="stuck",
+        initial_error="",
     )
     assert str(_AGENT_A) in html
-    assert "my-workspace" in html
     assert "http://agent.localhost:8421/" in html
     assert "/api/agents/" in html
+    # The two restart tiers the recovery page can dispatch.
     assert "restart-system-interface" in html
+    assert "restart-host" in html
+    # The layer-2 probe endpoint the page calls on load.
+    assert "host-health" in html
     assert 'data-initial-status="stuck"' in html
 
 
 def test_render_recovery_page_restarting_status() -> None:
     html = render_recovery_page(
         agent_id=_AGENT_B,
-        ws_name="ws",
         return_to="",
         initial_status="restarting",
+        initial_error="",
     )
     assert 'data-initial-status="restarting"' in html
+
+
+def test_render_recovery_page_carries_restart_failed_error() -> None:
+    html = render_recovery_page(
+        agent_id=_AGENT_B,
+        return_to="",
+        initial_status="restart_failed",
+        initial_error="Start step of host restart failed: exited 1",
+    )
+    assert 'data-initial-status="restart_failed"' in html
+    assert "Start step of host restart failed: exited 1" in html
+
+
+def test_render_recovery_page_includes_diagnostics_dom_hooks() -> None:
+    """The recovery page must expose the DOM hooks the JS uses to render the
+    debug-menu details block and the Copy diagnostics button. The hooks are
+    present on every render -- the JS populates them when the host-health
+    endpoint response arrives.
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="stuck",
+        initial_error="",
+    )
+    assert 'id="recovery-debug-details"' in html
+    assert 'id="recovery-debug-content"' in html
+    assert 'id="copy-diagnostics-btn"' in html
+
+
+def test_render_recovery_page_renders_copy_ssh_button_with_command() -> None:
+    """When given an ssh_command, the page renders a Copy SSH command button
+    that carries the exact command in its data attribute, beside Copy diagnostics.
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="stuck",
+        initial_error="",
+        ssh_command="ssh -i /home/user/.mngr/key -p 60022 root@127.0.0.1",
+    )
+    assert 'id="copy-ssh-btn"' in html
+    assert 'data-ssh-command="ssh -i /home/user/.mngr/key -p 60022 root@127.0.0.1"' in html
+    # The button must sit inside the diagnostics menu, alongside Copy diagnostics.
+    diag_pos = html.index('id="copy-diagnostics-btn"')
+    ssh_pos = html.index('id="copy-ssh-btn"')
+    details_pos = html.index('id="recovery-debug-details"')
+    assert details_pos < diag_pos < ssh_pos
+    # The click handler copies the data attribute to the clipboard.
+    assert "data-ssh-command" in html
+    assert "navigator.clipboard" in html
+
+
+def test_render_recovery_page_omits_copy_ssh_button_without_command() -> None:
+    """With no ssh_command (the default), the Copy SSH command button is absent
+    -- we never render an inert button that would copy nothing.
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="stuck",
+        initial_error="",
+    )
+    assert 'id="copy-ssh-btn"' not in html
+    assert "Copy SSH command" not in html
+    # Copy diagnostics is unaffected.
+    assert 'id="copy-diagnostics-btn"' in html
+
+
+def test_render_recovery_page_script_branches_on_dispatch_tier() -> None:
+    """The recovery page reads ``dispatch_tier`` directly off the host-health response.
+
+    Each restart tier the server may report must have a corresponding
+    code branch in the page's JS.
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="stuck",
+        initial_error="",
+    )
+    assert "dispatch_tier" in html
+    for tier in ("'workspace_misconfigured'", "'host_offline'", "'interface_unresponsive'", "'host_unresponsive'"):
+        assert tier in html, f"recovery page JS missing branch for {tier}"
+    # The shared landing places for each branch.
+    assert "renderMisconfigured" in html
+    assert "renderUnresponsive" in html
+    assert "Workspace misconfigured" in html
+    assert "Try restart anyway" in html
+
+
+def test_render_recovery_page_loading_hides_diagnostic_dropdown() -> None:
+    """renderLoading must hide the diagnostic dropdown so a stale prior diagnostic
+    does not linger on the page while a fresh check is in flight (issue: user
+    clicked Restart workspace and the previous probe's diagnostic stayed open).
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="stuck",
+        initial_error="",
+    )
+    # renderLoading clears the cached payload and hides the debug details.
+    loading_block_start = html.find("function renderLoading")
+    assert loading_block_start >= 0
+    loading_block_end = html.find("function ", loading_block_start + 1)
+    loading_block = html[loading_block_start:loading_block_end]
+    assert "show(debugDetailsEl, false)" in loading_block
+    assert "latestHealth = null" in loading_block
+
+
+def test_render_recovery_page_restart_failed_also_runs_probe() -> None:
+    """The restart_failed entry must run the diagnostic probe so the page
+    shows both the error details and the diagnostics (in separate elements),
+    not just the error.
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="restart_failed",
+        initial_error="Stop step of host restart failed: exited 1",
+    )
+    # The restart_failed branch in the dispatcher calls runProbe(false) so
+    # the diagnostics are populated without auto-dispatching another restart.
+    assert "restart_failed" in html
+    assert "runProbe(false)" in html
+    # The error-details DOM hook is rendered alongside the diagnostic.
+    assert 'id="recovery-error"' in html
+    assert 'id="recovery-debug-details"' in html
+
+
+def test_render_recovery_page_honors_misconfigured_before_autodispatch_short_circuit() -> None:
+    """The workspace_misconfigured tier must be honored on the restart_failed path.
+
+    A workspace whose services.toml lacks [services.system_interface] lands in
+    restart_failed once its undeclared interface fails to come back up, so the
+    page runs runProbe(false). If the no-auto-dispatch short-circuit
+    (``if (!autoDispatch) renderUnresponsive()``) ran before the
+    workspace_misconfigured check, that workspace would render a misleading
+    "unresponsive" page even though no restart can recover it. Assert the
+    misconfigured branch precedes the short-circuit inside runProbe so the
+    restart_failed path still reaches renderMisconfigured().
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="restart_failed",
+        initial_error="boom",
+    )
+    probe_body = html[html.index("function runProbe(") :]
+    misconfigured_pos = probe_body.index("'workspace_misconfigured'")
+    short_circuit_pos = probe_body.index("if (!autoDispatch)")
+    assert misconfigured_pos < short_circuit_pos, (
+        "the workspace_misconfigured branch must precede the !autoDispatch short-circuit "
+        "so a misconfigured workspace on the restart_failed path renders misconfigured"
+    )
+
+
+def test_render_recovery_page_promotes_button_above_troubleshooting() -> None:
+    """The restart button is the page's primary action, so it must appear
+    before the de-emphasized troubleshooting block -- not sandwiched between
+    the error and diagnostics disclosures as in the previous layout. Both
+    disclosures live inside that troubleshooting block.
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="restart_failed",
+        initial_error="boom",
+    )
+    button_pos = html.index('id="recovery-host-btn"')
+    block_pos = html.index('class="recovery-troubleshooting"')
+    error_pos = html.index('id="recovery-error"')
+    debug_pos = html.index('id="recovery-debug-details"')
+    # Button first, then the troubleshooting block, then both disclosures.
+    assert button_pos < block_pos < error_pos < debug_pos
+
+
+def test_render_dev_styleguide_page_surfaces_tokens_and_component_widgets() -> None:
+    """The styleguide must surface the live ``:root`` tokens and render
+    each catalog widget through its real JinjaX component (so the catalog
+    can't drift silently from the components it documents)."""
+    html = render_dev_styleguide_page()
+    assert "--shadow-seam" in html
+    # The accent picker section is a separate runtime variable, not a :root token.
+    assert "--workspace-accent" in html
+    # Each pattern block should be present.
+    for header in (
+        "Titlebar buttons",
+        "Window controls",
+        "Sidebar items",
+        "Accent spine",
+        "Spinner",
+        "Buttons",
+        "Notices",
+    ):
+        assert header in html, f"missing pattern: {header}"
+    # The buttons / notices / inputs are rendered through their JinjaX
+    # components (Button, Notice, TextInput); these assertions verify that
+    # the component output (button label, notice copy, input name) actually
+    # reaches the rendered page.
+    assert ">Primary<" in html and ">Danger<" in html
+    assert "All set: action completed." in html
+    assert 'name="styleguide-focus-ring-input"' in html
+
+
+def test_dev_styleguide_token_swatches_enumerate_root_declarations() -> None:
+    """Drift guard: every ``:root`` token in ``tokens.css`` must have a
+    matching ``data-token`` swatch in the styleguide template (and vice
+    versa). Failure means the catalog is out of sync with the live tokens.
+    """
+    root_block = re.search(r":root\s*\{([^}]*)\}", _TOKENS_CSS_PATH.read_text(), re.DOTALL)
+    assert root_block is not None, "tokens.css must declare a :root block"
+    declared = {f"--{name}" for name in re.findall(r"--([a-z][a-z0-9-]*)\s*:", root_block.group(1))}
+
+    html = render_dev_styleguide_page()
+    surfaced = set(re.findall(r'data-token="(--[a-z][a-z0-9-]*)"', html))
+
+    assert declared == surfaced, (
+        f"tokens.css :root declares {sorted(declared)} but the styleguide "
+        f"surfaces {sorted(surfaced)}. Add or remove a "
+        f'`data-token="--<name>"` swatch in templates/pages/DevStyleguide.jinja '
+        f"to match."
+    )
+
+
+# -- JinjaX component-level tests ----------------------------------------
+#
+# These exercise each individual component in isolation through the shared
+# CATALOG so we catch regressions in any one component without rendering a
+# whole page.
+
+
+def test_button_link_renders_anchor_with_href() -> None:
+    html = CATALOG.render("ButtonLink", href="/create", _content="Create")
+    assert '<a href="/create"' in html
+    assert ">Create</a>" in html
+
+
+def test_button_renders_each_variant_class_set() -> None:
+    # The five variants should each contribute their own background class.
+    variants_to_class = {
+        "primary": "bg-zinc-900",
+        "secondary": "bg-zinc-100",
+        "danger": "bg-red-50",
+        "success": "bg-emerald-800",
+        "ghost": "bg-transparent",
+    }
+    for variant, css_class in variants_to_class.items():
+        html = CATALOG.render("Button", variant=variant, _content="X")
+        assert css_class in html, f"variant={variant} missing {css_class}"
+
+
+def test_button_submit_has_form_attribute_when_passed() -> None:
+    html = CATALOG.render("ButtonSubmit", form="my-form", _content="Save")
+    assert 'type="submit"' in html
+    assert 'form="my-form"' in html
+
+
+def test_notice_renders_each_variant() -> None:
+    variants_to_class = {
+        "info": "bg-blue-50",
+        "warn": "bg-amber-50",
+        "success": "bg-emerald-50",
+        "error": "bg-red-50",
+    }
+    for variant, css_class in variants_to_class.items():
+        html = CATALOG.render("Notice", variant=variant, _content="msg")
+        assert css_class in html
+        assert "msg" in html
+
+
+def test_card_renders_default_slot() -> None:
+    html = CATALOG.render("Card", _content="<p>body</p>")
+    assert "<p>body</p>" in html
+    assert "border-zinc-200" in html
+
+
+def test_spinner_renders_for_each_size() -> None:
+    for size, css_class in (("sm", "w-3.5"), ("md", "w-[18px]"), ("lg", "w-8")):
+        html = CATALOG.render("Spinner", size=size)
+        assert 'class="spinner' in html
+        assert css_class in html
+
+
+def test_oauth_icon_google_includes_google_svg_path() -> None:
+    html = CATALOG.render("auth.OauthIcon", provider="google")
+    # One of the four <path d="..."> values unique to the Google glyph
+    # (the blue triangle); shows the right SVG was selected.
+    assert "M22.56 12.25" in html
+
+
+def test_oauth_icon_github_includes_github_svg_path() -> None:
+    html = CATALOG.render("auth.OauthIcon", provider="github")
+    # The opening of GitHub's mark path.
+    assert "M12 0C5.37 0 0 5.37" in html
+
+
+def test_oauth_icon_unknown_provider_renders_nothing_visible() -> None:
+    # Defensive: the icon component has no fallback path, so an unexpected
+    # provider just produces empty output (no exception).
+    html = CATALOG.render("auth.OauthIcon", provider="not-a-provider").strip()
+    assert html == ""
+
+
+def test_text_input_default_radius_is_md() -> None:
+    html = CATALOG.render("TextInput", name="email")
+    assert "rounded-md" in html
+    assert "rounded-lg" not in html
+
+
+def test_text_input_radius_lg_for_auth_cards() -> None:
+    html = CATALOG.render("TextInput", name="email", radius="lg")
+    assert "rounded-lg" in html
+    assert "rounded-md" not in html
+
+
+def test_text_input_autocomplete_and_minlength_pass_through() -> None:
+    html = CATALOG.render(
+        "TextInput",
+        name="password",
+        type="password",
+        radius="lg",
+        autocomplete="new-password",
+        minlength=8,
+    )
+    assert 'autocomplete="new-password"' in html
+    assert 'minlength="8"' in html
+
+
+def test_text_input_omits_autocomplete_and_minlength_when_unset() -> None:
+    html = CATALOG.render("TextInput", name="email")
+    assert "autocomplete=" not in html
+    assert "minlength=" not in html
+
+
+def test_section_header_plain_has_no_divider_classes() -> None:
+    html = CATALOG.render("SectionHeader", _content="Account")
+    assert "Account" in html
+    assert "border-t" not in html
+    assert "mt-8" not in html
+
+
+def test_section_header_divider_renders_top_border() -> None:
+    html = CATALOG.render("SectionHeader", divider=True, _content="Sharing")
+    assert "Sharing" in html
+    assert "border-t" in html
+    assert "border-zinc-200" in html
+    assert "mt-8" in html
+    assert "pt-5" in html
+
+
+def test_dialog_close_button_renders_x_svg_and_onclick() -> None:
+    html = CATALOG.render("DialogCloseButton", onclick="closePermissionDialog()")
+    assert 'aria-label="Close"' in html
+    assert 'onclick="closePermissionDialog()"' in html
+    # The X-glyph path data fragment that identifies the close SVG.
+    assert "M4.22 4.22a.75.75 0 0 1 1.06 0L10 8.94" in html
+
+
+def test_dialog_close_button_id_optional() -> None:
+    without_id = CATALOG.render("DialogCloseButton", onclick="x()")
+    with_id = CATALOG.render("DialogCloseButton", id="my-close", onclick="x()")
+    assert "id=" not in without_id
+    assert 'id="my-close"' in with_id
+
+
+def test_modal_renders_hidden_overlay_with_default_card() -> None:
+    html = CATALOG.render("Modal", id="my-dialog", _content="<p>body</p>")
+    assert 'id="my-dialog"' in html
+    assert "hidden fixed inset-0 z-50" in html
+    assert "bg-black/30" in html
+    assert "<p>body</p>" in html
+
+
+def test_modal_card_extra_appends_to_inner_card_classes() -> None:
+    html = CATALOG.render("Modal", id="x", card_extra="text-left", _content="hi")
+    # The card_extra value lands on the inner card div, NOT on the outer overlay.
+    assert "text-left" in html
+
+
+def test_status_badge_renders_each_variant_class_set() -> None:
+    variants_to_class = {
+        "neutral": "bg-zinc-100",
+        "success": "bg-emerald-100",
+        "error": "bg-red-100",
+        "warn": "bg-amber-100",
+        "info": "bg-blue-100",
+    }
+    for variant, css_class in variants_to_class.items():
+        html = CATALOG.render("StatusBadge", variant=variant, _content="x")
+        assert css_class in html, f"variant={variant} missing {css_class}"
+
+
+def test_status_badge_size_xs_uses_text_xs() -> None:
+    html = CATALOG.render("StatusBadge", size="xs", _content="x")
+    assert "text-xs" in html
+    assert "text-sm" not in html
+
+
+def test_status_badge_title_renders_when_present() -> None:
+    html = CATALOG.render("StatusBadge", title="why this is shown", _content="x")
+    assert 'title="why this is shown"' in html
+
+
+def test_status_badge_title_omitted_when_empty() -> None:
+    html = CATALOG.render("StatusBadge", _content="x")
+    assert "title=" not in html

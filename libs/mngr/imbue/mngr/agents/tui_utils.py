@@ -21,6 +21,7 @@ from loguru import logger
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.errors import SendMessageError
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.utils.polling import poll_until
 
 _SEND_MESSAGE_TIMEOUT_SECONDS: Final[float] = 15.0
@@ -63,7 +64,7 @@ def _check_paste_content(pane_content: str, message: str) -> bool:
     return probe in normalized_pane
 
 
-def wait_for_tui_ready(agent: BaseAgent[Any], tmux_target: str, indicator: str) -> None:
+def wait_for_tui_ready(agent: BaseAgent[Any], tmux_target: TmuxWindowTarget, indicator: str) -> None:
     """Wait until the TUI is ready by polling for ``indicator`` in the pane.
 
     Raises ``SendMessageError`` on timeout. Without this check, input sent
@@ -87,7 +88,7 @@ def wait_for_tui_ready(agent: BaseAgent[Any], tmux_target: str, indicator: str) 
         )
 
 
-def wait_for_paste_visible(agent: BaseAgent[Any], tmux_target: str, message: str) -> None:
+def wait_for_paste_visible(agent: BaseAgent[Any], tmux_target: TmuxWindowTarget, message: str) -> None:
     """Wait until pasted content is confirmed visible in the tmux pane.
 
     Raises ``SendMessageError`` on timeout. Either the tmux paste indicator
@@ -106,16 +107,16 @@ def wait_for_paste_visible(agent: BaseAgent[Any], tmux_target: str, message: str
         )
 
 
-def _is_paste_visible(agent: BaseAgent[Any], tmux_target: str, message: str) -> bool:
+def _is_paste_visible(agent: BaseAgent[Any], tmux_target: TmuxWindowTarget, message: str) -> bool:
     content = agent._capture_pane_content(tmux_target)
     if content is None:
         return False
     return _check_paste_content(content, message)
 
 
-def send_enter_keystroke(agent: BaseAgent[Any], tmux_target: str) -> None:
+def send_enter_keystroke(agent: BaseAgent[Any], tmux_target: TmuxWindowTarget) -> None:
     """Send a single Enter via ``tmux send-keys``; raise SendMessageError on failure."""
-    send_enter_cmd = f"tmux send-keys -t '{tmux_target}' Enter"
+    send_enter_cmd = f"tmux send-keys -t {tmux_target.as_shell_arg()} Enter"
     result = agent.host.execute_stateful_command(send_enter_cmd)
     if not result.success:
         raise SendMessageError(
@@ -130,7 +131,7 @@ def send_enter_keystroke(agent: BaseAgent[Any], tmux_target: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def send_enter_best_effort(agent: BaseAgent[Any], tmux_target: str) -> None:
+def send_enter_best_effort(agent: BaseAgent[Any], tmux_target: TmuxWindowTarget) -> None:
     """Strategy 1: send Enter, do not wait for any confirmation.
 
     Appropriate when the agent's TUI exposes no submission hook and no
@@ -142,7 +143,7 @@ def send_enter_best_effort(agent: BaseAgent[Any], tmux_target: str) -> None:
 
 def send_enter_and_poll_for_cleared_indicator(
     agent: BaseAgent[Any],
-    tmux_target: str,
+    tmux_target: TmuxWindowTarget,
     *,
     cleared_indicator: str,
     max_attempts: int = _SEND_ENTER_NO_SIGNAL_MAX_ATTEMPTS,
@@ -151,10 +152,11 @@ def send_enter_and_poll_for_cleared_indicator(
     """Strategy 2: send Enter, poll for the cleared indicator, retry on miss.
 
     ``cleared_indicator`` must be a substring that is hidden while the user's
-    text occupies the input row and reappears once Enter is consumed (e.g.
-    gemini's ``Type your message`` placeholder). When the poll times out we
-    re-send Enter -- interactive TUIs occasionally swallow Enter on fresh
-    sessions when it arrives before the pasted text has been absorbed.
+    text occupies the input row and reappears once Enter is consumed -- the
+    typical example is an input-prompt placeholder that the TUI hides while
+    the user is typing. When the poll times out we re-send Enter --
+    interactive TUIs occasionally swallow Enter on fresh sessions when it
+    arrives before the pasted text has been absorbed.
 
     Raises ``SendMessageError`` if all ``max_attempts`` rounds time out.
     """
@@ -190,7 +192,7 @@ def send_enter_and_poll_for_cleared_indicator(
 # sufficient for us to call it success.
 def send_enter_via_tmux_wait_for_hook(
     agent: BaseAgent[Any],
-    tmux_target: str,
+    tmux_target: TmuxWindowTarget,
     *,
     wait_channel: str,
     timeout_seconds: float,
@@ -243,7 +245,7 @@ def send_enter_via_tmux_wait_for_hook(
 def _send_enter_and_wait_for_signal(
     *,
     agent: BaseAgent[Any],
-    tmux_target: str,
+    tmux_target: TmuxWindowTarget,
     wait_channel: str,
     timeout_seconds: float,
     queue_log_path_template: str | None,
@@ -261,11 +263,13 @@ def _send_enter_and_wait_for_signal(
         )
         remaining_time = 5.0
 
+    # tmux_target.as_shell_arg() is already shell-quoted -- pass it as the
+    # bash positional $1 directly without a second round of shlex.quote.
     cmd = (
         f"bash -c '"
         f'( sleep 0.1 && tmux send-keys -t "$1" Enter ) & '
         f'timeout {full_timeout} tmux wait-for "$0"'
-        f"' {shlex.quote(wait_channel)} {shlex.quote(tmux_target)}"
+        f"' {shlex.quote(wait_channel)} {tmux_target.as_shell_arg()}"
     )
     try:
         result = agent.host.execute_stateful_command(cmd, timeout_seconds=remaining_time)

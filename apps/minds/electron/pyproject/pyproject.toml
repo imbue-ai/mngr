@@ -1,12 +1,20 @@
 [project]
 name = "minds-desktop"
 version = "0.1.0"
-requires-python = ">=3.12"
+requires-python = "==3.12.13"
 dependencies = [
     "minds>=0.1.0",
     "imbue-mngr-claude>=0.2.0",
     "imbue-mngr-modal>=0.2.0",
 ]
+
+# Supply-chain hardening: refuse to resolve any distribution published less
+# than 14 days ago, so a freshly-compromised release cannot be pulled into an
+# end-user install during first-launch `uv sync`. Applies to all dependencies,
+# including transitive ones. Only affects resolution (e.g. re-locking), not
+# installation from an already-pinned lockfile.
+[tool.uv]
+exclude-newer = "14 days"
 
 [tool.uv.sources]
 minds = { path = "../../../../apps/minds", editable = true }

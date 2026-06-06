@@ -373,6 +373,16 @@ PREVENT_PYTEST_MARK_INTEGRATION = RegexRatchetRule(
 
 # --- AST-based ratchet metadata ---
 
+PREVENT_PER_FILE_HOST_UPLOAD = RatchetRuleInfo(
+    rule_name="per-file host uploads inside loops",
+    rule_description=(
+        "Do not upload files to a host one at a time by calling write_file/write_text_file/put_file "
+        "inside a loop. Each call is a separate round-trip (an SFTP channel open per file), which over "
+        "an SSH tunnel scales linearly and has repeatedly caused upload timeouts and 'connection reset / "
+        "SSH protocol banner' failures. Transfer many files with a single host.copy_directory (rsync) call."
+    ),
+)
+
 PREVENT_IF_ELIF_WITHOUT_ELSE = RatchetRuleInfo(
     rule_name="if/elif without else",
     rule_description=(
@@ -519,4 +529,36 @@ PREVENT_BARE_URWID_TTY_SIGNAL_KEYS = RegexRatchetRule(
         "terminal settings in a finally block."
     ),
     pattern_string=r"\.tty_signal_keys\(",
+)
+
+
+PREVENT_BARE_TMUX_TARGETS = RegexRatchetRule(
+    rule_name="bare tmux -t targets",
+    rule_description=(
+        "tmux -t targets must use exact-session matching. Without a leading equals-sign "
+        "on the target, tmux silently falls back to session prefix matching: a command "
+        "aimed at a stopped session whose name is a prefix of a still-running session's "
+        "name will land on the wrong session. This can deliver keystrokes to the wrong "
+        "agent (send-keys), kill the wrong session (kill-session), or capture the wrong "
+        "agent's pane content (capture-pane). Construct targets via TmuxSessionTarget / "
+        "TmuxWindowTarget from imbue.mngr.hosts.tmux (call .as_shell_arg() to render), "
+        "or write the leading equals-sign literally. For target-window/-pane commands "
+        "an explicit :window component is required so tmux doesn't parse the "
+        "equals-sign-prefixed name as a literal window/pane name -- see the "
+        "TmuxWindowTarget docstring. (list-panes -s is a special case: cmd-find.c "
+        "ignores the equals-sign prefix even though -s is documented as a "
+        "target-session form; guard with a has-session call first.)"
+    ),
+    # Catch `tmux <subcmd> ... -t '<target>'` or `... -t "<target>"` where the quoted
+    # target starts with anything other than `=` (the exact-match prefix). Covers both
+    # single- and double-quoted forms, so it fires on shell variable interpolations
+    # like `tmux has-session -t "$SESSION"` (bash) as well as Python literal targets
+    # like `tmux send-keys -t 'foo' Enter`. `^(?!\s*#).*` at the start, with multiline,
+    # skips Python comment lines so commented-out historical examples don't get flagged.
+    # Bash `# ...` comments are also skipped by the same predicate since `\s*#` matches
+    # both. Variable-interpolated targets without outer quotes -- `-t {var}` -- are
+    # unmatched and assumed safe by convention (the variable should hold a
+    # `TmuxSessionTarget.as_shell_arg()` / `TmuxWindowTarget.as_shell_arg()` result).
+    pattern_string=r"""^(?!\s*#).*\btmux\b(?:\s+(?:-[a-zA-Z]\S*|[a-z][a-z-]*))*\s+-t\s+["'](?!=)""",
+    is_multiline=True,
 )

@@ -21,6 +21,16 @@ class ImbueCloudLeaseUnavailableError(ImbueCloudError):
     """Raised when the connector returns 503 (no matching pool host)."""
 
 
+class FastPathUnavailableError(ImbueCloudError):
+    """Raised when ``fast_mode=require`` finds no exact-attribute pool match.
+
+    Distinct from ``ImbueCloudLeaseUnavailableError`` (which means the pool is
+    genuinely empty): this signals that the fast/adopt path specifically could
+    not be satisfied, so a caller (e.g. minds) can fall back to the slow path
+    by re-running with ``fast_mode=prevent``.
+    """
+
+
 class ImbueCloudKeyError(ImbueCloudError):
     """Raised when a LiteLLM key operation fails."""
 
@@ -29,9 +39,33 @@ class ImbueCloudTunnelError(ImbueCloudError):
     """Raised when a Cloudflare tunnel operation fails."""
 
 
+class ImbueCloudPaidListError(ImbueCloudError):
+    """Raised when a paid-list (paid domains / emails) admin operation fails."""
+
+
 class PoolHostNotMatchedError(ImbueCloudError):
     """Raised when create_agent is invoked on a leased host that has no pre-baked agent or has more than one."""
 
 
 class AccountNotConfiguredError(ImbueCloudError):
     """Raised when the requested account has no provider instance entry."""
+
+
+class ImbueCloudBucketError(ImbueCloudError):
+    """Raised when an R2 bucket or bucket-key operation fails."""
+
+
+class ImbueCloudBucketNotEmptyError(ImbueCloudBucketError):
+    """Raised when destroying a bucket that still contains objects."""
+
+
+class ImbueCloudBucketExistsError(ImbueCloudBucketError):
+    """Raised when creating a bucket whose derived name already exists."""
+
+
+class ImbueCloudBucketNotFoundError(ImbueCloudBucketError):
+    """Raised when referencing a bucket that does not exist (or is not the caller's)."""
+
+
+class ImbueCloudBucketLimitError(ImbueCloudBucketError):
+    """Raised when the account is already at the per-account bucket cap."""

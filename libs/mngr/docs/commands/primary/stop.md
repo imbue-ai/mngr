@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr [stop|s] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [--archive] [--snapshot-mode <MODE>] [--graceful/--no-graceful]
+mngr [stop|s] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [--archive] [--stop-host] [--snapshot-mode <MODE>] [--graceful/--no-graceful]
 ```
 
 Stop running agent(s).
@@ -16,6 +16,11 @@ running unless idle detection stops it automatically.
 
 For local agents, this stops the agent's tmux session. The local host
 itself cannot be stopped (if you want that, shut down your computer).
+
+Use --stop-host to stop the agent's entire host instead of just the
+agent. This takes down every agent on that host. For container-backed
+providers it stops the container (the underlying machine keeps running);
+it is rejected on providers that do not support stopping hosts.
 
 Use --archive to also set an 'archived_at' label on each stopped agent.
 This marks the agent as archived without destroying it, allowing it to
@@ -49,6 +54,7 @@ mngr stop [OPTIONS] [AGENTS]...
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--archive` | boolean | Set an 'archived_at' label on each stopped agent (marks it as archived) | `False` |
+| `--stop-host` | boolean | Stop the agent's entire host (all agents on it) instead of just the named agent | `False` |
 | `--snapshot-mode` | choice (`auto` &#x7C; `always` &#x7C; `never`) | Control snapshot creation when stopping: auto (snapshot if needed), always, or never [future] | None |
 | `--graceful`, `--no-graceful` | boolean | Wait for agent to reach a clean state before stopping [future] | `True` |
 | `--graceful-timeout` | text | Timeout for graceful stop (e.g., 30s, 5m) [future] | None |
@@ -66,7 +72,7 @@ mngr stop [OPTIONS] [AGENTS]...
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
-| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## See Also
@@ -100,6 +106,12 @@ $ mngr list --ids | mngr stop -
 
 ```bash
 $ mngr stop my-agent --archive
+```
+
+**Stop the agent's whole host**
+
+```bash
+$ mngr stop my-agent --stop-host
 ```
 
 **Stop by tmux session name**

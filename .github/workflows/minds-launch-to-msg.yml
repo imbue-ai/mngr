@@ -1,0 +1,273 @@
+name: minds launch-to-first-message
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: 'Commit SHA (or branch / tag) to build a fresh ToDesktop draft from. Mutually exclusive with app_zip_url. Leave both empty to verify the latest released build.'
+        required: false
+        default: ''
+      app_zip_url:
+        description: 'ToDesktop .zip URL to verify directly (skips the build job). Takes precedence over commit_sha.'
+        required: false
+        default: ''
+      skip_first_message:
+        description: 'Skip the first-message round-trip step (smoke-only: install + launch + backend-ready).'
+        type: boolean
+        required: false
+        default: false
+      template_ref:
+        description: 'forever-claude-template ref (branch / tag / SHA) the agent is created from. Empty -> script default (pilot_2, known-compatible with the bundled mngr). Set to "main" to verify the user-default path.'
+        required: false
+        default: ''
+      template_url:
+        description: 'Override the FCT git URL (forks). Empty -> https://github.com/imbue-ai/forever-claude-template.'
+        required: false
+        default: ''
+
+concurrency:
+  group: mac-runner
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # Run only when a commit_sha was supplied AND no direct URL was given.
+    # When both are empty, skip; `verify` will resolve the latest released
+    # build via the electron-updater feed instead.
+    if: ${{ inputs.commit_sha != '' && inputs.app_zip_url == '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      TODESKTOP_ACCESS_TOKEN: ${{ secrets.TODESKTOP_ACCESS_TOKEN }}
+      TODESKTOP_EMAIL:        ${{ secrets.TODESKTOP_EMAIL }}
+      # Resolved relative to pnpm's CWD (apps/minds), not the repo root.
+      MINDS_CLIENT_CONFIG_BUNDLE: imbue/minds/config/envs/production/client.toml
+      MINDS_ROOT_NAME_BUNDLE: minds
+    outputs:
+      app_zip_url: ${{ steps.existing.outputs.url || steps.parse.outputs.url }}
+      build_id:    ${{ steps.existing.outputs.build_id || steps.parse.outputs.build_id }}
+      reused:      ${{ steps.existing.outputs.url != '' }}
+    steps:
+      - name: check ToDesktop secrets
+        run: |
+          missing=0
+          if [[ -z "${TODESKTOP_ACCESS_TOKEN:-}" ]]; then
+            echo "::error::TODESKTOP_ACCESS_TOKEN secret is not set."
+            missing=1
+          fi
+          if [[ -z "${TODESKTOP_EMAIL:-}" ]]; then
+            echo "::error::TODESKTOP_EMAIL secret is not set."
+            missing=1
+          fi
+          if (( missing )); then
+            echo "Add both at Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          echo "TODESKTOP_ACCESS_TOKEN length=${#TODESKTOP_ACCESS_TOKEN}, TODESKTOP_EMAIL length=${#TODESKTOP_EMAIL}"
+      - name: checkout @ ${{ inputs.commit_sha }}
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.commit_sha }}
+      - name: setup node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24.15.0'
+      - name: setup pnpm
+        run: |
+          npm install -g pnpm@10.33.4
+          pnpm --version
+      - name: setup uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: latest
+      - name: pnpm install
+        working-directory: apps/minds
+        run: pnpm install --frozen-lockfile
+      - name: read ToDesktop APP_ID from todesktop.js
+        working-directory: apps/minds
+        run: |
+          APP_ID=$(node -e "console.log(require('./todesktop.js').id)")
+          echo "APP_ID=$APP_ID" >> "$GITHUB_ENV"
+      - name: resolve full commit_sha (input may be a branch/tag)
+        id: sha
+        working-directory: apps/minds
+        run: |
+          FULL_SHA=$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)
+          echo "full_sha=$FULL_SHA" >> "$GITHUB_OUTPUT"
+          echo "Resolved input ${{ inputs.commit_sha }} -> $FULL_SHA"
+      - name: check for existing ToDesktop build matching this commit
+        id: existing
+        working-directory: apps/minds
+        env:
+          TARGET_SHA: ${{ steps.sha.outputs.full_sha }}
+        run: |
+          # ToDesktop returns versionControlInfo.commitId on each build via
+          # `todesktop builds --format json`. If a clean ready build exists
+          # for this SHA we can skip the 15+ min build by reusing its
+          # arm64 .zip URL.
+          mkdir -p resources  # todesktop config validation requires extraResources dir
+          pnpm exec todesktop builds --format json --count 30 --exit > /tmp/td-builds.json 2>&1 || true
+          URL=$(python3 -c '
+          import json, os, sys
+          try:
+              builds = json.load(open("/tmp/td-builds.json"))
+          except Exception:
+              sys.exit(0)
+          if not isinstance(builds, list):
+              sys.exit(0)
+          target = os.environ["TARGET_SHA"]
+          for b in builds:
+              vci = b.get("versionControlInfo") or {}
+              if vci.get("commitId") != target:                continue
+              if vci.get("hasUncommittedChanges"):              continue
+              if b.get("status") not in ("ready",):             continue
+              mac = (b.get("mac") or {}).get("zip") or {}
+              # mac.zip can be a dict {arm64: {url}, x64: {url}} OR a list of
+              # {arch, url} entries depending on CLI version; cover both.
+              if isinstance(mac, dict):
+                  arm = mac.get("arm64") or {}
+                  url = arm.get("url") if isinstance(arm, dict) else None
+              elif isinstance(mac, list):
+                  url = next((e.get("url") for e in mac if isinstance(e, dict) and e.get("arch") == "arm64"), None)
+              else:
+                  url = None
+              if url:
+                  print(url)
+                  print(b.get("id", ""), file=sys.stderr)
+                  sys.exit(0)
+          ' 2> /tmp/td-existing-build-id.txt || true)
+          if [[ -n "$URL" ]]; then
+            BID=$(cat /tmp/td-existing-build-id.txt | tr -d '[:space:]')
+            echo "url=$URL"      >> "$GITHUB_OUTPUT"
+            echo "build_id=$BID" >> "$GITHUB_OUTPUT"
+            echo "Reusing existing build $BID for commit $TARGET_SHA"
+            echo "  -> $URL"
+          else
+            echo "No existing build matches $TARGET_SHA; will build fresh."
+          fi
+      - name: pnpm dist (build + upload to ToDesktop)
+        id: dist
+        if: steps.existing.outputs.url == ''
+        working-directory: apps/minds
+        run: |
+          set -o pipefail
+          pnpm dist 2>&1 | tee /tmp/minds-dist.log
+      - name: parse build URL
+        id: parse
+        if: steps.existing.outputs.url == ''
+        run: |
+          # ToDesktop prints "Retrieved build ID: <id>" early in the upload
+          # step. Construct the arm64 .zip URL from it — pnpm dist's final
+          # "Build complete!" line is the dashboard URL, not a direct artifact.
+          BUILD_ID=$(grep -oE 'Retrieved build ID: [a-z0-9]+' /tmp/minds-dist.log 2>/dev/null | awk '{print $NF}' | tail -1 || true)
+          if [[ -z "$BUILD_ID" ]]; then
+            echo "::error::could not extract build ID from /tmp/minds-dist.log. Check the uploaded build-log artifact."
+            exit 1
+          fi
+          URL="https://dl.todesktop.com/${APP_ID}/builds/${BUILD_ID}/mac/zip/arm64"
+          echo "build_id=$BUILD_ID" >> "$GITHUB_OUTPUT"
+          echo "url=$URL"           >> "$GITHUB_OUTPUT"
+      - name: emit build summary
+        if: always()
+        run: |
+          if [[ -n "${{ steps.existing.outputs.url }}" ]]; then
+            URL='${{ steps.existing.outputs.url }}'
+            BID='${{ steps.existing.outputs.build_id }}'
+            SRC='reused (no rebuild needed)'
+          else
+            URL='${{ steps.parse.outputs.url }}'
+            BID='${{ steps.parse.outputs.build_id }}'
+            SRC='freshly built'
+          fi
+          {
+            echo "## Build result ($SRC)"
+            echo ""
+            echo "- commit: \`${{ inputs.commit_sha }}\` (resolved \`${{ steps.sha.outputs.full_sha }}\`)"
+            echo "- build_id: \`${BID:-<none>}\`"
+            echo "- url: ${URL:-<none>}"
+            echo "- dashboard: https://app.todesktop.com/apps/${APP_ID}/builds/${BID}"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: upload build log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: minds-dist-log-${{ github.run_id }}
+          path: /tmp/minds-dist.log
+          retention-days: 7
+
+  verify:
+    needs: [build]
+    # Run when build succeeded, or when build was skipped (workflow_dispatch
+    # with app_zip_url, or no inputs at all). On build failure verify is
+    # skipped; the build job's own `upload build log` step uses always() so
+    # the dist log artifact is preserved either way.
+    if: ${{ always() && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
+    runs-on: [self-hosted, macOS, minds-runner]
+    timeout-minutes: 25
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: verify ANTHROPIC_API_KEY injected
+        run: |
+          if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
+            echo "ANTHROPIC_API_KEY is empty — secret not reaching the runner"; exit 1
+          fi
+          echo "ANTHROPIC_API_KEY present, length=${#ANTHROPIC_API_KEY}"
+      - name: resolve build URL
+        id: url
+        run: |
+          if [[ -n "${{ inputs.app_zip_url }}" ]]; then
+            URL='${{ inputs.app_zip_url }}'
+            SRC='direct input'
+          elif [[ -n '${{ needs.build.outputs.app_zip_url }}' ]]; then
+            URL='${{ needs.build.outputs.app_zip_url }}'
+            SRC='build job (commit ${{ inputs.commit_sha }}, build_id ${{ needs.build.outputs.build_id }})'
+          else
+            URL=$(bash apps/minds/scripts/resolve-latest-todesktop-url.sh)
+            SRC='resolved latest released build'
+          fi
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Verifying: $URL"
+          echo "Source: $SRC"
+          {
+            echo "## Verifying"
+            echo ""
+            echo "- URL: $URL"
+            echo "- Source: $SRC"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: reset to clean state and install fresh app
+        run: bash apps/minds/scripts/mac-runner-reset.sh "${{ steps.url.outputs.url }}"
+      - name: launch and wait for backend
+        run: bash apps/minds/scripts/launch-and-verify.sh
+      - name: first message round-trip
+        if: ${{ inputs.skip_first_message != true }}
+        env:
+          GIT_BRANCH: ${{ inputs.template_ref }}
+          GIT_URL:    ${{ inputs.template_url }}
+        run: bash apps/minds/scripts/first-message-verify.sh
+      - name: collect diagnostic artifacts on failure
+        if: failure()
+        run: |
+          mkdir -p artifacts
+          [ -d "$HOME/.minds/logs" ] && cp -R "$HOME/.minds/logs" artifacts/ || true
+          [ -d "$HOME/.minds/events" ] && cp -R "$HOME/.minds/events" artifacts/ || true
+          [ -d "$HOME/.minds/mngr" ] && cp -R "$HOME/.minds/mngr"/*/events artifacts/agent-events 2>/dev/null || true
+          log show --process Minds --last 5m 2>/dev/null > artifacts/macos-console.log || true
+          ls -la "$HOME/.minds" > artifacts/minds-dir-listing.txt 2>&1 || true
+          for f in /tmp/first-message-*.json /tmp/first-message-*.txt /tmp/first-message-*.html; do
+            [ -f "$f" ] && cp "$f" artifacts/ 2>/dev/null || true
+          done
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: launch-to-first-message-${{ github.run_id }}
+          path: artifacts/
+          retention-days: 7
+      - name: post-test cleanup (best effort)
+        if: always()
+        run: |
+          # Wipe state after the run so the runner sits idle clean.
+          # Pre-test reset on the NEXT run also cleans, this is belt+braces.
+          # All steps are best-effort; we never want cleanup to fail the job.
+          bash apps/minds/scripts/mac-runner-reset.sh 2>&1 || true

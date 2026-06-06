@@ -3,6 +3,7 @@ import fnmatch
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -11,8 +12,10 @@ from inline_snapshot import snapshot
 
 from imbue.imbue_common.ratchet_testing.common_ratchets import RegexRatchetRule
 from imbue.imbue_common.ratchet_testing.common_ratchets import check_ratchet_rule_all_files
+from imbue.imbue_common.ratchet_testing.core import BINARY_FILE_EXCLUSION
 from imbue.imbue_common.ratchet_testing.core import _get_all_files_with_extension
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_import_lint_errors
+from imbue.imbue_common.ratchet_testing.ratchets import check_no_type_errors
 from imbue.imbue_common.ratchet_testing.ratchets import find_bash_scripts_without_strict_mode
 from imbue.imbue_common.test_profiles import detect_branch
 from scripts.changelog_projects import DEV_PROJECT
@@ -30,7 +33,6 @@ _REPO_ROOT = Path(__file__).parent
 _EXCLUDED_PROJECTS: frozenset[str] = frozenset()
 
 _SELF_EXCLUSION: tuple[str, ...] = ("test_meta_ratchets.py",)
-_BINARY_FILE_EXCLUSION: tuple[str, ...] = ("*.png", "*.ico", "*.jpg", "*.jpeg", "*.gif", "*.webp")
 _DATA_FILE_EXCLUSION: tuple[str, ...] = ("*.jsonl",)
 _MIGRATION_SCRIPT_EXCLUSION: tuple[str, ...] = (
     "migrate_code_mng_to_mngr.sh",
@@ -93,8 +95,7 @@ def test_every_project_has_test_ratchets_file() -> None:
 def _get_expected_ratchet_test_names() -> frozenset[str]:
     """Derive the expected set of test function names from standard_ratchet_checks.py.
 
-    Each check_foo() function maps to test_prevent_foo(). Two additional hand-written
-    tests (test_no_type_errors, test_no_ruff_errors) are always expected.
+    Each check_foo() function maps to test_prevent_foo().
     """
     checks_path = (
         _REPO_ROOT
@@ -111,8 +112,6 @@ def _get_expected_ratchet_test_names() -> frozenset[str]:
         for node in ast.walk(tree)
         if isinstance(node, ast.FunctionDef) and node.name.startswith("check_")
     }
-    test_names.add("test_no_type_errors")
-    test_names.add("test_no_ruff_errors")
     return frozenset(test_names)
 
 
@@ -120,7 +119,7 @@ def test_all_test_ratchets_files_have_same_tests() -> None:
     """Ensure all test_ratchets.py files define precisely the expected set of test functions.
 
     The expected tests are derived from standard_ratchet_checks.py (one test_prevent_*
-    per check_* function) plus test_no_type_errors and test_no_ruff_errors.
+    per check_* function).
     """
     reference_tests = _get_expected_ratchet_test_names()
 
@@ -162,13 +161,28 @@ def test_no_import_layer_violations() -> None:
     check_no_import_lint_errors(_REPO_ROOT)
 
 
-def test_no_ruff_lint_errors_repo_wide() -> None:
+@pytest.mark.timeout(60)
+def test_no_type_errors() -> None:
+    """Ensure the whole workspace has zero type errors (ty).
+
+    ty resolves the uv workspace root (root pyproject.toml declares
+    [tool.uv.workspace] members = ["libs/*", "apps/*"]) and scans every member, so
+    this single check covers the entire repo. CI backstop for the ty pre-push hook.
+
+    Timeout is 60s rather than the default 10s because the ``uv run ty check``
+    subprocess can be slow on offload under load; the check is deterministic, so it
+    is not marked flaky. If a failure looks spurious, run ``uv sync --all-packages``
+    and re-run before treating it as real (see CLAUDE.md).
+    """
+    check_no_type_errors(_REPO_ROOT)
+
+
+def test_no_ruff_errors() -> None:
     """Ensure all Python files pass ruff lint and format checks repo-wide.
 
-    Runs both ruff check and ruff format --check over the entire repo root.
-    Per-project test_ratchets.py files also run ruff check within each project;
-    this test acts as a CI backstop for the pre-commit hook and additionally
-    covers repo-root and scripts/ files.
+    Runs both ruff check and ruff format --check from the repo root, covering all
+    workspace members plus repo-root and scripts/ files. CI backstop for the ruff
+    pre-commit hook.
     """
     fix_hint = "To fix: `uv run ruff check --fix . && uv run ruff format .`"
     errors: list[str] = []
@@ -195,18 +209,57 @@ def test_no_ruff_lint_errors_repo_wide() -> None:
         raise AssertionError("\n".join(errors) + "\n" + fix_hint)
 
 
+def test_cli_docs_are_up_to_date() -> None:
+    """Committed CLI docs and the PyPI README must match scripts/make_cli_docs.py output.
+
+    Guards against editing a command's help metadata (or the top-level README) without
+    regenerating the docs -- the same check the regenerate-cli-docs pre-commit hook performs.
+    This complements test_all_non_hidden_commands_have_generated_docs in help_formatter_test.py
+    (which only checks that a doc *file* exists per command) by verifying the file *contents*
+    are current.
+
+    The generator is run via its --check mode in a fresh interpreter so that
+    MNGR_LOAD_ALL_PLUGINS is set before any mngr import and every provider's commands are
+    documented; running it in-process would not reliably reload already-imported modules.
+    """
+    result = subprocess.run(
+        [sys.executable, str(_REPO_ROOT / "scripts" / "make_cli_docs.py"), "--check"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        "Generated CLI docs are out of date. Run `uv run python scripts/make_cli_docs.py` "
+        f"and commit the result.\n{result.stdout}{result.stderr}"
+    )
+
+
 def test_prevent_bash_without_strict_mode() -> None:
     """Ensure all bash scripts in the repo use 'set -euo pipefail' for strict error handling.
 
-    Snapshot accommodates the committed secret-file templates at
-    ``.minds/template/*.sh``. Those files are shell-sourceable env
-    declarations (consumed by ``scripts/push_vault_from_file.py`` when
-    seeding HCP Vault), not executable scripts -- adding
-    ``set -euo pipefail`` to them would leak strict mode into whatever
-    shell sources them.
+    Snapshot accommodates two kinds of committed exception:
+
+    - The secret-file templates at ``.minds/template/*.sh``. Those files are
+      shell-sourceable env declarations (consumed by
+      ``scripts/push_vault_from_file.py`` when seeding HCP Vault), not
+      executable scripts -- adding ``set -euo pipefail`` to them would leak
+      strict mode into whatever shell sources them.
+    - The minds verify scripts ``apps/minds/scripts/first-message-verify.sh``
+      and ``apps/minds/scripts/launch-and-verify.sh``, which use
+      ``set -uo pipefail`` (omitting ``-e``) on purpose: they handle errors
+      explicitly (a ``fail`` helper, ``PIPESTATUS``, polling loops that depend
+      on commands exiting non-zero while they retry, and diagnostic blocks on
+      failure). ``-e`` would abort that handling instead of running it. The
+      sibling non-verify scripts in the same directory do use ``set -euo
+      pipefail``, so this omission is a deliberate, matched choice rather than
+      an oversight.
+
+    The count is enumerated against the full local checkout. In offload
+    sandboxes the count is lower because ``.dockerignore`` omits some of these
+    tracked paths from the build context, so they are absent on disk there.
     """
     violations = find_bash_scripts_without_strict_mode(_REPO_ROOT)
-    assert len(violations) <= snapshot(10), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
+    assert len(violations) <= snapshot(12), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
         f"  - {v}" for v in violations
     )
 
@@ -220,7 +273,7 @@ _PREVENT_OLD_MNG_NAME = RegexRatchetRule(
 
 def test_prevent_old_mng_name_in_file_contents() -> None:
     """Ensure the old 'mng' name (not followed by 'r') is not reintroduced in file contents."""
-    exclusions = _SELF_EXCLUSION + _BINARY_FILE_EXCLUSION + _DATA_FILE_EXCLUSION + _MIGRATION_SCRIPT_EXCLUSION
+    exclusions = _SELF_EXCLUSION + BINARY_FILE_EXCLUSION + _DATA_FILE_EXCLUSION + _MIGRATION_SCRIPT_EXCLUSION
     chunks = check_ratchet_rule_all_files(_PREVENT_OLD_MNG_NAME, _REPO_ROOT, exclusions)
     assert len(chunks) <= snapshot(0), _PREVENT_OLD_MNG_NAME.format_failure(chunks)
 
@@ -525,7 +578,7 @@ def test_pr_has_changelog_entry() -> None:
     """
     branch = detect_branch()
 
-    if not branch or branch in ("main", "release"):
+    if not branch or branch == "main":
         pytest.skip("Not a PR branch")
 
     for prefix in _CHANGELOG_EXEMPT_BRANCH_PREFIXES:
@@ -569,7 +622,7 @@ def test_pr_has_changelog_entry() -> None:
 def test_every_project_has_changelog_layout() -> None:
     """Ensure every project (libs/<name>, apps/<name>, and the synthetic dev)
     has the full changelog layout: ``CHANGELOG.md``, ``UNABRIDGED_CHANGELOG.md``,
-    and a ``changelog/`` directory for per-PR entries.
+    and a ``changelog/.gitkeep`` anchoring the directory for per-PR entries.
 
     Mirrors ``test_every_project_has_test_ratchets_file`` and
     ``test_every_project_has_pypi_readme``: a symmetric requirement that
@@ -578,19 +631,20 @@ def test_every_project_has_changelog_layout() -> None:
     missing: list[str] = []
     for project in all_known_projects(_REPO_ROOT):
         proj_dir = get_project_dir(project, _REPO_ROOT)
-        for required in ("CHANGELOG.md", "UNABRIDGED_CHANGELOG.md"):
-            target = proj_dir / required
+        required = [
+            proj_dir / "CHANGELOG.md",
+            proj_dir / "UNABRIDGED_CHANGELOG.md",
+            project_entries_dir(project, _REPO_ROOT) / ".gitkeep",
+        ]
+        for target in required:
             if not target.exists():
                 missing.append(str(target.relative_to(_REPO_ROOT)))
-        entries = project_entries_dir(project, _REPO_ROOT)
-        if not entries.is_dir():
-            missing.append(f"{entries.relative_to(_REPO_ROOT)}/ (directory)")
 
     assert not missing, (
         "The following projects are missing required changelog-layout files:\n"
         + "\n".join(f"  - {m}" for m in missing)
         + "\n\nEvery project must have CHANGELOG.md (with an '## [Unreleased]' heading), "
-        "UNABRIDGED_CHANGELOG.md, and a changelog/ directory."
+        "UNABRIDGED_CHANGELOG.md, and a changelog/ directory containing a .gitkeep."
     )
 
 

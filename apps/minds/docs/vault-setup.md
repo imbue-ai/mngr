@@ -36,7 +36,6 @@ secrets/minds/<tier>/cloudflare
 secrets/minds/<tier>/litellm
 secrets/minds/<tier>/litellm-connector
 secrets/minds/<tier>/neon
-secrets/minds/<tier>/paid-accounts
 secrets/minds/<tier>/pool-ssh
 secrets/minds/<tier>/supertokens
 ```
@@ -119,13 +118,16 @@ All deploys (dev / staging / production) flow through the unified
 
 ```bash
 # Tier deploys (staging / production):
-eval "$(uv run minds env activate staging)"
+eval "$(uv run minds env activate --deploy staging)"
 uv run minds env deploy --yes-i-mean-staging
 
 # Dev env deploys (per-developer):
-eval "$(uv run minds env activate dev-<your-user>)"
+eval "$(uv run minds env activate --deploy dev-<your-user>)"
 uv run minds env deploy
 ```
+
+(`--deploy` is required: `minds env deploy` refuses without it. See
+`docs/environments.md` for the use-vs-deploy split.)
 
 `minds env deploy` reads `apps/minds/imbue/minds/config/envs/<tier>/deploy.toml`
 for the Modal workspace name + the list of services to push from

@@ -19,7 +19,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr.errors import BaseMngrError
+from imbue.mngr.errors import MngrError
 
 GITHUB_REPO: Final[str] = "imbue-ai/mngr"
 GITHUB_BASE_URL: Final[str] = f"https://github.com/{GITHUB_REPO}"
@@ -32,7 +32,7 @@ _MAX_URL_LENGTH: Final[int] = 8000
 _TRUNCATION_SUFFIX: Final[str] = "\n\n_(truncated)_"
 
 
-class IssueSearchError(BaseMngrError):
+class IssueSearchError(MngrError):
     """Raised when searching for GitHub issues fails."""
 
 

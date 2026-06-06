@@ -19,8 +19,10 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.api.testing import FakeHost
+from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -297,14 +299,14 @@ def test_claude_agent_config_merge_overrides_command() -> None:
     assert merged.command == CommandString("custom-claude")
 
 
-def test_claude_agent_config_merge_concatenates_cli_args() -> None:
-    """Claude agent config should concatenate cli_args."""
+def test_claude_agent_config_merge_replaces_cli_args() -> None:
+    """ClaudeAgentConfig assigns cli_args from override (no concat under assign-by-default)."""
     base = ClaudeAgentConfig(cli_args=("--verbose",))
     override = ClaudeAgentConfig(cli_args=("--model", "sonnet"))
 
     merged = base.merge_with(override)
 
-    assert merged.cli_args == ("--verbose", "--model", "sonnet")
+    assert merged.cli_args == ("--model", "sonnet")
 
 
 def test_claude_agent_config_merge_uses_override_cli_args_when_base_empty() -> None:
@@ -1696,13 +1698,14 @@ def test_on_before_provisioning_shared_mode_raises_for_remote_host(
         agent.on_before_provisioning(host=remote_host, options=options, mngr_ctx=temp_mngr_ctx)
 
 
-def test_on_before_provisioning_shared_mode_raises_when_env_unset(
+def test_on_before_provisioning_shared_mode_passes_when_env_unset(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     temp_mngr_ctx: MngrContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With use_env_config_dir=True and $CLAUDE_CONFIG_DIR unset, on_before_provisioning raises."""
+    """With use_env_config_dir=True and $CLAUDE_CONFIG_DIR unset, on_before_provisioning falls
+    back to ``~/.claude/`` and does not raise (it's the "don't touch the config" path)."""
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     agent, host = make_claude_agent(
         local_provider,
@@ -1713,8 +1716,8 @@ def test_on_before_provisioning_shared_mode_raises_when_env_unset(
 
     options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
 
-    with pytest.raises(UserInputError, match="use_env_config_dir"):
-        agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+    # Should not raise.
+    agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
 
 
 def test_on_destroy_removes_trust(
@@ -3137,17 +3140,17 @@ def test_register_cli_options_returns_none_for_other_commands() -> None:
 # =============================================================================
 
 
-def test_on_before_create_skips_when_no_adopt_session() -> None:
+def test_on_before_create_skips_when_no_adopt_session(temp_mngr_ctx: MngrContext) -> None:
     """on_before_create should return None when adopt_session is not in plugin_data."""
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(agent_type=AgentTypeName("claude")),
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
     )
-    assert on_before_create(args=args) is None
+    assert on_before_create(args=args, mngr_ctx=temp_mngr_ctx) is None
 
 
-def test_on_before_create_passes_with_adopt_session() -> None:
+def test_on_before_create_passes_with_adopt_session(temp_mngr_ctx: MngrContext) -> None:
     """on_before_create should pass when --adopt-session is used with a claude agent."""
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(
@@ -3157,11 +3160,11 @@ def test_on_before_create_passes_with_adopt_session() -> None:
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
     )
-    result = on_before_create(args=args)
+    result = on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
     assert result is None
 
 
-def test_on_before_create_rejects_non_claude_agent_type() -> None:
+def test_on_before_create_rejects_non_claude_agent_type(temp_mngr_ctx: MngrContext) -> None:
     """on_before_create should raise UserInputError for non-claude agent types."""
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(
@@ -3171,12 +3174,39 @@ def test_on_before_create_rejects_non_claude_agent_type() -> None:
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
     )
-    with pytest.raises(UserInputError, match="--adopt-session can only be used with the claude agent type"):
-        on_before_create(args=args)
+    with pytest.raises(UserInputError, match="--adopt-session can only be used with a Claude agent type"):
+        on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
+
+
+def test_on_before_create_passes_with_claude_subtype(temp_mngr_ctx: MngrContext) -> None:
+    """on_before_create should accept a config-defined subtype whose parent_type
+    chain reaches claude (e.g. a ``write-plus`` template), not just the literal
+    ``claude`` type name. This is the centralized "is a claude agent" check via
+    resolve_agent_type, rather than a string comparison against "claude".
+    """
+    subtype = AgentTypeName("write-plus")
+    config_with_subtype = temp_mngr_ctx.config.model_copy_update(
+        to_update(
+            temp_mngr_ctx.config.field_ref().agent_types,
+            {subtype: AgentTypeConfig(parent_type=AgentTypeName("claude"))},
+        ),
+    )
+    mngr_ctx = temp_mngr_ctx.model_copy_update(
+        to_update(temp_mngr_ctx.field_ref().config, config_with_subtype),
+    )
+    args = OnBeforeCreateArgs(
+        agent_options=CreateAgentOptions(
+            agent_type=subtype,
+            plugin_data={"adopt_session": ("some-id",)},
+        ),
+        target_host=NewHostOptions(provider=ProviderInstanceName("local")),
+        create_work_dir=True,
+    )
+    assert on_before_create(args=args, mngr_ctx=mngr_ctx) is None
 
 
 def test_on_before_create_rejects_adopt_session_with_clone_source(
-    local_provider: LocalProviderInstance, tmp_path: Path
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """on_before_create should raise UserInputError when both --adopt-session
     and a clone source (source_agent_state_location) are passed: each is its
@@ -3195,7 +3225,7 @@ def test_on_before_create_rejects_adopt_session_with_clone_source(
         create_work_dir=True,
     )
     with pytest.raises(UserInputError, match="incompatible with cloning via --from"):
-        on_before_create(args=args)
+        on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
 
 
 # =============================================================================
@@ -4258,7 +4288,7 @@ def test_write_generated_files_writes_through_symlink_safely(tmp_path: Path, tem
     # Only settings.json, no installed_plugins.json (as happens for local hosts)
     generated_files = {Path("settings.json"): '{"some": "setting"}'}
 
-    _write_generated_files(host, config_dir, generated_files, temp_mngr_ctx)
+    _write_generated_files(host, config_dir, generated_files)
 
     # The symlink and source file should both be untouched
     assert symlink.is_symlink()
@@ -4286,7 +4316,7 @@ def test_write_generated_files_breaks_symlink_before_writing(tmp_path: Path, tem
     rewritten_content = '{"rewritten": true}'
     generated_files = {Path("plugins") / "known_marketplaces.json": rewritten_content}
 
-    _write_generated_files(host, config_dir, generated_files, temp_mngr_ctx)
+    _write_generated_files(host, config_dir, generated_files)
 
     # The symlink should be replaced with a regular file containing the rewritten content
     assert not symlink.is_symlink()
@@ -4380,13 +4410,17 @@ def test_get_claude_config_dir_returns_shared_env_value_in_shared_mode(
     assert agent.get_claude_config_dir() == shared
 
 
-def test_get_claude_config_dir_raises_in_shared_mode_when_env_unset(
+def test_get_claude_config_dir_falls_back_to_home_in_shared_mode_when_env_unset(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     temp_mngr_ctx: MngrContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """In shared mode with $CLAUDE_CONFIG_DIR unset, get_claude_config_dir raises."""
+    """In shared mode with $CLAUDE_CONFIG_DIR unset, get_claude_config_dir falls back
+    to ``~/.claude/`` (claude's own default), so ``use_env_config_dir=True`` effectively
+    means "don't touch the config dir at all -- inherit whatever the parent shell would
+    have used."
+    """
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     agent, _ = make_claude_agent(
         local_provider,
@@ -4395,8 +4429,7 @@ def test_get_claude_config_dir_raises_in_shared_mode_when_env_unset(
         agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
     )
 
-    with pytest.raises(UserInputError, match="use_env_config_dir"):
-        agent.get_claude_config_dir()
+    assert agent.get_claude_config_dir() == Path.home() / ".claude"
 
 
 # =============================================================================

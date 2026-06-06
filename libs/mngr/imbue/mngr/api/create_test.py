@@ -1,9 +1,12 @@
 from pathlib import Path
 
 import pytest
+from pydantic import Field
 
 from imbue.mngr.api.create import _create_new_host
+from imbue.mngr.api.create import _destroy_new_host_on_create_failure
 from imbue.mngr.api.create import _generate_unique_host_name
+from imbue.mngr.api.create import _run_post_host_create_commands
 from imbue.mngr.api.create import _write_host_env_vars
 from imbue.mngr.api.create import resolve_target_host
 from imbue.mngr.config.data_types import EnvVar
@@ -12,9 +15,12 @@ from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
+from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
+from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostNameStyle
 from imbue.mngr.primitives import ProviderInstanceName
@@ -93,6 +99,56 @@ def test_write_host_env_vars_skips_when_empty(
     # The host env file should not exist (no env vars written)
     host_env = local_host.get_env_vars()
     assert host_env == {}
+
+
+# =============================================================================
+# _run_post_host_create_commands Tests
+# =============================================================================
+
+
+def test_run_post_host_create_commands_no_op_on_empty_tuple(
+    local_host: Host,
+    temp_host_dir: Path,
+) -> None:
+    """An empty commands tuple is a no-op (no exec, no error)."""
+    _run_post_host_create_commands(local_host, ())
+
+
+def test_run_post_host_create_commands_runs_each_command_in_order(
+    local_host: Host,
+    temp_host_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Each command runs in order; we observe order via append-to-file side effect."""
+    marker = tmp_path / "order.txt"
+    _run_post_host_create_commands(
+        local_host,
+        (
+            CommandString(f"echo first >> {marker}"),
+            CommandString(f"echo second >> {marker}"),
+            CommandString(f"echo third >> {marker}"),
+        ),
+    )
+    assert marker.read_text().splitlines() == ["first", "second", "third"]
+
+
+def test_run_post_host_create_commands_raises_on_first_failure(
+    local_host: Host,
+    temp_host_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """A non-zero exit raises MngrError, and subsequent commands do not run."""
+    marker = tmp_path / "after_failure.txt"
+    with pytest.raises(MngrError, match="post-host-create command failed"):
+        _run_post_host_create_commands(
+            local_host,
+            (
+                CommandString("false"),
+                CommandString(f"echo unreached >> {marker}"),
+            ),
+        )
+    # The second command must not have executed.
+    assert not marker.exists()
 
 
 # =============================================================================
@@ -249,3 +305,74 @@ def test_write_host_env_vars_later_env_file_overrides_earlier(
     assert host_env["SHARED"] == "from_second"
     assert host_env["FIRST_ONLY"] == "present"
     assert host_env["SECOND_ONLY"] == "present"
+
+
+# =============================================================================
+# _destroy_new_host_on_create_failure -- a host we just created for a --new-host
+# create must be torn down if a later step fails, so we never leak it (and, for
+# non-idle-shutdown providers like imbue_cloud, its lease). Gated by the debug
+# retain flag.
+# =============================================================================
+
+_RETAIN_FLAG = "MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE"
+
+
+class _RecordingDestroyProvider(LocalProviderInstance):
+    """LocalProviderInstance that records destroy_host calls instead of performing them."""
+
+    destroyed_host_ids: list[HostId] = Field(default_factory=list)
+
+    def destroy_host(self, host: HostInterface | HostId) -> None:
+        self.destroyed_host_ids.append(host if isinstance(host, HostId) else host.id)
+
+
+def _make_recording_provider(local_provider: LocalProviderInstance) -> _RecordingDestroyProvider:
+    return _RecordingDestroyProvider(
+        name=local_provider.name,
+        host_dir=local_provider.host_dir,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+
+
+def test_destroy_new_host_on_create_failure_destroys_failed_new_host(
+    local_provider: LocalProviderInstance,
+    local_host: Host,
+) -> None:
+    """A failure inside the guard tears down the newly-created host and re-raises."""
+    provider = _make_recording_provider(local_provider)
+    with pytest.raises(ValueError):
+        with _destroy_new_host_on_create_failure(local_host, provider):
+            raise ValueError("provisioning blew up")
+    assert provider.destroyed_host_ids == [local_host.id]
+
+
+def test_destroy_new_host_on_create_failure_is_noop_on_success(
+    local_provider: LocalProviderInstance,
+    local_host: Host,
+) -> None:
+    """A clean exit must not destroy the host."""
+    provider = _make_recording_provider(local_provider)
+    with _destroy_new_host_on_create_failure(local_host, provider):
+        pass
+    assert provider.destroyed_host_ids == []
+
+
+def test_destroy_new_host_on_create_failure_does_not_destroy_existing_host(local_host: Host) -> None:
+    """provider=None means the caller already owned the host; never tear it down (just re-raise)."""
+    with pytest.raises(ValueError):
+        with _destroy_new_host_on_create_failure(local_host, None):
+            raise ValueError("boom")
+
+
+def test_destroy_new_host_on_create_failure_retains_host_when_debug_flag_set(
+    local_provider: LocalProviderInstance,
+    local_host: Host,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The debug retain flag suppresses the teardown so a failed host can be inspected."""
+    provider = _make_recording_provider(local_provider)
+    monkeypatch.setenv(_RETAIN_FLAG, "1")
+    with pytest.raises(ValueError):
+        with _destroy_new_host_on_create_failure(local_host, provider):
+            raise ValueError("boom")
+    assert provider.destroyed_host_ids == []

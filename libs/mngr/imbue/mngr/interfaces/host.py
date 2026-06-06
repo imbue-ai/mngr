@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import shlex
 from abc import ABC
 from abc import abstractmethod
@@ -9,7 +8,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from typing import Callable
-from typing import Final
 from typing import Iterator
 from typing import Mapping
 from typing import Sequence
@@ -21,7 +19,6 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import ParseSpecError
-from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import ActivityConfig
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -43,26 +40,6 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import TransferMode
-
-# Default timeout for waiting for agent readiness before sending messages.
-# With hook-based polling, we return early when the agent signals readiness,
-# so this is a max wait time, not an unconditional delay.
-# Can be overridden via the MNGR_AGENT_READY_TIMEOUT environment variable.
-DEFAULT_AGENT_READY_TIMEOUT_SECONDS: Final[float] = 10.0
-
-
-def get_agent_ready_timeout() -> float:
-    """Return the agent ready timeout, respecting MNGR_AGENT_READY_TIMEOUT env var.
-
-    Falls back to DEFAULT_AGENT_READY_TIMEOUT_SECONDS if the env var is not set.
-    """
-    env_val = os.environ.get("MNGR_AGENT_READY_TIMEOUT")
-    if env_val is not None:
-        try:
-            return float(env_val)
-        except ValueError as e:
-            raise UserInputError(f"MNGR_AGENT_READY_TIMEOUT must be a number, got: {env_val!r}") from e
-    return DEFAULT_AGENT_READY_TIMEOUT_SECONDS
 
 
 class HostInterface(MutableModel, ABC):
@@ -626,6 +603,18 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
         ...
 
     @abstractmethod
+    def copy_local_directory(self, source_path: Path, target_path: Path, extra_args: str | None) -> None:
+        """Copy a directory from the local machine (where mngr runs) to self:target_path.
+
+        Like ``copy_directory`` with a local source, but takes no source-host object --
+        the source is always the local filesystem. This lets the host layer push staged
+        files without resolving a local host (which would require ``mngr.api.providers``
+        and hit an import cycle). Uses rsync (additive, no ``--delete``); ``extra_args``
+        is appended to the rsync invocation (e.g. ``--include``/``--exclude`` filters).
+        """
+        ...
+
+    @abstractmethod
     def save_agent_data(self, agent_id: AgentId, agent_data: Mapping[str, object]) -> None:
         """Persist agent data to external storage.
 
@@ -858,8 +847,7 @@ class CreateAgentOptions(FrozenModel):
         default=None,
         description="Explicit agent ID (auto-generated if not specified)",
     )
-    agent_type: AgentTypeName | None = Field(
-        default=None,
+    agent_type: AgentTypeName = Field(
         description="Type of agent to run (claude, codex, etc.)",
     )
     name: AgentName | None = Field(
@@ -902,9 +890,10 @@ class CreateAgentOptions(FrozenModel):
         default=None,
         description="Message to send when the agent is started (resumed) after being stopped",
     )
-    ready_timeout_seconds: float = Field(
-        default_factory=get_agent_ready_timeout,
-        description="Timeout in seconds to wait for agent readiness before sending initial message",
+    ready_timeout_seconds: float | None = Field(
+        default=None,
+        description="Timeout in seconds to wait for agent readiness before sending initial message. "
+        "When None, falls back to MngrConfig.agent_ready_timeout at consumption time.",
     )
     git: AgentGitOptions | None = Field(
         default=None,
@@ -990,6 +979,26 @@ class HostEnvironmentOptions(FrozenModel):
     )
 
 
+class HostProvisioningOptions(FrozenModel):
+    """Simple provisioning options for a new host (post-creation hooks)."""
+
+    post_host_create_commands: tuple[CommandString, ...] = Field(
+        default=(),
+        description="Shell commands to run inside the newly-created host, "
+        "synchronously, after the host is ready but before any agent work_dir "
+        "is touched. Each command runs in order; a non-zero exit aborts the create.",
+    )
+
+
+# Mapping from raw-string config/CLI field names to HostProvisioningOptions
+# target fields and their parsers. Parallels PROVISIONING_FIELD_MAP for the
+# agent side; used so the CLI flag and template-stacking machinery stay in
+# sync.
+HOST_PROVISIONING_FIELD_MAP: tuple[tuple[str, str, Any], ...] = (
+    ("post_host_create_command", "post_host_create_commands", CommandString),
+)
+
+
 class NewHostOptions(FrozenModel):
     """Options for creating a new host."""
 
@@ -1019,4 +1028,8 @@ class NewHostOptions(FrozenModel):
     lifecycle: HostLifecycleOptions = Field(
         default_factory=HostLifecycleOptions,
         description="Lifecycle and idle detection options",
+    )
+    provisioning: HostProvisioningOptions = Field(
+        default_factory=HostProvisioningOptions,
+        description="Post-create provisioning hooks",
     )

@@ -1,6 +1,7 @@
 import re
 import shutil
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Final
 from urllib.parse import urlparse
@@ -90,6 +91,68 @@ def delete_git_branch(branch_name: str, source_repo_path: Path, cg: ConcurrencyG
         return True
     logger.warning("Failed to delete branch {}: {}", branch_name, result.stderr.strip())
     return False
+
+
+# Exclude patterns used when rsyncing a worktree's working tree over
+# the standalone clone produced for a docker build context. Mirrors the
+# defaults of dev-iteration rsyncs (.git, __pycache__, etc.) so the
+# build context isn't bloated with caches / virtualenvs / installed
+# node modules. ``.git`` is excluded because the clone already has a
+# standalone ``.git`` directory we must not clobber.
+RSYNC_WORKTREE_OVERLAY_EXCLUDES: Final[tuple[str, ...]] = (
+    ".git",
+    "__pycache__",
+    ".venv",
+    "node_modules",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".pytest_cache",
+    ".test_output",
+)
+
+
+def rsync_worktree_over_clone(
+    worktree_dir: Path,
+    clone_dir: Path,
+    cg: ConcurrencyGroup,
+    on_output: Callable[[str, bool], None] | None = None,
+) -> None:
+    """Rsync a worktree's working directory over a fresh ``git clone`` of it.
+
+    Why: ``git clone file://<worktree>`` produces a build context with a
+    proper standalone ``.git`` directory (vs the worktree's 93-byte
+    gitlink file), but it only ships *committed* files. Callers that
+    rely on uncommitted edits being in the build context (e.g. the
+    minds desktop client's ``--mngr-source``-equivalent path, and
+    ``mngr_vps_docker``'s docker-build-context assembly) need to
+    overlay the worktree's working tree on top of the clone to recover
+    them.
+
+    Preserves the clone's ``.git`` (excluded from the rsync) and skips
+    the usual caches / virtualenvs / installed node_modules so the
+    build context stays small.
+
+    Failures are logged at warning and swallowed -- the clone alone
+    still produces a usable (if stale) build context, and we'd rather
+    proceed with a possibly-stale build than fail the whole bake on a
+    transient rsync error.
+    """
+    logger.debug("Rsyncing worktree {} over clone {}", worktree_dir, clone_dir)
+    command: list[str] = ["rsync", "-a", "--delete"]
+    for pattern in RSYNC_WORKTREE_OVERLAY_EXCLUDES:
+        command.append(f"--exclude={pattern}")
+    command.extend([f"{worktree_dir}/", f"{clone_dir}/"])
+    result = cg.run_process_to_completion(
+        command=command,
+        is_checked_after=False,
+        on_output=on_output,
+    )
+    if result.returncode != 0:
+        logger.warning(
+            "rsync worktree over clone exited with code {}: {}",
+            result.returncode,
+            result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
+        )
 
 
 def resolve_project_filter_values(
@@ -407,3 +470,18 @@ def find_git_common_dir(path: Path, cg: ConcurrencyGroup) -> Path | None:
     except ProcessError as e:
         logger.trace("Failed to find main .git dir: {}", e)
         return None
+
+
+def find_git_source_path(path: Path, cg: ConcurrencyGroup) -> Path | None:
+    """Find the source repository root for ``path``, if it is inside a git repo.
+
+    Returns the parent of the git common dir (the source repo root) -- for a
+    worktree this is the main repository, for a regular checkout it is the repo
+    itself -- or ``None`` if ``path`` is not inside a git repo. The source-path
+    concept is what lets a single trust grant cover every worktree of the same
+    repo: it is the durable thing agent plugins persist.
+    """
+    git_common_dir = find_git_common_dir(path, cg)
+    if git_common_dir is None:
+        return None
+    return git_common_dir.parent

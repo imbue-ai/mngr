@@ -22,17 +22,17 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.agent_registry import list_available_agent_types
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
-from imbue.mngr.cli.config import ConfigScope
 from imbue.mngr.cli.config import get_config_path
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.help_formatter import show_help_with_pager
 from imbue.mngr.cli.output_helpers import AbortError
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.cli.plugin_install_wizard import install_wizard
 from imbue.mngr.config.data_types import CommonCliOptions
+from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
@@ -211,13 +211,13 @@ def _emit_plugin_list_human(plugins: list[PluginInfo], fields: tuple[str, ...]) 
 def _emit_plugin_list_json(plugins: list[PluginInfo], fields: tuple[str, ...]) -> None:
     """Emit plugin list in JSON format."""
     plugin_dicts = [{f: _get_field_value(p, f) for f in fields} for p in plugins]
-    emit_final_json({"plugins": plugin_dicts})
+    write_json_line({"plugins": plugin_dicts})
 
 
 def _emit_plugin_list_jsonl(plugins: list[PluginInfo], fields: tuple[str, ...]) -> None:
     """Emit plugin list in JSONL format (one line per plugin)."""
     for p in plugins:
-        emit_final_json({f: _get_field_value(p, f) for f in fields})
+        write_json_line({f: _get_field_value(p, f) for f in fields})
 
 
 @pure
@@ -297,7 +297,7 @@ def _emit_plugin_add_result(
                     "Package installed but no mngr entry points found -- this package may not be a mngr plugin"
                 )
         case OutputFormat.JSON:
-            emit_final_json(
+            write_json_line(
                 {
                     "specifier": specifier,
                     "package": package_name,
@@ -305,7 +305,7 @@ def _emit_plugin_add_result(
                 }
             )
         case OutputFormat.JSONL:
-            emit_final_json(
+            write_json_line(
                 {
                     "event": "plugin_added",
                     "specifier": specifier,
@@ -326,13 +326,13 @@ def _emit_plugin_remove_result(
         case OutputFormat.HUMAN:
             write_human_line("Removed plugin package '{}'", package_name)
         case OutputFormat.JSON:
-            emit_final_json(
+            write_json_line(
                 {
                     "package": package_name,
                 }
             )
         case OutputFormat.JSONL:
-            emit_final_json(
+            write_json_line(
                 {
                     "event": "plugin_removed",
                     "package": package_name,
@@ -800,7 +800,7 @@ def _emit_plugin_toggle_result(
             action = "Enabled" if is_enabled else "Disabled"
             write_human_line("{} plugin '{}' in {} ({})", action, name, scope.value.lower(), config_path)
         case OutputFormat.JSON:
-            emit_final_json(
+            write_json_line(
                 {
                     "plugin": name,
                     "enabled": is_enabled,
@@ -809,7 +809,7 @@ def _emit_plugin_toggle_result(
                 }
             )
         case OutputFormat.JSONL:
-            emit_final_json(
+            write_json_line(
                 {
                     "event": "plugin_toggled",
                     "plugin": name,
