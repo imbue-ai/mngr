@@ -19,10 +19,17 @@ for pid in $pids; do
   kill -9 "$pid" 2>/dev/null || true
 done
 
-if command -v limactl >/dev/null 2>&1; then
-  log "stopping and deleting Lima VM instances via limactl"
-  limactl stop --all >/dev/null 2>&1 || true
-  limactl delete --all >/dev/null 2>&1 || true
+BUNDLED_LIMACTL="/Applications/Minds.app/Contents/Resources/lima/bin/limactl"
+LIMACTL=""
+if [[ -x "$BUNDLED_LIMACTL" ]]; then
+  LIMACTL="$BUNDLED_LIMACTL"
+elif command -v limactl >/dev/null 2>&1; then
+  LIMACTL="limactl"
+fi
+if [[ -n "$LIMACTL" ]]; then
+  log "stopping and deleting Lima VM instances via $LIMACTL"
+  "$LIMACTL" stop --all >/dev/null 2>&1 || true
+  "$LIMACTL" delete --all >/dev/null 2>&1 || true
 fi
 
 # Belt and suspenders for the CI runner: rm any minds-e2e* dirs still
