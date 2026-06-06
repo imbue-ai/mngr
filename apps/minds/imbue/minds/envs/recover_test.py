@@ -138,8 +138,17 @@ def test_neon_restore_round_trips_as_nested_object(tmp_path: Path) -> None:
 
 
 def test_neon_restore_may_be_absent(tmp_path: Path) -> None:
-    # A deploy with no Neon-restore configuration carries neon_restore=None;
-    # recover skips the Neon step for it.
-    target = _sample_target().model_copy(update={"neon_restore": None})
+    # A deploy with no Neon-restore configuration carries neon_restore=None
+    # (the field defaults to None); recover skips the Neon step for it.
+    target = RecoverTarget(
+        deploy_id=DeployId("20260517T143022Z"),
+        env_name=_ENV_NAME,
+        tier="dev",
+        modal_env=_ENV_NAME,
+        modal_workspace="minds-dev",
+        vault_path_prefix="secrets/minds/dev",
+        app_versions_to_restore={"rsc-dev": "v17"},
+    )
+    assert target.neon_restore is None
     parsed = RecoverTarget.from_json_bytes(target.to_json_bytes())
     assert parsed.neon_restore is None

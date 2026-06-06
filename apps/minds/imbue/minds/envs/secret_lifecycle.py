@@ -23,7 +23,6 @@ from datetime import datetime
 from datetime import timezone
 from typing import Final
 from typing import Self
-from typing import cast
 
 from loguru import logger
 from pydantic import GetCoreSchemaHandler
@@ -33,6 +32,7 @@ from pydantic_core import core_schema
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.minds.envs.per_env_deploy import ModalDeployError
+from imbue.minds.envs.per_env_deploy import first_str_value
 from imbue.minds.errors import MindError
 
 # ``YYYYMMDDTHHMMSSZ`` -- compact ISO 8601 (RFC 3339 without separators),
@@ -185,14 +185,7 @@ def _extract_secret_names_from_rows(rows: object) -> tuple[str, ...]:
         raise ModalDeployError(f"`modal secret list --json` returned a non-list payload: {rows!r}")
     names: list[str] = []
     for row in rows:
-        name: str | None = None
-        if isinstance(row, dict):
-            row_map = cast("dict[str, object]", row)
-            candidate = row_map.get("Name")
-            if not isinstance(candidate, str):
-                candidate = row_map.get("name")
-            if isinstance(candidate, str):
-                name = candidate
+        name = first_str_value(row, ("Name", "name"))
         if name is None:
             logger.warning(
                 "`modal secret list --json` row had no usable Name/name field; skipping it in GC "

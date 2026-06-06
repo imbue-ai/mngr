@@ -13,7 +13,8 @@ def test_list_env_root_dirs_lists_minds_roots(monkeypatch: pytest.MonkeyPatch, t
     (tmp_path / ".minds").mkdir()
     (tmp_path / ".minds-dev-josh").mkdir()
     (tmp_path / ".minds-staging").mkdir()
-    (tmp_path / ".minds-backup-2024-01-01").mkdir()  # illegal env name -> excluded
+    # ".minds-backup-2024-01-01" is an illegal env name -> excluded; ".unrelated" isn't a minds root.
+    (tmp_path / ".minds-backup-2024-01-01").mkdir()
     (tmp_path / ".unrelated").mkdir()
     monkeypatch.setenv("HOME", str(tmp_path))
 

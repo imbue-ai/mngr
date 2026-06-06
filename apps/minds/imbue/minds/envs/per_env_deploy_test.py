@@ -85,10 +85,11 @@ def test_select_app_id_from_rows_raises_on_non_list_payload() -> None:
 
 
 def test_extract_container_ids_collects_ids_across_key_variants() -> None:
+    # The third row has no recognized id key -> warned + skipped, not fatal.
     rows = [
         {"Container ID": "ta-1"},
         {"container_id": "ta-2"},
-        {"unrecognized": "skip-me"},  # warned + skipped, not fatal
+        {"unrecognized": "skip-me"},
     ]
     assert _extract_container_ids_from_rows(rows) == ("ta-1", "ta-2")
 

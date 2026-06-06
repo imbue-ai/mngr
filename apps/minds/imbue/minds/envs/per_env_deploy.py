@@ -29,7 +29,6 @@ import os
 import re
 from pathlib import Path
 from typing import Final
-from typing import cast
 
 from loguru import logger
 from pydantic import AnyUrl
@@ -804,6 +803,23 @@ def _find_modal_app_id(*, app_name: str, modal_env: str, parent_cg: ConcurrencyG
     return _select_app_id_from_rows(rows, app_name=app_name)
 
 
+def first_str_value(row: object, keys: tuple[str, ...]) -> str | None:
+    """Return the first non-empty string value at any of ``keys`` in dict ``row``.
+
+    Tolerates Modal's shifting column names (callers pass every known alias)
+    and untyped JSON: ``row`` is whatever ``json.loads`` produced, so anything
+    that isn't a dict -- or a dict with no matching string value -- yields
+    ``None``. Iterating ``items()`` (rather than ``row.get(key)``) keeps the
+    type checker happy on a dict narrowed from ``object``.
+    """
+    if not isinstance(row, dict):
+        return None
+    for key, value in row.items():
+        if key in keys and isinstance(value, str) and value:
+            return value
+    return None
+
+
 def _select_app_id_from_rows(rows: object, *, app_name: str) -> str | None:
     """Find the running app id for ``app_name`` in ``modal app list --json`` rows.
 
@@ -822,16 +838,13 @@ def _select_app_id_from_rows(rows: object, *, app_name: str) -> str | None:
         if not isinstance(row, dict):
             logger.warning("`modal app list --json` returned a non-dict row; skipping it: {!r}", row)
             continue
-        row_map = cast("dict[str, object]", row)
-        name_value = row_map.get("Name") or row_map.get("name") or row_map.get("App")
-        state_raw = row_map.get("State") or row_map.get("state")
-        state_value = state_raw.lower() if isinstance(state_raw, str) else ""
+        name_value = first_str_value(row, ("Name", "name", "App"))
+        state_value = (first_str_value(row, ("State", "state")) or "").lower()
         if name_value != app_name or "stop" in state_value:
             continue
-        for id_key in ("App ID", "app_id", "AppID", "ID", "id"):
-            id_value = row_map.get(id_key)
-            if isinstance(id_value, str) and id_value:
-                return id_value
+        app_id_value = first_str_value(row, ("App ID", "app_id", "AppID", "ID", "id"))
+        if app_id_value is not None:
+            return app_id_value
         logger.warning(
             "`modal app list --json` row matched app {!r} but carried no recognized id key "
             "(Modal output shape may have shifted): {!r}",
@@ -881,12 +894,9 @@ def _extract_container_ids_from_rows(rows: object) -> tuple[str, ...]:
         if not isinstance(row, dict):
             logger.warning("`modal container list --json` returned a non-dict row; skipping it: {!r}", row)
             continue
-        row_map = cast("dict[str, object]", row)
-        for id_key in ("Container ID", "container_id", "ID", "id"):
-            value = row_map.get(id_key)
-            if isinstance(value, str) and value:
-                ids.append(value)
-                break
+        container_id = first_str_value(row, ("Container ID", "container_id", "ID", "id"))
+        if container_id is not None:
+            ids.append(container_id)
         else:
             logger.warning(
                 "`modal container list --json` row carried no recognized id key "
