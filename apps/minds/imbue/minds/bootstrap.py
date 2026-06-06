@@ -173,18 +173,14 @@ def _ensure_mngr_settings(root_name: str) -> None:
     yet (no ``config.toml`` / no profile dir) -- there's nothing to
     write to.
     """
-    mngr_host_dir = mngr_host_dir_for(root_name)
-    root_config_path = mngr_host_dir / "config.toml"
-    if not root_config_path.exists():
+    # Resolve through the same guarded helper the other readers use, rather
+    # than re-reading + re-parsing config.toml inline. ``read_active_profile_dir``
+    # (which this wraps) catches a corrupt/unreadable config.toml and degrades to
+    # None; the previous inline ``tomllib.loads`` here did not, so a corrupt
+    # config.toml raised a raw TOMLDecodeError out of the import-time bootstrap.
+    settings_path = _resolve_active_settings_path(root_name)
+    if settings_path is None:
         return
-    root_config = tomllib.loads(root_config_path.read_text())
-    profile_id = root_config.get("profile")
-    if not profile_id:
-        return
-    settings_dir = mngr_host_dir / "profiles" / profile_id
-    if not settings_dir.exists():
-        return
-    settings_path = settings_dir / "settings.toml"
 
     if settings_path.exists():
         existing = tomllib.loads(settings_path.read_text())
@@ -230,10 +226,7 @@ def _ensure_mngr_settings(root_name: str) -> None:
     recursive_block["enabled"] = False
     plugins_section["recursive"] = recursive_block
 
-    settings_dir.mkdir(parents=True, exist_ok=True)
-    tmp_path = settings_path.with_suffix(".tmp")
-    tmp_path.write_text(tomlkit.dumps(doc))
-    tmp_path.rename(settings_path)
+    _atomic_write_settings(settings_path, doc)
     logger.debug("Updated mngr settings at {} with minds-side overrides", settings_path)
     _cleanup_legacy_dynamic_hosts(root_name)
 
