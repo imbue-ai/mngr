@@ -16,7 +16,8 @@
 - Only assistant *text* blocks are streamed. A block is the content after a `●` whose marker glyph is uncolored (default terminal foreground); `●` markers that are colored (tool calls) are ignored. Reasoning/"thinking" blocks are not streamed.
 - A block spans the `●` line plus following lines indented by two spaces; blank lines continue the block; the first non-empty line that is not two-space-indented (a footer) ends it and is excluded.
 - The streamed markdown reconstructs bold/italic, headings, bullet/numbered lists, blockquotes, links (`[text](url)`), tables (box-drawing back to pipe syntax), and code blocks/inline code. Fidelity is best-effort and approximate.
-- The stream is strict-append within a message: partial constructs (half-typed link, unclosed code fence, partially-rendered table) are written as-is and never auto-closed or rewritten; later polls only append.
+- The stream is strict-append within a message: partial constructs (half-typed link, unclosed code fence) are written as-is and never auto-closed or rewritten; later polls only append.
+- Tables are a deferred-resolution exception: when content *could* be a table but there is not yet enough rendered to be sure, the watcher withholds that ambiguous region from `stream_buffer` (rather than appending raw box-drawing that would later need reinterpreting). It appends the region only once it is definitely a table (emitted as pipe-syntax markdown) or definitely not (emitted as its literal text). If the stream ends while the region is still ambiguous, it is treated as not-a-table and appended as literal text. This preserves strict-append for consumers — ambiguous content is delayed, never rewritten.
 - Each poll captures the visible pane and overlap-stitches it onto the existing buffer (longest suffix/prefix line match). If a poll finds no overlap (a chunk scrolled past unseen, e.g. stream much faster than the interval), it is treated as a new message and the body resets — accepting that earlier text may be dropped rather than rewritten.
 - The buffer holds only the latest assistant-text block; it resets when a new, non-continuing `●` text block appears. Line 1 is refreshed to the current last-complete id on every write.
 - When the turn ends (the `active` file disappears / Stop hook has fired), the watcher empties the body and refreshes line 1, leaving an idle buffer that is just the id line.
@@ -35,7 +36,8 @@
 
 - Add `streaming_snapshot_interval_seconds: float` (default `0.0`) to `ClaudeAgentConfig`, documented as "poll interval for tmux-based response streaming; `<= 0` disables it."
 - Add a self-contained watcher script under `mngr_claude/resources/` (e.g. `stream_snapshot.py`):
-  - Pure reverse-mapping functions (terminal-with-ANSI → markdown, block extraction, uncolored-`●` detection, overlap-stitch) at module top level so unit tests import them directly; runnable behavior behind `if __name__ == "__main__"`.
+  - Pure reverse-mapping functions (terminal-with-ANSI → markdown, block extraction, uncolored-`●` detection, overlap-stitch, deferred table resolution) at module top level so unit tests import them directly; runnable behavior behind `if __name__ == "__main__"`.
+  - Holds an ambiguous potential-table region in internal state (not yet appended to `stream_buffer`) until it resolves to a markdown table or to literal text; resolves to literal text if the stream ends while still ambiguous.
   - Runs its own `tmux capture-pane -e -J` (ANSI codes preserved, soft-wraps rejoined).
   - Reads the last-complete-assistant-message `uuid` from `logs/claude_transcript/events.jsonl`.
   - Writes `stream_buffer` atomically; clears it on startup; empties body on idle.
@@ -58,7 +60,7 @@
 
 ### Tests
 
-- Unit tests for the pure parser: real `tmux capture-pane -e -J` fixtures (raw terminal bytes) paired with expected markdown, covering each construct plus partial/transient states; tests for uncolored-`●` detection, block boundaries (blank lines, footers), overlap-stitch, and no-overlap reset.
+- Unit tests for the pure parser: real `tmux capture-pane -e -J` fixtures (raw terminal bytes) paired with expected markdown, covering each construct plus partial/transient states; tests for uncolored-`●` detection, block boundaries (blank lines, footers), overlap-stitch, no-overlap reset, and deferred table resolution (ambiguous → table, ambiguous → literal, and stream-ends-while-ambiguous → literal).
 - A robinhood-with-sonnet end-to-end acceptance/release test exercising the streaming flags (a live API key in `.env` is available but robinhood should work without it).
 
 ### Non-goals (recorded for scope)
