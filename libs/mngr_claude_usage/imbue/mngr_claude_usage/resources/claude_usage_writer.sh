@@ -113,8 +113,8 @@ event=$(printf '%s' "$input" | jq -c \
     type: "cost_snapshot",
     event_id: $event_id,
     timestamp: $timestamp,
-    session_id: (try .session_id // null),
-    cost: (try .cost // null),
+    session_id: (.session_id // null),
+    cost: (.cost // null),
     rate_limits: (
       (try .rate_limits // null) as $rl |
       if $rl == null then null
