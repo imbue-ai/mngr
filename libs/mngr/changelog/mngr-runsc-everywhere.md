@@ -12,3 +12,15 @@ forever-claude-template's lima create template does) reset `is_host_in_docker`,
 defaults, so the Lima provider silently ran in direct-in-VM mode instead of
 docker-in-VM mode. The merge now uses `model_fields_set` (matching
 `AgentTypeConfig` / `PluginConfig`), so untouched fields keep their base value.
+
+`mngr create --new-host` now tears down a freshly-created host on *any* failure
+up to and including the initial-message send, so a failed create never leaks a
+host (or, for non-idle-shutdown providers, its lease). The whole create flow --
+host env-var write, on_host_created hooks, post-host-create commands, locking,
+provisioning, agent start, and the initial-message delivery -- is now wrapped in
+a single continuous teardown guard, closing a gap where failures between the
+former two separate guard blocks (and the host env-var write) could leak the
+host. The `--edit-message` send, which the CLI performs after the API create
+returns, is now likewise covered. The existing
+`MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1` escape hatch still
+retains a failed host for debugging.

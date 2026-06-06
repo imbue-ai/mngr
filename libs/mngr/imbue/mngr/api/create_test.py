@@ -1,30 +1,45 @@
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 from pydantic import Field
 
+from imbue.mngr import hookimpl
 from imbue.mngr.api.create import _create_new_host
-from imbue.mngr.api.create import _destroy_new_host_on_create_failure
 from imbue.mngr.api.create import _generate_unique_host_name
 from imbue.mngr.api.create import _run_post_host_create_commands
 from imbue.mngr.api.create import _write_host_env_vars
+from imbue.mngr.api.create import create
+from imbue.mngr.api.create import destroy_new_host_on_create_failure
 from imbue.mngr.api.create import resolve_target_host
+from imbue.mngr.api.providers import _instance_cache
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.interfaces.host import AgentLabelOptions
+from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
 from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
+from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostNameStyle
+from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import TransferMode
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.plugin_testing import PLACEHOLDER_AGENT_TYPE
+from imbue.mngr.utils.testing import make_ctx_with_plugins
 
 
 def test_write_host_env_vars_writes_explicit_env_vars(
@@ -341,7 +356,7 @@ def test_destroy_new_host_on_create_failure_destroys_failed_new_host(
     """A failure inside the guard tears down the newly-created host and re-raises."""
     provider = _make_recording_provider(local_provider)
     with pytest.raises(ValueError):
-        with _destroy_new_host_on_create_failure(local_host, provider):
+        with destroy_new_host_on_create_failure(local_host, provider):
             raise ValueError("provisioning blew up")
     assert provider.destroyed_host_ids == [local_host.id]
 
@@ -352,7 +367,7 @@ def test_destroy_new_host_on_create_failure_is_noop_on_success(
 ) -> None:
     """A clean exit must not destroy the host."""
     provider = _make_recording_provider(local_provider)
-    with _destroy_new_host_on_create_failure(local_host, provider):
+    with destroy_new_host_on_create_failure(local_host, provider):
         pass
     assert provider.destroyed_host_ids == []
 
@@ -360,7 +375,7 @@ def test_destroy_new_host_on_create_failure_is_noop_on_success(
 def test_destroy_new_host_on_create_failure_does_not_destroy_existing_host(local_host: Host) -> None:
     """provider=None means the caller already owned the host; never tear it down (just re-raise)."""
     with pytest.raises(ValueError):
-        with _destroy_new_host_on_create_failure(local_host, None):
+        with destroy_new_host_on_create_failure(local_host, None):
             raise ValueError("boom")
 
 
@@ -373,6 +388,107 @@ def test_destroy_new_host_on_create_failure_retains_host_when_debug_flag_set(
     provider = _make_recording_provider(local_provider)
     monkeypatch.setenv(_RETAIN_FLAG, "1")
     with pytest.raises(ValueError):
-        with _destroy_new_host_on_create_failure(local_host, provider):
+        with destroy_new_host_on_create_failure(local_host, provider):
             raise ValueError("boom")
+    assert provider.destroyed_host_ids == []
+
+
+# =============================================================================
+# End-to-end: a --new-host create that fails at/before the initial-message send
+# must tear the new host down (single continuous guard around the whole flow),
+# unless the debug retain flag is set.
+# =============================================================================
+
+
+@contextmanager
+def _injected_provider(
+    name: ProviderInstanceName,
+    mngr_ctx: MngrContext,
+    instance: LocalProviderInstance,
+) -> Generator[None, None, None]:
+    """Temporarily inject a provider instance into the provider cache.
+
+    ``create`` resolves the new-host provider via ``get_provider_instance`` using
+    the same ``mngr_ctx``; injecting here makes it use our recording provider so
+    we can observe whether ``destroy_host`` is called on failure.
+    """
+    cache_key = (name, id(mngr_ctx))
+    _instance_cache[cache_key] = instance
+    try:
+        yield
+    finally:
+        _instance_cache.pop(cache_key, None)
+
+
+class _RaiseInOnHostCreated:
+    """Plugin that raises in on_host_created.
+
+    This fires for a --new-host create after ``create_host`` has already
+    succeeded but before the initial message is sent, simulating any failure in
+    that window.
+    """
+
+    @hookimpl
+    def on_host_created(self, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
+        raise RuntimeError("simulated failure after host create, before message send")
+
+
+def _make_create_agent_options() -> CreateAgentOptions:
+    return CreateAgentOptions(
+        name=AgentName("test-teardown-agent"),
+        agent_type=AgentTypeName(PLACEHOLDER_AGENT_TYPE),
+        command=CommandString("sleep 60"),
+        transfer_mode=TransferMode.NONE,
+        label_options=AgentLabelOptions(),
+    )
+
+
+def test_create_new_host_torn_down_when_failure_before_message_send(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_work_dir: Path,
+) -> None:
+    """A new-host create that fails after create_host but before the message send tears the host down."""
+    test_ctx = make_ctx_with_plugins(temp_mngr_ctx, [_RaiseInOnHostCreated()])
+    provider = _make_recording_provider(local_provider)
+
+    source_location = HostLocation(host=local_provider.create_host(HostName(LOCAL_HOST_NAME)), path=temp_work_dir)
+    target_host = NewHostOptions(provider=ProviderInstanceName(LOCAL_PROVIDER_NAME), name=HostName(LOCAL_HOST_NAME))
+
+    with _injected_provider(ProviderInstanceName(LOCAL_PROVIDER_NAME), test_ctx, provider):
+        with pytest.raises(RuntimeError, match="simulated failure after host create"):
+            create(
+                source_location=source_location,
+                target_host=target_host,
+                agent_options=_make_create_agent_options(),
+                mngr_ctx=test_ctx,
+            )
+
+    # The freshly-created host must have been destroyed so we never leak it.
+    assert provider.destroyed_host_ids == [provider.get_host(HostName(LOCAL_HOST_NAME)).id]
+
+
+def test_create_new_host_retained_on_failure_when_debug_flag_set(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_work_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the debug retain flag set, a failed new-host create keeps the host for inspection."""
+    monkeypatch.setenv(_RETAIN_FLAG, "1")
+    test_ctx = make_ctx_with_plugins(temp_mngr_ctx, [_RaiseInOnHostCreated()])
+    provider = _make_recording_provider(local_provider)
+
+    source_location = HostLocation(host=local_provider.create_host(HostName(LOCAL_HOST_NAME)), path=temp_work_dir)
+    target_host = NewHostOptions(provider=ProviderInstanceName(LOCAL_PROVIDER_NAME), name=HostName(LOCAL_HOST_NAME))
+
+    with _injected_provider(ProviderInstanceName(LOCAL_PROVIDER_NAME), test_ctx, provider):
+        with pytest.raises(RuntimeError, match="simulated failure after host create"):
+            create(
+                source_location=source_location,
+                target_host=target_host,
+                agent_options=_make_create_agent_options(),
+                mngr_ctx=test_ctx,
+            )
+
     assert provider.destroyed_host_ids == []
