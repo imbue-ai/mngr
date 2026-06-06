@@ -199,10 +199,14 @@ class ClaudeSDKClient(MutableModel):
         if not self.is_connected:
             return
         if self.session is not None:
-            await to_thread.run_sync(stop_session, self.session)
-            if self.session.hook_bridge is not None:
-                await to_thread.run_sync(self.session.hook_bridge.stop)
-                self.session.hook_bridge = None
+            # Stop the bridge even if stopping the agent raises, so its HTTP server / portal thread /
+            # temp settings dir are never leaked on a teardown failure.
+            try:
+                await to_thread.run_sync(stop_session, self.session)
+            finally:
+                if self.session.hook_bridge is not None:
+                    await to_thread.run_sync(self.session.hook_bridge.stop)
+                    self.session.hook_bridge = None
         self.is_connected = False
 
     async def query(self, prompt: PromptInput, session_id: str | None = None) -> None:
