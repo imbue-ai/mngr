@@ -410,8 +410,8 @@ def start_socat(cert: Path) -> subprocess.Popen:
 
 
 def stop_socat() -> None:
-    # The launched socat ran under sudo so kill via sudo pkill.
-    subprocess.run(["sudo", "pkill", "-f", "OPENSSL-LISTEN:443"], check=False)
+    # The launched socat ran under sudo so kill via sudo.
+    _kill_pgrep("OPENSSL-LISTEN:443", "stale socat", sudo=True)
 
 
 def latchkey_shim() -> Path:
@@ -531,55 +531,18 @@ async def find_chat_window(ctx: BrowserContext) -> Page | None:
 # --- main flow ---
 
 
-def _kill_named_processes(pgrep_pattern: str, label: str, *, argv0_must_start_with: str | None = None) -> None:
+def _kill_pgrep(pgrep_pattern: str, label: str, *, sudo: bool = False) -> None:
     """Kill processes whose argv matches ``pgrep_pattern``, by exact PID.
 
     Per CLAUDE.md, ``pkill -f`` / ``killall`` with broad patterns can hit
     unrelated processes (including this Claude Code session). Resolve PIDs
     with ``pgrep -f`` first, log each one, then ``kill`` by exact PID.
-
-    ``argv0_must_start_with`` is a second-pass guard against false positives.
-    pgrep -f matches anywhere in argv -- a shell command line containing the
-    literal string ``/Applications/Minds.app/Contents/MacOS/Minds`` (e.g.
-    this very docstring in a script being inspected) would match without it.
-    Resolve each candidate's argv via ps and verify argv[0] starts with the
-    expected absolute path before killing.
+    ``sudo=True`` runs both pgrep and kill under sudo for root-owned processes.
     """
+    prefix = ["sudo"] if sudo else []
     try:
         out = subprocess.run(
-            ["pgrep", "-lf", pgrep_pattern],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except FileNotFoundError:
-        return
-    for line in out.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        pid_str, _, argv = line.partition(" ")
-        if not pid_str.isdigit():
-            continue
-        if argv0_must_start_with is not None:
-            ps_out = subprocess.run(
-                ["ps", "-p", pid_str, "-o", "command="],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            real_argv = ps_out.stdout.strip()
-            if not real_argv.startswith(argv0_must_start_with):
-                continue
-        logger.info("[runner-sweep] killing {} pid={} ({})", label, pid_str, argv)
-        subprocess.run(["kill", pid_str], check=False)
-
-
-def _kill_sudo_named_processes(pgrep_pattern: str, label: str) -> None:
-    """Same as ``_kill_named_processes`` but for sudo-owned processes."""
-    try:
-        out = subprocess.run(
-            ["sudo", "pgrep", "-lf", pgrep_pattern],
+            [*prefix, "pgrep", "-lf", pgrep_pattern],
             capture_output=True,
             text=True,
             check=False,
@@ -594,7 +557,7 @@ def _kill_sudo_named_processes(pgrep_pattern: str, label: str) -> None:
         if not pid_str.isdigit():
             continue
         logger.info("[runner-sweep] killing {} pid={} ({})", label, pid_str, argv)
-        subprocess.run(["sudo", "kill", pid_str], check=False)
+        subprocess.run([*prefix, "kill", pid_str], check=False)
 
 
 def pre_run_sweep() -> None:
@@ -606,29 +569,17 @@ def pre_run_sweep() -> None:
     The sweep is idempotent and safe to call when there's nothing to clean.
     """
     logger.info("=== pre-run runner sweep ===")
-    # 1. Drop any stale slack-mock /etc/hosts line from a prior crashed run.
+    # mac-runner-reset.sh already kills every /Applications/Minds.app/...
+    # process, wipes ~/.minds, and removes the .app entirely BEFORE we run.
+    # So orphan mngr forward / mngr event / Minds.app processes can't exist
+    # by the time we get here. The state below is what mac-runner-reset.sh
+    # does NOT cover: host-side mocking residue and a stray caffeinate.
     revert_etc_hosts()
-    # 2. Kill stale socat that was holding :443 from a prior run.
-    _kill_sudo_named_processes("OPENSSL-LISTEN:443", "stale socat")
-    # 3. Kill stale Minds-spawned subprocesses (mngr forward / mngr event) BEFORE
-    # the Electron parent, so they exit cleanly rather than being orphaned. Then
-    # Minds.app itself -- prior runs that didn't reach the finally block leave
-    # backend on :8421 and CDP holding a port.
-    _kill_named_processes("mngr event", "stale mngr event")
-    _kill_named_processes("mngr forward", "stale mngr forward")
-    _kill_named_processes(
-        "/Applications/Minds.app/Contents/MacOS/Minds",
-        "stale Minds.app",
-        argv0_must_start_with="/Applications/Minds.app/Contents/MacOS/Minds",
-    )
-    # 4. Stale caffeinate -- this script always spawns its own, multiple
-    # surviving instances are wasteful.
-    _kill_named_processes("caffeinate -dimsu", "stale caffeinate")
-    # 5. Wipe per-run /tmp state. The cert + log files in /tmp/slack-mock/
-    # are regenerated by ensure_cert() / start_socat() / start_mock(); the
-    # screenshot dir is recreated by the first snap_page(). Leaving them
-    # behind means a later run that crashes early ships stale screenshots
-    # as its artifact.
+    _kill_pgrep("OPENSSL-LISTEN:443", "stale socat", sudo=True)
+    _kill_pgrep("caffeinate -dimsu", "stale caffeinate")
+    # Per-run /tmp state. cert + log files in /tmp/slack-mock/ are regenerated
+    # by ensure_cert() / start_socat() / start_mock(); the screenshot dir is
+    # recreated by the first snap_page().
     for stale in (
         SLACK_MOCK_STATE,
         SCREENSHOT_DIR,
@@ -639,7 +590,9 @@ def pre_run_sweep() -> None:
         elif stale.exists():
             with contextlib.suppress(OSError):
                 stale.unlink()
-    # 6. Clear any latchkey slack creds left over from a prior crashed run.
+    # Stale latchkey slack creds. mac-runner-reset.sh wiped ~/.minds so the
+    # latchkey dir is also gone -- this is belt-and-braces for the dev case
+    # where someone runs the script outside CI without resetting first.
     with contextlib.suppress(Exception):
         latchkey_clear_slack()
 
