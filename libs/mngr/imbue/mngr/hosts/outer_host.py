@@ -354,8 +354,9 @@ class OuterHost(OuterHostInterface):
         if client is not None:
             try:
                 client.close()
-            except (OSError, SSHException):
-                pass
+            except (OSError, SSHException) as e:
+                # Best-effort close; log so systematic close failures are visible.
+                logger.debug("Failed to close paramiko client for {}: {}", self.id, e)
 
     def disconnect(self) -> None:
         """Disconnect the pyinfra host if connected."""
