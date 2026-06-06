@@ -383,14 +383,15 @@ def exec_command_on_outer_hosts(
 
         with provider.outer_host_for(first.host_id) as outer:
             if outer is None:
-                # outer_host_id_for said this provider has an outer but the
-                # actual open returned None -- treat as a runtime failure.
-                err_msg = f"provider returned an outer id but outer_host_for yielded None for outer {outer_id}"
-                for match in group:
-                    is_should_abort = _record_failure(result, match.agent_name, err_msg, on_error, error_behavior)
-                    if is_should_abort:
-                        return result
-                continue
+                # This group is in by_outer only because outer_host_id_for(host_id) returned a
+                # non-None id, so outer_host_for(host_id) yielding None means the provider's two
+                # methods contractually disagree -- a provider-implementation bug, not a transient
+                # runtime condition an agent can be "failed" for. Raise rather than silently
+                # degrading these agents into failed_agents with an opaque message.
+                raise MngrError(
+                    f"Provider {first.provider_name} returned outer id {outer_id} from outer_host_id_for "
+                    f"but outer_host_for({first.host_id}) yielded None"
+                )
 
             # Default cwd = SSH user's home on the outer (None means the connector's default).
             effective_cwd = Path(cwd) if cwd is not None else None
