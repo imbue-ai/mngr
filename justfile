@@ -311,6 +311,11 @@ deploy *args:
 #       running minds-start).
 #   MINDS_WORKSPACE_BRANCH  = the FCT worktree's current branch.
 #   MINDS_WORKSPACE_NAME    = "mindtest".
+# Also sets MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1, the explicit opt-in that
+# tells the desktop client to honor those MINDS_WORKSPACE_* vars. Without it
+# (i.e. a normal `minds run`) the form ignores any stray MINDS_WORKSPACE_* in
+# the shell. The opt-in is what makes dev iteration work on ANY tier --
+# including staging / production -- instead of only on per-developer dev envs.
 #
 # Always re-syncs the live mngr working tree into the FCT worktree's
 # vendor/mngr/ first, so the very first Create after starting the app
@@ -402,6 +407,9 @@ minds-start agent_name="mindtest" branch="":
     # proportionate fix. `unset` of an already-unset var is a no-op.
     unset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL
     export MINDS_WORKSPACE_GIT_URL="$fct_wt"
+    # Explicit opt-in so the desktop client honors the MINDS_WORKSPACE_* vars
+    # on any tier (the form ignores them otherwise; see _operator_workspace_default).
+    export MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1
     if [ -n "{{branch}}" ]; then
         export MINDS_WORKSPACE_BRANCH="{{branch}}"
     else

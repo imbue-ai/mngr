@@ -254,14 +254,17 @@ def _build_electron_env(workspace_git_url: Path, workspace_name: str) -> dict[st
     """Return the env vars the Electron child process should inherit.
 
     Mirrors ``just minds-start``: passes the FCT path + agent name through
-    the ``MINDS_WORKSPACE_*`` prefill vars (honored only in dev tiers --
-    see ``_dev_only_workspace_default`` in templates.py), and scrubs any
+    the ``MINDS_WORKSPACE_*`` prefill vars (honored only when the explicit
+    opt-in ``MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1`` is also set -- see
+    ``_operator_workspace_default`` in templates.py), and scrubs any
     ANTHROPIC creds the operator's shell might have exported so they
     don't silently leak into every workspace we create.
     """
     env = dict(os.environ)
     env["MINDS_WORKSPACE_GIT_URL"] = str(workspace_git_url)
     env["MINDS_WORKSPACE_NAME"] = workspace_name
+    # Opt into the local-worktree create-form defaults (see just minds-start).
+    env["MINDS_USE_LOCAL_WORKSPACE_DEFAULTS"] = "1"
     # Pin MNGR_ROOT_NAME back to "mngr" for the Electron child so the
     # spawned `mngr create` subprocess finds FCT's .mngr/settings.toml
     # (which defines the `main` + `docker` create templates). The minds
@@ -443,10 +446,10 @@ def _backend_origin_from_page(page: Page) -> str:
 def _ensure_field_value(page: Page, selector: str, expected_value: str) -> None:
     """Type ``expected_value`` into the form field if it isn't already there.
 
-    Handles both the prefilled-via-env-var case (dev tiers) and the
-    blank-form case (shared tiers like ``minds-staging`` where
-    ``_dev_only_workspace_default`` deliberately ignores the
-    ``MINDS_WORKSPACE_*`` env vars).
+    Handles both the prefilled-via-env-var case (when the opt-in
+    ``MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1`` is set) and the blank-form case
+    (a normal launch where ``_operator_workspace_default`` falls back to the
+    hardcoded defaults).
     """
     current_value = page.input_value(selector)
     if current_value == expected_value:
