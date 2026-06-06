@@ -30,6 +30,7 @@ from pydantic import Field
 from pydantic import SkipValidation
 
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.errors import MngrError
 from imbue.mngr_robinhood._agent_sdk.driver import LiveSession
 from imbue.mngr_robinhood._agent_sdk.driver import deliver_turn
 from imbue.mngr_robinhood._agent_sdk.driver import drain_turn
@@ -50,12 +51,19 @@ _DRAIN_SENTINEL: Final[object] = object()
 PromptInput = str | AsyncIterator[dict[str, Any]]
 
 
-def _drain_worker(session: LiveSession, message_queue: "queue.Queue[Any]") -> None:
-    """Run the (blocking) turn drain in a background thread, pushing each message onto the queue."""
+def _drain_worker(session: LiveSession, stream: "_TurnMessageStream") -> None:
+    """Run the (blocking) turn drain in a background thread, pushing each message onto the queue.
+
+    Any exception raised by the drain is recorded on ``stream`` (and re-raised to the consumer when
+    it reaches the sentinel) rather than being swallowed by the thread's default excepthook, so a
+    drain failure surfaces to the SDK caller instead of looking like a clean end-of-turn.
+    """
     try:
-        drain_turn(session, message_queue.put)
+        drain_turn(session, stream.message_queue.put)
+    except MngrError as exc:
+        stream.drain_error = exc
     finally:
-        message_queue.put(_DRAIN_SENTINEL)
+        stream.message_queue.put(_DRAIN_SENTINEL)
 
 
 class _TurnMessageStream(MutableModel):
@@ -70,7 +78,12 @@ class _TurnMessageStream(MutableModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     message_queue: SkipValidation["queue.Queue[Any]"] = Field(description="Queue the drain thread pushes onto")
-    worker_thread: SkipValidation[Thread] = Field(description="Background thread running the turn drain")
+    worker_thread: SkipValidation[Thread | None] = Field(
+        default=None, description="Background thread running the turn drain (set once started)"
+    )
+    drain_error: SkipValidation["MngrError | None"] = Field(
+        default=None, description="Exception raised by the drain thread, re-raised to the consumer at end-of-turn"
+    )
 
     def __aiter__(self) -> "_TurnMessageStream":
         return self
@@ -78,6 +91,8 @@ class _TurnMessageStream(MutableModel):
     async def __anext__(self) -> Message:
         item = await to_thread.run_sync(self.message_queue.get)
         if item is _DRAIN_SENTINEL:
+            if self.drain_error is not None:
+                raise self.drain_error
             raise StopAsyncIteration
         return item
 
@@ -85,10 +100,9 @@ class _TurnMessageStream(MutableModel):
 def _start_turn_message_stream(session: LiveSession) -> _TurnMessageStream:
     """Start the background drain thread for one turn and return its async-iterable message stream."""
     message_queue: queue.Queue[Any] = queue.Queue()
-    worker_thread = Thread(
-        target=_drain_worker, args=(session, message_queue), name="mngr-sdk-turn-drain", daemon=True
-    )
-    stream = _TurnMessageStream(message_queue=message_queue, worker_thread=worker_thread)
+    stream = _TurnMessageStream(message_queue=message_queue)
+    worker_thread = Thread(target=_drain_worker, args=(session, stream), name="mngr-sdk-turn-drain", daemon=True)
+    stream.worker_thread = worker_thread
     worker_thread.start()
     return stream
 
