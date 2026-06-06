@@ -155,13 +155,31 @@ def test_stitch_markerless_does_not_start_empty_body() -> None:
     assert state.body_lines == []
 
 
-def test_stitch_ignores_stale_shorter_prefix_snapshot() -> None:
-    # A transient shorter snapshot that is a prefix of the accumulated body must
-    # not shrink the body (which would cause downstream consumers to re-emit).
+def test_stitch_markerless_ignores_stale_shorter_snapshot() -> None:
+    # A transient shorter marker-less snapshot must not shrink the body (an
+    # alignment that would shorten the accumulated body is rejected).
     state = stream_snapshot.StreamBufferState()
     state._prose_lines = ["a", "b", "c", "d"]
-    state._merge_prose(["a", "b"], has_marker=True)
+    state._merge_prose(["a", "b"], has_marker=False)
     assert state.body_lines == ["a", "b", "c", "d"]
+
+
+def test_stitch_marker_anchored_takes_full_region() -> None:
+    # A marker-anchored region is the full current message; it replaces the body.
+    state = stream_snapshot.StreamBufferState()
+    state._prose_lines = ["a", "b"]
+    state._merge_prose(["a", "b", "c", "d"], has_marker=True)
+    assert state.body_lines == ["a", "b", "c", "d"]
+
+
+def test_stitch_markerless_tolerates_volatile_last_row() -> None:
+    # The body's last row is volatile (Claude re-wraps the streaming row). A
+    # marker-less region re-includes a changed version of it plus new rows;
+    # alignment must drop the volatile row and continue rather than freeze.
+    state = stream_snapshot.StreamBufferState()
+    state._prose_lines = ["L1", "L2", "L3", "L4", "L5-old"]
+    state._merge_prose(["L3", "L4", "L5-new", "L6"], has_marker=False)
+    assert state.body_lines == ["L1", "L2", "L3", "L4", "L5-new", "L6"]
 
 
 def test_table_render_is_monotonic_as_rows_arrive() -> None:

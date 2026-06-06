@@ -50,6 +50,12 @@ _BLOCKQUOTE_BAR: str = "▎"
 # 256-color foreground code Claude uses for inline code spans.
 _INLINE_CODE_COLOR: int = 153
 
+# When stitching a marker-less (scrolled) region onto the accumulated body, the
+# body's last few rows are volatile because Claude re-wraps the currently-streaming
+# row. Tolerate dropping up to this many trailing body rows when searching for the
+# alignment between the body and the new region.
+_MAX_VOLATILE_TAIL_LINES: int = 5
+
 # Basic-color SGR foreground codes that indicate syntax-highlighted code-block
 # content. 94 (bright blue) is excluded because Claude uses it for links, not
 # code.
@@ -617,11 +623,6 @@ def compute_overlap(existing: list[str], incoming: list[str]) -> int:
     return 0
 
 
-def _is_prefix(candidate: list[str], whole: list[str]) -> bool:
-    """True if ``candidate`` is a (non-strict) prefix of ``whole``."""
-    return len(candidate) <= len(whole) and whole[: len(candidate)] == candidate
-
-
 class StreamBufferState:
     """Accumulates the strict-append buffer body across successive snapshots.
 
@@ -675,25 +676,37 @@ class StreamBufferState:
     def _merge_prose(self, incoming: list[str], has_marker: bool) -> None:
         if not incoming:
             return
-        if not self._prose_lines:
-            # Only start accumulating from a marker-anchored region; a marker-less
-            # region with nothing to overlap against has no reliable anchor.
-            if has_marker:
-                self._prose_lines = list(incoming)
-            return
-        overlap = compute_overlap(self._prose_lines, incoming)
-        if overlap > 0:
-            self._prose_lines.extend(incoming[overlap:])
-            return
-        # No overlap. A stale/shorter snapshot that is a prefix of what we already
-        # have is ignored (keep the longer accumulated prose).
-        if _is_prefix(incoming, self._prose_lines):
-            return
-        # A marker-anchored region with no overlap is a genuinely new message; a
-        # marker-less region with no overlap is lost continuity (or unrelated
-        # content) and is ignored rather than dropping/replacing the body.
+        # A marker-anchored region starts at the message's first line, so it IS
+        # the full current message: take it directly. (Claude's TUI re-wraps only
+        # the last, still-streaming row, so earlier rows are stable; the rendered
+        # message therefore grows monotonically and the consumer holds back the
+        # volatile last line.)
         if has_marker:
             self._prose_lines = list(incoming)
+            return
+        # Marker-less region: only the scrolled tail is visible. Align it onto the
+        # accumulated body and replace from the alignment point. The body's last
+        # few rows are volatile (the currently-streaming row re-wraps), so a strict
+        # suffix==prefix overlap can fail; tolerate dropping a few volatile trailing
+        # body rows when searching for the alignment (smallest drop first).
+        if not self._prose_lines:
+            return  # no anchor to start a marker-less region from
+        for drop in range(0, _MAX_VOLATILE_TAIL_LINES + 1):
+            kept = self._prose_lines[: len(self._prose_lines) - drop]
+            if not kept:
+                break
+            overlap = compute_overlap(kept, incoming)
+            if overlap == 0:
+                continue
+            candidate = kept[: len(kept) - overlap] + list(incoming)
+            # Only accept an alignment that continues the message forward; a
+            # candidate shorter than the current body is a stale/partial snapshot
+            # mis-aligning, so keep what we have rather than dropping content.
+            if len(candidate) >= len(self._prose_lines):
+                self._prose_lines = candidate
+            return
+        # No alignment found: lost continuity (scrolled too fast) or unrelated
+        # content. Keep the accumulated body rather than dropping or replacing it.
 
 
 def format_buffer(last_complete_id: str, body_lines: list[str]) -> str:

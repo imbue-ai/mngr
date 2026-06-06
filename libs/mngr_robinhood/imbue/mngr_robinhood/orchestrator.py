@@ -263,8 +263,26 @@ def compute_stream_delta(buffer_content: str, emitted_body: str, is_flush: bool)
     # A stale, shorter snapshot that the emitted text already covers: keep going.
     if emitted_body.startswith(visible):
         return "", emitted_body
-    # Otherwise this is a new message: emit it whole.
-    return visible, visible
+    # Divergence: the body is neither an extension nor a prefix of what we've
+    # emitted. This happens when the rendered text shifts slightly (e.g. Claude
+    # collapses the blank line around a horizontal rule as a paragraph streams in)
+    # and -- across turns -- when a new message begins. Emit only the part of the
+    # body past the longest common prefix with what we already emitted, never
+    # re-emitting the common prefix (plain-text output cannot be unprinted, so
+    # re-emitting would duplicate everything from the divergence point back to the
+    # start). At worst a small amount of already-printed text is left stale.
+    common = _common_prefix_length(emitted_body, visible)
+    return visible[common:], visible
+
+
+@pure
+def _common_prefix_length(first: str, second: str) -> int:
+    """Return the length of the longest common prefix of two strings."""
+    limit = min(len(first), len(second))
+    index = 0
+    while index < limit and first[index] == second[index]:
+        index += 1
+    return index
 
 
 @pure

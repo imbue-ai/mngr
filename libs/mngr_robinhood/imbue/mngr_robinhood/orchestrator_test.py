@@ -59,11 +59,23 @@ def test_compute_stream_delta_flush_emits_final_line() -> None:
     assert emitted == "line one\nline two"
 
 
-def test_compute_stream_delta_new_message_resets() -> None:
-    # A non-prefix body means a new message: emit the whole new (complete) body.
-    delta, emitted = compute_stream_delta("uuid-2\nA brand new reply\n", "An old reply\n", is_flush=False)
-    assert delta == "A brand new reply\n"
-    assert emitted == "A brand new reply\n"
+def test_compute_stream_delta_new_message_emits_after_common_prefix() -> None:
+    # A new message sharing no prefix is emitted whole.
+    delta, emitted = compute_stream_delta("uuid-2\nBrand new reply\n", "Old reply\n", is_flush=False)
+    assert delta == "Brand new reply\n"
+    assert emitted == "Brand new reply\n"
+
+
+def test_compute_stream_delta_divergence_does_not_reemit_common_prefix() -> None:
+    # The blank line after a horizontal rule collapses as the first paragraph
+    # streams in, so the body diverges from what was emitted. Only the text past
+    # the common prefix is emitted -- the title/rule are not re-printed.
+    emitted = "Title\n\n---\n\n"
+    delta, new_emitted = compute_stream_delta(
+        "id\nTitle\n\n---\nFor years he kept the light.\nmore", emitted, is_flush=False
+    )
+    assert delta == "For years he kept the light.\n"
+    assert new_emitted == "Title\n\n---\nFor years he kept the light.\n"
 
 
 def test_compute_stream_delta_empty_body_after_idle() -> None:
