@@ -395,10 +395,15 @@ def _read_asciinema_pids(test_output_dir: Path) -> list[int]:
     """Read all asciinema PIDs from .pid files in the given directory."""
     pids: list[int] = []
     for pid_file in test_output_dir.glob("*.pid"):
+        # Best-effort during teardown: a pid file can be empty/partial (the
+        # connect script writes it non-atomically via `echo $! > ...`, so we may
+        # read it mid-write -> ValueError) or unreadable (OSError). Skipping such
+        # a file means we cannot SIGINT that recorder, so log it rather than
+        # silently leaking the process.
         try:
             pids.append(int(pid_file.read_text().strip()))
-        except (ValueError, OSError):
-            pass
+        except (ValueError, OSError) as exc:
+            logger.debug("Skipping unreadable asciinema pid file {}: {!r}", pid_file, exc)
     return pids
 
 
