@@ -16,9 +16,8 @@ def test_merge_with_overrides_only_set_fields() -> None:
     override = ForwardPluginConfig(port=ForwardPort(9000))
     merged = base.merge_with(override)
     assert merged.port == ForwardPort(9000)
-    # agent_include in override is None; the base value should win.
-    # NOTE: pydantic resets None fields to defaults; the test demonstrates the behaviour.
-    assert merged.agent_include in (None, "has(agent.labels.workspace)")
+    # agent_include is not in the override's model_fields_set, so the base value wins.
+    assert merged.agent_include == "has(agent.labels.workspace)"
 
 
 def test_merge_with_explicit_disable() -> None:
@@ -26,3 +25,14 @@ def test_merge_with_explicit_disable() -> None:
     override = ForwardPluginConfig(enabled=False)
     merged = base.merge_with(override)
     assert merged.enabled is False
+
+
+def test_merge_with_does_not_re_enable_disabled_base() -> None:
+    # A base layer that disables the plugin must stay disabled when merged with
+    # an override that did not explicitly set ``enabled`` (regression: a
+    # hand-written ``value is not None`` merge would resurrect it to True).
+    base = ForwardPluginConfig(enabled=False)
+    override = ForwardPluginConfig(port=ForwardPort(9000))
+    merged = base.merge_with(override)
+    assert merged.enabled is False
+    assert merged.port == ForwardPort(9000)
