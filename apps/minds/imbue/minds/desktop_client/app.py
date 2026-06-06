@@ -1119,38 +1119,33 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
     git_url = str(body.get("git_url", "")).strip()
     host_name = str(body.get("host_name", "")).strip()
     branch = str(body.get("branch", "")).strip()
-    try:
-        launch_mode = LaunchMode(str(body.get("launch_mode", LaunchMode.DOCKER.value)))
-    except ValueError:
+    # Parse the <select>-backed enums the same way as the form handler. The
+    # label is the JSON field name (not a human phrase) so the API error stays
+    # "Invalid launch_mode: ..."; the default member is discarded here because,
+    # unlike the form, this handler rejects rather than re-renders.
+    launch_mode, launch_mode_error = _parse_form_enum(
+        LaunchMode, str(body.get("launch_mode", LaunchMode.DOCKER.value)), LaunchMode.DOCKER, "launch_mode"
+    )
+    ai_provider, ai_provider_error = _parse_form_enum(
+        AIProvider, str(body.get("ai_provider", AIProvider.SUBSCRIPTION.value)), AIProvider.SUBSCRIPTION, "ai_provider"
+    )
+    backup_provider, backup_provider_error = _parse_form_enum(
+        BackupProvider,
+        str(body.get("backup_provider", BackupProvider.CONFIGURE_LATER.value)),
+        BackupProvider.CONFIGURE_LATER,
+        "backup_provider",
+    )
+    backup_encryption_method, backup_encryption_method_error = _parse_form_enum(
+        BackupEncryptionMethod,
+        str(body.get("backup_encryption_method", BackupEncryptionMethod.NO_PASSWORD.value)),
+        BackupEncryptionMethod.NO_PASSWORD,
+        "backup_encryption_method",
+    )
+    enum_error = launch_mode_error or ai_provider_error or backup_provider_error or backup_encryption_method_error
+    if enum_error is not None:
         return Response(
             status_code=400,
-            content='{"error": "Invalid launch_mode"}',
-            media_type="application/json",
-        )
-    try:
-        ai_provider = AIProvider(str(body.get("ai_provider", AIProvider.SUBSCRIPTION.value)))
-    except ValueError:
-        return Response(
-            status_code=400,
-            content='{"error": "Invalid ai_provider"}',
-            media_type="application/json",
-        )
-    try:
-        backup_provider = BackupProvider(str(body.get("backup_provider", BackupProvider.CONFIGURE_LATER.value)))
-    except ValueError:
-        return Response(
-            status_code=400,
-            content='{"error": "Invalid backup_provider"}',
-            media_type="application/json",
-        )
-    try:
-        backup_encryption_method = BackupEncryptionMethod(
-            str(body.get("backup_encryption_method", BackupEncryptionMethod.NO_PASSWORD.value))
-        )
-    except ValueError:
-        return Response(
-            status_code=400,
-            content='{"error": "Invalid backup_encryption_method"}',
+            content=json.dumps({"error": enum_error}),
             media_type="application/json",
         )
     backup_master_password = str(body.get("backup_master_password", ""))
