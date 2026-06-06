@@ -116,7 +116,11 @@ def _build_toast_widgets(
     Returns (frame, content) where frame is the outermost container and
     content holds the text labels (used for click binding).
     """
-    urgency_color = _URGENCY_COLOR_BY_LEVEL.get(urgency, "#eab308")
+    # Direct subscript (not .get with a default): the map is exhaustive over
+    # NotificationUrgency, so a missing key means the enum grew without the map
+    # being extended -- surface that loudly via KeyError rather than silently
+    # rendering a new level with a stale fallback color.
+    urgency_color = _URGENCY_COLOR_BY_LEVEL[urgency]
 
     frame = tk.Frame(root, bg="#1e293b", padx=12, pady=8)
     frame.pack(fill=tk.BOTH, expand=True)
