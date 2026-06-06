@@ -40,6 +40,19 @@ STAGING_ENV_NAME: Final[str] = "staging"
 DEV_TIER: Final[str] = "dev"
 CI_TIER: Final[str] = "ci"
 
+# Vault keys for the per-tier OVH application credentials (stored under
+# ``<vault_prefix>/ovh``). The AK/AS/CK triple is required; the endpoint is
+# optional (the provider config defaults it to ``ovh-us``). Lives here -- not in
+# env.py or pool.py -- so ``minds env`` (deploy credential load) and ``minds
+# pool`` (tier-scoped OVH read) share one definition without an
+# env.py -> pool.py back-reference.
+OVH_REQUIRED_ENV_VARS: Final[tuple[str, ...]] = (
+    "OVH_APPLICATION_KEY",
+    "OVH_APPLICATION_SECRET",
+    "OVH_CONSUMER_KEY",
+)
+OVH_OPTIONAL_ENV_VARS: Final[tuple[str, ...]] = ("OVH_ENDPOINT",)
+
 
 def tier_for_env_name(env_name: str) -> str:
     """Hard-coded env-name -> tier mapping.
