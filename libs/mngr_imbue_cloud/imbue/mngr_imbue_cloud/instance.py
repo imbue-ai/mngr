@@ -1119,9 +1119,9 @@ class ImbueCloudProvider(BaseProviderInstance):
         for entry in leased:
             if entry.host_id == str(host.id):
                 attrs = entry.attributes
-                # Accept int OR float for cpus to match _build_host_details_from_raw
-                # (line ~888): a lease whose cpus came back as a JSON float (e.g.
-                # 4.0) must not silently fall through to the default 1.
+                # Accept int OR float for cpus to match the same coercion in
+                # _build_host_details_from_raw: a lease whose cpus came back as a
+                # JSON float (e.g. 4.0) must not silently fall through to default 1.
                 cpus = int(attrs.get("cpus", 1)) if isinstance(attrs.get("cpus"), (int, float)) else 1
                 memory = (
                     float(attrs.get("memory_gb", 1.0)) if isinstance(attrs.get("memory_gb"), (int, float)) else 1.0
