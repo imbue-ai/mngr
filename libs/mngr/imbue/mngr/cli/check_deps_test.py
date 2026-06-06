@@ -4,10 +4,13 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.mngr.cli import check_deps as check_deps_mod
+from imbue.mngr.cli.check_deps import DependencyScope
 from imbue.mngr.cli.check_deps import _print_status_table
 from imbue.mngr.cli.check_deps import _prompt_install_choice
 from imbue.mngr.cli.check_deps import _report_post_install_status
 from imbue.mngr.cli.check_deps import _run_installation
+from imbue.mngr.cli.check_deps import _scope_missing
+from imbue.mngr.cli.check_deps import _should_fail
 from imbue.mngr.cli.check_deps import check_deps
 from imbue.mngr.utils.deps import ALL_DEPS
 from imbue.mngr.utils.deps import DependencyCategory
@@ -16,14 +19,6 @@ from imbue.mngr.utils.deps import OsName
 from imbue.mngr.utils.deps import SystemDependency
 from imbue.mngr.utils.deps import describe_install_commands
 from imbue.mngr.utils.deps import detect_os
-
-_EXISTING_DEP = SystemDependency(
-    binary="python3",
-    purpose="testing (exists on PATH)",
-    macos_hint="n/a",
-    linux_hint="n/a",
-    category=DependencyCategory.CORE,
-)
 
 _TEST_DEPS: tuple[SystemDependency, ...] = (
     SystemDependency(
@@ -83,15 +78,21 @@ def test_check_deps_no_flags(cli_runner: CliRunner) -> None:
     assert "System dependencies" in result.output
 
 
-def test_check_deps_core_flag(cli_runner: CliRunner) -> None:
-    """Running 'mngr dependencies --core' runs the core check/install flow."""
-    result = cli_runner.invoke(check_deps, ["--core"])
+def test_check_deps_scope_core_flag(cli_runner: CliRunner) -> None:
+    """Running 'mngr dependencies --scope core' runs the check flow scoped to core deps."""
+    result = cli_runner.invoke(check_deps, ["--scope", "core"])
     assert "System dependencies" in result.output
 
 
-def test_check_deps_interactive_flag(cli_runner: CliRunner) -> None:
-    """Running 'mngr dependencies -i' runs the interactive flow (skipped without tty)."""
-    result = cli_runner.invoke(check_deps, ["-i"])
+def test_check_deps_install_interactive_flag(cli_runner: CliRunner) -> None:
+    """Running 'mngr dependencies --install interactive' runs the interactive flow (skipped without tty)."""
+    result = cli_runner.invoke(check_deps, ["--install", "interactive"])
+    assert "System dependencies" in result.output
+
+
+def test_check_deps_scope_and_install_are_independent(cli_runner: CliRunner) -> None:
+    """--scope and --install can be combined freely (they are orthogonal)."""
+    result = cli_runner.invoke(check_deps, ["--scope", "core", "--install", "auto"])
     assert "System dependencies" in result.output
 
 
@@ -126,59 +127,74 @@ def test_run_installation_with_empty_list_and_no_bash() -> None:
     assert failed == []
 
 
-def test_report_post_install_status_all_present() -> None:
-    """_report_post_install_status returns True when all core deps are present and bash is ok."""
-    result = _report_post_install_status(
-        failed=[],
-        need_bash=False,
-        os_name=OsName.LINUX,
-        all_deps=(_EXISTING_DEP,),
-        bash_ok_now=True,
-    )
-    assert result is True
-
-
-def test_report_post_install_status_with_failed_deps() -> None:
-    """_report_post_install_status reports failed deps and returns False when core deps are missing."""
-    result = _report_post_install_status(
+def test_report_post_install_status_reports_failed_and_still_missing(capsys: pytest.CaptureFixture[str]) -> None:
+    """_report_post_install_status prints the failed and still-missing deps."""
+    _report_post_install_status(
         failed=[_MISSING_CORE],
-        need_bash=False,
+        still_missing=[_MISSING_CORE, _MISSING_OPT],
         os_name=OsName.LINUX,
-        all_deps=(_MISSING_CORE,),
+        tried_bash=False,
         bash_ok_now=True,
     )
-    assert result is False
+    out = capsys.readouterr().out
+    assert "Failed to install: no-such-core-xyz" in out
+    assert "Still missing:" in out
+    assert "no-such-core-xyz" in out
+    assert "no-such-opt-xyz" in out
 
 
-def test_report_post_install_status_still_missing_optional_is_ok() -> None:
-    """_report_post_install_status returns True when only optional deps are still missing."""
-    result = _report_post_install_status(
+def test_report_post_install_status_warns_when_bash_still_old(capsys: pytest.CaptureFixture[str]) -> None:
+    """_report_post_install_status warns when bash is still old after a bash install attempt on macOS."""
+    _report_post_install_status(
         failed=[],
-        need_bash=False,
-        os_name=OsName.LINUX,
-        all_deps=(_EXISTING_DEP, _MISSING_OPT),
-        bash_ok_now=True,
-    )
-    assert result is True
-
-
-def test_report_post_install_status_bash_still_old() -> None:
-    """_report_post_install_status returns False and warns when bash is still old on macOS."""
-    result = _report_post_install_status(
-        failed=[],
-        need_bash=True,
+        still_missing=[],
         os_name=OsName.MACOS,
-        all_deps=(_EXISTING_DEP,),
+        tried_bash=True,
         bash_ok_now=False,
     )
-    assert result is False
+    out = capsys.readouterr().out
+    assert "PATH-resolved bash is still old" in out
+
+
+def test_should_fail_core_scope_tolerates_missing_optional() -> None:
+    """Under core scope, a missing optional dep does not cause failure (exit stays 0)."""
+    assert _should_fail([_MISSING_OPT], DependencyScope.CORE, need_bash=False) is False
+
+
+def test_should_fail_core_scope_fails_on_missing_core() -> None:
+    """Under core scope, a missing core dep causes failure (exit 1)."""
+    assert _should_fail([_MISSING_CORE, _MISSING_OPT], DependencyScope.CORE, need_bash=False) is True
+
+
+def test_should_fail_all_scope_fails_on_missing_optional() -> None:
+    """Under all scope, a missing optional dep causes failure (exit 1)."""
+    assert _should_fail([_MISSING_OPT], DependencyScope.ALL, need_bash=False) is True
+
+
+def test_should_fail_need_bash_fails_under_either_scope() -> None:
+    """Missing modern bash is a core requirement, so it fails under either scope."""
+    assert _should_fail([], DependencyScope.CORE, need_bash=True) is True
+    assert _should_fail([], DependencyScope.ALL, need_bash=True) is True
+
+
+def test_should_fail_nothing_missing_passes() -> None:
+    """With nothing missing and bash ok, neither scope fails (exit 0)."""
+    assert _should_fail([], DependencyScope.CORE, need_bash=False) is False
+    assert _should_fail([], DependencyScope.ALL, need_bash=False) is False
+
+
+def test_scope_missing_filters_by_category() -> None:
+    """_scope_missing returns only core deps under core scope, everything under all scope."""
+    missing = [_MISSING_CORE, _MISSING_OPT]
+    assert _scope_missing(missing, DependencyScope.CORE) == [_MISSING_CORE]
+    assert _scope_missing(missing, DependencyScope.ALL) == missing
 
 
 def test_check_deps_help(cli_runner: CliRunner) -> None:
     """The --help flag should work for the dependencies command."""
     result = cli_runner.invoke(check_deps, ["--help"])
     assert result.exit_code == 0
-    assert "dependencies" in result.output.lower() or "install mode" in result.output.lower()
+    assert "--scope" in result.output and "--install" in result.output
 
 
 def test_prompt_install_choice_interactive_choices(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -215,12 +231,12 @@ def _install_identifier(dep: SystemDependency, os_name: OsName) -> str | None:
     return None
 
 
-def test_check_deps_all_flag_plans_correct_install_commands() -> None:
-    """The --all flow should plan installs for all missing deps and skip present ones.
+def test_check_deps_all_scope_plans_correct_install_commands() -> None:
+    """The all-scope auto-install flow plans installs for all missing deps and skips present ones.
 
-    Exercises the same logic as _check_deps_impl with install_all=True: compute
-    which deps are missing, generate the install commands, and verify that every
-    missing dep is covered while every present dep is excluded.
+    Exercises the same logic as _check_deps_impl with scope=all, install=auto:
+    compute which deps are missing, generate the install commands, and verify that
+    every missing dep is covered while every present dep is excluded.
     """
     os_name = detect_os()
     missing = [dep for dep in ALL_DEPS if not dep.is_available()]

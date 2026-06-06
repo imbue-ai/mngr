@@ -5,9 +5,9 @@ description = "Auth + subdomain-forwarding plugin for mngr"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "imbue-mngr",
-    "imbue-common",
-    "concurrency-group",
+    "imbue-mngr==0.2.11",
+    "imbue-common==0.1.19",
+    "concurrency-group==0.1.19",
     "click",
     "click-option-group",
     "fastapi>=0.115",

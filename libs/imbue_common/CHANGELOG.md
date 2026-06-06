@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.19] - 2026-06-05
+
 ### Added
 
 - Added: `check_per_file_host_upload` ratchet (and `find_per_file_host_uploads_in_loops` AST helper) in the shared `ratchet_testing` framework. Flags `write_file` / `write_text_file` / `put_file` calls inside `for` / `while` loops, steering bulk transfers toward a single rsync (`host.copy_directory`).

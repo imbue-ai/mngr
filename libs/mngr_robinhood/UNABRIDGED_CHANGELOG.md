@@ -4,6 +4,21 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-05
+
+- Added to the release tooling's publish graph (`scripts/utils.py`). It will be offered for first publication to PyPI on the next release. Its stale `imbue-mngr==0.2.8` / `imbue-mngr-claude==0.2.8` pins are realigned to the current `0.2.10`. No runtime change.
+
+## 2026-06-05
+
+Renamed the plugin from `mngr_uncapped_claude` to `mngr_robinhood`. The
+PyPI package is now `imbue-mngr-robinhood`, the importable package is
+`imbue.mngr_robinhood`, and the CLI command is now `mngr robinhood`
+(previously `mngr uncapped-claude`). Spawned agents now use the `robinhood-`
+name prefix and a `created-by=robinhood` label. Every occurrence of
+"uncapped" was replaced with "robinhood" (case-preserving), including error
+classes (`RobinhoodError`) and CLI option types. Behavior is otherwise
+unchanged.
+
 ## 2026-06-04
 
 Replaced the module-local `_get_local_host` helper with the shared `get_local_host` from `imbue.mngr.api.providers` (deduplication; no behavior change).

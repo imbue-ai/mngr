@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-05
+
+- Added to the release tooling's publish graph (`scripts/utils.py`). It will be offered for first publication to PyPI on the next release. No runtime change.
+
 ## 2026-06-04
 
 Recycled OVH VPSes now receive the new bake's extra IAM tags (e.g. `minds_env=<env>`), overwriting any stale value left by the previous owner. Previously the recycle path only swapped `mngr-host-id` and skipped extra tags entirely, so a pool host provisioned by recycling a cancelled VPS carried no `minds_env` tag (or a stale one). That made it invisible to env-scoped discovery/teardown (`minds env destroy`, which enumerates VPSes by the `minds_env` IAM tag) and obscured which env actually owns a recycled host. Fresh-order behavior is unchanged.

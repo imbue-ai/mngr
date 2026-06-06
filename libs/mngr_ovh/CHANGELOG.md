@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.0] - 2026-06-05
+
 ### Fixed
 
 - Fixed: Discovery no longer masks failures as "zero hosts" — `_list_provider_vps_hostnames` previously caught any IAM-listing error and returned an empty list, so a transient OVH outage / expired credentials looked identical to a real empty result and defeated mngr's "mark hosts UNKNOWN when a provider's discovery fails" safeguard. It now lets the error propagate so `mngr list --on-error continue` records the failure instead of silently dropping live hosts.
@@ -29,6 +31,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Added `inotify-tools` and `jq` to `_REQUIRED_OUTER_PACKAGES` so the new `snapshot_helper.service` (provisioned by `mngr_vps_docker`) has the tools it needs on OVH-leased outers.
 - Changed: OVH-provisioned hosts now have OVH automated backups disabled. As the final bootstrap step the OVH provider purges all `qemu*` packages (`apt-get purge --auto-remove 'qemu*'`) over SSH on each freshly-ordered or recycled VPS, removing the `qemu-guest-agent` that OVH backups use to freeze the guest filesystem (which caused serious runtime problems on the agent). A failure aborts provisioning so no host is left running with backups enabled. mngr never orders an OVH backup option in the order/cart flow either. Existing already-running OVH hosts are not swept; they pick up the purge when next recycled.
 - Changed: `OvhVpsClient.set_renew_at_expiration` also retries on transient transport failures (dropped connection / timeout), not just the "subscription is not active yet" billing-propagation case, hardening the failure-cleanup cancel path against leaking a freshly-ordered month of billing. Non-transient API errors still surface immediately.
+- Changed: Added to the release tooling's publish graph (`scripts/utils.py`); will be offered for first publication to PyPI on the next release. No runtime change.
 
 ### Fixed
 
