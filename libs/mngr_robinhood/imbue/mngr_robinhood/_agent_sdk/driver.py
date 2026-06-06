@@ -20,6 +20,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from typing import Final
+from uuid import uuid4
 
 from claude_agent_sdk import ClaudeAgentOptions
 from claude_agent_sdk import Message
@@ -394,6 +395,7 @@ def _finalize_turn_messages(session: LiveSession, turn_messages: Sequence[Messag
         total_cost_usd=None,
         model_usage=model_usage,
         permission_denials=[],
+        result_uuid=str(uuid4()),
     )
     finalized: list[Message] = []
     if not session.is_init_emitted:

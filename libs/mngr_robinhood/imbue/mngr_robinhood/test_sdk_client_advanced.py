@@ -81,7 +81,7 @@ async def test_receive_messages_includes_system_init(sdk: ModuleType, sdk_live_m
 
 
 async def test_include_partial_messages_yields_stream_events(
-    sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path
+    sdk: ModuleType, requires_native_sdk: None, sdk_live_model: str, sdk_cwd: Path
 ) -> None:
     options = make_sdk_options(sdk_live_model, sdk_cwd, include_partial_messages=True)
     messages = await collect_query_messages(sdk, "Write a short two-sentence story.", options)

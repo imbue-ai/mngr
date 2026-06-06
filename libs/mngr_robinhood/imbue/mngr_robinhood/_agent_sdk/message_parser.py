@@ -245,6 +245,7 @@ def build_result_message(
     total_cost_usd: float | None,
     model_usage: Mapping[str, Any] | None,
     permission_denials: Sequence[Any] | None,
+    result_uuid: str,
 ) -> ResultMessage:
     """Synthesize the terminal ``result`` message that the real SDK emits last.
 
@@ -263,6 +264,7 @@ def build_result_message(
         total_cost_usd=total_cost_usd,
         model_usage=dict(model_usage) if model_usage is not None else None,
         permission_denials=list(permission_denials) if permission_denials is not None else None,
+        uuid=result_uuid,
     )
 
 

@@ -221,6 +221,7 @@ def test_build_result_message_success() -> None:
         total_cost_usd=0.001,
         model_usage={"claude-haiku-4-5": {"input_tokens": 3}},
         permission_denials=[],
+        result_uuid="res-uuid-1",
     )
     assert isinstance(result, ResultMessage)
     assert result.subtype == "success"
@@ -243,6 +244,7 @@ def test_build_result_message_error_subtype() -> None:
         total_cost_usd=None,
         model_usage=None,
         permission_denials=None,
+        result_uuid="res-uuid-2",
     )
     assert result.subtype == "error"
     assert result.is_error is True

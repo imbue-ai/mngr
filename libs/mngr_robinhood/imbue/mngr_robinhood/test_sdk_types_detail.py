@@ -59,7 +59,11 @@ async def test_result_usage_has_integer_token_counts(sdk: ModuleType, sdk_live_m
     assert result.usage["output_tokens"] > 0
 
 
-async def test_result_total_cost_is_positive(sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path) -> None:
+async def test_result_total_cost_is_positive(
+    sdk: ModuleType, requires_native_sdk: None, sdk_live_model: str, sdk_cwd: Path
+) -> None:
+    # total_cost_usd is not present in claude's native session JSONL (it is a stream-json
+    # ``result``-event field), so the mngr transport cannot observe it; only the real SDK asserts it.
     messages = await collect_query_messages(sdk, "Say hi.", make_sdk_options(sdk_live_model, sdk_cwd))
     result = find_result_message(messages)
     assert isinstance(result.total_cost_usd, float)

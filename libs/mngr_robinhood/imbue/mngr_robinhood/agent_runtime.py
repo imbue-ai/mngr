@@ -113,18 +113,27 @@ def apply_unattended_settings(mngr_ctx: MngrContext) -> MngrContext:
     return mngr_ctx.model_copy_update(to_update(mngr_ctx.field_ref().config, updated_config))
 
 
+# Characters that break the agent env file when a value is written unquoted and then sourced
+# (mngr's env-file writer does not quote backtick / command-substitution sequences). A single
+# such value silently swallows every variable written after it, so we drop those values rather
+# than forward them. Backtick and ``$(`` start a command substitution; a newline truncates the
+# line mid-value.
+_SHELL_UNSAFE_VALUE_FRAGMENTS: Final[tuple[str, ...]] = ("`", "$(", "\n", "\r")
+
+
 def _is_forwardable_env_var(key: str, value: str) -> bool:
     """True if this process env var is safe to write into the agent's sourced env file.
 
-    Drops the per-agent ``MNGR_*`` / ``LLM_USER_PATH`` vars that mngr sets itself, and exported
-    bash function definitions (``BASH_FUNC_*`` keys, whose multi-line ``() { ... }`` values
-    corrupt the agent's env file when it is sourced).
+    Drops the per-agent ``MNGR_*`` / ``LLM_USER_PATH`` vars that mngr sets itself, exported bash
+    function definitions (``BASH_FUNC_*`` keys, whose multi-line ``() { ... }`` values corrupt
+    the env file), and any value containing shell-unsafe fragments (e.g. a backtick) that would
+    break sourcing of the env file and drop every variable written after it.
     """
     if key in PER_AGENT_ENV_VARS_TO_DROP:
         return False
     if key.startswith("BASH_FUNC_"):
         return False
-    if "\n" in value:
+    if any(fragment in value for fragment in _SHELL_UNSAFE_VALUE_FRAGMENTS):
         return False
     return True
 
