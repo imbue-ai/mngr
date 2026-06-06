@@ -44,6 +44,8 @@ import sys
 import threading
 import time
 import urllib.parse
+from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
 from typing import Any
 
@@ -82,8 +84,23 @@ SLACK_MOCK_PORT = 8443  # plain HTTP; socat terminates TLS on :443
 LATCHKEY_DIR = MINDS_HOME / "latchkey"
 
 HOST_NAME = os.environ.get("HOST_NAME") or f"e2e{time.strftime('%H%M%S')}"
+HOST_NAME_2 = os.environ.get("HOST_NAME_2") or f"{HOST_NAME}-b"
+# WORKSPACE_COUNT=1 (default) preserves the single-workspace flow for local
+# repro; CI sets =2 to drive the second workspace + cross-workspace follow-up
+# pings as an end-to-end isolation check on the same minds.app session.
+WORKSPACE_COUNT = int(os.environ.get("WORKSPACE_COUNT", "1"))
+
 FIRST_PROMPT = "Reply with exactly the four characters: pong"
 FIRST_EXPECT = "pong"
+# Cross-workspace follow-up prompts use tokens that the chat body does NOT
+# contain before the prompt fires, so the >=2-occurrence check (prompt echo
+# + reply bubble) proves the agent responded to the NEW message rather than
+# counting carryover from earlier slack/first-message bubbles.
+FOLLOWUP_W1_PROMPT = "Reply with exactly the four characters: bing"
+FOLLOWUP_W1_EXPECT = "bing"
+FOLLOWUP_W2_PROMPT = "Reply with exactly the four characters: bong"
+FOLLOWUP_W2_EXPECT = "bong"
+
 CREATE_TIMEOUT = 900
 REPLY_TIMEOUT = 480
 DRIVE_SLACK_TIMEOUT = 360
@@ -528,6 +545,237 @@ async def find_chat_window(ctx: BrowserContext) -> Page | None:
     return None
 
 
+# --- per-workspace helpers ---
+
+
+@dataclass(frozen=True)
+class _SnapPrefixes:
+    """Per-workspace screenshot name prefixes.
+
+    Held in separate constants per workspace so the original W1 names
+    predating W2 stay stable; alphabetic sort of the screenshot dir
+    still reflects chronological execution (W1 03-06, slack 07-08,
+    W2 09-12, cross-workspace 13-16).
+    """
+
+    submitted: str
+    done: str
+    creating_mid: str
+    msg_sent: str
+    msg_reply: str
+
+
+_W1_SNAPS = _SnapPrefixes(
+    submitted="03-create-agent-submitted",
+    done="04-agent-DONE",
+    creating_mid="04b-creating-workspace-mid",
+    msg_sent="05-first-message-sent",
+    msg_reply="06-first-message-reply",
+)
+_W2_SNAPS = _SnapPrefixes(
+    submitted="09-create-agent-submitted-w2",
+    done="10-agent-DONE-w2",
+    creating_mid="10b-creating-workspace-mid-w2",
+    msg_sent="11-first-message-sent-w2",
+    msg_reply="12-first-message-reply-w2",
+)
+
+
+@dataclass
+class _WorkspaceResult:
+    chat_url: str
+    creation_id: str
+    phase_durations: dict[str, float] = field(default_factory=dict)
+    total_create_s: float = 0.0
+
+
+async def _create_workspace_and_first_message(
+    ctx: BrowserContext,
+    win: Page,
+    *,
+    origin: str,
+    host_name: str,
+    ai_provider: str,
+    anthropic_key: str,
+    snaps: _SnapPrefixes,
+    label: str,
+) -> _WorkspaceResult:
+    """Drive create-form -> first-message for one workspace; navigate `win` to its chat.
+
+    Steps: navigate to /create, fill the form for `host_name`, submit,
+    poll /api/create-agent/<id>/status until DONE, follow the
+    redirect_url to the agent chat URL on `win`, send FIRST_PROMPT,
+    wait for a >=2-occurrence reply of FIRST_EXPECT. Snaps each
+    milestone with names from `snaps`.
+
+    The same `win` Page is reused across calls; for a second workspace
+    the caller passes the (now-W1-chat-URL) `win` in, and this function
+    overwrites it via ``win.goto(origin + "/create")``. The W1 chat
+    URL is preserved on the underlying BrowserWindow's history; the
+    caller can navigate back via the URL it captured before this call.
+
+    `label` appears in log lines so two sequential workspaces are
+    distinguishable in CI logs (e.g. "w1" vs "w2").
+    """
+    await win.goto(origin + "/create")
+    await win.wait_for_selector("#create-form", timeout=10_000)
+    await win.click("#configure-toggle")
+    await win.wait_for_selector("#configure-panel:not(.hidden)", timeout=5_000)
+    await win.select_option("#launch_mode", value="LIMA")
+    await win.select_option("#ai_provider", value=ai_provider)
+    if ai_provider == "API_KEY":
+        await win.wait_for_selector("#api-key-row:not(.hidden)", timeout=5_000)
+        await win.fill("#anthropic_api_key", anthropic_key)
+    await win.fill("#host_name", host_name)
+    async with win.expect_navigation(url=re.compile(r"/creating/[a-z0-9-]+")):
+        await win.click("#create-submit")
+    with contextlib.suppress(Exception):
+        await win.wait_for_function(
+            "document.body.innerText.includes('Setting up your workspace')",
+            timeout=15_000,
+        )
+    await snap_page(win, snaps.submitted)
+    m = re.search(r"/creating/([a-z0-9-]+)", win.url)
+    if not m:
+        raise RuntimeError(f"[{label}] expected /creating/<id> after submit, got url={win.url}")
+    creation_id = m.group(1)
+    logger.info("[{}] creation_id={}", label, creation_id)
+
+    deadline = time.time() + CREATE_TIMEOUT
+    last_status = ""
+    phase_started_at = time.monotonic()
+    phase_durations: dict[str, float] = {}
+    done = False
+    done_redirect_url = ""
+    while time.time() < deadline and not done:
+        stat = await win.evaluate(
+            """async (id) => {
+                const r = await fetch('/api/create-agent/' + id + '/status');
+                return {status: r.status, body: await r.text()};
+            }""",
+            creation_id,
+        )
+        payload = {}
+        with contextlib.suppress(Exception):
+            payload = json.loads(stat["body"])
+        state = payload.get("status", "")
+        if state != last_status:
+            now = time.monotonic()
+            if last_status:
+                phase_durations[last_status] = round(now - phase_started_at, 2)
+                logger.info(
+                    "[{}] creation status: {} -> {} (prev took {:.1f}s)",
+                    label,
+                    last_status,
+                    state,
+                    phase_durations[last_status],
+                )
+            else:
+                logger.info("[{}] creation status: (none) -> {}", label, state)
+            last_status = state
+            phase_started_at = now
+        if state == "DONE":
+            phase_durations[state] = round(time.monotonic() - phase_started_at, 2)
+            done_redirect_url = payload.get("redirect_url", "")
+            done = True
+            break
+        if state == "FAILED":
+            raise RuntimeError(f"[{label}] creation FAILED: {payload.get('error', stat['body'])}")
+        if (
+            state == "CREATING_WORKSPACE"
+            and not any(SCREENSHOT_DIR.glob(f"{snaps.creating_mid}-*"))
+            and time.monotonic() - phase_started_at >= 60
+        ):
+            await snap_page(win, snaps.creating_mid)
+        await asyncio.sleep(5)
+    total_create_s = sum(phase_durations.values())
+    logger.info("[{}] creation phase timings: {} (total={:.1f}s)", label, phase_durations, total_create_s)
+    if not done:
+        if EVENTS_LOG.exists():
+            tail = EVENTS_LOG.read_text(errors="ignore").splitlines()[-60:]
+            logger.error("[{}] minds-events.jsonl tail:\n{}", label, "\n".join(tail))
+        raise RuntimeError(f"[{label}] creation didn't reach DONE in {CREATE_TIMEOUT}s (last={last_status})")
+    if not done_redirect_url:
+        raise E2EFailure(
+            f"[{label}] creation DONE without redirect_url; check the /api/create-agent/<id>/status contract"
+        )
+    target = done_redirect_url if done_redirect_url.startswith("http") else origin + done_redirect_url
+    logger.info("[{}] creation DONE; navigating directly to {}", label, target)
+    await win.goto(target)
+    chat_url_re = re.compile(r"agent-[a-f0-9]+\.localhost")
+    chat_deadline = time.time() + 30
+    while time.time() < chat_deadline and not chat_url_re.search(win.url):
+        await asyncio.sleep(0.5)
+    if not chat_url_re.search(win.url):
+        for p in all_pages(ctx):
+            with contextlib.suppress(Exception):
+                await snap_page(p, f"99-{label}-no-chat-{p.url.split('/')[-1] or 'root'}")
+        raise E2EFailure(f"[{label}] goto({target}) didn't redirect to chat URL within 30s (win.url={win.url})")
+    logger.info("[{}] agent DONE; chat URL={}", label, win.url)
+    await snap_page(win, snaps.done)
+
+    inp = await win.wait_for_selector('textarea, [contenteditable="true"]', timeout=60_000)
+    await inp.fill(FIRST_PROMPT)
+    await inp.press("Enter")
+    with contextlib.suppress(Exception):
+        await win.wait_for_function(
+            f"document.body.innerText.includes({FIRST_PROMPT!r})",
+            timeout=10_000,
+        )
+    await snap_page(win, snaps.msg_sent)
+    await win.wait_for_function(
+        f"(document.body.innerText.toLowerCase().match(/{FIRST_EXPECT}/g) || []).length >= 2",
+        timeout=REPLY_TIMEOUT * 1000,
+    )
+    await asyncio.sleep(1)
+    await snap_page(win, snaps.msg_reply)
+
+    return _WorkspaceResult(
+        chat_url=win.url,
+        creation_id=creation_id,
+        phase_durations=phase_durations,
+        total_create_s=total_create_s,
+    )
+
+
+async def _send_followup_and_verify(
+    win: Page,
+    *,
+    chat_url: str,
+    prompt: str,
+    expect_token: str,
+    snap_sent: str,
+    snap_reply: str,
+    label: str,
+) -> None:
+    """Navigate `win` to `chat_url`, send `prompt`, wait for >=2 occurrences of `expect_token`.
+
+    Proves the workspace's chat panel + agent backend stays responsive
+    after the BrowserWindow has been navigated away and back. Caller
+    picks a token that isn't already in the chat body so the count
+    check actually proves a NEW reply landed (not carryover from
+    earlier turns).
+    """
+    logger.info("[{}] navigating back to {}", label, chat_url)
+    await win.goto(chat_url)
+    inp = await win.wait_for_selector('textarea, [contenteditable="true"]', timeout=30_000)
+    await inp.fill(prompt)
+    await inp.press("Enter")
+    with contextlib.suppress(Exception):
+        await win.wait_for_function(
+            f"document.body.innerText.includes({prompt!r})",
+            timeout=10_000,
+        )
+    await snap_page(win, snap_sent)
+    await win.wait_for_function(
+        f"(document.body.innerText.toLowerCase().match(/{expect_token}/g) || []).length >= 2",
+        timeout=REPLY_TIMEOUT * 1000,
+    )
+    await asyncio.sleep(1)
+    await snap_page(win, snap_reply)
+    logger.info("[{}] follow-up reply confirmed", label)
+
+
 # --- main flow ---
 
 
@@ -680,202 +928,40 @@ async def amain() -> int:
         await win.goto(origin + "/")
         await snap_page(win, "02-home-after-auth")
 
-        if not SKIP_FIRST_MESSAGE:
-            # 4. Create agent via UI click. Mirrors what a user does:
-            #     - expand the "Configure..." panel (otherwise
-            #       launch_mode/ai_provider/api_key inputs are
-            #       display:none and Playwright can't fill them)
-            #     - set launch_mode=LIMA + ai_provider per MINDS_AI_PROVIDER
-            #       (default API_KEY: CI runners have no Claude.ai OAuth
-            #       in the host keychain. Local dev sets SUBSCRIPTION to
-            #       use the user's already-synced Claude.ai credential
-            #       without exposing an API key.)
-            #     - when API_KEY, paste ANTHROPIC_API_KEY into
-            #       anthropic_api_key (the api-key-row is .hidden until
-            #       the provider select fires its change event)
-            #     - when SUBSCRIPTION, skip the api-key fill entirely
-            #       and rely on mngr_claude's host-keychain credential
-            #       sync at agent-create time
-            #     - fill host_name, submit the form, follow the server
-            #       redirect to /creating/<id> which renders the
-            #       "Setting up your workspace" progress UI
-            # The script previously POSTed /api/create-agent directly,
-            # which left the form on screen unchanged -- 03 and 04b
-            # screenshots ended up visually identical to 02. Driving
-            # the click sequence makes those screenshots match their
-            # phase claims AND exercises the same code path a real
-            # user hits (more representative of UI regressions).
-            ai_provider = os.environ.get("MINDS_AI_PROVIDER", "API_KEY").upper()
-            if ai_provider not in ("API_KEY", "SUBSCRIPTION"):
-                raise RuntimeError(f"MINDS_AI_PROVIDER={ai_provider!r} -- must be API_KEY or SUBSCRIPTION")
-            anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
-            if ai_provider == "API_KEY" and not anthropic_key:
-                raise RuntimeError(
-                    "MINDS_AI_PROVIDER=API_KEY but ANTHROPIC_API_KEY not set; "
-                    "either set ANTHROPIC_API_KEY or pass MINDS_AI_PROVIDER=SUBSCRIPTION."
-                )
-            # /create is the form's action target; landing page is `/`.
-            await win.goto(origin + "/create")
-            await win.wait_for_selector("#create-form", timeout=10_000)
-            await win.click("#configure-toggle")
-            await win.wait_for_selector("#configure-panel:not(.hidden)", timeout=5_000)
-            await win.select_option("#launch_mode", value="LIMA")
-            await win.select_option("#ai_provider", value=ai_provider)
-            if ai_provider == "API_KEY":
-                await win.wait_for_selector("#api-key-row:not(.hidden)", timeout=5_000)
-                await win.fill("#anthropic_api_key", anthropic_key)
-            await win.fill("#host_name", HOST_NAME)
-            # Submit triggers a POST /create -> server redirects to
-            # /creating/<id>. wait_for_url scopes to that path so we
-            # also extract the creation_id from the URL afterwards.
-            async with win.expect_navigation(url=re.compile(r"/creating/[a-z0-9-]+")):
-                await win.click("#create-submit")
-            # Pull creation_id out of the post-submit URL.
-            with contextlib.suppress(Exception):
-                await win.wait_for_function(
-                    "document.body.innerText.includes('Setting up your workspace')",
-                    timeout=15_000,
-                )
-            await snap_page(win, "03-create-agent-submitted")
-            m = re.search(r"/creating/([a-z0-9-]+)", win.url)
-            if not m:
-                raise RuntimeError(f"expected /creating/<id> after submit, got url={win.url}")
-            creation_id = m.group(1)
-            logger.info("creation_id={}", creation_id)
-
-            # 5. Poll /api/create-agent/<id>/status until DONE. The chat
-            # panel does NOT auto-open when creation completes -- the
-            # user normally clicks the tile on the home page. Once
-            # status=DONE we do the same: navigate home, click the
-            # tile, then wait for the chat-URL page to materialise.
-            # Wall-clock per phase transition gets stitched into the
-            # /tmp/launch-to-msg-timings.json artifact at end of script.
-            deadline = time.time() + CREATE_TIMEOUT
-            last_status = ""
-            phase_started_at = time.monotonic()
-            phase_durations: dict[str, float] = {}
-            done = False
-            # Captured at DONE; absolute or relative "/goto/<agent_id>/" URL
-            # whose redirect lands on the agent's "agent-<hex>.localhost" chat
-            # page. The minds backend assembles it from the canonical AgentId
-            # the inner `mngr create` emits + the configured mngr_forward port.
-            done_redirect_url = ""
-            while time.time() < deadline and not done:
-                stat = await win.evaluate(
-                    """async (id) => {
-                        const r = await fetch('/api/create-agent/' + id + '/status');
-                        return {status: r.status, body: await r.text()};
-                    }""",
-                    creation_id,
-                )
-                payload = {}
-                with contextlib.suppress(Exception):
-                    payload = json.loads(stat["body"])
-                state = payload.get("status", "")
-                if state != last_status:
-                    now = time.monotonic()
-                    if last_status:
-                        phase_durations[last_status] = round(now - phase_started_at, 2)
-                        logger.info(
-                            "creation status: {} -> {} (prev took {:.1f}s)",
-                            last_status,
-                            state,
-                            phase_durations[last_status],
-                        )
-                    else:
-                        logger.info("creation status: (none) -> {}", state)
-                    last_status = state
-                    phase_started_at = now
-                if state == "DONE":
-                    phase_durations[state] = round(time.monotonic() - phase_started_at, 2)
-                    done_redirect_url = payload.get("redirect_url", "")
-                    done = True
-                    break
-                if state == "FAILED":
-                    raise RuntimeError(f"creation FAILED: {payload.get('error', stat['body'])}")
-                # Mid-creation snapshot so the "creating" UI is captured
-                # in CI -- fires once when CREATING_WORKSPACE has been
-                # running for ~60s so the progress dialog is on-screen.
-                if (
-                    state == "CREATING_WORKSPACE"
-                    and not any(SCREENSHOT_DIR.glob("04b-*"))
-                    and time.monotonic() - phase_started_at >= 60
-                ):
-                    # Snap `win` as-is. Previously tried ctx.new_page() +
-                    # navigate to /creating/<id> but Electron leaves the
-                    # transient BrowserWindow on screen even after close(),
-                    # and that stray /welcome window then sits in front of
-                    # the chat panel for every subsequent screencapture
-                    # (06 / 07 / 07a-d ended up showing the Welcome page).
-                    # The cost of just snapping win here is that 04b shows
-                    # the projects/form view instead of the progress UI.
-                    await snap_page(win, "04b-creating-workspace-mid")
-                await asyncio.sleep(5)
-            # Emit a per-phase summary line + persist to artifact JSON.
-            total_create_s = sum(phase_durations.values())
-            logger.info("creation phase timings: {} (total={:.1f}s)", phase_durations, total_create_s)
-            timings_artifact = SCREENSHOT_DIR / "launch-to-msg-timings.json"
-            with contextlib.suppress(Exception):
-                timings_artifact.write_text(
-                    json.dumps({"phase_durations_s": phase_durations, "total_create_s": total_create_s}, indent=2)
-                )
-            if not done:
-                if EVENTS_LOG.exists():
-                    tail = EVENTS_LOG.read_text(errors="ignore").splitlines()[-60:]
-                    logger.error("minds-events.jsonl tail:\n{}", "\n".join(tail))
-                raise RuntimeError(f"creation didn't reach DONE in {CREATE_TIMEOUT}s (last={last_status})")
-            # creation DONE: minds' status API also returns ``redirect_url``,
-            # the absolute (or "/goto/..."-relative) URL whose redirect lands
-            # on the agent's "agent-<hex>.localhost" chat page. Navigate ``win``
-            # straight there rather than clicking the home-page tile -- the
-            # tile only renders once the landing page's discovery refresh has
-            # caught up with creation completion, and on local macOS the
-            # discovery lag routinely exceeds the click window's 15s.
-            if not done_redirect_url:
-                raise E2EFailure(
-                    "creation DONE without redirect_url; check the /api/create-agent/<id>/status contract"
-                )
-            target = done_redirect_url if done_redirect_url.startswith("http") else base + done_redirect_url
-            logger.info("creation DONE; navigating directly to {}", target)
-            await win.goto(target)
-            chat_url_re = re.compile(r"agent-[a-f0-9]+\.localhost")
-            chat_deadline = time.time() + 30
-            while time.time() < chat_deadline and not chat_url_re.search(win.url):
-                await asyncio.sleep(0.5)
-            if not chat_url_re.search(win.url):
-                for p in all_pages(ctx):
-                    with contextlib.suppress(Exception):
-                        await snap_page(p, f"99-no-chat-{p.url.split('/')[-1] or 'root'}")
-                raise E2EFailure(f"goto({target}) didn't redirect to chat URL within 30s (win.url={win.url})")
-            logger.info("agent DONE; chat URL={}", win.url)
-            await snap_page(win, "04-agent-DONE")
-
-            # 6. Send first message, wait for "pong" reply
-            inp = await win.wait_for_selector('textarea, [contenteditable="true"]', timeout=60_000)
-            await inp.fill(FIRST_PROMPT)
-            await inp.press("Enter")
-            # Wait for the user's prompt to render before snapping so
-            # `05-first-message-sent` actually shows the prompt bubble.
-            # Without this the screenshot misses the bubble (as in run
-            # 26872452227 where 05 was visually identical to 04).
-            with contextlib.suppress(Exception):
-                await win.wait_for_function(
-                    f"document.body.innerText.includes({FIRST_PROMPT!r})",
-                    timeout=10_000,
-                )
-            await snap_page(win, "05-first-message-sent")
-            # Wait for the AGENT's reply, not the user prompt echo. The
-            # prompt itself contains "pong" so a naive `includes('pong')`
-            # check returns true the moment we send -- before any agent
-            # reply paints. Count occurrences instead: 1 (prompt only)
-            # vs 2+ (prompt + reply).
-            await win.wait_for_function(
-                f"(document.body.innerText.toLowerCase().match(/{FIRST_EXPECT}/g) || []).length >= 2",
-                timeout=REPLY_TIMEOUT * 1000,
+        # 4-6. Create agent via UI click and drive to first message. Mirrors
+        # what a user does (Configure panel, launch_mode/ai_provider/api_key
+        # fields, host_name fill, submit, poll until DONE, navigate to chat,
+        # send FIRST_PROMPT, wait for >=2 occurrences of FIRST_EXPECT in body).
+        # See _create_workspace_and_first_message for the exact step list.
+        ai_provider = os.environ.get("MINDS_AI_PROVIDER", "API_KEY").upper()
+        if ai_provider not in ("API_KEY", "SUBSCRIPTION"):
+            raise RuntimeError(f"MINDS_AI_PROVIDER={ai_provider!r} -- must be API_KEY or SUBSCRIPTION")
+        anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if ai_provider == "API_KEY" and not anthropic_key:
+            raise RuntimeError(
+                "MINDS_AI_PROVIDER=API_KEY but ANTHROPIC_API_KEY not set; "
+                "either set ANTHROPIC_API_KEY or pass MINDS_AI_PROVIDER=SUBSCRIPTION."
             )
-            # Brief settle for the reply bubble to paint, then snap.
-            await asyncio.sleep(1)
-            await snap_page(win, "06-first-message-reply")
+
+        all_timings: dict[str, Any] = {}
+
+        w1_result: _WorkspaceResult | None = None
+        if not SKIP_FIRST_MESSAGE:
+            w1_result = await _create_workspace_and_first_message(
+                ctx,
+                win,
+                origin=origin,
+                host_name=HOST_NAME,
+                ai_provider=ai_provider,
+                anthropic_key=anthropic_key,
+                snaps=_W1_SNAPS,
+                label="w1",
+            )
+            all_timings["w1"] = {
+                "host_name": HOST_NAME,
+                "phase_durations_s": w1_result.phase_durations,
+                "total_create_s": w1_result.total_create_s,
+            }
 
         if not SKIP_SLACK_FLOW:
             # 7. Slack mock setup
@@ -985,6 +1071,64 @@ async def amain() -> int:
                 revert_etc_hosts()
                 stop_socat()
                 mock.shutdown()
+
+        # 10-14. Second workspace + cross-workspace follow-up. Drives a
+        # FRESH host (HOST_NAME_2) through create + first-message on the
+        # same minds.app session, then navigates back to W1's chat URL and
+        # to W2's chat URL in turn, sending a unique-token follow-up to
+        # each. Proves: state isolation between workspaces, both agents
+        # survive cross-workspace navigation, mngr_forward + latchkey
+        # gateway don't collide on shared host-side state.
+        if WORKSPACE_COUNT >= 2 and not SKIP_FIRST_MESSAGE:
+            if w1_result is None:
+                raise E2EFailure("WORKSPACE_COUNT>=2 but W1 was skipped; cross-workspace check is meaningless")
+            w1_chat_url = w1_result.chat_url
+            logger.info("=== workspace 2 create + first message (host={}) ===", HOST_NAME_2)
+            w2_result = await _create_workspace_and_first_message(
+                ctx,
+                win,
+                origin=origin,
+                host_name=HOST_NAME_2,
+                ai_provider=ai_provider,
+                anthropic_key=anthropic_key,
+                snaps=_W2_SNAPS,
+                label="w2",
+            )
+            all_timings["w2"] = {
+                "host_name": HOST_NAME_2,
+                "phase_durations_s": w2_result.phase_durations,
+                "total_create_s": w2_result.total_create_s,
+            }
+            w2_chat_url = w2_result.chat_url
+
+            logger.info("=== cross-workspace: ping W1 chat ({}) ===", w1_chat_url)
+            await _send_followup_and_verify(
+                win,
+                chat_url=w1_chat_url,
+                prompt=FOLLOWUP_W1_PROMPT,
+                expect_token=FOLLOWUP_W1_EXPECT,
+                snap_sent="13-w1-followup-sent",
+                snap_reply="14-w1-followup-reply",
+                label="w1-followup",
+            )
+            logger.info("=== cross-workspace: ping W2 chat ({}) ===", w2_chat_url)
+            await _send_followup_and_verify(
+                win,
+                chat_url=w2_chat_url,
+                prompt=FOLLOWUP_W2_PROMPT,
+                expect_token=FOLLOWUP_W2_EXPECT,
+                snap_sent="15-w2-followup-sent",
+                snap_reply="16-w2-followup-reply",
+                label="w2-followup",
+            )
+
+        # Persist combined per-workspace timings as one artifact JSON
+        # rather than two -- one file is easier to embed in the run
+        # summary and to diff across runs.
+        if all_timings:
+            timings_artifact = SCREENSHOT_DIR / "launch-to-msg-timings.json"
+            with contextlib.suppress(Exception):
+                timings_artifact.write_text(json.dumps(all_timings, indent=2))
 
         await browser.close()
         minds_proc.terminate()

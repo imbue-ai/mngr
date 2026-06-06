@@ -374,6 +374,11 @@ jobs:
       - name: launch-to-msg + slack flow (Python)
         env:
           SKIP_SLACK_FLOW:    ${{ inputs.skip_slack_flow && '1' || '0' }}
+          # Drive a second workspace + cross-workspace follow-up pings as
+          # part of the same end-to-end run. Reuses the single mac-runner
+          # session for depth rather than spinning a separate workflow per
+          # scenario.
+          WORKSPACE_COUNT:    "2"
         run: |
           # pipefail is REQUIRED: without it, the pipeline below exits
           # with tee's status (always 0), so an e2e failure (exit 1) is
@@ -483,7 +488,7 @@ jobs:
             echo "| Milestone | Per-window (.win.png) | Full-desktop (.desktop.png) |"
             echo "|---|---|---|"
           } >> "$GITHUB_STEP_SUMMARY"
-          for prefix in 00 01 02 03 04 04b 05 06 07 07a 07b 07c 07d 08 09 10 11 12 99; do
+          for prefix in 00 01 02 03 04 04b 05 06 07 07a 07b 07c 07d 08 09 10 10b 11 12 13 14 15 16 99; do
             for win in "$shots_dir"/${prefix}-*.win.png; do
               [ -f "$win" ] || continue
               base=$(basename "$win" .win.png)
