@@ -2,7 +2,6 @@ from pathlib import Path
 
 from pydantic import SecretStr
 
-from imbue.minds.telegram.credential_store import has_agent_bot_credentials
 from imbue.minds.telegram.credential_store import load_agent_bot_credentials
 from imbue.minds.telegram.credential_store import load_telegram_user_credentials
 from imbue.minds.telegram.credential_store import save_agent_bot_credentials
@@ -41,12 +40,10 @@ def test_bot_credentials_round_trip_through_store(tmp_path: Path) -> None:
         bot_username="test_mind_bot",
     )
 
-    assert not has_agent_bot_credentials(data_dir, agent_id)
     assert load_agent_bot_credentials(data_dir, agent_id) is None
 
     save_agent_bot_credentials(data_dir, agent_id, creds)
 
-    assert has_agent_bot_credentials(data_dir, agent_id)
     loaded = load_agent_bot_credentials(data_dir, agent_id)
 
     assert loaded is not None

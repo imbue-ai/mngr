@@ -75,8 +75,9 @@ def load_agent_bot_credentials(
 
     # As with user credentials, a corrupt internal-state file is treated as
     # "absent" (return None) so setup re-runs and rebuilds it; the warning log
-    # makes the corruption visible. start_setup branches on this loaded value
-    # rather than file existence so a corrupt file is never reported as DONE.
+    # makes the corruption visible. Callers (start_setup, agent_has_telegram)
+    # branch on this loaded value rather than file existence, so a corrupt file
+    # is never reported as set up.
     try:
         raw = json.loads(creds_path.read_text())
     except (json.JSONDecodeError, OSError) as exc:
@@ -109,8 +110,3 @@ def save_agent_bot_credentials(
             "bot_username": credentials.bot_username,
         }
         creds_path.write_text(json.dumps(data, indent=2))
-
-
-def has_agent_bot_credentials(data_dir: Path, agent_id: AgentId) -> bool:
-    """Check whether bot credentials exist for the given agent."""
-    return _bot_credentials_path(data_dir, agent_id).exists()
