@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.11] - 2026-06-05
+
 ### Added
 
 - Added: New `mngr stop --stop-host` flag that stops an agent's whole host (every agent on it) instead of just the named agent. Rejected up front on providers that don't support stopping hosts; cannot be combined with `--archive`. Idempotent on already-offline hosts. Resolves the target host via the discovery event stream + `provider.get_host` instead of SSH, so it works even when the host's container is running but sshd is unreachable. Multiple `--stop-host` targets are stopped concurrently via a concurrency-group executor (output order is unchanged). Supports the minds tiered workspace-restart recovery flow.

@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.0] - 2026-06-05
+
 ### Added
 
 - Added: `mngr_forward` emits `system_interface_backend_failure` envelopes (renamed from `workspace_backend_failure`) on connection errors, mid-SSE EOF, or 5xx responses, so consumers like minds can drive a recovery UI; the plugin's 503 fallback page is now a styled card with a loading spinner.
