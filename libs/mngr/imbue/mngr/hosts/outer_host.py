@@ -973,6 +973,14 @@ class OuterHost(OuterHostInterface):
             return None
 
         host_data = self.connector.host.data
+        # NOTE: the "root" default is correct for provider-created hosts (Docker/Modal),
+        # which log in as root and do not set ssh_user. It is potentially wrong for
+        # user-configured ssh:// outers: create_ssh_pyinfra_host_using_user_config()
+        # deliberately leaves ssh_user unset when the user is None so OpenSSH /
+        # ~/.ssh/config resolves it, and this default then forces user=root for those
+        # hosts, overriding the user's ssh_config User directive. Fixing that cleanly
+        # means letting the returned user be "unset" (mirroring the key_path=None
+        # treatment below), which changes this method's return contract.
         user = host_data.get("ssh_user", "root")
         hostname = self.connector.host.name
         port = host_data.get("ssh_port", 22)
