@@ -1311,7 +1311,10 @@ async def amain() -> int:
                     const r = await fetch('/api/create-agent', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({host_name}),
+                        body: JSON.stringify({
+                            host_name,
+                            git_url: 'https://example.com/dummy.git',
+                        }),
                     });
                     return {status: r.status, body: await r.text()};
                 }""",
