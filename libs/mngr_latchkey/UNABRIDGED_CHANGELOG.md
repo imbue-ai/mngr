@@ -4,6 +4,16 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-05
+
+- Added to the release tooling's publish graph (`scripts/utils.py`). It will be offered for first publication to PyPI on the next release. Its stale `imbue-common==0.1.17` / `concurrency-group==0.1.17` pins are realigned to the current `0.1.18`. No runtime change.
+
+## 2026-06-04
+
+`mngr latchkey forward`'s discovery observer now writes to the standard discovery event log instead of a private per-env `discovery-observe` directory. It is the single discovery observer for the host dir (minds' `mngr forward --observe-via-file` tails the same log), so the previous isolation onto a separate event log -- needed only when two observers ran at once -- is no longer required. Old `discovery-observe/` directories left by prior versions are inert and can be deleted manually.
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.
+
 ## 2026-06-04
 
 `mngr latchkey forward` now refreshes its provider set on SIGHUP instead of shutting down. SIGHUP bounces only the `mngr observe` child (the shared gateway and all reverse tunnels stay up); SIGINT/SIGTERM remain the shutdown signals. Its discovery consumer also retains agents whose provider errored on a poll rather than tearing down their reverse tunnels, dropping them only on an explicit destroy or a later successful poll. `LatchkeyForwardSupervisor` gained a `bounce()` method that SIGHUPs a live supervisor (or starts one if none is running) so embedders can refresh latchkey's provider set mid-session.

@@ -4,6 +4,10 @@ This file contains the full, verbatim per-PR entries for the `mngr_mapreduce` li
 
 ## 2026-06-04
 
+Updated the `get_local_host` import to its new canonical home in `imbue.mngr.api.providers` (it previously lived in `imbue.mngr.cli.headless_runner`). No behavior change.
+
+## 2026-06-04
+
 - `sanitize_for_agent_name` now also strips trailing hyphens after the 40-char truncation, not just before it. Without this, a task slug whose 40th character was a hyphen (e.g. `test_create_modal_idle_mode_ssh_timeout_300`) produced `test-create-modal-idle-mode-ssh-timeout-`, which `AgentName` rejects as "alphanumeric with dashes/underscores allowed in the middle". TMR runs against the e2e test corpus hit this for the first time once `test_create_modal_idle_mode_ssh_timeout_300` landed.
 
 ## 2026-06-03

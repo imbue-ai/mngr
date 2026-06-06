@@ -4,6 +4,49 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-05
+
+- Release tooling (`scripts/utils.py`): added `imbue-mngr-usage`, `imbue-mngr-claude-usage`, `imbue-mngr-forward`, `imbue-mngr-latchkey`, `imbue-mngr-imbue-cloud`, `imbue-mngr-ovh`, `imbue-mngr-schedule`, and `imbue-mngr-robinhood` to the hard-coded `PACKAGES` publish graph so they are version-bumped, pin-aligned, and offered for first publication by `scripts/release.py`. Their internal dependency pins were realigned to the current workspace versions to satisfy `test_internal_dep_pins_are_consistent`.
+
+## 2026-06-05
+
+`scripts/install.sh` now invokes the reworked dependencies command as `mngr dependencies --install interactive --scope core` (was `mngr dependencies -i`). The `--scope core` flag means the installer only treats a missing *core* dependency (`git`/`tmux`/`jq`) as a hard failure that triggers its warning; a missing optional dependency (`ssh`/`rsync`/`unison`/`claude`) no longer trips the warning. The interactive prompt is unchanged, so users can still choose to install everything.
+
+Updated root-level references for the `mngr_uncapped_claude` plugin rename to
+`mngr_robinhood`: the top-level `README.md` sub-projects list, the
+`--cov=imbue.mngr_robinhood` coverage entry in the root `pyproject.toml`,
+the `robinhood` entry in `scripts/make_cli_docs.py`'s secondary-command
+set, the `specs/robinhood/` spec directory, and `uv.lock`.
+
+## 2026-06-05
+
+Updated the repo-root local-dev LiteLLM proxy config (`litellm_proxy/config.yaml`) to expose the full current Anthropic Claude lineup (Opus 4.8/4.7/4.6/4.5/4.1, Sonnet 4.6/4.5, Haiku 4.5, plus the dated Opus 4 / Sonnet 4 ids) with inline per-token pricing. This file is kept in sync with `apps/modal_litellm/app.py` by a drift test.
+
+## 2026-06-04
+
+Add a blueprint plan for the apps/minds template migration to JinjaX (`blueprint/jinjax-migration/`).
+
+- Add a new `audit-ci` Claude skill (`.claude/skills/audit-ci/SKILL.md`) that documents how to audit recent CI runs for anomalies (warnings, uncached/rebuilt docker images, flaky/slow tests, regressions). It explains this repo's counterintuitive CI layout -- test results live in separately-synthesized `Unit + Integration Tests` / `Acceptance Tests` check-runs (shown as "in 0s") rather than in the workflow jobs -- and includes calibration notes to avoid common false positives (duration variance vs regressions, normal Modal host-creation output, single broken branches vs systemic issues).
+- Speed up the `test-offload` and `test-offload-acceptance` checkouts: instead of `fetch-depth: 0` (which fetches the full history of *every* branch), do a default shallow checkout and then `git fetch --unshallow` only the current ref. offload needs the full ancestry of HEAD to find its checkpoint commit and thin-diff against it, but not other branches; on a repo with many branches the all-branches fetch can add minutes to each run.
+
+The bash strict-mode meta-ratchet snapshot is raised from 10 to 12 to accommodate the two minds verify scripts (`apps/minds/scripts/first-message-verify.sh` and `launch-and-verify.sh`), which intentionally omit `set -e` (they handle errors explicitly and their retry loops depend on commands exiting non-zero). The docstring now documents this exception alongside the existing `.minds/template/*.sh` accommodation and notes that the count is enumerated against the full local checkout (offload sandboxes see fewer because `.dockerignore` omits some tracked paths).
+
+- Remove the dead "release" branch apparatus from CI and give the release tests a real home. There is no `release` branch -- releases are cut from `main` as `v*` tags -- so the old `test-release`/`test-docker-release` jobs, gated to `refs/heads/release` push, never ran. `ci.yml` no longer references the release branch (dropped the `release` push trigger and the four `github.ref != 'refs/heads/release'` job guards), and the two release-test jobs move to a new dedicated workflow `.github/workflows/release-tests.yml`. That workflow runs on `workflow_dispatch` (trigger it against `main` to validate a commit before you cut a release) and automatically on `v*` tag pushes (a backstop record). Note: it is not a hard publish gate -- `publish.yml` runs on the same tag independently. `scripts/release.py` now prints an advisory warning before the release confirmation prompt if the Release Tests workflow has not passed on the exact commit being tagged. Also refresh the stale "Release Tests" description in `style_guide.md` and drop the dead `release` branch from the changelog-ratchet PR-branch skip in `test_meta_ratchets.py`.
+
+Added a blueprint planning doc (`blueprint/disable-ovh-qemu-backups/`) for disabling OVH-side VPS backups by purging qemu at the OVH provider level.
+
+Bumped GitHub Actions that were pinned to Node.js-20 runtimes (deprecated by
+GitHub; forced to Node 24 starting 2026-06-16) to their latest Node.js-24
+majors: `actions/cache` v4->v5, `actions/upload-artifact` v4->v7,
+`actions/setup-node` v4->v6, `actions/checkout` v4->v6 (vet.yml),
+`extractions/setup-just` v2->v4, `mikepenz/action-junit-report` v5->v6, and
+`astral-sh/setup-uv` v6->v7. This removes the Node.js-20 deprecation warnings
+from CI logs.
+
+Upgraded two vulnerable transitive dependencies in `uv.lock` to their fixed
+versions (surfaced by `uv audit`): `idna` 3.14->3.16 and `starlette`
+1.0.0->1.0.1.
+
 ## 2026-06-04
 
 - The `/sync-tutorial-to-e2e-tests` skill's default test-directory argument now points at the new `libs/mngr/imbue/mngr/e2e/tutorial/` subdirectory, so it no longer flags non-tutorial e2e tests as unmatched.
@@ -338,7 +381,7 @@ opt-in `--deploy` mode. Fixes the spurious Modal-discovery warnings and
 Latchkey breakage hit by users who activated `staging` only to *use* the
 deployed tier but had no Modal token for the `minds-staging` workspace.
 
-Root-level surface changes for the `mngr_uncapped_claude` plugin: README updated to advertise the new `uncapped-claude` command and link to the new sub-project, and the auto-generated CLI docs gained an entry at `libs/mngr/docs/commands/secondary/uncapped-claude.md` so `mngr ask` and `mngr --help` know about the command.
+Root-level surface changes for the `mngr_robinhood` plugin: README updated to advertise the new `robinhood` command and link to the new sub-project, and the auto-generated CLI docs gained an entry at `libs/mngr/docs/commands/secondary/robinhood.md` so `mngr ask` and `mngr --help` know about the command.
 
 ## 2026-05-20
 

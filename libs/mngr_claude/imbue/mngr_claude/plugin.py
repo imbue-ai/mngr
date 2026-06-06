@@ -68,7 +68,7 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import TransferMode
-from imbue.mngr.utils.git_utils import find_git_common_dir
+from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_claude import hookimpl
 from imbue.mngr_claude import resources as _claude_resources
@@ -1810,12 +1810,11 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         """Find the source repo path for the agent's work_dir, if it's a git worktree or mirror.
 
         Returns the parent of the git common dir (the source repo root),
-        or None if work_dir is not inside a git repo.
+        or None if work_dir is not inside a git repo. Delegates to the shared
+        core helper ``imbue.mngr.utils.git_utils.find_git_source_path`` (also
+        used by ``mngr_antigravity``).
         """
-        git_common_dir = find_git_common_dir(self.work_dir, concurrency_group)
-        if git_common_dir is None:
-            return None
-        return git_common_dir.parent
+        return find_git_source_path(self.work_dir, concurrency_group)
 
     def _setup_per_agent_config_dir(
         self,

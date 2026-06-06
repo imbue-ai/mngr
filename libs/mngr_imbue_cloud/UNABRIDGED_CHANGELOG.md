@@ -4,6 +4,18 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-05
+
+- Added to the release tooling's publish graph (`scripts/utils.py`). It will be offered for first publication to PyPI on the next release. Its previously-unpinned internal deps (`imbue-mngr-vps-docker`, `imbue-common`) are now pinned with `==` to their current workspace versions, as a published wheel requires. No runtime change.
+
+## 2026-06-04
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check. No runtime behavior change.
+
+Fixed a stale reference in `UNABRIDGED_CHANGELOG.md`: the `minds-dev-iterate`
+skill was renamed to `minds-dev-workflow`. The historical entry now points at
+the current skill name (noting the former name) so readers can find it.
+
 ## 2026-06-03
 
 Fixed the imbue_cloud slow (rebuild) path. When `fast_mode=prevent` leased a host

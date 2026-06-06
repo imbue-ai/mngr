@@ -1,0 +1,34 @@
+{#def variant="nav", tone="default", extra="" #}
+{#
+  Title-bar window-control button. Distinct from the general-purpose
+  Button primitive because the title bar lives on a dark
+  ``bg-zinc-900`` and uses different geometry (no border-radius for the
+  min/max/close window controls; small square icon hit area for the
+  navigation icons).
+
+  Props:
+    variant
+      "nav"     -- left-side icon hits (sidebar / home / back / forward /
+                   requests). ``w-8 h-7`` with a slight rounded corner.
+      "control" -- right-side native window controls (min / max / close)
+                   on platforms where minds draws its own frame.
+                   ``w-9 h-[38px]``, square corners (matches the OS).
+    tone
+      "default" -- hover lifts to ``bg-white/5`` + zinc-200 text.
+      "danger"  -- close-button-only red hover (``bg-red-600`` + white
+                   text); use on the close control to mirror native
+                   Windows / Linux behavior.
+
+  Any HTML attribute on the tag that is not declared above (id=, title=,
+  aria-*, data-*) flows through via JinjaX's ``attrs`` passthrough.
+#}
+{%- set _variants = {
+  "nav": "w-8 h-7 rounded-md active:bg-white/10",
+  "control": "w-9 h-[38px] rounded-none",
+} -%}
+{%- set _tones = {
+  "default": "hover:text-zinc-200 hover:bg-white/5",
+  "danger": "hover:text-white hover:bg-red-600",
+} -%}
+{%- set _cls = "bg-transparent border-none text-zinc-400 cursor-pointer flex items-center justify-center " ~ _variants[variant] ~ " " ~ _tones[tone] ~ " " ~ extra -%}
+<button {{ attrs.render(type="button", classes=_cls) }}>{{ content }}</button>

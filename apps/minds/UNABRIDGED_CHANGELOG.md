@@ -6,6 +6,36 @@ For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
 ## 2026-06-04
 
+Migrate the desktop client's templates from Jinja2 macros + `{% extends %}` to JinjaX components. UI primitives (Button, Card, Notice, Spinner, TextInput, PageContainer, Opt) and layout (Base, AuthBase) are now `.jinja` components composed via `<Component>` tags. Each page is a PascalCase component under `templates/pages/` (and auth pages under `templates/auth/`). The permission-request dialog is decomposed into five components (`PermissionsDialog`, `PermissionsHeader`, `PermissionsForm`, `PermissionsManualCredentials`, `PermissionsError`). The dev styleguide page (`/_dev/styleguide`) gains examples for the new components.
+
+No user-visible behavior changes -- HTML output stays semantically identical. Internal: `templates.py` now exposes a `CATALOG` constant in place of `JINJA_ENV`; the public `render_*` functions keep their signatures.
+
+- Disable the Modal provider in the Electron desktop-client e2e test (`test_create_local_docker_workspace_via_electron`) by setting `MNGR__PROVIDERS__MODAL__IS_ENABLED=false` for the Electron child process. The test creates a local Docker workspace and is given no Modal credentials, so the spawned `mngr`'s provider discovery was logging a "Modal is not authorized" warning every ~10s for the whole run; disabling the provider keeps the logs clean.
+
+Desktop app auto-update and developer-tooling fixes (extracted from the larger minds onboarding work for standalone review).
+
+- Auto-update: packaged builds now prompt to install a downloaded update. ToDesktop's runtime defaults `showInstallAndRestartPrompt` to `"never"`, so users saw "downloading in the background..." and were never prompted again; it is now set to `"always"`. ToDesktop is only initialized in packaged builds -- in dev its constructor threw on macOS (Squirrel is not linked in the unsigned binary), so dev launches now skip it.
+- Added a `Check for Updates...` item to the application menu that triggers a check and reports the result (update found / up to date / unavailable / error), with the unavailable message worded for the build type (dev vs unreleased draft).
+- Added a `View` menu with `Toggle Developer Tools` (Alt+Cmd+I), zoom controls, and fullscreen. The default Electron DevTools shortcut crashed because the app uses `BaseWindow` + `WebContentsView` rather than a `BrowserWindow`.
+- `MINDS_OPEN_DEVTOOLS=1` auto-opens detached DevTools on the content view at launch.
+- Startup env-setup failures are now logged to the console in addition to being shown in the error window.
+
+- Fixed `minds pool {list,create,destroy}` leaking the Neon pool DSN (which
+  embeds the DB username + password) into the `Running: ...` log line whenever
+  `--database-url` was passed explicitly. The DSN is now masked before the
+  command is rendered for logging; the real subprocess still receives the
+  unredacted value. The secret-masking logic that `mngr forward`'s
+  `--preauth-cookie` redaction already used is now a shared
+  `imbue.minds.utils.secret_redaction.redact_secret_flag_values` helper.
+
+Documented why `scripts/launch-and-verify.sh` and `scripts/first-message-verify.sh` intentionally use `set -uo pipefail` (omitting `-e`): both handle errors explicitly via a `fail` helper, `PIPESTATUS`, retry loops that depend on commands exiting non-zero, and diagnostic blocks on failure. No runtime behavior changed.
+
+The minds desktop client no longer runs a second discovery observer. Its `mngr forward` subprocess is now launched with `--observe-via-file`, so it tails the shared discovery events file written by the single `mngr observe` under `mngr latchkey forward` instead of spawning its own. Provider-set changes (enable/disable, signin/signout/OAuth) now refresh discovery solely by bouncing the detached `mngr latchkey forward` supervisor; minds no longer sends SIGHUP to `mngr forward` (its `bounce_observe` path was removed). Behavior is unchanged from the user's perspective.
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.
+
+## 2026-06-04
+
 Bump Latchkey version to 2.15.1. to include the playwright compatibility fix.
 
 A workspace no longer flickers out of the minds desktop list when its provider has a transient discovery error. Minds now retains agents/hosts whose provider errored on a poll and marks the affected workspaces stale (an amber dot in the sidebar) while keeping them fully clickable; they are only removed on an explicit destroy or a later clean poll. On the same provider-set changes that already bounce minds' own `mngr forward` observe (provider enable/disable, imbue_cloud account add on signin, account removal on signout/OAuth), minds now also bounces the detached `mngr latchkey forward` supervisor so latchkey's discovery stays in lockstep without a full minds restart.

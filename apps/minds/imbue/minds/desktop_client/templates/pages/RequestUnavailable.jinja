@@ -32,16 +32,13 @@
   <div id="permissions-backdrop"
        class="fixed inset-0 bg-black/40 flex items-center justify-center p-6"
        onclick="onBackdropClick(event)">
-    <div class="relative w-full max-w-[460px] bg-white border border-zinc-200 rounded-2xl shadow-xl overflow-hidden">
+    <div class="relative w-full max-w-[460px] bg-white border border-zinc-200 rounded-xl shadow-xl overflow-hidden">
       <DialogCloseButton onclick="closePermissionDialog()" />
       <div class="p-6 sm:p-7">
         <h1 class="text-xl font-semibold text-zinc-900 leading-tight pr-8">This permission request is no longer available</h1>
-        <p class="mt-2 text-zinc-600">{{ message }}</p>
+        <p class="mt-2 text-zinc-700">{{ message }}</p>
         <div class="flex justify-end mt-6">
-          <button type="button" onclick="closePermissionDialog()"
-                  class="inline-flex items-center justify-center rounded-lg px-4 py-2 text-sm font-medium bg-zinc-900 text-white hover:bg-zinc-800 transition-colors cursor-pointer">
-            Close
-          </button>
+          <Button variant="primary" onclick="closePermissionDialog()">Close</Button>
         </div>
       </div>
     </div>

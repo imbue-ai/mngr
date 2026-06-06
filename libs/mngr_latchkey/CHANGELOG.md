@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.0] - 2026-06-05
+
 ### Added
 
 - Added: `LatchkeyForwardSupervisor.bounce()` method that SIGHUPs a live supervisor (or starts one if none is running) so embedders can refresh latchkey's provider set mid-session. `mngr latchkey forward` now refreshes its provider set on SIGHUP instead of shutting down (SIGINT/SIGTERM remain the shutdown signals).
@@ -36,9 +38,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `services.json` catalog (and the `permissions` gateway extension that reads it) now maps each raw service name to a *list* of scope entries instead of a single entry, so one service can expose more than one detent scope. `GET /permissions/available` and `GET /permissions/available/<service_name>` now return arrays of `{scope, display_name, permissions}` objects per service.
 - Changed: Regenerated `services.json` against the current detent — each scope entry now carries a `description` (detent's `$comment` for the scope), and `permissions` changed from a list of strings to a list of `{"name", "description"}` objects so each permission's summary is colocated with its name. Picks up detent's newer definitions: Slack gains `slack-auth-read`/`slack-auth-write`, and GitLab now exposes a separate `gitlab-git` scope (alongside `gitlab-api`). The `permissions` gateway extension's `GET /permissions/available` and `GET /permissions/available/<service_name>` endpoints surface the scope and per-permission descriptions.
 - Changed: `permission_requests` gateway extension now validates the `scope` and `permissions` of incoming `predefined` `POST /permission-requests` bodies against the bundled `services.json` catalog. Requests whose `scope` is not a known Detent scope, or whose `permissions` list contains entries the catalog does not list under that scope, are rejected with HTTP 400 at creation time rather than persisted. File-sharing requests are unaffected.
-- Changed: The latchkey forward's discovery observer (`mngr observe --discovery-only`) now writes its event log to a private, per-environment directory under the latchkey plugin data dir instead of the shared mngr discovery log, fixing workspaces flickering out of the desktop UI when latchkey's observer and another forward's observer shared one discovery log. The private log is cleared on forward (re)start so a prior run's stale snapshots aren't replayed.
+- Changed: `mngr latchkey forward`'s discovery observer (`mngr observe --discovery-only`) is now the single discovery observer for the host dir and writes to the standard mngr discovery event log. Minds' `mngr forward --observe-via-file` tails the same log instead of running its own observer, removing the multi-observer flicker that earlier required isolating latchkey onto a private per-env event log. Old `discovery-observe/` directories left by prior versions are inert and can be deleted manually.
 - Changed: Latchkey forward's discovery consumer now retains agents whose provider errored on a poll rather than tearing down their reverse tunnels, dropping them only on an explicit destroy or a later successful poll.
 - Changed: Aligned the workspace's `imbue-mngr*==` pin stragglers in `pyproject.toml` with the satellites bumped in main's release commit, so building the `apps/minds` ToDesktop bundle from main no longer fails at `uv lock`.
+- Changed: Added to the release tooling's publish graph (`scripts/utils.py`); will be offered for first publication to PyPI on the next release. Stale `imbue-common==0.1.17` / `concurrency-group==0.1.17` pins in `pyproject.toml` are realigned to the current `0.1.18`. No runtime change.
 
 ### Fixed
 

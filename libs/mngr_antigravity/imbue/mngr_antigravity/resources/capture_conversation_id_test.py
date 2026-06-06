@@ -75,17 +75,17 @@ def test_records_each_distinct_conversation_in_order(tmp_path: Path) -> None:
     assert _recorded(tmp_path) == [_CONV_A, _CONV_B]
 
 
-def test_switch_back_reappends_so_last_line_is_current(tmp_path: Path) -> None:
-    """Switching back to an earlier conversation re-appends it.
+def test_switch_back_does_not_reappend(tmp_path: Path) -> None:
+    """Revisiting an earlier conversation does not re-append it.
 
-    This keeps `tail -n 1` pointing at the currently-active conversation (for
-    resume) while `sort -u` still yields the full distinct set (for transcripts).
+    The file is a set for transcript scoping (`sort -u`), so order and recency
+    are irrelevant -- resume tracks the main conversation in root_conversation,
+    not here. Recording each distinct id once keeps the file small.
     """
     _run(tmp_path, _payload(_CONV_A))
     _run(tmp_path, _payload(_CONV_B))
     _run(tmp_path, _payload(_CONV_A))
-    assert _recorded(tmp_path) == [_CONV_A, _CONV_B, _CONV_A]
-    assert _recorded(tmp_path)[-1] == _CONV_A
+    assert _recorded(tmp_path) == [_CONV_A, _CONV_B]
     assert set(_recorded(tmp_path)) == {_CONV_A, _CONV_B}
 
 

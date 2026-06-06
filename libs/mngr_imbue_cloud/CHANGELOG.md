@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.0] - 2026-06-05
+
 ### Added
 
 - Added: New `mngr imbue_cloud bucket` command group (`create` / `list` / `info` / `destroy`) for managing per-host R2 buckets (paid accounts only), plus `bucket keys create/list/destroy` for minting and revoking bucket-scoped S3 keys (read-only or read-write). `bucket create` returns S3-compatible credentials as JSON; the secret is shown only once and never stored. `bucket destroy` refuses a non-empty bucket and otherwise cascades to revoke its keys.
@@ -25,6 +27,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: The bake's services agent now uses the constant name `system-services` (was per-bake `pool-<hex>` UUID); the bake also destroys the FCT-bootstrap-created chat agent and `rm -f`'s `/code/runtime/initial_chat_created` so the user's first start re-fires the bootstrap cleanly.
 - Changed: `_get_agent_info` now takes `host_name` as a keyword arg and filters by both `name` and `host.name`, so the operator's local mngr state accumulating one `system-services` agent per bake no longer routes subsequent calls to the wrong VPS.
 - Changed: Provider's `get_host_and_agent_details` override (and its lease-only `_build_offline_details_from_lease` fallback) now accepts and forwards the new `offline_field_generators` parameter, so offline plugin fields are populated for leased hosts that fall back to offline/lease-only data.
+- Changed: Added to the release tooling's publish graph (`scripts/utils.py`); will be offered for first publication to PyPI on the next release. Previously-unpinned internal deps (`imbue-mngr-vps-docker`, `imbue-common`) are now pinned with `==` to their current workspace versions, as a published wheel requires. No runtime change.
 
 ### Removed
 

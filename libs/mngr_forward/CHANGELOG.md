@@ -6,11 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.0] - 2026-06-05
+
 ### Added
 
 - Added: `mngr_forward` emits `system_interface_backend_failure` envelopes (renamed from `workspace_backend_failure`) on connection errors, mid-SSE EOF, or 5xx responses, so consumers like minds can drive a recovery UI; the plugin's 503 fallback page is now a styled card with a loading spinner.
 - Added: `ReverseTunnelInfo.agent_id` field and matching `agent_id` parameter on `setup_reverse_tunnel`; new `remove_reverse_tunnels_for_agent(agent_id)` method that tears down every reverse tunnel tagged with a given agent (careful not to close an SSH client shared with live forward tunnels).
 - Added: New `resolver_snapshot` envelope — the plugin emits the full per-agent service map on every mutation (both `update_services` and the destruction paths) so a consumer's mirror does not retain stale entries for destroyed agents. The full map is sent on every change (no per-agent diff) so a late-attaching consumer only needs the most recent envelope to be in sync.
+- Added: `mngr forward --observe-via-file` makes the forward server consume discovery by tailing the shared discovery events file in-process instead of spawning its own `mngr observe --discovery-only` subprocess. Per-agent `mngr event` streams are still spawned for discovered agents. The flag is mutually exclusive with `--no-observe` and works with either `--service` or `--forward-port`. In this mode SIGHUP is a no-op (there is no observe child to bounce; the file's writer re-emits snapshots the tailer picks up automatically).
 
 ### Changed
 
@@ -22,6 +25,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Stopped following the per-agent `refresh` event source in `ForwardStreamManager`; default event sources are now just `services` and `requests`. The refresh-via-desktop-client mechanism has been superseded by an `open_tab` WebSocket broadcast from the workspace server.
 - Changed: Unreachable backends (SSH-tunnel setup failure and refused host-loopback dial) are now treated as backend failures — the plugin emits a `CONNECT_ERROR` `system_interface_backend_failure` envelope and serves the styled "Loading workspace" loader to HTML callers. The "Loading workspace" loader no longer shows the explanatory "This page will reload automatically…" line.
 - Changed: HTTP error handling simplified — the plugin no longer special-cases which status codes matter (previously tagged only 502/503/504 as `FIVEXX_RESPONSE` and 404-on-`GET` as `NOT_FOUND_RESPONSE`). It now forwards every response unchanged and emits a single `ERROR_RESPONSE` reason (carrying the `status_code`) for any non-2xx response, leaving the policy decision to the consumer.
+- Changed: Added to the release tooling's publish graph (`scripts/utils.py`); will be offered for first publication to PyPI on the next release. Previously-unpinned internal deps (`imbue-mngr`, `imbue-common`, `concurrency-group`) are now pinned with `==` to their current workspace versions, as a published wheel requires. No runtime change.
 
 ### Fixed
 
