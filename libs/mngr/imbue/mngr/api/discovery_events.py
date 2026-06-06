@@ -1012,6 +1012,10 @@ def _discovery_stream_tail_events_file(
     """Poll the events file for new content written by other mngr processes."""
     current_offset = initial_offset
     while not stop_event.is_set():
+        new_lines: list[str] = []
+        # Only the filesystem access is treated as transient and retryable. A read failure
+        # (file briefly missing, interrupted read) is logged and retried on the next poll;
+        # the offset is left unchanged so nothing is skipped.
         try:
             if events_path.exists():
                 file_size = events_path.stat().st_size
@@ -1038,12 +1042,21 @@ def _discovery_stream_tail_events_file(
                         bytes_consumed,
                         len(new_lines),
                     )
-                    for file_line in new_lines:
-                        if stop_event.is_set():
-                            break
-                        _discovery_stream_emit_line(file_line, warner, emitted_event_ids, emit_lock, on_line)
+        except OSError as e:
+            logger.debug("Transient I/O error while tailing discovery events file: {}", e)
+            new_lines = []
+
+        # Emit outside the I/O guard. A failure here is not a transient I/O hiccup but a real
+        # bug (or a dead output stream); log it once and stop the tail rather than swallowing it
+        # and re-running every second forever (the broad retry the previous structure had).
+        try:
+            for file_line in new_lines:
+                if stop_event.is_set():
+                    break
+                _discovery_stream_emit_line(file_line, warner, emitted_event_ids, emit_lock, on_line)
         except Exception as e:
-            logger.opt(exception=e).error("Error while tailing discovery events file")
+            logger.opt(exception=e).error("Unrecoverable error emitting tailed discovery events; stopping tail")
+            return
         stop_event.wait(timeout=1.0)
 
 
