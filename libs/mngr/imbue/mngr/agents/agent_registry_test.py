@@ -156,6 +156,12 @@ def test_register_agent_registers_class_and_config() -> None:
     assert get_agent_config_class("runtime-test-type") == AgentTypeConfig
 
 
+def test_register_agent_with_neither_class_nor_config_raises() -> None:
+    """Registering an agent type with neither a class nor a config is a no-op bug and must explode."""
+    with pytest.raises(AssertionError, match="neither an agent class nor a config class"):
+        _register_agent(agent_type="empty-registration-type")
+
+
 def test_list_available_agent_types_unions_registered_and_user_config() -> None:
     """list_available_agent_types must include both plugin-registered and user-config-defined types.
 
