@@ -411,6 +411,28 @@ def test_validate_and_create_discovered_agent_returns_none_for_missing_name() ->
     assert ref is None
 
 
+@pytest.mark.allow_warnings(match=r"^Skipping malformed agent record for host")
+@pytest.mark.parametrize("bad_id", [123, {"nested": "dict"}, ["list"], 5.0])
+def test_validate_and_create_discovered_agent_returns_none_for_non_str_id(bad_id: object) -> None:
+    # A non-str id from corrupt JSON must be skipped (not crash with AttributeError
+    # raised inside AgentId(...), which would take down the whole discovery loop).
+    host_id = HostId.generate()
+    agent_data = {"id": bad_id, "name": "my-agent"}
+    ref = validate_and_create_discovered_agent(agent_data, host_id, ProviderInstanceName("p"))
+    assert ref is None
+
+
+@pytest.mark.allow_warnings(match=r"^Skipping malformed agent record for host")
+@pytest.mark.parametrize("bad_name", [123, {"nested": "dict"}, ["list"], 5.0])
+def test_validate_and_create_discovered_agent_returns_none_for_non_str_name(bad_name: object) -> None:
+    # A non-str name from corrupt JSON must be skipped, same as a non-str id.
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    agent_data = {"id": str(agent_id), "name": bad_name}
+    ref = validate_and_create_discovered_agent(agent_data, host_id, ProviderInstanceName("p"))
+    assert ref is None
+
+
 # =============================================================================
 # Tests for default discover_hosts_and_agents on the provider
 # =============================================================================

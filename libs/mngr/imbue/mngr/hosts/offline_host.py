@@ -49,27 +49,30 @@ def validate_and_create_discovered_agent(
     Logs warnings for malformed records.
     """
     agent_id_str = agent_data.get("id")
-    if agent_id_str is None:
-        logger.warning("Skipping malformed agent record for host {}: missing 'id': {}", host_id, agent_data)
+    # isinstance(str) covers both a missing key (None) and a non-str value (e.g. an
+    # int/dict from corrupt JSON). A non-str would otherwise raise AttributeError
+    # inside AgentId(...) (the primitive calls value.strip()) and escape this
+    # "tolerate malformed records" path, crashing discovery.
+    if not isinstance(agent_id_str, str):
+        logger.warning("Skipping malformed agent record for host {}: missing or non-str 'id': {}", host_id, agent_data)
         return None
     try:
         agent_id = AgentId(agent_id_str)
-    except (ValueError, TypeError) as e:
-        # TypeError covers a non-str id (e.g. an int/dict from corrupt JSON), which would
-        # otherwise escape this "tolerate malformed records" path and crash discovery.
+    except ValueError as e:
         logger.opt(exception=e).warning(
             "Skipping malformed agent record for host {}: invalid 'id': {}", host_id, agent_data
         )
         return None
 
     agent_name_str = agent_data.get("name")
-    if agent_name_str is None:
-        logger.warning("Skipping malformed agent record for host {}: missing 'name': {}", host_id, agent_data)
+    if not isinstance(agent_name_str, str):
+        logger.warning(
+            "Skipping malformed agent record for host {}: missing or non-str 'name': {}", host_id, agent_data
+        )
         return None
     try:
         agent_name = AgentName(agent_name_str)
-    except (ValueError, TypeError) as e:
-        # TypeError covers a non-str name; see the 'id' handling above.
+    except ValueError as e:
         logger.opt(exception=e).warning(
             "Skipping malformed agent record for host {}: invalid 'name': {}", host_id, agent_data
         )
