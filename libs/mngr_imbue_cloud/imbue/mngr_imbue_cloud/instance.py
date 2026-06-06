@@ -950,6 +950,20 @@ class ImbueCloudProvider(BaseProviderInstance):
         if not agent_id_str or not agent_name_str:
             logger.warning("imbue_cloud[{}] skipping agent missing id/name in listing data", self.name)
             return None
+        # We have id+name (guard above), so a missing type/command means a
+        # partially-written data.json -- unexpected enough to warn about. The
+        # defaults applied below ("unknown" type, "bash" command, 800s idle
+        # timeout, "DISABLED" idle mode, "/" work_dir, start_on_boot False) are
+        # display stand-ins that keep the listing row renderable rather than
+        # dropping the agent; they are not real configured values.
+        missing_fields = [field for field in ("type", "command") if not agent_data.get(field)]
+        if missing_fields:
+            logger.warning(
+                "imbue_cloud[{}] agent {} listing data missing {}; using display defaults",
+                self.name,
+                agent_id_str,
+                ", ".join(missing_fields),
+            )
         agent_type = str(agent_data.get("type", "unknown"))
         command = CommandString(agent_data.get("command", "bash"))
         create_time_str = agent_data.get("create_time")
