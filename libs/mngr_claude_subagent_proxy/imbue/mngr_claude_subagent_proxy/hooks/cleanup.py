@@ -28,13 +28,31 @@ from imbue.mngr_claude_subagent_proxy.hooks.destroy_detached import destroy_agen
 from imbue.mngr_claude_subagent_proxy.hooks.mngr_api import ListAgentsByNameCallable
 from imbue.mngr_claude_subagent_proxy.hooks.mngr_api import list_agents_by_name
 
-# Lifecycle states that mean "child is still doing real work" -- in
-# those states, PostToolUse must NOT destroy the child or we throw away
-# the user's work. Anything else (STOPPED, REPLACED, DONE,
-# RUNNING_UNKNOWN_AGENT_TYPE, missing-from-mngr-list) is treated as
-# "safe to destroy."
-_LIVE_LIFECYCLE_STATES: Final[frozenset[AgentLifecycleState]] = frozenset(
-    {AgentLifecycleState.RUNNING, AgentLifecycleState.WAITING}
+# Lifecycle states in which PostToolUse may safely destroy the child --
+# the child has reached a terminal state and is no longer doing real
+# work. This is a positive allowlist ON PURPOSE: any state NOT listed
+# here (including any state added to the enum in the future) is treated
+# as "still alive / do not destroy" so we never throw away an in-flight
+# subagent. It mirrors hooks/mngr_api.find_terminal_children, which is
+# likewise a positive terminal allowlist, and errs toward preserving the
+# user's work. The full enum is enumerated below so a newly-added state
+# is forced to be classified explicitly rather than silently falling
+# into the destructive bucket.
+#
+# Terminal (safe to destroy):
+# - DONE / STOPPED: the child finished or was cleanly stopped.
+# - REPLACED: the child was superseded by a newer agent; the old
+#   instance is dead.
+# Non-terminal (preserve -- NOT in the set):
+# - RUNNING / WAITING: actively working / waiting on permission.
+# - RUNNING_UNKNOWN_AGENT_TYPE: running, just not a type our config
+#   recognizes -- still alive, so preserve it.
+# - UNKNOWN: the owning provider could not be reached during the last
+#   discovery attempt, so the real state is unknown and sticky. A child
+#   that is transiently undiscoverable while still working reports
+#   UNKNOWN, so destroying it would throw away live work.
+_TERMINAL_LIFECYCLE_STATES: Final[frozenset[AgentLifecycleState]] = frozenset(
+    {AgentLifecycleState.DONE, AgentLifecycleState.STOPPED, AgentLifecycleState.REPLACED}
 )
 
 
@@ -87,7 +105,7 @@ def _is_child_still_alive(
     if agent is None:
         # Already gone from the registry; nothing to preserve.
         return False
-    return agent.state in _LIVE_LIFECYCLE_STATES
+    return agent.state not in _TERMINAL_LIFECYCLE_STATES
 
 
 def run(
@@ -159,10 +177,10 @@ def run(
     # destroy.
     #
     # Skip destroy when result_file is absent OR the child is currently
-    # in a live lifecycle state (RUNNING / WAITING). Either signal means
-    # the child is still doing real work and destroying it on the
-    # parent's PostToolUse would throw away that work and leave the
-    # user with no recovery path.
+    # in a non-terminal lifecycle state (anything but DONE / STOPPED /
+    # REPLACED). Either signal means the child is still doing real work
+    # and destroying it on the parent's PostToolUse would throw away that
+    # work and leave the user with no recovery path.
     #
     # - result_file-absent: subagent_wait never observed an END_TURN
     #   (Haiku bailed early -- timeout, hallucinated permission dialog,

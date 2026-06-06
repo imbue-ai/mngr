@@ -518,19 +518,28 @@ def test_rewrite_missing_result_preserves_subagent(
 
 @pytest.mark.parametrize(
     "live_state",
-    [AgentLifecycleState.RUNNING, AgentLifecycleState.WAITING],
-    ids=["running", "waiting"],
+    [
+        AgentLifecycleState.RUNNING,
+        AgentLifecycleState.WAITING,
+        AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
+        AgentLifecycleState.UNKNOWN,
+    ],
+    ids=["running", "waiting", "running_unknown_agent_type", "unknown"],
 )
 def test_rewrite_live_lifecycle_preserves_subagent(
     clean_env: pytest.MonkeyPatch,
     live_state: AgentLifecycleState,
     state_dir: Path,
 ) -> None:
-    """Even when result_file IS present, a child still in RUNNING /
-    WAITING must be preserved -- catches edge cases where subagent_wait
-    saw an early end_turn but the child legitimately re-entered (e.g.
-    waiting for a permission prompt resolution that will produce more
-    work).
+    """Even when result_file IS present, a child in any non-terminal
+    lifecycle state must be preserved -- catches edge cases where
+    subagent_wait saw an early end_turn but the child legitimately
+    re-entered (e.g. waiting for a permission prompt resolution that will
+    produce more work). The cleanup uses a positive terminal allowlist
+    ({DONE, STOPPED, REPLACED}), so RUNNING_UNKNOWN_AGENT_TYPE (running,
+    just an unrecognized type) and UNKNOWN (provider transiently
+    undiscoverable, state sticky) both count as still-alive and are
+    preserved rather than destroyed mid-work.
     """
     for sub in ("subagent_map", "subagent_results", "subagent_prompts", "proxy_commands"):
         (state_dir / sub).mkdir(parents=True)
