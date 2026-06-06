@@ -9,7 +9,6 @@ dependencies = [
     "modal==1.4.3",
     "modal-proxy==0.1.13",
     "dockerfile-parse>=2.0.0",
-    "tomlkit>=0.12.0",
 ]
 
 [project.entry-points.mngr]
