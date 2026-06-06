@@ -167,6 +167,15 @@ def merge_trusted_workspace(settings: Mapping[str, Any], workspace_path: str) ->
     the trust list); otherwise returns a fresh dict with the workspace
     appended.
 
+    Raises ``UserInputError`` if ``trustedWorkspaces`` is present but is not a
+    list. A non-list value means an unknown agy schema (or a hand edit), and
+    silently coercing it to a fresh single-entry array -- as this helper used
+    to do -- would destroy whatever was stored there. That is the same
+    refuse-to-overwrite stance ``read_antigravity_settings`` and
+    ``AntigravityAgent._check_existing_trustedworkspaces_shape`` take; keeping
+    it here too means the ``@pure`` helper can't silently lose data even if a
+    future caller forgets the upstream shape check.
+
     The array is preserved exactly as Antigravity writes it -- agy stores
     paths as strings with no further normalization, so the caller is
     responsible for passing the same canonical absolute path that ``agy``
@@ -175,10 +184,13 @@ def merge_trusted_workspace(settings: Mapping[str, Any], workspace_path: str) ->
     matching agy's own behavior.
     """
     existing_raw = settings.get(TRUSTED_WORKSPACES_KEY, [])
-    if isinstance(existing_raw, list):
-        existing: list[Any] = list(existing_raw)
-    else:
-        existing = []
+    if not isinstance(existing_raw, list):
+        raise UserInputError(
+            f"Antigravity settings have a non-list {TRUSTED_WORKSPACES_KEY} value "
+            f"({type(existing_raw).__name__}); refusing to overwrite it. Inspect the "
+            f"file by hand and either fix the value or remove the key, then re-run."
+        )
+    existing: list[Any] = list(existing_raw)
     if workspace_path in existing:
         return None
     merged: dict[str, Any] = dict(settings)

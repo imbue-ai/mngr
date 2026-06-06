@@ -72,13 +72,13 @@ def test_merge_trusted_workspace_returns_none_when_already_trusted() -> None:
     assert merge_trusted_workspace(base, "/work/agent-1") is None
 
 
-def test_merge_trusted_workspace_promotes_non_list_value_to_fresh_array() -> None:
-    """If a future agy version stores a different shape under the key, we don't crash."""
+def test_merge_trusted_workspace_raises_on_non_list_value() -> None:
+    """A non-list value under the key means an unknown schema, so we refuse to overwrite it
+    rather than silently discarding whatever a future agy version stored there."""
     base = {"trustedWorkspaces": "unexpected"}
-    merged = merge_trusted_workspace(base, "/work/agent-1")
-
-    assert merged is not None
-    assert merged["trustedWorkspaces"] == ["/work/agent-1"]
+    with pytest.raises(UserInputError) as excinfo:
+        merge_trusted_workspace(base, "/work/agent-1")
+    assert "trustedWorkspaces" in str(excinfo.value)
 
 
 # =============================================================================
