@@ -47,6 +47,12 @@ _BOX_DRAWING_CHARS: frozenset[str] = frozenset("─│┌┐└┘├┤┬┴�
 # The dim left-bar glyph Claude renders before blockquote lines (U+258E).
 _BLOCKQUOTE_BAR: str = "▎"
 
+# The connector glyph Claude prints on the first line of a tool call's rendered
+# output (e.g. "  ⎿  $ cd ..."). It is U+23BF, distinct from the box-drawing
+# characters used in markdown tables, and never appears in assistant prose, so its
+# presence reliably marks the start of a tool-call block (the end of the message).
+_TOOL_OUTPUT_CONNECTOR: str = "⎿"
+
 # 256-color foreground code Claude uses for inline code spans.
 _INLINE_CODE_COLOR: int = 153
 
@@ -252,10 +258,23 @@ def _collect_region_lines(lines: list[str], start_index: int, strip_first_marker
       only ever uses single blank lines between paragraphs), or
     - a new marker line (the next tool-call/status block), or
     - a non-empty line that is not two-space indented (a column-0 footer such as
-      the input-box border).
+      the input-box border), or
+    - a ``⎿`` tool-output connector (see below).
 
     ``strip_first_marker`` controls whether the first line is treated as a marker
     line (strip the ``●`` prefix) or a plain continuation line (de-indent).
+
+    A tool call that begins right as the message ends also ends the region. Its
+    marker line ("● Running 1 shell command…") normally ends the region via the
+    marker check, but the grey ``●`` flashes off, and while off the line looks like
+    an indented continuation ("  Running 1 shell command…"). We do not match that
+    spinner text (it may be only partially rendered); instead we key off the ``⎿``
+    tool-output connector beneath it: when seen, the message ended at the tool
+    marker line above (which we may already have appended), so that line is dropped
+    and the tool block is never captured as assistant text. While the marker is
+    briefly the last visible line (before the ``⎿`` renders) it is the body's last
+    line, held back by the consumer, so it is never emitted; the next poll's ``⎿``
+    removes it.
     """
     if strip_first_marker:
         first = _strip_marker_prefix(lines[start_index])
@@ -276,6 +295,14 @@ def _collect_region_lines(lines: list[str], start_index: int, strip_first_marker
         if _line_is_any_marker(line):
             break
         if not stripped.startswith("  "):
+            break
+        if stripped.strip().startswith(_TOOL_OUTPUT_CONNECTOR):
+            # Tool-call output: drop the (circle-off) tool marker line above it
+            # along with any trailing blanks, and end the message here.
+            while region and region[-1] == "":
+                region.pop()
+            if region:
+                region.pop()
             break
         region.append(_deindent_continuation(line))
 

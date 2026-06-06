@@ -119,6 +119,52 @@ def test_extract_message_region_markerless_tail() -> None:
     ]
 
 
+def test_extract_stops_at_circle_off_shell_spinner() -> None:
+    # A tool call begins as the message ends; its grey marker circle is off, so the
+    # spinner line looks like an indented continuation. It (and the tool output
+    # below it) must not be captured as assistant text -- the "⎿" connector ends
+    # the block and drops the spinner line above it.
+    pane = (
+        "\x1b[38;5;231m●\x1b[39m The answer is below.\n"
+        "  Here are the details.\n"
+        "  Running 1 shell command…\n"
+        "  ⎿  $ cd /home/user/project\n"
+        "     echo hello\n"
+        "\n"
+        "────────\n"
+    )
+    result = stream_snapshot.extract_message_region(pane)
+    assert result is not None
+    lines, _ = result
+    assert [stream_snapshot.strip_ansi(line) for line in lines] == [
+        "The answer is below.",
+        "Here are the details.",
+    ]
+
+
+def test_extract_drops_circle_off_tool_marker_before_connector() -> None:
+    # For a non-shell tool the spinner text differs, but the "⎿" connector still
+    # ends the block and drops the circle-off marker line above it.
+    pane = "\x1b[38;5;231m●\x1b[39m Reading the file now.\n  Reading config.toml…\n  ⎿  Read 12 lines\n\n────────\n"
+    result = stream_snapshot.extract_message_region(pane)
+    assert result is not None
+    lines, _ = result
+    assert [stream_snapshot.strip_ansi(line) for line in lines] == ["Reading the file now."]
+
+
+def test_extract_keeps_assistant_text_containing_running() -> None:
+    # Ordinary prose that merely starts with "Running" must not be truncated; only
+    # the "⎿" connector ends the block, and there is none here.
+    pane = "\x1b[38;5;231m●\x1b[39m A short tale.\n  Running water flowed past the old mill all night.\n\n────────\n"
+    result = stream_snapshot.extract_message_region(pane)
+    assert result is not None
+    lines, _ = result
+    assert [stream_snapshot.strip_ansi(line) for line in lines] == [
+        "A short tale.",
+        "Running water flowed past the old mill all night.",
+    ]
+
+
 def test_compute_overlap() -> None:
     assert stream_snapshot.compute_overlap(["a", "b", "c"], ["b", "c", "d"]) == 2
     assert stream_snapshot.compute_overlap(["a", "b"], ["a", "b", "c", "d"]) == 2
