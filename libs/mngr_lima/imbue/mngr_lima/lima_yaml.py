@@ -134,6 +134,7 @@ def generate_default_lima_yaml(
             host_public_key_openssh,
             outer_authorized_public_key=outer_authorized_public_key,
             install_gvisor_runtime=install_gvisor_runtime,
+            host_data_disk_name=host_data_disk_name,
         )
     else:
         port_forwards = _disable_port_forwards_rules()
@@ -194,6 +195,13 @@ def _build_provisioning_script(
     """Build the Lima ``provision[mode=system]`` script that installs required packages, configures sshd, optionally lands the btrfs host-data disk at the canonical mount point, and (when a keypair is supplied) installs it as the guest's ed25519 sshd host key."""
     host_key_block = _build_host_key_block(host_private_key_pem, host_public_key_openssh)
     host_data_disk_block = _build_host_data_disk_block(host_data_disk_name, host_dir)
+    # The btrfs data disk is formatted in-guest (see _build_format_and_mount_data_disk_block),
+    # so mkfs.btrfs must be present; minimal images (e.g. Debian genericcloud) don't ship it.
+    btrfs_pkg_line = (
+        '\ncommand -v mkfs.btrfs >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL btrfs-progs"'
+        if host_data_disk_name is not None
+        else ""
+    )
     return f"""\
 #!/bin/bash
 set -eux -o pipefail
@@ -207,7 +215,7 @@ command -v rsync >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL rsync"
 command -v curl >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL curl"
 command -v xxd >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL xxd"
 test -x /usr/sbin/sshd || PKGS_TO_INSTALL="$PKGS_TO_INSTALL openssh-server"
-test -f /etc/ssl/certs/ca-certificates.crt || PKGS_TO_INSTALL="$PKGS_TO_INSTALL ca-certificates"
+test -f /etc/ssl/certs/ca-certificates.crt || PKGS_TO_INSTALL="$PKGS_TO_INSTALL ca-certificates"{btrfs_pkg_line}
 
 if [ -n "$PKGS_TO_INSTALL" ]; then
     apt-get update -qq && apt-get install -y -qq $PKGS_TO_INSTALL
@@ -267,6 +275,7 @@ def _build_docker_provisioning_script(
     host_public_key_openssh: str | None,
     outer_authorized_public_key: str | None,
     install_gvisor_runtime: bool,
+    host_data_disk_name: str | None,
 ) -> str:
     """Build the Lima ``provision[mode=system]`` script for is_host_in_docker mode.
 
@@ -277,9 +286,17 @@ def _build_docker_provisioning_script(
     drive docker/btrfs/systemctl as root. The injected ed25519 host key gives
     the VM a known sshd identity (no TOFU). When ``install_gvisor_runtime`` is
     True, an idempotent block installs and registers the gVisor ``runsc`` runtime.
+    When ``host_data_disk_name`` is set, the btrfs data disk is formatted +
+    mounted in-guest (Lima can't format it on minimal images that lack mkfs.btrfs).
     """
     host_key_block = _build_host_key_block(host_private_key_pem, host_public_key_openssh)
     root_authorized_keys_block = _build_root_authorized_keys_block(outer_authorized_public_key)
+    data_disk_block = (
+        f"\n# Format + mount the btrfs data disk (Lima can't on minimal images).\n"
+        f"{_build_format_and_mount_data_disk_block(host_data_disk_name)}\n"
+        if host_data_disk_name is not None
+        else ""
+    )
     gvisor_install_block = (
         f"\n# Install and register the gVisor runsc runtime (idempotent).\n{_GVISOR_RUNSC_INSTALL_BLOCK}\n"
         if install_gvisor_runtime
@@ -313,7 +330,7 @@ if [ -n "$PKGS_TO_INSTALL" ]; then
 fi
 
 systemctl enable --now docker
-{gvisor_install_block}
+{gvisor_install_block}{data_disk_block}
 mkdir -p /run/sshd
 
 # Install the caller-provided sshd host key (when given).
@@ -371,25 +388,17 @@ def _build_host_data_disk_block(host_data_disk_name: str | None, host_dir: str) 
     if host_data_disk_name is None:
         return "# (no host-data disk attached; host_dir uses today's bind mount or local fs)"
     lima_mount = lima_host_data_disk_mount_path(host_data_disk_name)
+    format_and_mount_block = _build_format_and_mount_data_disk_block(host_data_disk_name)
     return f"""\
-# Wait for Lima to finish auto-mounting the additional btrfs disk.
-for _ in $(seq 1 60); do
-    if mountpoint -q {lima_mount}; then
-        break
-    fi
-    sleep 1
-done
-if ! mountpoint -q {lima_mount}; then
-    echo "ERROR: Lima additional disk not mounted at {lima_mount}" >&2
-    exit 1
-fi
+# Format + mount the additional btrfs disk ourselves (Lima can't on minimal images).
+{format_and_mount_block}
 
 # Open up the btrfs root so the Lima default (non-root) user can write to
 # host_dir without sudo (a fresh mkfs.btrfs leaves the root dir owned by
 # root:root with 0755). Mirrors the chmod 777 the script applies to /code.
 chmod 0777 {lima_mount}
 
-# Replace host_dir with a symlink to Lima's auto-mounted btrfs disk.
+# Replace host_dir with a symlink to the mounted btrfs disk.
 # ``ln -sfn`` alone won't replace an existing directory, so rm any real
 # dir first. Idempotent across re-runs.
 if [ -L {host_dir} ] || [ ! -e {host_dir} ]; then
@@ -397,6 +406,50 @@ if [ -L {host_dir} ] || [ ! -e {host_dir} ]; then
 else
     rm -rf {host_dir}
     ln -sfn {lima_mount} {host_dir}
+fi"""
+
+
+def _build_format_and_mount_data_disk_block(host_data_disk_name: str) -> str:
+    """Return a bash block that formats (if needed) and mounts the Lima btrfs data disk.
+
+    Minimal cloud images (e.g. Debian genericcloud) ship no ``mkfs.btrfs``, so
+    Lima's guestagent cannot format the ``format: true`` btrfs additionalDisk at
+    boot -- it partitions the disk but leaves it unformatted, and nothing mounts
+    at ``/mnt/lima-<name>``. ``btrfs-progs`` is installed earlier in the
+    provisioning script; here we format + mount the disk ourselves at exactly the
+    path Lima would have used, so the per-host btrfs subvolume can be created.
+
+    Idempotent: a no-op when already mounted, and ``mkfs`` runs only when the
+    device is not already btrfs (so re-provisioning and existing snapshot data
+    survive). The data disk is identified as the one ``disk``-type block device
+    that is not the root disk -- in this mode there is exactly one additional
+    disk. On later boots Lima's guestagent handles the mount itself (``btrfs-progs``
+    now persists in the image's root fs), so this is first-boot setup; the mount
+    path is the same either way.
+    """
+    lima_mount = lima_host_data_disk_mount_path(host_data_disk_name)
+    return f"""\
+if ! mountpoint -q {lima_mount}; then
+    DATA_ROOT_SRC="$(findmnt -no SOURCE /)"
+    DATA_ROOT_DISK="$(lsblk -no PKNAME "$DATA_ROOT_SRC" | head -1)"
+    DATA_DISK=""
+    for DATA_CANDIDATE in $(lsblk -dn -o NAME,TYPE | awk '$2=="disk"{{print $1}}'); do
+        if [ "$DATA_CANDIDATE" != "$DATA_ROOT_DISK" ]; then
+            DATA_DISK="$DATA_CANDIDATE"
+            break
+        fi
+    done
+    if [ -z "$DATA_DISK" ]; then
+        echo "ERROR: no additional data disk found to back {lima_mount}" >&2
+        exit 1
+    fi
+    DATA_PART="$(lsblk -ln -o NAME "/dev/$DATA_DISK" | sed -n '2p')"
+    DATA_DEV="/dev/${{DATA_PART:-$DATA_DISK}}"
+    if ! blkid -t TYPE=btrfs "$DATA_DEV" >/dev/null 2>&1; then
+        mkfs.btrfs -f "$DATA_DEV"
+    fi
+    mkdir -p {lima_mount}
+    mount "$DATA_DEV" {lima_mount}
 fi"""
 
 
