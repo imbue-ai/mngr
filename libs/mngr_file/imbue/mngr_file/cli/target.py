@@ -13,6 +13,7 @@ from imbue.mngr.api.find import filter_one_host
 from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import get_agent_state_dir_path
@@ -189,8 +190,11 @@ def _get_host_access(
     online_host: OnlineHostInterface | None = None
     try:
         host_interface = provider.get_host(host_id)
-    except MngrError as err:
-        logger.trace("Host {} is not available: {}", host_id, err)
+    except HostNotFoundError as err:
+        # The host_id was just produced by discovery, so a missing host here means it was
+        # destroyed in the interim; degrade to volume access but log at warning so the
+        # degradation is visible. Any other MngrError (auth/config/provider bugs) propagates.
+        logger.warning("Host {} not found; falling back to volume access: {}", host_id, err)
         host_interface = None
 
     if host_interface is not None and isinstance(host_interface, OnlineHostInterface):
