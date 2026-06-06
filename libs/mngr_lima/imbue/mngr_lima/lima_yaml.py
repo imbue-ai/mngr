@@ -249,9 +249,9 @@ if [ "$SSH_KEY_CHANGED" = "1" ] || [ "$SSHD_CONFIG_CHANGED" = "1" ]; then
     systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null || true
 fi
 
-# Optional: if a Lima-managed btrfs additional disk was attached, symlink
-# host_dir to Lima's auto-mount path for that disk. No-op when the block
-# below is the inert comment placeholder.
+# Optional: if a btrfs additional disk was attached, format + mount it at the
+# canonical path and symlink host_dir to it. No-op when the block below is the
+# inert comment placeholder.
 {host_data_disk_block}
 """
 
