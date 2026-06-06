@@ -220,8 +220,15 @@ def _derive_host_state_from_raw(raw: Mapping[str, Any]) -> HostState:
         return HostState.DESTROYED
     container_state = raw.get("container_state")
     if not container_state:
-        # Outer SSH succeeded but produced no state -- treat as crashed
-        # (no info to be more specific).
+        # Outer SSH succeeded but the listing script emitted no CONTAINER_STATE.
+        # We deliberately report CRASHED rather than UNKNOWN: HostState.UNKNOWN
+        # is reserved for "the provider could not be accessed at all" -- but we
+        # DID reach the outer host here, and a reachable outer host that can't
+        # even report its container's state means something is wrong with the
+        # container, not with our access. CRASHED is the alarming-but-actionable
+        # choice, and is consistent with _map_docker_status_to_host_state
+        # defaulting unrecognized docker states to CRASHED so we never silently
+        # misreport a broken host as fine.
         return HostState.CRASHED
     exit_code = raw.get("container_exit_code") or 0
     has_certified_data = bool(raw.get("certified_data"))
