@@ -2846,11 +2846,15 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
         try:
             result = self.execute_idempotent_command("echo ok")
+        except (OSError, HostConnectionError) as e:
+            # Ping failed: the host is (probably) unreachable. Fall through to the
+            # offline-derived state, but log why so a transient/unexpected failure
+            # is not silently indistinguishable from a genuinely down host.
+            logger.trace("Ping of host {} failed ({}); falling back to offline state derivation", self.id, e)
+        else:
             if result.success:
                 logger.trace("Determined host {} state=RUNNING (ping successful)", self.id)
                 return HostState.RUNNING
-        except (OSError, HostConnectionError):
-            pass
 
         # otherwise use the offline logic
         return super().get_state()
