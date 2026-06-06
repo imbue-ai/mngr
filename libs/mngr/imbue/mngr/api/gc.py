@@ -951,18 +951,24 @@ def _remove_directory(host: OnlineHostInterface, path: Path) -> None:
     has passwordless sudo).
     """
     result = host.execute_idempotent_command(f"test -e {shlex.quote(str(path))}")
-    if result.success:
-        quoted = shlex.quote(str(path))
-        result = host.execute_idempotent_command(f"rm -rf {quoted}")
+    if not result.success:
+        # The path is already gone, so there is nothing to remove. Log it: callers always expect
+        # the path to exist, so a silent no-op can mask a partial earlier removal (e.g. a worktree
+        # whose files were deleted but whose registration was left dangling).
+        logger.debug("Directory {} did not exist; nothing to remove", path)
+        return
 
-        if not result.success:
-            logger.debug("rm -rf failed for {}, retrying with sudo: {}", path, result.stderr)
-            result = host.execute_idempotent_command(f"sudo rm -rf {quoted}")
+    quoted = shlex.quote(str(path))
+    result = host.execute_idempotent_command(f"rm -rf {quoted}")
 
-        if not result.success:
-            raise MngrError(f"Failed to remove directory {path}: {result.stderr}")
+    if not result.success:
+        logger.debug("rm -rf failed for {}, retrying with sudo: {}", path, result.stderr)
+        result = host.execute_idempotent_command(f"sudo rm -rf {quoted}")
 
-        logger.debug("Removed directory: {}", path)
+    if not result.success:
+        raise MngrError(f"Failed to remove directory {path}: {result.stderr}")
+
+    logger.debug("Removed directory: {}", path)
 
 
 def _handle_error(error_msg: str, error_behavior: ErrorBehavior, exc: Exception | None = None) -> None:
