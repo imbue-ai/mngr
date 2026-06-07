@@ -46,24 +46,82 @@ def _resolve_mngr_binary() -> str:
 MNGR_BINARY: Final[str] = _resolve_mngr_binary()
 
 
-class WorkspacePaths(FrozenModel):
-    """Resolved filesystem paths for minds data storage."""
+class MindsPaths(FrozenModel):
+    """Resolved per-category, platform-canonical filesystem roots for minds state.
 
-    data_dir: Path = Field(description="Root directory for minds data (e.g. ~/.minds)")
+    Replaces the single ``~/.minds-<tier>/`` dotfolder with four roots, each
+    following the host OS's documented conventions (Apple Application
+    Support / Caches / Logs on macOS; the XDG data / cache / state / config
+    dirs on Linux). Built via :meth:`for_root_name`, which delegates the
+    actual resolution to the (mngr-free) functions in
+    :mod:`imbue.minds.bootstrap`.
+
+    For tests, the legacy single-root shape is still accepted:
+    ``MindsPaths(data_dir=tmp_path)`` lays all four roots flat under one
+    directory, matching the ``MINDS_DATA_HOME`` override layout.
+    """
+
+    tier: str = Field(default="production", description="Tier subdirectory name (production, staging, dev-<name>).")
+    app_support: Path = Field(description="Secrets, sessions, mngr/, ssh/, telegram/, latchkey/, backups/.")
+    cache: Path = Field(description="Regenerable caches (template-cache/); the OS may purge these.")
+    logs: Path = Field(description="Log files (minds.log, minds-events.jsonl).")
+    config: Path = Field(description="User-editable config (client.toml, config.toml, minds_root.toml).")
+    legacy_data_dir: Path = Field(description="Pre-move ~/.<root_name>/ location; read-only after migration.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _expand_legacy_data_dir(cls, data: object) -> object:
+        """Accept ``data_dir=<base>`` as a flat all-in-one-root shorthand.
+
+        Lets tests construct a self-contained throwaway tree the same way
+        the ``MINDS_DATA_HOME`` override lays one out (all four roots under
+        one directory), without enumerating every root.
+        """
+        if isinstance(data, dict) and "data_dir" in data:
+            base = Path(data.pop("data_dir"))
+            data.setdefault("app_support", base)
+            data.setdefault("cache", base)
+            data.setdefault("logs", base)
+            data.setdefault("config", base)
+            data.setdefault("legacy_data_dir", base)
+        return data
+
+    @classmethod
+    def for_root_name(cls, root_name: str) -> "MindsPaths":
+        """Resolve the platform-canonical roots for ``root_name`` (e.g. ``minds``)."""
+        from imbue.minds.bootstrap import minds_app_support_dir_for
+        from imbue.minds.bootstrap import minds_cache_dir_for
+        from imbue.minds.bootstrap import minds_config_dir_for
+        from imbue.minds.bootstrap import minds_data_dir_for
+        from imbue.minds.bootstrap import minds_logs_dir_for
+        from imbue.minds.bootstrap import minds_tier_for
+
+        return cls(
+            tier=minds_tier_for(root_name),
+            app_support=minds_app_support_dir_for(root_name),
+            cache=minds_cache_dir_for(root_name),
+            logs=minds_logs_dir_for(root_name),
+            config=minds_config_dir_for(root_name),
+            legacy_data_dir=minds_data_dir_for(root_name),
+        )
 
     @property
     def auth_dir(self) -> Path:
-        """Directory for authentication data (signing key, one-time codes)."""
-        return self.data_dir / "auth"
+        """Directory for authentication data (signing key, one-time codes, sessions)."""
+        return self.app_support / "auth"
 
     @property
     def mngr_host_dir(self) -> Path:
-        """Directory where mngr stores agent state for this minds install (e.g. ~/.minds/mngr)."""
-        return self.data_dir / "mngr"
+        """Directory where mngr stores agent state for this minds install (under app_support)."""
+        return self.app_support / "mngr"
 
     def workspace_dir(self, agent_id: AgentId) -> Path:
-        """Directory for a specific workspace's repo (e.g. ~/.minds/<agent-id>/)."""
-        return self.data_dir / str(agent_id)
+        """Directory for a specific workspace's repo (under app_support)."""
+        return self.app_support / str(agent_id)
+
+
+# Deprecated alias kept for one release cycle; ``MindsPaths`` is the canonical name.
+WorkspacePaths = MindsPaths
 
 
 class ClientEnvConfig(FrozenModel):

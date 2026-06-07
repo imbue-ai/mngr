@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import tomllib
 from pathlib import Path
 from typing import Final
@@ -21,6 +22,15 @@ from loguru import logger
 
 MINDS_ROOT_NAME_ENV_VAR: Final[str] = "MINDS_ROOT_NAME"
 DEFAULT_MINDS_ROOT_NAME: Final[str] = "minds"
+# Single opaque override for the whole platform-canonical layout: when set,
+# all four roots become ``$MINDS_DATA_HOME/<tier>/{app_support,cache,logs,config}``.
+# Used by tests and the CI runner to get one self-contained throwaway tree
+# independent of the host's home-dir state.
+MINDS_DATA_HOME_ENV_VAR: Final[str] = "MINDS_DATA_HOME"
+# Bundle name matching the ToDesktop bundle; the first path component under
+# each macOS Library root and the directory name under each XDG root.
+_MINDS_BUNDLE_NAME: Final[str] = "Minds"
+_MINDS_XDG_DIR_NAME: Final[str] = "minds"
 # Names that are not legal env-name suffixes. Today this is just the prefix
 # string itself, because ``minds-`` with an empty suffix would round-trip
 # to the production path (``~/.minds-/`` is nonsensical) and we'd rather
@@ -124,8 +134,99 @@ def root_name_for_env_name(env_name: str) -> str:
 
 
 def minds_data_dir_for(root_name: str) -> Path:
-    """Return the minds data directory for a given root name (e.g. ~/.minds)."""
+    """Return the *legacy* minds data directory for a given root name (e.g. ~/.minds).
+
+    Deprecated: this is the pre-platform-canonical single dotfolder under
+    ``$HOME``. New code resolves per-category roots via
+    :func:`minds_app_support_dir_for` / :func:`minds_cache_dir_for` /
+    :func:`minds_logs_dir_for` / :func:`minds_config_dir_for` (or the
+    :class:`imbue.minds.config.data_types.MindsPaths` model built from
+    them). Kept as the canonical answer to "where did state live before
+    the move?" -- the startup migration reads from here.
+    """
     return Path.home() / ".{}".format(root_name)
+
+
+def minds_tier_for(root_name: str) -> str:
+    """Return the platform-canonical tier subdirectory name for a root name.
+
+    ``minds`` -> ``production``; ``minds-<env>`` -> ``<env>`` (so
+    ``minds-staging`` -> ``staging``, ``minds-dev-josh-3`` ->
+    ``dev-josh-3``, ``minds-dev-staging`` -> ``dev-staging``). This is the
+    first subdirectory under each canonical root, lifting the tier
+    discriminator out of the ``$HOME`` dotfolder name. Delegates to
+    :func:`env_name_from_root_name` so the prefix-stripping rule lives in
+    one place and cross-tier names never collapse (``minds-dev-staging``
+    stays distinct from ``minds-staging``).
+    """
+    return env_name_from_root_name(root_name)
+
+
+def _xdg_base(env_var: str, default: Path) -> Path:
+    """Return the XDG base dir from ``env_var``, honoring it only when absolute.
+
+    Per the XDG Base Directory spec, a relative value must be ignored and
+    the default used instead.
+    """
+    value = os.environ.get(env_var)
+    if value:
+        candidate = Path(value)
+        if candidate.is_absolute():
+            return candidate
+    return default
+
+
+def _minds_roots_for(root_name: str) -> tuple[Path, Path, Path, Path]:
+    """Resolve the four platform-canonical roots ``(app_support, cache, logs, config)``.
+
+    Resolution order:
+      1. ``MINDS_DATA_HOME`` override -> ``$MINDS_DATA_HOME/<tier>/{app_support,cache,logs,config}``.
+      2. ``sys.platform == "darwin"`` -> Apple's Application Support / Caches / Logs.
+      3. Otherwise (Linux) -> the XDG data / cache / state / config dirs.
+
+    Windows is unsupported (matches CLAUDE.md).
+    """
+    tier = minds_tier_for(root_name)
+    override = os.environ.get(MINDS_DATA_HOME_ENV_VAR)
+    if override:
+        base = Path(override).expanduser() / tier
+        return base / "app_support", base / "cache", base / "logs", base / "config"
+    home = Path.home()
+    if sys.platform == "darwin":
+        app_support = home / "Library" / "Application Support" / _MINDS_BUNDLE_NAME / tier
+        cache = home / "Library" / "Caches" / _MINDS_BUNDLE_NAME / tier
+        logs = home / "Library" / "Logs" / _MINDS_BUNDLE_NAME / tier
+        config = app_support / "config"
+        return app_support, cache, logs, config
+    data_home = _xdg_base("XDG_DATA_HOME", home / ".local" / "share")
+    cache_home = _xdg_base("XDG_CACHE_HOME", home / ".cache")
+    state_home = _xdg_base("XDG_STATE_HOME", home / ".local" / "state")
+    config_home = _xdg_base("XDG_CONFIG_HOME", home / ".config")
+    app_support = data_home / _MINDS_XDG_DIR_NAME / tier
+    cache = cache_home / _MINDS_XDG_DIR_NAME / tier
+    logs = state_home / _MINDS_XDG_DIR_NAME / tier / "logs"
+    config = config_home / _MINDS_XDG_DIR_NAME / tier
+    return app_support, cache, logs, config
+
+
+def minds_app_support_dir_for(root_name: str) -> Path:
+    """Return the app-support root (secrets, sessions, mngr/, ssh/, telegram/, latchkey/, backups/)."""
+    return _minds_roots_for(root_name)[0]
+
+
+def minds_cache_dir_for(root_name: str) -> Path:
+    """Return the cache root (template-cache/; regenerable, OS may purge)."""
+    return _minds_roots_for(root_name)[1]
+
+
+def minds_logs_dir_for(root_name: str) -> Path:
+    """Return the logs root (minds.log, minds-events.jsonl)."""
+    return _minds_roots_for(root_name)[2]
+
+
+def minds_config_dir_for(root_name: str) -> Path:
+    """Return the config root (client.toml, config.toml, minds_root.toml)."""
+    return _minds_roots_for(root_name)[3]
 
 
 def mngr_host_dir_for(root_name: str) -> Path:
