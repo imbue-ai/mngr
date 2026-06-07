@@ -142,7 +142,11 @@ class _BridgeHandler(BaseHTTPRequestHandler):
     """Per-request handler that delegates to the owning :class:`HookBridge` on its server."""
 
     def do_POST(self) -> None:
-        content_length = int(self.headers.get("Content-Length", "0") or "0")
+        try:
+            content_length = int(self.headers.get("Content-Length", "0") or "0")
+        except ValueError:
+            # A malformed Content-Length is treated as no body so the handler never crashes.
+            content_length = 0
         raw_body = self.rfile.read(content_length) if content_length > 0 else b""
         query = parse_qs(urlparse(self.path).query)
         hook_id_values = query.get("hook_id", [])
