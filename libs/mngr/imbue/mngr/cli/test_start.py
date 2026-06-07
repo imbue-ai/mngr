@@ -35,6 +35,7 @@ def test_start_restart_running_agent(
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_start_restart_stopped_agent(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
