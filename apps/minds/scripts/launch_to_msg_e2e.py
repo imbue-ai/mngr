@@ -62,9 +62,6 @@ import sys
 import threading
 import time
 import urllib.parse
-from pydantic import BaseModel
-from pydantic import ConfigDict
-from pydantic import Field
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +74,9 @@ from loguru import logger
 from playwright.async_api import BrowserContext
 from playwright.async_api import Page
 from playwright.async_api import async_playwright
+from pydantic import BaseModel
+from pydantic import ConfigDict
+from pydantic import Field
 
 
 class E2EFailure(Exception):
