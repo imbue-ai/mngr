@@ -6,6 +6,7 @@ that records issued commands and returns canned ``CommandResult``s, which
 keeps these unit tests fast and free of any real SSH/Docker dependency.
 """
 
+import base64
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -244,7 +245,13 @@ def test_stop_container_includes_timeout_arg() -> None:
 def test_start_container_uses_docker_start() -> None:
     outer = _outer()
     start_container(outer, "my-container")
-    assert _stub(outer).recorded[0].command == "docker start my-container"
+    # start_container now ships a single base64-wrapped recovery script (start +
+    # conditional runsc-overlay cleanup + retry) in one round-trip; decode it and
+    # confirm it drives `docker start` for the container.
+    command = _stub(outer).recorded[0].command
+    decoded = base64.b64decode(command.split(" | ", 1)[0].removeprefix("echo ")).decode()
+    assert "name=my-container" in decoded
+    assert 'docker start "$name"' in decoded
 
 
 def test_remove_container_without_force() -> None:

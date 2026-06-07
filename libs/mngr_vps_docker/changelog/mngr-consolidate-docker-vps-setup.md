@@ -15,3 +15,12 @@ release and downloaded + checksum-verified directly.
 The SSH host-key injection stays first-boot-only in the cloud-init wrapper and is
 deliberately excluded from the re-runnable steps, so re-provisioning never resets
 the VPS host key or breaks `known_hosts`.
+
+Made `start_container` (shared by vps_docker / ovh / lima) resilient to restarting
+a container under gVisor (runsc). A leftover runsc sandbox from the container's
+previous run can keep the rootfs-overlay `.gvisor.filestore` mounted, so
+`docker start` fails with "repeated submounts are not supported with overlay
+optimizations". `start_container` now runs the start + recovery + retry as a
+single remote script: on that specific gVisor error it reaps the leftover runsc
+processes scoped to that container id, removes the stale on-disk filestore, then
+retries. A normal start stays a single `docker start`.

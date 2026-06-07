@@ -1,3 +1,4 @@
+import base64
 import os
 import re
 import shlex
@@ -322,9 +323,90 @@ def stop_container(outer: OuterHostInterface, container_name: str, timeout_secon
     run_docker(outer, ["stop", "-t", str(timeout_seconds), container_name])
 
 
+# Hard timeout for the start-container script: a plain start is quick, but the
+# recovery path adds a bounded process-reap wait plus a second start attempt.
+_START_CONTAINER_TIMEOUT_SECONDS: Final[float] = 120.0
+
+# Single shell script that starts a stopped container and, only if the start
+# fails with the gVisor (runsc) self-overlay filestore collision, reaps the
+# stale runsc state for THIS container and retries -- all in one round-trip.
+#
+# Background: under runsc with the default ``--overlay2=root:self`` medium, the
+# rootfs overlay is backed by a ``.gvisor.filestore.*`` file placed inside the
+# container's overlay mount. If a previous run's runsc sandbox/gofer is still
+# alive (an unclean stop), it keeps that overlay mounted, so the next
+# ``docker start`` aborts with "repeated submounts are not supported with overlay
+# optimizations". Reaping that leftover process releases the mount + filestore so
+# the restart can recreate the sandbox cleanly. See
+# https://gvisor.dev/blog/2023/05/08/rootfs-overlay/.
+#
+# The reap is scoped to this container: it matches on BOTH the container id and a
+# runsc process, so it only ever kills this container's stuck gVisor processes --
+# never a broad pattern. A normal start never enters the recovery branch.
+_START_CONTAINER_SCRIPT_TEMPLATE = r"""set -u
+name=__CONTAINER_NAME__
+err="$(docker start "$name" 2>&1)" && exit 0
+case "$err" in
+    *gvisor.filestore*|*"repeated submounts"*) ;;
+    *) printf '%s\n' "$err" >&2; exit 1 ;;
+esac
+echo "mngr: recovering stale gVisor runsc overlay state for $name before retrying start" >&2
+cid="$(docker inspect --format '{{.Id}}' "$name" 2>/dev/null || true)"
+if [ -n "$cid" ]; then
+    for pid in $(ps -eo pid=,args= | grep -F "$cid" | grep runsc | grep -v grep | awk '{print $1}'); do
+        kill -TERM "$pid" 2>/dev/null || true
+    done
+    n=0
+    while [ "$n" -lt 25 ]; do
+        alive="$(ps -eo pid=,args= | grep -F "$cid" | grep runsc | grep -v grep | awk '{print $1}')"
+        [ -z "$alive" ] && break
+        n=$((n + 1))
+        sleep 0.2
+    done
+    for pid in $(ps -eo pid=,args= | grep -F "$cid" | grep runsc | grep -v grep | awk '{print $1}'); do
+        kill -KILL "$pid" 2>/dev/null || true
+    done
+fi
+for d in \
+    "$(docker inspect --format '{{.GraphDriver.Data.UpperDir}}' "$name" 2>/dev/null || true)" \
+    "$(docker inspect --format '{{.GraphDriver.Data.MergedDir}}' "$name" 2>/dev/null || true)"; do
+    [ -n "$d" ] && rm -f "$d"/.gvisor.filestore.* 2>/dev/null || true
+done
+docker start "$name"
+"""
+
+
+def _build_start_container_script(container_name: str) -> str:
+    """Render the start-container recovery script with the container name shell-quoted."""
+    return _START_CONTAINER_SCRIPT_TEMPLATE.replace("__CONTAINER_NAME__", shlex.quote(container_name))
+
+
+def _remote_sh_command(script: str) -> str:
+    """Wrap a shell script so it survives transport to the remote shell verbatim.
+
+    Base64-encodes the script and decodes it remotely before piping to sh,
+    sidestepping any quoting pitfalls from the multi-line recovery script.
+    """
+    encoded = base64.b64encode(script.encode("utf-8")).decode("ascii")
+    return f"echo {encoded} | base64 -d | sh"
+
+
 def start_container(outer: OuterHostInterface, container_name: str) -> None:
-    """Start a stopped container."""
-    run_docker(outer, ["start", container_name])
+    """Start a stopped container, recovering from stale gVisor (runsc) overlay state.
+
+    Runs the start, the (conditional) runsc-overlay cleanup, and the retry as a
+    single remote script so a wedged container recovers in one round-trip. A
+    normal start is just one ``docker start``; the cleanup only triggers on the
+    gVisor self-overlay filestore collision. Raises ``MngrError`` if the
+    container still fails to start. Shared by every docker-based provider
+    (vps_docker / ovh / lima), all of which run the agent container under runsc.
+    """
+    script = _build_start_container_script(container_name)
+    result = outer.execute_idempotent_command(
+        _remote_sh_command(script), timeout_seconds=_START_CONTAINER_TIMEOUT_SECONDS
+    )
+    if not result.success:
+        raise MngrError(f"docker start {container_name} failed: {result.stderr.strip() or result.stdout.strip()}")
 
 
 def remove_container(outer: OuterHostInterface, container_name: str, force: bool = False) -> None:
