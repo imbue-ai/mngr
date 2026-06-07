@@ -29,7 +29,7 @@ root of `templates/`. Auth-flow components live under `templates/auth/`.
 | `CardPage` | Centered-card layout for auth flow + form pages. `padding="default"` (`p-10`, auth) or `"form"` (`p-6`, Create); `max_width` is a Tailwind utility. |
 | `Card` | Card surface with `layout`/`padding`/`interactive`/`tag`/`href` props. Pulls `.minds-card` from `tokens.css` for the shared shell. |
 | `Modal` | Overlay dialog with backdrop. Used for confirmation dialogs (Welcome's skip-account prompt, WorkspaceSettings' destroy modal). |
-| `PermissionsDialog` | Full-page permission-request overlay. Composes `PermissionsHeader` + `PermissionsForm` + `PermissionsError`. |
+| `PermissionsHeader` / `PermissionsForm` / `PermissionsError` / `PermissionsManualCredentials` | Composable building blocks for the latchkey permission-request detail fragments (`pages.LatchkeyPredefinedPermission`, `pages.LatchkeyFileSharingPermission`). The surrounding modal chrome lives in the inbox shell (`pages.Inbox`), not in a separate dialog primitive. |
 
 ### Interactive
 
