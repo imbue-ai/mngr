@@ -1506,17 +1506,25 @@ def list_dev_envs() -> tuple[DevEnvSummary, ...]:
 
 
 def _env_name_from_root_path(env_root: Path) -> str:
-    """Convert ``~/.minds/`` or ``~/.minds-<name>/`` back to an env name.
+    """Convert an env's app-support root (or a legacy dotfolder) back to an env name.
 
-    The mirror of :func:`imbue.minds.envs.paths.env_root_dir`. Inlined
-    here (instead of in ``paths.py``) so the regex stays close to its
-    only caller, the ``list_dev_envs`` glob walker.
+    The mirror of :func:`imbue.minds.envs.paths.env_root_dir`. Handles both
+    the platform-canonical roots (whose directory name is the tier, which
+    equals the env name) and the un-migrated legacy ``~/.minds`` /
+    ``~/.minds-<name>`` dotfolders. The ``MINDS_DATA_HOME`` override nests
+    the tier one level up (``<tier>/app_support``), so unwrap that first.
     """
     dirname = env_root.name
     if dirname == ".minds":
         return "production"
-    assert dirname.startswith(".minds-"), f"Unexpected env root path: {env_root}"
-    return dirname[len(".minds-") :]
+    if dirname.startswith(".minds-"):
+        return dirname[len(".minds-") :]
+    if dirname == "app_support":
+        # Override layout: ``$MINDS_DATA_HOME/<tier>/app_support``.
+        return env_root.parent.name
+    # Canonical macOS / Linux layout: the directory name is the tier,
+    # which is the env name (``production`` / ``staging`` / ``dev-<name>``).
+    return dirname
 
 
 # Re-export the per_env_deploy helpers so the CLI can build a Providers

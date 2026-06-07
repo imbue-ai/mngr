@@ -16,7 +16,7 @@ from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 
 def _build_authenticated_client(tmp_path: Path) -> tuple[TestClient, str]:
     """Build a TestClient + the central minds API key it expects."""
-    paths = WorkspacePaths(data_dir=tmp_path / "minds")
+    paths = WorkspacePaths.flat(tmp_path / "minds")
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
     api_key = generate_api_key()
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})

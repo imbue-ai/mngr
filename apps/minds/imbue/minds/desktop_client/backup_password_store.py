@@ -24,7 +24,7 @@ _BACKUP_PASSWORD_FILENAME = "backup_password"
 
 def backup_password_file_path(paths: WorkspacePaths) -> Path:
     """Return the path of the shared master-password file for this minds env."""
-    return paths.data_dir / _BACKUP_PASSWORD_FILENAME
+    return paths.app_support / _BACKUP_PASSWORD_FILENAME
 
 
 def has_saved_backup_password(paths: WorkspacePaths) -> bool:

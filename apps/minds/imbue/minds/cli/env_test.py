@@ -256,3 +256,31 @@ def test_deactivate_unsets_modal_profile(_isolated_env: Path) -> None:
     assert "unset MNGR_HOST_DIR" in result.output
     assert "unset MNGR_PREFIX" in result.output
     assert "unset MINDS_CLIENT_CONFIG_PATH" in result.output
+
+
+# -- teardown: local uninstall of an env's data roots --
+
+
+def test_env_teardown_removes_all_roots(_isolated_env: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from imbue.minds.config.data_types import MindsPaths
+
+    monkeypatch.setenv("MINDS_DATA_HOME", str(tmp_path / "data"))
+    paths = MindsPaths.for_root_name("minds-staging")
+    for root in (paths.app_support, paths.cache, paths.logs, paths.config):
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "marker").write_text("x")
+
+    result = CliRunner().invoke(env, ["teardown", "staging", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert not paths.app_support.exists()
+    assert not paths.cache.exists()
+    assert not paths.logs.exists()
+    assert not paths.config.exists()
+
+
+def test_env_teardown_is_noop_when_absent(
+    _isolated_env: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("MINDS_DATA_HOME", str(tmp_path / "data"))
+    result = CliRunner().invoke(env, ["teardown", "dev-nope", "--yes"])
+    assert result.exit_code == 0, result.output

@@ -420,10 +420,11 @@ function bakeBuildInfo() {
  *
  *   - MINDS_ROOT_NAME_BUNDLE: the MINDS_ROOT_NAME the runtime should
  *     export before launching `minds run`. Production builds use
- *     "minds" (so on-disk state lands in ~/.minds/); a staging build
- *     uses "minds-staging" (so state lands in ~/.minds-staging/ and
- *     never collides with an installed prod build). Must match the
- *     minds(-<env-name>)? shape enforced by the runtime bootstrap.
+ *     "minds" (so on-disk state lands under the production-tier roots);
+ *     a staging build uses "minds-staging" (so state lands under the
+ *     staging-tier roots and never collides with an installed prod
+ *     build). Must match the minds(-<env-name>)? shape enforced by the
+ *     runtime bootstrap.
  *
  * When both are unset, leaves _bundled/ empty -- this is the
  * `uv run minds run` / dev-mode case where the user is expected to

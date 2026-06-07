@@ -1322,7 +1322,7 @@ class AgentCreator(MutableModel):
                     # under ``data_dir/template-cache/forever-claude-template``,
                     # pass it as ``--reference-if-able`` so we reuse those
                     # objects and the network fetch shrinks to the delta.
-                    ref_repo = self.paths.data_dir / "template-cache" / "forever-claude-template"
+                    ref_repo = self.paths.cache / "template-cache" / "forever-claude-template"
                     clone_git_repo(
                         GitUrl(repo_source),
                         clone_target,

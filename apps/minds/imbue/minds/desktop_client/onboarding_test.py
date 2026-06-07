@@ -92,7 +92,7 @@ def _make_applier(
     root_concurrency_group: ConcurrencyGroup,
     notification_dispatcher: NotificationDispatcher,
 ) -> OnboardingApplier:
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     agent_creator = AgentCreator(
         paths=paths,
         root_concurrency_group=root_concurrency_group,
@@ -166,7 +166,7 @@ def test_q2_and_q3_are_applied_concurrently(
     root_concurrency_group: ConcurrencyGroup,
     notification_dispatcher: NotificationDispatcher,
 ) -> None:
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     agent_creator = AgentCreator(
         paths=paths,
         root_concurrency_group=root_concurrency_group,

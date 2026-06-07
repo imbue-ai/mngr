@@ -42,7 +42,7 @@ def test_generate_bot_display_name() -> None:
 
 
 def test_orchestrator_start_setup_returns_done_when_already_configured(tmp_path: Path) -> None:
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     orchestrator = TelegramSetupOrchestrator(paths=paths)
     agent_id = AgentId()
 
@@ -65,7 +65,7 @@ def test_orchestrator_start_setup_returns_done_when_already_configured(tmp_path:
 
 
 def test_orchestrator_agent_has_telegram_returns_false_when_no_credentials(tmp_path: Path) -> None:
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     orchestrator = TelegramSetupOrchestrator(paths=paths)
     agent_id = AgentId()
 
@@ -73,7 +73,7 @@ def test_orchestrator_agent_has_telegram_returns_false_when_no_credentials(tmp_p
 
 
 def test_orchestrator_agent_has_telegram_returns_true_when_credentials_exist(tmp_path: Path) -> None:
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     orchestrator = TelegramSetupOrchestrator(paths=paths)
     agent_id = AgentId()
 
@@ -90,14 +90,14 @@ def test_orchestrator_agent_has_telegram_returns_true_when_credentials_exist(tmp
 
 
 def test_orchestrator_get_setup_info_returns_none_for_unknown_agent(tmp_path: Path) -> None:
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     orchestrator = TelegramSetupOrchestrator(paths=paths)
 
     assert orchestrator.get_setup_info(AgentId()) is None
 
 
 def test_orchestrator_start_setup_skips_when_setup_already_in_progress(tmp_path: Path) -> None:
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     orchestrator = TelegramSetupOrchestrator(paths=paths)
     agent_id = AgentId()
     aid = str(agent_id)
@@ -120,7 +120,7 @@ def test_orchestrator_start_setup_skips_when_setup_already_in_progress(tmp_path:
 
 
 def test_orchestrator_wait_for_all_returns_immediately_when_no_threads(tmp_path: Path) -> None:
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     orchestrator = TelegramSetupOrchestrator(paths=paths)
 
     orchestrator.wait_for_all(timeout=0.1)

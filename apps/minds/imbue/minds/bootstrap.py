@@ -12,7 +12,10 @@ import json
 import os
 import re
 import shutil
+import sys
 import tomllib
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Final
 
@@ -21,6 +24,15 @@ from loguru import logger
 
 MINDS_ROOT_NAME_ENV_VAR: Final[str] = "MINDS_ROOT_NAME"
 DEFAULT_MINDS_ROOT_NAME: Final[str] = "minds"
+# Single opaque override for the whole platform-canonical layout: when set,
+# all four roots become ``$MINDS_DATA_HOME/<tier>/{app_support,cache,logs,config}``.
+# Used by tests and the CI runner to get one self-contained throwaway tree
+# independent of the host's home-dir state.
+MINDS_DATA_HOME_ENV_VAR: Final[str] = "MINDS_DATA_HOME"
+# Bundle name matching the ToDesktop bundle; the first path component under
+# each macOS Library root and the directory name under each XDG root.
+_MINDS_BUNDLE_NAME: Final[str] = "Minds"
+_MINDS_XDG_DIR_NAME: Final[str] = "minds"
 # Names that are not legal env-name suffixes. Today this is just the prefix
 # string itself, because ``minds-`` with an empty suffix would round-trip
 # to the production path (``~/.minds-/`` is nonsensical) and we'd rather
@@ -124,13 +136,128 @@ def root_name_for_env_name(env_name: str) -> str:
 
 
 def minds_data_dir_for(root_name: str) -> Path:
-    """Return the minds data directory for a given root name (e.g. ~/.minds)."""
+    """Return the *legacy* minds data directory for a given root name (e.g. ~/.minds).
+
+    Deprecated: this is the pre-platform-canonical single dotfolder under
+    ``$HOME``. New code resolves per-category roots via
+    :func:`minds_app_support_dir_for` / :func:`minds_cache_dir_for` /
+    :func:`minds_logs_dir_for` / :func:`minds_config_dir_for` (or the
+    :class:`imbue.minds.config.data_types.MindsPaths` model built from
+    them). Kept as the canonical answer to "where did state live before
+    the move?" -- the startup migration reads from here.
+    """
     return Path.home() / ".{}".format(root_name)
 
 
+def minds_tier_for(root_name: str) -> str:
+    """Return the platform-canonical tier subdirectory name for a root name.
+
+    ``minds`` -> ``production``; ``minds-<env>`` -> ``<env>`` (so
+    ``minds-staging`` -> ``staging``, ``minds-dev-josh-3`` ->
+    ``dev-josh-3``, ``minds-dev-staging`` -> ``dev-staging``). This is the
+    first subdirectory under each canonical root, lifting the tier
+    discriminator out of the ``$HOME`` dotfolder name. Delegates to
+    :func:`env_name_from_root_name` so the prefix-stripping rule lives in
+    one place and cross-tier names never collapse (``minds-dev-staging``
+    stays distinct from ``minds-staging``).
+    """
+    return env_name_from_root_name(root_name)
+
+
+def _xdg_base(env_var: str, default: Path) -> Path:
+    """Return the XDG base dir from ``env_var``, honoring it only when absolute.
+
+    Per the XDG Base Directory spec, a relative value must be ignored and
+    the default used instead.
+    """
+    value = os.environ.get(env_var)
+    if value:
+        candidate = Path(value)
+        if candidate.is_absolute():
+            return candidate
+    return default
+
+
+def _minds_roots_for(root_name: str, platform_name: str | None = None) -> tuple[Path, Path, Path, Path]:
+    """Resolve the four platform-canonical roots ``(app_support, cache, logs, config)``.
+
+    Resolution order:
+      1. ``MINDS_DATA_HOME`` override -> ``$MINDS_DATA_HOME/<tier>/{app_support,cache,logs,config}``.
+      2. ``platform_name == "darwin"`` -> Apple's Application Support / Caches / Logs.
+      3. Otherwise (Linux) -> the XDG data / cache / state / config dirs.
+
+    ``platform_name`` defaults to :data:`sys.platform`; it is a parameter so
+    tests can exercise both OS branches on either host. Windows is
+    unsupported (matches CLAUDE.md).
+    """
+    if platform_name is None:
+        platform_name = sys.platform
+    tier = minds_tier_for(root_name)
+    override = os.environ.get(MINDS_DATA_HOME_ENV_VAR)
+    if override:
+        base = Path(override).expanduser() / tier
+        return base / "app_support", base / "cache", base / "logs", base / "config"
+    home = Path.home()
+    if platform_name == "darwin":
+        app_support = home / "Library" / "Application Support" / _MINDS_BUNDLE_NAME / tier
+        cache = home / "Library" / "Caches" / _MINDS_BUNDLE_NAME / tier
+        logs = home / "Library" / "Logs" / _MINDS_BUNDLE_NAME / tier
+        config = app_support / "config"
+        return app_support, cache, logs, config
+    data_home = _xdg_base("XDG_DATA_HOME", home / ".local" / "share")
+    cache_home = _xdg_base("XDG_CACHE_HOME", home / ".cache")
+    state_home = _xdg_base("XDG_STATE_HOME", home / ".local" / "state")
+    config_home = _xdg_base("XDG_CONFIG_HOME", home / ".config")
+    app_support = data_home / _MINDS_XDG_DIR_NAME / tier
+    cache = cache_home / _MINDS_XDG_DIR_NAME / tier
+    logs = state_home / _MINDS_XDG_DIR_NAME / tier / "logs"
+    config = config_home / _MINDS_XDG_DIR_NAME / tier
+    return app_support, cache, logs, config
+
+
+def minds_app_support_dir_for(root_name: str) -> Path:
+    """Return the app-support root (secrets, sessions, mngr/, ssh/, telegram/, latchkey/, backups/)."""
+    return _minds_roots_for(root_name)[0]
+
+
+def minds_tiers_parent_dir(platform_name: str | None = None) -> Path:
+    """Return the directory under which every tier's app-support root lives.
+
+    The common parent for enumerating tiers (``minds env list``):
+    ``$MINDS_DATA_HOME`` under the override, ``~/Library/Application
+    Support/Minds`` on macOS, ``$XDG_DATA_HOME/minds`` on Linux. For each
+    child ``<tier>`` here, the tier's app-support root is
+    ``minds_app_support_dir_for(root_name_for_env_name(<tier>))``.
+    """
+    if platform_name is None:
+        platform_name = sys.platform
+    override = os.environ.get(MINDS_DATA_HOME_ENV_VAR)
+    if override:
+        return Path(override).expanduser()
+    home = Path.home()
+    if platform_name == "darwin":
+        return home / "Library" / "Application Support" / _MINDS_BUNDLE_NAME
+    return _xdg_base("XDG_DATA_HOME", home / ".local" / "share") / _MINDS_XDG_DIR_NAME
+
+
+def minds_cache_dir_for(root_name: str) -> Path:
+    """Return the cache root (template-cache/; regenerable, OS may purge)."""
+    return _minds_roots_for(root_name)[1]
+
+
+def minds_logs_dir_for(root_name: str) -> Path:
+    """Return the logs root (minds.log, minds-events.jsonl)."""
+    return _minds_roots_for(root_name)[2]
+
+
+def minds_config_dir_for(root_name: str) -> Path:
+    """Return the config root (client.toml, config.toml, minds_root.toml)."""
+    return _minds_roots_for(root_name)[3]
+
+
 def mngr_host_dir_for(root_name: str) -> Path:
-    """Return the mngr host directory for a given root name (e.g. ~/.minds/mngr)."""
-    return minds_data_dir_for(root_name) / "mngr"
+    """Return the mngr host directory for a given root name (under the app-support root)."""
+    return minds_app_support_dir_for(root_name) / "mngr"
 
 
 def mngr_prefix_for(root_name: str) -> str:
@@ -238,6 +365,192 @@ def _ensure_mngr_settings(root_name: str) -> None:
     _cleanup_legacy_dynamic_hosts(root_name)
 
 
+_MIGRATION_LOCK_FILENAME: Final[str] = "migration.lock"
+_MIGRATED_README_FILENAME: Final[str] = "MIGRATED.txt"
+# Per-subdir map from a legacy ``~/.<root_name>/`` entry to its new root +
+# relative destination. ``"app_support" | "cache" | "logs" | "config"``
+# selects which canonical root the entry moves under. Entries absent from
+# the legacy tree are skipped; Electron-managed junk (``.venv``,
+# ``.uv-cache``, Chromium ``Cache``/``Code Cache``, etc.) is deliberately
+# omitted so it is regenerated in place rather than copied.
+_LEGACY_LAYOUT_MAP: Final[tuple[tuple[str, str, str], ...]] = (
+    ("auth", "app_support", "auth"),
+    ("mngr", "app_support", "mngr"),
+    ("ssh", "app_support", "ssh"),
+    ("telegram", "app_support", "telegram"),
+    ("latchkey", "app_support", "latchkey"),
+    ("backups", "app_support", "backups"),
+    ("backup_envs", "app_support", "backup_envs"),
+    ("backup_password", "app_support", "backup_password"),
+    ("destroying", "app_support", "destroying"),
+    ("user_context", "app_support", "user_context"),
+    ("events", "app_support", "events"),
+    ("workspace_associations.json", "app_support", "workspace_associations.json"),
+    ("sessions.json", "app_support", "sessions.json"),
+    ("last_good_agent_topology.json", "app_support", "last_good_agent_topology.json"),
+    ("secrets.toml", "app_support", "secrets.toml"),
+    ("template-cache", "cache", "template-cache"),
+    ("config.toml", "config", "config.toml"),
+    ("client.toml", "config", "client.toml"),
+    ("minds_root.toml", "config", "minds_root.toml"),
+)
+
+
+def _move_into_place(src: Path, dest: Path) -> None:
+    """Move ``src`` to ``dest`` via a sibling ``._migrating`` staging name.
+
+    Crash-safe: the final ``dest`` only ever appears via an atomic rename of
+    a fully-staged copy, so a kill mid-move never leaves a half-written
+    ``dest``. ``shutil.move`` handles both same-filesystem renames (fast) and
+    cross-filesystem copies (the rare Linux ``$HOME`` != ``~/.local/share``
+    mount case).
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    staging = dest.parent / f"{dest.name}._migrating"
+    if staging.exists():
+        if staging.is_dir():
+            shutil.rmtree(staging)
+        else:
+            staging.unlink()
+    shutil.move(str(src), str(staging))
+    os.replace(staging, dest)
+
+
+def migrate_legacy_minds_layout(root_name: str) -> bool:
+    """Move a legacy ``~/.<root_name>/`` tree onto the platform-canonical roots.
+
+    Idempotent: a no-op once ``migration.lock`` exists under the app-support
+    root, or when there is no legacy directory to migrate. Each known subdir
+    is moved to its destination root (see :data:`_LEGACY_LAYOUT_MAP`); the
+    legacy ``logs/`` contents fold into the canonical logs root. An entry
+    whose destination already exists is left untouched (never overwritten).
+    On success a lock file records the migration and a ``MIGRATED.txt`` is
+    left in the legacy directory pointing at the new roots; the legacy
+    directory itself is not deleted.
+
+    Returns ``True`` when a migration ran, ``False`` when it was skipped.
+    """
+    legacy = minds_data_dir_for(root_name)
+    app_support, cache, logs, config = _minds_roots_for(root_name)
+    roots = {"app_support": app_support, "cache": cache, "logs": logs, "config": config}
+    lock_path = app_support / _MIGRATION_LOCK_FILENAME
+    if lock_path.exists():
+        return False
+    if not legacy.is_dir():
+        return False
+    # A migration can be partially complete if a prior run crashed before
+    # writing the lock; resume by moving only the entries not yet at dest.
+    for src_rel, root_key, dest_rel in _LEGACY_LAYOUT_MAP:
+        src = legacy / src_rel
+        if not src.exists():
+            continue
+        dest = roots[root_key] / dest_rel
+        if dest.exists():
+            continue
+        _move_into_place(src, dest)
+        logger.info("Migrated minds state {} -> {}", src, dest)
+    legacy_logs = legacy / "logs"
+    if legacy_logs.is_dir():
+        logs.mkdir(parents=True, exist_ok=True)
+        for entry in legacy_logs.iterdir():
+            dest = logs / entry.name
+            if dest.exists():
+                continue
+            _move_into_place(entry, dest)
+            logger.info("Migrated minds log {} -> {}", entry, dest)
+    _rewrite_mngr_data_json_paths(legacy, app_support)
+    app_support.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(
+        json.dumps(
+            {
+                "migrated_at": datetime.now(timezone.utc).isoformat(),
+                "from": str(legacy),
+                "roots": {key: str(path) for key, path in roots.items()},
+            },
+            indent=2,
+        )
+    )
+    (legacy / _MIGRATED_README_FILENAME).write_text(
+        "This directory's minds state has moved to platform-canonical locations:\n"
+        + "".join(f"  {key}: {path}\n" for key, path in roots.items())
+        + "\nThis legacy directory is no longer read. It is safe to delete once you\n"
+        "have confirmed the new build works.\n"
+    )
+    _create_legacy_compat_symlinks(legacy, app_support)
+    logger.info("Completed legacy minds layout migration for {} (lock: {})", root_name, lock_path)
+    return True
+
+
+# Subdirs that an already-running Lima VM may bind-mount from the old path
+# (the mngr profile + its docker SSH keys). Symlinking them back keeps those
+# VMs working until they are naturally destroyed + recreated; remove the
+# shim after one minor-version cycle.
+_LEGACY_COMPAT_SYMLINK_SUBDIRS: Final[tuple[str, ...]] = ("mngr", "ssh")
+
+
+def _create_legacy_compat_symlinks(legacy: Path, app_support: Path) -> None:
+    """Leave symlinks at the moved-away legacy mngr/ssh paths -> their new homes.
+
+    Risk 3: a Lima instance yaml created before the move bind-mounts host paths
+    under ``~/.<root_name>/mngr`` (SSH keys it surfaces inside the VM). After
+    the move those paths are vacant; a compat symlink makes them resolve to the
+    relocated material so existing VMs keep booting. Best-effort: a symlink
+    failure (e.g. a platform without symlink support) is logged, not fatal.
+    """
+    for subdir in _LEGACY_COMPAT_SYMLINK_SUBDIRS:
+        target = app_support / subdir
+        link = legacy / subdir
+        if not target.exists() or link.exists() or link.is_symlink():
+            continue
+        try:
+            link.symlink_to(target, target_is_directory=True)
+        except OSError as e:
+            logger.warning("Could not create legacy compat symlink {} -> {}: {}", link, target, e)
+        else:
+            logger.info("Left legacy compat symlink {} -> {}", link, target)
+
+
+def _rewrite_mngr_data_json_paths(legacy: Path, app_support: Path) -> None:
+    """Rewrite absolute legacy paths embedded in migrated mngr ``data.json`` files.
+
+    mngr's per-host records under ``mngr/profiles/<id>/data.json`` embed
+    absolute paths (e.g. ``~/.minds/mngr/profiles/<id>/keys/docker_ssh_key``)
+    that point into the now-vacated legacy tree. After the move, rewrite the
+    legacy prefix to the app-support prefix so each record points at the
+    relocated key material. Best-effort per file: a malformed JSON file is
+    logged and skipped rather than aborting the whole migration.
+    """
+    profiles_dir = app_support / "mngr" / "profiles"
+    if not profiles_dir.is_dir():
+        return
+    old_prefix = str(legacy)
+    new_prefix = str(app_support)
+    for data_json in profiles_dir.glob("*/data.json"):
+        try:
+            raw = data_json.read_text()
+        except OSError as e:
+            logger.warning("Could not read mngr record {} during migration: {}", data_json, e)
+            continue
+        if old_prefix not in raw:
+            continue
+        # Validate it parses before and after so we never write back garbage.
+        try:
+            json.loads(raw)
+        except json.JSONDecodeError as e:
+            logger.warning("Skipping path rewrite of malformed mngr record {}: {}", data_json, e)
+            continue
+        rewritten = raw.replace(old_prefix, new_prefix)
+        try:
+            json.loads(rewritten)
+        except json.JSONDecodeError as e:
+            logger.warning("Path rewrite produced invalid JSON for {}; leaving as-is: {}", data_json, e)
+            continue
+        tmp_path = data_json.with_suffix(".json._migrating")
+        tmp_path.write_text(rewritten)
+        tmp_path.rename(data_json)
+        logger.info("Rewrote legacy paths in mngr record {}", data_json)
+
+
 def _cleanup_legacy_dynamic_hosts(root_name: str) -> None:
     """Remove the stale ``ssh/dynamic_hosts.toml`` file + ``ssh/keys/leased_host/`` dir.
 
@@ -248,10 +561,10 @@ def _cleanup_legacy_dynamic_hosts(root_name: str) -> None:
     at long-destroyed VPS IPs, and any code path that reads it would
     block on TCP timeouts. Best-effort: log + continue on any FS error.
     """
-    data_dir = minds_data_dir_for(root_name)
+    ssh_dir = minds_app_support_dir_for(root_name) / "ssh"
     legacy_paths = (
-        data_dir / "ssh" / "dynamic_hosts.toml",
-        data_dir / "ssh" / "keys" / "leased_host",
+        ssh_dir / "dynamic_hosts.toml",
+        ssh_dir / "keys" / "leased_host",
     )
     for path in legacy_paths:
         if not path.exists():
@@ -315,6 +628,15 @@ def apply_bootstrap() -> None:
         # has not activated any env yet".
         return
     root_name = resolve_minds_root_name()
+    # Migrate any legacy ~/.<root_name>/ tree onto the platform-canonical
+    # roots BEFORE exporting MNGR_HOST_DIR or touching mngr settings, so mngr
+    # reads the relocated state rather than a fresh empty host_dir. Best-effort:
+    # a migration failure must not block startup -- the user falls back to a
+    # fresh install rather than a hard crash.
+    try:
+        migrate_legacy_minds_layout(root_name)
+    except OSError as e:
+        logger.warning("Legacy minds layout migration failed for {}: {}", root_name, e)
     os.environ["MNGR_HOST_DIR"] = str(mngr_host_dir_for(root_name))
     os.environ["MNGR_PREFIX"] = mngr_prefix_for(root_name)
     _ensure_mngr_settings(root_name)

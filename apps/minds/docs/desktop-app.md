@@ -86,27 +86,38 @@ All three are placed in the `resources/` directory (outside the asar archive) an
 
 ## Data directory
 
-Every minds env owns one data root. Production lives at `~/.minds/`;
-every other env lives at `~/.minds-<env-name>/`. The contents are the
-same shape:
+Each env's state is split across four platform-canonical roots keyed by tier
+(`production` / `staging` / `dev-<name>`), instead of one dotfolder. On macOS
+those are `~/Library/Application Support/Minds/<tier>/` (app support),
+`~/Library/Caches/Minds/<tier>/` (cache), `~/Library/Logs/Minds/<tier>/` (logs),
+and `<app-support>/config/` (config); on Linux the XDG data/cache/state/config
+dirs. `MINDS_DATA_HOME` overrides everything to
+`$MINDS_DATA_HOME/<tier>/{app_support,cache,logs,config}/`. See the
+[README data-locations table](../README.md#where-minds-stores-its-data).
 
 ```
-~/.minds-<env-name>/
+<app_support>/            # ~/Library/Application Support/Minds/<tier>/ (macOS)
   .venv/                  # uv-managed Python virtual environment
   .uv-cache/              # uv package cache
   .uv-python/             # uv-managed Python installations
-  logs/
-    minds.log             # Combined stdout/stderr log from the backend
-    minds-events.jsonl    # Structured JSONL event log
-  auth/                   # Cookie signing key, one-time codes
-  config.toml             # Optional minds user preferences (default account, etc.)
-  client.toml             # Per-env public config (URLs only; dev envs only -- staging/production source from in-repo)
+  auth/                   # Cookie signing key, one-time codes, sessions
+  config/
+    config.toml           # Optional minds user preferences (default account, etc.)
+    client.toml           # Per-env public config (URLs only; dev envs only -- staging/production source from in-repo)
   secrets.toml            # Per-env chmod-0600 secrets (Neon DSN, SuperTokens API key; dev envs only)
   window-state.json       # Per-window content URLs, restored on next launch
   mngr/                   # mngr host directory (MNGR_HOST_DIR)
     agents/               # per-agent state managed by mngr
   <agent-id>/             # Per-agent workspace directories
+<cache>/                  # ~/Library/Caches/Minds/<tier>/ (macOS)
+  template-cache/         # FCT bare clone reused across agent creates
+<logs>/                   # ~/Library/Logs/Minds/<tier>/ (macOS)
+  minds.log               # Combined stdout/stderr log from the backend
+  minds-events.jsonl      # Structured JSONL event log
 ```
+
+A legacy `~/.minds/` (or `~/.minds-<tier>/`) install is migrated onto these
+roots automatically on first launch of a new build.
 
 `MINDS_ROOT_NAME` selects which data root the backend uses. Activation
 (`minds env activate <name>`) sets it to `minds-<env-name>` (or just

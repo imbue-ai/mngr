@@ -33,7 +33,7 @@ def _create_test_server_with_telegram(
         service_logs={str(agent_id): server_log},
     )
 
-    paths = WorkspacePaths(data_dir=tmp_path / "minds_data")
+    paths = WorkspacePaths.flat(tmp_path / "minds_data")
     telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
 
     app = create_desktop_client(
@@ -69,7 +69,7 @@ def test_telegram_status_returns_done_when_bot_credentials_exist(tmp_path: Path)
 
     # Pre-populate bot credentials
     save_agent_bot_credentials(
-        data_dir=orchestrator.paths.data_dir,
+        data_dir=orchestrator.paths.app_support,
         agent_id=agent_id,
         credentials=TelegramBotCredentials(
             bot_token=SecretStr("fake-token"),
@@ -103,7 +103,7 @@ def test_telegram_setup_returns_done_immediately_when_already_configured(tmp_pat
 
     # Pre-populate bot credentials
     save_agent_bot_credentials(
-        data_dir=orchestrator.paths.data_dir,
+        data_dir=orchestrator.paths.app_support,
         agent_id=agent_id,
         credentials=TelegramBotCredentials(
             bot_token=SecretStr("existing-token"),
@@ -141,7 +141,7 @@ def _create_test_server_with_two_agents(
         },
     )
 
-    paths = WorkspacePaths(data_dir=tmp_path / "minds_data")
+    paths = WorkspacePaths.flat(tmp_path / "minds_data")
     telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
 
     app = create_desktop_client(
@@ -169,7 +169,7 @@ def test_workspace_settings_shows_telegram_active_when_bot_exists(tmp_path: Path
 
     # Pre-populate bot credentials for one agent
     save_agent_bot_credentials(
-        data_dir=orchestrator.paths.data_dir,
+        data_dir=orchestrator.paths.app_support,
         agent_id=agent_id_1,
         credentials=TelegramBotCredentials(
             bot_token=SecretStr("active-token"),

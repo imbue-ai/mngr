@@ -11,7 +11,7 @@ exit -- so it is structurally the wrong tool here. Same justification as
 ``apps/minds/imbue/minds/desktop_client/latchkey/_spawn.py``.
 
 Status is fully derived from disk + the live resolver; there is no
-state.json. For each in-flight destroy ``<paths.data_dir>/destroying/<agent_id>/``
+state.json. For each in-flight destroy ``<paths.app_support>/destroying/<agent_id>/``
 contains exactly two files: ``pid`` (single-line text) and
 ``output.log`` (combined stdout+stderr from the bash wrapper).
 :py:class:`DestroyingStatus` is computed from ``pid`` liveness +
@@ -69,7 +69,7 @@ class DestroyingRecord(FrozenModel):
     """Snapshot of a detached destroy's state.
 
     All fields are derived from disk inspection of
-    ``<paths.data_dir>/destroying/<agent_id>/`` plus the caller's
+    ``<paths.app_support>/destroying/<agent_id>/`` plus the caller's
     ``agent_in_resolver`` answer; there is no on-disk state.json.
     """
 
@@ -85,7 +85,7 @@ class DestroyingRecord(FrozenModel):
 
 
 def _destroying_dir(paths: WorkspacePaths, agent_id: AgentId) -> Path:
-    return paths.data_dir / _DESTROYING_DIR_NAME / str(agent_id)
+    return paths.app_support / _DESTROYING_DIR_NAME / str(agent_id)
 
 
 def _pid_file(paths: WorkspacePaths, agent_id: AgentId) -> Path:
@@ -344,14 +344,14 @@ def list_destroying(
     paths: WorkspacePaths,
     agent_ids_in_resolver: frozenset[AgentId],
 ) -> dict[AgentId, DestroyingRecord]:
-    """Walk ``<paths.data_dir>/destroying/`` and return a record per agent_id.
+    """Walk ``<paths.app_support>/destroying/`` and return a record per agent_id.
 
     Used by the landing-page renderer. ``agent_ids_in_resolver`` is the
     snapshot of ``MngrCliBackendResolver.list_known_workspace_ids()`` at
     render time so the same set is shared across every record's status
     derivation.
     """
-    root = paths.data_dir / _DESTROYING_DIR_NAME
+    root = paths.app_support / _DESTROYING_DIR_NAME
     if not root.is_dir():
         return {}
     records: dict[AgentId, DestroyingRecord] = {}
@@ -370,7 +370,7 @@ def list_destroying(
 
 
 def delete_destroying(agent_id: AgentId, paths: WorkspacePaths) -> bool:
-    """Remove ``<paths.data_dir>/destroying/<agent_id>/``. Idempotent.
+    """Remove ``<paths.app_support>/destroying/<agent_id>/``. Idempotent.
 
     Returns ``True`` if the directory was present and removed,
     ``False`` if there was nothing to remove. Best-effort: errors during

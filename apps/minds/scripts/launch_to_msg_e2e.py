@@ -93,6 +93,8 @@ from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import Field
 
+from imbue.minds.config.data_types import MindsPaths
+
 
 class E2EFailure(Exception):
     """Raised for end-to-end drive failures specific to this script's domain.
@@ -109,13 +111,15 @@ class E2EFailure(Exception):
 # --- knobs (override via env) ---
 
 MINDS_APP_PATH = Path(os.environ.get("MINDS_APP_PATH", "/Applications/Minds.app/Contents/MacOS/Minds"))
-MINDS_HOME = Path(os.environ.get("HOME", "/Users/macrunner")) / ".minds"
-EVENTS_LOG = MINDS_HOME / "logs" / "minds-events.jsonl"
-ONE_TIME_CODES = MINDS_HOME / "auth" / "one_time_codes.json"
+# Resolve the platform-canonical roots the same way the app does -- honoring
+# MINDS_DATA_HOME, which CI sets so the whole run is self-contained.
+MINDS_PATHS = MindsPaths.for_root_name(os.environ.get("MINDS_ROOT_NAME", "minds"))
+EVENTS_LOG = MINDS_PATHS.logs / "minds-events.jsonl"
+ONE_TIME_CODES = MINDS_PATHS.app_support / "auth" / "one_time_codes.json"
 SCREENSHOT_DIR = Path(os.environ.get("LAUNCH_TO_MSG_SHOTS_DIR", "/tmp/launch-to-msg-screenshots"))
 SLACK_MOCK_STATE = Path("/tmp/slack-mock")
 SLACK_MOCK_PORT = 8443  # plain HTTP; socat terminates TLS on :443
-LATCHKEY_DIR = MINDS_HOME / "latchkey"
+LATCHKEY_DIR = MINDS_PATHS.app_support / "latchkey"
 
 HOST_NAME = os.environ.get("HOST_NAME") or f"e2e{time.strftime('%H%M%S')}"
 HOST_NAME_2 = os.environ.get("HOST_NAME_2") or f"{HOST_NAME}-b"
@@ -1316,7 +1320,7 @@ async def amain() -> int:
             # tile check above (which scrapes the same discovery layer the
             # destroy handler does).
             logger.info("=== mngr CLI list: cross-check W1 present, W2 removed ===")
-            bundled_mngr = MINDS_HOME / ".venv" / "bin" / "mngr"
+            bundled_mngr = MINDS_PATHS.app_support / ".venv" / "bin" / "mngr"
             if bundled_mngr.exists():
                 # mngr's lima provider shells out to ``limactl list --json``
                 # without going through the bundled-binary env vars (those
@@ -1329,7 +1333,7 @@ async def amain() -> int:
                 bundled_lima_bin = minds_resources / "lima" / "bin"
                 mngr_env = {
                     **os.environ,
-                    "MNGR_HOST_DIR": str(MINDS_HOME / "mngr"),
+                    "MNGR_HOST_DIR": str(MINDS_PATHS.mngr_host_dir),
                     "PATH": f"{bundled_lima_bin}:{os.environ.get('PATH', '')}",
                 }
                 # ``--on-error continue`` puts each provider's discovery error

@@ -120,8 +120,8 @@ class TelegramSetupOrchestrator(MutableModel):
         aid = str(agent_id)
 
         # Check if already has credentials
-        if has_agent_bot_credentials(self.paths.data_dir, agent_id):
-            existing = load_agent_bot_credentials(self.paths.data_dir, agent_id)
+        if has_agent_bot_credentials(self.paths.app_support, agent_id):
+            existing = load_agent_bot_credentials(self.paths.app_support, agent_id)
             with self._lock:
                 self._statuses[aid] = TelegramSetupStatus.DONE
                 if existing is not None:
@@ -163,7 +163,7 @@ class TelegramSetupOrchestrator(MutableModel):
 
     def agent_has_telegram(self, agent_id: AgentId) -> bool:
         """Check whether the given agent has Telegram bot credentials."""
-        return has_agent_bot_credentials(self.paths.data_dir, agent_id)
+        return has_agent_bot_credentials(self.paths.app_support, agent_id)
 
     def wait_for_all(self, timeout: float = 10.0) -> None:
         """Wait for all background setup threads to finish."""
@@ -182,7 +182,7 @@ class TelegramSetupOrchestrator(MutableModel):
         try:
             with log_span("Setting up Telegram for agent {}", agent_id):
                 # Step 1: get or extract user credentials
-                user_credentials = load_telegram_user_credentials(self.paths.data_dir)
+                user_credentials = load_telegram_user_credentials(self.paths.app_support)
 
                 if user_credentials is None:
                     with self._lock:
@@ -190,7 +190,7 @@ class TelegramSetupOrchestrator(MutableModel):
 
                     logger.info("No stored Telegram credentials, opening browser for login...")
                     user_credentials = extract_telegram_credentials_from_browser()
-                    save_telegram_user_credentials(self.paths.data_dir, user_credentials)
+                    save_telegram_user_credentials(self.paths.app_support, user_credentials)
                 else:
                     logger.debug(
                         "Using stored Telegram credentials for {} (DC={})",
@@ -221,7 +221,7 @@ class TelegramSetupOrchestrator(MutableModel):
                 )
 
                 # Step 4: persist bot credentials
-                save_agent_bot_credentials(self.paths.data_dir, agent_id, bot_credentials)
+                save_agent_bot_credentials(self.paths.app_support, agent_id, bot_credentials)
 
                 with self._lock:
                     self._statuses[aid] = TelegramSetupStatus.DONE

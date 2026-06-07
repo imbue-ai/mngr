@@ -47,6 +47,7 @@ from imbue.minds.cli._activated_env import require_activated_env_name
 from imbue.minds.cli._activated_env import require_deploy_mode_activation
 from imbue.minds.cli._activated_env import tier_for_env_name as _tier_for_env_name
 from imbue.minds.cli._activated_env import validate_modal_profile_exists_in_modal_toml
+from imbue.minds.config.data_types import MindsPaths
 from imbue.minds.config.loader import EnvConfigError
 from imbue.minds.config.loader import load_client_config
 from imbue.minds.config.loader import load_deploy_config
@@ -1098,6 +1099,46 @@ def env_list(ctx: click.Context) -> None:
             write_stdout_line(json.dumps(entry, default=str))
     else:
         write_stdout_line(json.dumps(payload, indent=2, default=str))
+
+
+@env.command("teardown")
+@click.argument("name", type=str, required=False)
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+@click.pass_context
+def env_teardown(ctx: click.Context, name: str | None, yes: bool) -> None:
+    """Delete every local data root for an env (uninstall its on-disk state).
+
+    Removes the app-support / cache / logs / config roots for the chosen env,
+    plus the legacy ``~/.<root_name>/`` dotfolder if one survived a migration.
+    Does NOT touch cloud resources -- use ``minds env destroy`` for that.
+    Defaults to the active env, or ``production`` when nothing is activated.
+    """
+    _refuse_if_any_recover_target_exists()
+    output_format: OutputFormat = (ctx.obj or {}).get("output_format", OutputFormat.HUMAN)
+    env_name = name or active_env_name_or_none() or "production"
+    paths = MindsPaths.for_root_name(root_name_for_env_name(env_name))
+    # dict.fromkeys dedups while preserving order (config nests under
+    # app_support on macOS, so the two can coincide).
+    candidates = (paths.app_support, paths.cache, paths.logs, paths.config, paths.legacy_data_dir)
+    existing = [p for p in dict.fromkeys(candidates) if p.exists() or p.is_symlink()]
+    if not existing:
+        logger.info("No on-disk state found for env {!r}.", env_name)
+        _emit_json({"name": env_name, "status": "absent", "deleted": []}, output_format=output_format)
+        return
+    if not yes and output_format is OutputFormat.HUMAN:
+        logger.info("About to permanently delete the following for env {!r}:", env_name)
+        for path in existing:
+            logger.info("  {}", path)
+        click.confirm("Proceed?", abort=True)
+    deleted: list[str] = []
+    for path in existing:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink(missing_ok=True)
+        deleted.append(str(path))
+    logger.info("Tore down {} root(s) for env {!r}.", len(deleted), env_name)
+    _emit_json({"name": env_name, "status": "torn_down", "deleted": deleted}, output_format=output_format)
 
 
 @env.command("deploy")

@@ -251,6 +251,13 @@ jobs:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
       - uses: actions/checkout@v6
+      - name: opt into the MINDS_DATA_HOME override layout
+        # Self-contained throwaway tree under the runner temp dir, so the run
+        # is independent of the runner's home-dir state from past runs. Set via
+        # $GITHUB_ENV (not job-level env) because the `runner` context is not
+        # available there; $RUNNER_TEMP is the same dir at runtime. Every
+        # subsequent step (reset, launch, e2e, artifacts) inherits it.
+        run: echo "MINDS_DATA_HOME=$RUNNER_TEMP/minds" >> "$GITHUB_ENV"
       - name: verify ANTHROPIC_API_KEY injected
         run: |
           if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
@@ -423,21 +430,24 @@ jobs:
           if [ -d /tmp/launch-to-msg-screenshots ]; then
             cp -R /tmp/launch-to-msg-screenshots artifacts/screenshots 2>/dev/null || true
           fi
-          # Diagnostic logs (also useful on success for tuning).
+          # Diagnostic logs (also useful on success for tuning). CI runs with
+          # MINDS_DATA_HOME set, so the production-tier roots are nested under it.
+          MINDS_BASE="${MINDS_DATA_HOME}/production"
+          APP_SUPPORT="${MINDS_BASE}/app_support"
           [ -d /tmp/launch-to-msg-logs ] && cp -R /tmp/launch-to-msg-logs artifacts/ || true
-          [ -d "$HOME/.minds/logs" ] && cp -R "$HOME/.minds/logs" artifacts/ || true
-          [ -d "$HOME/.minds/events" ] && cp -R "$HOME/.minds/events" artifacts/ || true
-          [ -d "$HOME/.minds/mngr" ] && cp -R "$HOME/.minds/mngr"/*/events artifacts/agent-events 2>/dev/null || true
+          [ -d "${MINDS_BASE}/logs" ] && cp -R "${MINDS_BASE}/logs" artifacts/ || true
+          [ -d "${APP_SUPPORT}/events" ] && cp -R "${APP_SUPPORT}/events" artifacts/ || true
+          [ -d "${APP_SUPPORT}/mngr" ] && cp -R "${APP_SUPPORT}/mngr"/*/events artifacts/agent-events 2>/dev/null || true
           log show --process Minds --last 5m 2>/dev/null > artifacts/macos-console.log || true
-          ls -la "$HOME/.minds" > artifacts/minds-dir-listing.txt 2>&1 || true
+          ls -la "${APP_SUPPORT}" > artifacts/minds-dir-listing.txt 2>&1 || true
           [ -f /tmp/minds-electron.log ] && cp /tmp/minds-electron.log artifacts/ || true
           [ -d /tmp/slack-mock ] && cp -R /tmp/slack-mock artifacts/ 2>/dev/null || true
           # Latchkey gateway state (encryption_key excluded by directory selection).
-          if [ -d "$HOME/.minds/latchkey" ]; then
+          if [ -d "${APP_SUPPORT}/latchkey" ]; then
             mkdir -p artifacts/latchkey
-            cp -R "$HOME/.minds/latchkey/mngr_latchkey" artifacts/latchkey/ 2>/dev/null || true
-            cp "$HOME/.minds/latchkey/latchkey_gateway.log" artifacts/latchkey/ 2>/dev/null || true
-            cp "$HOME/.minds/latchkey/latchkey_ensure_browser.log" artifacts/latchkey/ 2>/dev/null || true
+            cp -R "${APP_SUPPORT}/latchkey/mngr_latchkey" artifacts/latchkey/ 2>/dev/null || true
+            cp "${APP_SUPPORT}/latchkey/latchkey_gateway.log" artifacts/latchkey/ 2>/dev/null || true
+            cp "${APP_SUPPORT}/latchkey/latchkey_ensure_browser.log" artifacts/latchkey/ 2>/dev/null || true
           fi
       - uses: actions/upload-artifact@v7
         # Always upload: this branch's verify step relies on downloading

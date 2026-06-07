@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import tomllib
@@ -10,16 +11,20 @@ from imbue.minds.bootstrap import DEFAULT_MINDS_ROOT_NAME
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_PATTERN
 from imbue.minds.bootstrap import _ensure_mngr_settings
+from imbue.minds.bootstrap import _minds_roots_for
 from imbue.minds.bootstrap import apply_bootstrap
 from imbue.minds.bootstrap import env_name_from_root_name
 from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
+from imbue.minds.bootstrap import migrate_legacy_minds_layout
 from imbue.minds.bootstrap import minds_data_dir_for
+from imbue.minds.bootstrap import minds_tier_for
 from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.bootstrap import root_name_for_env_name
 from imbue.minds.bootstrap import set_imbue_cloud_provider_for_account
 from imbue.minds.bootstrap import set_provider_is_enabled
+from imbue.minds.config.data_types import MindsPaths
 from imbue.minds.testing import stub_mngr_host_dir
 
 
@@ -142,8 +147,10 @@ def test_minds_data_dir_for() -> None:
     assert minds_data_dir_for("minds") == Path.home() / ".minds"
 
 
-def test_mngr_host_dir_for() -> None:
-    assert mngr_host_dir_for("minds-dev-josh-3") == Path.home() / ".minds-dev-josh-3" / "mngr"
+def test_mngr_host_dir_for(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _clear_layout_env(monkeypatch)
+    monkeypatch.setenv("MINDS_DATA_HOME", str(tmp_path))
+    assert mngr_host_dir_for("minds-dev-josh-3") == tmp_path / "dev-josh-3" / "app_support" / "mngr"
 
 
 def test_mngr_prefix_for() -> None:
@@ -151,16 +158,18 @@ def test_mngr_prefix_for() -> None:
     assert mngr_prefix_for("minds") == "minds-"
 
 
-def test_apply_bootstrap_sets_env_vars_when_root_name_set(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_apply_bootstrap_sets_env_vars_when_root_name_set(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _clear_env(monkeypatch)
+    _clear_layout_env(monkeypatch)
+    monkeypatch.setenv("MINDS_DATA_HOME", str(tmp_path))
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "minds-dev-testname")
     apply_bootstrap()
 
-    assert os.environ["MNGR_HOST_DIR"] == str(Path.home() / ".minds-dev-testname" / "mngr")
+    assert os.environ["MNGR_HOST_DIR"] == str(tmp_path / "dev-testname" / "app_support" / "mngr")
     assert os.environ["MNGR_PREFIX"] == "minds-dev-testname-"
 
 
-def test_apply_bootstrap_overrides_inherited_mngr_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_apply_bootstrap_overrides_inherited_mngr_vars(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Explicit MINDS_ROOT_NAME wins over an inherited MNGR_HOST_DIR/MNGR_PREFIX.
 
     Without this, a minds process spawned from a parent that already set
@@ -169,12 +178,14 @@ def test_apply_bootstrap_overrides_inherited_mngr_vars(monkeypatch: pytest.Monke
     minds bootstrap writes to.
     """
     _clear_env(monkeypatch)
+    _clear_layout_env(monkeypatch)
+    monkeypatch.setenv("MINDS_DATA_HOME", str(tmp_path))
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "minds-dev-josh-3")
     monkeypatch.setenv("MNGR_HOST_DIR", "/custom/host/dir")
     monkeypatch.setenv("MNGR_PREFIX", "custom-")
     apply_bootstrap()
 
-    assert os.environ["MNGR_HOST_DIR"] == str(Path.home() / ".minds-dev-josh-3" / "mngr")
+    assert os.environ["MNGR_HOST_DIR"] == str(tmp_path / "dev-josh-3" / "app_support" / "mngr")
     assert os.environ["MNGR_PREFIX"] == "minds-dev-josh-3-"
 
 
@@ -203,7 +214,7 @@ def test_apply_bootstrap_unset_does_not_write_mngr_vars(monkeypatch: pytest.Monk
     assert "MNGR_PREFIX" not in os.environ
 
 
-def test_apply_bootstrap_invalid_value_still_writes_default(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_apply_bootstrap_invalid_value_still_writes_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A stale `MINDS_ROOT_NAME=devminds` shell still gets consistent MNGR_* vars.
 
     The bootstrap resolves to the production default and exports the
@@ -211,10 +222,12 @@ def test_apply_bootstrap_invalid_value_still_writes_default(monkeypatch: pytest.
     host_dir to point at instead of half-honoring the bad value.
     """
     _clear_env(monkeypatch)
+    _clear_layout_env(monkeypatch)
+    monkeypatch.setenv("MINDS_DATA_HOME", str(tmp_path))
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "devminds")
     monkeypatch.setenv("MNGR_HOST_DIR", "/custom/host/dir")
     apply_bootstrap()
-    assert os.environ["MNGR_HOST_DIR"] == str(Path.home() / ".minds" / "mngr")
+    assert os.environ["MNGR_HOST_DIR"] == str(tmp_path / "production" / "app_support" / "mngr")
     assert os.environ["MNGR_PREFIX"] == "minds-"
 
 
@@ -447,3 +460,250 @@ def test_set_imbue_cloud_provider_for_account_repairs_missing_default_block_on_r
     parsed = tomllib.loads(settings_path.read_text())
     assert parsed["providers"]["imbue_cloud"] == {"backend": "imbue_cloud", "is_enabled": False}
     assert parsed["plugins"]["recursive"]["enabled"] is False
+
+
+# -- Platform-canonical layout resolver (MindsPaths) --
+
+
+def _clear_layout_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remove the override + XDG vars so layout tests see a clean baseline."""
+    for var in (
+        "MINDS_DATA_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
+        "XDG_CONFIG_HOME",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_minds_tier_for_maps_root_name_to_tier() -> None:
+    assert minds_tier_for("minds") == "production"
+    assert minds_tier_for("minds-staging") == "staging"
+    assert minds_tier_for("minds-dev-josh-3") == "dev-josh-3"
+    assert minds_tier_for("minds-ci-abc") == "ci-abc"
+
+
+def test_minds_tier_for_does_not_collapse_dev_staging() -> None:
+    """Cross-tier collision: minds-dev-staging must stay distinct from minds-staging."""
+    assert minds_tier_for("minds-dev-staging") == "dev-staging"
+    assert minds_tier_for("minds-staging") == "staging"
+    assert minds_tier_for("minds-dev-staging") != minds_tier_for("minds-staging")
+
+
+def test_minds_data_home_override_layout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _clear_layout_env(monkeypatch)
+    monkeypatch.setenv("MINDS_DATA_HOME", str(tmp_path))
+    app_support, cache, logs, config = _minds_roots_for("minds-staging")
+    assert app_support == tmp_path / "staging" / "app_support"
+    assert cache == tmp_path / "staging" / "cache"
+    assert logs == tmp_path / "staging" / "logs"
+    assert config == tmp_path / "staging" / "config"
+
+
+def test_minds_data_home_override_wins_over_platform(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _clear_layout_env(monkeypatch)
+    monkeypatch.setenv("MINDS_DATA_HOME", str(tmp_path))
+    # darwin requested, but the override must still win.
+    app_support, _cache, _logs, _config = _minds_roots_for("minds", platform_name="darwin")
+    assert app_support == tmp_path / "production" / "app_support"
+
+
+def test_darwin_layout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _clear_layout_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    app_support, cache, logs, config = _minds_roots_for("minds", platform_name="darwin")
+    assert app_support == tmp_path / "Library" / "Application Support" / "Minds" / "production"
+    assert cache == tmp_path / "Library" / "Caches" / "Minds" / "production"
+    assert logs == tmp_path / "Library" / "Logs" / "Minds" / "production"
+    assert config == app_support / "config"
+
+
+def test_darwin_layout_dev_tier(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _clear_layout_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    app_support, _cache, _logs, _config = _minds_roots_for("minds-dev-josh-3", platform_name="darwin")
+    assert app_support == tmp_path / "Library" / "Application Support" / "Minds" / "dev-josh-3"
+
+
+def test_linux_xdg_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _clear_layout_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    app_support, cache, logs, config = _minds_roots_for("minds", platform_name="linux")
+    assert app_support == tmp_path / ".local" / "share" / "minds" / "production"
+    assert cache == tmp_path / ".cache" / "minds" / "production"
+    assert logs == tmp_path / ".local" / "state" / "minds" / "production" / "logs"
+    assert config == tmp_path / ".config" / "minds" / "production"
+
+
+def test_linux_honors_xdg_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _clear_layout_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+    app_support, cache, logs, config = _minds_roots_for("minds-staging", platform_name="linux")
+    assert app_support == tmp_path / "xdg-data" / "minds" / "staging"
+    assert cache == tmp_path / "xdg-cache" / "minds" / "staging"
+    assert logs == tmp_path / "xdg-state" / "minds" / "staging" / "logs"
+    assert config == tmp_path / "xdg-config" / "minds" / "staging"
+
+
+def test_linux_ignores_relative_xdg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The XDG spec mandates ignoring relative base dirs and using the default."""
+    _clear_layout_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", "relative/not/absolute")
+    app_support, _cache, _logs, _config = _minds_roots_for("minds", platform_name="linux")
+    assert app_support == tmp_path / ".local" / "share" / "minds" / "production"
+
+
+def test_dev_staging_distinct_roots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Cross-tier collision, end-to-end: the two tiers resolve to different roots."""
+    _clear_layout_env(monkeypatch)
+    monkeypatch.setenv("MINDS_DATA_HOME", str(tmp_path))
+    dev_staging, *_ = _minds_roots_for("minds-dev-staging")
+    staging, *_ = _minds_roots_for("minds-staging")
+    assert dev_staging != staging
+    assert dev_staging == tmp_path / "dev-staging" / "app_support"
+    assert staging == tmp_path / "staging" / "app_support"
+
+
+def test_minds_paths_for_root_name_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _clear_layout_env(monkeypatch)
+    monkeypatch.setenv("MINDS_DATA_HOME", str(tmp_path))
+    paths = MindsPaths.for_root_name("minds-dev-josh-3")
+    assert paths.tier == "dev-josh-3"
+    assert paths.app_support == tmp_path / "dev-josh-3" / "app_support"
+    assert paths.cache == tmp_path / "dev-josh-3" / "cache"
+    assert paths.logs == tmp_path / "dev-josh-3" / "logs"
+    assert paths.config == tmp_path / "dev-josh-3" / "config"
+    assert paths.legacy_data_dir == Path.home() / ".minds-dev-josh-3"
+    assert paths.auth_dir == paths.app_support / "auth"
+    assert paths.mngr_host_dir == paths.app_support / "mngr"
+
+
+def test_minds_paths_flat_shorthand(tmp_path: Path) -> None:
+    """``data_dir=`` lays all four roots flat under one directory (test convenience)."""
+    paths = MindsPaths.flat(tmp_path)
+    assert paths.app_support == tmp_path
+    assert paths.cache == tmp_path
+    assert paths.logs == tmp_path
+    assert paths.config == tmp_path
+    assert paths.legacy_data_dir == tmp_path
+    assert paths.auth_dir == tmp_path / "auth"
+
+
+# -- Legacy -> platform-canonical migration --
+
+
+def _legacy_migration_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path]:
+    """Point HOME (legacy roots) and MINDS_DATA_HOME (new roots) at tmp subdirs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    data = tmp_path / "data"
+    monkeypatch.setenv("HOME", str(home))
+    _clear_layout_env(monkeypatch)
+    monkeypatch.setenv("MINDS_DATA_HOME", str(data))
+    return home, data
+
+
+def test_migration_noop_when_no_legacy(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _legacy_migration_env(monkeypatch, tmp_path)
+    assert migrate_legacy_minds_layout("minds") is False
+
+
+def test_migration_moves_state_to_canonical_roots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    home, data = _legacy_migration_env(monkeypatch, tmp_path)
+    legacy = home / ".minds"
+    (legacy / "auth" / "sessions").mkdir(parents=True)
+    (legacy / "auth" / "sessions" / "acct.json").write_text("{}")
+    (legacy / "template-cache" / "forever-claude-template").mkdir(parents=True)
+    (legacy / "template-cache" / "forever-claude-template" / "x").write_text("clone")
+    (legacy / "logs").mkdir()
+    (legacy / "logs" / "minds.log").write_text("log line")
+    (legacy / "config.toml").write_text("default_account_id = 'a'\n")
+
+    assert migrate_legacy_minds_layout("minds") is True
+
+    base = data / "production"
+    assert (base / "app_support" / "auth" / "sessions" / "acct.json").read_text() == "{}"
+    assert (base / "cache" / "template-cache" / "forever-claude-template" / "x").read_text() == "clone"
+    assert (base / "logs" / "minds.log").read_text() == "log line"
+    assert (base / "config" / "config.toml").read_text() == "default_account_id = 'a'\n"
+    assert (base / "app_support" / "migration.lock").is_file()
+    assert (legacy / "MIGRATED.txt").is_file()
+    # Moved-away entries no longer live in the legacy tree.
+    assert not (legacy / "auth").exists()
+    assert not (legacy / "config.toml").exists()
+
+
+def test_migration_is_idempotent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    home, data = _legacy_migration_env(monkeypatch, tmp_path)
+    legacy = home / ".minds"
+    (legacy / "auth").mkdir(parents=True)
+    (legacy / "auth" / "code.json").write_text("1")
+    assert migrate_legacy_minds_layout("minds") is True
+    # A second run is a no-op (lock present) and does not move newly-created
+    # legacy files.
+    (legacy / "auth").mkdir(exist_ok=True)
+    (legacy / "auth" / "late.json").write_text("2")
+    assert migrate_legacy_minds_layout("minds") is False
+    assert not (data / "production" / "app_support" / "auth" / "late.json").exists()
+
+
+def test_migration_does_not_overwrite_existing_dest(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    home, data = _legacy_migration_env(monkeypatch, tmp_path)
+    legacy = home / ".minds"
+    (legacy / "auth").mkdir(parents=True)
+    (legacy / "auth" / "code.json").write_text("legacy")
+    dest_auth = data / "production" / "app_support" / "auth"
+    dest_auth.mkdir(parents=True)
+    (dest_auth / "code.json").write_text("already-there")
+    assert migrate_legacy_minds_layout("minds") is True
+    # The pre-existing destination wins; the legacy copy is left in place.
+    assert (dest_auth / "code.json").read_text() == "already-there"
+    assert (legacy / "auth" / "code.json").read_text() == "legacy"
+
+
+def test_migration_rewrites_mngr_data_json_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Risk 1: absolute paths inside mngr/profiles/*/data.json are rewritten."""
+    home, data = _legacy_migration_env(monkeypatch, tmp_path)
+    legacy = home / ".minds"
+    profile = legacy / "mngr" / "profiles" / "p1"
+    (profile / "keys").mkdir(parents=True)
+    (profile / "keys" / "docker_ssh_key").write_text("PRIVATE KEY")
+    legacy_key = legacy / "mngr" / "profiles" / "p1" / "keys" / "docker_ssh_key"
+    (profile / "data.json").write_text(json.dumps({"ssh_key_path": str(legacy_key), "name": "agent-1"}))
+
+    assert migrate_legacy_minds_layout("minds") is True
+
+    app_support = data / "production" / "app_support"
+    new_data_json = app_support / "mngr" / "profiles" / "p1" / "data.json"
+    parsed = json.loads(new_data_json.read_text())
+    expected_key = app_support / "mngr" / "profiles" / "p1" / "keys" / "docker_ssh_key"
+    assert parsed["ssh_key_path"] == str(expected_key)
+    assert str(legacy) not in new_data_json.read_text()
+    assert (expected_key).read_text() == "PRIVATE KEY"
+
+
+def test_migration_leaves_legacy_compat_symlinks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Risk 3: moved-away mngr/ssh keep resolving at the legacy path via symlink."""
+    home, data = _legacy_migration_env(monkeypatch, tmp_path)
+    legacy = home / ".minds"
+    (legacy / "mngr" / "profiles" / "p1" / "keys").mkdir(parents=True)
+    (legacy / "mngr" / "profiles" / "p1" / "keys" / "docker_ssh_key").write_text("KEY")
+    (legacy / "ssh").mkdir()
+    (legacy / "ssh" / "config").write_text("Host x")
+
+    assert migrate_legacy_minds_layout("minds") is True
+
+    app_support = data / "production" / "app_support"
+    legacy_mngr = legacy / "mngr"
+    legacy_ssh = legacy / "ssh"
+    assert legacy_mngr.is_symlink()
+    assert legacy_ssh.is_symlink()
+    # The old absolute path still reaches the relocated key material.
+    assert (legacy / "mngr" / "profiles" / "p1" / "keys" / "docker_ssh_key").read_text() == "KEY"
+    assert legacy_mngr.resolve() == (app_support / "mngr").resolve()
