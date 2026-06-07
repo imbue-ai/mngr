@@ -929,11 +929,11 @@ async def amain() -> int:
         stderr=subprocess.STDOUT,
     )
 
-    async with async_playwright() as p:
+    async with async_playwright() as pw:
         # Wait for CDP endpoint to be reachable
         cdp_url = await _wait_cdp(cdp_port)
         logger.info("attaching via CDP at {}", cdp_url)
-        browser = await p.chromium.connect_over_cdp(cdp_url, timeout=60_000)
+        browser = await pw.chromium.connect_over_cdp(cdp_url, timeout=60_000)
         # Single Electron context wraps all WebContentsViews as pages.
         ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
         # Wait for first page (chrome shell or splash) to materialise.
@@ -1382,7 +1382,7 @@ async def amain() -> int:
             )
 
             cdp_url2 = await _wait_cdp(cdp_port2)
-            browser = await p.chromium.connect_over_cdp(cdp_url2, timeout=60_000)
+            browser = await pw.chromium.connect_over_cdp(cdp_url2, timeout=60_000)
             ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
             for _ in range(60):
                 if ctx.pages:
