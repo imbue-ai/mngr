@@ -1068,8 +1068,7 @@ async def amain() -> int:
                 else:
                     await snap_page(win, "99-TIMEOUT-no-denial")
                     raise E2EFailure(
-                        f"[deny-phase] denial token not in chat after {DRIVE_SLACK_TIMEOUT}s "
-                        f"(stage={deny_stage})"
+                        f"[deny-phase] denial token not in chat after {DRIVE_SLACK_TIMEOUT}s (stage={deny_stage})"
                     )
 
                 # === Phase B: ask the agent to retry ===
@@ -1079,9 +1078,7 @@ async def amain() -> int:
                     "Please try the Slack read again -- I just enabled the "
                     "permission. Quote the message you read back here."
                 )
-                retry_inp = await target.wait_for_selector(
-                    'textarea, [contenteditable="true"]', timeout=10_000
-                )
+                retry_inp = await target.wait_for_selector('textarea, [contenteditable="true"]', timeout=10_000)
                 await retry_inp.fill(retry_msg)
                 await retry_inp.press("Enter")
                 await snap_page(target, "07f-retry-after-deny-sent")
@@ -1162,8 +1159,7 @@ async def amain() -> int:
                             preview = (await p.evaluate("document.body.innerText"))[:200].replace("\n", " ")
                             logger.error("  page url={} body=...{!r}", p.url, preview)
                     raise RuntimeError(
-                        f"canned body not in chat after {DRIVE_SLACK_TIMEOUT}s "
-                        f"(approve_stage={approve_stage})"
+                        f"canned body not in chat after {DRIVE_SLACK_TIMEOUT}s (approve_stage={approve_stage})"
                     )
             finally:
                 logger.info("=== slack teardown ===")
@@ -1458,9 +1454,7 @@ async def amain() -> int:
             win = ctx.pages[0]
             await snap_page(win, "23-after-relaunch")
 
-            base2 = await asyncio.get_event_loop().run_in_executor(
-                None, wait_backend_url, events_offset_pre_relaunch
-            )
+            base2 = await asyncio.get_event_loop().run_in_executor(None, wait_backend_url, events_offset_pre_relaunch)
             logger.info("[relaunch] new backend up at {}", base2)
             code2 = await asyncio.get_event_loop().run_in_executor(None, mint_one_time_code)
             origin = base2
@@ -1473,9 +1467,7 @@ async def amain() -> int:
             await snap_page(win, "25-home-after-relaunch")
             home_html = await win.content()
             if HOST_NAME not in home_html:
-                raise E2EFailure(
-                    f"[relaunch] home page after relaunch missing W1 tile {HOST_NAME!r}"
-                )
+                raise E2EFailure(f"[relaunch] home page after relaunch missing W1 tile {HOST_NAME!r}")
 
             # Send a fresh follow-up on W1's chat URL. ``bump`` is a token
             # that didn't appear in any earlier exchange, so a >=2-count
