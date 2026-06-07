@@ -183,9 +183,13 @@ def run(
 
     Returns the integer exit code the caller should pass to ``ctx.exit()``.
     """
+    import sys as _sys
+
+    print("RUN_DBG run() entered", file=_sys.stderr, flush=True)
     normalize_credentials_env()
     is_streaming_requested = partition.include_partial_messages or partition.stream_plain_text
     mngr_ctx = apply_unattended_settings(mngr_ctx, _STREAMING_SETTINGS if is_streaming_requested else ())
+    print("RUN_DBG after apply_unattended_settings", file=_sys.stderr, flush=True)
 
     try:
         prompts = iter_user_prompts(
@@ -195,10 +199,12 @@ def run(
             is_stdin_a_tty,
         )
         first_prompt = next(prompts, None)
+        print(f"RUN_DBG first_prompt={first_prompt!r}", file=_sys.stderr, flush=True)
         if first_prompt is None:
             logger.error("no prompt provided")
             return EXIT_MNGR_ERROR
     except MngrError as exc:
+        print(f"RUN_DBG iter_user_prompts MngrError: {exc!r}", file=_sys.stderr, flush=True)
         logger.error("{}", exc)
         return EXIT_MNGR_ERROR
 
