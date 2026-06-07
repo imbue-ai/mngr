@@ -59,6 +59,22 @@ observable); a user-passed `--model` still takes precedence. The streamed text i
 best-effort: the `result` envelope (and, in stream-json, the final `assistant`
 message) remain the source of truth.
 
+## tmux window size
+
+The streamed response is reverse-mapped from the spawned agent's rendered tmux
+pane, so the pane width determines where lines hard-wrap in the output. `mngr
+robinhood` therefore creates its agent in a large, pinned window by default
+(`2048` columns x `256` rows, resize policy `manual`) so the streamed text is not
+chopped at a narrow width. Override with:
+
+- `--tmux-width <columns>` (default `2048`)
+- `--tmux-height <rows>` (default `256`)
+- `--tmux-window-size manual|latest|largest|smallest` (default `manual`; `manual`
+  pins the window to the given size and never resizes it)
+
+These flags are consumed by the wrapper and not forwarded to the spawned claude;
+an invalid value exits with code 2.
+
 ## Flags not supported in v1
 
 The following `claude` flags are explicitly rejected (exit code 2):

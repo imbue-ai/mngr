@@ -23,6 +23,7 @@ from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.host import AgentLabelOptions
+from imbue.mngr.interfaces.host import AgentTmuxOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -251,6 +252,11 @@ def _run_with_agent(
         label_options=AgentLabelOptions(labels={"created-by": "robinhood"}),
         environment=pass_env_vars,
         ready_timeout_seconds=AGENT_READY_TIMEOUT_SECONDS,
+        tmux=AgentTmuxOptions(
+            width=partition.tmux_width,
+            height=partition.tmux_height,
+            window_size=partition.tmux_window_size,
+        ),
     )
 
     try:
