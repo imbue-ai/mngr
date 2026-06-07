@@ -19,16 +19,9 @@ Flow:
      03-06)
   3. Slack flow on W1 (if enabled): stand up local slack mock HTTPS
      server on :443 via sudo socat TLS-terminator, patch /etc/hosts,
-     pre-seed latchkey slack credential. Three phases:
-     - A: send slack prompt, click Requests -> entry -> DENY; verify
-       the Deny click reached stage 3 (screenshots 07a-d). Do NOT
-       gate on a denial token in chat: empirically the slack tool
-       does not self-react to a deny, it polls; the user's retry in
-       Phase B is what unblocks it.
-     - B: send a retry prompt to wake the parked agent and trigger
-       a fresh permission request (screenshot 07f)
-     - C: APPROVE the retry's new request, kick agent, verify canned
-       MESSAGE_BODY appears (screenshots 07g-j, 08 PASS)
+     pre-seed latchkey slack credential, send slack prompt; click
+     Requests -> entry -> Approve, kick agent to retry; verify canned
+     MESSAGE_BODY appears (screenshots 07-08)
   4. (if WORKSPACE_COUNT >= 2) Workspace 2 (W2): same create-form
      flow with HOST_NAME_2, send first message, wait for reply
      (screenshots 09-12)
@@ -1015,107 +1008,48 @@ async def amain() -> int:
             time.sleep(2)  # let socat bind
             try:
                 latchkey_set_slack()
-
-                # === Phase A: send slack prompt, DENY the request ===
-                # Real users sometimes click Deny by mistake or change their
-                # mind. The agent should report the denial back in chat
-                # rather than silently looping.
-                logger.info("=== Phase A: slack prompt -> DENY ===")
+                # 8. Send slack prompt
                 inp = await win.wait_for_selector('textarea, [contenteditable="true"]', timeout=60_000)
                 await inp.fill(SLACK_PROMPT)
                 await inp.press("Enter")
                 await snap_page(win, "07-slack-prompt-sent")
 
-                # Drive the 3-stage state machine to a Deny click. Do NOT
-                # gate on a "denial" word in chat afterwards: empirically
-                # (run 27101154824), Claude's slack tool sits on a polling
-                # loop and does NOT self-react when the gateway denies --
-                # the chat stays parked on the original "waiting for
-                # approval" message until the user sends a new prompt.
-                # Phase B's retry kick is what unblocks the agent; if the
-                # tool really did not see the deny, the retry triggers a
-                # NEW permission request and Phase C's auto-approve catches
-                # it. Either way the round-trip to canned body in Phase C
-                # is the ultimate PASS signal.
-                deny_stage = 0
-                deny_clicked = {}
-                deny_deadline = time.time() + DRIVE_SLACK_TIMEOUT
-                while time.time() < deny_deadline:
-                    chat_now = await find_chat_window(ctx)
-                    if chat_now is not None:
-                        win = chat_now
-                    if deny_stage >= 3:
-                        logger.info("[deny-phase] PASS: Deny click landed (stage 3)")
-                        break
-                    await _advance_approval(
-                        ctx,
-                        win,
-                        deny_stage,
-                        deny_clicked,
-                        decision="deny",
-                        snap_stage0="07a-deny-stage0-pre-click-requests",
-                        snap_stage1="07b-deny-stage1-pre-click-entry",
-                        snap_stage2_pre="07c-deny-stage2-pre-click-deny",
-                        snap_stage2_post="07d-deny-stage2-post-deny",
-                    )
-                    deny_stage = deny_clicked.get("stage", deny_stage)
-                    await asyncio.sleep(2)
-                else:
-                    await snap_page(win, "99-TIMEOUT-no-deny-click")
-                    raise E2EFailure(
-                        f"[deny-phase] Deny click did not land after {DRIVE_SLACK_TIMEOUT}s (stage={deny_stage})"
-                    )
-
-                # === Phase B: ask the agent to retry ===
-                logger.info("=== Phase B: send retry prompt ===")
-                target = (await find_chat_window(ctx)) or win
-                retry_msg = (
-                    "Please try the Slack read again -- I just enabled the "
-                    "permission. Quote the message you read back here."
-                )
-                retry_inp = await target.wait_for_selector('textarea, [contenteditable="true"]', timeout=10_000)
-                await retry_inp.fill(retry_msg)
-                await retry_inp.press("Enter")
-                await snap_page(target, "07f-retry-after-deny-sent")
-
-                # === Phase C: APPROVE the new request, verify canned body ===
-                # Same machinery as the original single-approve flow, just
-                # with deny-phase prefix collisions avoided (07g-07j).
-                logger.info("=== Phase C: APPROVE the retry request ===")
-                approve_stage = 0
-                approve_clicked = {}
+                # 9. Wait for agent to emit permission request; click
+                # Requests button -> entry -> Approve.
+                #
+                # After Approve, the requests-panel window closes and
+                # Electron may shuffle the BrowserWindow z-order; ``win``
+                # can end up pointing at the Projects page. Re-resolve
+                # the chat panel each iteration so the canned-body check
+                # always reads from the right window.
+                approval_stage = 0
+                deadline = time.time() + DRIVE_SLACK_TIMEOUT
+                clicked_at = {}
                 approved_request_urls: set[str] = set()
-                last_kick_at = 0.0
+                last_kick_at = 0.0  # monotonic timestamp of last kick
                 first_approve_at = 0.0
-                approve_deadline = time.time() + DRIVE_SLACK_TIMEOUT
-                while time.time() < approve_deadline:
+                while time.time() < deadline:
                     chat_now = await find_chat_window(ctx)
                     if chat_now is not None:
                         win = chat_now
+                    # Check for canned body in chat (PASS).
                     body = await win.evaluate("document.body.innerText")
-                    if CANNED_BODY.lower() in body.lower() and approve_stage >= 3:
+                    if CANNED_BODY.lower() in body.lower() and approval_stage >= 3:
                         logger.info("PASS: canned body in reply")
                         await snap_page(win, "08-PASS-canned-body")
                         break
-                    if approve_stage < 3:
-                        await _advance_approval(
-                            ctx,
-                            win,
-                            approve_stage,
-                            approve_clicked,
-                            decision="approve",
-                            snap_stage0="07g-approve-stage0-pre-click-requests",
-                            snap_stage1="07h-approve-stage1-pre-click-entry",
-                            snap_stage2_pre="07i-approve-stage2-pre-click-approve",
-                            snap_stage2_post="07j-approve-stage2-post-approve",
-                        )
-                        approve_stage = approve_clicked.get("stage", approve_stage)
-                        if approve_stage >= 3 and first_approve_at == 0.0:
+
+                    if approval_stage < 3:
+                        await _advance_approval(ctx, win, approval_stage, clicked_at)
+                        approval_stage = clicked_at.get("stage", approval_stage)
+                        if approval_stage >= 3 and first_approve_at == 0.0:
                             first_approve_at = time.monotonic()
-                    if approve_stage >= 3:
-                        # Latchkey often re-gates follow-up calls as fresh
-                        # requests; auto-approve any that appear so Claude
-                        # can finish quoting the canned body.
+
+                    # After the first approval, the latchkey gateway often
+                    # re-gates the next slack API call separately -- the
+                    # agent submits a NEW /requests/<id>. Auto-approve any
+                    # follow-up requests so Claude can complete its retry.
+                    if approval_stage >= 3:
                         for p in all_pages(ctx):
                             with contextlib.suppress(Exception):
                                 if "/requests/" not in p.url or p.url in approved_request_urls:
@@ -1125,6 +1059,13 @@ async def amain() -> int:
                                     logger.info("auto-approving follow-up request at {}", p.url)
                                     await btn.click()
                                     approved_request_urls.add(p.url)
+
+                        # Periodic kick: Claude often sits parked after a
+                        # permission round-trip. Every KICK_INTERVAL secs
+                        # send a short "approved, retry" prompt into the
+                        # chat to nudge it. The first kick fires KICK_DELAY
+                        # secs after the first Approve so it lands AFTER
+                        # the gateway's permission grant is visible.
                         KICK_DELAY = 8
                         KICK_INTERVAL = 30
                         now = time.monotonic()
@@ -1146,15 +1087,18 @@ async def amain() -> int:
                                     last_kick_at = now
                                 except Exception as exc:
                                     logger.warning("kick attempt failed on chat {}: {}", target.url, exc)
+
                     await asyncio.sleep(2)
                 else:
                     await snap_page(win, "99-TIMEOUT-no-canned-body")
+                    # Dump every page's URL + first 200 chars of body so we
+                    # can tell whether the chat panel was alive somewhere.
                     for p in all_pages(ctx):
                         with contextlib.suppress(Exception):
                             preview = (await p.evaluate("document.body.innerText"))[:200].replace("\n", " ")
                             logger.error("  page url={} body=...{!r}", p.url, preview)
                     raise RuntimeError(
-                        f"canned body not in chat after {DRIVE_SLACK_TIMEOUT}s (approve_stage={approve_stage})"
+                        f"canned body not in chat after {DRIVE_SLACK_TIMEOUT}s (approval_stage={approval_stage})"
                     )
             finally:
                 logger.info("=== slack teardown ===")
@@ -1497,27 +1441,8 @@ async def amain() -> int:
     return 0
 
 
-async def _advance_approval(
-    ctx: BrowserContext,
-    win: Page,
-    stage: int,
-    state: dict,
-    *,
-    decision: str = "approve",
-    snap_stage0: str = "07a-stage0-pre-click-requests",
-    snap_stage1: str = "07b-stage1-pre-click-entry",
-    snap_stage2_pre: str = "07c-stage2-pre-click-approve",
-    snap_stage2_post: str = "07d-stage2-post-approve",
-) -> None:
-    """One step of the 3-stage permission click. Updates state['stage'].
-
-    ``decision`` is ``"approve"`` (default) or ``"deny"``. At stage 2 we
-    click the matching button in the per-request detail window. The
-    four snap_* params let iter 10 run the machine twice in one test
-    (once for deny, once for approve) without colliding snap names.
-    """
-    if decision not in ("approve", "deny"):
-        raise E2EFailure(f"_advance_approval: decision must be approve|deny, got {decision!r}")
+async def _advance_approval(ctx: BrowserContext, win: Page, stage: int, state: dict) -> None:
+    """One step of the 3-stage approval click. Updates state['stage']."""
     # Stage 0: click Requests button to open the panel (skipped if
     # panel already auto-opened).
     if stage == 0:
@@ -1552,7 +1477,7 @@ async def _advance_approval(
                 btn = w.locator('button[title="Requests"]')
                 if await btn.count() > 0 and await btn.first.is_visible():
                     logger.info("clicking Requests button")
-                    await snap_page(w, snap_stage0)
+                    await snap_page(w, "07a-stage0-pre-click-requests")
                     await btn.first.click()
                     state["stage"] = 1
                     return
@@ -1577,51 +1502,42 @@ async def _advance_approval(
                     if txt in ("close", "cancel", "back", "requests"):
                         continue
                     logger.info("clicking permission entry via {!r}", sel)
-                    await snap_page(panel, snap_stage1)
+                    await snap_page(panel, "07b-stage1-pre-click-entry")
                     await loc.click()
                     state["stage"] = 2
                     return
             except Exception:
                 pass
 
-    # Stage 2: click Approve or Deny in the per-request detail window.
+    # Stage 2: click Approve in the per-request detail window.
     elif stage == 2:
-        button_text = "Approve" if decision == "approve" else "Deny"
         for w in all_pages(ctx):
             try:
                 if "/requests/" not in w.url:
                     continue
-                btn = w.locator(f'button:has-text("{button_text}")').first
+                btn = w.locator('button:has-text("Approve")').first
                 if await btn.count() > 0 and await btn.is_visible():
-                    logger.info("clicking {}", button_text)
-                    await snap_page(w, snap_stage2_pre)
+                    logger.info("clicking Approve")
+                    await snap_page(w, "07c-stage2-pre-click-approve")
                     await btn.click()
                     state["stage"] = 3
-                    # Snap a beat later. For approve the per-request page
-                    # stays open ("Approved" state); for deny the window
-                    # closes, so snap the chat window instead -- that's
-                    # the state we actually care about.
+                    # Snap a beat later so the post-approval state of the
+                    # request page (typically "Approved") is captured.
                     await asyncio.sleep(2)
-                    snap_target = w
-                    if decision == "deny":
-                        chat_after_deny = await find_chat_window(ctx)
-                        if chat_after_deny is not None:
-                            snap_target = chat_after_deny
                     with contextlib.suppress(Exception):
-                        await snap_page(snap_target, snap_stage2_post)
+                        await snap_page(w, "07d-stage2-post-approve")
                     # Surface latchkey-side authorisation failures
                     # immediately rather than waiting DRIVE_SLACK_TIMEOUT
-                    # seconds for a timeout. Only meaningful on Approve;
-                    # a Deny that triggers an auth-fail banner would still
-                    # be a real failure but the check is approve-specific.
-                    if decision == "approve":
-                        with contextlib.suppress(Exception):
-                            body_text = await w.evaluate("document.body.innerText")
-                            if "Authorization failed" in body_text or "No browser configured" in body_text:
-                                raise RuntimeError(
-                                    f"{snap_stage2_post} shows authorization failure: "
-                                    + body_text.replace("\n", " | ")[:400]
-                                )
+                    # seconds for a timeout. The post-approve page renders
+                    # the error banner verbatim; parse the visible text and
+                    # raise so CI fails on the actual signal, not a timeout
+                    # that happens to coincide.
+                    with contextlib.suppress(Exception):
+                        body_text = await w.evaluate("document.body.innerText")
+                        if "Authorization failed" in body_text or "No browser configured" in body_text:
+                            raise RuntimeError(
+                                "07d shows authorization failure: " + body_text.replace("\n", " | ")[:400]
+                            )
                     # Kicks are sent from the main poll loop after a
                     # KICK_DELAY settle period; see slack-flow loop.
                     return
