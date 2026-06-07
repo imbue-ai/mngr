@@ -86,8 +86,16 @@ and the agent is destroyed.
 
 Almost every flag accepted by the regular `claude` CLI is forwarded verbatim
 to the spawned agent. The `-p`/`--print` flag is implied (always on); the
-`--input-format`, `--output-format`, and `--replay-user-messages` flags are
-consumed by the wrapper to shape stdin/stdout.
+`--input-format`, `--output-format`, `--replay-user-messages`,
+`--include-partial-messages`, and `--stream-plain-text` flags are consumed by
+the wrapper to shape stdin/stdout.
+
+Streaming (approximate, reverse-mapped from the agent's tmux pane):
+- `--include-partial-messages` (with `--output-format stream-json`) emits
+  claude-native `text_delta` partial events as the response is produced.
+- `--stream-plain-text` (with the default text output) streams the response
+  text to stdout incrementally.
+Both default the agent to sonnet (a user-passed `--model` still wins).
 
 The following flags are explicitly NOT supported in v1 and will cause the
 command to exit with code 2:
@@ -96,7 +104,6 @@ command to exit with code 2:
 - --max-budget-usd
 - --no-session-persistence
 - --include-hook-events
-- --include-partial-messages
 - -c / --continue
 - -r / --resume
 - --session-id

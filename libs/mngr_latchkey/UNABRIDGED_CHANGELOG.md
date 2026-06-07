@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-05
+
+- Added to the release tooling's publish graph (`scripts/utils.py`). It will be offered for first publication to PyPI on the next release. Its stale `imbue-common==0.1.17` / `concurrency-group==0.1.17` pins are realigned to the current `0.1.18`. No runtime change.
+
 ## 2026-06-04
 
 `mngr latchkey forward`'s discovery observer now writes to the standard discovery event log instead of a private per-env `discovery-observe` directory. It is the single discovery observer for the host dir (minds' `mngr forward --observe-via-file` tails the same log), so the previous isolation onto a separate event log -- needed only when two observers ran at once -- is no longer required. Old `discovery-observe/` directories left by prior versions are inert and can be deleted manually.

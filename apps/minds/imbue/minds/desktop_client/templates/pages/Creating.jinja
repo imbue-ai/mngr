@@ -107,9 +107,9 @@
           <div class="text-lg font-semibold mb-1.5 text-red-600">We couldn't set up your workspace</div>
           <p class="text-[13px] text-zinc-500 leading-snug">Setup stopped before your workspace was ready.</p>
         </div>
-        <div class="px-3 py-2.5 rounded-md text-sm my-2 bg-red-50 text-red-600 border border-red-200">
+        <Notice variant="error">
           <span id="error-message" class="font-mono text-[12.5px] break-words whitespace-pre-wrap"></span>
-        </div>
+        </Notice>
         <div class="flex items-center justify-center gap-2 mt-4">
           <ButtonLink href="/create" variant="primary">Back to setup</ButtonLink>
           <ButtonLink href="/" variant="ghost">Home</ButtonLink>
@@ -120,7 +120,7 @@
       <div class="flex items-center justify-between mt-2.5 text-[11.5px] text-zinc-400">
         <span id="stage">{{ status_text }}</span>
         <button type="button" id="details-toggle"
-                class="js-details inline-flex items-center gap-1 text-zinc-400 hover:text-zinc-600 cursor-pointer">
+                class="js-details inline-flex items-center gap-1 text-zinc-400 hover:text-zinc-700 cursor-pointer">
           Show details
         </button>
       </div>

@@ -58,6 +58,42 @@ PACKAGES: Final[tuple[PackageInfo, ...]] = (
         pypi_name="imbue-mngr-vultr",
         internal_deps=("imbue-mngr", "imbue-mngr-vps-docker"),
     ),
+    PackageInfo(dir_name="mngr_usage", pypi_name="imbue-mngr-usage", internal_deps=("imbue-mngr",)),
+    PackageInfo(
+        dir_name="mngr_claude_usage",
+        pypi_name="imbue-mngr-claude-usage",
+        internal_deps=("imbue-mngr", "imbue-mngr-claude", "imbue-mngr-usage"),
+    ),
+    PackageInfo(
+        dir_name="mngr_forward",
+        pypi_name="imbue-mngr-forward",
+        internal_deps=("imbue-mngr", "imbue-common", "concurrency-group"),
+    ),
+    PackageInfo(
+        dir_name="mngr_latchkey",
+        pypi_name="imbue-mngr-latchkey",
+        internal_deps=("imbue-mngr", "imbue-mngr-forward", "imbue-common", "concurrency-group"),
+    ),
+    PackageInfo(
+        dir_name="mngr_imbue_cloud",
+        pypi_name="imbue-mngr-imbue-cloud",
+        internal_deps=("imbue-mngr", "imbue-mngr-vps-docker", "imbue-common"),
+    ),
+    PackageInfo(
+        dir_name="mngr_ovh",
+        pypi_name="imbue-mngr-ovh",
+        internal_deps=("imbue-mngr", "imbue-mngr-vps-docker"),
+    ),
+    PackageInfo(
+        dir_name="mngr_schedule",
+        pypi_name="imbue-mngr-schedule",
+        internal_deps=("imbue-mngr", "imbue-common", "imbue-mngr-modal"),
+    ),
+    PackageInfo(
+        dir_name="mngr_robinhood",
+        pypi_name="imbue-mngr-robinhood",
+        internal_deps=("imbue-mngr", "imbue-mngr-claude"),
+    ),
 )
 
 PACKAGE_BY_PYPI_NAME: Final[dict[str, PackageInfo]] = {pkg.pypi_name: pkg for pkg in PACKAGES}
