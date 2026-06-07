@@ -25,7 +25,7 @@ _BACKUP_ENV_DIRNAME = "backup_envs"
 
 def backup_env_dir(paths: WorkspacePaths) -> Path:
     """Return the directory holding the canonical per-workspace restic env files."""
-    return paths.data_dir / _BACKUP_ENV_DIRNAME
+    return paths.app_support / _BACKUP_ENV_DIRNAME
 
 
 def canonical_env_path(paths: WorkspacePaths, agent_id: AgentId) -> Path:

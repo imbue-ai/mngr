@@ -27,7 +27,8 @@ from pathlib import Path
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.bootstrap import env_name_from_root_name
 from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
-from imbue.minds.bootstrap import minds_data_dir_for
+from imbue.minds.bootstrap import minds_app_support_dir_for
+from imbue.minds.bootstrap import minds_tiers_parent_dir
 from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.bootstrap import root_name_for_env_name
 from imbue.minds.envs.primitives import DevEnvName
@@ -39,12 +40,14 @@ _MINDS_PREFIX = "minds"
 
 
 def env_root_dir(name: DevEnvName) -> Path:
-    """Return ``~/.minds-<name>/`` (or ``~/.minds/`` for ``production``).
+    """Return the env's app-support root (e.g. the ``<tier>/`` app-support dir).
 
-    Computed via :func:`root_name_for_env_name` so the special-cased
-    ``production`` -> ``~/.minds/`` mapping stays in one place.
+    The per-env on-disk root for mngr profile / auth / agents / the dev-env
+    ``client.toml`` + ``secrets.toml``. Computed via
+    :func:`root_name_for_env_name` so the ``production`` mapping stays in
+    one place.
     """
-    return minds_data_dir_for(root_name_for_env_name(str(name)))
+    return minds_app_support_dir_for(root_name_for_env_name(str(name)))
 
 
 def client_config_file(name: DevEnvName) -> Path:
@@ -70,14 +73,38 @@ def secrets_file(name: DevEnvName) -> Path:
 
 
 def list_env_root_dirs() -> tuple[Path, ...]:
-    """Glob the user's home for every ``~/.minds*/`` directory.
+    """Return every env's app-support root on disk, plus un-migrated legacy roots.
 
-    Returns each existing root in sorted order, with ``~/.minds/``
-    (production) first if it exists. Used by ``minds env list`` to
-    enumerate every env on disk -- including ones the user manually
-    ``mkdir``'d. Callers that need to filter by "has a real
-    ``client.toml``" do so themselves.
+    Enumerates the tier subdirectories under the platform-canonical tiers
+    parent (``minds_tiers_parent_dir``) and maps each to its app-support
+    root, then appends any surviving legacy ``~/.minds*/`` dotfolders that
+    a one-shot migration has not yet moved. Sorted with the production
+    root first. Used by ``minds env list``; callers that need to filter by
+    "has a real ``client.toml``" do so themselves.
     """
+    matches: list[Path] = []
+    seen: set[Path] = set()
+    parent = minds_tiers_parent_dir()
+    if parent.is_dir():
+        for child in parent.iterdir():
+            if not child.is_dir():
+                continue
+            tier = child.name
+            if tier != "production" and not _is_legal_env_name(tier):
+                continue
+            root = minds_app_support_dir_for(root_name_for_env_name(tier))
+            if root not in seen:
+                seen.add(root)
+                matches.append(root)
+    for legacy in _list_legacy_env_root_dirs():
+        if legacy not in seen:
+            seen.add(legacy)
+            matches.append(legacy)
+    return tuple(sorted(matches, key=_env_root_sort_key))
+
+
+def _list_legacy_env_root_dirs() -> tuple[Path, ...]:
+    """Glob the user's home for every legacy ``~/.minds*/`` directory."""
     home = Path.home()
     if not home.is_dir():
         return ()
@@ -99,16 +126,13 @@ def list_env_root_dirs() -> tuple[Path, ...]:
         if not _is_legal_env_name(env_name):
             continue
         matches.append(child)
-    return tuple(sorted(matches, key=_env_root_sort_key))
+    return tuple(matches)
 
 
 def _env_root_sort_key(path: Path) -> tuple[int, str]:
-    # ``~/.minds`` (production) sorts first, then everything else
-    # alphabetically by env name. The numeric prefix keeps production
-    # at the head of the list even when its dirname (``.minds``) would
-    # otherwise sort between hypothetical ``.mindd*`` / ``.minde*``
-    # neighbors.
-    if path.name == f".{_MINDS_PREFIX}":
+    # The production root sorts first, then everything else alphabetically
+    # by directory name.
+    if path.name in ("production", f".{_MINDS_PREFIX}"):
         return (0, "")
     return (1, path.name)
 
@@ -143,10 +167,11 @@ def active_env_name_or_none() -> str | None:
 
 
 def resolved_env_root_dir() -> Path:
-    """Return the ``minds_data_dir_for`` of the resolved root name.
+    """Return the app-support root of the resolved root name.
 
     Used by callers that just want "where does my mngr profile / auth /
     agents live" without caring whether the user has activated a real
-    env. Falls back to ``~/.minds/`` when nothing is activated.
+    env. Falls back to the production app-support root when nothing is
+    activated.
     """
-    return minds_data_dir_for(resolve_minds_root_name())
+    return minds_app_support_dir_for(resolve_minds_root_name())

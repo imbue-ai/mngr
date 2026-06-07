@@ -218,6 +218,26 @@ def minds_app_support_dir_for(root_name: str) -> Path:
     return _minds_roots_for(root_name)[0]
 
 
+def minds_tiers_parent_dir(platform_name: str | None = None) -> Path:
+    """Return the directory under which every tier's app-support root lives.
+
+    The common parent for enumerating tiers (``minds env list``):
+    ``$MINDS_DATA_HOME`` under the override, ``~/Library/Application
+    Support/Minds`` on macOS, ``$XDG_DATA_HOME/minds`` on Linux. For each
+    child ``<tier>`` here, the tier's app-support root is
+    ``minds_app_support_dir_for(root_name_for_env_name(<tier>))``.
+    """
+    if platform_name is None:
+        platform_name = sys.platform
+    override = os.environ.get(MINDS_DATA_HOME_ENV_VAR)
+    if override:
+        return Path(override).expanduser()
+    home = Path.home()
+    if platform_name == "darwin":
+        return home / "Library" / "Application Support" / _MINDS_BUNDLE_NAME
+    return _xdg_base("XDG_DATA_HOME", home / ".local" / "share") / _MINDS_XDG_DIR_NAME
+
+
 def minds_cache_dir_for(root_name: str) -> Path:
     """Return the cache root (template-cache/; regenerable, OS may purge)."""
     return _minds_roots_for(root_name)[1]
@@ -234,8 +254,8 @@ def minds_config_dir_for(root_name: str) -> Path:
 
 
 def mngr_host_dir_for(root_name: str) -> Path:
-    """Return the mngr host directory for a given root name (e.g. ~/.minds/mngr)."""
-    return minds_data_dir_for(root_name) / "mngr"
+    """Return the mngr host directory for a given root name (under the app-support root)."""
+    return minds_app_support_dir_for(root_name) / "mngr"
 
 
 def mngr_prefix_for(root_name: str) -> str:
@@ -353,10 +373,10 @@ def _cleanup_legacy_dynamic_hosts(root_name: str) -> None:
     at long-destroyed VPS IPs, and any code path that reads it would
     block on TCP timeouts. Best-effort: log + continue on any FS error.
     """
-    data_dir = minds_data_dir_for(root_name)
+    ssh_dir = minds_app_support_dir_for(root_name) / "ssh"
     legacy_paths = (
-        data_dir / "ssh" / "dynamic_hosts.toml",
-        data_dir / "ssh" / "keys" / "leased_host",
+        ssh_dir / "dynamic_hosts.toml",
+        ssh_dir / "keys" / "leased_host",
     )
     for path in legacy_paths:
         if not path.exists():

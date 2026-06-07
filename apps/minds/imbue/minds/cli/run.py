@@ -35,13 +35,12 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.minds.bootstrap import minds_data_dir_for
 from imbue.minds.bootstrap import reconcile_imbue_cloud_providers_from_sessions
 from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_HOST
 from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_PORT
 from imbue.minds.config.data_types import MNGR_BINARY
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import MindsPaths
 from imbue.minds.config.loader import load_client_config
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.api_key_store import generate_api_key
@@ -161,8 +160,8 @@ def run(
             "`dev-<your-user>`, `staging`, or `production`), then re-run."
         )
     root_name = resolve_minds_root_name()
-    data_directory = minds_data_dir_for(root_name)
-    minds_config = MindsConfig(data_dir=data_directory)
+    paths = MindsPaths.for_root_name(root_name)
+    minds_config = MindsConfig(data_dir=paths.config)
     client_config_path = config_file
     client_env_config = load_client_config(client_config_path)
     connector_url_str = str(client_env_config.connector_url).rstrip("/")
@@ -171,7 +170,10 @@ def run(
     logger.info("Starting `minds run`...")
     logger.info("  Bare-origin: http://{}:{}", host, port)
     logger.info("  MINDS_ROOT_NAME: {}", root_name)
-    logger.info("  Data directory: {}", data_directory)
+    logger.info("  App support: {}", paths.app_support)
+    logger.info("  Cache: {}", paths.cache)
+    logger.info("  Logs: {}", paths.logs)
+    logger.info("  Config: {}", paths.config)
     logger.info("  Config file: {}", client_config_path)
     logger.info("  connector_url: {}", client_env_config.connector_url)
     logger.info("  litellm_proxy_url: {}", client_env_config.litellm_proxy_url)
@@ -180,14 +182,13 @@ def run(
     # so the reconcile happens here once we've loaded the client config.
     reconcile_imbue_cloud_providers_from_sessions(connector_url_str, root_name=root_name)
 
-    paths = WorkspacePaths(data_dir=data_directory)
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
     is_electron = os.getenv("MINDS_ELECTRON") == "1"
     notification_dispatcher = NotificationDispatcher(is_electron=is_electron)
     backend_resolver = MngrCliBackendResolver(
-        last_good_agents_path=paths.data_dir / "last_good_agent_topology.json",
+        last_good_agents_path=paths.app_support / "last_good_agent_topology.json",
     )
-    latchkey = _build_latchkey(data_directory=data_directory)
+    latchkey = _build_latchkey(app_support=paths.app_support)
     latchkey.initialize()
 
     # Mint a fresh central minds API key for this process. The same
@@ -249,14 +250,14 @@ def run(
 
     mngr_message_sender = MngrMessageSender()
     latchkey_permission_handler = LatchkeyPermissionGrantHandler(
-        data_dir=data_directory,
+        data_dir=paths.app_support,
         latchkey=latchkey,
         services_catalog=ServicesCatalog(gateway_client=gateway_client),
         mngr_message_sender=mngr_message_sender,
         gateway_client=gateway_client,
     )
     file_sharing_handler = FileSharingGrantHandler(
-        data_dir=data_directory,
+        data_dir=paths.app_support,
         gateway_client=gateway_client,
         mngr_message_sender=mngr_message_sender,
     )
@@ -265,8 +266,8 @@ def run(
         connector_url=client_env_config.connector_url,
     )
     telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
-    session_store = MultiAccountSessionStore(data_dir=data_directory, cli=imbue_cloud_cli)
-    response_events = load_response_events(data_directory)
+    session_store = MultiAccountSessionStore(data_dir=paths.app_support, cli=imbue_cloud_cli)
+    response_events = load_response_events(paths.app_support)
     request_inbox = RequestInbox()
     for resp in response_events:
         request_inbox = request_inbox.add_response(resp)
@@ -362,7 +363,7 @@ def run(
     # the lazy fallback at create-agent time keeps working.
     from imbue.minds.desktop_client.first_launch_prefetch import start_first_launch_prefetch
 
-    start_first_launch_prefetch(paths.data_dir, root_concurrency_group)
+    start_first_launch_prefetch(paths.cache, root_concurrency_group)
 
     # Emit the started event so Electron can pre-set the cookie before the
     # first navigation. ``minds run`` itself does not open the browser at
@@ -576,7 +577,7 @@ class _StreamedPermissionRequestHandler(FrozenModel):
         self.backend_resolver.notify_change()
 
 
-def _build_latchkey(data_directory: Path) -> Latchkey:
+def _build_latchkey(app_support: Path) -> Latchkey:
     # The latchkey-binary path is supplied by the Electron shell (which
     # bundles its own copy of latchkey under the app resources) via
     # ``MINDS_LATCHKEY_BINARY``. We fall back to ``"latchkey"`` on PATH
@@ -594,7 +595,7 @@ def _build_latchkey(data_directory: Path) -> Latchkey:
     if directory_override:
         latchkey_directory = Path(directory_override).expanduser()
     else:
-        latchkey_directory = data_directory / "latchkey"
+        latchkey_directory = app_support / "latchkey"
     # The per-env encryption key is loaded lazily on every subprocess
     # spawn inside ``Latchkey`` itself (via ``_load_encryption_key``)
     # so the secret only lives in parent-process memory for the

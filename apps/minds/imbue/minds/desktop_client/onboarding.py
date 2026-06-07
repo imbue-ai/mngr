@@ -309,7 +309,7 @@ class OnboardingApplier(MutableModel):
         """Resolve the user's name and write the per-creation user-context JSON file."""
         user_name = resolve_local_user_name()
         document = build_user_context_document(user_name)
-        context_dir = self.paths.data_dir / USER_CONTEXT_DIR_NAME
+        context_dir = self.paths.app_support / USER_CONTEXT_DIR_NAME
         context_dir.mkdir(parents=True, exist_ok=True)
         context_path = context_dir / f"{creation_id}.json"
         context_path.write_text(json.dumps(document, indent=2))

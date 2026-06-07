@@ -145,8 +145,10 @@ def test_minds_data_dir_for() -> None:
     assert minds_data_dir_for("minds") == Path.home() / ".minds"
 
 
-def test_mngr_host_dir_for() -> None:
-    assert mngr_host_dir_for("minds-dev-josh-3") == Path.home() / ".minds-dev-josh-3" / "mngr"
+def test_mngr_host_dir_for(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _clear_layout_env(monkeypatch)
+    monkeypatch.setenv("MINDS_DATA_HOME", str(tmp_path))
+    assert mngr_host_dir_for("minds-dev-josh-3") == tmp_path / "dev-josh-3" / "app_support" / "mngr"
 
 
 def test_mngr_prefix_for() -> None:
@@ -154,16 +156,18 @@ def test_mngr_prefix_for() -> None:
     assert mngr_prefix_for("minds") == "minds-"
 
 
-def test_apply_bootstrap_sets_env_vars_when_root_name_set(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_apply_bootstrap_sets_env_vars_when_root_name_set(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _clear_env(monkeypatch)
+    _clear_layout_env(monkeypatch)
+    monkeypatch.setenv("MINDS_DATA_HOME", str(tmp_path))
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "minds-dev-testname")
     apply_bootstrap()
 
-    assert os.environ["MNGR_HOST_DIR"] == str(Path.home() / ".minds-dev-testname" / "mngr")
+    assert os.environ["MNGR_HOST_DIR"] == str(tmp_path / "dev-testname" / "app_support" / "mngr")
     assert os.environ["MNGR_PREFIX"] == "minds-dev-testname-"
 
 
-def test_apply_bootstrap_overrides_inherited_mngr_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_apply_bootstrap_overrides_inherited_mngr_vars(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Explicit MINDS_ROOT_NAME wins over an inherited MNGR_HOST_DIR/MNGR_PREFIX.
 
     Without this, a minds process spawned from a parent that already set
@@ -172,12 +176,14 @@ def test_apply_bootstrap_overrides_inherited_mngr_vars(monkeypatch: pytest.Monke
     minds bootstrap writes to.
     """
     _clear_env(monkeypatch)
+    _clear_layout_env(monkeypatch)
+    monkeypatch.setenv("MINDS_DATA_HOME", str(tmp_path))
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "minds-dev-josh-3")
     monkeypatch.setenv("MNGR_HOST_DIR", "/custom/host/dir")
     monkeypatch.setenv("MNGR_PREFIX", "custom-")
     apply_bootstrap()
 
-    assert os.environ["MNGR_HOST_DIR"] == str(Path.home() / ".minds-dev-josh-3" / "mngr")
+    assert os.environ["MNGR_HOST_DIR"] == str(tmp_path / "dev-josh-3" / "app_support" / "mngr")
     assert os.environ["MNGR_PREFIX"] == "minds-dev-josh-3-"
 
 
@@ -206,7 +212,7 @@ def test_apply_bootstrap_unset_does_not_write_mngr_vars(monkeypatch: pytest.Monk
     assert "MNGR_PREFIX" not in os.environ
 
 
-def test_apply_bootstrap_invalid_value_still_writes_default(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_apply_bootstrap_invalid_value_still_writes_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A stale `MINDS_ROOT_NAME=devminds` shell still gets consistent MNGR_* vars.
 
     The bootstrap resolves to the production default and exports the
@@ -214,10 +220,12 @@ def test_apply_bootstrap_invalid_value_still_writes_default(monkeypatch: pytest.
     host_dir to point at instead of half-honoring the bad value.
     """
     _clear_env(monkeypatch)
+    _clear_layout_env(monkeypatch)
+    monkeypatch.setenv("MINDS_DATA_HOME", str(tmp_path))
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "devminds")
     monkeypatch.setenv("MNGR_HOST_DIR", "/custom/host/dir")
     apply_bootstrap()
-    assert os.environ["MNGR_HOST_DIR"] == str(Path.home() / ".minds" / "mngr")
+    assert os.environ["MNGR_HOST_DIR"] == str(tmp_path / "production" / "app_support" / "mngr")
     assert os.environ["MNGR_PREFIX"] == "minds-"
 
 
@@ -475,7 +483,7 @@ def test_minds_tier_for_maps_root_name_to_tier() -> None:
 
 
 def test_minds_tier_for_does_not_collapse_dev_staging() -> None:
-    """Risk #5: ``minds-dev-staging`` must stay distinct from ``minds-staging``."""
+    """Cross-tier collision: minds-dev-staging must stay distinct from minds-staging."""
     assert minds_tier_for("minds-dev-staging") == "dev-staging"
     assert minds_tier_for("minds-staging") == "staging"
     assert minds_tier_for("minds-dev-staging") != minds_tier_for("minds-staging")
@@ -550,7 +558,7 @@ def test_linux_ignores_relative_xdg(monkeypatch: pytest.MonkeyPatch, tmp_path: P
 
 
 def test_dev_staging_distinct_roots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Risk #5 end-to-end: the two tiers resolve to different roots."""
+    """Cross-tier collision, end-to-end: the two tiers resolve to different roots."""
     _clear_layout_env(monkeypatch)
     monkeypatch.setenv("MINDS_DATA_HOME", str(tmp_path))
     dev_staging, *_ = _minds_roots_for("minds-dev-staging")

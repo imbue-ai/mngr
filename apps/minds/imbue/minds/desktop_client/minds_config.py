@@ -26,7 +26,7 @@ _CONFIG_FILENAME: Final[str] = "config.toml"
 class MindsConfig(MutableModel):
     """Thread-safe configuration manager for ``~/.minds/config.toml``."""
 
-    data_dir: Path = Field(frozen=True, description="Root data directory (e.g. ~/.minds)")
+    data_dir: Path = Field(frozen=True, description="Config root directory where config.toml lives.")
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     @property

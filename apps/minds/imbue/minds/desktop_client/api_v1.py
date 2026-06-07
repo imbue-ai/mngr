@@ -95,7 +95,7 @@ def _handle_telegram_status(
         is_active = telegram_orchestrator.agent_has_telegram(parsed_id)
         if is_active:
             paths: WorkspacePaths = request.app.state.api_v1_paths
-            credentials = load_agent_bot_credentials(paths.data_dir, parsed_id)
+            credentials = load_agent_bot_credentials(paths.app_support, parsed_id)
             result: dict[str, object] = {
                 "agent_id": str(parsed_id),
                 "status": str(TelegramSetupStatus.DONE),

@@ -23,6 +23,9 @@ from imbue.minds.envs.local_store import env_root_exists
 from imbue.minds.envs.local_store import read_client_config_file
 from imbue.minds.envs.local_store import read_secrets_file
 from imbue.minds.envs.mngr_agent_cleanup import MngrAgentCleanupError
+from imbue.minds.envs.paths import client_config_file
+from imbue.minds.envs.paths import env_root_dir
+from imbue.minds.envs.paths import secrets_file
 from imbue.minds.envs.per_env_deploy import ModalDeployError
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.providers.modal_env import ModalEnvProviderError
@@ -410,10 +413,10 @@ def test_deploy_dev_env_writes_split_files(_isolated_home: Path, _root_cg: Concu
     assert "SUPERTOKENS_API_KEY" in secrets.secrets
 
     # Sanity: the result struct carries paths to both files.
-    assert result.client_config_path is not None and result.client_config_path.endswith(
-        "/.minds-dev-alice/client.toml"
+    assert result.client_config_path is not None and result.client_config_path == str(
+        client_config_file(DevEnvName("dev-alice"))
     )
-    assert result.secrets_path is not None and result.secrets_path.endswith("/.minds-dev-alice/secrets.toml")
+    assert result.secrets_path is not None and result.secrets_path == str(secrets_file(DevEnvName("dev-alice")))
 
 
 def test_deploy_dev_env_is_idempotent_on_re_run(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
@@ -600,7 +603,7 @@ def test_destroy_env_dev_destroys_mngr_agents_before_cloud_teardown(
         parent_concurrency_group=_root_cg,
     )
     # Seed two fake agent dirs under the env's mngr profile.
-    agents_dir = _isolated_home / ".minds-dev-kim" / "mngr" / "agents"
+    agents_dir = env_root_dir(DevEnvName("dev-kim")) / "mngr" / "agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
     (agents_dir / "agent-1111").mkdir()
     (agents_dir / "agent-2222").mkdir()
@@ -635,7 +638,7 @@ def test_destroy_env_dev_keep_agents_skips_mngr_destroy(_isolated_home: Path, _r
         providers=providers,
         parent_concurrency_group=_root_cg,
     )
-    agents_dir = _isolated_home / ".minds-dev-liz" / "mngr" / "agents"
+    agents_dir = env_root_dir(DevEnvName("dev-liz")) / "mngr" / "agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
     (agents_dir / "agent-1111").mkdir()
     call_log["calls"].clear()
@@ -824,7 +827,7 @@ def test_deploy_env_shared_tier_writes_nothing_to_disk(_isolated_home: Path, _ro
     assert result.client_config_path is None
     assert result.secrets_path is None
     # ~/.minds/, ~/.minds-staging/ are not created by shared-tier deploy.
-    assert not (_isolated_home / ".minds-staging").exists()
+    assert not (env_root_dir(DevEnvName("staging"))).exists()
     assert not (_isolated_home / ".minds").exists()
 
 
@@ -985,7 +988,7 @@ def test_destroy_env_tier_stops_apps_deletes_secrets_and_removes_env_root(
     # operator workflow (you only destroy what you deployed).
     call_log = _make_call_log()
     providers = _build_fake_providers(call_log)
-    _isolated_home.joinpath(".minds-staging").mkdir(exist_ok=True)
+    env_root_dir(DevEnvName("staging")).mkdir(parents=True, exist_ok=True)
     deploy_env(
         DevEnvName("staging"),
         tier="staging",
@@ -1024,13 +1027,13 @@ def test_destroy_env_tier_stops_apps_deletes_secrets_and_removes_env_root(
     first_delete_idx = min(call_log["calls"].index(d) for d in deletes)
     assert call_log["calls"].index(stops[-1]) < first_delete_idx
     # Env root gone -- subsequent activation has to re-create it.
-    assert not (_isolated_home / ".minds-staging").exists()
+    assert not (env_root_dir(DevEnvName("staging"))).exists()
 
 
 def test_destroy_env_tier_destroys_mngr_agents_first(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
     """Tier destroy must `mngr destroy` any agents under the env root before cloud teardown."""
     # Seed an env root + a couple of fake agent dirs under it.
-    staging_root = _isolated_home / ".minds-staging"
+    staging_root = env_root_dir(DevEnvName("staging"))
     agents_dir = staging_root / "mngr" / "agents"
     agents_dir.mkdir(parents=True)
     (agents_dir / "agent-9999").mkdir()
@@ -1083,8 +1086,8 @@ def test_destroy_env_tier_proceeds_when_env_root_missing(_isolated_home: Path, _
 
 def test_destroy_env_tier_leaves_env_root_when_step_fails(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
     """If any cleanup step fails, the env root must stay so re-runs can recover."""
-    staging_root = _isolated_home / ".minds-staging"
-    staging_root.mkdir()
+    staging_root = env_root_dir(DevEnvName("staging"))
+    staging_root.mkdir(parents=True)
 
     failing_providers = _build_fake_providers(_make_call_log(), fail_step="stop_modal_app")
     with pytest.raises(ModalDeployError, match="modal app stop boom"):
@@ -1103,8 +1106,8 @@ def test_destroy_env_tier_wipes_supertokens_app_with_parsed_app_id(
     _isolated_home: Path, _root_cg: ConcurrencyGroup
 ) -> None:
     """SuperTokens wipe must extract the app_id from the Vault connection URI."""
-    staging_root = _isolated_home / ".minds-staging"
-    staging_root.mkdir()
+    staging_root = env_root_dir(DevEnvName("staging"))
+    staging_root.mkdir(parents=True)
     call_log = _make_call_log()
     providers = _build_fake_providers(
         call_log,
@@ -1131,8 +1134,8 @@ def test_destroy_env_tier_wipes_supertokens_app_with_parsed_app_id(
 
 def test_destroy_env_tier_wipes_neon_with_dsn_from_vault(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
     """Neon wipe must use the DATABASE_URL from the tier Vault entry."""
-    staging_root = _isolated_home / ".minds-staging"
-    staging_root.mkdir()
+    staging_root = env_root_dir(DevEnvName("staging"))
+    staging_root.mkdir(parents=True)
     call_log = _make_call_log()
     providers = _build_fake_providers(
         call_log,
@@ -1161,8 +1164,8 @@ def test_destroy_env_tier_refuses_when_supertokens_vault_entry_incomplete(
     _isolated_home: Path, _root_cg: ConcurrencyGroup
 ) -> None:
     """A misconfigured / missing Vault entry must fail loud, not skip the wipe."""
-    staging_root = _isolated_home / ".minds-staging"
-    staging_root.mkdir()
+    staging_root = env_root_dir(DevEnvName("staging"))
+    staging_root.mkdir(parents=True)
     providers = _build_fake_providers(
         _make_call_log(),
         vault_responses={
@@ -1186,7 +1189,7 @@ def test_destroy_env_tier_refuses_when_supertokens_vault_entry_incomplete(
 
 def test_destroy_env_tier_full_step_order(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
     """End-to-end tier destroy: same step ordering as dev destroy (only resource-management ops differ + the generation-id removal is tier-only)."""
-    staging_root = _isolated_home / ".minds-staging"
+    staging_root = env_root_dir(DevEnvName("staging"))
     agents_dir = staging_root / "mngr" / "agents"
     agents_dir.mkdir(parents=True)
     (agents_dir / "agent-aaaa").mkdir()

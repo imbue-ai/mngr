@@ -13,6 +13,12 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.primitives import NonNegativeInt
+from imbue.minds.bootstrap import minds_app_support_dir_for
+from imbue.minds.bootstrap import minds_cache_dir_for
+from imbue.minds.bootstrap import minds_config_dir_for
+from imbue.minds.bootstrap import minds_data_dir_for
+from imbue.minds.bootstrap import minds_logs_dir_for
+from imbue.minds.bootstrap import minds_tier_for
 from imbue.minds.errors import MalformedMngrOutputError
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
@@ -89,13 +95,6 @@ class MindsPaths(FrozenModel):
     @classmethod
     def for_root_name(cls, root_name: str) -> "MindsPaths":
         """Resolve the platform-canonical roots for ``root_name`` (e.g. ``minds``)."""
-        from imbue.minds.bootstrap import minds_app_support_dir_for
-        from imbue.minds.bootstrap import minds_cache_dir_for
-        from imbue.minds.bootstrap import minds_config_dir_for
-        from imbue.minds.bootstrap import minds_data_dir_for
-        from imbue.minds.bootstrap import minds_logs_dir_for
-        from imbue.minds.bootstrap import minds_tier_for
-
         return cls(
             tier=minds_tier_for(root_name),
             app_support=minds_app_support_dir_for(root_name),

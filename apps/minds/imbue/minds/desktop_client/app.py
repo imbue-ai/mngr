@@ -1297,7 +1297,7 @@ def _resolve_destroying_for_landing(
     paths: WorkspacePaths | None,
     all_agent_ids: tuple[AgentId, ...],
 ) -> dict[str, str]:
-    """Walk ``<paths.data_dir>/destroying/``, delete DONE records, return marker map.
+    """Walk ``<paths.app_support>/destroying/``, delete DONE records, return marker map.
 
     Returns ``{agent_id_str: "running" | "failed"}`` for any in-flight or
     failed destroy whose agent_id is currently known to the resolver. DONE
