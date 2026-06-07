@@ -1424,8 +1424,7 @@ async def amain() -> int:
                 await asyncio.sleep(2)
             else:
                 raise E2EFailure(
-                    f"[relaunch] mngr_forward never routed to {w1_result.chat_url!r} "
-                    f"after 60s; ended at {win.url!r}"
+                    f"[relaunch] mngr_forward never routed to {w1_result.chat_url!r} after 60s; ended at {win.url!r}"
                 )
 
             # Send a fresh follow-up on W1's chat URL. ``bump`` is a token
