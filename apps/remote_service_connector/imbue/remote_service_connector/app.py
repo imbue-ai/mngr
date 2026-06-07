@@ -407,6 +407,22 @@ class LeaseHostRequest(BaseModel):
             "explicitly sets are constrained; missing fields are unconstrained. Required."
         ),
     )
+    region: str | None = Field(
+        default=None,
+        description=(
+            "Hard region requirement (OVH datacenter code, e.g. 'US-EAST-VA'). When set, only "
+            "hosts whose region column equals this value are eligible; if none is available the "
+            "lease fails. Leave unset to be region-agnostic."
+        ),
+    )
+    preferred_region: str | None = Field(
+        default=None,
+        description=(
+            "Soft region preference (OVH datacenter code). When set, an available host in this "
+            "region is preferred, but any available host is still returned if none matches -- so "
+            "the fast path is never blocked. Mutually independent of 'region'."
+        ),
+    )
 
     _validate_host_name = field_validator("host_name")(_validate_host_name)
 
@@ -2367,13 +2383,28 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
         try:
             with conn:
                 with conn.cursor() as cur:
-                    cur.execute(
+                    # Build the lease selection dynamically so region knobs stay a
+                    # single round-trip (the fast path must not pay an extra query).
+                    # A hard ``region`` adds an equality filter; a soft
+                    # ``preferred_region`` only reorders, preferring a matching
+                    # region but never excluding a non-matching host. NULLS LAST
+                    # keeps un-regioned (pre-migration) rows behind region matches.
+                    where_clauses = ["status = 'available'", "attributes @> %s::jsonb"]
+                    query_params: list[object] = [json.dumps(body.attributes)]
+                    if body.region is not None:
+                        where_clauses.append("region = %s")
+                        query_params.append(body.region)
+                    order_by = "created_at ASC"
+                    if body.preferred_region is not None:
+                        order_by = "(region = %s) DESC NULLS LAST, created_at ASC"
+                        query_params.append(body.preferred_region)
+                    lease_select_sql = (
                         "SELECT id, vps_address, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes "
                         "FROM pool_hosts "
-                        "WHERE status = 'available' AND attributes @> %s::jsonb "
-                        "ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
-                        (json.dumps(body.attributes),),
+                        f"WHERE {' AND '.join(where_clauses)} "
+                        f"ORDER BY {order_by} LIMIT 1 FOR UPDATE SKIP LOCKED"
                     )
+                    cur.execute(lease_select_sql, tuple(query_params))
                     row = cur.fetchone()
                     if row is None:
                         raise HTTPException(

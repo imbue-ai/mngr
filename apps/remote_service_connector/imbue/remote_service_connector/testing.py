@@ -865,6 +865,7 @@ class FakePoolRow:
     status: str
     version: str
     attributes: dict[str, Any] | None
+    region: str | None
     leased_to_user: str | None
     leased_at: str | None
     released_at: str | None
@@ -905,6 +906,7 @@ def _make_pool_row(
     leased_to_user: str | None = None,
     leased_at: str | None = None,
     host_name: str | None = None,
+    region: str | None = None,
 ) -> FakePoolRow:
     row = FakePoolRow()
     row.host_id = host_id
@@ -924,6 +926,7 @@ def _make_pool_row(
     row.leased_at = leased_at
     row.released_at = None
     row.attributes = None
+    row.region = region
     return row
 
 
@@ -942,28 +945,48 @@ class FakeCursor:
         if "from pool_hosts" in query_lower and "status = 'available'" in query_lower:
             # The connector serialises the request attributes via json.dumps
             # before passing them to the SQL bind parameter, so we always get
-            # a JSON string here.
+            # a JSON string here. Region knobs (if present) follow it in the
+            # param tuple in SQL clause order: hard ``region`` (WHERE) then
+            # ``preferred_region`` (ORDER BY).
             raw = params[0]
             requested = json.loads(raw) if isinstance(raw, str) else dict(raw)
-            for row in self._backend.pool_rows:
-                if row.status != "available":
-                    continue
-                row_attrs = _row_attributes(row)
-                if not _attributes_contain(row_attrs, requested):
-                    continue
+            next_param_idx = 1
+            hard_region: str | None = None
+            if "and region = %s" in query_lower:
+                hard_region = params[next_param_idx]
+                next_param_idx += 1
+            preferred_region: str | None = None
+            if "order by (region = %s) desc" in query_lower:
+                preferred_region = params[next_param_idx]
+                next_param_idx += 1
+            candidate_rows = [
+                row
+                for row in self._backend.pool_rows
+                if row.status == "available"
+                and _attributes_contain(_row_attributes(row), requested)
+                and (hard_region is None or row.region == hard_region)
+            ]
+            # Mirror ``(region = preferred) DESC NULLS LAST, created_at ASC``:
+            # region matches first, then the rest in insertion (created_at) order.
+            if preferred_region is not None:
+                candidate_rows = sorted(
+                    candidate_rows,
+                    key=lambda row: 0 if row.region == preferred_region else 1,
+                )
+            if candidate_rows:
+                chosen = candidate_rows[0]
                 self._results = [
                     (
-                        row.host_id,
-                        row.vps_address,
-                        row.ssh_port,
-                        row.ssh_user,
-                        row.container_ssh_port,
-                        row.agent_id,
-                        row.host_id_str,
-                        row_attrs,
+                        chosen.host_id,
+                        chosen.vps_address,
+                        chosen.ssh_port,
+                        chosen.ssh_user,
+                        chosen.container_ssh_port,
+                        chosen.agent_id,
+                        chosen.host_id_str,
+                        _row_attributes(chosen),
                     )
                 ]
-                break
 
         elif "update pool_hosts set status = 'leased'" in query_lower:
             # Lease SQL now also writes the user-supplied host_name on the
@@ -1243,6 +1266,7 @@ class FakePoolBackend:
         agent_id: str = "agent-abc123",
         host_id_str: str = "host-xyz",
         host_name: str | None = None,
+        region: str | None = None,
     ) -> FakePoolRow:
         """Add an available host to the in-memory pool."""
         row = _make_pool_row(
@@ -1255,6 +1279,7 @@ class FakePoolBackend:
             container_ssh_port=container_ssh_port,
             version=version,
             host_name=host_name,
+            region=region,
         )
         self.pool_rows.append(row)
         return row

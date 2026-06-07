@@ -80,6 +80,29 @@ class MindsConfig(MutableModel):
                 pass
             self._write_raw(data)
 
+    def get_preferred_region(self) -> str | None:
+        """Return the preferred OVH datacenter for imbue_cloud leases, or None.
+
+        Resolved from the user's IP geolocation when the create page is opened
+        and passed to ``mngr create`` as a soft ``-b preferred_region=`` knob.
+        """
+        with self._lock:
+            data = self._read_raw()
+            value = data.get("preferred_region")
+            return str(value) if value is not None else None
+
+    def set_preferred_region(self, region: str | None) -> None:
+        """Set or clear the preferred OVH datacenter for imbue_cloud leases."""
+        with self._lock:
+            data = self._read_raw()
+            if region is not None:
+                data["preferred_region"] = region
+            elif "preferred_region" in data:
+                del data["preferred_region"]
+            else:
+                pass
+            self._write_raw(data)
+
     def get_auto_open_requests_panel(self) -> bool:
         """Return whether the requests panel should auto-open on new requests. Default: True."""
         with self._lock:

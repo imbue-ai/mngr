@@ -91,3 +91,32 @@ def test_parse_build_args_rejects_empty_account() -> None:
 def test_parse_build_args_fast_mode_is_case_insensitive() -> None:
     parsed = parse_imbue_cloud_build_args(["fast_mode=REQUIRE"])
     assert parsed.fast_mode == FastMode.REQUIRE
+
+
+def test_parse_build_args_parses_region_and_preferred_region() -> None:
+    parsed = parse_imbue_cloud_build_args(["region=US-EAST-VA", "preferred_region=US-WEST-OR"])
+    assert parsed.region == "US-EAST-VA"
+    assert parsed.preferred_region == "US-WEST-OR"
+    # Region knobs are top-level, never folded into the attribute filter.
+    assert parsed.attributes.to_request_dict() == {}
+
+
+def test_parse_build_args_region_defaults_to_none() -> None:
+    parsed = parse_imbue_cloud_build_args(["cpus=2"])
+    assert parsed.region is None
+    assert parsed.preferred_region is None
+
+
+def test_parse_build_args_rejects_unknown_region() -> None:
+    with pytest.raises(ValueError, match="region"):
+        parse_imbue_cloud_build_args(["region=US-CENTRAL-TX"])
+
+
+def test_parse_build_args_rejects_unknown_preferred_region() -> None:
+    with pytest.raises(ValueError, match="preferred_region"):
+        parse_imbue_cloud_build_args(["preferred_region=EU-WEST-1"])
+
+
+def test_parse_build_args_rejects_empty_region() -> None:
+    with pytest.raises(ValueError, match="region"):
+        parse_imbue_cloud_build_args(["region="])

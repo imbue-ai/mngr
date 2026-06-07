@@ -1,4 +1,4 @@
-{#def agent_id, ws_name, current_account, accounts, servers, telegram_state, accent #}
+{#def agent_id, ws_name, current_account, accounts, servers, telegram_state, accent, is_leased_imbue_cloud=False #}
 {#
   Workspace settings page. Account section, sharing servers list,
   optional Telegram setup, and the danger-zone destroy flow.
@@ -7,6 +7,11 @@
     - None        : no Telegram orchestrator; section hidden
     - "active"    : Telegram already set up for this workspace
     - "pending"   : show the setup button
+
+  is_leased_imbue_cloud is True for workspaces running on a host leased from
+  Imbue Cloud. Such hosts are permanently bound to the leasing account to avoid
+  confusing "account mixing", so the account section shows the bound account
+  with a disabled Disassociate control and offers no association controls.
 #}
 {% set _body_style = "--workspace-accent: " ~ accent ~ ";" %}
 {% set _scripts %}
@@ -68,7 +73,16 @@
 
       <SectionHeader>Account</SectionHeader>
       <div id="account-section">
-      {% if current_account %}
+      {% if is_leased_imbue_cloud %}
+        {% if current_account %}
+          <p>Associated with: <strong>{{ current_account.email }}</strong></p>
+        {% endif %}
+        <Notice variant="info">
+          This workspace runs on a host leased from Imbue Cloud, so its account
+          association is fixed and cannot be changed.
+        </Notice>
+        <Button variant="danger" id="disassociate-btn" disabled>Disassociate</Button>
+      {% elif current_account %}
         <p>Associated with: <strong>{{ current_account.email }}</strong></p>
         <Notice variant="warn">
           Disassociating will remove all sharing (tunnels) for this workspace.

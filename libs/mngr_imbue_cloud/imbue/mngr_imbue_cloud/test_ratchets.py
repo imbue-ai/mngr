@@ -57,7 +57,10 @@ def test_prevent_base_exception_catch() -> None:
 
 
 def test_prevent_builtin_exception_raises() -> None:
-    rc.check_builtin_exception_raises(_DIR, snapshot(4))
+    # +1 for the region/preferred_region validation in parse_imbue_cloud_build_args,
+    # which raises ValueError to match the rest of that parser's contract (the
+    # caller, instance.create_host, catches ValueError and wraps it as MngrError).
+    rc.check_builtin_exception_raises(_DIR, snapshot(5))
 
 
 def test_prevent_silent_decode_error_catches() -> None:

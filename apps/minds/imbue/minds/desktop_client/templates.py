@@ -1094,6 +1094,7 @@ def render_workspace_settings(
     accounts: Sequence[object],
     servers: Sequence[str],
     telegram_state: str | None = None,
+    is_leased_imbue_cloud: bool = False,
 ) -> str:
     """Render the workspace settings page.
 
@@ -1102,6 +1103,10 @@ def render_workspace_settings(
     - ``None`` -- no Telegram orchestrator configured; section is hidden.
     - ``"active"`` -- Telegram is already set up for this workspace.
     - ``"pending"`` -- setup button is shown.
+
+    ``is_leased_imbue_cloud`` is True for workspaces on a host leased from
+    Imbue Cloud; the account section then shows the bound account with a
+    disabled Disassociate control and no association controls.
 
     Interactivity for the setup flow lives in ``static/workspace_settings.js``,
     which reads the agent id from the page's ``data-agent-id`` attribute.
@@ -1114,6 +1119,7 @@ def render_workspace_settings(
         accounts=accounts,
         servers=servers,
         telegram_state=telegram_state,
+        is_leased_imbue_cloud=is_leased_imbue_cloud,
         accent=workspace_accent(agent_id),
     )
 

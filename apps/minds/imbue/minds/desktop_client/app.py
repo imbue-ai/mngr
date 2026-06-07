@@ -80,6 +80,7 @@ from imbue.minds.desktop_client.onboarding import OnboardingApplier
 from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
 from imbue.minds.desktop_client.recovery_probe import build_host_health_response
 from imbue.minds.desktop_client.recovery_probe import build_probe_argv
+from imbue.minds.desktop_client.region_preference import trigger_preferred_region_refresh
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import parse_request_event
@@ -404,6 +405,7 @@ def _handle_landing_page(
     session_store: MultiAccountSessionStore | None = request.app.state.session_store
     minds_config: MindsConfig | None = request.app.state.minds_config
     agent_creator: AgentCreator | None = request.app.state.agent_creator
+    _trigger_region_preference_refresh(request, minds_config)
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
     is_backup_password_saved = has_saved_backup_password(agent_creator.paths) if agent_creator is not None else False
@@ -415,6 +417,40 @@ def _handle_landing_page(
         has_saved_backup_password=is_backup_password_saved,
     )
     return HTMLResponse(content=html)
+
+
+def _handle_post_login_redirect(
+    request: Request,
+    auth_store: AuthStoreDep,
+    backend_resolver: BackendResolverDep,
+) -> Response:
+    """Decide where a just-authenticated user lands (GET /post-login).
+
+    All sign-in paths (email/password, OAuth, post-email-verification) funnel
+    here. A user who already has workspaces goes to the account-management page
+    (the prior behavior); a user with none goes to ``/`` -- which renders the
+    create form -- so first-time users land on the new-workspace screen instead
+    of the account page.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=302, headers={"Location": "/login"})
+    has_any_workspace = bool(backend_resolver.list_known_workspace_ids())
+    destination = "/accounts" if has_any_workspace else "/"
+    return Response(status_code=302, headers={"Location": destination})
+
+
+def _trigger_region_preference_refresh(request: Request, minds_config: MindsConfig | None) -> None:
+    """Kick off the non-blocking, throttled IP-geo region refresh when a create page opens.
+
+    No-op when config or the root concurrency group is unavailable; never blocks
+    or raises into the request path.
+    """
+    if minds_config is None:
+        return
+    root_concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
+    if root_concurrency_group is None:
+        return
+    trigger_preferred_region_refresh(root_concurrency_group, minds_config)
 
 
 def _handle_backup_status_api(
@@ -849,6 +885,11 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
     # Build a post-creation callback that injects the tunnel token
     on_created = _build_on_created_callback(request, account_id)
 
+    # Soft region preference (resolved from IP geo when the create page was
+    # opened). Only IMBUE_CLOUD leases consume it; other modes ignore it.
+    minds_config: MindsConfig | None = request.app.state.minds_config
+    preferred_region = (minds_config.get_preferred_region() or "") if minds_config is not None else ""
+
     # ``start_creation`` returns a CreationId (minds-internal handle for
     # tracking the in-flight create) -- the canonical AgentId only exists
     # after ``mngr create`` returns. Workspace<->account association is now
@@ -862,6 +903,7 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
         ai_provider=ai_provider,
         account_email=account_email,
         branch_or_tag=branch_or_tag,
+        preferred_region=preferred_region,
         anthropic_api_key=anthropic_api_key,
         on_created=on_created,
         backup_request=backup_request,
@@ -884,6 +926,7 @@ def _handle_create_page(
     session_store: MultiAccountSessionStore | None = request.app.state.session_store
     minds_config: MindsConfig | None = request.app.state.minds_config
     agent_creator: AgentCreator | None = request.app.state.agent_creator
+    _trigger_region_preference_refresh(request, minds_config)
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
     is_backup_password_saved = has_saved_backup_password(agent_creator.paths) if agent_creator is not None else False
@@ -1021,6 +1064,11 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
             media_type="application/json",
         )
 
+    # Soft region preference (resolved from IP geo when the create page was
+    # opened). Only IMBUE_CLOUD leases consume it; other modes ignore it.
+    minds_config: MindsConfig | None = request.app.state.minds_config
+    preferred_region = (minds_config.get_preferred_region() or "") if minds_config is not None else ""
+
     creation_id = agent_creator.start_creation(
         git_url,
         host_name=host_name,
@@ -1028,6 +1076,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
         launch_mode=launch_mode,
         ai_provider=ai_provider,
         account_email=account_email,
+        preferred_region=preferred_region,
         anthropic_api_key=anthropic_api_key,
         backup_request=backup_request,
     )
@@ -2569,6 +2618,23 @@ async def _handle_account_logout(
 # -- Workspace settings routes --
 
 
+_IMBUE_CLOUD_PROVIDER_PREFIX: Final[str] = "imbue_cloud_"
+
+
+def _is_leased_imbue_cloud_workspace(backend_resolver: BackendResolverInterface, agent_id: str) -> bool:
+    """Return True if the workspace runs on a host leased from imbue_cloud.
+
+    Leased hosts surface under a per-account provider instance named
+    ``imbue_cloud_<account-slug>`` (the bare singleton ``imbue_cloud`` provider
+    is hidden and never hosts a user workspace). The trailing-underscore prefix
+    matches the per-account instances while excluding that singleton.
+    """
+    info = backend_resolver.get_agent_display_info(AgentId(agent_id))
+    if info is None or info.provider_name is None:
+        return False
+    return info.provider_name.startswith(_IMBUE_CLOUD_PROVIDER_PREFIX)
+
+
 def _handle_workspace_settings(
     agent_id: str,
     request: Request,
@@ -2581,6 +2647,7 @@ def _handle_workspace_settings(
     session_store: MultiAccountSessionStore | None = request.app.state.session_store
     current_account = session_store.get_account_for_workspace(agent_id) if session_store else None
     accounts = session_store.list_accounts() if session_store else []
+    is_leased_imbue_cloud = _is_leased_imbue_cloud_workspace(backend_resolver, agent_id)
 
     ws_name = backend_resolver.get_workspace_name(AgentId(agent_id))
     if not ws_name:
@@ -2601,6 +2668,7 @@ def _handle_workspace_settings(
         accounts=accounts,
         servers=servers,
         telegram_state=telegram_state,
+        is_leased_imbue_cloud=is_leased_imbue_cloud,
     )
     return HTMLResponse(content=html)
 
@@ -2613,6 +2681,15 @@ async def _handle_workspace_associate(
     """Associate a workspace with an account."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
+    # Leased imbue_cloud hosts are permanently bound to their leasing account;
+    # re-associating one to a different account would cause confusing account
+    # mixing, so reject it here as a defense-in-depth backstop to the UI guard.
+    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    if _is_leased_imbue_cloud_workspace(backend_resolver, agent_id):
+        return Response(
+            status_code=403,
+            content="Cannot change the account association of a host leased from imbue_cloud",
+        )
     form = await request.form()
     user_id = str(form.get("user_id", ""))
     redirect_url = str(form.get("redirect", ""))
@@ -2624,7 +2701,6 @@ async def _handle_workspace_associate(
         # heartbeat. Without this, the user clicks Associate, the page
         # reloads via 303, but the chrome panel still shows the old
         # unassociated state for ~half a minute.
-        backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
         if isinstance(backend_resolver, MngrCliBackendResolver):
             backend_resolver.notify_change()
     location = redirect_url if redirect_url else f"/workspace/{agent_id}/settings"
@@ -2639,6 +2715,14 @@ async def _handle_workspace_disassociate(
     """Disassociate a workspace from its account and tear down its tunnel."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
+    # Leased imbue_cloud hosts must stay bound to their leasing account; block
+    # disassociation here as a defense-in-depth backstop to the disabled UI control.
+    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    if _is_leased_imbue_cloud_workspace(backend_resolver, agent_id):
+        return Response(
+            status_code=403,
+            content="Cannot disassociate a host leased from imbue_cloud",
+        )
     session_store: MultiAccountSessionStore | None = request.app.state.session_store
     cli: ImbueCloudCli | None = request.app.state.imbue_cloud_cli
     if session_store:
@@ -2661,7 +2745,6 @@ async def _handle_workspace_disassociate(
             # Mirror the associate handler: poke the chrome SSE so the
             # tile flips back to unassociated immediately instead of
             # waiting out the 30s heartbeat.
-            backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
             if isinstance(backend_resolver, MngrCliBackendResolver):
                 backend_resolver.notify_change()
     return Response(status_code=303, headers={"Location": f"/workspace/{agent_id}/settings"})
@@ -3388,6 +3471,7 @@ def create_desktop_client(
     app.get("/login")(_handle_login)
     app.get("/authenticate")(_handle_authenticate)
     app.get("/")(_handle_landing_page)
+    app.get("/post-login")(_handle_post_login_redirect)
 
     # Account management routes
     app.get("/accounts")(_handle_accounts_page)

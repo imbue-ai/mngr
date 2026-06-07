@@ -212,12 +212,22 @@ class ImbueCloudConnectorClient(MutableModel):
         attributes: LeaseAttributes,
         ssh_public_key: str,
         host_name: str,
+        # Hard datacenter requirement: only a host in this region is eligible.
+        region: str | None = None,
+        # Soft datacenter preference: prefer this region but accept any host.
+        preferred_region: str | None = None,
     ) -> LeaseResult:
-        body = {
+        body: dict[str, object] = {
             "attributes": attributes.to_request_dict(),
             "ssh_public_key": ssh_public_key,
             "host_name": host_name,
         }
+        # Only send the region knobs when set so the connector treats absent
+        # fields as unconstrained (and old connectors ignore unknown nulls).
+        if region is not None:
+            body["region"] = region
+        if preferred_region is not None:
+            body["preferred_region"] = preferred_region
         response = httpx.post(
             self._url("/hosts/lease"),
             headers=self._bearer(access_token),

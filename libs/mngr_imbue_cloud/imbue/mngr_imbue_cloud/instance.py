@@ -1141,7 +1141,13 @@ class ImbueCloudProvider(BaseProviderInstance):
                         "imbue_cloud fast_mode=require does not accept --image or --start-arg; "
                         "the pre-baked agent is adopted as-is. Use fast_mode=prevent to rebuild."
                     )
-                return self._create_host_fast_path(name=name, attributes=parsed.attributes, token=token)
+                return self._create_host_fast_path(
+                    name=name,
+                    attributes=parsed.attributes,
+                    token=token,
+                    region=parsed.region,
+                    preferred_region=parsed.preferred_region,
+                )
             case FastMode.PREVENT:
                 return self._create_host_slow_path(
                     name=name,
@@ -1154,6 +1160,8 @@ class ImbueCloudProvider(BaseProviderInstance):
                     known_hosts=known_hosts,
                     authorized_keys=authorized_keys,
                     passthrough_build_args=parsed.passthrough_build_args,
+                    region=parsed.region,
+                    preferred_region=parsed.preferred_region,
                 )
             case _ as unreachable:
                 assert_never(unreachable)
@@ -1164,6 +1172,8 @@ class ImbueCloudProvider(BaseProviderInstance):
         name: HostName,
         attributes: LeaseAttributes,
         token: SecretStr,
+        region: str | None,
+        preferred_region: str | None,
     ) -> Host:
         """Lease an exact-attribute pool host and adopt its pre-baked agent.
 
@@ -1174,7 +1184,14 @@ class ImbueCloudProvider(BaseProviderInstance):
         logger.info("imbue_cloud[{}] FAST PATH: leasing exact-attribute pool host for {!r}", self.name, str(name))
         tmp_private_key, tmp_public_key, public_key_text = self._prepare_pending_keypair()
         try:
-            lease_result = self.client.lease_host(token, attributes, public_key_text, str(name))
+            lease_result = self.client.lease_host(
+                token,
+                attributes,
+                public_key_text,
+                str(name),
+                region=region,
+                preferred_region=preferred_region,
+            )
         except ImbueCloudLeaseUnavailableError as exc:
             self._discard_pending_keypair(tmp_private_key, tmp_public_key)
             raise FastPathUnavailableError(
@@ -1229,6 +1246,8 @@ class ImbueCloudProvider(BaseProviderInstance):
         known_hosts: Sequence[str] | None,
         authorized_keys: Sequence[str] | None,
         passthrough_build_args: tuple[str, ...],
+        region: str | None,
+        preferred_region: str | None,
     ) -> Host:
         """Lease any available host (relaxed attributes), nuke its container, and rebuild it.
 
@@ -1248,7 +1267,17 @@ class ImbueCloudProvider(BaseProviderInstance):
         )
         tmp_private_key, tmp_public_key, public_key_text = self._prepare_pending_keypair()
         try:
-            lease_result = self.client.lease_host(token, relaxed_attributes, public_key_text, str(name))
+            # Region constraints are NOT relaxed: a hard ``region`` requirement
+            # still applies to the rebuilt host, and ``preferred_region`` still
+            # biases which available host we pick before rebuilding.
+            lease_result = self.client.lease_host(
+                token,
+                relaxed_attributes,
+                public_key_text,
+                str(name),
+                region=region,
+                preferred_region=preferred_region,
+            )
         except ImbueCloudLeaseUnavailableError:
             # Genuinely no available host in the pool -- nothing was leased, so
             # there is nothing to release. Surface the pool-exhausted signal.
