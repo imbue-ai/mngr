@@ -26,6 +26,7 @@ from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import HostId
 from imbue.mngr_vps_docker.container_setup import LABEL_HOST_ID
+from imbue.mngr_vps_docker.container_setup import _build_start_container_script
 from imbue.mngr_vps_docker.container_setup import build_image_on_outer
 from imbue.mngr_vps_docker.container_setup import build_ssh_transport_for_outer
 from imbue.mngr_vps_docker.container_setup import check_directory_exists_on_outer
@@ -124,6 +125,12 @@ def _outer(*responses: CommandResult) -> OuterHostInterface:
 def _stub(outer: OuterHostInterface) -> _StubOuter:
     """Recover the underlying ``_StubOuter`` so tests can introspect ``recorded``."""
     return cast(_StubOuter, outer)
+
+
+def _decode_remote_sh_command(command: str) -> str:
+    """Decode the ``echo <b64> | base64 -d | sh`` wrapper back into its shell script."""
+    encoded = command.split(" | ", 1)[0].removeprefix("echo ")
+    return base64.b64decode(encoded).decode("utf-8")
 
 
 # =============================================================================
@@ -248,10 +255,25 @@ def test_start_container_uses_docker_start() -> None:
     # start_container now ships a single base64-wrapped recovery script (start +
     # conditional runsc-overlay cleanup + retry) in one round-trip; decode it and
     # confirm it drives `docker start` for the container.
-    command = _stub(outer).recorded[0].command
-    decoded = base64.b64decode(command.split(" | ", 1)[0].removeprefix("echo ")).decode()
+    decoded = _decode_remote_sh_command(_stub(outer).recorded[0].command)
     assert "name=my-container" in decoded
     assert 'docker start "$name"' in decoded
+
+
+def test_start_container_runs_single_wrapped_script() -> None:
+    outer = _outer()
+    start_container(outer, "c1")
+    recorded = _stub(outer).recorded
+    # The whole start+recovery script travels in a single round-trip, and the
+    # transported script matches what the builder renders for this container.
+    assert len(recorded) == 1
+    assert _decode_remote_sh_command(recorded[0].command) == _build_start_container_script("c1")
+
+
+def test_start_container_raises_on_failure() -> None:
+    outer = _outer(CommandResult(stdout="", stderr="boom", success=False))
+    with pytest.raises(MngrError, match="docker start c1 failed: boom"):
+        start_container(outer, "c1")
 
 
 def test_remove_container_without_force() -> None:
