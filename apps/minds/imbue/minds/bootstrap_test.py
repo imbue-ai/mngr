@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import tomllib
@@ -14,6 +15,7 @@ from imbue.minds.bootstrap import _minds_roots_for
 from imbue.minds.bootstrap import apply_bootstrap
 from imbue.minds.bootstrap import env_name_from_root_name
 from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
+from imbue.minds.bootstrap import migrate_legacy_minds_layout
 from imbue.minds.bootstrap import minds_data_dir_for
 from imbue.minds.bootstrap import minds_tier_for
 from imbue.minds.bootstrap import mngr_host_dir_for
@@ -591,3 +593,96 @@ def test_minds_paths_flat_shorthand(tmp_path: Path) -> None:
     assert paths.config == tmp_path
     assert paths.legacy_data_dir == tmp_path
     assert paths.auth_dir == tmp_path / "auth"
+
+
+# -- Legacy -> platform-canonical migration --
+
+
+def _legacy_migration_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path]:
+    """Point HOME (legacy roots) and MINDS_DATA_HOME (new roots) at tmp subdirs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    data = tmp_path / "data"
+    monkeypatch.setenv("HOME", str(home))
+    _clear_layout_env(monkeypatch)
+    monkeypatch.setenv("MINDS_DATA_HOME", str(data))
+    return home, data
+
+
+def test_migration_noop_when_no_legacy(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _legacy_migration_env(monkeypatch, tmp_path)
+    assert migrate_legacy_minds_layout("minds") is False
+
+
+def test_migration_moves_state_to_canonical_roots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    home, data = _legacy_migration_env(monkeypatch, tmp_path)
+    legacy = home / ".minds"
+    (legacy / "auth" / "sessions").mkdir(parents=True)
+    (legacy / "auth" / "sessions" / "acct.json").write_text("{}")
+    (legacy / "template-cache" / "forever-claude-template").mkdir(parents=True)
+    (legacy / "template-cache" / "forever-claude-template" / "x").write_text("clone")
+    (legacy / "logs").mkdir()
+    (legacy / "logs" / "minds.log").write_text("log line")
+    (legacy / "config.toml").write_text("default_account_id = 'a'\n")
+
+    assert migrate_legacy_minds_layout("minds") is True
+
+    base = data / "production"
+    assert (base / "app_support" / "auth" / "sessions" / "acct.json").read_text() == "{}"
+    assert (base / "cache" / "template-cache" / "forever-claude-template" / "x").read_text() == "clone"
+    assert (base / "logs" / "minds.log").read_text() == "log line"
+    assert (base / "config" / "config.toml").read_text() == "default_account_id = 'a'\n"
+    assert (base / "app_support" / "migration.lock").is_file()
+    assert (legacy / "MIGRATED.txt").is_file()
+    # Moved-away entries no longer live in the legacy tree.
+    assert not (legacy / "auth").exists()
+    assert not (legacy / "config.toml").exists()
+
+
+def test_migration_is_idempotent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    home, data = _legacy_migration_env(monkeypatch, tmp_path)
+    legacy = home / ".minds"
+    (legacy / "auth").mkdir(parents=True)
+    (legacy / "auth" / "code.json").write_text("1")
+    assert migrate_legacy_minds_layout("minds") is True
+    # A second run is a no-op (lock present) and does not move newly-created
+    # legacy files.
+    (legacy / "auth").mkdir(exist_ok=True)
+    (legacy / "auth" / "late.json").write_text("2")
+    assert migrate_legacy_minds_layout("minds") is False
+    assert not (data / "production" / "app_support" / "auth" / "late.json").exists()
+
+
+def test_migration_does_not_overwrite_existing_dest(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    home, data = _legacy_migration_env(monkeypatch, tmp_path)
+    legacy = home / ".minds"
+    (legacy / "auth").mkdir(parents=True)
+    (legacy / "auth" / "code.json").write_text("legacy")
+    dest_auth = data / "production" / "app_support" / "auth"
+    dest_auth.mkdir(parents=True)
+    (dest_auth / "code.json").write_text("already-there")
+    assert migrate_legacy_minds_layout("minds") is True
+    # The pre-existing destination wins; the legacy copy is left in place.
+    assert (dest_auth / "code.json").read_text() == "already-there"
+    assert (legacy / "auth" / "code.json").read_text() == "legacy"
+
+
+def test_migration_rewrites_mngr_data_json_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Risk 1: absolute paths inside mngr/profiles/*/data.json are rewritten."""
+    home, data = _legacy_migration_env(monkeypatch, tmp_path)
+    legacy = home / ".minds"
+    profile = legacy / "mngr" / "profiles" / "p1"
+    (profile / "keys").mkdir(parents=True)
+    (profile / "keys" / "docker_ssh_key").write_text("PRIVATE KEY")
+    legacy_key = legacy / "mngr" / "profiles" / "p1" / "keys" / "docker_ssh_key"
+    (profile / "data.json").write_text(json.dumps({"ssh_key_path": str(legacy_key), "name": "agent-1"}))
+
+    assert migrate_legacy_minds_layout("minds") is True
+
+    app_support = data / "production" / "app_support"
+    new_data_json = app_support / "mngr" / "profiles" / "p1" / "data.json"
+    parsed = json.loads(new_data_json.read_text())
+    expected_key = app_support / "mngr" / "profiles" / "p1" / "keys" / "docker_ssh_key"
+    assert parsed["ssh_key_path"] == str(expected_key)
+    assert str(legacy) not in new_data_json.read_text()
+    assert (expected_key).read_text() == "PRIVATE KEY"

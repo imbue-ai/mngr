@@ -14,6 +14,8 @@ import re
 import shutil
 import sys
 import tomllib
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Final
 
@@ -363,6 +365,162 @@ def _ensure_mngr_settings(root_name: str) -> None:
     _cleanup_legacy_dynamic_hosts(root_name)
 
 
+_MIGRATION_LOCK_FILENAME: Final[str] = "migration.lock"
+_MIGRATED_README_FILENAME: Final[str] = "MIGRATED.txt"
+# Per-subdir map from a legacy ``~/.<root_name>/`` entry to its new root +
+# relative destination. ``"app_support" | "cache" | "logs" | "config"``
+# selects which canonical root the entry moves under. Entries absent from
+# the legacy tree are skipped; Electron-managed junk (``.venv``,
+# ``.uv-cache``, Chromium ``Cache``/``Code Cache``, etc.) is deliberately
+# omitted so it is regenerated in place rather than copied.
+_LEGACY_LAYOUT_MAP: Final[tuple[tuple[str, str, str], ...]] = (
+    ("auth", "app_support", "auth"),
+    ("mngr", "app_support", "mngr"),
+    ("ssh", "app_support", "ssh"),
+    ("telegram", "app_support", "telegram"),
+    ("latchkey", "app_support", "latchkey"),
+    ("backups", "app_support", "backups"),
+    ("backup_envs", "app_support", "backup_envs"),
+    ("backup_password", "app_support", "backup_password"),
+    ("destroying", "app_support", "destroying"),
+    ("user_context", "app_support", "user_context"),
+    ("events", "app_support", "events"),
+    ("workspace_associations.json", "app_support", "workspace_associations.json"),
+    ("sessions.json", "app_support", "sessions.json"),
+    ("last_good_agent_topology.json", "app_support", "last_good_agent_topology.json"),
+    ("secrets.toml", "app_support", "secrets.toml"),
+    ("template-cache", "cache", "template-cache"),
+    ("config.toml", "config", "config.toml"),
+    ("client.toml", "config", "client.toml"),
+    ("minds_root.toml", "config", "minds_root.toml"),
+)
+
+
+def _move_into_place(src: Path, dest: Path) -> None:
+    """Move ``src`` to ``dest`` via a sibling ``._migrating`` staging name.
+
+    Crash-safe: the final ``dest`` only ever appears via an atomic rename of
+    a fully-staged copy, so a kill mid-move never leaves a half-written
+    ``dest``. ``shutil.move`` handles both same-filesystem renames (fast) and
+    cross-filesystem copies (the rare Linux ``$HOME`` != ``~/.local/share``
+    mount case).
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    staging = dest.parent / f"{dest.name}._migrating"
+    if staging.exists():
+        if staging.is_dir():
+            shutil.rmtree(staging)
+        else:
+            staging.unlink()
+    shutil.move(str(src), str(staging))
+    os.replace(staging, dest)
+
+
+def migrate_legacy_minds_layout(root_name: str) -> bool:
+    """Move a legacy ``~/.<root_name>/`` tree onto the platform-canonical roots.
+
+    Idempotent: a no-op once ``migration.lock`` exists under the app-support
+    root, or when there is no legacy directory to migrate. Each known subdir
+    is moved to its destination root (see :data:`_LEGACY_LAYOUT_MAP`); the
+    legacy ``logs/`` contents fold into the canonical logs root. An entry
+    whose destination already exists is left untouched (never overwritten).
+    On success a lock file records the migration and a ``MIGRATED.txt`` is
+    left in the legacy directory pointing at the new roots; the legacy
+    directory itself is not deleted.
+
+    Returns ``True`` when a migration ran, ``False`` when it was skipped.
+    """
+    legacy = minds_data_dir_for(root_name)
+    app_support, cache, logs, config = _minds_roots_for(root_name)
+    roots = {"app_support": app_support, "cache": cache, "logs": logs, "config": config}
+    lock_path = app_support / _MIGRATION_LOCK_FILENAME
+    if lock_path.exists():
+        return False
+    if not legacy.is_dir():
+        return False
+    # A migration can be partially complete if a prior run crashed before
+    # writing the lock; resume by moving only the entries not yet at dest.
+    for src_rel, root_key, dest_rel in _LEGACY_LAYOUT_MAP:
+        src = legacy / src_rel
+        if not src.exists():
+            continue
+        dest = roots[root_key] / dest_rel
+        if dest.exists():
+            continue
+        _move_into_place(src, dest)
+        logger.info("Migrated minds state {} -> {}", src, dest)
+    legacy_logs = legacy / "logs"
+    if legacy_logs.is_dir():
+        logs.mkdir(parents=True, exist_ok=True)
+        for entry in legacy_logs.iterdir():
+            dest = logs / entry.name
+            if dest.exists():
+                continue
+            _move_into_place(entry, dest)
+            logger.info("Migrated minds log {} -> {}", entry, dest)
+    _rewrite_mngr_data_json_paths(legacy, app_support)
+    app_support.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(
+        json.dumps(
+            {
+                "migrated_at": datetime.now(timezone.utc).isoformat(),
+                "from": str(legacy),
+                "roots": {key: str(path) for key, path in roots.items()},
+            },
+            indent=2,
+        )
+    )
+    (legacy / _MIGRATED_README_FILENAME).write_text(
+        "This directory's minds state has moved to platform-canonical locations:\n"
+        + "".join(f"  {key}: {path}\n" for key, path in roots.items())
+        + "\nThis legacy directory is no longer read. It is safe to delete once you\n"
+        "have confirmed the new build works.\n"
+    )
+    logger.info("Completed legacy minds layout migration for {} (lock: {})", root_name, lock_path)
+    return True
+
+
+def _rewrite_mngr_data_json_paths(legacy: Path, app_support: Path) -> None:
+    """Rewrite absolute legacy paths embedded in migrated mngr ``data.json`` files.
+
+    mngr's per-host records under ``mngr/profiles/<id>/data.json`` embed
+    absolute paths (e.g. ``~/.minds/mngr/profiles/<id>/keys/docker_ssh_key``)
+    that point into the now-vacated legacy tree. After the move, rewrite the
+    legacy prefix to the app-support prefix so each record points at the
+    relocated key material. Best-effort per file: a malformed JSON file is
+    logged and skipped rather than aborting the whole migration.
+    """
+    profiles_dir = app_support / "mngr" / "profiles"
+    if not profiles_dir.is_dir():
+        return
+    old_prefix = str(legacy)
+    new_prefix = str(app_support)
+    for data_json in profiles_dir.glob("*/data.json"):
+        try:
+            raw = data_json.read_text()
+        except OSError as e:
+            logger.warning("Could not read mngr record {} during migration: {}", data_json, e)
+            continue
+        if old_prefix not in raw:
+            continue
+        # Validate it parses before and after so we never write back garbage.
+        try:
+            json.loads(raw)
+        except json.JSONDecodeError as e:
+            logger.warning("Skipping path rewrite of malformed mngr record {}: {}", data_json, e)
+            continue
+        rewritten = raw.replace(old_prefix, new_prefix)
+        try:
+            json.loads(rewritten)
+        except json.JSONDecodeError as e:
+            logger.warning("Path rewrite produced invalid JSON for {}; leaving as-is: {}", data_json, e)
+            continue
+        tmp_path = data_json.with_suffix(".json._migrating")
+        tmp_path.write_text(rewritten)
+        tmp_path.rename(data_json)
+        logger.info("Rewrote legacy paths in mngr record {}", data_json)
+
+
 def _cleanup_legacy_dynamic_hosts(root_name: str) -> None:
     """Remove the stale ``ssh/dynamic_hosts.toml`` file + ``ssh/keys/leased_host/`` dir.
 
@@ -440,6 +598,15 @@ def apply_bootstrap() -> None:
         # has not activated any env yet".
         return
     root_name = resolve_minds_root_name()
+    # Migrate any legacy ~/.<root_name>/ tree onto the platform-canonical
+    # roots BEFORE exporting MNGR_HOST_DIR or touching mngr settings, so mngr
+    # reads the relocated state rather than a fresh empty host_dir. Best-effort:
+    # a migration failure must not block startup -- the user falls back to a
+    # fresh install rather than a hard crash.
+    try:
+        migrate_legacy_minds_layout(root_name)
+    except OSError as e:
+        logger.warning("Legacy minds layout migration failed for {}: {}", root_name, e)
     os.environ["MNGR_HOST_DIR"] = str(mngr_host_dir_for(root_name))
     os.environ["MNGR_PREFIX"] = mngr_prefix_for(root_name)
     _ensure_mngr_settings(root_name)
