@@ -217,6 +217,18 @@ class StreamingOutputWriter(MutableModel):
             "emitted because they carry assistant feedback, not the user's input."
         ),
     )
+    stream_plain_text: bool = Field(
+        default=False,
+        description=(
+            "If True (text output mode + --stream-plain-text), assistant text is streamed to stdout "
+            "incrementally via emit_partial_text, and the trailing full-text dump in finalize is "
+            "suppressed to avoid duplicating the streamed content."
+        ),
+    )
+    has_streamed_partials: bool = Field(
+        default=False,
+        description="Whether any partial text has been streamed (used to gate the final text dump)",
+    )
     is_init_written: bool = Field(default=False, description="Whether the system/init envelope was emitted")
     seen_event_ids: set[str] = Field(default_factory=set, description="Event IDs already processed")
     assistant_text_parts: list[str] = Field(
@@ -242,6 +254,41 @@ class StreamingOutputWriter(MutableModel):
             "anything else (notably ``tool_use``) means more events are still coming."
         ),
     )
+
+    def emit_partial_text(self, delta: str) -> None:
+        """Emit a chunk of in-progress assistant text sourced from the stream buffer.
+
+        For stream-json output, emits a claude-native ``stream_event`` carrying a
+        ``content_block_delta`` / ``text_delta``. For text output (with
+        --stream-plain-text), writes the delta straight to stdout. Other modes
+        ignore partial text.
+        """
+        if delta == "":
+            return
+        match self.output_format:
+            case OutputFormat.STREAM_JSON:
+                self.write_init_if_needed()
+                event = {
+                    "type": "stream_event",
+                    "event": {
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": {"type": "text_delta", "text": delta},
+                    },
+                    "session_id": self.session_id,
+                }
+                self.stdout.write(json.dumps(event, separators=(",", ":")) + "\n")
+                self.stdout.flush()
+                self.has_streamed_partials = True
+            case OutputFormat.TEXT:
+                if self.stream_plain_text:
+                    self.stdout.write(delta)
+                    self.stdout.flush()
+                    self.has_streamed_partials = True
+            case OutputFormat.JSON:
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
 
     def write_init_if_needed(self) -> None:
         """Write the synthesized ``system/init`` envelope on first stream-json call."""
@@ -321,6 +368,13 @@ class StreamingOutputWriter(MutableModel):
         return "".join(self.assistant_text_parts)
 
     def _finalize_text(self) -> None:
+        # When text was streamed incrementally, the body has already been written
+        # to stdout; re-dumping the authoritative text would duplicate it. Emit a
+        # trailing newline so the output is newline-terminated, then stop.
+        if self.stream_plain_text and self.has_streamed_partials:
+            self.stdout.write("\n")
+            self.stdout.flush()
+            return
         body = self._collected_assistant_text()
         if body:
             self.stdout.write(body + "\n")

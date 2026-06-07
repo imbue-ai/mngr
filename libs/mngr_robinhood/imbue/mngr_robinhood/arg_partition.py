@@ -14,7 +14,6 @@ REJECTED_FLAGS: Final[Mapping[str, str]] = {
     "--max-budget-usd": "--max-budget-usd is not supported by mngr robinhood in v1",
     "--no-session-persistence": "--no-session-persistence is not supported by mngr robinhood in v1",
     "--include-hook-events": "--include-hook-events is not supported by mngr robinhood in v1",
-    "--include-partial-messages": "--include-partial-messages is not supported by mngr robinhood in v1",
     "-c": "-c / --continue is not supported by mngr robinhood in v1",
     "--continue": "-c / --continue is not supported by mngr robinhood in v1",
     "-r": "-r / --resume is not supported by mngr robinhood in v1",
@@ -36,6 +35,11 @@ _SIMULATED_BOOL_FLAGS: Final[frozenset[str]] = frozenset(
         "-p",
         "--print",
         "--replay-user-messages",
+        # Opt in to claude-native partial-message (text_delta) events sourced from
+        # the agent's stream_buffer. Requires --output-format=stream-json.
+        "--include-partial-messages",
+        # Stream the assistant's text to stdout incrementally (text output mode).
+        "--stream-plain-text",
     }
 )
 
@@ -128,6 +132,8 @@ def partition_args(argv: tuple[str, ...]) -> ArgPartition:
     input_format = InputFormat.TEXT
     output_format = OutputFormat.TEXT
     replay_user_messages = False
+    include_partial_messages = False
+    stream_plain_text = False
     pass_through: list[str] = []
     positional_prompt: str | None = None
 
@@ -146,6 +152,10 @@ def partition_args(argv: tuple[str, ...]) -> ArgPartition:
                 pass
             elif flag == "--replay-user-messages":
                 replay_user_messages = True
+            elif flag == "--include-partial-messages":
+                include_partial_messages = True
+            elif flag == "--stream-plain-text":
+                stream_plain_text = True
             else:
                 raise UnsupportedClaudeFlagError(f"unexpected simulated flag: {flag}")
             index += 1
@@ -190,11 +200,14 @@ def partition_args(argv: tuple[str, ...]) -> ArgPartition:
         index += 1
 
     _validate_replay_user_messages(replay_user_messages, input_format, output_format)
+    _validate_streaming_flags(include_partial_messages, stream_plain_text, output_format)
 
     return ArgPartition(
         input_format=input_format,
         output_format=output_format,
         replay_user_messages=replay_user_messages,
+        include_partial_messages=include_partial_messages,
+        stream_plain_text=stream_plain_text,
         pass_through_agent_args=tuple(pass_through),
         positional_prompt=positional_prompt,
     )
@@ -211,3 +224,14 @@ def _validate_replay_user_messages(
         raise UnsupportedClaudeFlagError(
             "--replay-user-messages requires both --input-format=stream-json and --output-format=stream-json"
         )
+
+
+def _validate_streaming_flags(
+    include_partial_messages: bool,
+    stream_plain_text: bool,
+    output_format: OutputFormat,
+) -> None:
+    if include_partial_messages and output_format != OutputFormat.STREAM_JSON:
+        raise UnsupportedClaudeFlagError("--include-partial-messages requires --output-format=stream-json")
+    if stream_plain_text and output_format != OutputFormat.TEXT:
+        raise UnsupportedClaudeFlagError("--stream-plain-text requires --output-format=text (the default)")
