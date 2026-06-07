@@ -249,12 +249,15 @@ jobs:
     timeout-minutes: 40
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      # Opt every component (Electron app + e2e driver) into the override
-      # layout so the run is self-contained under one throwaway tree,
-      # independent of the runner's home-dir state from past runs.
-      MINDS_DATA_HOME: ${{ runner.temp }}/minds
     steps:
       - uses: actions/checkout@v6
+      - name: opt into the MINDS_DATA_HOME override layout
+        # Self-contained throwaway tree under the runner temp dir, so the run
+        # is independent of the runner's home-dir state from past runs. Set via
+        # $GITHUB_ENV (not job-level env) because the `runner` context is not
+        # available there; $RUNNER_TEMP is the same dir at runtime. Every
+        # subsequent step (reset, launch, e2e, artifacts) inherits it.
+        run: echo "MINDS_DATA_HOME=$RUNNER_TEMP/minds" >> "$GITHUB_ENV"
       - name: verify ANTHROPIC_API_KEY injected
         run: |
           if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
