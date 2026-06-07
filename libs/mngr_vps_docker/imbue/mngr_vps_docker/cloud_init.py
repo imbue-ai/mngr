@@ -1,6 +1,23 @@
+# Idempotent shell that installs and registers the gVisor `runsc` runtime with the
+# Docker daemon via gVisor's official APT repository, then re-registers it with
+# `runsc install` and restarts Docker. Guarded so it is a no-op when runsc is
+# already registered (e.g. baked into the base image), avoiding a needless apt
+# round-trip and Docker restart. Indented to sit under a cloud-init `runcmd: - |`
+# block (six spaces: two for the list item body, four for cloud-init's list nesting).
+_GVISOR_RUNSC_INSTALL_RUNCMD = """  - |
+    if ! docker info 2>/dev/null | grep -q runsc; then
+        curl -fsSL https://gvisor.dev/archive.key | gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" > /etc/apt/sources.list.d/gvisor.list
+        apt-get update && apt-get install -y runsc
+        runsc install
+        systemctl restart docker
+    fi"""
+
+
 def generate_cloud_init_user_data(
     host_private_key: str,
     host_public_key: str,
+    install_gvisor_runtime: bool,
 ) -> str:
     """Generate a cloud-init user_data script for VPS provisioning.
 
@@ -14,7 +31,7 @@ def generate_cloud_init_user_data(
     knob the lima provider applies to its VMs.
 
     ``rsync`` is explicit in the package list because
-    ``mngr_vps_docker._upload_directory_to_outer`` requires it for the
+    ``mngr_vps_docker.container_setup.upload_directory_to_outer`` requires it for the
     build-context push. Standard Debian/Ubuntu cloud images ship rsync
     by default so this is belt-and-suspenders on cloud-init backends;
     non-cloud-init backends (e.g. OVH) install it from their own
@@ -24,7 +41,15 @@ def generate_cloud_init_user_data(
     ``snapshot_helper.sh`` (installed later, after the btrfs mount is
     ready) -- pre-baked here so the helper install via SSH only needs
     to drop files in place, no extra package install round-trips.
+
+    When ``install_gvisor_runtime`` is True, an idempotent runcmd step installs
+    and registers the gVisor ``runsc`` runtime after Docker is up (a no-op when
+    runsc is already present).
     """
+    gvisor_install_block = f"\n{_GVISOR_RUNSC_INSTALL_RUNCMD}" if install_gvisor_runtime else ""
+    # The gVisor install block dearmors the archive key with `gpg`, which is not
+    # guaranteed to be present on minimal cloud images; install gnupg when needed.
+    gvisor_packages = "\n  - gnupg" if install_gvisor_runtime else ""
     return f"""#cloud-config
 ssh_deletekeys: true
 ssh_keys:
@@ -38,11 +63,11 @@ packages:
   - ca-certificates
   - rsync
   - inotify-tools
-  - jq
+  - jq{gvisor_packages}
 runcmd:
   - curl -fsSL https://get.docker.com | sh
   - systemctl enable docker
-  - systemctl start docker
+  - systemctl start docker{gvisor_install_block}
   - |
     if ! grep -q '^MaxSessions' /etc/ssh/sshd_config 2>/dev/null; then
         cat >> /etc/ssh/sshd_config <<SSHD_EOF
