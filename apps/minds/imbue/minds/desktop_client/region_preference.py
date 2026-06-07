@@ -92,8 +92,11 @@ def region_from_geo_payload(payload: object) -> str | None:
     """
     if not isinstance(payload, dict):
         return None
-    latitude = payload.get("latitude")
-    longitude = payload.get("longitude")
+    # Re-key into a str->object dict so value lookups stay well-typed regardless
+    # of how the raw JSON's key/value types are inferred.
+    geo_by_key: dict[str, object] = {str(key): value for key, value in payload.items()}
+    latitude = geo_by_key.get("latitude")
+    longitude = geo_by_key.get("longitude")
     # bool is an int subclass; geolocation never returns bools, but guard anyway.
     if isinstance(latitude, bool) or isinstance(longitude, bool):
         return None
