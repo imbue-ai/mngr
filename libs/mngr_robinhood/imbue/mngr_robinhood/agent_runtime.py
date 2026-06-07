@@ -125,32 +125,36 @@ def apply_unattended_settings(mngr_ctx: MngrContext, extra_settings: tuple[str, 
 # line mid-value.
 _SHELL_UNSAFE_VALUE_FRAGMENTS: Final[tuple[str, ...]] = ("`", "$(", "\n", "\r")
 
-# Prefixes of terminal-emulator environment variables that must NOT be forwarded to a headless
-# tmux agent. The critical one is ``KITTY_SHELL_INTEGRATION=enabled``: when present, the agent's
-# login shell tries to load kitty's shell-integration scripts even though it is running inside a
-# detached tmux pane (not a real kitty window), which wedges shell startup so claude never boots
-# and never writes its ``session_started`` readiness signal -- the agent then times out / hangs.
-# The whole ``KITTY_*`` family is terminal-specific and useless to a headless agent, so we drop it
-# all. (On main this breakage is masked by luck: ``KITTY_PUBLIC_KEY``'s backtick value triggers an
-# unterminated command substitution that happens to swallow the following ``KITTY_SHELL_INTEGRATION``
-# line; dropping the unsafe-valued ``KITTY_PUBLIC_KEY`` removes that accident and exposes the bug.)
-_TERMINAL_ENV_VAR_PREFIXES_TO_DROP: Final[tuple[str, ...]] = ("KITTY_",)
+# Environment variables tied to the CALLER's interactive tmux + terminal session that must NOT be
+# forwarded to the spawned, headless mngr agent (which gets its OWN tmux session). When ``mngr
+# robinhood`` is itself run from inside a tmux/mngr agent, forwarding these makes the new agent's
+# tmux-aware machinery -- readiness detection, ``stream_transcript.sh``'s ``tmux capture-pane``, the
+# activity tracker -- target the *parent's* pane instead of the agent's own, so the agent never
+# signals readiness and ``api_create`` hangs until it times out:
+#   - ``TMUX`` / ``TMUX_PANE`` point at the parent tmux server/pane (the actual culprit here).
+#   - ``KITTY_*`` are terminal-emulator vars; ``KITTY_SHELL_INTEGRATION=enabled`` also wedges the
+#     agent's shell startup, and ``KITTY_PUBLIC_KEY`` has an unquoted-backtick value.
+# (On main this is masked by luck: ``KITTY_PUBLIC_KEY``'s backtick triggers an unterminated command
+# substitution in the unquoted env file that swallows every following line -- including ``TMUX`` --
+# so the parent's tmux vars never reach the agent. Filtering out that unsafe value removes the
+# accident and exposes the latent bug, which is why it must be fixed properly here.)
+_CALLER_SESSION_ENV_VARS_TO_DROP: Final[frozenset[str]] = frozenset({"TMUX", "TMUX_PANE"})
+_NON_FORWARDABLE_KEY_PREFIXES: Final[tuple[str, ...]] = ("BASH_FUNC_", "KITTY_")
 
 
 def _is_forwardable_env_var(key: str, value: str) -> bool:
     """True if this process env var is safe to write into the agent's sourced env file.
 
-    Drops the per-agent ``MNGR_*`` / ``LLM_USER_PATH`` vars that mngr sets itself; terminal-emulator
-    vars (``KITTY_*``) that wedge a headless agent's shell startup; exported bash function definitions
-    (``BASH_FUNC_*`` keys, whose multi-line ``() { ... }`` values corrupt the env file); and any value
-    containing shell-unsafe fragments (e.g. a backtick) that would break sourcing of the env file and
-    drop every variable written after it.
+    Drops: the per-agent ``MNGR_*`` / ``LLM_USER_PATH`` vars that mngr sets itself; the caller's tmux
+    session vars (``TMUX`` / ``TMUX_PANE``) and terminal-emulator vars (``KITTY_*``) that would point
+    the spawned agent's tmux machinery at the parent and wedge readiness; exported bash function
+    definitions (``BASH_FUNC_*``, whose multi-line values corrupt the env file); and any value with
+    shell-unsafe fragments (e.g. a backtick) that would break sourcing of the env file and drop every
+    variable written after it.
     """
-    if key in PER_AGENT_ENV_VARS_TO_DROP:
+    if key in PER_AGENT_ENV_VARS_TO_DROP or key in _CALLER_SESSION_ENV_VARS_TO_DROP:
         return False
-    if key.startswith("BASH_FUNC_"):
-        return False
-    if any(key.startswith(prefix) for prefix in _TERMINAL_ENV_VAR_PREFIXES_TO_DROP):
+    if any(key.startswith(prefix) for prefix in _NON_FORWARDABLE_KEY_PREFIXES):
         return False
     if any(fragment in value for fragment in _SHELL_UNSAFE_VALUE_FRAGMENTS):
         return False

@@ -98,6 +98,21 @@ def test_build_pass_env_vars_drops_kitty_terminal_vars(monkeypatch: pytest.Monke
     assert "ROBINHOOD_TEST_FORWARDABLE_VAR" in forwarded_keys
 
 
+def test_build_pass_env_vars_drops_caller_tmux_session_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    # When ``mngr robinhood`` runs from inside a tmux session, forwarding the caller's TMUX /
+    # TMUX_PANE points the spawned (headless, own-tmux) agent's tmux machinery at the parent's pane,
+    # so the agent never signals readiness and create hangs. These must not be forwarded.
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,12345,7")
+    monkeypatch.setenv("TMUX_PANE", "%48")
+    monkeypatch.setenv("ROBINHOOD_TEST_FORWARDABLE_VAR", "keep-me")
+    options = build_pass_env_vars()
+    forwarded_keys = {env_var.key for env_var in options.env_vars}
+    assert "TMUX" not in forwarded_keys
+    assert "TMUX_PANE" not in forwarded_keys
+    # Guard against a vacuous test: a benign var injected alongside is still forwarded.
+    assert "ROBINHOOD_TEST_FORWARDABLE_VAR" in forwarded_keys
+
+
 def test_build_result_meta_records_error_text() -> None:
     meta = _build_result_meta(start_time=0.0, agent_id="agent-x", error_text="boom")
     assert meta.is_error

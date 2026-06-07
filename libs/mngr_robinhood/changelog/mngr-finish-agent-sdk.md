@@ -1,5 +1,13 @@
 # Finish the mngr-backed Agent SDK
 
+Bug fix: `mngr robinhood` (and the Agent SDK) no longer forward the caller's tmux/terminal session
+variables (`TMUX`, `TMUX_PANE`, `KITTY_*`) into the spawned agent's environment. When `mngr robinhood`
+is run from inside a tmux/mngr session, forwarding `TMUX` pointed the new headless agent's tmux
+machinery (readiness detection, transcript capture) at the *parent's* pane, so the agent never
+signalled readiness and the command hung. (This was latent on `main` too, masked by `KITTY_PUBLIC_KEY`'s
+unquoted-backtick value accidentally truncating the env file before those vars; this branch's env-file
+hardening removed that accident and exposed the bug, now fixed properly in `build_pass_env_vars`.)
+
 Completed the previously-stubbed control surfaces of the mngr-backed Agent SDK
 (`imbue.mngr_robinhood.agent_sdk`) so it is a faithful drop-in for `claude_agent_sdk`:
 
