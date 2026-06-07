@@ -97,14 +97,18 @@ Supported control surfaces and how they map onto mngr:
 - `get_server_info()` — runs a one-shot `claude` stream-json probe for the real commands / output
   style, cached per session.
 - `total_cost_usd` — computed from per-turn token usage times a per-model price table (approximate).
+- `include_partial_messages` -> `StreamEvent` — when set, the agent's tmux pane is watched and the
+  reconstructed assistant text is wrapped as the claude-native partial-event sequence
+  (`message_start` -> `content_block_delta`(`text_delta`)* -> `message_stop`). Approximate (text is
+  reconstructed from the rendered pane, not claude's token-level deltas) and best-effort; the
+  authoritative `AssistantMessage` still arrives from the transcript, and `usage`/`total_cost_usd`
+  remain on the final `ResultMessage`.
 
 Documented limitations (real-SDK-only):
 
 - `fork_session` raises `AgentSdkNotImplementedError`. claude's `--fork-session` does not assign a
   new session id when driven interactively over an adopted, resumed session (the forked turn is
   written under the source id), so a faithful fork cannot be produced on this transport.
-- Partial-message streaming (`include_partial_messages` -> `StreamEvent`) is not available (mngr
-  mirrors message-level session JSONL, not claude's token-level stream).
 - The agent is not hermetic from the host's claude config -- it must load real settings to
   authenticate -- whereas the real SDK with `setting_sources=[]` is hermetic.
 
@@ -118,7 +122,7 @@ names from `claude_agent_sdk` and assert the documented behavior.
 The suite is parametrized by the `sdk` fixture over **two targets**: `real_sdk` (the real
 `claude_agent_sdk` package, run via `claude --print`) and `mngr_sdk` (this module, which drives an
 interactive `claude` agent in tmux). Every test runs against both unless it exercises a surface the
-mngr transport cannot provide (currently only partial-message `StreamEvent` streaming), which is
+mngr transport cannot provide (currently only `fork_session`), which is
 gated to `real_sdk` via the `requires_native_sdk` fixture. The mngr target therefore needs a local
 `claude` CLI and `tmux` on PATH. Use `-k mngr_sdk` / `-k real_sdk` to run a single target.
 
