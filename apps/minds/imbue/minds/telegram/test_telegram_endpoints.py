@@ -33,7 +33,7 @@ def _create_test_server_with_telegram(
         service_logs={str(agent_id): server_log},
     )
 
-    paths = WorkspacePaths(data_dir=tmp_path / "minds_data")
+    paths = WorkspacePaths.flat(tmp_path / "minds_data")
     telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
 
     app = create_desktop_client(
@@ -141,7 +141,7 @@ def _create_test_server_with_two_agents(
         },
     )
 
-    paths = WorkspacePaths(data_dir=tmp_path / "minds_data")
+    paths = WorkspacePaths.flat(tmp_path / "minds_data")
     telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
 
     app = create_desktop_client(

@@ -36,13 +36,13 @@ def test_export_zip_path_for_host_is_keyed_and_in_tmp() -> None:
 
 
 def test_export_raises_without_canonical_env(tmp_path: Path) -> None:
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     with pytest.raises(BackupExportError):
         export_latest_snapshot_zip(paths=paths, agent_id=_fresh_agent_id(), host_id="host-" + uuid4().hex)
 
 
 def test_export_raises_when_repository_missing(tmp_path: Path) -> None:
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     agent_id = _fresh_agent_id()
     # Canonical env present but with no RESTIC_REPOSITORY line.
     write_canonical_env(paths, agent_id, "RESTIC_PASSWORD=secret\n")
@@ -55,7 +55,7 @@ def test_export_raises_when_repository_missing(tmp_path: Path) -> None:
 
 @pytest.mark.timeout(60)
 def test_export_latest_snapshot_zip_produces_zip(tmp_path: Path) -> None:
-    paths = WorkspacePaths(data_dir=tmp_path / "minds-data")
+    paths = WorkspacePaths.flat(tmp_path / "minds-data")
     agent_id = _fresh_agent_id()
     host_id = "host-" + uuid4().hex
     repo = str(tmp_path / "repo")

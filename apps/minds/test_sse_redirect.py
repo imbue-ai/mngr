@@ -52,7 +52,7 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
     port = _find_free_port()
     code = OneTimeCode("test-sse-code-abc123")
 
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
     auth_store.add_one_time_code(code=code)
     resolver = MngrCliBackendResolver()

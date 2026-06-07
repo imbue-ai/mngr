@@ -714,7 +714,7 @@ def _build_authenticated_client(
     auth_dir = tmp_path / "auth"
     auth_store = FileAuthStore(data_directory=auth_dir)
     backend_resolver: BackendResolverInterface = StaticBackendResolver(url_by_agent_and_service={})
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     app = create_desktop_client(
         auth_store=auth_store,
         backend_resolver=backend_resolver,

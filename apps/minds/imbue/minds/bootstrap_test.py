@@ -586,7 +586,7 @@ def test_minds_paths_for_root_name_override(monkeypatch: pytest.MonkeyPatch, tmp
 
 def test_minds_paths_flat_shorthand(tmp_path: Path) -> None:
     """``data_dir=`` lays all four roots flat under one directory (test convenience)."""
-    paths = MindsPaths(data_dir=tmp_path)
+    paths = MindsPaths.flat(tmp_path)
     assert paths.app_support == tmp_path
     assert paths.cache == tmp_path
     assert paths.logs == tmp_path

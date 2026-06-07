@@ -11,7 +11,7 @@ from imbue.mngr.primitives import AgentId
 
 def test_workspace_paths_workspace_dir_uses_agent_id(tmp_path: Path) -> None:
     """Verify workspace_dir incorporates the agent_id into the path."""
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     agent_id = AgentId()
 
     result = paths.workspace_dir(agent_id)
@@ -20,12 +20,12 @@ def test_workspace_paths_workspace_dir_uses_agent_id(tmp_path: Path) -> None:
 
 
 def test_workspace_paths_auth_dir_is_under_data_dir(tmp_path: Path) -> None:
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     assert paths.auth_dir == tmp_path / "auth"
 
 
 def test_workspace_paths_mngr_host_dir_is_under_data_dir(tmp_path: Path) -> None:
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     assert paths.mngr_host_dir == tmp_path / "mngr"
 
 

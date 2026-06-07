@@ -62,9 +62,7 @@ class MindsPaths(FrozenModel):
     actual resolution to the (mngr-free) functions in
     :mod:`imbue.minds.bootstrap`.
 
-    For tests, the legacy single-root shape is still accepted:
-    ``MindsPaths(data_dir=tmp_path)`` lays all four roots flat under one
-    directory, matching the ``MINDS_DATA_HOME`` override layout.
+    For tests, :meth:`flat` lays all four roots under one directory.
     """
 
     tier: str = Field(default="production", description="Tier subdirectory name (production, staging, dev-<name>).")
@@ -74,23 +72,10 @@ class MindsPaths(FrozenModel):
     config: Path = Field(description="User-editable config (client.toml, config.toml, minds_root.toml).")
     legacy_data_dir: Path = Field(description="Pre-move ~/.<root_name>/ location; read-only after migration.")
 
-    @model_validator(mode="before")
     @classmethod
-    def _expand_legacy_data_dir(cls, data: object) -> object:
-        """Accept ``data_dir=<base>`` as a flat all-in-one-root shorthand.
-
-        Lets tests construct a self-contained throwaway tree the same way
-        the ``MINDS_DATA_HOME`` override lays one out (all four roots under
-        one directory), without enumerating every root.
-        """
-        if isinstance(data, dict) and "data_dir" in data:
-            base = Path(data.pop("data_dir"))
-            data.setdefault("app_support", base)
-            data.setdefault("cache", base)
-            data.setdefault("logs", base)
-            data.setdefault("config", base)
-            data.setdefault("legacy_data_dir", base)
-        return data
+    def flat(cls, base: Path, *, tier: str = "production") -> "MindsPaths":
+        """Lay all four roots flat under ``base`` (a self-contained test tree)."""
+        return cls(tier=tier, app_support=base, cache=base, logs=base, config=base, legacy_data_dir=base)
 
     @classmethod
     def for_root_name(cls, root_name: str) -> "MindsPaths":

@@ -243,7 +243,7 @@ def _build_authenticated_client(
         )
     else:
         backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
 
     app = create_desktop_client(
         auth_store=auth_store,
@@ -835,7 +835,7 @@ def _build_authenticated_client_with_handlers(
         )
     else:
         backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     app = create_desktop_client(
         auth_store=auth_store,
         backend_resolver=backend_resolver,

@@ -97,7 +97,7 @@ def test_build_destroy_command_without_host_id_falls_back_to_single() -> None:
 
 
 def test_start_destroy_writes_pid_file_and_log(tmp_path: Path) -> None:
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     agent_id = AgentId.generate()
     fake = _make_fake_mngr(tmp_path, exit_code=0, stdout="destroyed agent\n")
     record = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(fake), mngr_binary="mngr")
@@ -110,7 +110,7 @@ def test_start_destroy_writes_pid_file_and_log(tmp_path: Path) -> None:
 
 
 def test_read_destroying_status_running_when_pid_alive(tmp_path: Path) -> None:
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     agent_id = AgentId.generate()
     # Sleep long enough for the next read but not so long that the test gets slow.
     sleeper = tmp_path / "bin" / "mngr"
@@ -133,7 +133,7 @@ def test_read_destroying_status_running_when_pid_alive(tmp_path: Path) -> None:
 
 
 def test_read_destroying_status_done_when_pid_dead_and_agent_gone(tmp_path: Path) -> None:
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     agent_id = AgentId.generate()
     fake = _make_fake_mngr(tmp_path, exit_code=0)
     record = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(fake), mngr_binary="mngr")
@@ -145,7 +145,7 @@ def test_read_destroying_status_done_when_pid_dead_and_agent_gone(tmp_path: Path
 
 
 def test_read_destroying_status_failed_when_pid_dead_but_agent_still_present(tmp_path: Path) -> None:
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     agent_id = AgentId.generate()
     fake = _make_fake_mngr(tmp_path, exit_code=1, stderr="boom\n")
     record = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(fake), mngr_binary="mngr")
@@ -156,12 +156,12 @@ def test_read_destroying_status_failed_when_pid_dead_but_agent_still_present(tmp
 
 
 def test_read_destroying_returns_none_when_no_directory(tmp_path: Path) -> None:
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     assert read_destroying(AgentId.generate(), paths, agent_in_resolver=False) is None
 
 
 def test_start_destroy_is_idempotent_while_running(tmp_path: Path) -> None:
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     agent_id = AgentId.generate()
     sleeper = tmp_path / "bin" / "mngr"
     sleeper.parent.mkdir(exist_ok=True)
@@ -181,7 +181,7 @@ def test_start_destroy_is_idempotent_while_running(tmp_path: Path) -> None:
 
 
 def test_list_destroying_walks_dir_and_picks_up_each_agent(tmp_path: Path) -> None:
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     agent_a = AgentId.generate()
     agent_b = AgentId.generate()
     fake = _make_fake_mngr(tmp_path, exit_code=0)
@@ -198,7 +198,7 @@ def test_list_destroying_walks_dir_and_picks_up_each_agent(tmp_path: Path) -> No
 
 
 def test_delete_destroying_is_idempotent(tmp_path: Path) -> None:
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     agent_id = AgentId.generate()
     fake = _make_fake_mngr(tmp_path, exit_code=0)
     record = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(fake), mngr_binary="mngr")
@@ -209,7 +209,7 @@ def test_delete_destroying_is_idempotent(tmp_path: Path) -> None:
 
 
 def test_read_log_chunk_returns_tail_from_offset(tmp_path: Path) -> None:
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     agent_id = AgentId.generate()
     fake = _make_fake_mngr(tmp_path, exit_code=0, stdout="hello world\n")
     record = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(fake), mngr_binary="mngr")
@@ -224,14 +224,14 @@ def test_read_log_chunk_returns_tail_from_offset(tmp_path: Path) -> None:
 
 
 def test_read_log_chunk_raises_filenotfound_when_no_record(tmp_path: Path) -> None:
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     with pytest.raises(FileNotFoundError):
         read_log_chunk(AgentId.generate(), paths, offset=0)
 
 
 def test_idempotent_after_failure_overwrites_log(tmp_path: Path) -> None:
     """A Retry overwrites the previous run's log so the user sees the new attempt fresh."""
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     agent_id = AgentId.generate()
     failing = _make_fake_mngr(tmp_path, exit_code=1, stderr="first run boom\n")
     first = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(failing), mngr_binary="mngr")

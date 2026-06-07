@@ -24,7 +24,7 @@ from imbue.mngr.primitives import AgentId
 
 
 def _paths(tmp_path: Path) -> WorkspacePaths:
-    return WorkspacePaths(data_dir=tmp_path)
+    return WorkspacePaths.flat(tmp_path)
 
 
 def _now() -> datetime:

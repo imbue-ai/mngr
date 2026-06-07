@@ -503,7 +503,7 @@ def _create_test_server_with_agent_creator(
     root_cg = ConcurrencyGroup(name="test-root")
     root_cg.__enter__()
     agent_creator = AgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        paths=WorkspacePaths.flat(tmp_path / "minds"),
         root_concurrency_group=root_cg,
         notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
@@ -1324,7 +1324,7 @@ def test_destroying_agent_ids_returns_ids_with_live_destroy(tmp_path: Path) -> N
     failed destroy id whose marker dir exists on disk.
     """
     agent_id = AgentId()
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     destroying_dir = tmp_path / "destroying" / str(agent_id)
     destroying_dir.mkdir(parents=True)
     # The current process pid is alive, so the helper sees the destroy as
@@ -1419,7 +1419,7 @@ def _create_test_client_with_stores(
         session_store=session_store,
         minds_config=minds_config,
         request_inbox=request_inbox,
-        paths=WorkspacePaths(data_dir=tmp_path),
+        paths=WorkspacePaths.flat(tmp_path),
     )
     client = TestClient(app, base_url="http://localhost")
     return client, auth_store
@@ -1509,7 +1509,7 @@ def test_requests_panel_card_routes_via_minds_bridge(tmp_path: Path) -> None:
         session_store=session_store,
         minds_config=minds_config,
         request_inbox=request_inbox,
-        paths=WorkspacePaths(data_dir=tmp_path),
+        paths=WorkspacePaths.flat(tmp_path),
     )
     client = TestClient(app, base_url="http://localhost")
     _authenticate_client(client, auth_store)

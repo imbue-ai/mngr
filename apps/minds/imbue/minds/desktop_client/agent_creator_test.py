@@ -421,7 +421,7 @@ def _make_test_creator(
     probe_timeout_seconds: float = 0.5,
     system_interface_health_tracker: SystemInterfaceHealthTracker | None = None,
 ) -> AgentCreator:
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = WorkspacePaths.flat(tmp_path)
     cg = ConcurrencyGroup(name="agent-creator-test")
     cg.__enter__()
     return AgentCreator(
@@ -710,7 +710,7 @@ def _make_creator_with_cli(tmp_path: Path, cli: _RecordingImbueCloudCli) -> Agen
     cg = ConcurrencyGroup(name="agent-creator-test")
     cg.__enter__()
     return AgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path),
+        paths=WorkspacePaths.flat(tmp_path),
         root_concurrency_group=cg,
         notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
         imbue_cloud_cli=cli,
