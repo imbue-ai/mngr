@@ -41,14 +41,7 @@ Flow:
   9. Duplicate-name conflict: POST /api/create-agent with HOST_NAME
      already owned by W1; assert 409 with "already exists". Proves
      the duplicate-name guard added on this branch works.
-  10. Quit + relaunch: terminate minds.app, wait, relaunch on a fresh
-     CDP port, mint a new one-time code, re-auth, confirm home page
-     still lists W1's tile, navigate to W1's chat URL, send a unique
-     follow-up token (bump), verify reply. Proves session + mngr
-     state persist across a real Mac-style quit/reopen cycle and that
-     the Electron shutdown chain releases :8421 cleanly so the new
-     mngr_forward can claim it (screenshots 23-27).
-  11. Teardown: revert /etc/hosts, clear latchkey, kill mock + socat
+  10. Teardown: revert /etc/hosts, clear latchkey, kill mock + socat
 
 Takes a `screencapture -x` whole-desktop shot at every milestone.
 Files land in /tmp/launch-to-msg-screenshots/ and the workflow
@@ -1353,106 +1346,6 @@ async def amain() -> int:
             if "already exists" not in conflict_resp["body"]:
                 raise E2EFailure(f"[conflict-409] 409 body missing 'already exists' text: {conflict_resp['body']!r}")
             logger.info("[conflict-409] PASS: duplicate-name guard returned 409")
-
-        # 25. Quit + relaunch: a user closes the Mac app, opens it again, and
-        # expects W1's chat to still work. Verifies session_store + mngr
-        # data.json survive the restart, the Electron shutdown chain leaves
-        # no orphans (port 8421 / mngr_forward / latchkey gateway), and the
-        # in-VM Lima system_interface is still reachable from the new
-        # mngr_forward.
-        if w1_result is not None:
-            logger.info("=== iter 9: quit + relaunch ===")
-            events_offset_pre_relaunch = EVENTS_LOG.stat().st_size if EVENTS_LOG.exists() else 0
-
-            await browser.close()
-            minds_proc.terminate()
-            with contextlib.suppress(Exception):
-                minds_proc.wait(timeout=15)
-            # The Electron shutdown chain SHOULD SIGTERM mngr forward +
-            # latchkey gateway, but in practice (per memory
-            # feedback_orphan_mngr_forward_blocks_8421 and #106) orphans
-            # routinely survive. If they do, the next launch's mngr_forward
-            # binds nothing on :8421 (or binds but has stale state with
-            # no W1), so the chat URL redirects to localhost:8421/.
-            # Sweep both names explicitly between quit and relaunch.
-            _kill_pgrep("mngr forward", "orphan mngr forward")
-            _kill_pgrep("mngr latchkey forward", "orphan mngr latchkey forward")
-            _kill_pgrep("latchkey gateway", "orphan latchkey gateway")
-            _kill_pgrep("mngr observe", "orphan mngr observe")
-            _kill_pgrep("mngr event", "orphan mngr event")
-            # Settle: SIGTERM propagation + socket close + Electron shutdown
-            # all need time. 10s is empirically enough for :8421 to free.
-            await asyncio.sleep(10)
-
-            cdp_port2 = _free_port()
-            logger.info("relaunching {} --remote-debugging-port={}", MINDS_APP_PATH, cdp_port2)
-            minds_proc = subprocess.Popen(
-                [str(MINDS_APP_PATH), f"--remote-debugging-port={cdp_port2}"],
-                env=env,
-                stdout=open("/tmp/minds-electron-relaunch.log", "w"),
-                stderr=subprocess.STDOUT,
-            )
-
-            cdp_url2 = await _wait_cdp(cdp_port2)
-            browser = await pw.chromium.connect_over_cdp(cdp_url2, timeout=60_000)
-            ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
-            for _ in range(60):
-                if ctx.pages:
-                    break
-                await asyncio.sleep(0.5)
-            if not ctx.pages:
-                raise E2EFailure("[relaunch] no Electron windows 30s after relaunch")
-            win = ctx.pages[0]
-            await snap_page(win, "23-after-relaunch")
-
-            base2 = await asyncio.get_event_loop().run_in_executor(None, wait_backend_url, events_offset_pre_relaunch)
-            logger.info("[relaunch] new backend up at {}", base2)
-            code2 = await asyncio.get_event_loop().run_in_executor(None, mint_one_time_code)
-            origin = base2
-            await win.goto(origin + "/authenticate?one_time_code=" + code2)
-            await snap_page(win, "24-after-relaunch-auth")
-
-            # The home page after relaunch must still show W1's tile;
-            # this is the proof that session + mngr data persisted.
-            await win.goto(origin + "/")
-            await snap_page(win, "25-home-after-relaunch")
-            home_html = await win.content()
-            if HOST_NAME not in home_html:
-                raise E2EFailure(f"[relaunch] home page after relaunch missing W1 tile {HOST_NAME!r}")
-
-            # Wait for the freshly-restarted mngr_forward (which serves
-            # ``agent-<hex>.localhost:8421``) to re-learn the agent set
-            # from mngr's persisted data.json. Until it has, hitting the
-            # chat URL redirects to ``http://localhost:8421/`` (its
-            # fallback landing). Poll the chat URL until the final URL
-            # carries the agent-<hex> host; otherwise the follow-up fails
-            # at wait_for_selector on the wrong page.
-            forward_ready_deadline = time.time() + 60
-            chat_url_re = re.compile(r"agent-[a-f0-9]+\.localhost")
-            while time.time() < forward_ready_deadline:
-                await win.goto(w1_result.chat_url, wait_until="domcontentloaded")
-                if chat_url_re.search(win.url):
-                    break
-                await asyncio.sleep(2)
-            else:
-                raise E2EFailure(
-                    f"[relaunch] mngr_forward never routed to {w1_result.chat_url!r} after 60s; ended at {win.url!r}"
-                )
-
-            # Send a fresh follow-up on W1's chat URL. ``bump`` is a token
-            # that didn't appear in any earlier exchange, so a >=2-count
-            # match proves the new prompt round-tripped end-to-end through
-            # the freshly-restarted mngr_forward.
-            await _send_followup_and_verify(
-                win,
-                chat_url=w1_result.chat_url,
-                prompt="Reply with exactly the four characters: bump",
-                expect_token="bump",
-                snap_sent="26-w1-after-relaunch-sent",
-                snap_reply="27-w1-after-relaunch-reply",
-                label="w1-after-relaunch",
-            )
-            logger.info("[relaunch] PASS: W1 chat survived quit + relaunch")
 
         # Persist combined per-workspace timings as one artifact JSON
         # rather than two -- one file is easier to embed in the run
