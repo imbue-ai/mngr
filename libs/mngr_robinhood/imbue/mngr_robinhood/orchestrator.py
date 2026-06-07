@@ -602,9 +602,6 @@ def _drain_new_events(
             read_failure_warner.warn(exc)
         return seen_bytes
     content_bytes = content.encode("utf-8")
-    import sys as _sys
-
-    print(f"DRAIN_DBG content_bytes={len(content_bytes)} seen={seen_bytes}", file=_sys.stderr, flush=True)
     if len(content_bytes) <= seen_bytes:
         return seen_bytes
     new_slice = content_bytes[seen_bytes:].decode("utf-8", errors="replace")
@@ -615,12 +612,6 @@ def _drain_new_events(
     new_events = parser.parse_lines(new_lines)
     if new_events:
         writer.emit_events(new_events)
-    print(
-        f"DRAIN_DBG new_lines={len(new_lines)} new_events={len(new_events)} "
-        f"asst_count={writer.assistant_message_count} stop={writer.last_assistant_stop_reason!r}",
-        file=_sys.stderr,
-        flush=True,
-    )
     return seen_bytes + consumed_bytes
 
 
