@@ -253,6 +253,9 @@ def _run_with_agent(
         ready_timeout_seconds=AGENT_READY_TIMEOUT_SECONDS,
     )
 
+    import sys as _sys
+
+    print("PROBE before api_create", file=_sys.stderr, flush=True)
     try:
         result = api_create(
             source_location=source_location,
@@ -261,6 +264,7 @@ def _run_with_agent(
             mngr_ctx=mngr_ctx,
             create_work_dir=False,
         )
+        print("PROBE after api_create OK", file=_sys.stderr, flush=True)
     except MngrError as exc:
         logger.error("Failed to create agent: {}", exc)
         return EXIT_MNGR_ERROR
