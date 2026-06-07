@@ -68,8 +68,8 @@ This constructs `VpsDockerProviderConfig` with **defaults** for everything else,
 so `docker_runtime` is `None` and `default_start_args` is empty. The rebuilt
 container's `docker run` therefore gets no `--runtime runsc` and none of the
 `--workdir=/` / `--security-opt=no-new-privileges` hardening. (See
-`mngr_vps_docker/.../instance.py`: `runtime_args = ("--runtime", config.docker_runtime)
-if config.docker_runtime is not None else ()`.)
+`mngr_vps_docker/.../instance.py`: `runtime_args = ("--runtime", self.config.docker_runtime)
+if self.config.docker_runtime is not None else ()`.)
 
 `ImbueCloudProviderConfig` (`libs/mngr_imbue_cloud/.../config.py`) extends
 `ProviderInstanceConfig`, **not** `VpsDockerProviderConfig`, so it has no
