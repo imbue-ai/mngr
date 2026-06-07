@@ -13,3 +13,9 @@ vps_docker provider used for the rebuild forwards these, so the rebuilt containe
 runs under `--runtime runsc` with the `--workdir=/` and
 `--security-opt=no-new-privileges` hardening args. These values are written into
 the per-account `[providers.imbue_cloud_<slug>]` block by minds bootstrap.
+
+Added a `--no-recycle` flag to `mngr imbue_cloud admin pool create`. By default
+the OVH provider reclaims a cancelled (still-billable) VPS when one is available;
+`--no-recycle` forces a fresh order instead (it sets
+`MNGR__PROVIDERS__OVH__ENABLE_RECYCLE_CANCELLED=false` on the inner `mngr create`),
+which makes it easy to exercise and test the fresh-provision path.
