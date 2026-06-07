@@ -1408,6 +1408,26 @@ async def amain() -> int:
             if HOST_NAME not in home_html:
                 raise E2EFailure(f"[relaunch] home page after relaunch missing W1 tile {HOST_NAME!r}")
 
+            # Wait for the freshly-restarted mngr_forward (which serves
+            # ``agent-<hex>.localhost:8421``) to re-learn the agent set
+            # from mngr's persisted data.json. Until it has, hitting the
+            # chat URL redirects to ``http://localhost:8421/`` (its
+            # fallback landing). Poll the chat URL until the final URL
+            # carries the agent-<hex> host; otherwise the follow-up fails
+            # at wait_for_selector on the wrong page.
+            forward_ready_deadline = time.time() + 60
+            chat_url_re = re.compile(r"agent-[a-f0-9]+\.localhost")
+            while time.time() < forward_ready_deadline:
+                await win.goto(w1_result.chat_url, wait_until="domcontentloaded")
+                if chat_url_re.search(win.url):
+                    break
+                await asyncio.sleep(2)
+            else:
+                raise E2EFailure(
+                    f"[relaunch] mngr_forward never routed to {w1_result.chat_url!r} "
+                    f"after 60s; ended at {win.url!r}"
+                )
+
             # Send a fresh follow-up on W1's chat URL. ``bump`` is a token
             # that didn't appear in any earlier exchange, so a >=2-count
             # match proves the new prompt round-tripped end-to-end through
