@@ -686,3 +686,24 @@ def test_migration_rewrites_mngr_data_json_paths(monkeypatch: pytest.MonkeyPatch
     assert parsed["ssh_key_path"] == str(expected_key)
     assert str(legacy) not in new_data_json.read_text()
     assert (expected_key).read_text() == "PRIVATE KEY"
+
+
+def test_migration_leaves_legacy_compat_symlinks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Risk 3: moved-away mngr/ssh keep resolving at the legacy path via symlink."""
+    home, data = _legacy_migration_env(monkeypatch, tmp_path)
+    legacy = home / ".minds"
+    (legacy / "mngr" / "profiles" / "p1" / "keys").mkdir(parents=True)
+    (legacy / "mngr" / "profiles" / "p1" / "keys" / "docker_ssh_key").write_text("KEY")
+    (legacy / "ssh").mkdir()
+    (legacy / "ssh" / "config").write_text("Host x")
+
+    assert migrate_legacy_minds_layout("minds") is True
+
+    app_support = data / "production" / "app_support"
+    legacy_mngr = legacy / "mngr"
+    legacy_ssh = legacy / "ssh"
+    assert legacy_mngr.is_symlink()
+    assert legacy_ssh.is_symlink()
+    # The old absolute path still reaches the relocated key material.
+    assert (legacy / "mngr" / "profiles" / "p1" / "keys" / "docker_ssh_key").read_text() == "KEY"
+    assert legacy_mngr.resolve() == (app_support / "mngr").resolve()

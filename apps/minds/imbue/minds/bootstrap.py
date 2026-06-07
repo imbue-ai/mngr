@@ -476,8 +476,38 @@ def migrate_legacy_minds_layout(root_name: str) -> bool:
         + "\nThis legacy directory is no longer read. It is safe to delete once you\n"
         "have confirmed the new build works.\n"
     )
+    _create_legacy_compat_symlinks(legacy, app_support)
     logger.info("Completed legacy minds layout migration for {} (lock: {})", root_name, lock_path)
     return True
+
+
+# Subdirs that an already-running Lima VM may bind-mount from the old path
+# (the mngr profile + its docker SSH keys). Symlinking them back keeps those
+# VMs working until they are naturally destroyed + recreated; remove the
+# shim after one minor-version cycle.
+_LEGACY_COMPAT_SYMLINK_SUBDIRS: Final[tuple[str, ...]] = ("mngr", "ssh")
+
+
+def _create_legacy_compat_symlinks(legacy: Path, app_support: Path) -> None:
+    """Leave symlinks at the moved-away legacy mngr/ssh paths -> their new homes.
+
+    Risk 3: a Lima instance yaml created before the move bind-mounts host paths
+    under ``~/.<root_name>/mngr`` (SSH keys it surfaces inside the VM). After
+    the move those paths are vacant; a compat symlink makes them resolve to the
+    relocated material so existing VMs keep booting. Best-effort: a symlink
+    failure (e.g. a platform without symlink support) is logged, not fatal.
+    """
+    for subdir in _LEGACY_COMPAT_SYMLINK_SUBDIRS:
+        target = app_support / subdir
+        link = legacy / subdir
+        if not target.exists() or link.exists() or link.is_symlink():
+            continue
+        try:
+            link.symlink_to(target, target_is_directory=True)
+        except OSError as e:
+            logger.warning("Could not create legacy compat symlink {} -> {}: {}", link, target, e)
+        else:
+            logger.info("Left legacy compat symlink {} -> {}", link, target)
 
 
 def _rewrite_mngr_data_json_paths(legacy: Path, app_support: Path) -> None:
