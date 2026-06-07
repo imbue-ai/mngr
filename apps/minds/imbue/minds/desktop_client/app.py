@@ -439,6 +439,16 @@ def _handle_post_login_redirect(
     return Response(status_code=302, headers={"Location": destination})
 
 
+def _resolve_preferred_region(minds_config: MindsConfig | None) -> str:
+    """Read the soft preferred region from config, or "" when unset/unavailable.
+
+    Only IMBUE_CLOUD leases consume it; other launch modes ignore it.
+    """
+    if minds_config is None:
+        return ""
+    return minds_config.get_preferred_region() or ""
+
+
 def _trigger_region_preference_refresh(request: Request, minds_config: MindsConfig | None) -> None:
     """Kick off the non-blocking, throttled IP-geo region refresh when a create page opens.
 
@@ -885,10 +895,9 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
     # Build a post-creation callback that injects the tunnel token
     on_created = _build_on_created_callback(request, account_id)
 
-    # Soft region preference (resolved from IP geo when the create page was
-    # opened). Only IMBUE_CLOUD leases consume it; other modes ignore it.
+    # Soft region preference (resolved from IP geo when the create page was opened).
     minds_config: MindsConfig | None = request.app.state.minds_config
-    preferred_region = (minds_config.get_preferred_region() or "") if minds_config is not None else ""
+    preferred_region = _resolve_preferred_region(minds_config)
 
     # ``start_creation`` returns a CreationId (minds-internal handle for
     # tracking the in-flight create) -- the canonical AgentId only exists
@@ -1064,10 +1073,9 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
             media_type="application/json",
         )
 
-    # Soft region preference (resolved from IP geo when the create page was
-    # opened). Only IMBUE_CLOUD leases consume it; other modes ignore it.
+    # Soft region preference (resolved from IP geo when the create page was opened).
     minds_config: MindsConfig | None = request.app.state.minds_config
-    preferred_region = (minds_config.get_preferred_region() or "") if minds_config is not None else ""
+    preferred_region = _resolve_preferred_region(minds_config)
 
     creation_id = agent_creator.start_creation(
         git_url,
