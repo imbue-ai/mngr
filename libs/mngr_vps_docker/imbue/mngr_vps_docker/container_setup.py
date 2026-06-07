@@ -343,7 +343,7 @@ _START_CONTAINER_TIMEOUT_SECONDS: Final[float] = 120.0
 # The reap is scoped to this container: it matches on BOTH the container id and a
 # runsc process, so it only ever kills this container's stuck gVisor processes --
 # never a broad pattern. A normal start never enters the recovery branch.
-_START_CONTAINER_SCRIPT_TEMPLATE = r"""set -u
+_START_CONTAINER_SCRIPT_TEMPLATE: Final[str] = r"""set -u
 name=__CONTAINER_NAME__
 err="$(docker start "$name" 2>&1)" && exit 0
 case "$err" in
