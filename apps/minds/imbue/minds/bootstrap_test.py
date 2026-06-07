@@ -10,16 +10,19 @@ from imbue.minds.bootstrap import DEFAULT_MINDS_ROOT_NAME
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_PATTERN
 from imbue.minds.bootstrap import _ensure_mngr_settings
+from imbue.minds.bootstrap import _minds_roots_for
 from imbue.minds.bootstrap import apply_bootstrap
 from imbue.minds.bootstrap import env_name_from_root_name
 from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
 from imbue.minds.bootstrap import minds_data_dir_for
+from imbue.minds.bootstrap import minds_tier_for
 from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.bootstrap import root_name_for_env_name
 from imbue.minds.bootstrap import set_imbue_cloud_provider_for_account
 from imbue.minds.bootstrap import set_provider_is_enabled
+from imbue.minds.config.data_types import MindsPaths
 from imbue.minds.testing import stub_mngr_host_dir
 
 
@@ -447,3 +450,136 @@ def test_set_imbue_cloud_provider_for_account_repairs_missing_default_block_on_r
     parsed = tomllib.loads(settings_path.read_text())
     assert parsed["providers"]["imbue_cloud"] == {"backend": "imbue_cloud", "is_enabled": False}
     assert parsed["plugins"]["recursive"]["enabled"] is False
+
+
+# -- Platform-canonical layout resolver (MindsPaths) --
+
+
+def _clear_layout_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remove the override + XDG vars so layout tests see a clean baseline."""
+    for var in (
+        "MINDS_DATA_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
+        "XDG_CONFIG_HOME",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_minds_tier_for_maps_root_name_to_tier() -> None:
+    assert minds_tier_for("minds") == "production"
+    assert minds_tier_for("minds-staging") == "staging"
+    assert minds_tier_for("minds-dev-josh-3") == "dev-josh-3"
+    assert minds_tier_for("minds-ci-abc") == "ci-abc"
+
+
+def test_minds_tier_for_does_not_collapse_dev_staging() -> None:
+    """Risk #5: ``minds-dev-staging`` must stay distinct from ``minds-staging``."""
+    assert minds_tier_for("minds-dev-staging") == "dev-staging"
+    assert minds_tier_for("minds-staging") == "staging"
+    assert minds_tier_for("minds-dev-staging") != minds_tier_for("minds-staging")
+
+
+def test_minds_data_home_override_layout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _clear_layout_env(monkeypatch)
+    monkeypatch.setenv("MINDS_DATA_HOME", str(tmp_path))
+    app_support, cache, logs, config = _minds_roots_for("minds-staging")
+    assert app_support == tmp_path / "staging" / "app_support"
+    assert cache == tmp_path / "staging" / "cache"
+    assert logs == tmp_path / "staging" / "logs"
+    assert config == tmp_path / "staging" / "config"
+
+
+def test_minds_data_home_override_wins_over_platform(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _clear_layout_env(monkeypatch)
+    monkeypatch.setenv("MINDS_DATA_HOME", str(tmp_path))
+    # darwin requested, but the override must still win.
+    app_support, _cache, _logs, _config = _minds_roots_for("minds", platform_name="darwin")
+    assert app_support == tmp_path / "production" / "app_support"
+
+
+def test_darwin_layout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _clear_layout_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    app_support, cache, logs, config = _minds_roots_for("minds", platform_name="darwin")
+    assert app_support == tmp_path / "Library" / "Application Support" / "Minds" / "production"
+    assert cache == tmp_path / "Library" / "Caches" / "Minds" / "production"
+    assert logs == tmp_path / "Library" / "Logs" / "Minds" / "production"
+    assert config == app_support / "config"
+
+
+def test_darwin_layout_dev_tier(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _clear_layout_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    app_support, _cache, _logs, _config = _minds_roots_for("minds-dev-josh-3", platform_name="darwin")
+    assert app_support == tmp_path / "Library" / "Application Support" / "Minds" / "dev-josh-3"
+
+
+def test_linux_xdg_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _clear_layout_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    app_support, cache, logs, config = _minds_roots_for("minds", platform_name="linux")
+    assert app_support == tmp_path / ".local" / "share" / "minds" / "production"
+    assert cache == tmp_path / ".cache" / "minds" / "production"
+    assert logs == tmp_path / ".local" / "state" / "minds" / "production" / "logs"
+    assert config == tmp_path / ".config" / "minds" / "production"
+
+
+def test_linux_honors_xdg_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _clear_layout_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+    app_support, cache, logs, config = _minds_roots_for("minds-staging", platform_name="linux")
+    assert app_support == tmp_path / "xdg-data" / "minds" / "staging"
+    assert cache == tmp_path / "xdg-cache" / "minds" / "staging"
+    assert logs == tmp_path / "xdg-state" / "minds" / "staging" / "logs"
+    assert config == tmp_path / "xdg-config" / "minds" / "staging"
+
+
+def test_linux_ignores_relative_xdg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The XDG spec mandates ignoring relative base dirs and using the default."""
+    _clear_layout_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", "relative/not/absolute")
+    app_support, _cache, _logs, _config = _minds_roots_for("minds", platform_name="linux")
+    assert app_support == tmp_path / ".local" / "share" / "minds" / "production"
+
+
+def test_dev_staging_distinct_roots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Risk #5 end-to-end: the two tiers resolve to different roots."""
+    _clear_layout_env(monkeypatch)
+    monkeypatch.setenv("MINDS_DATA_HOME", str(tmp_path))
+    dev_staging, *_ = _minds_roots_for("minds-dev-staging")
+    staging, *_ = _minds_roots_for("minds-staging")
+    assert dev_staging != staging
+    assert dev_staging == tmp_path / "dev-staging" / "app_support"
+    assert staging == tmp_path / "staging" / "app_support"
+
+
+def test_minds_paths_for_root_name_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _clear_layout_env(monkeypatch)
+    monkeypatch.setenv("MINDS_DATA_HOME", str(tmp_path))
+    paths = MindsPaths.for_root_name("minds-dev-josh-3")
+    assert paths.tier == "dev-josh-3"
+    assert paths.app_support == tmp_path / "dev-josh-3" / "app_support"
+    assert paths.cache == tmp_path / "dev-josh-3" / "cache"
+    assert paths.logs == tmp_path / "dev-josh-3" / "logs"
+    assert paths.config == tmp_path / "dev-josh-3" / "config"
+    assert paths.legacy_data_dir == Path.home() / ".minds-dev-josh-3"
+    assert paths.auth_dir == paths.app_support / "auth"
+    assert paths.mngr_host_dir == paths.app_support / "mngr"
+
+
+def test_minds_paths_flat_shorthand(tmp_path: Path) -> None:
+    """``data_dir=`` lays all four roots flat under one directory (test convenience)."""
+    paths = MindsPaths(data_dir=tmp_path)
+    assert paths.app_support == tmp_path
+    assert paths.cache == tmp_path
+    assert paths.logs == tmp_path
+    assert paths.config == tmp_path
+    assert paths.legacy_data_dir == tmp_path
+    assert paths.auth_dir == tmp_path / "auth"

@@ -176,23 +176,27 @@ def _xdg_base(env_var: str, default: Path) -> Path:
     return default
 
 
-def _minds_roots_for(root_name: str) -> tuple[Path, Path, Path, Path]:
+def _minds_roots_for(root_name: str, platform_name: str | None = None) -> tuple[Path, Path, Path, Path]:
     """Resolve the four platform-canonical roots ``(app_support, cache, logs, config)``.
 
     Resolution order:
       1. ``MINDS_DATA_HOME`` override -> ``$MINDS_DATA_HOME/<tier>/{app_support,cache,logs,config}``.
-      2. ``sys.platform == "darwin"`` -> Apple's Application Support / Caches / Logs.
+      2. ``platform_name == "darwin"`` -> Apple's Application Support / Caches / Logs.
       3. Otherwise (Linux) -> the XDG data / cache / state / config dirs.
 
-    Windows is unsupported (matches CLAUDE.md).
+    ``platform_name`` defaults to :data:`sys.platform`; it is a parameter so
+    tests can exercise both OS branches on either host. Windows is
+    unsupported (matches CLAUDE.md).
     """
+    if platform_name is None:
+        platform_name = sys.platform
     tier = minds_tier_for(root_name)
     override = os.environ.get(MINDS_DATA_HOME_ENV_VAR)
     if override:
         base = Path(override).expanduser() / tier
         return base / "app_support", base / "cache", base / "logs", base / "config"
     home = Path.home()
-    if sys.platform == "darwin":
+    if platform_name == "darwin":
         app_support = home / "Library" / "Application Support" / _MINDS_BUNDLE_NAME / tier
         cache = home / "Library" / "Caches" / _MINDS_BUNDLE_NAME / tier
         logs = home / "Library" / "Logs" / _MINDS_BUNDLE_NAME / tier
