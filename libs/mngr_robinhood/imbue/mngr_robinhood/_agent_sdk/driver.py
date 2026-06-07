@@ -26,6 +26,7 @@ from uuid import uuid4
 
 from claude_agent_sdk import ClaudeAgentOptions
 from claude_agent_sdk import Message
+from claude_agent_sdk import StreamEvent
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
@@ -524,35 +525,55 @@ class _TurnDrainTicker(MutableModel):
     synthesizer: StreamEventSynthesizer | None = Field(
         default=None, description="Emits partial-message StreamEvents when include_partial_messages is set"
     )
-    ended_clean: bool = Field(default=False, description="Whether the turn ended on a terminal stop_reason")
 
-    def _emit_stream_events(self) -> None:
-        """Poll the stream_buffer (if streaming) and push any synthesized StreamEvents to the sink."""
-        if self.synthesizer is None:
+    def _sink_stream_events(self, events: list[StreamEvent]) -> None:
+        if not events:
             return
         _emit_init_if_needed(self.session, self.sink)
-        for event in self.synthesizer.poll(self.session.latest_session_id or "", _resolve_model(self.session)):
+        for event in events:
             self.sink(event)
+
+    def _emit_stream_events(self) -> None:
+        """Poll the stream_buffer (if streaming) and push any synthesized partial StreamEvents."""
+        if self.synthesizer is None:
+            return
+        self._sink_stream_events(
+            self.synthesizer.poll(self.session.latest_session_id or "", _resolve_model(self.session))
+        )
+
+    def _finalize_stream_events(self) -> None:
+        """Push the held-back final delta plus the closing stream framing (clean completion only)."""
+        if self.synthesizer is None:
+            return
+        self._sink_stream_events(
+            self.synthesizer.finalize(self.session.latest_session_id or "", _resolve_model(self.session))
+        )
 
     def tick(self) -> bool | None:
         raw_events = _read_new_raw_events(self.session)
         if raw_events:
             self.last_progress_at = time.monotonic()
+        parsed_messages: list[Message] = []
         has_terminal_stop = False
+        # Absorb metadata first (this sets latest_session_id) but defer sinking the authoritative
+        # transcript messages until after the stream events, so the ordering matches the real SDK:
+        # all partial StreamEvents -- including the closing message_stop -- precede the final
+        # AssistantMessage.
         for raw_event in raw_events:
             stop_reason = _absorb_event_metadata(self.session, raw_event)
             message = parse_transcript_event(raw_event)
             if message is not None:
-                _emit_init_if_needed(self.session, self.sink)
-                self.messages.append(message)
-                self.sink(message)
+                parsed_messages.append(message)
             if stop_reason in TERMINAL_STOP_REASONS:
                 has_terminal_stop = True
-        # Surface partial-message previews after the transcript poll (which sets latest_session_id),
-        # so each StreamEvent can carry a non-empty session id.
         self._emit_stream_events()
         if has_terminal_stop:
-            self.ended_clean = True
+            self._finalize_stream_events()
+        for message in parsed_messages:
+            _emit_init_if_needed(self.session, self.sink)
+            self.messages.append(message)
+            self.sink(message)
+        if has_terminal_stop:
             return True
         if self.session.agent is not None and self.session.agent.get_lifecycle_state() in AGENT_DEAD_STATES:
             return True
@@ -585,11 +606,9 @@ def drain_turn(session: LiveSession, sink: MessageSink) -> None:
             outer_timeout_seconds,
             len(ticker.messages),
         )
-    # On a clean completion, deliver the held-back final delta and the closing stream framing. On an
-    # interrupt / timeout the partial sequence is deliberately left unterminated (mirror the transport).
-    if ticker.synthesizer is not None and ticker.ended_clean:
-        for event in ticker.synthesizer.finalize(session.latest_session_id or "", _resolve_model(session)):
-            sink(event)
+    # The ticker emits the closing stream framing in the terminal tick (before the final
+    # AssistantMessage); an interrupt / timeout leaves the partial sequence deliberately
+    # unterminated (mirror the transport), so there is nothing to finalize here.
     # If the turn produced no surfaced content (e.g. interrupted before the first message), still
     # emit the init message before the terminal result so ordering is consistent.
     _emit_init_if_needed(session, sink)
