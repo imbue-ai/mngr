@@ -1,10 +1,10 @@
 import io
 import json
-import os
 import threading
 import time
 from pathlib import Path
-from unittest.mock import patch
+
+import pytest
 
 from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.hosts.host import Host
@@ -85,16 +85,13 @@ def test_build_pass_env_vars_is_populated() -> None:
     assert len(options.env_vars) > 0
 
 
-def test_build_pass_env_vars_drops_kitty_terminal_vars() -> None:
+def test_build_pass_env_vars_drops_kitty_terminal_vars(monkeypatch: pytest.MonkeyPatch) -> None:
     # KITTY_* terminal-emulator vars (notably KITTY_SHELL_INTEGRATION) wedge a headless tmux
     # agent's login-shell startup, so they must not be forwarded into the sourced env file.
-    injected = {
-        "KITTY_SHELL_INTEGRATION": "enabled",
-        "KITTY_WINDOW_ID": "1",
-        "ROBINHOOD_TEST_FORWARDABLE_VAR": "keep-me",
-    }
-    with patch.dict(os.environ, injected, clear=False):
-        options = build_pass_env_vars()
+    monkeypatch.setenv("KITTY_SHELL_INTEGRATION", "enabled")
+    monkeypatch.setenv("KITTY_WINDOW_ID", "1")
+    monkeypatch.setenv("ROBINHOOD_TEST_FORWARDABLE_VAR", "keep-me")
+    options = build_pass_env_vars()
     forwarded_keys = {env_var.key for env_var in options.env_vars}
     assert not any(key.startswith("KITTY_") for key in forwarded_keys)
     # Guard against a vacuous test: a benign var injected alongside is still forwarded.
