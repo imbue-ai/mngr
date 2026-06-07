@@ -2,6 +2,8 @@
 
 from imbue.mngr_vps_docker.cloud_init import _indent
 from imbue.mngr_vps_docker.cloud_init import generate_cloud_init_user_data
+from imbue.mngr_vps_docker.host_setup import PINNED_DOCKER_APT_VERSION
+from imbue.mngr_vps_docker.host_setup import PINNED_GVISOR_RELEASE
 
 
 def test_indent_single_line() -> None:
@@ -57,13 +59,17 @@ def test_generate_cloud_init_disables_password_auth() -> None:
     assert "ssh_pwauth: false" in result
 
 
-def test_generate_cloud_init_installs_docker() -> None:
+def test_generate_cloud_init_installs_pinned_docker() -> None:
     result = generate_cloud_init_user_data(
         host_private_key="fake-key",
         host_public_key="ssh-ed25519 AAAA fake",
         install_gvisor_runtime=False,
     )
-    assert "get.docker.com" in result
+    # Pinned install via the official Docker apt repo (not the unpinned get.docker.com script).
+    assert "get.docker.com" not in result
+    assert "download.docker.com/linux/debian" in result
+    assert f"docker-ce={PINNED_DOCKER_APT_VERSION}" in result
+    assert "--allow-downgrades" in result
     assert "systemctl enable docker" in result
     assert "systemctl start docker" in result
 
@@ -102,11 +108,10 @@ def test_generate_cloud_init_includes_gvisor_install_when_requested() -> None:
         host_public_key="ssh-ed25519 AAAA fake",
         install_gvisor_runtime=True,
     )
-    # Installs runsc from gVisor's APT repo and registers it with the daemon.
-    assert "apt-get install -y runsc" in result
-    assert "gvisor.dev/archive.key" in result
+    # Downloads the pinned dated gVisor release and registers it with the daemon.
+    assert f"gvisor/releases/release/{PINNED_GVISOR_RELEASE}" in result
     assert "runsc install" in result
     # Guarded so it is a no-op when runsc is already registered.
     assert "docker info" in result
-    # gnupg is needed for `gpg --dearmor` on minimal images that lack it.
+    # gnupg is installed with the base packages (needed for the Docker apt key).
     assert "gnupg" in result

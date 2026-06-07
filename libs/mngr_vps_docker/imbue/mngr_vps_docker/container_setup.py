@@ -374,8 +374,9 @@ def provision_snapshot_helper_on_outer(
     enabled and active; the ``docker volume create`` is no-op-with-warning
     when the volume already exists.
 
-    Assumes ``inotify-tools`` and ``jq`` are already installed (cloud-init
-    installs them; OVH installs them via ``_REQUIRED_OUTER_PACKAGES``).
+    Assumes ``inotify-tools`` and ``jq`` are already installed (both the
+    cloud-init and SSH host-setup paths install them via the shared
+    ``host_setup`` base-packages step).
     """
     helper_script = load_resource_text("snapshot_helper.sh")
     helper_service = load_resource_text("snapshot_helper.service")
