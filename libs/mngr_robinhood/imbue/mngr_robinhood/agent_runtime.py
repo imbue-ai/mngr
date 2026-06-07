@@ -125,18 +125,32 @@ def apply_unattended_settings(mngr_ctx: MngrContext, extra_settings: tuple[str, 
 # line mid-value.
 _SHELL_UNSAFE_VALUE_FRAGMENTS: Final[tuple[str, ...]] = ("`", "$(", "\n", "\r")
 
+# Prefixes of terminal-emulator environment variables that must NOT be forwarded to a headless
+# tmux agent. The critical one is ``KITTY_SHELL_INTEGRATION=enabled``: when present, the agent's
+# login shell tries to load kitty's shell-integration scripts even though it is running inside a
+# detached tmux pane (not a real kitty window), which wedges shell startup so claude never boots
+# and never writes its ``session_started`` readiness signal -- the agent then times out / hangs.
+# The whole ``KITTY_*`` family is terminal-specific and useless to a headless agent, so we drop it
+# all. (On main this breakage is masked by luck: ``KITTY_PUBLIC_KEY``'s backtick value triggers an
+# unterminated command substitution that happens to swallow the following ``KITTY_SHELL_INTEGRATION``
+# line; dropping the unsafe-valued ``KITTY_PUBLIC_KEY`` removes that accident and exposes the bug.)
+_TERMINAL_ENV_VAR_PREFIXES_TO_DROP: Final[tuple[str, ...]] = ("KITTY_",)
+
 
 def _is_forwardable_env_var(key: str, value: str) -> bool:
     """True if this process env var is safe to write into the agent's sourced env file.
 
-    Drops the per-agent ``MNGR_*`` / ``LLM_USER_PATH`` vars that mngr sets itself, exported bash
-    function definitions (``BASH_FUNC_*`` keys, whose multi-line ``() { ... }`` values corrupt
-    the env file), and any value containing shell-unsafe fragments (e.g. a backtick) that would
-    break sourcing of the env file and drop every variable written after it.
+    Drops the per-agent ``MNGR_*`` / ``LLM_USER_PATH`` vars that mngr sets itself; terminal-emulator
+    vars (``KITTY_*``) that wedge a headless agent's shell startup; exported bash function definitions
+    (``BASH_FUNC_*`` keys, whose multi-line ``() { ... }`` values corrupt the env file); and any value
+    containing shell-unsafe fragments (e.g. a backtick) that would break sourcing of the env file and
+    drop every variable written after it.
     """
     if key in PER_AGENT_ENV_VARS_TO_DROP:
         return False
     if key.startswith("BASH_FUNC_"):
+        return False
+    if any(key.startswith(prefix) for prefix in _TERMINAL_ENV_VAR_PREFIXES_TO_DROP):
         return False
     if any(fragment in value for fragment in _SHELL_UNSAFE_VALUE_FRAGMENTS):
         return False
