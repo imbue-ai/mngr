@@ -22,8 +22,9 @@ jobs:
         run: bash apps/minds/scripts/mac-runner-reset.sh "${{ inputs.app_zip_url }}"
       - name: verify clean state
         run: |
-          echo "--- ~/.minds ---"
-          ls -d "$HOME/.minds" 2>&1 || echo "  absent"
+          echo "--- Minds state roots ---"
+          ls -d "$HOME/Library/Application Support/Minds" "$HOME/Library/Caches/Minds" \
+            "$HOME/Library/Logs/Minds" "$HOME"/.minds "$HOME"/.minds-* 2>&1 || echo "  absent"
           echo "--- /Applications/minds.app ---"
           ls -d /Applications/minds.app 2>&1 || echo "  absent"
           echo "--- Minds processes ---"

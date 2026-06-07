@@ -209,7 +209,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           // reports contain enough context to debug "Discovering agents..."
           // hangs. Single v keeps noise manageable; -vv (DEBUG) is dev-only.
           'run', '--project', pyprojectDir,
-          // --active makes uv use VIRTUAL_ENV (~/.minds/.venv) instead of
+          // --active makes uv use VIRTUAL_ENV (the per-user app-support .venv) instead of
           // <project>/.venv, which is inside the signed .app bundle and
           // read-only on macOS. Without this, `uv run` tries to create
           // .venv inside the bundle and fails with "Operation not permitted".

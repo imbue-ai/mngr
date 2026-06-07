@@ -88,7 +88,7 @@ function getLatchkeyPath() {
  * once for all their agents, instead of once per agent.
  */
 function getLatchkeyDirectory() {
-  return path.join(getDataDir(), 'latchkey');
+  return path.join(getAppSupportDir(), 'latchkey');
 }
 
 /**
@@ -179,32 +179,109 @@ function getMindsRootName() {
   return 'minds';
 }
 
+/**
+ * Tier subdirectory name for the active root name. Mirror of the Python
+ * `minds_tier_for`: `minds` -> `production`, `minds-<env>` -> `<env>`.
+ */
+function getTier() {
+  const rootName = getMindsRootName();
+  if (rootName === 'minds') {
+    return 'production';
+  }
+  return rootName.slice('minds-'.length);
+}
+
+function xdgBase(envVar, fallback) {
+  const value = process.env[envVar];
+  if (value && path.isAbsolute(value)) {
+    return value;
+  }
+  return fallback;
+}
+
+/**
+ * Resolve the four platform-canonical roots, mirroring the Python
+ * `imbue.minds.bootstrap._minds_roots_for`:
+ *   1. MINDS_DATA_HOME override -> $MINDS_DATA_HOME/<tier>/{app_support,cache,logs,config}
+ *   2. darwin -> Apple Application Support / Caches / Logs
+ *   3. otherwise (Linux) -> the XDG data / cache / state / config dirs
+ */
+function getMindsRoots() {
+  const tier = getTier();
+  const home = os.homedir();
+  const override = process.env.MINDS_DATA_HOME;
+  if (override) {
+    const base = path.join(override, tier);
+    return {
+      appSupport: path.join(base, 'app_support'),
+      cache: path.join(base, 'cache'),
+      logs: path.join(base, 'logs'),
+      config: path.join(base, 'config'),
+    };
+  }
+  if (process.platform === 'darwin') {
+    const appSupport = path.join(home, 'Library', 'Application Support', 'Minds', tier);
+    return {
+      appSupport,
+      cache: path.join(home, 'Library', 'Caches', 'Minds', tier),
+      logs: path.join(home, 'Library', 'Logs', 'Minds', tier),
+      config: path.join(appSupport, 'config'),
+    };
+  }
+  const dataHome = xdgBase('XDG_DATA_HOME', path.join(home, '.local', 'share'));
+  const cacheHome = xdgBase('XDG_CACHE_HOME', path.join(home, '.cache'));
+  const stateHome = xdgBase('XDG_STATE_HOME', path.join(home, '.local', 'state'));
+  const configHome = xdgBase('XDG_CONFIG_HOME', path.join(home, '.config'));
+  return {
+    appSupport: path.join(dataHome, 'minds', tier),
+    cache: path.join(cacheHome, 'minds', tier),
+    logs: path.join(stateHome, 'minds', tier, 'logs'),
+    config: path.join(configHome, 'minds', tier),
+  };
+}
+
+function getAppSupportDir() {
+  return getMindsRoots().appSupport;
+}
+
+function getCacheDir() {
+  return getMindsRoots().cache;
+}
+
+function getConfigDir() {
+  return getMindsRoots().config;
+}
+
+// Electron userData + window-state.json live under the app-support root.
 function getDataDir() {
-  return path.join(os.homedir(), '.' + getMindsRootName());
+  return getAppSupportDir();
 }
 
 function getMngrHostDir() {
-  return path.join(getDataDir(), 'mngr');
+  return path.join(getAppSupportDir(), 'mngr');
 }
 
 function getMngrPrefix() {
   return getMindsRootName() + '-';
 }
 
+// The uv cache, managed python, and .venv are kept under the app-support
+// root (not the cache root) so an OS cache purge can't delete the running
+// app's interpreter out from under it.
 function getUvCacheDir() {
-  return path.join(getDataDir(), '.uv-cache');
+  return path.join(getAppSupportDir(), '.uv-cache');
 }
 
 function getUvPythonDir() {
-  return path.join(getDataDir(), '.uv-python');
+  return path.join(getAppSupportDir(), '.uv-python');
 }
 
 function getLogDir() {
-  return path.join(getDataDir(), 'logs');
+  return getMindsRoots().logs;
 }
 
 function getVenvDir() {
-  return path.join(getDataDir(), '.venv');
+  return path.join(getAppSupportDir(), '.venv');
 }
 
 function getPyprojectDir() {
@@ -232,6 +309,11 @@ module.exports = {
   getLatchkeyDirectory,
   getResticPath,
   getMindsRootName,
+  getTier,
+  getMindsRoots,
+  getAppSupportDir,
+  getCacheDir,
+  getConfigDir,
   getDataDir,
   getMngrHostDir,
   getMngrPrefix,

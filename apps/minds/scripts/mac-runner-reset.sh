@@ -88,20 +88,36 @@ log "wiping leftover /tmp diagnostic artifacts from prior runs"
 # scripts that no longer exist.
 rm -f /tmp/minds-electron.log 2>/dev/null || true
 
-log "removing ~/.minds and /Applications/minds.app"
 # `rm -rf` can race against a not-yet-fully-dead Minds backend process that
-# is still writing to ~/.minds/Cache or ~/.minds/Code Cache. Retry a few
-# times with a short backoff before giving up.
-for attempt in 1 2 3 4 5; do
-  if rm -rf "$HOME/.minds" 2>/dev/null; then
-    break
-  fi
-  log "  rm ~/.minds attempt $attempt failed (likely still being written); waiting 2s"
-  sleep 2
-  if [[ $attempt -eq 5 ]]; then
-    log "  forcing one more pass with verbose errors"
-    rm -rf "$HOME/.minds" || true
-  fi
+# is still writing to a Chromium Cache / Code Cache dir. Retry a few times
+# with a short backoff before giving up.
+wipe_dir() {
+  local target="$1"
+  [[ -e "$target" ]] || return 0
+  for attempt in 1 2 3 4 5; do
+    if rm -rf "$target" 2>/dev/null; then
+      return 0
+    fi
+    log "  rm $target attempt $attempt failed (likely still being written); waiting 2s"
+    sleep 2
+  done
+  log "  forcing one more pass with verbose errors"
+  rm -rf "$target" || true
+}
+
+log "removing Minds state roots and /Applications/minds.app"
+# The override layout (CI sets MINDS_DATA_HOME) puts every root under one
+# tree; clear it wholesale.
+if [[ -n "${MINDS_DATA_HOME:-}" ]]; then
+  wipe_dir "$MINDS_DATA_HOME"
+fi
+# Platform-canonical macOS roots (used when MINDS_DATA_HOME is unset).
+wipe_dir "$HOME/Library/Application Support/Minds"
+wipe_dir "$HOME/Library/Caches/Minds"
+wipe_dir "$HOME/Library/Logs/Minds"
+# Legacy single-dotfolder roots from before the platform-dirs migration.
+for legacy in "$HOME"/.minds "$HOME"/.minds-*; do
+  wipe_dir "$legacy"
 done
 sudo rm -rf /Applications/minds.app
 
