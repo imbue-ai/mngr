@@ -43,6 +43,47 @@ minds run
    - An **app watcher** service monitors `applications.toml` and writes server events to `events.jsonl` for discovery
    - A **cloudflared** service watches `runtime/secrets` for a tunnel token and runs the Cloudflare tunnel
 
+## Where Minds stores its data
+
+Minds follows each OS's documented conventions instead of a single dotfolder.
+State is split across four roots, each with the tier (`production` / `staging` /
+`dev-<name>`) as its first subdirectory:
+
+| Category | macOS | Linux (XDG) |
+|----------|-------|-------------|
+| App support (secrets, sessions, mngr, ssh, telegram, latchkey, backups) | `~/Library/Application Support/Minds/<tier>/` | `~/.local/share/minds/<tier>/` |
+| Cache (regenerable, e.g. the FCT clone) | `~/Library/Caches/Minds/<tier>/` | `~/.cache/minds/<tier>/` |
+| Logs | `~/Library/Logs/Minds/<tier>/` | `~/.local/state/minds/<tier>/logs/` |
+| Config (`client.toml`, `config.toml`) | `~/Library/Application Support/Minds/<tier>/config/` | `~/.config/minds/<tier>/` |
+
+Set `MINDS_DATA_HOME` to override everything: all four roots become
+`$MINDS_DATA_HOME/<tier>/{app_support,cache,logs,config}/`. This is what the
+test/CI runner uses for a self-contained, throwaway tree.
+
+An older install under `~/.minds/` (or `~/.minds-<tier>/`) is migrated to these
+locations automatically on first launch of a new build; the legacy directory is
+left in place with a `MIGRATED.txt` pointer and is safe to delete.
+
+## Uninstalling Minds
+
+Drag `Minds.app` to the Trash, then delete the four data roots for each tier you
+used (see the table above). For production on macOS that is:
+
+```bash
+rm -rf "$HOME/Library/Application Support/Minds/production" \
+       "$HOME/Library/Caches/Minds/production" \
+       "$HOME/Library/Logs/Minds/production"
+```
+
+Or let the CLI do it for one env (after confirmation):
+
+```bash
+uv run minds env teardown production   # or staging / dev-<name>
+```
+
+`minds env teardown` deletes only local data roots; it does not touch any cloud
+resources (use `minds env destroy` for a deployed env's cloud teardown).
+
 ## Learn more
 
 - [Architecture and design](./docs/design.md)

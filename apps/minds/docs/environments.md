@@ -18,14 +18,26 @@ pool-management SSH keypair. There is zero cross-tier reach.
 
 ## Per-env data root
 
-Every minds env owns one data root:
+Each env's state lives under platform-canonical roots keyed by tier rather than
+a single dotfolder. The app-support root (secrets, mngr, ssh, telegram,
+latchkey, dev-env `client.toml`/`secrets.toml`) per tier is:
 
-| Env name              | Data root                | `MINDS_ROOT_NAME`    |
-|-----------------------|--------------------------|----------------------|
-| `production`          | `~/.minds/`              | `minds`              |
-| `staging`             | `~/.minds-staging/`      | `minds-staging`      |
-| `dev-<your-user>`     | `~/.minds-dev-<your-user>/` | `minds-dev-<your-user>` |
-| `dev-josh-1` (any dev) | `~/.minds-dev-josh-1/`  | `minds-dev-josh-1`   |
+| Env name              | App-support root (macOS)                          | `MINDS_ROOT_NAME`    |
+|-----------------------|---------------------------------------------------|----------------------|
+| `production`          | `~/Library/Application Support/Minds/production/`  | `minds`              |
+| `staging`             | `~/Library/Application Support/Minds/staging/`     | `minds-staging`      |
+| `dev-<your-user>`     | `~/Library/Application Support/Minds/dev-<your-user>/` | `minds-dev-<your-user>` |
+| `dev-josh-1` (any dev) | `~/Library/Application Support/Minds/dev-josh-1/` | `minds-dev-josh-1`   |
+
+On Linux the app-support root is `~/.local/share/minds/<tier>/`; caches, logs,
+and config live under their own roots (see the
+[README data-locations table](../README.md#where-minds-stores-its-data)).
+`MINDS_DATA_HOME` overrides everything to
+`$MINDS_DATA_HOME/<tier>/{app_support,cache,logs,config}/`.
+
+> Note: older `~/.minds/` and `~/.minds-<tier>/` paths mentioned elsewhere in
+> this doc are the *legacy* location. A new build migrates that tree onto the
+> roots above on first launch.
 
 By convention dev env names lead with the tier (`dev-`) so the
 `MINDS_ROOT_NAME` always reads tier-first: `minds-dev-<your-user>`,
