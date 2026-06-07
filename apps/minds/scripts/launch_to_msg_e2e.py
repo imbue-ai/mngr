@@ -1368,9 +1368,21 @@ async def amain() -> int:
             minds_proc.terminate()
             with contextlib.suppress(Exception):
                 minds_proc.wait(timeout=15)
-            # Give the SIGTERM->Electron->backend->mngr_forward shutdown
-            # chain time to release :8421 before the new launch claims it.
-            await asyncio.sleep(5)
+            # The Electron shutdown chain SHOULD SIGTERM mngr forward +
+            # latchkey gateway, but in practice (per memory
+            # feedback_orphan_mngr_forward_blocks_8421 and #106) orphans
+            # routinely survive. If they do, the next launch's mngr_forward
+            # binds nothing on :8421 (or binds but has stale state with
+            # no W1), so the chat URL redirects to localhost:8421/.
+            # Sweep both names explicitly between quit and relaunch.
+            _kill_pgrep("mngr forward", "orphan mngr forward")
+            _kill_pgrep("mngr latchkey forward", "orphan mngr latchkey forward")
+            _kill_pgrep("latchkey gateway", "orphan latchkey gateway")
+            _kill_pgrep("mngr observe", "orphan mngr observe")
+            _kill_pgrep("mngr event", "orphan mngr event")
+            # Settle: SIGTERM propagation + socket close + Electron shutdown
+            # all need time. 10s is empirically enough for :8421 to free.
+            await asyncio.sleep(10)
 
             cdp_port2 = _free_port()
             logger.info("relaunching {} --remote-debugging-port={}", MINDS_APP_PATH, cdp_port2)
