@@ -183,9 +183,8 @@ class ClaudeSDKClient(MutableModel):
     def _start_hook_bridge_if_needed(self) -> None:
         """Start the in-process can_use_tool / hooks bridge when the options request callbacks.
 
-        The bridge runs callbacks on this client's event loop and records permission denials into
-        the live session (surfaced in ResultMessage.permission_denials). Started here (in the async
-        context) because it needs the running loop.
+        The bridge runs callbacks on its own anyio portal thread (created by start_hook_bridge) and
+        records permission denials into the live session (surfaced in ResultMessage.permission_denials).
         """
         session = self.session
         if session is None or not is_hook_bridge_needed(self.options):
