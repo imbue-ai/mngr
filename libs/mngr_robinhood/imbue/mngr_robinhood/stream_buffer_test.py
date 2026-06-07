@@ -63,6 +63,50 @@ def test_compute_stream_delta_divergence_does_not_reemit_common_prefix() -> None
     assert new_emitted == "Title\n\n---\nFor years he kept the light.\n"
 
 
+def test_compute_stream_delta_blank_line_collapse_does_not_reemit_already_emitted_paragraph() -> None:
+    # Regression: the paragraph after a horizontal rule has ALREADY been emitted (it
+    # is part of emitted_body). When Claude collapses the blank line between the rule
+    # and the paragraph as later text streams in, the body diverges from emitted_body,
+    # but the paragraph must NOT be printed a second time (plain text cannot be
+    # unprinted). The previous char-level common-prefix logic re-emitted everything
+    # past the collapsed blank line, duplicating the paragraph.
+    emitted = "Some earlier text.\n\n---\n\nHer name was Sefa.\n"
+    delta, new_emitted = compute_stream_delta(
+        "id\nSome earlier text.\n\n---\nHer name was Sefa.\nstreaming tail", emitted, is_flush=False
+    )
+    assert delta == ""
+    assert new_emitted == emitted
+
+
+def test_compute_stream_delta_blank_line_collapse_emits_only_new_tail() -> None:
+    # After the blank-line reflow, any genuinely new content past the already-emitted
+    # text is still emitted (and only that new content).
+    emitted = "Title\n\n---\n\nFirst paragraph.\n"
+    delta, new_emitted = compute_stream_delta(
+        "id\nTitle\n\n---\nFirst paragraph.\nSecond paragraph.\ntail", emitted, is_flush=False
+    )
+    assert delta == "Second paragraph.\n"
+    assert new_emitted == "Title\n\n---\nFirst paragraph.\nSecond paragraph.\n"
+
+
+def test_compute_stream_delta_sequence_with_rule_reflow_emits_paragraph_once() -> None:
+    # Drive the consumer's poll loop over a snapshot sequence where the blank line
+    # around a horizontal rule collapses while the following paragraph streams in.
+    # The paragraph must appear exactly once across the concatenated deltas.
+    paragraph = "Her name was Sefa, and she came from the open west."
+    snapshots = [
+        "id\nEarlier.\n\n---\n",
+        f"id\nEarlier.\n\n---\n\n{paragraph}\nstreaming...",
+        f"id\nEarlier.\n\n---\n{paragraph}\nmore streaming...",
+    ]
+    emitted = ""
+    output_parts: list[str] = []
+    for snapshot in snapshots:
+        delta, emitted = compute_stream_delta(snapshot, emitted, is_flush=False)
+        output_parts.append(delta)
+    assert "".join(output_parts).count(paragraph) == 1
+
+
 def test_compute_stream_delta_empty_body_after_idle() -> None:
     # When the watcher empties the body at turn end, only the id line remains.
     delta, emitted = compute_stream_delta("uuid-1", "previous text", is_flush=False)

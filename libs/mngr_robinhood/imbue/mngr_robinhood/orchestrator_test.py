@@ -64,14 +64,17 @@ def test_stream_consumer_emits_full_new_message_sharing_prefix_across_turns() ->
     )
 
     _drive_consumer_turn(consumer, host, ["id1\nThe answer is\n", "id1\nThe answer is 42.\nx"])
-    assert stdout.getvalue() == "The answer is\n 42.\nx"
+    # The continuation reflows "The answer is" onto the same line as "42."; the
+    # already-printed newline cannot be unprinted, and the redundant whitespace at
+    # the reflow boundary is collapsed rather than re-emitted.
+    assert stdout.getvalue() == "The answer is\n42.\nx"
 
     stdout.truncate(0)
     stdout.seek(0)
     _drive_consumer_turn(consumer, host, ["id2\nThe answer is\n", "id2\nThe answer is right.\nx"])
-    # The full new message is emitted; the shared "The answer is " prefix is not
-    # stripped (which would have produced "\n right.\nx").
-    assert stdout.getvalue() == "The answer is\n right.\nx"
+    # The full new message is emitted; the shared "The answer is" prefix is not
+    # stripped (which would have produced just "right.\nx" without the prefix).
+    assert stdout.getvalue() == "The answer is\nright.\nx"
 
     # A subsequent turn with no new output must not re-emit the prior content.
     stdout.truncate(0)

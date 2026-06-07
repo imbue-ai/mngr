@@ -42,24 +42,56 @@ def compute_stream_delta(buffer_content: str, emitted_body: str, is_flush: bool)
     if emitted_body.startswith(visible):
         return "", emitted_body
     # Divergence: the body is neither an extension nor a prefix of what we've emitted. This happens
-    # when the rendered text shifts slightly (e.g. Claude collapses the blank line around a
-    # horizontal rule as a paragraph streams in) and -- across turns -- when a new message begins.
-    # Emit only the part of the body past the longest common prefix with what we already emitted,
-    # never re-emitting the common prefix (plain-text output cannot be unprinted, so re-emitting
-    # would duplicate everything from the divergence point back to the start). At worst a small
-    # amount of already-printed text is left stale.
-    common = _common_prefix_length(emitted_body, visible)
-    return visible[common:], visible
+    # when the rendered text reflows (e.g. Claude collapses a blank line around a horizontal rule as
+    # the following paragraph streams in) and -- across turns -- when a new message begins. Emit only
+    # the content past what we have already emitted, treating whitespace runs as equivalent so a
+    # reflowed-but-already-printed region is recognized as already emitted rather than re-printed.
+    # Plain-text output cannot be unprinted, so re-emitting that region would duplicate everything
+    # from the reflow point onward (this is the source of the duplicated paragraphs seen after a
+    # horizontal rule). At worst a little already-printed whitespace (a collapsed blank line) is left
+    # stale; if no new content remains, keep the existing emitted body as the baseline.
+    suffix_start = _unemitted_suffix_start(emitted_body, visible)
+    delta = visible[suffix_start:]
+    if delta == "":
+        return "", emitted_body
+    return delta, visible
 
 
 @pure
-def _common_prefix_length(first: str, second: str) -> int:
-    """Return the length of the longest common prefix of two strings."""
-    limit = min(len(first), len(second))
-    index = 0
-    while index < limit and first[index] == second[index]:
-        index += 1
-    return index
+def _unemitted_suffix_start(emitted_body: str, visible: str) -> int:
+    """Return the index in ``visible`` where genuinely new (un-emitted) content begins.
+
+    Walks ``emitted_body`` and ``visible`` together, consuming a whitespace run in one as matching a
+    whitespace run in the other and skipping whitespace present in only one. This absorbs the
+    blank-line reflow Claude performs as text streams in (e.g. collapsing the blank line around a
+    horizontal rule), so content already emitted under a different line layout is recognized as
+    already-emitted rather than re-emitted. Stops at the first non-whitespace character that diverges
+    (or when ``emitted_body`` is exhausted) and returns that visible offset.
+    """
+    emitted_index = 0
+    visible_index = 0
+    matched_visible_index = 0
+    while emitted_index < len(emitted_body) and visible_index < len(visible):
+        is_emitted_space = emitted_body[emitted_index].isspace()
+        is_visible_space = visible[visible_index].isspace()
+        if is_emitted_space and is_visible_space:
+            while emitted_index < len(emitted_body) and emitted_body[emitted_index].isspace():
+                emitted_index += 1
+            while visible_index < len(visible) and visible[visible_index].isspace():
+                visible_index += 1
+            matched_visible_index = visible_index
+        elif is_emitted_space:
+            emitted_index += 1
+        elif is_visible_space:
+            visible_index += 1
+            matched_visible_index = visible_index
+        elif emitted_body[emitted_index] == visible[visible_index]:
+            emitted_index += 1
+            visible_index += 1
+            matched_visible_index = visible_index
+        else:
+            break
+    return matched_visible_index
 
 
 @pure
