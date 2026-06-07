@@ -22,7 +22,7 @@
         <strong>read-only</strong> access to the following file:
       {% endif %}
     </p>
-    <div class="bg-white border border-zinc-200 rounded-xl p-4 flex items-center gap-3">
+    <Card layout="row">
       <code class="text-sm font-mono text-zinc-900 break-all flex-1 min-w-0">{{ file_path }}</code>
       {# Access mode badge -- emerald tint for read-only, amber for
          read+write so the broader grant stands out visually. #}
@@ -35,7 +35,7 @@
           {{ access_human_label }}
         </span>
       {% endif %}
-    </div>
+    </Card>
     {# Hidden checked input named ``permissions`` so the base dialog's
        updateApproveState enables the Approve button on first paint:
        there is no per-permission choice in this flow, the request itself

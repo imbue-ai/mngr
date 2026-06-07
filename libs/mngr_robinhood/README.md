@@ -34,7 +34,30 @@ printf '%s\n%s\n' \
   '{"type":"user","message":{"role":"user","content":"hi"}}' \
   '{"type":"user","message":{"role":"user","content":"and again"}}' \
   | mngr robinhood --input-format stream-json --output-format stream-json
+
+# Live (approximate) streaming of the response as it is produced
+mngr robinhood --output-format stream-json --include-partial-messages "tell me a long story"
+mngr robinhood --stream-plain-text "tell me a long story"
 ```
+
+## Streaming the response
+
+`mngr robinhood` can surface an *approximate* live view of the response, sourced
+from the agent's `stream_buffer` (the tmux-based response stream; see the
+`imbue-mngr-claude` README). Two opt-in flags enable it:
+
+- `--include-partial-messages` (requires `--output-format stream-json`): emits
+  claude-native `stream_event` / `text_delta` events as the response is produced,
+  followed by the authoritative `assistant` message from the transcript.
+- `--stream-plain-text` (text output, the default): streams the response text to
+  stdout incrementally and suppresses the trailing full-text dump to avoid
+  duplication.
+
+When either flag is set, robinhood enables the streaming watcher on the spawned
+agent and defaults the model to sonnet (so fast mode is off and streaming is
+observable); a user-passed `--model` still takes precedence. The streamed text is
+best-effort: the `result` envelope (and, in stream-json, the final `assistant`
+message) remain the source of truth.
 
 ## Flags not supported in v1
 
@@ -44,7 +67,6 @@ The following `claude` flags are explicitly rejected (exit code 2):
 - `--max-budget-usd`
 - `--no-session-persistence`
 - `--include-hook-events`
-- `--include-partial-messages`
 - `-c` / `--continue`
 - `-r` / `--resume`
 - `--session-id`

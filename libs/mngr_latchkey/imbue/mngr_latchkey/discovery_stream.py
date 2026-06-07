@@ -46,6 +46,7 @@ from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.api.discovery_events import partition_removed_agents_by_provider_error
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
@@ -59,7 +60,7 @@ MNGR_BINARY: Final[str] = "mngr"
 # pydantic types so test doubles can pass arbitrary callables without
 # having to subclass the production discovery handler (which carries
 # its own required fields).
-OnAgentDiscoveredCallback = Callable[[AgentId, RemoteSSHInfo | None, str], None]
+OnAgentDiscoveredCallback = Callable[[AgentId, HostId, RemoteSSHInfo | None, str], None]
 OnAgentDestroyedCallback = Callable[[AgentId], None]
 
 
@@ -243,7 +244,7 @@ class DiscoveryStreamConsumer(MutableModel):
 
         for agent in new_agents.values():
             ssh_info = self._ssh_for_agent(agent.agent_id)
-            self._safely_call_discovered(agent.agent_id, ssh_info, str(agent.provider_name))
+            self._safely_call_discovered(agent.agent_id, agent.host_id, ssh_info, str(agent.provider_name))
 
     def _handle_host_ssh_info(self, event: HostSSHInfoEvent) -> None:
         ssh_info = _convert_ssh_info(event.ssh)
@@ -259,7 +260,7 @@ class DiscoveryStreamConsumer(MutableModel):
         # ``LatchkeyDiscoveryHandler`` can set up the reverse tunnel
         # now that SSH info is finally available.
         for agent_id, provider_name in agents_on_host:
-            self._safely_call_discovered(agent_id, ssh_info, provider_name)
+            self._safely_call_discovered(agent_id, HostId(host_id_str), ssh_info, provider_name)
 
     def _handle_agent_discovered(self, event: AgentDiscoveryEvent) -> None:
         agent = event.agent
@@ -268,7 +269,7 @@ class DiscoveryStreamConsumer(MutableModel):
             self._host_id_by_agent_id[aid_str] = str(agent.host_id)
             self._provider_by_agent_id[aid_str] = str(agent.provider_name)
         ssh_info = self._ssh_for_agent(agent.agent_id)
-        self._safely_call_discovered(agent.agent_id, ssh_info, str(agent.provider_name))
+        self._safely_call_discovered(agent.agent_id, agent.host_id, ssh_info, str(agent.provider_name))
 
     def _handle_agent_destroyed(self, event: AgentDestroyedEvent) -> None:
         self._destroy_agent(event.agent_id)
@@ -296,12 +297,13 @@ class DiscoveryStreamConsumer(MutableModel):
     def _safely_call_discovered(
         self,
         agent_id: AgentId,
+        host_id: HostId,
         ssh_info: RemoteSSHInfo | None,
         provider_name: str,
     ) -> None:
         for callback in self._on_agent_discovered_callbacks:
             try:
-                callback(agent_id, ssh_info, provider_name)
+                callback(agent_id, host_id, ssh_info, provider_name)
             except (OSError, RuntimeError, ValueError) as e:
                 logger.warning("on_agent_discovered callback failed for {}: {}", agent_id, e)
 

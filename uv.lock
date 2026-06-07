@@ -1972,6 +1972,7 @@ dependencies = [
     { name = "pluggy" },
     { name = "psutil" },
     { name = "pydantic" },
+    { name = "watchdog" },
 ]
 
 [package.metadata]
@@ -1986,6 +1987,7 @@ requires-dist = [
     { name = "pluggy", specifier = ">=1.0" },
     { name = "psutil", specifier = ">=5.9" },
     { name = "pydantic", specifier = ">=2.0" },
+    { name = "watchdog", specifier = ">=4.0" },
 ]
 
 [[package]]

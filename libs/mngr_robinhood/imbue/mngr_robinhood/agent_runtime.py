@@ -103,11 +103,16 @@ def normalize_credentials_env() -> None:
     os.environ.pop("ORIGINAL_CLAUDE_CONFIG_DIR", None)
 
 
-def apply_unattended_settings(mngr_ctx: MngrContext) -> MngrContext:
-    """Inject the claude agent-type config overrides for unattended operation."""
+def apply_unattended_settings(mngr_ctx: MngrContext, extra_settings: tuple[str, ...] = ()) -> MngrContext:
+    """Inject the claude agent-type config overrides for unattended operation.
+
+    ``extra_settings`` (e.g. streaming overrides) are merged into the SAME
+    ``apply_settings_to_config`` call so the ``settings_overrides`` dict is assembled in one shot (a
+    second merge over the non-empty dict would trip the settings-narrowing guard).
+    """
     updated_config = apply_settings_to_config(
         mngr_ctx.config,
-        UNATTENDED_SETTINGS,
+        UNATTENDED_SETTINGS + extra_settings,
         mngr_ctx.config.disabled_plugins,
     )
     return mngr_ctx.model_copy_update(to_update(mngr_ctx.field_ref().config, updated_config))

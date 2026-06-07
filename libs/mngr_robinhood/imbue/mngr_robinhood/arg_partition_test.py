@@ -112,3 +112,38 @@ def test_only_first_positional_is_prompt_others_forwarded() -> None:
     partition = partition_args(("first", "second"))
     assert partition.positional_prompt == "first"
     assert partition.pass_through_agent_args == ("second",)
+
+
+def test_include_partial_messages_no_longer_rejected() -> None:
+    assert "--include-partial-messages" not in REJECTED_FLAGS
+
+
+def test_include_partial_messages_accepted_with_stream_json() -> None:
+    partition = partition_args(("--output-format", "stream-json", "--include-partial-messages", "hi"))
+    assert partition.include_partial_messages
+    assert partition.positional_prompt == "hi"
+    # Consumed by the wrapper, not forwarded to the spawned claude.
+    assert partition.pass_through_agent_args == ()
+
+
+def test_include_partial_messages_requires_stream_json() -> None:
+    with pytest.raises(UnsupportedClaudeFlagError, match="requires --output-format=stream-json"):
+        partition_args(("--include-partial-messages", "hi"))
+
+
+def test_stream_plain_text_accepted_with_text_output() -> None:
+    partition = partition_args(("--stream-plain-text", "hi"))
+    assert partition.stream_plain_text
+    assert partition.positional_prompt == "hi"
+    assert partition.pass_through_agent_args == ()
+
+
+def test_stream_plain_text_rejected_with_json_output() -> None:
+    with pytest.raises(UnsupportedClaudeFlagError, match="requires --output-format=text"):
+        partition_args(("--output-format", "json", "--stream-plain-text", "hi"))
+
+
+def test_streaming_flags_default_false() -> None:
+    partition = partition_args(("hi",))
+    assert not partition.include_partial_messages
+    assert not partition.stream_plain_text

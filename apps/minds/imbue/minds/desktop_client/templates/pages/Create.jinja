@@ -156,16 +156,13 @@
   })();
 </script>
 {% endset %}
-<Base title="Create workspace"
-      body_class="bg-zinc-50 text-zinc-900 font-sans antialiased flex items-center justify-center min-h-screen p-6"
-      scripts={{ _scripts }}>
-  <main class="w-full max-w-[520px] bg-white border border-zinc-200 rounded-xl shadow-sm p-6">
-    <form id="create-form" action="/create" method="post">
+<CardPage title="Create workspace" padding="form" max_width="max-w-[520px]" scripts={{ _scripts }}>
+  <form id="create-form" action="/create" method="post">
 
       <div class="flex items-center justify-between gap-4 mb-5">
         <h1 class="text-sm font-medium text-zinc-500">Create workspace</h1>
         <select id="account_id" name="account_id"
-                class="max-w-[220px] text-xs text-right text-zinc-400 bg-transparent border-0 rounded px-1 py-1 outline-none cursor-pointer transition-colors hover:text-zinc-600 focus:outline-none focus:ring-0">
+                class="max-w-[220px] text-xs text-right text-zinc-400 bg-transparent border-0 rounded-md px-1 py-1 outline-none cursor-pointer transition-colors hover:text-zinc-700 focus:outline-none focus:ring-0">
           {% for acct in accounts %}
             <option value="{{ acct.user_id }}"{% if acct.user_id == default_account_id %} selected{% endif %}>{{ acct.email }}</option>
           {% endfor %}
@@ -184,85 +181,81 @@
 
       <div class="flex items-center justify-between gap-3 mt-2.5 px-1 text-xs">
         <span id="config-summary" class="text-zinc-400 leading-snug"></span>
-        <button type="button" id="configure-toggle"
-                class="text-blue-600 hover:text-blue-700 cursor-pointer transition-colors whitespace-nowrap">
+        <Button variant="ghost" id="configure-toggle"
+                extra="!p-0 !bg-transparent !text-xs !font-normal !text-blue-600 hover:!bg-transparent hover:underline hover:!text-blue-700 whitespace-nowrap">
           Configure&hellip;
-        </button>
+        </Button>
       </div>
 
       <div id="configure-panel" class="hidden mt-5 flex flex-col gap-4">
 
         <div>
           <div class="flex items-center justify-between gap-3">
-            <label for="launch_mode" class="text-sm text-zinc-900 font-medium">Compute provider</label>
-            <select id="launch_mode" name="launch_mode"
-                    class="w-48 px-3 py-2 text-sm rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
+            <FormLabel target="launch_mode" inline>Compute provider</FormLabel>
+            <Select id="launch_mode" name="launch_mode" width="w-48">
               {% for mode in launch_modes %}
                 <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}
                         {% if mode.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{{ mode.value | lower }}</option>
               {% endfor %}
-            </select>
+            </Select>
           </div>
           <p id="launch-mode-account-error" class="hidden mt-1 text-xs text-amber-600 text-right">imbue_cloud requires a selected account.</p>
         </div>
 
         <div>
           <div class="flex items-center justify-between gap-3">
-            <label for="ai_provider" class="text-sm text-zinc-900 font-medium">AI provider</label>
-            <select id="ai_provider" name="ai_provider"
-                    class="w-48 px-3 py-2 text-sm rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
+            <FormLabel target="ai_provider" inline>AI provider</FormLabel>
+            <Select id="ai_provider" name="ai_provider" width="w-48">
               {% for provider in ai_providers %}
                 <option value="{{ provider.value }}"{% if provider.value == selected_ai_provider %} selected{% endif %}
                         {% if provider.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{{ provider.value | lower }}</option>
               {% endfor %}
-            </select>
+            </Select>
           </div>
           <p id="ai-provider-account-error" class="hidden mt-1 text-xs text-amber-600 text-right">imbue_cloud requires a selected account.</p>
           <div id="api-key-row" class="mt-2 hidden">
-            <label for="anthropic_api_key" class="text-sm text-zinc-900 font-medium block mb-1">Anthropic API key</label>
+            <FormLabel target="anthropic_api_key">Anthropic API key</FormLabel>
             <TextInput name="anthropic_api_key" :value="anthropic_api_key" placeholder="sk-ant-..." id="anthropic_api_key" type="password" />
           </div>
         </div>
 
         <div>
           <div class="flex items-center justify-between gap-3">
-            <label for="backup_provider" class="text-sm text-zinc-900 font-medium">Backup provider</label>
-            <select id="backup_provider" name="backup_provider"
-                    class="w-48 px-3 py-2 text-sm rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
+            <FormLabel target="backup_provider" inline>Backup provider</FormLabel>
+            <Select id="backup_provider" name="backup_provider" width="w-48">
               {% for provider in backup_providers %}
                 <option value="{{ provider.value }}"{% if provider.value == selected_backup_provider %} selected{% endif %}
                         {% if provider.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{% if provider.value == 'API_KEY' %}manual{% else %}{{ provider.value | lower }}{% endif %}</option>
               {% endfor %}
-            </select>
+            </Select>
           </div>
           <p id="backup-provider-account-error" class="hidden mt-1 text-xs text-amber-600 text-right">imbue_cloud requires a selected account.</p>
 
           <div id="backup-api-key-row" class="mt-2 hidden">
-            <label for="backup_api_key_env" class="text-sm text-zinc-900 font-medium block mb-1">restic environment</label>
+            <FormLabel target="backup_api_key_env">restic environment</FormLabel>
             <p class="mb-1 text-xs text-zinc-400">
               Written verbatim to <code>restic.env</code>. Don't set <code>RESTIC_PASSWORD</code> -- minds assigns each
               workspace its own. See the
-              <a href="https://restic.readthedocs.io/en/stable/040_backup.html#environment-variables"
-                 target="_blank" rel="noopener" class="text-blue-600 hover:underline">restic docs</a>.
+              <Link href="https://restic.readthedocs.io/en/stable/040_backup.html#environment-variables"
+                    target="_blank" rel="noopener">restic docs</Link>.
             </p>
-            <textarea id="backup_api_key_env" name="backup_api_key_env" rows="6"
-                      class="w-full px-3 py-2.5 text-sm font-mono rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">{{ backup_api_key_env if backup_api_key_env else _default_restic_env }}</textarea>
+            <Textarea id="backup_api_key_env" name="backup_api_key_env" rows="6" extra="font-mono"
+                      :value="backup_api_key_env if backup_api_key_env else _default_restic_env" />
           </div>
 
           <div id="backup-encryption-row" class="mt-2 hidden">
             <div class="flex items-center justify-between gap-3">
-              <label for="backup_encryption_method" class="text-sm text-zinc-900 font-medium">Backup encryption method</label>
-              <select id="backup_encryption_method" name="backup_encryption_method"
-                      class="w-48 px-3 py-2 text-sm rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
+              <FormLabel target="backup_encryption_method" inline>Backup encryption method</FormLabel>
+              <Select id="backup_encryption_method" name="backup_encryption_method" width="w-48">
                 {% for method in backup_encryption_methods %}
                   <option value="{{ method.value }}"{% if method.value == selected_backup_encryption_method %} selected{% endif %}>{{ method.value | lower }}</option>
                 {% endfor %}
-              </select>
+              </Select>
             </div>
           </div>
 
           <div id="backup-master-password-row" class="mt-2 hidden">
-            <label for="backup_master_password" class="text-sm text-zinc-900 font-medium block mb-1">Backup master password</label>
+            <FormLabel target="backup_master_password">Backup master password</FormLabel>
             {% if has_saved_backup_password %}
               <p class="text-xs text-zinc-500">A saved backup password will be used for this workspace.</p>
             {% else %}
@@ -276,24 +269,23 @@
           </div>
         </div>
 
-        <button type="button" id="toggle-advanced"
-                class="self-start text-xs text-blue-600 hover:text-blue-700 cursor-pointer transition-colors">
+        <Button variant="ghost" id="toggle-advanced"
+                extra="self-start !p-0 !bg-transparent !text-xs !font-normal !text-blue-600 hover:!bg-transparent hover:underline hover:!text-blue-700">
           Show advanced settings
-        </button>
+        </Button>
 
         <div id="advanced-options" class="hidden flex flex-col gap-4">
           <div>
-            <label for="git_url" class="text-sm text-zinc-900 font-medium block mb-1">Repository</label>
+            <FormLabel target="git_url">Repository</FormLabel>
             <p class="mb-1 text-xs text-zinc-400">Git URL or local path</p>
             <TextInput name="git_url" :value="git_url" placeholder="https://github.com/user/repo.git" id="git_url" required />
           </div>
           <div>
-            <label for="branch" class="text-sm text-zinc-900 font-medium block mb-1">Branch</label>
+            <FormLabel target="branch">Branch</FormLabel>
             <p class="mb-1 text-xs text-zinc-400">Leave empty for latest version</p>
             <TextInput name="branch" :value="branch" placeholder="latest tag" id="branch" />
           </div>
         </div>
       </div>
-    </form>
-  </main>
-</Base>
+  </form>
+</CardPage>
