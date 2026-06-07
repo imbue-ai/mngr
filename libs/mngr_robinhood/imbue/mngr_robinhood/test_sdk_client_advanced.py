@@ -78,20 +78,23 @@ async def test_receive_messages_includes_system_init(sdk: ModuleType, sdk_live_m
     assert any(isinstance(m, SystemMessage) and m.subtype == "init" for m in collected)
 
 
+# A deliberately long prompt: the mngr target streams approximately by polling the agent's tmux
+# pane every ~0.25s, so the response must render over several poll intervals for partials to appear.
+_STREAMING_PROMPT = "Write a detailed story of at least six paragraphs about a lighthouse keeper and the sea."
+
+
 async def test_include_partial_messages_yields_stream_events(
-    sdk: ModuleType, requires_native_sdk: None, sdk_live_model: str, sdk_cwd: Path
+    sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path
 ) -> None:
     options = make_sdk_options(sdk_live_model, sdk_cwd, include_partial_messages=True)
-    messages = await collect_query_messages(sdk, "Write a short two-sentence story.", options)
+    messages = await collect_query_messages(sdk, _STREAMING_PROMPT, options)
     stream_events = [m for m in messages if isinstance(m, StreamEvent)]
     assert len(stream_events) >= 1
 
 
-async def test_stream_event_has_documented_fields(
-    sdk: ModuleType, requires_native_sdk: None, sdk_live_model: str, sdk_cwd: Path
-) -> None:
+async def test_stream_event_has_documented_fields(sdk: ModuleType, sdk_live_model: str, sdk_cwd: Path) -> None:
     options = make_sdk_options(sdk_live_model, sdk_cwd, include_partial_messages=True)
-    messages = await collect_query_messages(sdk, "Write a short two-sentence story.", options)
+    messages = await collect_query_messages(sdk, _STREAMING_PROMPT, options)
     stream_events = [m for m in messages if isinstance(m, StreamEvent)]
     assert len(stream_events) >= 1
     for event in stream_events:

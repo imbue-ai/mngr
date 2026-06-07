@@ -72,6 +72,7 @@ from imbue.mngr_robinhood._agent_sdk.message_parser import collect_assistant_tex
 from imbue.mngr_robinhood._agent_sdk.message_parser import parse_transcript_event
 from imbue.mngr_robinhood._agent_sdk.pricing import accumulate_usage_totals
 from imbue.mngr_robinhood._agent_sdk.pricing import compute_total_cost_usd
+from imbue.mngr_robinhood._agent_sdk.stream_events import StreamEventSynthesizer
 from imbue.mngr_robinhood.agent_runtime import AGENT_DEAD_STATES
 from imbue.mngr_robinhood.agent_runtime import AGENT_READY_TIMEOUT_SECONDS
 from imbue.mngr_robinhood.agent_runtime import POLL_INTERVAL_SECONDS
@@ -89,6 +90,12 @@ from imbue.mngr_robinhood.raw_transcript import RAW_TRANSCRIPT_PATH
 # Label attached to every agent the SDK creates, so they are recognizable in ``mngr list`` and
 # can be enumerated by the session functions.
 SDK_CREATED_BY_LABEL: Final[Mapping[str, str]] = {"created-by": "robinhood-agent-sdk"}
+
+# Agent-type config injected (only) when the caller requests include_partial_messages: enable the
+# mngr_claude tmux response-streaming watcher at a 0.25s poll cadence. Unlike the robinhood CLI's
+# streaming settings, this deliberately does NOT force the model to sonnet -- the SDK honors the
+# caller's requested model.
+_SDK_STREAMING_SETTINGS: Final[tuple[str, ...]] = ("agent_types.claude.streaming_snapshot_interval_seconds=0.25",)
 
 # The tools list reported in the synthesized ``system``/``init`` message. mngr does not surface
 # claude's negotiated tool list at wrapper level, so we report the documented built-in set; this
@@ -160,7 +167,11 @@ def start_session(options: ClaudeAgentOptions) -> LiveSession:
     # failure path without swallowing or narrowing the propagating exception.
     is_session_built = False
     try:
-        mngr_ctx = apply_unattended_settings(build_sdk_mngr_context(concurrency_group))
+        # Enable the tmux response-streaming watcher only when the caller asked for partial
+        # messages. Unlike the CLI streaming path, the SDK does not force sonnet -- the caller's
+        # requested model is honored (the watcher works for any non-fast-mode model).
+        streaming_settings = _SDK_STREAMING_SETTINGS if options.include_partial_messages else ()
+        mngr_ctx = apply_unattended_settings(build_sdk_mngr_context(concurrency_group), streaming_settings)
         session = LiveSession(
             options=options,
             cwd=resolve_cwd(options),
@@ -471,11 +482,16 @@ def _absorb_event_metadata(session: LiveSession, raw_event: Mapping[str, Any]) -
 MessageSink = Callable[[Message], None]
 
 
+def _resolve_model(session: LiveSession) -> str:
+    """The model id to report: the most recent one seen in the transcript, else the requested one."""
+    return session.latest_model or (session.options.model or "")
+
+
 def _emit_init_if_needed(session: LiveSession, sink: MessageSink) -> None:
     """Emit the synthesized ``system``/``init`` message once per session, with the known metadata."""
     if session.is_init_emitted:
         return
-    model = session.latest_model or (session.options.model or "")
+    model = _resolve_model(session)
     sink(
         build_system_init_message(
             session_id=session.latest_session_id or "",
@@ -505,6 +521,18 @@ class _TurnDrainTicker(MutableModel):
     last_progress_at: float = Field(
         default_factory=time.monotonic, description="``time.monotonic()`` of the last forward progress"
     )
+    synthesizer: StreamEventSynthesizer | None = Field(
+        default=None, description="Emits partial-message StreamEvents when include_partial_messages is set"
+    )
+    ended_clean: bool = Field(default=False, description="Whether the turn ended on a terminal stop_reason")
+
+    def _emit_stream_events(self) -> None:
+        """Poll the stream_buffer (if streaming) and push any synthesized StreamEvents to the sink."""
+        if self.synthesizer is None:
+            return
+        _emit_init_if_needed(self.session, self.sink)
+        for event in self.synthesizer.poll(self.session.latest_session_id or "", _resolve_model(self.session)):
+            self.sink(event)
 
     def tick(self) -> bool | None:
         raw_events = _read_new_raw_events(self.session)
@@ -520,7 +548,11 @@ class _TurnDrainTicker(MutableModel):
                 self.sink(message)
             if stop_reason in TERMINAL_STOP_REASONS:
                 has_terminal_stop = True
+        # Surface partial-message previews after the transcript poll (which sets latest_session_id),
+        # so each StreamEvent can carry a non-empty session id.
+        self._emit_stream_events()
         if has_terminal_stop:
+            self.ended_clean = True
             return True
         if self.session.agent is not None and self.session.agent.get_lifecycle_state() in AGENT_DEAD_STATES:
             return True
@@ -539,7 +571,7 @@ def drain_turn(session: LiveSession, sink: MessageSink) -> None:
     fallback exits.
     """
     turn_start = time.monotonic()
-    ticker = _TurnDrainTicker(session=session, sink=sink)
+    ticker = _TurnDrainTicker(session=session, sink=sink, synthesizer=_build_stream_synthesizer(session))
     # The ticker owns the real stop decision (including its no-progress safety check); the outer
     # timeout is deliberately oversized so it only trips in pathological cases.
     outer_timeout_seconds = TURN_END_NO_PROGRESS_TIMEOUT_SECONDS * 10
@@ -553,6 +585,11 @@ def drain_turn(session: LiveSession, sink: MessageSink) -> None:
             outer_timeout_seconds,
             len(ticker.messages),
         )
+    # On a clean completion, deliver the held-back final delta and the closing stream framing. On an
+    # interrupt / timeout the partial sequence is deliberately left unterminated (mirror the transport).
+    if ticker.synthesizer is not None and ticker.ended_clean:
+        for event in ticker.synthesizer.finalize(session.latest_session_id or "", _resolve_model(session)):
+            sink(event)
     # If the turn produced no surfaced content (e.g. interrupted before the first message), still
     # emit the init message before the terminal result so ordering is consistent.
     _emit_init_if_needed(session, sink)
@@ -560,10 +597,21 @@ def drain_turn(session: LiveSession, sink: MessageSink) -> None:
     sink(_build_turn_result_message(session, ticker.messages, duration_ms))
 
 
+def _build_stream_synthesizer(session: LiveSession) -> StreamEventSynthesizer | None:
+    """Build the partial-message synthesizer for this turn, or None when streaming is not enabled."""
+    if not session.options.include_partial_messages:
+        return None
+    agent = session.agent
+    host = session.host
+    if agent is None or host is None:
+        return None
+    return StreamEventSynthesizer(host=host, buffer_path=agent.get_stream_buffer_path())
+
+
 def _build_turn_result_message(session: LiveSession, turn_messages: Sequence[Message], duration_ms: int) -> Message:
     """Build the synthesized terminal ``ResultMessage`` for a turn from accumulated session state."""
     session_id = session.latest_session_id or ""
-    model = session.latest_model or (session.options.model or "")
+    model = _resolve_model(session)
     result_text = collect_assistant_text(turn_messages) or None
     model_usage = {model: session.latest_usage} if (model and session.latest_usage is not None) else None
     # Cost is computed from the turn's accumulated token usage (the session JSONL has no cost field).
