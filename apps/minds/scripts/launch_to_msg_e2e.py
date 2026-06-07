@@ -62,8 +62,9 @@ import sys
 import threading
 import time
 import urllib.parse
-from dataclasses import dataclass
-from dataclasses import field
+from pydantic import BaseModel
+from pydantic import ConfigDict
+from pydantic import Field
 from pathlib import Path
 from typing import Any
 
@@ -566,8 +567,7 @@ async def find_chat_window(ctx: BrowserContext) -> Page | None:
 # --- per-workspace helpers ---
 
 
-@dataclass(frozen=True)
-class _SnapPrefixes:
+class _SnapPrefixes(BaseModel):
     """Per-workspace screenshot name prefixes.
 
     Held in separate constants per workspace so the original W1 names
@@ -575,6 +575,8 @@ class _SnapPrefixes:
     still reflects chronological execution (W1 03-06, slack 07-08,
     W2 09-12, cross-workspace 13-16).
     """
+
+    model_config = ConfigDict(frozen=True)
 
     submitted: str
     done: str
@@ -599,11 +601,10 @@ _W2_SNAPS = _SnapPrefixes(
 )
 
 
-@dataclass
-class _WorkspaceResult:
+class _WorkspaceResult(BaseModel):
     chat_url: str
     creation_id: str
-    phase_durations: dict[str, float] = field(default_factory=dict)
+    phase_durations: dict[str, float] = Field(default_factory=dict)
     total_create_s: float = 0.0
 
 
