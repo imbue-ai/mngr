@@ -24,7 +24,7 @@ PINNED_DOCKER_APT_VERSION: Final[str] = "5:29.5.1-1~debian.12~bookworm"
 # Pin one so runsc is reproducible; confirm the date exists in that bucket before
 # deploying (the apt repo only ever serves "latest", so we download + checksum
 # the dated binaries directly instead).
-PINNED_GVISOR_RELEASE: Final[str] = "20260602"
+PINNED_GVISOR_RELEASE: Final[str] = "20260601"
 
 # Each host-setup step is a self-contained shell script run with a generous hard
 # timeout. apt mirror round-trips plus package extraction routinely take a couple
