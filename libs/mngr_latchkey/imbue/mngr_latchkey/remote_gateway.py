@@ -294,12 +294,22 @@ def _build_gateway_start_script(outer_port: int, encryption_key: str) -> str:
     ``encryption_key`` is interpolated as ``LATCHKEY_ENCRYPTION_KEY`` so the
     gateway can decrypt the synced ``credentials.json.enc`` (it must be the same
     key the desktop gateway uses).
+
+    ``LATCHKEY_DISABLE_CREDENTIALS_REFRESH=1`` is set so the VPS gateway never
+    refreshes OAuth credentials. The credentials here are a synced *copy* of the
+    desktop's store (see :func:`sync_credentials`); the desktop-side latchkey is
+    the single owner of credential refresh. If this remote instance also
+    refreshed, the two would race to rotate the same refresh token -- each
+    refresh invalidates the previous token -- which would exhaust the user's
+    token and break the desktop's credentials. The remote gateway therefore uses
+    the synced credentials as-is and lets the desktop keep them fresh.
     """
     # Detach from the SSH session: nohup + closed stdin + redirected stdio so
     # the channel can close while the gateway keeps running.
     launch_command = (
         f"LATCHKEY_GATEWAY_PORT={outer_port} LATCHKEY_GATEWAY_LISTEN_HOST=127.0.0.1 "
-        f"LATCHKEY_DISABLE_COUNTING=1 LATCHKEY_ENCRYPTION_KEY={shlex.quote(encryption_key)} "
+        f"LATCHKEY_DISABLE_COUNTING=1 LATCHKEY_DISABLE_CREDENTIALS_REFRESH=1 "
+        f"LATCHKEY_ENCRYPTION_KEY={shlex.quote(encryption_key)} "
         f"nohup latchkey gateway "
         f'</dev/null >"$HOME/.latchkey/{_REMOTE_GATEWAY_LOG_FILENAME}" 2>&1'
     )
