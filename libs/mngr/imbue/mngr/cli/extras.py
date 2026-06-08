@@ -2,7 +2,6 @@
 
 import json
 import os
-import platform
 import shutil
 import tomllib
 from collections.abc import Callable
@@ -42,17 +41,36 @@ from imbue.mngr.uv_tool import read_receipt
 from imbue.mngr.uv_tool import require_uv_tool_receipt
 
 
-def _detect_shell() -> str:
-    """Detect the user's shell type (zsh or bash)."""
+def _detect_shell() -> str | None:
+    """Detect the user's shell type from $SHELL.
+
+    Returns "zsh" or "bash", or None if $SHELL is neither. We deliberately do not
+    guess a shell for an unrecognized $SHELL: writing a completion script to
+    ~/.zshrc/~/.bashrc for a fish (or other) user would silently land in a file
+    their shell never sources. The caller prompts or skips instead.
+    """
     shell_env = os.environ.get("SHELL", "")
     if "zsh" in shell_env:
         return "zsh"
     if "bash" in shell_env:
         return "bash"
-    # Fallback based on OS
-    if platform.system() == "Darwin":
-        return "zsh"
-    return "bash"
+    return None
+
+
+def _prompt_for_shell() -> str | None:
+    """Prompt the user to pick a shell for completion. Returns None if they skip.
+
+    Caller must ensure an interactive terminal is available before calling.
+    """
+    options = ["zsh", "bash"]
+    idx = run_single_select_picker(
+        options=options,
+        title="mngr extras",
+        header_text="Could not detect your shell from $SHELL. Which shell's completion should be installed?",
+    )
+    if idx is None:
+        return None
+    return options[idx]
 
 
 def _get_shell_rc(shell_type: str) -> Path:
@@ -97,9 +115,15 @@ def _confirm_install(question: str, install_label: str, skip_label: str = "Skip"
 # -- Completion extra --
 
 
-def _completion_status() -> tuple[bool, str, Path]:
-    """Return (is_configured, shell_type, rc_path)."""
+def _completion_status() -> tuple[bool, str | None, Path | None]:
+    """Return (is_configured, shell_type, rc_path).
+
+    shell_type/rc_path are None when $SHELL is neither zsh nor bash (the caller
+    then prompts for a shell or skips).
+    """
     shell_type = _detect_shell()
+    if shell_type is None:
+        return False, None, None
     rc_path = _get_shell_rc(shell_type)
     configured = _is_completion_configured(rc_path)
     return configured, shell_type, rc_path
@@ -110,8 +134,9 @@ def _install_completion(
     *,
     # Dependencies are exposed as keyword arguments so tests can substitute
     # in-memory fakes without monkeypatching module-level callables.
-    status_fn: Callable[[], tuple[bool, str, Path]] = _completion_status,
+    status_fn: Callable[[], tuple[bool, str | None, Path | None]] = _completion_status,
     is_interactive_fn: Callable[[], bool] = has_interactive_terminal,
+    prompt_shell_fn: Callable[[], str | None] = _prompt_for_shell,
     confirm_fn: Callable[[Path], bool] = lambda rc_path: _confirm_install(
         f"Enable shell completion? This will add a line to {rc_path}.",
         "Enable shell completion",
@@ -123,6 +148,24 @@ def _install_completion(
     if configured:
         write_human_line("Shell completion already configured in {}", rc_path)
         return True
+
+    # $SHELL was neither zsh nor bash: prompt for a shell when interactive, or
+    # skip with a clear message rather than guessing and writing an unusable
+    # script to an rc file the user's shell may never source.
+    if shell_type is None:
+        if auto or not is_interactive_fn():
+            write_human_line(
+                "Could not detect a supported shell from $SHELL (only bash and zsh completion is supported). "
+                "Skipping shell completion."
+            )
+            return False
+        shell_type = prompt_shell_fn()
+        if shell_type is None:
+            write_human_line("Skipping shell completion.")
+            return False
+        rc_path = _get_shell_rc(shell_type)
+
+    assert rc_path is not None  # shell_type is set, so rc_path was resolved
 
     if not auto:
         if not is_interactive_fn():
