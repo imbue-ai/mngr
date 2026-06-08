@@ -719,9 +719,9 @@ def test_titlebar_button_danger_tone_applies_red_hover() -> None:
 # The accent is set per-workspace via a CSS variable on document.documentElement
 # (chrome.js) so the value is computed; the *shape* of the computation lives
 # in workspace_accent() (mirrored in static/workspace_accent.js). These tests
-# pin the OKLCH lightness / chroma to the values used for the full-width
-# titlebar -- 65 / 0.15 reads as a saturated highlight, fine for a 10x10
-# swatch, too loud across a 38px-tall bar.
+# pin the OKLCH lightness / chroma at 80% / 0.1 -- a calm tone that reads as
+# chrome across the full-width titlebar -- and pin the deterministic
+# agent-id -> hue mapping that powers identity color across the app.
 
 
 def test_workspace_accent_uses_80_lightness_and_0_1_chroma() -> None:
