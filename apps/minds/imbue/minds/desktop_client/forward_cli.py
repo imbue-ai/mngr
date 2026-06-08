@@ -447,6 +447,28 @@ class EnvelopeStreamConsumer(MutableModel):
             ssh_info = ssh_info_by_agent.get(str(agent.agent_id))
             self._fire_discovered(agent.agent_id, ssh_info, str(agent.provider_name))
 
+    def _build_agents_result_locked(self) -> ParsedAgentsResult:
+        """Snapshot the current agent/ssh/host-state maps into a ParsedAgentsResult.
+
+        Must be called while ``self._lock`` is held: it reads the shared mutable
+        maps. Callers push the result to the resolver *after* releasing the lock.
+        Centralizing this keeps the per-event handlers from each re-deriving (and
+        having to re-thread every new resolver-snapshot field through) the same
+        merged view.
+        """
+        agent_ids = tuple(AgentId(aid) for aid in self._agent_host_map)
+        ssh_info_by_agent = {
+            aid: self._ssh_by_host_id[hid] for aid, hid in self._agent_host_map.items() if hid in self._ssh_by_host_id
+        }
+        discovered = tuple(self._discovered_agents.values())
+        host_state_snapshot = dict(self._host_state_by_host_id)
+        return ParsedAgentsResult(
+            agent_ids=agent_ids,
+            discovered_agents=discovered,
+            ssh_info_by_agent_id=ssh_info_by_agent,
+            host_state_by_host_id=host_state_snapshot,
+        )
+
     def _handle_host_ssh_info(self, event: HostSSHInfoEvent) -> None:
         ssh_info = RemoteSSHInfo(
             user=event.ssh.user, host=event.ssh.host, port=event.ssh.port, key_path=event.ssh.key_path
@@ -455,22 +477,8 @@ class EnvelopeStreamConsumer(MutableModel):
         with self._lock:
             self._ssh_by_host_id[host_id_str] = ssh_info
             agents_on_host = [AgentId(aid) for aid, hid in self._agent_host_map.items() if hid == host_id_str]
-            agent_ids = tuple(AgentId(aid) for aid in self._agent_host_map)
-            ssh_info_by_agent = {
-                aid: self._ssh_by_host_id[hid]
-                for aid, hid in self._agent_host_map.items()
-                if hid in self._ssh_by_host_id
-            }
-            discovered = tuple(self._discovered_agents.values())
-            host_state_snapshot = dict(self._host_state_by_host_id)
-        self.resolver.update_agents(
-            ParsedAgentsResult(
-                agent_ids=agent_ids,
-                discovered_agents=discovered,
-                ssh_info_by_agent_id=ssh_info_by_agent,
-                host_state_by_host_id=host_state_snapshot,
-            )
-        )
+            agents_result = self._build_agents_result_locked()
+        self.resolver.update_agents(agents_result)
         for agent_id in agents_on_host:
             self._fire_discovered(agent_id, ssh_info, self._provider_name_for_agent(agent_id))
 
@@ -479,22 +487,8 @@ class EnvelopeStreamConsumer(MutableModel):
             return
         with self._lock:
             self._host_state_by_host_id[str(event.host.host_id)] = event.host.host_state
-            agent_ids = tuple(AgentId(aid) for aid in self._agent_host_map)
-            ssh_info_by_agent = {
-                aid: self._ssh_by_host_id[hid]
-                for aid, hid in self._agent_host_map.items()
-                if hid in self._ssh_by_host_id
-            }
-            discovered = tuple(self._discovered_agents.values())
-            host_state_snapshot = dict(self._host_state_by_host_id)
-        self.resolver.update_agents(
-            ParsedAgentsResult(
-                agent_ids=agent_ids,
-                discovered_agents=discovered,
-                ssh_info_by_agent_id=ssh_info_by_agent,
-                host_state_by_host_id=host_state_snapshot,
-            )
-        )
+            agents_result = self._build_agents_result_locked()
+        self.resolver.update_agents(agents_result)
 
     def _handle_agent_discovered(self, event: AgentDiscoveryEvent) -> None:
         agent = event.agent
@@ -502,23 +496,9 @@ class EnvelopeStreamConsumer(MutableModel):
         with self._lock:
             self._agent_host_map[aid_str] = str(agent.host_id)
             self._discovered_agents[aid_str] = agent
-            agent_ids = tuple(AgentId(aid) for aid in self._agent_host_map)
-            ssh_info_by_agent = {
-                aid: self._ssh_by_host_id[hid]
-                for aid, hid in self._agent_host_map.items()
-                if hid in self._ssh_by_host_id
-            }
-            discovered = tuple(self._discovered_agents.values())
             ssh_info = self._ssh_by_host_id.get(str(agent.host_id))
-            host_state_snapshot = dict(self._host_state_by_host_id)
-        self.resolver.update_agents(
-            ParsedAgentsResult(
-                agent_ids=agent_ids,
-                discovered_agents=discovered,
-                ssh_info_by_agent_id=ssh_info_by_agent,
-                host_state_by_host_id=host_state_snapshot,
-            )
-        )
+            agents_result = self._build_agents_result_locked()
+        self.resolver.update_agents(agents_result)
         self._fire_discovered(agent.agent_id, ssh_info, str(agent.provider_name))
 
     def _handle_agent_destroyed(self, agent_id: AgentId) -> None:
@@ -527,22 +507,8 @@ class EnvelopeStreamConsumer(MutableModel):
             self._discovered_agents.pop(aid_str, None)
             self._agent_host_map.pop(aid_str, None)
             self._services_by_agent.pop(aid_str, None)
-            agent_ids = tuple(AgentId(aid) for aid in self._agent_host_map)
-            ssh_info_by_agent = {
-                aid: self._ssh_by_host_id[hid]
-                for aid, hid in self._agent_host_map.items()
-                if hid in self._ssh_by_host_id
-            }
-            discovered = tuple(self._discovered_agents.values())
-            host_state_snapshot = dict(self._host_state_by_host_id)
-        self.resolver.update_agents(
-            ParsedAgentsResult(
-                agent_ids=agent_ids,
-                discovered_agents=discovered,
-                ssh_info_by_agent_id=ssh_info_by_agent,
-                host_state_by_host_id=host_state_snapshot,
-            )
-        )
+            agents_result = self._build_agents_result_locked()
+        self.resolver.update_agents(agents_result)
         self.resolver.update_services(agent_id, {})
         self._fire_destroyed(agent_id)
 
