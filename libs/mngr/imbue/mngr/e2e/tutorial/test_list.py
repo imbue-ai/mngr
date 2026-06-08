@@ -91,7 +91,7 @@ def test_list_running_filter(e2e: E2eSession) -> None:
     # reports the agent as RUNNING -- the exact state the --running filter keeps.
     expect(
         e2e.run(
-            'mngr exec running-agent \'touch "$MNGR_AGENT_STATE_DIR/active"\'',
+            "mngr exec running-agent 'touch \"$MNGR_AGENT_STATE_DIR/active\"'",
             comment="mark running-agent as actively running",
         )
     ).to_succeed()
@@ -530,9 +530,7 @@ def test_list_pipe_stdin(e2e: E2eSession) -> None:
     # Scope this helper lookup to the local provider so it stays fast and
     # deterministic (the verbatim tutorial pipe below still exercises full,
     # all-provider discovery).
-    json_result = e2e.run(
-        "mngr list --provider local --format json", comment="look up the created agent's id"
-    )
+    json_result = e2e.run("mngr list --provider local --format json", comment="look up the created agent's id")
     expect(json_result).to_succeed()
     agents = json.loads(json_result.stdout)["agents"]
     matching = [agent for agent in agents if agent["name"] == "my-task"]

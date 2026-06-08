@@ -196,9 +196,7 @@ class E2eSession(Session):
         # A PTY merges stdout/stderr into one terminal stream and uses CRLF line
         # endings; normalize so transcript lines are clean.
         text = captured.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
-        output_lines = tuple(
-            OutputLine(source=OutputSource.STDOUT, text=line) for line in text.split("\n") if line
-        )
+        output_lines = tuple(OutputLine(source=OutputSource.STDOUT, text=line) for line in text.split("\n") if line)
         exit_code = 124 if timed_out else (proc.returncode if proc.returncode is not None else -1)
         result = CommandResult(
             command=command,

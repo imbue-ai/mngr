@@ -4,8 +4,8 @@ The tests are intentionally kept as separate functions (not parametrized) so tha
 each one has a 1:1 correspondence with a tutorial script block.
 """
 
-import re
 import json
+import re
 import tomllib
 from pathlib import Path
 

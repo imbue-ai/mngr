@@ -3,9 +3,9 @@
 Each test corresponds 1:1 to a tutorial script block.
 """
 
-import shlex
 import json
 import re
+import shlex
 from pathlib import Path
 
 import pytest
