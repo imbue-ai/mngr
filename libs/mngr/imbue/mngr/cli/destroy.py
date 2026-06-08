@@ -487,12 +487,14 @@ def _resolve_host_for_partition(
                 # auto-destroy contract).
                 if added_any:
                     online_hosts_with_provider.append((online_host, provider))
+        # OnlineHostInterface is a subclass of HostInterface, so this arm is the
+        # catch-all for every non-online host. No trailing `case _` /
+        # assert_never: it would be unreachable dead code (and could not actually
+        # prove exhaustiveness via a subclass runtime check anyway).
         case HostInterface() as offline_host:
             _check_all_agents_targeted_on_offline_host(
                 offline_host, matched_ids, host_id_str, offline_hosts, provider, results_lock
             )
-        case _ as unreachable:
-            assert_never(unreachable)
 
 
 def _destroy_single_online_agent(
