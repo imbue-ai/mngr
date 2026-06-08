@@ -1210,6 +1210,35 @@ async def amain() -> int:
             logger.info("[tile-click] PASS: W1 tile click landed at {}", win.url)
             await win.goto(origin + "/")
 
+            # Iter 16 (/accounts smoke): users click the account icon in
+            # the header to manage accounts. Smoke-test that the page
+            # renders without a 500/404. We don't drive any signin here.
+            logger.info("=== iter 16: /accounts smoke ===")
+            await win.goto(origin + "/accounts")
+            await win.wait_for_load_state("domcontentloaded", timeout=10_000)
+            await snap_page(win, "17c-accounts-page")
+            accounts_body = (await win.evaluate("document.body.innerText")).lower()
+            if "account" not in accounts_body:
+                raise E2EFailure(f"[accounts] /accounts body looks empty: {accounts_body[:200]!r}")
+            logger.info("[accounts] PASS: /accounts renders")
+
+            # Iter 17 (W1 settings page renders): all earlier settings-page
+            # coverage is on W2 (which we then destroy). Visit W1's settings
+            # page read-only and assert the danger-zone button renders.
+            # Catches regressions specific to W1's settings rendering.
+            logger.info("=== iter 17: W1 settings page renders ===")
+            await win.goto(origin + f"/workspace/{w1_agent_host}/settings")
+            await win.wait_for_selector("#destroy-btn", state="visible", timeout=15_000)
+            await snap_page(win, "17d-w1-settings-page")
+            w1_settings_body = await win.evaluate("document.body.innerText")
+            if HOST_NAME not in w1_settings_body:
+                raise E2EFailure(
+                    f"[w1-settings] W1 settings page missing HOST_NAME {HOST_NAME!r}; "
+                    f"body head={w1_settings_body[:200]!r}"
+                )
+            logger.info("[w1-settings] PASS: W1 settings page renders with {} present", HOST_NAME)
+            await win.goto(origin + "/")
+
             # 18-22. Destroy W2 via the UI (gear icon -> WorkspaceSettings ->
             # destroy-btn -> destroy-confirm-btn), poll status to completion,
             # then assert (a) the landing page drops W2's tile while keeping
