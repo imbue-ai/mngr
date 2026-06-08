@@ -44,6 +44,7 @@ import tomlkit
 from changelog_release_utils import finalize_changelog_unreleased
 from changelog_release_utils import today_pacific
 from consolidate_changelog import pending_changelog_entries
+from tomlkit.items import Array
 from trigger_changelog_consolidation import MNGR_ROOT_NAME as CHANGELOG_MNGR_ROOT_NAME
 from trigger_changelog_consolidation import PROVIDER as CHANGELOG_PROVIDER
 from trigger_changelog_consolidation import TRIGGER_NAME as CHANGELOG_TRIGGER_NAME
@@ -52,7 +53,11 @@ from utils import PACKAGES
 from utils import PACKAGE_BY_PYPI_NAME
 from utils import REPO_ROOT
 from utils import get_package_versions
+from utils import get_workspace_package_versions
+from utils import iter_workspace_member_dirs
+from utils import normalize_pypi_name
 from utils import parse_dep_name
+from utils import parse_exact_pin
 
 from imbue.mngr.utils.polling import poll_for_value
 
@@ -286,32 +291,107 @@ def _write_version(pkg_pypi_name: str, new_version: str) -> None:
     pkg.pyproject_path.write_text(tomlkit.dumps(doc))
 
 
-def update_internal_dep_pins(all_versions: dict[str, str]) -> list[str]:
-    """Rewrite internal dep entries to use == pins matching current versions.
+def _realign_dep_string(dep_str: str, version: str, force_pin: bool) -> str:
+    """Return ``dep_str`` rewritten to ``<name>==<version>``, or unchanged.
 
-    Returns list of packages whose pyproject.toml was modified.
+    Rewrites when the dep already carries a ``==`` pin (realign a stale pin) or when
+    ``force_pin`` is set (introduce a pin a publishable wheel requires). Otherwise the
+    string is returned untouched, so a deliberately-unpinned dependency stays unpinned.
+
+    The rewrite collapses the spec to a bare ``name==version``; internal deps in this
+    repo never carry extras or environment markers, and asserting that keeps a future
+    one from being silently dropped.
     """
-    modified: list[str] = []
-    for pkg in PACKAGES:
-        if not pkg.internal_deps:
+    if parse_exact_pin(dep_str) is None and not force_pin:
+        return dep_str
+    name = parse_dep_name(dep_str)
+    assert ";" not in dep_str and "[" not in dep_str, (
+        f"internal dependency {dep_str!r} carries an extra or marker; _realign_dep_string "
+        f"would drop it. Handle this explicitly."
+    )
+    return f"{name}=={version}"
+
+
+def _realign_dep_array(
+    array: Array,
+    *,
+    is_runtime: bool,
+    self_name: str | None,
+    pkg_is_publishable: bool,
+    publishable: set[str],
+    all_versions: dict[str, str],
+) -> int:
+    """Rewrite internal-dependency pins in one dependency array in place.
+
+    Returns the number of entries changed. A publishable wheel must pin its publishable
+    runtime deps, so those are forced; everywhere else only an already-present ``==`` pin
+    is realigned.
+    """
+    changed = 0
+    for idx in range(len(array)):
+        entry = array[idx]
+        if not isinstance(entry, str):
             continue
-        doc = tomlkit.loads(pkg.pyproject_path.read_text())
-        project = doc["project"]
-        # Modify the tomlkit array in-place to preserve formatting and comments
-        deps = project["dependencies"]
-        is_changed = False
-        for idx in range(len(deps)):
-            dep_str = str(deps[idx])
-            dep_name = parse_dep_name(dep_str)
-            if dep_name in all_versions:
-                canonical_name = PACKAGE_BY_PYPI_NAME[dep_name].pypi_name
-                new_dep = f"{canonical_name}=={all_versions[dep_name]}"
-                if dep_str != new_dep:
-                    deps[idx] = new_dep
-                    is_changed = True
-        if is_changed:
-            pkg.pyproject_path.write_text(tomlkit.dumps(doc))
-            modified.append(pkg.pypi_name)
+        dep_name = parse_dep_name(entry)
+        if dep_name not in all_versions or dep_name == self_name:
+            continue
+        force_pin = pkg_is_publishable and is_runtime and dep_name in publishable
+        new_entry = _realign_dep_string(entry, all_versions[dep_name], force_pin)
+        if new_entry != entry:
+            array[idx] = new_entry
+            changed += 1
+    return changed
+
+
+def update_internal_dep_pins(all_versions: dict[str, str]) -> list[str]:
+    """Realign internal dependency pins across the whole workspace to ``all_versions``.
+
+    ``all_versions`` maps every workspace package's PyPI name to its (already-bumped)
+    version. For each workspace member (libs/ and apps/):
+
+    * Publishable packages get every publishable internal *runtime* dep forced to
+      ``name==version`` -- introducing the pin if missing, since a published wheel must
+      pin its internal deps. Their dev-group / optional pins to internal packages are
+      realigned only if already pinned.
+    * Non-publishable packages and apps only have their existing ``==`` pins realigned;
+      deliberately-unpinned internal deps are left alone.
+
+    Returns the repo-relative paths of modified pyproject.toml files. Editing the
+    tomlkit arrays in place preserves formatting and comments.
+    """
+    publishable = {pkg.pypi_name for pkg in PACKAGES}
+    modified: list[str] = []
+    for _parent, child in iter_workspace_member_dirs():
+        path = child / "pyproject.toml"
+        doc = tomlkit.loads(path.read_text())
+        project = doc.get("project")
+        self_name = normalize_pypi_name(project["name"]) if project is not None and "name" in project else None
+        pkg_is_publishable = self_name in publishable
+
+        # (array, is_runtime): runtime tables (dependencies + optional-dependencies
+        # extras) ship in the wheel; dev [dependency-groups] do not.
+        tables: list[tuple[Array, bool]] = []
+        if project is not None:
+            if "dependencies" in project:
+                tables.append((project["dependencies"], True))
+            for extra in project.get("optional-dependencies", {}).values():
+                tables.append((extra, True))
+        for group in doc.get("dependency-groups", {}).values():
+            tables.append((group, False))
+
+        changed = 0
+        for array, is_runtime in tables:
+            changed += _realign_dep_array(
+                array,
+                is_runtime=is_runtime,
+                self_name=self_name,
+                pkg_is_publishable=pkg_is_publishable,
+                publishable=publishable,
+                all_versions=all_versions,
+            )
+        if changed:
+            path.write_text(tomlkit.dumps(doc))
+            modified.append(str(path.relative_to(REPO_ROOT)))
     return modified
 
 
@@ -732,8 +812,16 @@ def main() -> None:
             print("\nNo packages changed since the last release. Nothing to do.")
         return
 
-    # Detect new packages (not present at last tag) and confirm with user
-    new_packages = _detect_new_packages(last_tag) & directly_changed
+    # Detect new packages (not present at last tag, or never published on PyPI) and
+    # confirm with the user. We intersect with the full set of packages this release
+    # would touch -- directly changed PLUS everything pulled in by the cascade and the
+    # mngr-always rule -- not just the directly-changed set. Otherwise an unpublished
+    # package that is only reached via cascade (e.g. a plugin that depends on mngr, so
+    # it cascades on every release) would silently be bumped and published as if it
+    # already existed, with no first-publication confirmation and no Trusted Publisher
+    # registered. Computing the preliminary bump set here is cheap and pure.
+    release_candidates = directly_changed | set(_compute_bump_set(directly_changed))
+    new_packages = _detect_new_packages(last_tag) & release_candidates
     current_versions = get_package_versions()
     if new_packages and not args.dry_run:
         confirmed_new = _confirm_new_packages(new_packages, current_versions)
@@ -772,8 +860,11 @@ def main() -> None:
     bump_levels = _compute_bump_levels(to_bump, base_kind, overrides)
     new_versions = bump_package_versions(bump_levels, current_versions)
 
-    # Compute what the full version map will look like after bumping
-    all_versions_after = dict(current_versions)
+    # Compute what the full version map will look like after bumping. Start from
+    # every workspace package's version (not just publishable ones) so pin
+    # alignment can realign a == pin pointing at any internal package; overlay the
+    # freshly-bumped versions on top.
+    all_versions_after = get_workspace_package_versions()
     all_versions_after.update(new_versions)
 
     new_mngr_version = all_versions_after["imbue-mngr"]
@@ -899,6 +990,8 @@ def main() -> None:
         # update_exclude_newer may have advanced above.
         "pyproject.toml",
         *[str(pkg.pyproject_path.relative_to(REPO_ROOT)) for pkg in PACKAGES],
+        # Pin alignment may also touch non-publishable libs and apps/ pyprojects.
+        *pin_modified,
         "uv.lock",
         *[str(p.relative_to(REPO_ROOT)) for p in finalized_paths],
     ]
