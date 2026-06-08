@@ -880,13 +880,18 @@ def _parse_tmux_config(raw_tmux: dict[str, Any], *, strict: bool = True, silent:
     Uses model_construct to bypass validation and explicitly set None for unset fields.
     ``attach_args`` is coerced to a tuple here (accepting either a single string or a
     list) because model_construct skips the field validator that would otherwise do so.
+    A string value is wrapped in ``StringDerivedTuple`` (mirroring how ``cli_args`` is
+    handled in ``_normalize_tuple_fields_for_construct``) so narrowing detection treats
+    a higher-precedence string replacement as scalar replacement rather than aggregate
+    narrowing.
     """
     raw_tmux = _normalize_field_keys(raw_tmux, "tmux")
     _check_unknown_fields(raw_tmux, TmuxConfig, "tmux", strict=strict, silent=silent)
     if "attach_args" in raw_tmux:
         attach_args = raw_tmux["attach_args"]
         if isinstance(attach_args, str):
-            raw_tmux["attach_args"] = split_cli_args_string(attach_args) if attach_args else ()
+            tokens = split_cli_args_string(attach_args) if attach_args else ()
+            raw_tmux["attach_args"] = StringDerivedTuple(tokens)
         else:
             raw_tmux["attach_args"] = tuple(attach_args)
     # Coerce the path to Path here: model_construct bypasses field validation, so

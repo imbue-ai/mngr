@@ -19,6 +19,9 @@ from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import PluginConfig
+from imbue.mngr.config.data_types import StringDerivedTuple
+from imbue.mngr.config.data_types import TmuxConfig
+from imbue.mngr.config.data_types import detect_settings_narrowing
 from imbue.mngr.config.data_types import get_or_create_user_id
 from imbue.mngr.config.loader import _FileSettingsSource
 from imbue.mngr.config.loader import _NarrowingViolation
@@ -34,6 +37,7 @@ from imbue.mngr.config.loader import _parse_logging_config
 from imbue.mngr.config.loader import _parse_mngr_env_overrides
 from imbue.mngr.config.loader import _parse_plugins
 from imbue.mngr.config.loader import _parse_providers
+from imbue.mngr.config.loader import _parse_tmux_config
 from imbue.mngr.config.loader import block_disabled_plugins
 from imbue.mngr.config.loader import get_or_create_profile_dir
 from imbue.mngr.config.loader import load_config
@@ -641,6 +645,41 @@ def test_parse_logging_config_warns_on_unknown_fields_when_not_strict(log_warnin
     assert isinstance(result, LoggingConfig)
     assert "unknown_log_option" not in result.model_dump()
     assert any("unknown_log_option" in msg for msg in log_warnings)
+
+
+# =============================================================================
+# Tests for _parse_tmux_config
+# =============================================================================
+
+
+def test_parse_tmux_config_marks_string_attach_args_as_string_derived() -> None:
+    """A string attach_args is shell-split and tagged StringDerivedTuple so narrowing
+    detection treats a higher-precedence string replacement as scalar replacement."""
+    result = _parse_tmux_config({"attach_args": "-CC -u"})
+    assert result.attach_args == ("-CC", "-u")
+    assert isinstance(result.attach_args, StringDerivedTuple)
+
+
+def test_parse_tmux_config_keeps_list_attach_args_as_plain_tuple() -> None:
+    """An explicit list attach_args is genuine aggregate intent, not a scalar string."""
+    result = _parse_tmux_config({"attach_args": ["-CC", "-u"]})
+    assert result.attach_args == ("-CC", "-u")
+    assert not isinstance(result.attach_args, StringDerivedTuple)
+
+
+def test_string_attach_args_replacement_is_not_flagged_as_narrowing() -> None:
+    """Replacing one string attach_args with another (e.g. '-CC -u' then '-2') is scalar
+    replacement, mirroring cli_args, so it must not trip the narrowing safety net."""
+    base = MngrConfig(prefix="mngr-", tmux=_parse_tmux_config({"attach_args": "-CC -u"}))
+    override = MngrConfig(prefix="mngr-", tmux=_parse_tmux_config({"attach_args": "-2"}))
+    assert detect_settings_narrowing(base, override) == []
+
+
+def test_list_attach_args_replacement_is_flagged_as_narrowing() -> None:
+    """A list override that drops base entries is aggregate narrowing and is flagged."""
+    base = MngrConfig(prefix="mngr-", tmux=TmuxConfig(attach_args=("-CC", "-u")))
+    override = MngrConfig(prefix="mngr-", tmux=_parse_tmux_config({"attach_args": ["-2"]}))
+    assert detect_settings_narrowing(base, override) == ["tmux.attach_args"]
 
 
 # =============================================================================
