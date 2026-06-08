@@ -84,6 +84,12 @@ class EnvironmentStoppedError(ConcurrencyGroupError):
     ...
 
 
+class ProcessInvariantError(ConcurrencyGroupError):
+    """Raised when a process reaches an internal state that should be impossible."""
+
+    ...
+
+
 class ProcessTerminationError(ConcurrencyGroupError):
     """Raised when a process could not be terminated even after a force kill."""
 

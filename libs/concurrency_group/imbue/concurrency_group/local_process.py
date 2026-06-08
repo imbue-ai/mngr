@@ -13,6 +13,7 @@ from typing import TypeVar
 
 from imbue.concurrency_group.errors import EnvironmentStoppedError
 from imbue.concurrency_group.errors import ProcessError
+from imbue.concurrency_group.errors import ProcessInvariantError
 from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.event_utils import MutableEvent
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
@@ -112,15 +113,31 @@ class RunningProcess:
             return self._completed_process.returncode
 
         if not thread.is_alive():
+            # Re-read `_completed_process` after observing the thread is dead: there is a race
+            # window where the first check above ran while the thread was still finishing, and the
+            # result became visible only after the thread terminated. This is not the same check as
+            # the one at the top of the method (it runs under a different observed thread state).
             if self._completed_process is not None:
                 return self._completed_process.returncode
+            # The run thread finished but never set `_completed_process`. If it recorded an
+            # exception, re-raise it via join() so the real failure surfaces to the caller.
             if thread.exception_raw is not None:
                 thread.join()
-            return 1007
+            # If we get here the thread finished without a result and without an exception,
+            # which should be impossible: `run()` always assigns `_completed_process` unless it
+            # raises. Surface the invariant violation loudly rather than fabricating an exit code.
+            raise ProcessInvariantError(
+                f"Run thread for command `{' '.join(self._command)}` finished without producing a "
+                "result or recording an exception."
+            )
 
         return None
 
     def is_finished(self) -> bool:
+        # poll() re-raises any exception captured by the run thread (e.g. ProcessSetupError when
+        # the command failed to start). Such a process has finished -- it will never produce more
+        # output or a different exit status -- so report it as finished rather than propagating here;
+        # the failure is surfaced later through wait()/check().
         try:
             return self.poll() is not None
         except ProcessSetupError:
