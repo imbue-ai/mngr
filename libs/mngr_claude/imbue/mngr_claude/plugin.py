@@ -1636,7 +1636,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         env_exports = f"export IS_SANDBOX=1 && {sid_export}" if not host.is_local else sid_export
 
         # Build the background tasks command (activity tracking + transcript export)
-        session_name = f"{self.mngr_ctx.config.prefix}{self.name}"
+        session_name = self.session_name
         background_cmd = self._build_background_tasks_command(session_name)
 
         # Combine: start background tasks, export env (including session ID), then run the main command (and make sure we get rid of the session started marker on each run so that wait_for_ready_signal works correctly for both new and resumed sessions)

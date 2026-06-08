@@ -1,0 +1,1 @@
+Internal refactor: the Claude agent now builds its tmux session name via the shared `AgentInterface.session_name` helper instead of hand-rolling the `prefix + name` string, keeping it consistent with mngr's centralized session-name construction. No user-visible behavior change.
