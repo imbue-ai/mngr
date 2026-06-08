@@ -792,7 +792,7 @@ function scheduleInboxListRefresh(bundle, evt) {
 function sendCurrentWorkspaceToBundleViews(bundle) {
   if (!bundle) return;
   // Both the titlebar (chrome view) and the sidebar key UI off the current
-  // workspace -- the titlebar uses it to scope the per-agent accent swatch
+  // workspace -- the titlebar uses it to drive the per-agent accent color
   // and the auto-redirect to the recovery page (which only fires when a
   // system_interface_status event matches the currently-displayed agent).
   if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
@@ -800,6 +800,13 @@ function sendCurrentWorkspaceToBundleViews(bundle) {
   }
   if (bundle.sidebarView && !bundle.sidebarView.webContents.isDestroyed()) {
     bundle.sidebarView.webContents.send('current-workspace-changed', bundle.currentWorkspaceId);
+  }
+  // Persist as the "last opened workspace" so a subsequent navigation to
+  // Home (or any non-workspace URL) keeps the bar tinted in this workspace's
+  // color, and so cold-start restores the same color before the first
+  // ``current-workspace-changed`` event lands.
+  if (bundle.currentWorkspaceId) {
+    setLastWorkspaceAgentId(bundle.currentWorkspaceId);
   }
 }
 
@@ -947,17 +954,44 @@ function readLastLogLines(lineCount) {
 }
 
 // -- Session state --
+//
+// On-disk shape is ``{ windows: [...], lastWorkspaceAgentId: string | null }``
+// in ``window-state.json``. The pre-titlebar-accent version of the file was a
+// bare array of window entries; ``loadSessionState`` accepts either shape so
+// existing installs migrate transparently on first read. ``lastWorkspaceAgentId``
+// is the agent id whose accent should color the titlebar even after the user
+// navigates away from the workspace (e.g. to Home); cleared on workspace
+// deletion or account sign-out.
+
+// In-memory mirror of ``lastWorkspaceAgentId`` so the IPC ``get`` handler is
+// synchronous (no disk reads on every chrome page load) and ``set`` can keep
+// the next ``saveSessionState`` flush in sync without re-reading the file.
+let lastWorkspaceAgentId = null;
 
 function loadSessionState() {
   try {
     const p = getSessionStatePath();
-    if (!fs.existsSync(p)) return [];
+    if (!fs.existsSync(p)) return { windows: [], lastWorkspaceAgentId: null };
     const raw = fs.readFileSync(p, 'utf-8');
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((e) => typeof e === 'object' && typeof e.url === 'string');
+    // Legacy shape: a bare array of window entries (pre-titlebar-accent).
+    if (Array.isArray(parsed)) {
+      return {
+        windows: parsed.filter((e) => typeof e === 'object' && typeof e.url === 'string'),
+        lastWorkspaceAgentId: null,
+      };
+    }
+    if (parsed && typeof parsed === 'object') {
+      const windows = Array.isArray(parsed.windows)
+        ? parsed.windows.filter((e) => typeof e === 'object' && typeof e.url === 'string')
+        : [];
+      const lastAgentId =
+        typeof parsed.lastWorkspaceAgentId === 'string' ? parsed.lastWorkspaceAgentId : null;
+      return { windows, lastWorkspaceAgentId: lastAgentId };
+    }
+    return { windows: [], lastWorkspaceAgentId: null };
   } catch {
-    return [];
+    return { windows: [], lastWorkspaceAgentId: null };
   }
 }
 
@@ -974,7 +1008,7 @@ function toRelativeBackendUrl(url) {
 
 function saveSessionState() {
   try {
-    const state = [];
+    const windows = [];
     for (const b of bundles) {
       if (b.window.isDestroyed()) continue;
       const url = b.preErrorUrl || b.currentContentUrl;
@@ -982,7 +1016,7 @@ function saveSessionState() {
       if (!relative) continue;
       const bounds = b.window.getBounds();
       const display = screen.getDisplayMatching(bounds);
-      state.push({
+      windows.push({
         url: relative,
         x: bounds.x,
         y: bounds.y,
@@ -993,9 +1027,34 @@ function saveSessionState() {
     }
     const p = getSessionStatePath();
     fs.mkdirSync(path.dirname(p), { recursive: true });
-    fs.writeFileSync(p, JSON.stringify(state, null, 2));
+    fs.writeFileSync(p, JSON.stringify({ windows, lastWorkspaceAgentId }, null, 2));
   } catch (err) {
     console.log('[session] Failed to save state:', err.message);
+  }
+}
+
+function getLastWorkspaceAgentId() {
+  return lastWorkspaceAgentId;
+}
+
+// Update the in-memory ``lastWorkspaceAgentId`` and flush to disk. No-op when
+// the value isn't actually changing so a stream of duplicate
+// ``current-workspace-changed`` IPC events (Electron emits one per content
+// navigation) doesn't thrash the file. Pass ``null`` to clear (workspace
+// deleted, user signed out, no active workspace).
+function setLastWorkspaceAgentId(agentId) {
+  const normalized = typeof agentId === 'string' && agentId ? agentId : null;
+  if (normalized === lastWorkspaceAgentId) return;
+  lastWorkspaceAgentId = normalized;
+  saveSessionState();
+  // Push the (possibly null) value to every chrome view so renderers that
+  // weren't the source of the change still update. The chrome.js handler
+  // is idempotent on no-op.
+  for (const b of bundles) {
+    if (b.window.isDestroyed()) continue;
+    if (b.chromeView && !b.chromeView.webContents.isDestroyed()) {
+      b.chromeView.webContents.send('last-workspace-agent-id-changed', lastWorkspaceAgentId);
+    }
   }
 }
 
@@ -1098,10 +1157,28 @@ function handleChromeSSEEvent(evt) {
           updateOsTitle(b);
         }
       }
+      // If the destroyed workspace is the one currently coloring the
+      // titlebar, clear the stored accent so the next render falls back
+      // to the dark default chrome rather than pointing at a workspace
+      // that no longer exists.
+      if (oldId === lastWorkspaceAgentId) {
+        setLastWorkspaceAgentId(null);
+      }
     }
 
     updateAllOsTitles();
   } else if (evt.type === 'auth_status') {
+    // Clear the stored accent on account-level sign-out (true -> false
+    // transition). Without this guard the bar would stay tinted with the
+    // last-opened workspace's color on the sign-in page. We only fire on
+    // the transition so the initial unauthenticated SSE snapshot doesn't
+    // clobber a value that was just hydrated from disk.
+    const prev = latestChromeState.authStatus;
+    const wasSignedIn = !!(prev && prev.signed_in);
+    const isSignedIn = !!evt.signed_in;
+    if (wasSignedIn && !isSignedIn) {
+      setLastWorkspaceAgentId(null);
+    }
     latestChromeState.authStatus = evt;
   } else if (evt.type === 'requests') {
     const prevIds = latestChromeState.requestIds || [];
@@ -1706,6 +1783,10 @@ async function startBackendWithRetry() {
 
     if (isFirstStart && initialBundle && !initialBundle.window.isDestroyed()) {
       const savedState = loadSessionState();
+      // Hydrate the in-memory ``lastWorkspaceAgentId`` from disk so the
+      // titlebar accent picks up the most-recently-opened workspace as
+      // soon as the chrome page calls ``getLastWorkspaceAgentId`` over IPC.
+      lastWorkspaceAgentId = savedState.lastWorkspaceAgentId;
 
       // Consume the one-time login code via net.request BEFORE checking
       // chrome state. This hits /authenticate which sets the minds_session
@@ -1762,8 +1843,19 @@ async function startBackendWithRetry() {
         ? new Set(workspaceList.map((w) => w.id))
         : null;
       const restorable = authenticated
-        ? filterRestorableUrls(savedState, knownAgentIdsSet)
+        ? filterRestorableUrls(savedState.windows, knownAgentIdsSet)
         : [];
+      // Drop the stored lastWorkspaceAgentId if its workspace no longer
+      // exists -- otherwise the titlebar would paint with the color of a
+      // workspace the user already destroyed.
+      if (
+        authenticated &&
+        knownAgentIdsSet &&
+        lastWorkspaceAgentId &&
+        !knownAgentIdsSet.has(lastWorkspaceAgentId)
+      ) {
+        setLastWorkspaceAgentId(null);
+      }
 
       initialBundle.isLoadingState = false;
       updateBundleBounds(initialBundle);
@@ -2114,6 +2206,21 @@ ipcMain.on('window-maximize', (event) => {
 ipcMain.on('window-close', (event) => {
   const bundle = getBundleFromEvent(event);
   if (bundle && !bundle.window.isDestroyed()) bundle.window.close();
+});
+
+// Renderer (chrome.js) asks for the persisted last-opened workspace agent id
+// on DOMContentLoaded so the titlebar accent can paint before any
+// ``current-workspace-changed`` event arrives. Synchronous-feeling via the
+// in-memory mirror -- no disk read per call.
+ipcMain.handle('get-last-workspace-agent-id', () => {
+  return getLastWorkspaceAgentId();
+});
+
+// Renderer pushes a new value when the user explicitly switches workspaces.
+// Also used by the chrome.js "in active workspace but no stored value yet"
+// fallback to backfill on first paint.
+ipcMain.on('set-last-workspace-agent-id', (_event, agentId) => {
+  setLastWorkspaceAgentId(agentId);
 });
 
 // -- App lifecycle --

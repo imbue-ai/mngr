@@ -55,6 +55,19 @@ contextBridge.exposeInMainWorld('minds', {
     ipcRenderer.on('current-workspace-changed', (_event, agentId) => callback(agentId));
   },
 
+  // Persisted "last opened workspace" agent id. The chrome page reads this
+  // on bootstrap to paint the titlebar accent before the first
+  // ``current-workspace-changed`` event arrives, and pushes back via
+  // ``setLastWorkspaceAgentId`` for the "active workspace but no stored
+  // value" fallback. Main may also broadcast updates via
+  // ``onLastWorkspaceAgentIdChanged`` (workspace deleted, user signed out).
+  getLastWorkspaceAgentId: () => ipcRenderer.invoke('get-last-workspace-agent-id'),
+  setLastWorkspaceAgentId: (agentId) =>
+    ipcRenderer.send('set-last-workspace-agent-id', agentId),
+  onLastWorkspaceAgentIdChanged: (callback) => {
+    ipcRenderer.on('last-workspace-agent-id-changed', (_event, agentId) => callback(agentId));
+  },
+
   // Actions
   retry: () => ipcRenderer.send('retry'),
   openLogFile: () => ipcRenderer.send('open-log-file'),

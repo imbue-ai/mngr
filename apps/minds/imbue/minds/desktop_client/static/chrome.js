@@ -175,7 +175,38 @@
     // it from the content URL alone would clobber it to null on every navigation
     // that doesn't match /goto/<id>/, which would prevent the recovery-page
     // redirect from firing for the current agent.
+    //
+    // Distinct from the persisted "last opened workspace" accent (below):
+    // ``onCurrentWorkspaceChanged`` carries null whenever the content view is
+    // on a non-workspace URL (Home, sign-in, ...) so it can't be used as the
+    // titlebar accent source. We track both -- the current workspace drives
+    // the recovery-page redirect lock, the last-opened workspace drives the
+    // accent color.
     window.minds.onCurrentWorkspaceChanged(function (agentId) {
+      if (agentId) {
+        // Real workspace navigation -- apply the accent immediately. Main
+        // also persists this id so it survives a restart; we don't need to
+        // push it back over IPC here.
+        applyTitleAccent(agentId);
+      } else {
+        // Navigated to a non-workspace URL (Home, etc.). Keep the bar
+        // tinted with whatever the last-opened workspace was; main owns
+        // clearing the accent (workspace deleted, user signed out) via
+        // ``onLastWorkspaceAgentIdChanged``. Clear ``currentTitleAgentId``
+        // so the recovery-redirect lock fires again if the user navigates
+        // back to a stuck workspace.
+        currentTitleAgentId = null;
+      }
+    });
+    // Bootstrap: paint the accent on chrome page load using the persisted
+    // last-opened workspace, before any other IPC fires.
+    window.minds.getLastWorkspaceAgentId().then(function (agentId) {
+      if (agentId && !currentTitleAgentId) applyTitleAccent(agentId);
+    });
+    // Main pushes the new value on workspace-delete / sign-out / any other
+    // update so the bar tracks the source of truth even when this renderer
+    // wasn't the one that triggered the change.
+    window.minds.onLastWorkspaceAgentIdChanged(function (agentId) {
       applyTitleAccent(agentId || null);
     });
   } else {
