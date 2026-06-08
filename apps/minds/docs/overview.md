@@ -10,7 +10,7 @@ The system has two main components:
 
 The desktop client (`minds run`) provides:
 - Authentication via one-time codes and signed cookies
-- A landing page listing all accessible workspaces (or a creation form if none exist)
+- A landing page listing all accessible workspaces (or a creation form if none exist). Local (`docker` / `lima`) minds show a live container-status badge and a Start/Stop button (Stop asks for confirmation); a background poll keeps that status fresh, and the same liveness drives the quit-time shutdown prompt (see `desktop-app.md`).
 - Agent creation from git repositories or local paths via a web form or API
 - Byte-forwarding of HTTP and WebSocket traffic from `<agent-id>.localhost:8420/*` to the workspace's own system interface (the `system-interface` CLI, source at `forever-claude-template/apps/system_interface/`; optionally through an SSH tunnel for remote agents)
 

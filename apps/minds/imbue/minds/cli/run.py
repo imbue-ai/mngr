@@ -46,6 +46,7 @@ from imbue.minds.config.loader import load_client_config
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.api_key_store import generate_api_key
 from imbue.minds.desktop_client.app import create_desktop_client
+from imbue.minds.desktop_client.app import start_local_liveness_poll_loop
 from imbue.minds.desktop_client.app import start_system_interface_health_probe_loop
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -61,6 +62,7 @@ from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPerm
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.latchkey_auto_register import LatchkeyAutoRegister
+from imbue.minds.desktop_client.local_liveness import LocalMindLivenessTracker
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
@@ -289,6 +291,10 @@ def run(
     # consumer's failure callback (registered before consumer.start() below;
     # otherwise early failures would dispatch against an empty list).
     system_interface_health_tracker = SystemInterfaceHealthTracker()
+    # Tracks container liveness of local (docker / lima) minds for the landing-page
+    # Start/Stop controls and the quit-time shutdown prompt; fed by the poll loop
+    # started below and by the Start/Stop endpoints.
+    local_mind_liveness_tracker = LocalMindLivenessTracker()
     # The plugin reports every non-2xx response; minds decides which ones count.
     # Only connection-level failures and infrastructure 5xx enroll a suspect --
     # application errors are left for the background probe to adjudicate.
@@ -383,6 +389,7 @@ def run(
         output_format=output_format,
         root_concurrency_group=root_concurrency_group,
         system_interface_health_tracker=system_interface_health_tracker,
+        local_mind_liveness_tracker=local_mind_liveness_tracker,
         mngr_binary=MNGR_BINARY,
         mngr_host_dir=mngr_host_dir,
         minds_api_key=minds_api_key,
@@ -398,6 +405,19 @@ def run(
         backend_resolver=backend_resolver,
         mngr_forward_port=mngr_forward_port,
         mngr_forward_preauth_cookie=preauth_cookie,
+        root_concurrency_group=root_concurrency_group,
+    )
+
+    # Background poll that keeps each local mind's container-liveness fresh for
+    # the landing-page Start/Stop controls and the quit-time shutdown prompt.
+    # Uses the same refresh event the Start/Stop endpoints poke for an immediate
+    # re-read after a user-initiated change.
+    start_local_liveness_poll_loop(
+        liveness_tracker=local_mind_liveness_tracker,
+        backend_resolver=backend_resolver,
+        mngr_binary=MNGR_BINARY,
+        mngr_host_dir=mngr_host_dir,
+        refresh_event=app.state.local_liveness_refresh_event,
         root_concurrency_group=root_concurrency_group,
     )
 

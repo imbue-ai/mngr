@@ -39,6 +39,15 @@ When accessing an agent URL in a regular browser (not the Electron app), the Pyt
 
 Closing an individual window just tears down that window's views -- the backend keeps running while any window is open. When the last window closes (or the user issues `Cmd+Q` / `Ctrl+Q`), Electron sends SIGTERM to the backend process and waits up to 5 seconds. If the process doesn't exit, SIGKILL is sent.
 
+#### Local-mind shutdown prompt
+
+Agent containers run independently of the backend, so quitting the app would otherwise leave any **local** minds (those on `docker` / `lima` hosts) running and consuming machine resources. Before tearing the backend down, Electron asks the backend which local minds are still running (`GET /api/local-minds/running`, which forces a fresh liveness read). If any are:
+
+- A dialog lists how many and which minds are running, with three choices: **Cancel** (stay open), **Leave running** (quit now; containers keep running), or **Shut down**.
+- **Shut down** issues `mngr stop --stop-host` for each running local mind (via `POST /api/agents/{id}/stop-host`), shows a "Stopping minds…" progress window, and polls until they are all down before quitting. If some can't be stopped within the deadline, it offers Retry / Quit anyway / Cancel.
+
+Programmatic shutdowns (SIGTERM / SIGINT, e.g. `just minds-stop`) skip the prompt and shut down directly. Remote minds are never counted or stopped -- they don't use local resources.
+
 ### Crash recovery
 
 If the backend exits unexpectedly, every open window switches to the error screen (chrome view expanded to fill the window, content/sidebar/requests-panel/modal views torn down) with the last lines from the log file. Clicking "Retry" from any window restarts the backend once; on success every window reloads to its pre-error URL.

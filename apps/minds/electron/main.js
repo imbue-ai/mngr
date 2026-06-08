@@ -1,4 +1,4 @@
-const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app, session, screen, dialog, clipboard } = require('electron');
+const { BaseWindow, BrowserWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app, session, screen, dialog, clipboard } = require('electron');
 const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
@@ -1302,6 +1302,180 @@ function sleepInterruptible(ms) {
   });
 }
 
+// ---------- Local-mind shutdown on quit + landing Stop button ----------
+
+const LOCAL_MINDS_HTTP_TIMEOUT_MS = 10000;
+const LOCAL_MIND_STOP_POLL_INTERVAL_MS = 1000;
+// Generous ceiling: a host stop bounces a container, which can take tens of
+// seconds; past this we surface a "couldn't stop" choice rather than hang quit.
+const LOCAL_MIND_STOP_DEADLINE_MS = 90000;
+
+function delayMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// GET /api/local-minds/running -> array of {id, name}. Resolves [] on any
+// error (network, parse, no backend) so the quit flow never wedges on it.
+function getRunningLocalMinds() {
+  return new Promise((resolve) => {
+    if (!backendBaseUrl) {
+      resolve([]);
+      return;
+    }
+    let req;
+    try {
+      req = net.request({ url: backendBaseUrl + '/api/local-minds/running', method: 'GET', useSessionCookies: true });
+    } catch {
+      resolve([]);
+      return;
+    }
+    let body = '';
+    let settled = false;
+    const settle = (value) => { if (!settled) { settled = true; resolve(value); } };
+    const timer = setTimeout(() => { try { req.abort(); } catch { /* noop */ } settle([]); }, LOCAL_MINDS_HTTP_TIMEOUT_MS);
+    req.on('response', (response) => {
+      response.on('data', (chunk) => { body += chunk.toString(); });
+      response.on('end', () => {
+        clearTimeout(timer);
+        try {
+          const parsed = JSON.parse(body);
+          settle(Array.isArray(parsed.running) ? parsed.running : []);
+        } catch {
+          settle([]);
+        }
+      });
+      response.on('error', () => { clearTimeout(timer); settle([]); });
+    });
+    req.on('error', () => { clearTimeout(timer); settle([]); });
+    req.end();
+  });
+}
+
+// POST /api/agents/<id>/stop-host. Resolves true when the server accepts the
+// dispatch (<400), false otherwise. Mirrors postRestart's request handling.
+function postLocalMindStop(agentId) {
+  return new Promise((resolve) => {
+    if (!agentId || !backendBaseUrl) {
+      resolve(false);
+      return;
+    }
+    let req;
+    try {
+      req = net.request({
+        url: `${backendBaseUrl}/api/agents/${encodeURIComponent(agentId)}/stop-host`,
+        method: 'POST',
+        useSessionCookies: true,
+      });
+    } catch {
+      resolve(false);
+      return;
+    }
+    let settled = false;
+    let isAccepted = false;
+    const settle = () => { if (!settled) { settled = true; resolve(isAccepted); } };
+    const timer = setTimeout(() => { try { req.abort(); } catch { /* noop */ } settle(); }, LOCAL_MINDS_HTTP_TIMEOUT_MS);
+    req.on('response', (response) => {
+      isAccepted = response.statusCode < 400;
+      response.on('data', () => {});
+      response.on('end', () => { clearTimeout(timer); settle(); });
+      response.on('error', () => { clearTimeout(timer); settle(); });
+    });
+    req.on('error', () => { clearTimeout(timer); settle(); });
+    req.end();
+  });
+}
+
+// A small frameless "Stopping minds…" window shown while the host stops drain.
+// Native message boxes can't show progress, so this is a tiny static window.
+let stoppingProgressWindow = null;
+function showStoppingProgress(count) {
+  closeStoppingProgress();
+  const label = count === 1 ? 'Stopping 1 mind…' : `Stopping ${count} minds…`;
+  const docHtml = `<!doctype html><html><head><meta charset="utf-8"><style>
+    html,body{margin:0;height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#fff;color:#27272a}
+    .wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:14px}
+    .spinner{width:26px;height:26px;border:3px solid #e4e4e7;border-top-color:#52525b;border-radius:50%;animation:spin .8s linear infinite}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .label{font-size:14px}</style></head>
+    <body><div class="wrap"><div class="spinner"></div><div class="label">${label}</div></div></body></html>`;
+  stoppingProgressWindow = new BrowserWindow({
+    width: 320,
+    height: 150,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    frame: false,
+    alwaysOnTop: true,
+    show: true,
+    title: 'Stopping minds',
+  });
+  stoppingProgressWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(docHtml));
+}
+
+function closeStoppingProgress() {
+  if (stoppingProgressWindow && !stoppingProgressWindow.isDestroyed()) {
+    stoppingProgressWindow.destroy();
+  }
+  stoppingProgressWindow = null;
+}
+
+// Dispatch a stop for every running local mind, then poll until they are all
+// down (or the deadline passes). Returns true to proceed with the quit, false
+// to cancel it. On a failure to stop everything, offers Retry / Quit anyway /
+// Cancel.
+async function stopAllLocalMindsThenDecide(running) {
+  let remaining = running;
+  while (true) {
+    showStoppingProgress(remaining.length);
+    await Promise.all(remaining.map((mind) => postLocalMindStop(mind.id)));
+    const deadline = Date.now() + LOCAL_MIND_STOP_DEADLINE_MS;
+    let stillRunning = await getRunningLocalMinds();
+    while (stillRunning.length > 0 && Date.now() < deadline) {
+      await delayMs(LOCAL_MIND_STOP_POLL_INTERVAL_MS);
+      stillRunning = await getRunningLocalMinds();
+    }
+    closeStoppingProgress();
+    if (stillRunning.length === 0) return true;
+    const names = stillRunning.map((mind) => mind.name).join(', ');
+    const { response } = await dialog.showMessageBox({
+      type: 'warning',
+      buttons: ['Cancel quit', 'Quit anyway', 'Retry'],
+      defaultId: 2,
+      cancelId: 0,
+      message: stillRunning.length === 1 ? 'A mind could not be stopped' : 'Some minds could not be stopped',
+      detail: `${names}\n\nRetry stopping them, quit anyway (they keep running and using resources), or cancel and stay open.`,
+    });
+    if (response === 0) return false;
+    if (response === 1) return true;
+    remaining = stillRunning;
+  }
+}
+
+// On quit, offer to shut down any still-running local minds. Returns true to
+// proceed with the quit, false to cancel it (stay open).
+async function promptLocalMindShutdownAndMaybeStop() {
+  if (!getBackendProcess() || !backendBaseUrl) return true;
+  const running = await getRunningLocalMinds();
+  if (running.length === 0) return true;
+  const names = running.map((mind) => mind.name).join(', ');
+  const { response } = await dialog.showMessageBox({
+    type: 'question',
+    buttons: ['Cancel', 'Leave running', 'Shut down'],
+    defaultId: 2,
+    cancelId: 0,
+    message: running.length === 1
+      ? '1 local mind is still running'
+      : `${running.length} local minds are still running`,
+    detail: `${names}\n\nLeaving them running keeps using your computer's resources. `
+      + 'Shutting them down stops their agents and makes their services inaccessible '
+      + '(your data is preserved and you can start them again).',
+  });
+  if (response === 0) return false;
+  if (response === 1) return true;
+  return stopAllLocalMindsThenDecide(running);
+}
+
 function fetchInitialChromeState(timeoutMs = 4000) {
   // Drives one round-trip to /_chrome/events (SSE) to learn both auth status
   // and the current workspace list. Returns:
@@ -2053,6 +2227,28 @@ ipcMain.on('open-log-file', () => {
   shell.openPath(logPath);
 });
 
+// Landing-page Stop button: show a native confirmation, then issue the host
+// stop ourselves. The SSE drives the row from running -> stopped once it lands.
+ipcMain.on('confirm-stop-mind', async (event, agentId, name) => {
+  if (!agentId) return;
+  const bundle = getBundleFromEvent(event) || getMostRecentWindow();
+  const parentWindow = bundle && !bundle.window.isDestroyed() ? bundle.window : null;
+  const options = {
+    type: 'warning',
+    buttons: ['Cancel', 'Stop mind'],
+    defaultId: 0,
+    cancelId: 0,
+    message: `Stop "${name || agentId}"?`,
+    detail: 'Its agents will stop and its services become inaccessible. '
+      + 'Your data is preserved and you can start it again.',
+  };
+  const { response } = parentWindow
+    ? await dialog.showMessageBox(parentWindow, options)
+    : await dialog.showMessageBox(options);
+  if (response !== 1) return;
+  await postLocalMindStop(agentId);
+});
+
 ipcMain.on('window-minimize', (event) => {
   const bundle = getBundleFromEvent(event);
   if (bundle && !bundle.window.isDestroyed()) bundle.window.minimize();
@@ -2086,40 +2282,67 @@ function initiateFullQuit() {
   app.quit();
 }
 
-// Route POSIX SIGTERM / SIGINT through `app.quit()` so they trigger the
-// same `before-quit` chain that window-close uses (which already runs
-// `backend.shutdown()`, SIGTERMing the python backend and waiting for
-// uvicorn's graceful exit). Without these handlers Node's default for
-// these signals is to exit immediately, which orphans the python backend
-// and the `mngr forward` / `observe` subprocesses. The `just minds-stop`
-// recipe sends SIGTERM to this process so the clean-shutdown chain can run.
+// Guards for the quit sequence. ``isQuitSequenceRunning`` prevents the prompt
+// from firing twice (before-quit + window-all-closed can both arrive).
+// ``isHeadlessQuit`` is set by signal handlers so a programmatic shutdown
+// (e.g. ``just minds-stop``) never shows an interactive dialog.
+let isQuitSequenceRunning = false;
+let isHeadlessQuit = false;
+
+// Single async chokepoint for quitting: optionally prompt to shut down running
+// local minds, then tear the backend down and quit. Cancelling the prompt
+// leaves the app running.
+async function runQuitSequence() {
+  if (isShuttingDown || isQuitSequenceRunning) return;
+  isQuitSequenceRunning = true;
+  try {
+    if (!isHeadlessQuit) {
+      const shouldProceed = await promptLocalMindShutdownAndMaybeStop();
+      if (!shouldProceed) {
+        isQuitSequenceRunning = false;
+        return;
+      }
+    }
+  } catch (err) {
+    // A failure deciding the prompt must not strand the user unable to quit;
+    // fall through to a normal shutdown.
+    console.warn('[lifecycle] local-mind shutdown prompt failed, quitting anyway:', err);
+  }
+  isShuttingDown = true;
+  // Capture session state for every open window before teardown (the per-window
+  // `close` handler skips saving once isShuttingDown is set).
+  if (bundles.size > 0) saveSessionState();
+  await shutdown();
+  app.quit();
+}
+
+// Route POSIX SIGTERM / SIGINT through the quit sequence so they trigger the
+// same `backend.shutdown()` chain that window-close uses (SIGTERMing the python
+// backend and waiting for uvicorn's graceful exit). Without these handlers
+// Node's default for these signals is to exit immediately, which orphans the
+// python backend and the `mngr forward` / `observe` subprocesses. The `just
+// minds-stop` recipe sends SIGTERM here; we mark it headless so it shuts down
+// without showing an interactive local-mind prompt.
 for (const signal of ['SIGTERM', 'SIGINT']) {
   process.on(signal, () => {
-    console.log(`[lifecycle] ${signal} received, requesting app.quit()`);
+    console.log(`[lifecycle] ${signal} received, requesting quit`);
+    isHeadlessQuit = true;
     app.quit();
   });
 }
 
-app.on('window-all-closed', async () => {
+app.on('window-all-closed', () => {
   console.log('[lifecycle] window-all-closed fired, isShuttingDown=' + isShuttingDown);
-  if (isShuttingDown) return;
-  isShuttingDown = true;
-  await shutdown();
-  app.quit();
+  if (isShuttingDown || isQuitSequenceRunning) return;
+  runQuitSequence();
 });
 
-app.on('before-quit', async (event) => {
+app.on('before-quit', (event) => {
   console.log('[lifecycle] before-quit fired, isShuttingDown=' + isShuttingDown + ', hasBackend=' + !!getBackendProcess());
-  // Capture session state for every open window before teardown. Only save
-  // when bundles is non-empty: on the `window-all-closed` -> `app.quit()`
-  // path, every bundle has already been removed from the Set by its `closed`
-  // handler (and the per-window `close` handler already wrote the last
-  // non-empty snapshot), so saving here would just clobber it with `[]`.
-  if (bundles.size > 0) saveSessionState();
-  if (getBackendProcess() && !isShuttingDown) {
-    isShuttingDown = true;
-    event.preventDefault();
-    await shutdown();
-    app.quit();
-  }
+  // Once the quit sequence has committed (isShuttingDown), let the final
+  // app.quit() proceed untouched. Otherwise intercept: defer the actual quit
+  // until the local-mind prompt + teardown finish (or the user cancels).
+  if (isShuttingDown) return;
+  event.preventDefault();
+  runQuitSequence();
 });

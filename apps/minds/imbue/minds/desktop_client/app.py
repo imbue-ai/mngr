@@ -10,10 +10,12 @@ from collections.abc import AsyncGenerator
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime
+from enum import auto
 from pathlib import Path
 from typing import Annotated
 from typing import Any
 from typing import Final
+from typing import assert_never
 from urllib.parse import urlparse
 
 import httpx
@@ -33,6 +35,7 @@ from pydantic import SecretStr
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.bootstrap import is_imbue_cloud_provider_enabled_for_account
 from imbue.minds.bootstrap import list_disabled_provider_names
@@ -71,6 +74,12 @@ from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
+from imbue.minds.desktop_client.local_liveness import LocalMindLivenessTracker
+from imbue.minds.desktop_client.local_liveness import LocalMindState
+from imbue.minds.desktop_client.local_liveness import build_local_host_state_list_argv
+from imbue.minds.desktop_client.local_liveness import get_local_provider_names
+from imbue.minds.desktop_client.local_liveness import get_local_workspace_agent_ids
+from imbue.minds.desktop_client.local_liveness import parse_local_mind_states_from_list_json
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
@@ -158,6 +167,22 @@ def _enqueue_health_change(
     """Push a health-change event into ``health_queue`` and wake the SSE loop."""
     health_queue.put_nowait((str(agent_id), status))
     change_event.set()
+
+
+def _enqueue_local_mind_state_change(
+    liveness_queue: "asyncio.Queue[tuple[str, LocalMindState]]",
+    change_event: asyncio.Event,
+    agent_id: AgentId,
+    state: LocalMindState,
+) -> None:
+    """Push a local-mind liveness change into ``liveness_queue`` and wake the SSE loop."""
+    liveness_queue.put_nowait((str(agent_id), state))
+    change_event.set()
+
+
+def _local_mind_state_payload(agent_id: str, state: LocalMindState) -> dict[str, str]:
+    """Build a ``local_mind_state`` SSE payload for one local mind."""
+    return {"type": "local_mind_state", "agent_id": agent_id, "state": state.value}
 
 
 def _system_interface_status_payload(
@@ -378,12 +403,21 @@ def _handle_landing_page(
             else:
                 info = backend_resolver.get_agent_display_info(aid)
                 agent_names[str(aid)] = info.agent_name if info else str(aid)
+        local_agent_ids = get_local_workspace_agent_ids(backend_resolver)
+        liveness_tracker: LocalMindLivenessTracker | None = request.app.state.local_mind_liveness_tracker
+        local_mind_state_by_agent_id = (
+            {str(aid): state.value for aid, state in liveness_tracker.snapshot_all().items()}
+            if liveness_tracker is not None
+            else {}
+        )
         html = render_landing_page(
             accessible_agent_ids=all_agent_ids,
             mngr_forward_origin=_get_mngr_forward_origin(request),
             telegram_status_by_agent_id=telegram_status,
             agent_names=agent_names,
             destroying_status_by_agent_id=destroying_status_by_agent_id,
+            local_agent_ids=local_agent_ids,
+            local_mind_state_by_agent_id=local_mind_state_by_agent_id,
         )
         return HTMLResponse(content=html)
 
@@ -1674,6 +1708,10 @@ async def _handle_chrome_events(
         # We accumulate them into a per-connection queue and drain them
         # in the main generator loop so each subscriber sees every event.
         health_queue: asyncio.Queue[tuple[str, AgentHealth]] = asyncio.Queue()
+        # Local-mind liveness transitions arrive on the same kind of background
+        # threads (the liveness poll loop, the Start/Stop workers); accumulate
+        # them into their own per-connection queue and drain alongside health.
+        liveness_queue: asyncio.Queue[tuple[str, LocalMindState]] = asyncio.Queue()
 
         def _on_change() -> None:
             loop.call_soon_threadsafe(change_event.set)
@@ -1681,12 +1719,19 @@ async def _handle_chrome_events(
         def _on_health_change(agent_id: AgentId, status: AgentHealth) -> None:
             loop.call_soon_threadsafe(_enqueue_health_change, health_queue, change_event, agent_id, status)
 
+        def _on_liveness_change(agent_id: AgentId, state: LocalMindState) -> None:
+            loop.call_soon_threadsafe(_enqueue_local_mind_state_change, liveness_queue, change_event, agent_id, state)
+
         if isinstance(backend_resolver, MngrCliBackendResolver):
             backend_resolver.add_on_change_callback(_on_change)
 
         tracker: SystemInterfaceHealthTracker | None = request.app.state.system_interface_health_tracker
         if tracker is not None:
             tracker.add_on_change_callback(_on_health_change)
+
+        liveness_tracker: LocalMindLivenessTracker | None = request.app.state.local_mind_liveness_tracker
+        if liveness_tracker is not None:
+            liveness_tracker.add_on_change_callback(_on_liveness_change)
 
         try:
             # Send initial workspace list and request count
@@ -1725,6 +1770,12 @@ async def _handle_chrome_events(
                     yield "data: {}\n\n".format(
                         json.dumps(_system_interface_status_payload(tracker, str(aid), status))
                     )
+
+            # Send the initial local-mind liveness snapshot so the landing page
+            # can render Start/Stop controls without waiting for the next poll.
+            if liveness_tracker is not None:
+                for aid, state in liveness_tracker.snapshot_all().items():
+                    yield "data: {}\n\n".format(json.dumps(_local_mind_state_payload(str(aid), state)))
 
             # Wait for changes and push updates until client disconnects.
             #
@@ -1777,6 +1828,10 @@ async def _handle_chrome_events(
                     aid_str, status = health_queue.get_nowait()
                     yield "data: {}\n\n".format(json.dumps(_system_interface_status_payload(tracker, aid_str, status)))
 
+                while not liveness_queue.empty():
+                    aid_str, liveness_state = liveness_queue.get_nowait()
+                    yield "data: {}\n\n".format(json.dumps(_local_mind_state_payload(aid_str, liveness_state)))
+
                 current_data = _build_workspace_list(backend_resolver, session_store)
                 current_destroying_ids = _destroying_agent_ids(paths, backend_resolver.list_known_workspace_ids())
                 if current_data != last_workspace_data or current_destroying_ids != last_destroying_ids:
@@ -1813,6 +1868,8 @@ async def _handle_chrome_events(
                 backend_resolver.remove_on_change_callback(_on_change)
             if tracker is not None:
                 tracker.remove_on_change_callback(_on_health_change)
+            if liveness_tracker is not None:
+                liveness_tracker.remove_on_change_callback(_on_liveness_change)
 
     return StreamingResponse(
         _event_generator(),
@@ -2409,6 +2466,168 @@ def _handle_restart_host_api(
 ) -> Response:
     """Dispatch a full host restart (``mngr stop --stop-host`` + ``mngr start`` of system-services)."""
     return _dispatch_restart(request=request, auth_store=auth_store, agent_id=agent_id, is_host_restart=True)
+
+
+# -- Local-mind Start / Stop --
+#
+# A "local mind" is a workspace whose host runs on a local provider backend
+# (docker / lima); stopping one frees the user's machine while preserving data
+# and leaving it fully restartable. Stop = ``mngr stop --stop-host`` on the
+# host (same teardown the host-restart tier uses); Start = ``mngr start`` (boots
+# the stopped container). Both reflect the new state into the liveness tracker
+# and poke the poll loop to re-read, so the landing page and quit prompt see
+# the change without waiting for the next tick.
+
+
+class _LocalMindAction(UpperCaseStrEnum):
+    """Which lifecycle action a Start/Stop dispatch performs on a local mind's host."""
+
+    STOP = auto()
+    START = auto()
+
+
+def _run_local_mind_action(
+    workspace_agent_id: AgentId,
+    action: _LocalMindAction,
+    liveness_tracker: LocalMindLivenessTracker,
+    backend_resolver: BackendResolverInterface,
+    mngr_binary: str,
+    mngr_host_dir: Path,
+    concurrency_group: ConcurrencyGroup,
+    refresh_event: threading.Event,
+) -> None:
+    """Background worker: stop or start a local mind's host, then reflect the new liveness."""
+    services_agent_id = backend_resolver.get_system_services_agent_id(workspace_agent_id)
+    if services_agent_id is None:
+        logger.warning("Could not locate the system-services agent for local-mind action on {}", workspace_agent_id)
+        return
+    env = dict(os.environ)
+    env["MNGR_HOST_DIR"] = str(mngr_host_dir)
+    match action:
+        case _LocalMindAction.STOP:
+            argv = _build_mngr_stop_argv(mngr_binary, services_agent_id, is_host_restart=True)
+        case _LocalMindAction.START:
+            argv = _build_mngr_start_argv(mngr_binary, services_agent_id)
+        case _ as unreachable:
+            assert_never(unreachable)
+    try:
+        _run_mngr(concurrency_group, argv, env)
+    except MngrCommandError as exc:
+        # The action did not complete: leave the authoritative state to the poll
+        # (mark UNKNOWN so the UI stops showing the optimistic transient) and
+        # poke an immediate re-read.
+        logger.warning("Local-mind {} for {} failed: {}", action.value, workspace_agent_id, exc)
+        liveness_tracker.set_state(workspace_agent_id, LocalMindState.UNKNOWN)
+        refresh_event.set()
+        return
+    # The command ran to completion, so the container has reached the target
+    # state; reflect it immediately and poke the poll to confirm.
+    match action:
+        case _LocalMindAction.STOP:
+            liveness_tracker.set_state(workspace_agent_id, LocalMindState.STOPPED)
+        case _LocalMindAction.START:
+            liveness_tracker.set_state(workspace_agent_id, LocalMindState.RUNNING)
+        case _ as unreachable:
+            assert_never(unreachable)
+    refresh_event.set()
+
+
+def _dispatch_local_mind_action(
+    request: Request,
+    auth_store: AuthStoreDep,
+    agent_id: str,
+    action: _LocalMindAction,
+) -> Response:
+    """Shared body for the stop-host / start-host endpoints: validate, spawn the worker, return 202."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return _json_error("Not authenticated", status_code=403)
+    aid = AgentId(agent_id)
+    liveness_tracker: LocalMindLivenessTracker | None = request.app.state.local_mind_liveness_tracker
+    concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
+    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    refresh_event: threading.Event = request.app.state.local_liveness_refresh_event
+    if liveness_tracker is None or concurrency_group is None:
+        return _json_error("Local-mind control is unavailable in this configuration", status_code=503)
+    try:
+        concurrency_group.start_new_thread(
+            target=_run_local_mind_action,
+            kwargs={
+                "workspace_agent_id": aid,
+                "action": action,
+                "liveness_tracker": liveness_tracker,
+                "backend_resolver": backend_resolver,
+                "mngr_binary": request.app.state.mngr_binary,
+                "mngr_host_dir": request.app.state.mngr_host_dir,
+                "concurrency_group": concurrency_group,
+                "refresh_event": refresh_event,
+            },
+            name=f"local-mind-{action.value}-{aid}",
+            daemon=True,
+            is_checked=False,
+        )
+    except (OSError, RuntimeError, ConcurrencyGroupError) as exc:
+        logger.warning("Failed to spawn local-mind {} worker for {}: {}", action.value, aid, exc)
+        return _json_error(f"Could not start the {action.value} worker: {exc}", status_code=503)
+    return Response(status_code=202, content="{}", media_type="application/json")
+
+
+def _handle_stop_host_api(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Stop a local mind's host (``mngr stop --stop-host``)."""
+    return _dispatch_local_mind_action(
+        request=request, auth_store=auth_store, agent_id=agent_id, action=_LocalMindAction.STOP
+    )
+
+
+def _handle_start_host_api(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Start a local mind's stopped host (``mngr start``)."""
+    return _dispatch_local_mind_action(
+        request=request, auth_store=auth_store, agent_id=agent_id, action=_LocalMindAction.START
+    )
+
+
+def _handle_running_local_minds_api(
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Return the local minds whose containers are currently running, for the quit prompt.
+
+    Forces a fresh liveness read (rather than trusting the last poll) so the
+    Electron quit dialog never lists a mind that is already stopped. Each entry
+    carries the agent id and human-readable workspace name.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return _json_error("Not authenticated", status_code=403)
+    liveness_tracker: LocalMindLivenessTracker | None = request.app.state.local_mind_liveness_tracker
+    concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
+    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    if liveness_tracker is None or concurrency_group is None:
+        return Response(content=json.dumps({"running": []}), media_type="application/json")
+    state_by_agent_id = _read_local_mind_states(
+        backend_resolver=backend_resolver,
+        mngr_binary=request.app.state.mngr_binary,
+        mngr_host_dir=request.app.state.mngr_host_dir,
+        concurrency_group=concurrency_group,
+    )
+    liveness_tracker.apply_poll_results(state_by_agent_id)
+    running = []
+    for aid_str, state in state_by_agent_id.items():
+        if state != LocalMindState.RUNNING:
+            continue
+        aid = AgentId(aid_str)
+        name = backend_resolver.get_workspace_name(aid)
+        if not name:
+            info = backend_resolver.get_agent_display_info(aid)
+            name = info.agent_name if info is not None else aid_str
+        running.append({"id": aid_str, "name": name})
+    return Response(content=json.dumps({"running": running}), media_type="application/json")
 
 
 def _handle_host_health_probe_api(
@@ -3233,6 +3452,7 @@ def create_desktop_client(
     output_format: OutputFormat | None = None,
     root_concurrency_group: ConcurrencyGroup | None = None,
     system_interface_health_tracker: SystemInterfaceHealthTracker | None = None,
+    local_mind_liveness_tracker: LocalMindLivenessTracker | None = None,
     mngr_binary: str = "mngr",
     mngr_host_dir: Path | None = None,
     minds_api_key: str | None = None,
@@ -3327,6 +3547,11 @@ def create_desktop_client(
     app.state.auth_output_format = output_format or OutputFormat.JSONL
     app.state.root_concurrency_group = root_concurrency_group
     app.state.system_interface_health_tracker = system_interface_health_tracker
+    app.state.local_mind_liveness_tracker = local_mind_liveness_tracker
+    # Set by a Start/Stop action to ask the liveness poll loop to re-read
+    # immediately instead of waiting for the next tick. Always present so the
+    # stop/start endpoints can poke it even when no poll loop is running.
+    app.state.local_liveness_refresh_event = threading.Event()
     app.state.mngr_binary = mngr_binary
     app.state.mngr_host_dir = mngr_host_dir if mngr_host_dir is not None else Path.home() / ".mngr"
     # Always-set (possibly None) so consumers can read directly via
@@ -3444,6 +3669,11 @@ def create_desktop_client(
     app.post("/api/agents/{agent_id}/restart-system-interface")(_handle_restart_system_interface_api)
     app.post("/api/agents/{agent_id}/restart-host")(_handle_restart_host_api)
 
+    # Local-mind Start / Stop + the quit-prompt running-minds lookup
+    app.post("/api/agents/{agent_id}/stop-host")(_handle_stop_host_api)
+    app.post("/api/agents/{agent_id}/start-host")(_handle_start_host_api)
+    app.get("/api/local-minds/running")(_handle_running_local_minds_api)
+
     return app
 
 
@@ -3527,3 +3757,85 @@ def _run_system_interface_health_probe_loop(
                 else:
                     tracker.record_probe_failure(aid)
             threading.Event().wait(timeout=_HEALTH_PROBE_INTERVAL_SECONDS)
+
+
+# How often the local-mind liveness poll re-reads each local container's state.
+# Generous because it only catches *externally*-driven stop/start (a manual
+# ``docker stop``, a crash); minds' own Start/Stop poke the poll for an
+# immediate re-read, so the steady-state cadence can be slow.
+_LOCAL_LIVENESS_POLL_INTERVAL_SECONDS: Final[float] = 60.0
+
+
+def _read_local_mind_states(
+    backend_resolver: BackendResolverInterface,
+    mngr_binary: str,
+    mngr_host_dir: Path,
+    concurrency_group: ConcurrencyGroup,
+) -> dict[str, LocalMindState]:
+    """Read each local mind's container liveness via a single read-only ``mngr list``.
+
+    Returns an empty mapping when there are no local minds. A failed listing
+    maps every local mind to UNKNOWN rather than dropping them, so a transient
+    error never reads as "all stopped".
+    """
+    local_agent_ids = get_local_workspace_agent_ids(backend_resolver)
+    if not local_agent_ids:
+        return {}
+    local_provider_names = get_local_provider_names(backend_resolver)
+    argv = build_local_host_state_list_argv(mngr_binary, local_provider_names, local_agent_ids)
+    env = dict(os.environ)
+    env["MNGR_HOST_DIR"] = str(mngr_host_dir)
+    try:
+        list_json = _run_mngr(concurrency_group, argv, env)
+    except MngrCommandError as exc:
+        logger.warning("Local-mind liveness `mngr list` did not exit cleanly: {}", exc)
+        return {str(aid): LocalMindState.UNKNOWN for aid in local_agent_ids}
+    return parse_local_mind_states_from_list_json(list_json, local_agent_ids)
+
+
+def start_local_liveness_poll_loop(
+    liveness_tracker: LocalMindLivenessTracker,
+    backend_resolver: BackendResolverInterface,
+    mngr_binary: str,
+    mngr_host_dir: Path,
+    refresh_event: threading.Event,
+    root_concurrency_group: ConcurrencyGroup | None,
+) -> None:
+    """Start the background thread that polls local-mind container liveness.
+
+    No-ops for a non-mngr resolver (tests) or when there is no concurrency group,
+    so test factories can build the app without spawning the poll thread.
+    """
+    if root_concurrency_group is None or not isinstance(backend_resolver, MngrCliBackendResolver):
+        return
+    root_concurrency_group.start_new_thread(
+        target=_run_local_liveness_poll_loop,
+        args=(liveness_tracker, backend_resolver, mngr_binary, mngr_host_dir, refresh_event, root_concurrency_group),
+        name="local-mind-liveness-poll",
+        daemon=True,
+    )
+
+
+def _run_local_liveness_poll_loop(
+    liveness_tracker: LocalMindLivenessTracker,
+    backend_resolver: BackendResolverInterface,
+    mngr_binary: str,
+    mngr_host_dir: Path,
+    refresh_event: threading.Event,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """Loop body for the local-mind liveness poll thread.
+
+    Re-reads on a fixed interval, but wakes early whenever ``refresh_event`` is
+    set by a Start/Stop action so a user-initiated change converges at once.
+    """
+    while not root_concurrency_group.is_shutting_down():
+        state_by_agent_id = _read_local_mind_states(
+            backend_resolver=backend_resolver,
+            mngr_binary=mngr_binary,
+            mngr_host_dir=mngr_host_dir,
+            concurrency_group=root_concurrency_group,
+        )
+        liveness_tracker.apply_poll_results(state_by_agent_id)
+        refresh_event.wait(timeout=_LOCAL_LIVENESS_POLL_INTERVAL_SECONDS)
+        refresh_event.clear()

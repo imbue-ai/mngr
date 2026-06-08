@@ -1,4 +1,4 @@
-{#def agent_ids, agent_accents, mngr_forward_origin, telegram_enabled, telegram_status_by_agent_id, is_discovering, agent_names, destroying_status_by_agent_id #}
+{#def agent_ids, agent_accents, mngr_forward_origin, telegram_enabled, telegram_status_by_agent_id, is_discovering, agent_names, destroying_status_by_agent_id, local_agent_ids, local_mind_state_by_agent_id #}
 {#
   Landing page: list of accessible workspaces with per-row health, backup,
   and telegram status. Subscribes to the chrome SSE so the page reloads
@@ -13,6 +13,12 @@
 
     var healthStatusByAgent = {};
 
+    // Server-seeded local-mind container liveness. ``localMindStateByAgent`` maps
+    // agent id -> 'RUNNING' | 'STOPPED' | 'UNKNOWN'; only local (docker/lima)
+    // minds appear, and they are the only rows that get Start/Stop controls.
+    var localMindStateByAgent = {{ local_mind_state_by_agent_id | tojson }};
+    var isElectronShell = navigator.userAgent.indexOf('Electron') !== -1;
+
     function getRow(agentId) {
       return document.querySelector('[data-agent-id="' + (window.CSS && CSS.escape ? CSS.escape(agentId) : agentId) + '"]');
     }
@@ -20,6 +26,11 @@
     function applyRowHealth(agentId, status) {
       var row = getRow(agentId);
       if (!row) return;
+      // A stopped container has no server to be unhealthy; suppress the health
+      // badge entirely so it doesn't compete with the "Stopped" state badge.
+      if (localMindStateByAgent[agentId] === 'STOPPED') {
+        status = 'healthy';
+      }
       var badge = row.querySelector('.landing-health-badge');
       if (!badge) return;
       if (status === 'stuck') {
@@ -55,6 +66,86 @@
       var ret = row.dataset.defaultHref || '';
       window.location = '/agents/' + encodeURIComponent(agentId)
         + '/recovery?return_to=' + encodeURIComponent(ret) + '&intent=restart';
+    };
+
+    // -- Local-mind Start / Stop controls --
+
+    // Apply a (possibly transient) liveness label to a local row: swap which of
+    // the Start / Stop buttons is shown and set the status badge. Transient
+    // 'STARTING' / 'STOPPING' are client-only optimistic labels set on click;
+    // the authoritative 'RUNNING' / 'STOPPED' / 'UNKNOWN' arrive over the SSE.
+    function applyLocalMindState(agentId, state) {
+      localMindStateByAgent[agentId] = state;
+      var row = getRow(agentId);
+      if (!row) return;
+      var startBtn = row.querySelector('.landing-start-btn');
+      var stopBtn = row.querySelector('.landing-stop-btn');
+      var badge = row.querySelector('.landing-mind-state-badge');
+      var showStart = state === 'STOPPED';
+      var showStop = state === 'RUNNING';
+      if (startBtn) startBtn.classList.toggle('hidden', !showStart);
+      if (stopBtn) stopBtn.classList.toggle('hidden', !showStop);
+      if (badge) {
+        var text = '';
+        var tone = 'bg-zinc-100 text-zinc-700';
+        if (state === 'STOPPED') { text = 'Stopped'; tone = 'bg-zinc-100 text-zinc-700'; }
+        else if (state === 'UNKNOWN') { text = 'Status unknown'; tone = 'bg-zinc-100 text-zinc-500'; }
+        else if (state === 'STOPPING') { text = 'Stopping…'; tone = 'bg-amber-100 text-amber-800'; }
+        else if (state === 'STARTING') { text = 'Starting…'; tone = 'bg-amber-100 text-amber-800'; }
+        badge.textContent = text;
+        badge.className = 'landing-mind-state-badge inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium '
+          + (text ? tone : 'hidden');
+      }
+      // Re-evaluate the health badge: a freshly-stopped row must drop any
+      // "Server not responding" badge it was showing.
+      applyRowHealth(agentId, healthStatusByAgent[agentId] || 'healthy');
+    }
+
+    window.landingStartClick = function (button) {
+      var row = button.closest('[data-agent-id]');
+      if (!row) return;
+      var agentId = row.dataset.agentId;
+      applyLocalMindState(agentId, 'STARTING');
+      fetch('/api/agents/' + encodeURIComponent(agentId) + '/start-host', { method: 'POST' })
+        .then(function (response) {
+          if (!response.ok) {
+            console.error('Start for', agentId, 'returned HTTP', response.status);
+            applyLocalMindState(agentId, 'STOPPED');
+          }
+        })
+        .catch(function (err) {
+          console.error('Start for', agentId, 'failed:', err);
+          applyLocalMindState(agentId, 'STOPPED');
+        });
+    };
+
+    window.landingStopClick = function (button) {
+      var row = button.closest('[data-agent-id]');
+      if (!row) return;
+      var agentId = row.dataset.agentId;
+      var name = row.dataset.mindName || agentId;
+      // In the desktop shell, route through the relay so the main process can
+      // show a native confirmation dialog and issue the stop itself. In a plain
+      // browser there is no shell, so confirm in-page and stop via fetch.
+      if (isElectronShell) {
+        window.postMessage({ type: 'minds:confirm-stop-mind', agentId: agentId, name: name }, '*');
+        return;
+      }
+      var ok = window.confirm('Stop "' + name + '"? Its agents will stop and its services become inaccessible. '
+        + 'Data is preserved and you can start it again.');
+      if (!ok) return;
+      applyLocalMindState(agentId, 'STOPPING');
+      fetch('/api/agents/' + encodeURIComponent(agentId) + '/stop-host', { method: 'POST' })
+        .then(function (response) {
+          if (!response.ok) {
+            console.error('Stop for', agentId, 'returned HTTP', response.status);
+            applyLocalMindState(agentId, 'RUNNING');
+          }
+        })
+        .catch(function (err) {
+          console.error('Stop for', agentId, 'failed:', err);
+          applyLocalMindState(agentId, 'RUNNING');
+        });
     };
 
     var pendingToggleClickedAtByProvider = {};
@@ -345,6 +436,10 @@
           applyRowHealth(aid, data.status);
           return;
         }
+        if (data.type === 'local_mind_state') {
+          applyLocalMindState(data.agent_id, data.state);
+          return;
+        }
         if (data.type === 'providers_state') {
           lastEventAt = data.last_event_at;
           lastFullSnapshotAt = data.last_full_snapshot_at;
@@ -376,6 +471,10 @@
         setTimeout(connect, 5000);
       };
     }
+    // Reconcile each row with its server-seeded liveness before the SSE opens.
+    Object.keys(localMindStateByAgent).forEach(function (agentId) {
+      applyLocalMindState(agentId, localMindStateByAgent[agentId]);
+    });
     connect();
   })();
 </script>
@@ -397,6 +496,8 @@
           {% set accent_style = "--workspace-accent: " ~ agent_accents.get(agent_id | string, "oklch(65% 0.15 230)") ~ ";" %}
           {% set goto_href = mngr_forward_origin ~ "/goto/" ~ agent_id ~ "/" %}
           {% set destroying_href = "/destroying/" ~ agent_id %}
+          {% set is_local_mind = (agent_id | string) in local_agent_ids %}
+          {% set mind_state = local_mind_state_by_agent_id.get(agent_id | string, "UNKNOWN") %}
           {% if destroying_status %}
             <Card tag="a" layout="row" interactive
                   extra="accent-spine relative overflow-hidden"
@@ -418,17 +519,38 @@
                   :style="accent_style"
                   :data-agent-id="agent_id"
                   :data-default-href="goto_href"
+                  :data-mind-name="agent_names.get(agent_id | string, agent_id)"
                   onclick="window.landingRowClick(event, this)">
               <span class="flex-1 font-medium text-zinc-900 pl-1">{{ agent_names.get(agent_id | string, agent_id) }}</span>
               <span class="landing-backup-badge hidden inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium"></span>
               <Link href="#" class="landing-backup-download hidden cursor-pointer" extra="text-xs">download</Link>
+              <span class="landing-mind-state-badge hidden inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium"></span>
               <span class="landing-health-badge hidden inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium"></span>
-              <Button variant="ghost" size="icon"
-                      onclick="event.stopPropagation(); window.landingRestartClick(this)"
-                      title="Restart workspace"
-                      aria-label="Restart workspace">
-                <Icon24 name="restart" />
-              </Button>
+              {% if is_local_mind %}
+                {# Local (docker/lima) minds get container Start/Stop instead of
+                   the recovery-only Restart button; JS toggles which is shown. #}
+                <Button variant="ghost" size="icon"
+                        extra="landing-start-btn{% if mind_state != 'STOPPED' %} hidden{% endif %}"
+                        onclick="event.stopPropagation(); window.landingStartClick(this)"
+                        title="Start mind"
+                        aria-label="Start mind">
+                  <Icon24 name="play" />
+                </Button>
+                <Button variant="ghost" size="icon"
+                        extra="landing-stop-btn{% if mind_state != 'RUNNING' %} hidden{% endif %}"
+                        onclick="event.stopPropagation(); window.landingStopClick(this)"
+                        title="Stop mind"
+                        aria-label="Stop mind">
+                  <Icon24 name="stop" />
+                </Button>
+              {% else %}
+                <Button variant="ghost" size="icon"
+                        onclick="event.stopPropagation(); window.landingRestartClick(this)"
+                        title="Restart workspace"
+                        aria-label="Restart workspace">
+                  <Icon24 name="restart" />
+                </Button>
+              {% endif %}
               <Button variant="ghost" size="icon"
                       onclick="event.stopPropagation(); window.location='/workspace/{{ agent_id }}/settings'"
                       title="Settings"
