@@ -26,11 +26,11 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_claude.headless_claude_agent import HeadlessClaude
 from imbue.mngr_claude.headless_claude_agent import HeadlessClaudeAgentConfig
-from imbue.mngr_claude.headless_claude_agent import extract_assistant_message_id
-from imbue.mngr_claude.headless_claude_agent import extract_assistant_text
-from imbue.mngr_claude.headless_claude_agent import extract_message_start_id
-from imbue.mngr_claude.headless_claude_agent import extract_text_delta
 from imbue.mngr_claude.plugin import ClaudeAgent
+from imbue.mngr_claude.stream_json import extract_assistant_message_id
+from imbue.mngr_claude.stream_json import extract_assistant_text
+from imbue.mngr_claude.stream_json import extract_message_start_id
+from imbue.mngr_claude.stream_json import extract_text_delta
 
 # =============================================================================
 # MRO invariant test
@@ -422,8 +422,13 @@ def _make_assistant_message_line(text: str, message_id: str | None = None) -> st
     (without `--include-partial-messages`) on v2.1.114 and similar versions.
     """
     message: dict[str, object] = {
+        "type": "message",
         "role": "assistant",
+        "model": "claude-sonnet-4-5",
         "content": [{"type": "text", "text": text}],
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 0, "output_tokens": 0},
     }
     if message_id is not None:
         message["id"] = message_id
@@ -442,7 +447,16 @@ def _make_message_start_line(message_id: str) -> str:
             "type": "stream_event",
             "event": {
                 "type": "message_start",
-                "message": {"id": message_id, "role": "assistant"},
+                "message": {
+                    "id": message_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-5",
+                    "content": [],
+                    "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 0, "output_tokens": 0},
+                },
             },
         }
     )

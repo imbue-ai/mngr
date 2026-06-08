@@ -78,7 +78,9 @@ def test_transcript_assistant_event_to_stream_json() -> None:
     message = converted["message"]
     assert isinstance(message, dict)
     assert message["role"] == "assistant"
-    assert message["content"] == [{"type": "text", "text": "hi"}]
+    # The inner message is dumped from anthropic.types.Message, so the text block also carries the
+    # API's optional `citations` field (null here).
+    assert message["content"] == [{"type": "text", "text": "hi", "citations": None}]
 
 
 def test_transcript_user_event_to_stream_json() -> None:
