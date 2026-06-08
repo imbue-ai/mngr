@@ -294,6 +294,30 @@ def test_assemble_command_appends_user_agent_args(antigravity_agent: Antigravity
     assert "agy --add-dir /tmp --log-file" in command
 
 
+def test_assemble_command_shell_quotes_agent_args_with_spaces_and_parens(
+    antigravity_agent: AntigravityAgent,
+) -> None:
+    """A model name with spaces/parens is shell-quoted, not spliced in raw.
+
+    Regression test for the reported failure: passing
+    ``--model "Gemini 3.5 Flash (Medium)"`` produced
+    ``agy --model Gemini 3.5 Flash (Medium) ...`` inside the shell-evaluated
+    launch command, so bash word-split the value and parsed ``(Medium)`` as a
+    subshell ("syntax error near unexpected token `('"). The value must appear
+    as a single quoted token.
+    """
+    command = str(
+        antigravity_agent.assemble_command(
+            antigravity_agent.host,
+            ("--model", "Gemini 3.5 Flash (Medium)"),
+            command_override=None,
+        )
+    )
+    assert "agy --model 'Gemini 3.5 Flash (Medium)' --log-file" in command
+    # The raw, unquoted value (which triggered the bash syntax error) must not appear.
+    assert "--model Gemini 3.5 Flash (Medium)" not in command
+
+
 def test_assemble_command_omits_dangerously_skip_permissions_when_auto_allow_disabled(
     antigravity_agent: AntigravityAgent,
 ) -> None:
