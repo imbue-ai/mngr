@@ -1234,9 +1234,11 @@ async def amain() -> int:
 
             # Iter 14 (Back to projects link): real users navigate back from
             # settings via the top-level link without ever opening the
-            # destroy modal. Verify the link returns to home, then re-enter
-            # settings to continue the destroy flow.
-            await win.click('text="Back to projects"')
+            # destroy modal. The template renders it as ``&larr; Back to
+            # projects`` (a left-arrow glyph + the phrase), so an exact
+            # text= match for the phrase alone won't find it. Match by
+            # href= on the wrapping Link instead.
+            await win.click('a[href="/"]:has-text("Back to projects")')
             await win.wait_for_url(origin + "/", timeout=10_000)
             await snap_page(win, "18a-back-to-projects-from-settings")
             await win.goto(origin + f"/workspace/{w2_agent_id}/settings")
