@@ -1,7 +1,5 @@
-from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
-from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
@@ -16,7 +14,7 @@ from imbue.mngr.api.create import _write_host_env_vars
 from imbue.mngr.api.create import create
 from imbue.mngr.api.create import destroy_new_host_on_create_failure
 from imbue.mngr.api.create import resolve_target_host
-from imbue.mngr.api.providers import _instance_cache
+from imbue.mngr.api.testing import inject_provider_instance
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNameConflictError
@@ -125,22 +123,6 @@ def _make_scripted_provider(
         existing_host_names=existing_host_names if existing_host_names is not None else [],
         conflicts_before_success=conflicts_before_success,
     )
-
-
-@contextmanager
-def _inject_provider(provider: _ScriptedProvider, mngr_ctx: MngrContext) -> Generator[None, None, None]:
-    """Make ``get_provider_instance`` (and thus ``resolve_target_host``) return ``provider``.
-
-    ``resolve_target_host`` resolves the provider for a ``NewHostOptions`` via the
-    shared provider-instance cache, so seeding the cache is the only way to make
-    it use our scripted provider without editing shared code.
-    """
-    cache_key = (provider.name, id(mngr_ctx))
-    _instance_cache[cache_key] = provider
-    try:
-        yield
-    finally:
-        _instance_cache.pop(cache_key, None)
 
 
 def test_write_host_env_vars_writes_explicit_env_vars(
@@ -368,7 +350,7 @@ def test_resolve_target_host_retries_auto_named_host_on_name_conflict(
         tags={},
     )
 
-    with _inject_provider(provider, temp_mngr_ctx):
+    with inject_provider_instance(provider, temp_mngr_ctx):
         result = resolve_target_host(target, temp_mngr_ctx)
 
     assert isinstance(result, OnlineHostInterface)
@@ -402,7 +384,7 @@ def test_resolve_target_host_does_not_retry_user_specified_name_on_conflict(
         tags={},
     )
 
-    with _inject_provider(provider, temp_mngr_ctx):
+    with inject_provider_instance(provider, temp_mngr_ctx):
         with pytest.raises(HostNameConflictError):
             resolve_target_host(target, temp_mngr_ctx)
 
