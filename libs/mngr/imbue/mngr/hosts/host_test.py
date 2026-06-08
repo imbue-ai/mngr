@@ -2326,7 +2326,6 @@ def test_host_get_agents_returns_agents(
     assert "agent-two" in agent_names
 
 
-@pytest.mark.allow_warnings(match=r"^Agent .* has type .* which is no longer registered")
 def test_host_get_agents_tolerates_agent_with_unregistered_type(
     local_host: Host,
     temp_host_dir: Path,

@@ -1010,15 +1010,14 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         was uninstalled or the type was renamed since the agent was created),
         we degrade to the orphan-fallback class wired via
         ``set_orphan_agent_class`` (configured by ``load_agents_from_plugins``
-        in the agents layer) plus a base ``AgentTypeConfig``, with a logged
-        warning so commands like ``mngr destroy`` / ``mngr list`` /
-        ``mngr cleanup`` can still operate on the agent. If no orphan
-        fallback has been wired (e.g. tests that skipped plugin loading),
-        the original ``UnknownAgentTypeError`` is propagated so the missing
-        setup surfaces instead of silently being swallowed.
-        ``check_agent_type_known`` separately marks the agent's lifecycle
-        state as ``RUNNING_UNKNOWN_AGENT_TYPE`` so users see that something
-        is off.
+        in the agents layer) plus a base ``AgentTypeConfig`` so commands like
+        ``mngr destroy`` / ``mngr list`` / ``mngr cleanup`` can still operate
+        on the agent. If no orphan fallback has been wired (e.g. tests that
+        skipped plugin loading), the original ``UnknownAgentTypeError`` is
+        propagated so the missing setup surfaces instead of silently being
+        swallowed. ``check_agent_type_known`` separately marks the agent's
+        lifecycle state as ``RUNNING_UNKNOWN_AGENT_TYPE`` so users see that
+        something is off.
         """
         data_path = agent_dir / "data.json"
         try:
@@ -1042,13 +1041,6 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 # agent registry). Re-raise so the test surfaces the
                 # missing setup rather than silently swallowing the error.
                 raise
-            logger.warning(
-                "Agent {} has type '{}' which is no longer registered; "
-                "loading with fallback class {} so existing commands keep working.",
-                data.get("name"),
-                agent_type,
-                orphan_class.__name__,
-            )
             resolved_class = orphan_class
             resolved_config = AgentTypeConfig()
 
