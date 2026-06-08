@@ -10,7 +10,6 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 def test_create_with_template(e2e: E2eSession) -> None:
     # Write a template that sets transfer=none (so agent runs in-place)
     cfg = ".$MNGR_ROOT_NAME/settings.local.toml"
@@ -31,12 +30,22 @@ def test_create_with_template(e2e: E2eSession) -> None:
         )
     ).to_succeed()
 
-    # Verify the template was applied: work_dir should not contain "worktrees"
-    list_result = e2e.run("mngr list --format json", comment="Verify template settings applied")
+    # Verify the template was applied: work_dir should not contain "worktrees".
+    # Scope discovery to the local provider so the test does not fan out to the
+    # (slow, network-bound) Modal provider -- the template runs the agent
+    # in-place locally, so there is nothing to learn from remote providers.
+    list_result = e2e.run("mngr list --provider local --format json", comment="Verify template settings applied")
     expect(list_result).to_succeed()
     agents = json.loads(list_result.stdout)["agents"]
     matching = [a for a in agents if a["name"] == "my-task"]
     assert len(matching) == 1
-    assert "worktrees" not in matching[0]["work_dir"], (
-        f"Expected in-place work_dir (no worktree) from template, got: {matching[0]['work_dir']}"
-    )
+    work_dir = matching[0]["work_dir"]
+    assert "worktrees" not in work_dir, f"Expected in-place work_dir (no worktree) from template, got: {work_dir}"
+
+    # Confirm the agent is genuinely running in-place by observing its actual
+    # runtime working directory (not just the metadata reported by `mngr list`).
+    # With transfer=none the agent's cwd must be the repo itself, which is what
+    # `work_dir` points at -- a worktree-based transfer would put it elsewhere.
+    pwd_result = e2e.run("mngr exec my-task pwd", comment="Confirm the agent runs in-place in the repo")
+    expect(pwd_result).to_succeed()
+    expect(pwd_result.stdout).to_contain(work_dir)

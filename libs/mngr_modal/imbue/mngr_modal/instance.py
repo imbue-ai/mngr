@@ -1778,6 +1778,12 @@ log "=== Shutdown script completed ==="
             )
             if isinstance(e, ModalProxyRemoteError):
                 raise MngrError(f"Failed to create Modal sandbox: {e}\n{build_log}") from None
+            elif isinstance(e, ModalProxyInvalidError):
+                # An invalid argument (e.g. a non-existent --snapshot image id) is a
+                # user/config error, not an internal bug. Surface it as a clean
+                # MngrError so the CLI prints a single-line message instead of
+                # dumping a raw Python traceback.
+                raise MngrError(f"Failed to create Modal host: {e}") from None
             else:
                 raise
 
