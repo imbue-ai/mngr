@@ -4,6 +4,21 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-08
+
+Fixed the antigravity onboarding seed so it also skips agy's first-run NUX for users authenticated through an enterprise account. The seed now marks `enterpriseOnboardingComplete` as `True` (previously `False`), which was leaving enterprise-authenticated users stuck in the enterprise onboarding flow on their first message.
+
+Fixed: passing a model name (or any value containing spaces or parentheses) as an `agy` argument no longer breaks `mngr create`.
+
+Passing `--model "Gemini 3.5 Flash (Medium)"` to an `antigravity` agent previously produced `agy --model Gemini 3.5 Flash (Medium) ...` in the shell-evaluated launch command, so bash word-split the value and parsed `(Medium)` as a subshell (`syntax error near unexpected token '('`). The underlying fix is in `mngr` (`agent_args` are now shell-quoted in `BaseAgent.assemble_command`); the `antigravity` plugin inherits it.
+
+Note: the model is normally set via `settings_overrides` (a `model` key in the per-agent `settings.json`), which is the supported path and is unaffected. This fix covers the case where a model is instead passed explicitly as a CLI argument.
+
+Standardized this plugin's test setup on `register_plugin_test_fixtures(globals())`
+instead of `pytest_plugins = ["imbue.mngr.conftest"]`, so HOME isolation is wired
+the same single way across all mngr plugins. Internal test-infrastructure change
+only; no user-facing behavior change.
+
 ## 2026-06-05
 
 `antigravity` agents now stay RUNNING while a subagent or backgrounded task they launched is still working, instead of flipping to WAITING the moment the root agent's turn ends.
