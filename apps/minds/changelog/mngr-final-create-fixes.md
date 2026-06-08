@@ -13,3 +13,7 @@ Final fixes to the standardized workspace-create flow:
   the host isn't reachable yet, and only notifies you if it ultimately fails.
 - Destroyed workspaces now disappear from the workspace list, and destroying a
   workspace no longer reports a spurious "failed" once the host is actually gone.
+- The onboarding "initial message" retry budget is raised from 10 minutes to 1
+  hour, so the message still lands on slow-to-start workspaces (e.g. a cold lima
+  create that boots a VM and builds an in-VM image) and when the user takes a
+  while to finish logging in to their AI provider.

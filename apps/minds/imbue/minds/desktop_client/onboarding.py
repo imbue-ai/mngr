@@ -211,9 +211,15 @@ class OnboardingApplier(MutableModel):
         description="Max time to wait for ``mngr create`` to publish the canonical agent id before giving up on Q3.",
     )
     chat_agent_message_timeout_seconds: float = Field(
-        default=600.0,
+        default=3600.0,
         frozen=True,
-        description="Max time to keep retrying the Q2 message until the bootstrap-created chat agent accepts it.",
+        description=(
+            "Max time to keep retrying the Q2 message until the bootstrap-created chat agent accepts it. "
+            "Set generously (1 hour) because the chat agent can take a long time to come online: a cold "
+            "lima create boots a VM and builds the in-VM image first, and the user may still need to finish "
+            "logging in to their AI provider before the agent will accept the message. This is not provider-"
+            "specific -- it just has to outlast the slowest realistic 'workspace fully ready to chat' path."
+        ),
     )
     poll_interval_seconds: float = Field(
         default=2.0,
