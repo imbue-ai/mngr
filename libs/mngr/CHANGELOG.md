@@ -6,6 +6,12 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: Regenerated `docs/commands/secondary/robinhood.md` CLI help doc to document the new `--include-partial-messages` and `--stream-plain-text` streaming flags (implemented in `imbue-mngr-robinhood`).
+
+## [v0.2.11] - 2026-06-05
+
 ### Added
 
 - Added: New `mngr stop --stop-host` flag that stops an agent's whole host (every agent on it) instead of just the named agent. Rejected up front on providers that don't support stopping hosts; cannot be combined with `--archive`. Idempotent on already-offline hosts. Resolves the target host via the discovery event stream + `provider.get_host` instead of SSH, so it works even when the host's container is running but sshd is unreachable. Multiple `--stop-host` targets are stopped concurrently via a concurrency-group executor (output order is unchanged). Supports the minds tiered workspace-restart recovery flow.
@@ -13,9 +19,13 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `get_local_host(mngr_ctx)` in `imbue.mngr.api.providers` is the canonical way to obtain the local host (e.g. as an rsync / `copy_directory` source). The previously duplicated `_get_local_host` helpers in plugins were consolidated through this single entry point.
 - Added: `upload_files_in_bulk` (`imbue.mngr.hosts.file_upload`) transfers many files to a host in a single rsync (remote) or direct write (local), backed by a new `copy_local_directory` host primitive. `Host.provision_agent`'s user-upload and agent file-transfer loops route through it instead of one `write_file` per file (a per-file SSH round-trip that did not scale — github issue 1825).
 - Added: `tail_discovery_events_file` helper — a pure consumer that emits the latest cached snapshot then tails the discovery event log without polling providers or writing snapshots. Backs `mngr forward --observe-via-file` and is shared with `run_discovery_stream`.
+- Added: `imbue.mngr.utils.git_utils.find_git_source_path` shared helper for resolving the per-agent source-repo trust path, replacing the byte-for-byte-duplicated logic in the `antigravity` and `claude` plugins.
+- Added: `imbue.mngr.hosts.common.symlink_on_host(host, source, dest, *, ensure_source_parent=...)` and `copy_on_host(host, source, dest, *, copy_file_mode=...)` — one-round-trip helpers that respectively symlink (write-through, even to a not-yet-existing source) or copy (only if the source exists) a path on the host, centralizing the symlink-vs-copy credential/cache pattern.
 
 ### Changed
 
+- Changed: **Breaking** — `mngr dependencies` flags reworked. The old `-c`/`-a`/`-i` flags are removed; "which dependencies count" and "whether to install" are now two orthogonal options: `--scope core|all` (default `all`) controls which dependencies determine the exit code, and `--install none|interactive|auto` (default `none`) controls install behavior. Old `-c` → `--scope core --install auto`, old `-a` → `--install auto`, old `-i` → `--install interactive`.
+- Changed: `ssh` is reclassified from a core to an optional dependency; core dependencies are now `git`, `tmux`, and `jq`. mngr's remote-host connectivity runs through paramiko (pure-Python), so the `ssh` binary is only needed for `mngr connect` to a remote agent, `mngr git push`/`pull` and `mngr rsync`, and the git-mirror/rsync source transfer when creating a remote agent. Those paths now raise a clear `BinaryNotInstalledError` if `ssh` is missing instead of an opaque "ssh: command not found".
 - Changed: **Breaking** — discovery snapshots are now authoritative only for providers that succeeded on a given poll. The `FullDiscoverySnapshotEvent` contract changed: agents/hosts whose provider is in `error_by_provider_name` must be retained from prior consumer state (and surfaced as unknown/stale) rather than dropped, and are only removed on an explicit destroy event or a subsequent successful poll that omits them. Added a shared `partition_removed_agents_by_provider_error` helper that all discovery-snapshot consumers use to make this decision consistently. No discovery-event schema change.
 - Changed: `mngr create --format jsonl` (and every other command) now emits a structured error record when a command fails, e.g. `{"event": "error", "error_class": "FastPathUnavailableError", "message": "..."}`. The top-level CLI exception handler calls `emit_error_event(...)` for real errors (not Ctrl-C / `--help`) when the resolved output format is JSONL, attaching the exception's class name. `on_error` likewise includes `error_class` in its JSONL error event when given the exception.
 - Changed: `mngr create --new-host` now tears down the host it just created if a later step fails (provisioning, agent start, etc.), so a failed create never leaks the host. Previously the only cleanup was removing the host lock, which never helped providers that disable idle shutdown. The teardown is gated by the existing `MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1`, which now retains the failed host (not just its lock) for debugging.

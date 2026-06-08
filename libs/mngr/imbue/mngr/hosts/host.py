@@ -70,6 +70,7 @@ from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import HostResources
+from imbue.mngr.interfaces.host import AgentTmuxOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import CreateWorkDirResult
 from imbue.mngr.interfaces.host import HostInterface
@@ -86,6 +87,7 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import TransferMode
+from imbue.mngr.utils.deps import SSH
 from imbue.mngr.utils.env_utils import build_source_env_shell_commands
 from imbue.mngr.utils.env_utils import parse_env_file
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
@@ -274,6 +276,12 @@ def _is_same_machine(a: OnlineHostInterface, b: OnlineHostInterface) -> bool:
 
 # mngr's preferred length of tmux's status-left.
 _TMUX_STATUS_LEFT_LENGTH: Final[int] = 20
+
+# Default tmux window dimensions used when the agent does not specify its own.
+# These match the historical hard-coded ``-x 200 -y 50`` (see the new-session
+# call in _build_start_agent_shell_command for why -x/-y are passed at all).
+_DEFAULT_TMUX_WIDTH: Final[int] = 200
+_DEFAULT_TMUX_HEIGHT: Final[int] = 50
 
 
 class Host(OuterHost, BaseHost, OnlineHostInterface):
@@ -1332,6 +1340,11 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         same_machine = _is_same_machine(source_host, self)
         target_ssh_info = self.get_ssh_connection_info()
 
+        # Cross-machine git transfer shells out to the ssh binary (via
+        # GIT_SSH_COMMAND); ssh is optional, so surface a clear error if it's absent.
+        if not same_machine:
+            SSH.require()
+
         # Same-machine push uses a bare local-on-host URL with no SSH
         # transport (covers both local-laptop-to-itself and
         # remote-host-to-itself).
@@ -1738,6 +1751,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                         )
             return
 
+        # Every remaining branch transfers to/from a remote host and uses the ssh
+        # binary as rsync's transport (-e ssh); ssh is optional, so require it here.
+        SSH.require()
+
         if source_host.is_local and not self.is_local:
             # Local to remote
             target_ssh_info = self.get_ssh_connection_info()
@@ -2006,6 +2023,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 "start_on_boot": False,
                 "labels": dict(options.label_options.labels),
                 "created_branch_name": created_branch_name,
+                "tmux": options.tmux.to_data_dict(),
             }
 
             # this is really just here to parallelize some of the work and decrease latency to creating a host
@@ -2548,6 +2566,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                         tmux_config_path=tmux_config_path,
                         unset_vars=self.mngr_ctx.config.unset_vars,
                         host_dir=self.host_dir,
+                        tmux_options=self.get_agent_tmux_options(agent),
                         onboarding_text=onboarding_text,
                     )
                     result = self.execute_stateful_command(combined_command, cwd=agent.work_dir)
@@ -2771,6 +2790,20 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 result.append(NamedCommand(command=cmd["command"], window_name=cmd.get("window_name")))
         return result
 
+    def get_agent_tmux_options(self, agent: AgentInterface) -> AgentTmuxOptions:
+        """Read the agent's persisted tmux window options from data.json.
+
+        Returns default (all-None) options when there is no data.json or no tmux
+        block, so older agents created before this field existed behave as before.
+        """
+        data_path = self.host_dir / "agents" / str(agent.id) / "data.json"
+        try:
+            content = self.read_text_file(data_path)
+        except FileNotFoundError:
+            return AgentTmuxOptions()
+        data = json.loads(content)
+        return AgentTmuxOptions.from_data_dict(data.get("tmux"))
+
     # =========================================================================
     # Agent-Derived Information
     # =========================================================================
@@ -2896,6 +2929,7 @@ def _build_start_agent_shell_command(
     tmux_config_path: Path,
     unset_vars: Sequence[str],
     host_dir: Path,
+    tmux_options: AgentTmuxOptions,
     onboarding_text: str | None = None,
 ) -> str:
     """Build a single shell command that starts an agent and its tmux session.
@@ -2930,16 +2964,29 @@ def _build_start_agent_shell_command(
     # Code's Ink framework to render at 1 column wide, breaking marker-based
     # message sending. Passing -x/-y appears to use a different tmux code
     # path that sets the PTY dimensions correctly at creation time.
-    # The window will be resized to match the client's terminal when attached.
+    # Width/height come from the agent's tmux options (falling back to the
+    # historical 200x50). Unless window-size is "manual", the window will still be
+    # resized to match the client's terminal when attached.
+    tmux_width = int(tmux_options.width) if tmux_options.width is not None else _DEFAULT_TMUX_WIDTH
+    tmux_height = int(tmux_options.height) if tmux_options.height is not None else _DEFAULT_TMUX_HEIGHT
     steps.append(
         f"tmux -f {shlex.quote(str(tmux_config_path))} new-session -d"
         f" -s {shlex.quote(session_name)}"
-        f" -x 200 -y 50"
+        f" -x {tmux_width} -y {tmux_height}"
         f" -c {shlex.quote(str(agent.work_dir))}"
         f" {shlex.quote(env_shell_cmd)}"
     )
 
     quoted_exact_agent_window = TmuxWindowTarget(session_name=session_name, window=0).as_shell_arg()
+
+    # Apply the requested resize policy (e.g. "manual" pins the window to the
+    # dimensions above so attaching clients never resize it). window-size is a
+    # window option, so it is set on the agent's window (:0). When unset, tmux's
+    # own default ("latest") is left in place -- today's behavior.
+    if tmux_options.window_size is not None:
+        steps.append(
+            f"tmux set-option -t {quoted_exact_agent_window} window-size {tmux_options.window_size.value.lower()}"
+        )
 
     # Save the user's original default-command (from their ~/.tmux.conf) into
     # the tmux session environment, then set default-command to env_shell_cmd.

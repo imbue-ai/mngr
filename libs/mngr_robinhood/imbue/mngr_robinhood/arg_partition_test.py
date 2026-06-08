@@ -1,5 +1,6 @@
 import pytest
 
+from imbue.mngr.primitives import TmuxWindowSize
 from imbue.mngr_robinhood.arg_partition import REJECTED_FLAGS
 from imbue.mngr_robinhood.arg_partition import partition_args
 from imbue.mngr_robinhood.data_types import InputFormat
@@ -112,3 +113,75 @@ def test_only_first_positional_is_prompt_others_forwarded() -> None:
     partition = partition_args(("first", "second"))
     assert partition.positional_prompt == "first"
     assert partition.pass_through_agent_args == ("second",)
+
+
+def test_include_partial_messages_no_longer_rejected() -> None:
+    assert "--include-partial-messages" not in REJECTED_FLAGS
+
+
+def test_include_partial_messages_accepted_with_stream_json() -> None:
+    partition = partition_args(("--output-format", "stream-json", "--include-partial-messages", "hi"))
+    assert partition.include_partial_messages
+    assert partition.positional_prompt == "hi"
+    # Consumed by the wrapper, not forwarded to the spawned claude.
+    assert partition.pass_through_agent_args == ()
+
+
+def test_include_partial_messages_requires_stream_json() -> None:
+    with pytest.raises(UnsupportedClaudeFlagError, match="requires --output-format=stream-json"):
+        partition_args(("--include-partial-messages", "hi"))
+
+
+def test_stream_plain_text_accepted_with_text_output() -> None:
+    partition = partition_args(("--stream-plain-text", "hi"))
+    assert partition.stream_plain_text
+    assert partition.positional_prompt == "hi"
+    assert partition.pass_through_agent_args == ()
+
+
+def test_stream_plain_text_rejected_with_json_output() -> None:
+    with pytest.raises(UnsupportedClaudeFlagError, match="requires --output-format=text"):
+        partition_args(("--output-format", "json", "--stream-plain-text", "hi"))
+
+
+def test_streaming_flags_default_false() -> None:
+    partition = partition_args(("hi",))
+    assert not partition.include_partial_messages
+    assert not partition.stream_plain_text
+
+
+def test_tmux_flags_default_to_wide_pinned_window() -> None:
+    partition = partition_args(("hi",))
+    assert int(partition.tmux_width) == 2048
+    assert int(partition.tmux_height) == 256
+    assert partition.tmux_window_size == TmuxWindowSize.MANUAL
+
+
+def test_tmux_flags_parse_explicit_values() -> None:
+    partition = partition_args(("--tmux-width", "120", "--tmux-height", "40", "--tmux-window-size", "latest", "hi"))
+    assert int(partition.tmux_width) == 120
+    assert int(partition.tmux_height) == 40
+    assert partition.tmux_window_size == TmuxWindowSize.LATEST
+    assert partition.positional_prompt == "hi"
+    assert partition.pass_through_agent_args == ()
+
+
+def test_tmux_flags_parse_equals_form() -> None:
+    partition = partition_args(("--tmux-width=320", "--tmux-window-size=smallest", "hi"))
+    assert int(partition.tmux_width) == 320
+    assert partition.tmux_window_size == TmuxWindowSize.SMALLEST
+
+
+def test_tmux_width_rejects_non_positive() -> None:
+    with pytest.raises(UnsupportedClaudeFlagError, match="--tmux-width must be a positive integer"):
+        partition_args(("--tmux-width", "0", "hi"))
+
+
+def test_tmux_height_rejects_non_integer() -> None:
+    with pytest.raises(UnsupportedClaudeFlagError, match="--tmux-height must be a positive integer"):
+        partition_args(("--tmux-height", "tall", "hi"))
+
+
+def test_tmux_window_size_rejects_unknown_value() -> None:
+    with pytest.raises(UnsupportedClaudeFlagError, match="--tmux-window-size must be"):
+        partition_args(("--tmux-window-size", "huge", "hi"))

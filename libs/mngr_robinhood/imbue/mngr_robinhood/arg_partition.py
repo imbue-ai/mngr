@@ -2,7 +2,13 @@ from collections.abc import Mapping
 from typing import Final
 
 from imbue.imbue_common.pure import pure
+from imbue.mngr.primitives import TmuxHeight
+from imbue.mngr.primitives import TmuxWidth
+from imbue.mngr.primitives import TmuxWindowSize
 from imbue.mngr_robinhood.data_types import ArgPartition
+from imbue.mngr_robinhood.data_types import DEFAULT_ROBINHOOD_TMUX_HEIGHT
+from imbue.mngr_robinhood.data_types import DEFAULT_ROBINHOOD_TMUX_WIDTH
+from imbue.mngr_robinhood.data_types import DEFAULT_ROBINHOOD_TMUX_WINDOW_SIZE
 from imbue.mngr_robinhood.data_types import InputFormat
 from imbue.mngr_robinhood.data_types import OutputFormat
 from imbue.mngr_robinhood.errors import UnsupportedClaudeFlagError
@@ -14,7 +20,6 @@ REJECTED_FLAGS: Final[Mapping[str, str]] = {
     "--max-budget-usd": "--max-budget-usd is not supported by mngr robinhood in v1",
     "--no-session-persistence": "--no-session-persistence is not supported by mngr robinhood in v1",
     "--include-hook-events": "--include-hook-events is not supported by mngr robinhood in v1",
-    "--include-partial-messages": "--include-partial-messages is not supported by mngr robinhood in v1",
     "-c": "-c / --continue is not supported by mngr robinhood in v1",
     "--continue": "-c / --continue is not supported by mngr robinhood in v1",
     "-r": "-r / --resume is not supported by mngr robinhood in v1",
@@ -27,6 +32,12 @@ _SIMULATED_VALUE_FLAGS: Final[frozenset[str]] = frozenset(
     {
         "--input-format",
         "--output-format",
+        # tmux window sizing for the spawned agent (consumed by the wrapper, not
+        # forwarded to claude). Defaults are large + pinned so streamed text is not
+        # hard-wrapped at a narrow pane width.
+        "--tmux-width",
+        "--tmux-height",
+        "--tmux-window-size",
     }
 )
 
@@ -36,6 +47,11 @@ _SIMULATED_BOOL_FLAGS: Final[frozenset[str]] = frozenset(
         "-p",
         "--print",
         "--replay-user-messages",
+        # Opt in to claude-native partial-message (text_delta) events sourced from
+        # the agent's stream_buffer. Requires --output-format=stream-json.
+        "--include-partial-messages",
+        # Stream the assistant's text to stdout incrementally (text output mode).
+        "--stream-plain-text",
     }
 )
 
@@ -91,6 +107,13 @@ _OUTPUT_FORMAT_BY_TOKEN: Final[Mapping[str, OutputFormat]] = {
     "stream-json": OutputFormat.STREAM_JSON,
 }
 
+_TMUX_WINDOW_SIZE_BY_TOKEN: Final[Mapping[str, TmuxWindowSize]] = {
+    "manual": TmuxWindowSize.MANUAL,
+    "latest": TmuxWindowSize.LATEST,
+    "largest": TmuxWindowSize.LARGEST,
+    "smallest": TmuxWindowSize.SMALLEST,
+}
+
 
 @pure
 def _split_equals(token: str) -> tuple[str, str | None]:
@@ -115,6 +138,29 @@ def _resolve_output_format(value: str) -> OutputFormat:
     return resolved
 
 
+def _resolve_tmux_width(value: str) -> TmuxWidth:
+    try:
+        return TmuxWidth(int(value))
+    except ValueError:
+        raise UnsupportedClaudeFlagError(f"--tmux-width must be a positive integer (got {value!r})") from None
+
+
+def _resolve_tmux_height(value: str) -> TmuxHeight:
+    try:
+        return TmuxHeight(int(value))
+    except ValueError:
+        raise UnsupportedClaudeFlagError(f"--tmux-height must be a positive integer (got {value!r})") from None
+
+
+def _resolve_tmux_window_size(value: str) -> TmuxWindowSize:
+    resolved = _TMUX_WINDOW_SIZE_BY_TOKEN.get(value)
+    if resolved is None:
+        raise UnsupportedClaudeFlagError(
+            f"--tmux-window-size must be 'manual', 'latest', 'largest', or 'smallest' (got {value!r})"
+        )
+    return resolved
+
+
 def partition_args(argv: tuple[str, ...]) -> ArgPartition:
     """Split argv into our simulated flags, the positional prompt, and the pass-through tail.
 
@@ -128,6 +174,11 @@ def partition_args(argv: tuple[str, ...]) -> ArgPartition:
     input_format = InputFormat.TEXT
     output_format = OutputFormat.TEXT
     replay_user_messages = False
+    include_partial_messages = False
+    stream_plain_text = False
+    tmux_width = DEFAULT_ROBINHOOD_TMUX_WIDTH
+    tmux_height = DEFAULT_ROBINHOOD_TMUX_HEIGHT
+    tmux_window_size = DEFAULT_ROBINHOOD_TMUX_WINDOW_SIZE
     pass_through: list[str] = []
     positional_prompt: str | None = None
 
@@ -146,6 +197,10 @@ def partition_args(argv: tuple[str, ...]) -> ArgPartition:
                 pass
             elif flag == "--replay-user-messages":
                 replay_user_messages = True
+            elif flag == "--include-partial-messages":
+                include_partial_messages = True
+            elif flag == "--stream-plain-text":
+                stream_plain_text = True
             else:
                 raise UnsupportedClaudeFlagError(f"unexpected simulated flag: {flag}")
             index += 1
@@ -164,6 +219,12 @@ def partition_args(argv: tuple[str, ...]) -> ArgPartition:
                 input_format = _resolve_input_format(value)
             elif flag == "--output-format":
                 output_format = _resolve_output_format(value)
+            elif flag == "--tmux-width":
+                tmux_width = _resolve_tmux_width(value)
+            elif flag == "--tmux-height":
+                tmux_height = _resolve_tmux_height(value)
+            elif flag == "--tmux-window-size":
+                tmux_window_size = _resolve_tmux_window_size(value)
             else:
                 raise UnsupportedClaudeFlagError(f"unexpected simulated flag: {flag}")
             continue
@@ -190,11 +251,17 @@ def partition_args(argv: tuple[str, ...]) -> ArgPartition:
         index += 1
 
     _validate_replay_user_messages(replay_user_messages, input_format, output_format)
+    _validate_streaming_flags(include_partial_messages, stream_plain_text, output_format)
 
     return ArgPartition(
         input_format=input_format,
         output_format=output_format,
         replay_user_messages=replay_user_messages,
+        include_partial_messages=include_partial_messages,
+        stream_plain_text=stream_plain_text,
+        tmux_width=tmux_width,
+        tmux_height=tmux_height,
+        tmux_window_size=tmux_window_size,
         pass_through_agent_args=tuple(pass_through),
         positional_prompt=positional_prompt,
     )
@@ -211,3 +278,14 @@ def _validate_replay_user_messages(
         raise UnsupportedClaudeFlagError(
             "--replay-user-messages requires both --input-format=stream-json and --output-format=stream-json"
         )
+
+
+def _validate_streaming_flags(
+    include_partial_messages: bool,
+    stream_plain_text: bool,
+    output_format: OutputFormat,
+) -> None:
+    if include_partial_messages and output_format != OutputFormat.STREAM_JSON:
+        raise UnsupportedClaudeFlagError("--include-partial-messages requires --output-format=stream-json")
+    if stream_plain_text and output_format != OutputFormat.TEXT:
+        raise UnsupportedClaudeFlagError("--stream-plain-text requires --output-format=text (the default)")

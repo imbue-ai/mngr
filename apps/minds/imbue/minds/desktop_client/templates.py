@@ -47,17 +47,77 @@ TEMPLATE_DIR: Final[Path] = Path(__file__).resolve().parent / "templates"
 # -- drifted across files trivially. Surface as uppercase to match the
 # `CATALOG` constant convention and to mark them as Jinja globals (not
 # per-render context).
+#
+# Size axis is independent of variant -- size dictates geometry (padding,
+# radius, font weight, text size), variant dictates color. ``md`` is the
+# default in-flow button; ``lg`` is the prominent block CTA used on the
+# auth flow; ``icon`` is a square padding for icon-only buttons (e.g. the
+# restart / settings icons in the Landing project row).
 _BTN_BASE: Final[str] = (
-    "inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-md "
-    "font-medium text-sm leading-tight transition-colors disabled:opacity-50 "
-    "disabled:cursor-not-allowed cursor-pointer no-underline whitespace-nowrap"
+    "inline-flex items-center justify-center gap-1.5 leading-tight "
+    "transition-colors disabled:opacity-30 disabled:cursor-not-allowed "
+    "cursor-pointer no-underline whitespace-nowrap"
 )
+_BTN_SIZES: Final[Mapping[str, str]] = {
+    "md": "px-3.5 py-2 rounded-md font-medium text-sm",
+    "lg": "px-4 py-3 rounded-lg font-semibold text-base",
+    "icon": "p-1.5 rounded-md font-medium text-sm",
+}
 _BTN_VARIANTS: Final[Mapping[str, str]] = {
     "primary": "bg-zinc-900 text-zinc-50 border border-transparent hover:bg-zinc-800",
     "secondary": "bg-zinc-100 text-zinc-900 border border-zinc-200 hover:bg-zinc-200",
     "danger": "bg-red-50 text-red-600 border border-red-200 hover:bg-red-100",
     "success": "bg-emerald-800 text-emerald-50 border border-transparent hover:bg-emerald-900",
-    "ghost": "bg-transparent text-zinc-600 border border-transparent hover:bg-zinc-100 hover:text-zinc-900",
+    "ghost": "bg-transparent text-zinc-700 border border-transparent hover:bg-zinc-100 hover:text-zinc-900",
+}
+
+# Shared Tailwind class string for the three form-control components
+# (TextInput.jinja, Select.jinja, Textarea.jinja). Exposed as a Catalog
+# global so the focus-ring token, border, padding and text size live in
+# exactly one place. Width and border-radius vary per-component so they
+# are NOT included here -- each component sets its own.
+_INPUT_BASE: Final[str] = (
+    "px-3 py-2.5 text-sm border border-zinc-200 bg-white text-zinc-900 "
+    "outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15"
+)
+
+# Inner SVG path data for the lucide-style 24x24 stroke icons. The
+# Icon24.jinja component wraps these in the canonical stroke shell
+# (fill=none, stroke=currentColor, stroke-width=2, stroke-linecap=round,
+# stroke-linejoin=round). The dict is the single source of truth -- to
+# add or swap an icon, edit one entry here.
+_ICONS_24: Final[Mapping[str, str]] = {
+    "sidebar": '<rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/>',
+    "home": '<path d="M3 12L12 3l9 9"/><path d="M5 10v10a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V10"/>',
+    "back": '<polyline points="15 18 9 12 15 6"/>',
+    "forward": '<polyline points="9 6 15 12 9 18"/>',
+    "messages": '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+    "restart": '<path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/>',
+    "settings": (
+        '<circle cx="12" cy="12" r="3"/>'
+        '<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06'
+        "a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09"
+        "A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83"
+        "l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09"
+        "A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83"
+        "l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09"
+        "a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83"
+        "l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09"
+        'a1.65 1.65 0 0 0-1.51 1z"/>'
+    ),
+    "external": (
+        '<path d="M14 3h7v7"/><path d="M10 14L21 3"/>'
+        '<path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/>'
+    ),
+}
+
+# 12x12 chrome glyph path data (minimize / maximize / close). Title-bar
+# window controls only; rendered through Icon12.jinja, which wraps these
+# in the same stroke shell as Icon24 but with the smaller viewBox + size.
+_ICONS_12: Final[Mapping[str, str]] = {
+    "minimize": '<line x1="2" y1="6" x2="10" y2="6"/>',
+    "maximize": '<rect x="2" y="2" width="8" height="8" rx="0.5"/>',
+    "close": '<line x1="2" y1="2" x2="10" y2="10"/><line x1="10" y1="2" x2="2" y2="10"/>',
 }
 
 
@@ -78,7 +138,14 @@ def _build_catalog() -> Catalog:
     )
     catalog = Catalog(
         jinja_env=seed_env,
-        globals={"BTN_BASE": _BTN_BASE, "BTN_VARIANTS": _BTN_VARIANTS},
+        globals={
+            "BTN_BASE": _BTN_BASE,
+            "BTN_SIZES": _BTN_SIZES,
+            "BTN_VARIANTS": _BTN_VARIANTS,
+            "INPUT_BASE": _INPUT_BASE,
+            "ICONS_24": _ICONS_24,
+            "ICONS_12": _ICONS_12,
+        },
     )
     catalog.add_folder(str(TEMPLATE_DIR))
     return catalog

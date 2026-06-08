@@ -48,6 +48,7 @@ class _DiscoveredCall(FrozenModel):
     """One captured ``__call__`` of the discovery handler."""
 
     agent_id: AgentId
+    host_id: HostId
     ssh_info: RemoteSSHInfo | None
     provider_name: str
 
@@ -70,12 +71,13 @@ class _RecordingHandlers:
     def on_discovered(
         self,
         agent_id: AgentId,
+        host_id: HostId,
         ssh_info: RemoteSSHInfo | None,
         provider_name: str,
     ) -> None:
         with self._lock:
             self._discovered_calls.append(
-                _DiscoveredCall(agent_id=agent_id, ssh_info=ssh_info, provider_name=provider_name)
+                _DiscoveredCall(agent_id=agent_id, host_id=host_id, ssh_info=ssh_info, provider_name=provider_name)
             )
 
     def on_destroyed(self, agent_id: AgentId) -> None:

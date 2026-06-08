@@ -4,6 +4,31 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-06
+
+`mngr robinhood` can now surface an approximate, live view of the response as it is produced, sourced from the spawned agent's tmux-based `stream_buffer` (see `imbue-mngr-claude`).
+
+- `--include-partial-messages` is now accepted (previously rejected). With `--output-format stream-json` it emits claude-native `stream_event` / `content_block_delta` / `text_delta` events as the response streams, followed by the authoritative `assistant` message from the transcript -- matching claude's native partial-message ordering.
+- New `--stream-plain-text` flag: with the default text output, streams the response text to stdout incrementally and suppresses the trailing full-text dump so the streamed content is not duplicated.
+- When either streaming flag is set, robinhood enables the streaming watcher on the spawned agent (`streaming_snapshot_interval_seconds = 0.25`) and defaults the model to sonnet (so fast mode is off and streaming is observable); a user-passed `--model` still takes precedence. Both flags are consumed by the wrapper and not forwarded to the spawned claude.
+- The orchestrator reads `stream_buffer` over the host inside its existing end-of-turn poll loop, diffing the cumulative body against what it last emitted (prefix-extension -> append delta; reset -> new message) so deltas are pure appends. The streamed text is best-effort; the `result` envelope and the final `assistant` message remain the source of truth.
+- `--include-partial-messages` requires `--output-format stream-json`, and `--stream-plain-text` requires the default text output; mismatches exit with code 2.
+
+## 2026-06-05
+
+- Added to the release tooling's publish graph (`scripts/utils.py`). It will be offered for first publication to PyPI on the next release. Its stale `imbue-mngr==0.2.8` / `imbue-mngr-claude==0.2.8` pins are realigned to the current `0.2.10`. No runtime change.
+
+## 2026-06-05
+
+Renamed the plugin from `mngr_uncapped_claude` to `mngr_robinhood`. The
+PyPI package is now `imbue-mngr-robinhood`, the importable package is
+`imbue.mngr_robinhood`, and the CLI command is now `mngr robinhood`
+(previously `mngr uncapped-claude`). Spawned agents now use the `robinhood-`
+name prefix and a `created-by=robinhood` label. Every occurrence of
+"uncapped" was replaced with "robinhood" (case-preserving), including error
+classes (`RobinhoodError`) and CLI option types. Behavior is otherwise
+unchanged.
+
 ## 2026-06-04
 
 Replaced the module-local `_get_local_host` helper with the shared `get_local_host` from `imbue.mngr.api.providers` (deduplication; no behavior change).

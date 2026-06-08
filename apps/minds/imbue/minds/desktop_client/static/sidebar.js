@@ -29,7 +29,7 @@
 
   function buildOpenNewBtn(agentId) {
     var btn = document.createElement('button');
-    btn.className = 'sidebar-open-new hidden items-center justify-center bg-transparent border-none p-1 cursor-pointer text-zinc-400 rounded hover:text-zinc-200 hover:bg-white/5';
+    btn.className = 'sidebar-open-new hidden items-center justify-center bg-transparent border-none p-1 cursor-pointer text-zinc-400 rounded-md hover:text-zinc-200 hover:bg-white/5';
     btn.title = 'Open in new window';
     btn.tabIndex = -1;
     btn.setAttribute('data-open-new', agentId);

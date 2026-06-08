@@ -105,6 +105,9 @@ def default_create_cli_opts() -> CreateCliOptions:
         upload_file=(),
         update=False,
         yes=False,
+        tmux_width=None,
+        tmux_height=None,
+        tmux_window_size=None,
     )
 
 

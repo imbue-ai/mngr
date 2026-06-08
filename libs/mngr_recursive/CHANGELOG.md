@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.8] - 2026-06-05
+
 ### Fixed
 
 - Fixed: `mngr create` on remote hosts (e.g. Modal) no longer fails during provisioning with `Error reading SSH protocol banner` / `Connection reset by peer` (github issue 1825). Deploy files are now uploaded with a single rsync transfer instead of one SFTP channel per file; the old per-file approach opened a fresh SFTP channel per file (~0.7s/file over Modal), so a user's `~/.claude/plugins` tree (hundreds of files) could exceed the upload timeout or reset the connection mid-transfer.
