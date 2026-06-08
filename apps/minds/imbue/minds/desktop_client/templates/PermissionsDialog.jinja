@@ -86,6 +86,16 @@
           window.updateApproveState();
           return;
         }
+        // FAILED: the approval did not complete (e.g. the browser sign-in
+        // flow failed). The request stays pending server-side, so show the
+        // reason and re-enable Approve so the user can retry -- this is a
+        // failure, not a denial.
+        if (data.outcome === "FAILED") {
+          errorMsg.textContent = data.message || "Approval failed; please try again.";
+          errorBox.classList.remove("hidden");
+          approveBtn.disabled = false;
+          return;
+        }
         errorMsg.textContent = data.message || "Authorization failed.";
         errorBox.classList.remove("hidden");
         approveBtn.disabled = false;

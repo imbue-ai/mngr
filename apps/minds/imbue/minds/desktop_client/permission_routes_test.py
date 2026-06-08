@@ -96,9 +96,9 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
                 "granted_permissions": tuple(granted_permissions),
             }
         )
-        # NEEDS_MANUAL_CREDENTIALS keeps the request pending and writes
-        # no response event; the other outcomes resolve it.
-        if self.grant_outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS:
+        # NEEDS_MANUAL_CREDENTIALS and FAILED keep the request pending and
+        # write no response event; the other outcomes resolve it.
+        if self.grant_outcome in (GrantOutcome.NEEDS_MANUAL_CREDENTIALS, GrantOutcome.FAILED):
             return GrantResult(
                 outcome=self.grant_outcome,
                 message=self.grant_message,
@@ -462,7 +462,8 @@ def test_post_permission_grant_rejects_empty_permissions(tmp_path: Path) -> None
     assert final_inbox.get_pending_count() == 1
 
 
-def test_post_permission_grant_with_failed_signin_returns_denied_outcome(tmp_path: Path) -> None:
+def test_post_permission_grant_with_failed_signin_keeps_request_pending(tmp_path: Path) -> None:
+    """A failed sign-in is reported as FAILED and must not auto-deny the request."""
     agent_id = AgentId()
     request = create_latchkey_predefined_permission_request_event(
         agent_id=str(agent_id),
@@ -472,8 +473,8 @@ def test_post_permission_grant_with_failed_signin_returns_denied_outcome(tmp_pat
     inbox = RequestInbox().add_request(request)
     handler = _make_recording_handler(
         tmp_path,
-        grant_outcome=GrantOutcome.DENIED,
-        grant_message="Your sign-in flow did not finish. Reason: user cancelled.",
+        grant_outcome=GrantOutcome.FAILED,
+        grant_message="Sign-in to Slack did not complete. Reason: user cancelled.",
     )
     client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id)
 
@@ -484,10 +485,13 @@ def test_post_permission_grant_with_failed_signin_returns_denied_outcome(tmp_pat
 
     assert response.status_code == 200
     payload = response.json()
-    # No separate AUTH_FAILED status: a failed sign-in is reported as DENIED
-    # with a distinct message so the agent can tell the user what happened.
-    assert payload["outcome"] == "DENIED"
+    # FAILED is a distinct outcome from DENIED: the approval failed but the
+    # request is not resolved, so the agent's message carries the reason.
+    assert payload["outcome"] == "FAILED"
     assert "user cancelled" in payload["message"]
+    # The request must remain pending so the user can click Approve again.
+    final_inbox = _get_app_request_inbox(client)
+    assert final_inbox.get_pending_count() == 1
 
 
 def test_post_permission_grant_with_manual_credentials_keeps_request_pending(tmp_path: Path) -> None:
