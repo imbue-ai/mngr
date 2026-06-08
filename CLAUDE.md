@@ -141,6 +141,7 @@ Every PR must include one changelog entry file **per project it touches**. CI wi
   - Example: branch `mngr/add-mngr-feature-and-minds-fix` touches `libs/mngr` and `apps/minds`, so create both `libs/mngr/changelog/mngr-add-mngr-feature-and-minds-fix.md` and `apps/minds/changelog/mngr-add-mngr-feature-and-minds-fix.md`.
   - A PR that only edits `scripts/` and CI workflows is a `dev`-only PR: `dev/changelog/<branch>.md`.
 - Each file should briefly describe the user-visible changes in the PR that pertain to *that* project. Same-PR entries can repeat shared context if it helps readers of each project's changelog.
+  - If the entry uses a list, separate the bullets with a double newline (a blank line between each bullet).
 - A nightly agent fans each project's entries into that project's `<project_dir>/UNABRIDGED_CHANGELOG.md` (full verbatim entries) and `<project_dir>/CHANGELOG.md` (concise AI-generated summary).
 - The changelog consolidation agent's own PRs (`mngr/changelog-consolidation-*`) are exempt from this requirement.
 - There is no separate "this file is a changelog file, so it doesn't count" exemption: adding a `<project_dir>/changelog/<branch>.md` entry is itself an edit under that project, and inherently satisfies the requirement. A PR that *only* touches a project's consolidated `CHANGELOG.md` (e.g. a manual correction) still owes a per-PR entry describing the correction.
