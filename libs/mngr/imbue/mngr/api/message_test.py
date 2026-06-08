@@ -1,5 +1,4 @@
 from pathlib import Path
-from uuid import uuid4
 
 import pytest
 
@@ -21,6 +20,7 @@ from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.testing import get_short_random_string
 
 
 @pytest.mark.tmux
@@ -280,7 +280,7 @@ def test_send_message_one_agent_failure_does_not_prevent_other_agents(
     """
     # Register a one-off agent type whose send always raises. resolve_agent_type
     # requires both a class and a config to be registered for the type name.
-    exploding_type = f"exploding-{uuid4().hex[:8]}"
+    exploding_type = f"exploding-{get_short_random_string()}"
     register_agent_class(exploding_type, _ExplodingSendAgent)
     register_agent_config(exploding_type, AgentTypeConfig)
 

@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.api.discovery_events import DISCOVERY_EVENT_SOURCE
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
@@ -50,7 +51,9 @@ from imbue.mngr.utils.testing import make_test_discovered_host
 def test_get_default_events_base_dir_expands_home(temp_config: MngrConfig) -> None:
     # Point default_host_dir at a ~-containing path so we verify the helper
     # actually expands "~" rather than mirroring a no-op expanduser() call.
-    tilde_config = temp_config.model_copy(update={"default_host_dir": Path("~/.mngr-observe-test")})
+    tilde_config = temp_config.model_copy_update(
+        to_update(temp_config.field_ref().default_host_dir, Path("~/.mngr-observe-test"))
+    )
     events_base_dir = get_default_events_base_dir(tilde_config)
     assert not str(events_base_dir).startswith("~")
     assert events_base_dir == Path.home() / ".mngr-observe-test"

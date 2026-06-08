@@ -15,7 +15,6 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
-from uuid import uuid4
 
 import pluggy
 import pytest
@@ -45,6 +44,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.testing import create_test_agent_via_cli
+from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import tmux_session_cleanup
 
 # =============================================================================
@@ -739,7 +739,7 @@ def test_list_agents_reports_unlocked_host_when_no_lock_is_held(
     tmux integration test. The locked-path field mapping is instead covered at
     the pure-context layer by test_agent_details_to_cel_context_with_host_lock_fields.
     """
-    agent_name = f"test-lock-fields-{uuid4().hex[:8]}"
+    agent_name = f"test-lock-fields-{get_short_random_string()}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):

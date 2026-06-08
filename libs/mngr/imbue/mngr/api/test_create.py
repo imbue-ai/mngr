@@ -40,6 +40,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.utils.plugin_testing import PLACEHOLDER_AGENT_TYPE
+from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import make_ctx_with_plugins
 from imbue.mngr.utils.testing import tmux_session_cleanup
@@ -137,7 +138,7 @@ def test_create_simple_echo_agent(
     temp_work_dir: Path,
 ) -> None:
     """Test creating a simple agent that runs echo."""
-    agent_name = AgentName(f"test-echo-{uuid4().hex[:8]}")
+    agent_name = AgentName(f"test-echo-{get_short_random_string()}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -167,7 +168,7 @@ def test_create_agent_with_new_host(
     temp_work_dir: Path,
 ) -> None:
     """Test creating an agent with explicit new host options."""
-    agent_name = AgentName(f"test-new-host-{uuid4().hex[:8]}")
+    agent_name = AgentName(f"test-new-host-{get_short_random_string()}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -203,7 +204,7 @@ def test_create_agent_work_dir_is_created(
     temp_work_dir: Path,
 ) -> None:
     """Test that the agent work_dir directory is used."""
-    agent_name = AgentName(f"test-work-dir-{uuid4().hex[:8]}")
+    agent_name = AgentName(f"test-work-dir-{get_short_random_string()}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -240,7 +241,7 @@ def test_agent_state_is_persisted(
     temp_host_dir: Path,
 ) -> None:
     """Test that agent state is persisted to disk."""
-    agent_name = AgentName(f"test-persist-{uuid4().hex[:8]}")
+    agent_name = AgentName(f"test-persist-{get_short_random_string()}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -289,7 +290,7 @@ def test_create_agent_with_unknown_type_raises(
     that the name is not recognized and suggests installing a plugin that
     provides it.
     """
-    agent_name = AgentName(f"test-unknown-type-{uuid4().hex[:8]}")
+    agent_name = AgentName(f"test-unknown-type-{get_short_random_string()}")
 
     local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
@@ -324,7 +325,7 @@ def test_create_agent_with_worktree(
     temp_git_repo: Path,
 ) -> None:
     """Test creating an agent using git worktree."""
-    agent_name = AgentName(f"test-worktree-{uuid4().hex[:8]}")
+    agent_name = AgentName(f"test-worktree-{get_short_random_string()}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -375,7 +376,7 @@ def test_worktree_with_custom_branch_name(
     temp_git_repo: Path,
 ) -> None:
     """Test creating a worktree with a custom branch name."""
-    agent_name = AgentName(f"test-worktree-custom-{uuid4().hex[:8]}")
+    agent_name = AgentName(f"test-worktree-custom-{get_short_random_string()}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
     custom_branch = "feature/custom-branch"
 
@@ -432,7 +433,7 @@ def test_worktree_with_existing_branch(
     temp_git_repo: Path,
 ) -> None:
     """Test creating a worktree that checks out an existing branch (no new branch created)."""
-    agent_name = AgentName(f"test-worktree-existing-{uuid4().hex[:8]}")
+    agent_name = AgentName(f"test-worktree-existing-{get_short_random_string()}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
     existing_branch = "feature/already-exists"
 
@@ -628,7 +629,7 @@ def test_worktree_branch_is_cleaned_up_when_create_fails(
     (recorded in created_branch_name) is deleted; pre-existing branches are not.
     The worktree itself is always removed because we always create it ourselves.
     """
-    agent_name = AgentName(f"test-cleanup-fail-{uuid4().hex[:8]}")
+    agent_name = AgentName(f"test-cleanup-fail-{get_short_random_string()}")
     leaked_branch = f"mngr/{agent_name}"
 
     failure_plugin = _RaiseAfterFileCopy()
@@ -713,7 +714,7 @@ def test_preexisting_branch_is_preserved_when_create_fails(
     local_host, source_location = _get_local_host_and_location(test_ctx, temp_git_repo)
 
     agent_options = _make_options(
-        AgentName(f"test-preserve-{uuid4().hex[:8]}"),
+        AgentName(f"test-preserve-{get_short_random_string()}"),
         SLEEP_COMMAND,
         transfer_mode=TransferMode.GIT_WORKTREE,
         # No new_branch_name -- agent attaches to the existing branch.
@@ -756,7 +757,7 @@ def test_in_place_mode_sets_is_generated_work_dir_false(
     temp_host_dir: Path,
 ) -> None:
     """Test that in-place mode does not track work_dir as generated."""
-    agent_name = AgentName(f"test-in-place-{uuid4().hex[:8]}")
+    agent_name = AgentName(f"test-in-place-{get_short_random_string()}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -801,7 +802,7 @@ def test_in_place_preserves_generated_work_dir_entry(
     have no living agent using them as work_dir. Removing the entry would cause a leak --
     after both agents are destroyed, the directory would never be cleaned up.
     """
-    agent_name = AgentName(f"test-in-place-preserve-{uuid4().hex[:8]}")
+    agent_name = AgentName(f"test-in-place-preserve-{get_short_random_string()}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -845,7 +846,7 @@ def test_worktree_mode_sets_is_generated_work_dir_true(
     temp_host_dir: Path,
 ) -> None:
     """Test that worktree mode tracks work_dir as generated."""
-    agent_name = AgentName(f"test-worktree-gen-{uuid4().hex[:8]}")
+    agent_name = AgentName(f"test-worktree-gen-{get_short_random_string()}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
 
     _setup_claude_trust_config(temp_git_repo, tmp_home_dir)
@@ -895,7 +896,7 @@ def test_worktree_base_folder_overrides_default_worktree_location(
     tmp_path: Path,
 ) -> None:
     """Test that worktree_base_folder places worktrees in the specified directory."""
-    agent_name = AgentName(f"test-wt-base-{uuid4().hex[:8]}")
+    agent_name = AgentName(f"test-wt-base-{get_short_random_string()}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
     custom_base = tmp_path / "custom_worktrees"
 
@@ -938,7 +939,7 @@ def test_target_path_different_from_source_sets_is_generated_work_dir_true(
     tmp_path: Path,
 ) -> None:
     """Test that specifying a different target path tracks work_dir as generated."""
-    agent_name = AgentName(f"test-target-diff-{uuid4().hex[:8]}")
+    agent_name = AgentName(f"test-target-diff-{get_short_random_string()}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
     target_dir = tmp_path / "different_target"
 
@@ -980,7 +981,7 @@ def test_target_path_same_as_source_sets_is_generated_work_dir_false(
     temp_host_dir: Path,
 ) -> None:
     """Test that specifying the same target as source path does not track work_dir as generated."""
-    agent_name = AgentName(f"test-target-same-{uuid4().hex[:8]}")
+    agent_name = AgentName(f"test-target-same-{get_short_random_string()}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -1024,7 +1025,7 @@ def test_create_work_dir_false_uses_target_path(
     tmp_path: Path,
 ) -> None:
     """Test that when create_work_dir=False, the agent's work_dir is set to target_path, not source_path."""
-    agent_name = AgentName(f"test-no-create-{uuid4().hex[:8]}")
+    agent_name = AgentName(f"test-no-create-{get_short_random_string()}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
     target_dir = tmp_path / "target_work_dir"
     target_dir.mkdir(parents=True)
@@ -1060,7 +1061,7 @@ def test_create_work_dir_false_without_target_path_uses_source(
     temp_host_dir: Path,
 ) -> None:
     """Test that when create_work_dir=False and target_path is None, the source path is used."""
-    agent_name = AgentName(f"test-no-create-src-{uuid4().hex[:8]}")
+    agent_name = AgentName(f"test-no-create-src-{get_short_random_string()}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -1096,7 +1097,7 @@ def test_create_rejects_duplicate_agent_name_on_same_host(
     temp_work_dir: Path,
 ) -> None:
     """Test that creating a second agent with the same name on the same host raises DuplicateAgentNameError."""
-    agent_name = AgentName(f"test-dup-name-{uuid4().hex[:8]}")
+    agent_name = AgentName(f"test-dup-name-{get_short_random_string()}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -1141,7 +1142,7 @@ def test_create_with_update_flag_updates_existing_agent(
     3. Call create() again with is_update=True and the same agent_id
     4. The agent should be re-created with the same ID and work_dir but updated metadata
     """
-    agent_name = AgentName(f"test-update-{uuid4().hex[:8]}")
+    agent_name = AgentName(f"test-update-{get_short_random_string()}")
     session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
