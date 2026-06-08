@@ -1,1 +1,0 @@
-- Add a `--dry-run` flag to `mngr start`. With it, the command reports which agents *would* be started (e.g. `mngr list --ids | mngr start - --dry-run`) and returns without contacting any host or starting anything. This matches the `--dry-run` already supported by `mngr archive`, `mngr destroy`, and `mngr gc`, and the dry-run usage shown in the tutorial.
