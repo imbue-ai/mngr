@@ -1426,8 +1426,11 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
     ) -> None:
         """Validate that .claude/settings.local.json is gitignored in the source repo.
 
-        mngr writes readiness hooks to this file during provisioning. If it's not
-        gitignored, it would appear as an unstaged change. Checking early avoids
+        mngr's own readiness hooks now live in the per-agent managed settings
+        file (see get_managed_settings_path), not this file. But the
+        subagent_proxy plugin still modifies .claude/settings.local.json to
+        guard user-defined Stop/SubagentStop hooks, so if it's not gitignored
+        those edits would appear as an unstaged change. Checking early avoids
         wasting time on host creation and work_dir setup before surfacing this error.
 
         Uses require_repo_rule=True so that rules only in the user's global
