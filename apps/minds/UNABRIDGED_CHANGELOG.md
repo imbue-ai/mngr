@@ -4,6 +4,89 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-08
+
+The right-side requests panel is gone: pending permission requests now live
+in an inbox modal opened from the same titlebar bell, with a master/detail
+layout. Opening the inbox no longer resizes or shifts the workspace -- it
+overlays the window the same way the permission dialog already did.
+
+Approving or denying a request keeps the inbox open and auto-advances to
+the next pending item. Browser-mode deep links are now ``/inbox?selected=<id>``
+(the standalone ``/requests/<id>`` page has been removed).
+
+Minds bootstrap now writes the gVisor runtime settings into each per-account
+`[providers.imbue_cloud_<slug>]` block it registers: `docker_runtime = "runsc"`,
+`install_gvisor_runtime = true`, and
+`default_start_args = ["--workdir=/", "--security-opt=no-new-privileges"]`. This
+makes the imbue_cloud slow (rebuild) path run the agent container under gVisor
+with the runsc hardening args, mirroring the forever-claude-template
+`[providers.ovh]` bake settings. No user-visible change to the create flow.
+
+Added a `--no-recycle` flag to `minds pool create` that forwards `--no-recycle`
+to the admin command, forcing a fresh OVH VPS order instead of reclaiming a
+cancelled one (useful for testing the fresh-provision path).
+
+Fixed two JinjaX template bugs where a component tag had a quoted attribute
+containing `{{ ... }}` (which JinjaX forwards literally instead of interpolating):
+the Landing page's settings-gear `<Button onclick="...{{ agent_id }}...">` (which
+navigated to a literal `/workspace/{{ agent_id }}/settings` and then 500'd the
+destroy with "AgentId must start with 'agent-', got '{{ agent_id }}'") and the
+Sharing page's `<Link href="...{{ agent_id }}...">` (dead "open workspace" link).
+Both now use the `attr={{ expr }}` form. Added render regression tests asserting
+no literal `{{` survives in the Landing / Workspace-settings / Sharing pages.
+
+Three fixes to the new-workspace creation flow:
+
+- **Post-login redirect.** After signing in (email/password or OAuth) or finishing email verification, users now land on the new-workspace screen (`/`) when they have no workspaces yet, instead of always being dropped on the account-management page. Returning users who already have workspaces continue to land on `/accounts`. All sign-in paths funnel through a new `/post-login` endpoint that branches on the workspace count.
+- **Leased-host account binding.** Workspaces running on a host leased from Imbue Cloud (provider `imbue_cloud_<account-slug>`) can no longer be disassociated or re-associated to a different account, preventing confusing "account mixing". The settings page shows the bound account with a disabled Disassociate control and an explanatory note, and the associate/disassociate backend routes reject such requests with HTTP 403. Non-leased workspaces are unaffected.
+- **Region preference.** When the create page is opened, minds kicks off a best-effort, non-blocking lookup of the user's IP geolocation (via `ifconfig.co/json`) and stores the nearest OVH-US datacenter (`US-EAST-VA` or `US-WEST-OR`) as a preferred region in `~/.minds/config.toml`. IMBUE_CLOUD workspace creation passes it to `mngr create` as a soft `-b preferred_region=` hint, so a closer host is used when one is free without ever blocking the fast path. The lookup adds no page-load latency and refreshes at most about once per hour per process.
+
+Test infra (not user-visible): made the Electron e2e workspace runner's onboarding step resilient to a Playwright click race -- it now confirms each onboarding question screen actually advanced and retries the click, since `page.click` could land before `creating.js` attached its `.js-next` handlers and silently no-op.
+
+Final fixes to the standardized workspace-create flow:
+
+- Region selection is now explicit. The create form always shows a "Region"
+  control under advanced settings for providers that place a host in a region
+  (Imbue Cloud and Vultr). It defaults to that provider's last-used region (saved
+  per provider in `~/.minds/config.toml`), then a region guessed from your IP
+  geolocation, then a hardcoded default (US-EAST-VA for Imbue Cloud, `ewr` for
+  Vultr). The chosen region is remembered for next time on a successful create.
+  The old, implicit "preferred region" behavior has been removed; geolocation is
+  now fetched once at startup in the background instead of hourly.
+- Backups no longer block workspace creation or get lost on slow hosts. Restic
+  backup setup runs after the workspace is ready, retries for up to ~5 minutes if
+  the host isn't reachable yet, and only notifies you if it ultimately fails.
+- Destroyed workspaces now disappear from the workspace list, and destroying a
+  workspace no longer reports a spurious "failed" once the host is actually gone.
+- The onboarding "initial message" retry budget is raised from 10 minutes to 1
+  hour, so the message still lands on slow-to-start workspaces (e.g. a cold lima
+  create that boots a VM and builds an in-VM image) and when the user takes a
+  while to finish logging in to their AI provider.
+
+Bumped the LIMA launch-mode progress-bar duration estimate from 300s to 600s on
+the workspace creation page: LIMA mode now boots a VM *and* builds the project
+image inside it (the workspace runs in a Docker container in the Lima VM), so a
+cold create takes longer than the old run-directly-in-the-VM path. This only
+affects the creating-page animation, not any hard timeout.
+
+Fixed the dev create-form defaults so they work on any tier, including staging
+and production. The `MINDS_WORKSPACE_GIT_URL` / `_NAME` / `_BRANCH` env vars
+(which point the create form at the operator's local FCT worktree) were
+previously honored only on per-developer dev tiers and silently dropped on the
+shared `minds` / `minds-staging` tiers -- so `just minds-start` against staging
+fell back to the public GitHub FCT on `main`, and local FCT changes could never
+be tested there.
+
+The tier-based gate is replaced with an explicit opt-in: the form honors those
+vars only when `MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1` is set in the same
+environment. `just minds-start` and the e2e workspace runner set it; a normal
+end-user `minds run` never does, so a stray `MINDS_WORKSPACE_*` left in the
+operator's shell is ignored on every tier (the safety the tier gate provided,
+now applied uniformly -- and dev tiers no longer honor stray vars by tier alone).
+These defaults point at a local path + dev branch and only make sense for
+local-compute launch modes (Lima / Docker), not IMBUE_CLOUD pool leases.
+
 ## 2026-06-06
 
 Large pass over the desktop client's HTML templates to extract recurring inline Tailwind patterns into JinjaX primitives. The change set is mostly internal -- rendered behavior is preserved -- but a few visual tweaks ride along.

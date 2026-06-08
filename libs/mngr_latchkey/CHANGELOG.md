@@ -17,6 +17,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Changed: **Breaking** — `LatchkeyDiscoveryHandler` now takes an `MngrContext`, and the discovery callback now carries the host id. On discovery, every SSH-reachable agent gets the desktop-side gateway reverse-tunneled onto its `127.0.0.1:AGENT_SIDE_LATCHKEY_PORT` (run inline). Agents whose host also has an accessible outer host (cheap connection-free `outer_host_id_for` check) additionally get the heavy VPS-resident gateway provisioning thrown onto its own fire-and-forget concurrency-group thread, reverse-tunneled onto a distinct `127.0.0.1:INNER_PORT`, so a VPS agent can reach both the desktop and VPS gateways at once.
 - Changed: `INNER_PORT` is now `AGENT_SIDE_LATCHKEY_PORT + 1` (not 1989), so the VPS gateway's in-container reverse-tunnel port does not collide with the desktop gateway's in-container port.
+- Changed: Auto-discovered as a publishable package by the release tooling; will be offered for first publication to PyPI on the next release.
 
 ## [v0.1.0] - 2026-06-05
 

@@ -6,6 +6,21 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `--no-recycle` flag on `mngr imbue_cloud admin pool create` that forces a fresh OVH VPS order (sets `MNGR__PROVIDERS__OVH__ENABLE_RECYCLE_CANCELLED=false` on the inner `mngr create`) instead of reclaiming a cancelled (still-billable) VPS, for exercising the fresh-provision path.
+- Added: Region-aware leasing — `mngr create` against imbue_cloud accepts a hard `-b region=<datacenter>` build arg (lease fails if no host is available in that datacenter), validated against the known OVH-US datacenters (`US-EAST-VA`, `US-WEST-OR`). The region is sent to the connector's lease endpoint as a separate field (not folded into the JSONB attribute filter), applied on both fast (adopt) and slow (rebuild) paths, and preserved through the slow path's attribute relaxation. `mngr imbue_cloud admin pool add` now records the bake `--region` into the new `pool_hosts.region` column so the connector can filter on it.
+- Added: Auto-discovered as a publishable package by the release tooling; will be offered for first publication to PyPI on the next release.
+
+### Changed
+
+- Changed: `ImbueCloudProviderConfig` now extends `VpsDockerProviderConfig`, so it carries `docker_runtime` / `install_gvisor_runtime` / `default_start_args`; the delegated vps_docker provider forwards them, so the rebuilt container runs under `--runtime runsc` with the `--workdir=/` and `--security-opt=no-new-privileges` hardening args (values are written into the per-account `[providers.imbue_cloud_<slug>]` block by minds bootstrap).
+- Changed: The imbue_cloud slow (rebuild) path now re-applies the full idempotent host setup (pinned Docker version, gVisor `runsc` install/registration, sshd tuning, base packages) on the leased VPS before rebuilding the container, so a workspace created via the slow path — even on a host baked before runsc existed — comes up consistent and runs its agent container under gVisor. A failure is fatal.
+
+### Removed
+
+- Removed: The soft `-b preferred_region=<dc>` lease build arg. A lease is now constrained only by the hard `-b region=<dc>` arg; when unset, the lease is region-agnostic.
+
 ## [v0.1.0] - 2026-06-05
 
 ### Added

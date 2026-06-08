@@ -1,1 +1,0 @@
-Strengthened the e2e test `test_create_with_dirty_tree_fails` so it actually exercises the dirty-working-tree guard: it now supplies a concrete agent type (previously the create aborted on a missing default type, so the test passed for the wrong reason) and asserts that the failure message specifically mentions the uncommitted changes and the `--no-ensure-clean` escape hatch.
