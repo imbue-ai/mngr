@@ -1273,6 +1273,9 @@ function kickChromeSSEReconnect() {
 async function runChromeSSELoop() {
   // Runs until the app is shutting down. Maintains exactly one SSE
   // connection to /_chrome/events, reconnecting on end/error with backoff.
+  // `_started` tracks whether this loop is currently running so callers can
+  // tell whether it needs to be (re)started -- it is cleared on exit below.
+  runChromeSSELoop._started = true;
   while (!isShuttingDown) {
     if (!backendBaseUrl) {
       await sleepInterruptible(500);
@@ -1332,6 +1335,22 @@ async function runChromeSSELoop() {
     });
     // Brief backoff before reconnecting.
     await sleepInterruptible(1500);
+  }
+  // The loop has exited (isShuttingDown went true). Clear the flag so that if
+  // the user backs out of an already-committed quit, ensureChromeSSELoopRunning
+  // can restart it rather than leaving the titlebar without a live SSE feed.
+  runChromeSSELoop._started = false;
+}
+
+// Guarantee the chrome-events SSE consumer is running. Starts it if it has
+// never run or has exited (e.g. it terminated when a quit committed and the
+// user then backed out); otherwise nudges the existing connection to reconnect.
+// Idempotent and safe to call whenever the app returns to its normal state.
+function ensureChromeSSELoopRunning() {
+  if (!runChromeSSELoop._started) {
+    runChromeSSELoop();
+  } else {
+    kickChromeSSEReconnect();
   }
 }
 
@@ -1964,14 +1983,10 @@ async function startBackendWithRetry() {
 
     console.log('[startup] Backend ready. Loading chrome from', backendBaseUrl + '/_chrome');
 
-    // Kick off the shared chrome-events SSE consumer (idempotent: only starts once).
-    if (!runChromeSSELoop._started) {
-      runChromeSSELoop._started = true;
-      runChromeSSELoop();
-    } else {
-      // On retry after backend restart, force the live connection to reconnect.
-      kickChromeSSEReconnect();
-    }
+    // Kick off the shared chrome-events SSE consumer (idempotent: starts it if
+    // it isn't already running, otherwise forces a reconnect after a backend
+    // restart).
+    ensureChromeSSELoopRunning();
 
     const isFirstStart = !hasCompletedInitialStart;
     hasCompletedInitialStart = true;
@@ -2473,10 +2488,14 @@ async function runQuitSequence() {
       console.warn('[lifecycle] stopping local minds failed, quitting anyway:', err);
     }
     if (!shouldProceed) {
-      // User backed out via "Cancel quit" after committing -- undo the flip and
-      // return the app to its normal, running state.
-      restoreFromQuittingInAllWindows();
+      // User backed out via "Cancel quit" after committing -- return the app to
+      // its normal, running state. Clear isShuttingDown FIRST so the restarted
+      // chrome-events SSE loop (which guards on `while (!isShuttingDown)`) does
+      // not immediately exit again; the loop can die during the stop window if
+      // its connection happened to drop while isShuttingDown was set.
       isShuttingDown = false;
+      restoreFromQuittingInAllWindows();
+      ensureChromeSSELoopRunning();
       isQuitSequenceRunning = false;
       return;
     }
