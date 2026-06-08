@@ -218,7 +218,15 @@ def _do_rsync(
 
             rsync_stdout = process_result.stdout
 
-        files_transferred, bytes_transferred = parse_rsync_output(rsync_stdout)
+        parsed_stats = parse_rsync_output(rsync_stdout)
+
+    if parsed_stats is None:
+        # rsync succeeded (we only reach here past the success checks) but its --stats block was
+        # not found. Report unknown counts rather than fabricating a misleading "0 files, 0 bytes".
+        logger.warning("rsync succeeded but its --stats output could not be parsed; transfer counts are unknown")
+        files_transferred, bytes_transferred = 0, 0
+    else:
+        files_transferred, bytes_transferred = parsed_stats
 
     logger.debug("Sync complete: {} files, {} bytes transferred", files_transferred, bytes_transferred)
 

@@ -51,28 +51,30 @@ Total transferred file size: 1,234,567,890 B
     assert bytes_transferred == 1234567890
 
 
-def test_parse_rsync_output_with_no_stats_lines() -> None:
-    """Test parsing rsync output when stats lines are missing."""
+def test_parse_rsync_output_with_no_stats_lines_returns_none() -> None:
+    """Output without a --stats block returns None (unparseable), not a fake (0, 0)."""
     output = """sending incremental file list
 file1.txt
 file2.txt
 """
-    files, bytes_transferred = parse_rsync_output(output)
-    assert files == 0
-    assert bytes_transferred == 0
+    assert parse_rsync_output(output) is None
 
 
-def test_parse_rsync_output_empty_string() -> None:
-    """Test parsing empty rsync output."""
-    output = ""
-    files, bytes_transferred = parse_rsync_output(output)
-    assert files == 0
-    assert bytes_transferred == 0
+def test_parse_rsync_output_empty_string_returns_none() -> None:
+    """Empty rsync output has no stats block, so it is unparseable (None)."""
+    assert parse_rsync_output("") is None
 
 
-def test_parse_rsync_output_whitespace_only() -> None:
-    """Test parsing rsync output with only whitespace."""
-    output = "   \n  \n   "
-    files, bytes_transferred = parse_rsync_output(output)
-    assert files == 0
-    assert bytes_transferred == 0
+def test_parse_rsync_output_whitespace_only_returns_none() -> None:
+    """Whitespace-only output has no stats block, so it is unparseable (None)."""
+    assert parse_rsync_output("   \n  \n   ") is None
+
+
+def test_parse_rsync_output_zero_transfer_block_is_distinct_from_unparseable() -> None:
+    """A genuine zero-file transfer still has the stats block and parses to (0, 0), not None."""
+    output = """Number of files: 10
+Number of files transferred: 0
+Total transferred file size: 0 B
+"""
+    result = parse_rsync_output(output)
+    assert result == (0, 0)
