@@ -232,7 +232,7 @@ curl -fsSL https://raw.githubusercontent.com/imbue-ai/mngr/main/scripts/install.
 ```
 This installs [uv](https://docs.astral.sh/uv/) and mngr (`uv tool install imbue-mngr`), then interactively prompts about system dependencies, optional extras, and a default agent type for `mngr create`. You can [review the script](https://github.com/imbue-ai/mngr/blob/main/scripts/install.sh) before running it.
 
-**Manual install** (requires [uv](https://docs.astral.sh/uv/) and core system deps: `ssh`, `git`, `tmux`, `jq`; optional: `rsync`, `unison`, `claude`):
+**Manual install** (requires [uv](https://docs.astral.sh/uv/) and core system deps: `git`, `tmux`, `jq`; optional: `ssh`, `rsync`, `unison`, `claude`):
 ```bash
 uv tool install imbue-mngr
 

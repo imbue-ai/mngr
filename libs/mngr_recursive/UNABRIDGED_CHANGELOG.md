@@ -4,6 +4,10 @@ Full, unedited changelog entries for the `mngr_recursive` project, consolidated 
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-04
+
+Fixed `mngr create` on remote hosts (e.g. Modal) failing during provisioning with `Error reading SSH protocol banner` / `Connection reset by peer` (github issue 1825). Deploy files are now uploaded with a single rsync transfer instead of one SFTP channel per file. The old per-file approach opened a fresh SFTP channel per file -- a full round-trip over the SSH tunnel (~0.7s/file over Modal) -- so a user's `~/.claude/plugins` tree (hundreds of files) would either exceed the upload timeout or reset the connection mid-transfer. The same set now transfers in seconds over one connection.
+
 ## 2026-05-28
 
 # Dropped redundant per-project ty/ruff ratchet tests

@@ -4,15 +4,18 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
+from imbue.mngr_robinhood.agent_runtime import build_pass_env_vars
 from imbue.mngr_robinhood.data_types import OutputFormat
+from imbue.mngr_robinhood.orchestrator import _StreamBufferConsumer
 from imbue.mngr_robinhood.orchestrator import _TranscriptReadFailureWarner
 from imbue.mngr_robinhood.orchestrator import _TurnEndTicker
 from imbue.mngr_robinhood.orchestrator import _build_agent_name
-from imbue.mngr_robinhood.orchestrator import _build_pass_env_vars
 from imbue.mngr_robinhood.orchestrator import _build_result_meta
 from imbue.mngr_robinhood.orchestrator import monotonic_ms_since
 from imbue.mngr_robinhood.output_modes import StreamingOutputWriter
@@ -25,9 +28,92 @@ def test_build_agent_name_has_robinhood_prefix() -> None:
     assert len(str(name)) > len("robinhood-")
 
 
+class _FakeBufferHost:
+    """Minimal host stand-in whose read_text_file returns a settable buffer."""
+
+    def __init__(self) -> None:
+        self.content = ""
+
+    def read_text_file(self, _path: Path) -> str:
+        return self.content
+
+
+def _drive_consumer_turn(consumer: _StreamBufferConsumer, host: _FakeBufferHost, snapshots: list[str]) -> None:
+    """Feed a turn's buffer snapshots through poll(), then empty + flush()."""
+    for snapshot in snapshots:
+        host.content = snapshot
+        consumer.poll()
+    # The watcher empties the body at idle (id line only).
+    host.content = "id\n"
+    consumer.poll()
+    consumer.flush()
+
+
+def test_stream_consumer_emits_full_new_message_sharing_prefix_across_turns() -> None:
+    # A new turn's message that shares a leading prefix with the previous turn's
+    # message must be emitted whole, not truncated to the diverging suffix. The
+    # consumer resets its emitted/last-content state at flush() so each turn diffs
+    # from an empty baseline.
+    stdout = io.StringIO()
+    writer = StreamingOutputWriter(
+        output_format=OutputFormat.TEXT, session_id="agent-x", stdout=stdout, stream_plain_text=True
+    )
+    host = _FakeBufferHost()
+    consumer = _StreamBufferConsumer.model_construct(
+        host=host, buffer_path=Path("/buffer"), writer=writer, emitted_body="", last_content=""
+    )
+
+    _drive_consumer_turn(consumer, host, ["id1\nThe answer is\n", "id1\nThe answer is 42.\nx"])
+    # The continuation reflows "The answer is" onto the same line as "42."; the
+    # already-printed newline cannot be unprinted, and the redundant whitespace at
+    # the reflow boundary is collapsed rather than re-emitted.
+    assert stdout.getvalue() == "The answer is\n42.\nx"
+
+    stdout.truncate(0)
+    stdout.seek(0)
+    _drive_consumer_turn(consumer, host, ["id2\nThe answer is\n", "id2\nThe answer is right.\nx"])
+    # The full new message is emitted; the shared "The answer is" prefix is not
+    # stripped (which would have produced just "right.\nx" without the prefix).
+    assert stdout.getvalue() == "The answer is\nright.\nx"
+
+    # A subsequent turn with no new output must not re-emit the prior content.
+    stdout.truncate(0)
+    stdout.seek(0)
+    _drive_consumer_turn(consumer, host, [])
+    assert stdout.getvalue() == ""
+
+
 def test_build_pass_env_vars_is_populated() -> None:
-    options = _build_pass_env_vars()
+    options = build_pass_env_vars()
     assert len(options.env_vars) > 0
+
+
+def test_build_pass_env_vars_drops_kitty_terminal_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    # KITTY_* terminal-emulator vars (notably KITTY_SHELL_INTEGRATION) wedge a headless tmux
+    # agent's login-shell startup, so they must not be forwarded into the sourced env file.
+    monkeypatch.setenv("KITTY_SHELL_INTEGRATION", "enabled")
+    monkeypatch.setenv("KITTY_WINDOW_ID", "1")
+    monkeypatch.setenv("ROBINHOOD_TEST_FORWARDABLE_VAR", "keep-me")
+    options = build_pass_env_vars()
+    forwarded_keys = {env_var.key for env_var in options.env_vars}
+    assert not any(key.startswith("KITTY_") for key in forwarded_keys)
+    # Guard against a vacuous test: a benign var injected alongside is still forwarded.
+    assert "ROBINHOOD_TEST_FORWARDABLE_VAR" in forwarded_keys
+
+
+def test_build_pass_env_vars_drops_caller_tmux_session_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    # When ``mngr robinhood`` runs from inside a tmux session, forwarding the caller's TMUX /
+    # TMUX_PANE points the spawned (headless, own-tmux) agent's tmux machinery at the parent's pane,
+    # so the agent never signals readiness and create hangs. These must not be forwarded.
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,12345,7")
+    monkeypatch.setenv("TMUX_PANE", "%48")
+    monkeypatch.setenv("ROBINHOOD_TEST_FORWARDABLE_VAR", "keep-me")
+    options = build_pass_env_vars()
+    forwarded_keys = {env_var.key for env_var in options.env_vars}
+    assert "TMUX" not in forwarded_keys
+    assert "TMUX_PANE" not in forwarded_keys
+    # Guard against a vacuous test: a benign var injected alongside is still forwarded.
+    assert "ROBINHOOD_TEST_FORWARDABLE_VAR" in forwarded_keys
 
 
 def test_build_result_meta_records_error_text() -> None:

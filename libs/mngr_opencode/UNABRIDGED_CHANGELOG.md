@@ -4,6 +4,10 @@ Full, unedited changelog entries for the `mngr_opencode` project, consolidated n
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-04
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.
+
 ## 2026-05-28
 
 # Dropped redundant per-project ty/ruff ratchet tests

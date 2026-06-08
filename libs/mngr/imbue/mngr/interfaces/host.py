@@ -40,6 +40,9 @@ from imbue.mngr.primitives import HostNameStyle
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
+from imbue.mngr.primitives import TmuxHeight
+from imbue.mngr.primitives import TmuxWidth
+from imbue.mngr.primitives import TmuxWindowSize
 from imbue.mngr.primitives import TransferMode
 
 
@@ -883,6 +886,49 @@ class AgentDataOptions(FrozenModel):
     )
 
 
+class AgentTmuxOptions(FrozenModel):
+    """Per-agent tmux window sizing and resize behavior.
+
+    A ``None`` field means "use the host default" (the session builder falls back
+    to its built-in defaults and leaves tmux's resize policy untouched).
+    """
+
+    width: TmuxWidth | None = Field(
+        default=None,
+        description="tmux window width in columns (None = host default)",
+    )
+    height: TmuxHeight | None = Field(
+        default=None,
+        description="tmux window height in rows (None = host default)",
+    )
+    window_size: TmuxWindowSize | None = Field(
+        default=None,
+        description="tmux window-size resize mode (None = host default / today's behavior)",
+    )
+
+    def to_data_dict(self) -> dict[str, Any]:
+        """Serialize to the JSON-friendly shape persisted in the agent's data.json."""
+        return {
+            "width": int(self.width) if self.width is not None else None,
+            "height": int(self.height) if self.height is not None else None,
+            "window_size": self.window_size.value if self.window_size is not None else None,
+        }
+
+    @classmethod
+    def from_data_dict(cls, data: Mapping[str, Any] | None) -> "AgentTmuxOptions":
+        """Reconstruct from the data.json ``tmux`` block, tolerating a missing/empty block."""
+        if not data:
+            return cls()
+        raw_width = data.get("width")
+        raw_height = data.get("height")
+        raw_window_size = data.get("window_size")
+        return cls(
+            width=TmuxWidth(raw_width) if raw_width is not None else None,
+            height=TmuxHeight(raw_height) if raw_height is not None else None,
+            window_size=TmuxWindowSize(raw_window_size) if raw_window_size is not None else None,
+        )
+
+
 class CreateAgentOptions(FrozenModel):
     """Complete options for creating a new agent.
 
@@ -964,6 +1010,10 @@ class CreateAgentOptions(FrozenModel):
     provisioning: AgentProvisioningOptions = Field(
         default_factory=AgentProvisioningOptions,
         description="Simple provisioning options",
+    )
+    tmux: AgentTmuxOptions = Field(
+        default_factory=AgentTmuxOptions,
+        description="tmux window sizing and resize behavior for the agent's session",
     )
     plugin_data: dict[str, Any] = Field(
         default_factory=dict,

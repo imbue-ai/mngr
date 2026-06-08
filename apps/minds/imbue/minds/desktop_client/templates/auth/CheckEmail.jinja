@@ -38,21 +38,18 @@
   });
 </script>
 {% endset %}
-<auth.AuthBase title="Check your email" scripts={{ _scripts }}>
+<CardPage title="Check your email" scripts={{ _scripts }}>
   <div class="text-center">
     <h1 class="text-2xl font-semibold text-zinc-900 mb-2">Check your email</h1>
     <p class="text-zinc-500 mb-3">We sent a verification link to <strong>{{ email }}</strong></p>
     <p class="text-sm text-zinc-500 mb-5">
       Click the link in the email to verify your account, then come back here.
     </p>
-    <div id="status-msg" class="text-blue-900 text-sm mb-3 px-3 py-2 bg-blue-50 rounded-md border border-blue-100">Waiting for verification...</div>
-    <div id="success-msg" class="hidden text-emerald-700 text-sm mb-3 px-3 py-2 bg-emerald-50 rounded-md border border-emerald-200">Email verified. Redirecting...</div>
-    <button id="resend-btn"
-            class="mt-4 w-full py-3 rounded-lg bg-zinc-900 text-zinc-50 font-semibold cursor-pointer transition-colors hover:bg-zinc-800 disabled:bg-zinc-400 disabled:cursor-not-allowed">
-      Resend verification email
-    </button>
+    <Notice variant="info" id="status-msg">Waiting for verification...</Notice>
+    <Notice variant="success" id="success-msg" class="hidden">Email verified. Redirecting...</Notice>
+    <Button variant="primary" size="lg" block id="resend-btn" extra="mt-4">Resend verification email</Button>
     <div class="text-center mt-3 text-sm text-zinc-500">
-      <a href="/" class="text-blue-600 hover:underline">Go to home</a>
+      <Link href="/">Go to home</Link>
     </div>
   </div>
-</auth.AuthBase>
+</CardPage>

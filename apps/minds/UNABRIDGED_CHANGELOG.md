@@ -4,6 +4,70 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-06
+
+Large pass over the desktop client's HTML templates to extract recurring inline Tailwind patterns into JinjaX primitives. The change set is mostly internal -- rendered behavior is preserved -- but a few visual tweaks ride along.
+
+New / generalized primitives (under ``apps/minds/imbue/minds/desktop_client/templates/``):
+
+- ``Card`` (rewritten): ``layout`` (``block`` / ``row`` / ``row-spread``), ``padding`` (``default`` / ``tight``), ``interactive``, ``tag`` (``div`` / ``a`` / ``button``), ``href``, plus JinjaX ``attrs`` passthrough for arbitrary HTML attributes. The visual shell moves into a shared ``.minds-card`` CSS class in ``tokens.css`` so JS-rendered surfaces (the Landing providers panel) reference one source of truth.
+- ``CardPage`` (renamed from ``auth/AuthBase``): centered-card layout used by the auth flow + the Create workspace form. ``padding="default"`` (``p-10``, auth) or ``"form"`` (``p-6``, Create); ``max_width`` is a Tailwind utility. The Login / AuthError pages now go through this primitive instead of hand-rolling the centered card.
+- ``Button`` / ``ButtonLink`` / ``ButtonSubmit``: add a ``size`` axis (``md`` default, ``lg`` for prominent block CTAs, ``icon`` for square padding). Disabled buttons fade to ``opacity-30`` (was ``opacity-50``). All three now use JinjaX ``attrs.render()`` passthrough.
+- ``TitlebarButton``: new primitive for the dark title-bar window controls. ``variant="nav"`` (left-side icons) / ``"control"`` (min/max/close); ``tone="default"`` / ``"danger"`` (close button's red hover).
+- ``Link``: new primitive for inline ``text-blue-600 hover:underline`` anchors. ``weight="regular"`` (default) or ``"medium"`` for the auth-flow tab-switch / back-link affordances.
+- ``Select`` / ``Textarea``: new primitives sharing TextInput's focus-ring token via a new ``INPUT_BASE`` catalog global.
+- ``FormLabel``: new primitive for form-field labels. ``inline=False`` (block, mb-1.5) or ``inline=True`` (sits beside its control). Prop is ``target=`` (the HTML ``for`` attribute id).
+- ``Icon24`` / ``Icon12``: new primitives wrapping the 24x24 lucide stroke icons + the 12x12 title-bar chrome glyphs. Path data lives in ``ICONS_24`` / ``ICONS_12`` dicts in ``templates.py``.
+- ``Notice``: drops the bespoke ``extra`` prop in favor of attrs passthrough so callers can pass ``id=``, ``class="hidden"``, ``data-*`` alongside ``variant=``.
+- ``auth.OauthButton``: new primitive composing ``auth.OauthIcon`` + the brand label, picked by ``provider="google"|"github"``.
+- ``Spinner``: gains ``tone="accent"`` (blue ring) for primary-action spinners; old inline ``border-blue-300 border-t-blue-600 animate-spin`` patterns migrate to ``<Spinner tone="accent">``.
+
+Standardization sweeps:
+
+- **Text colors**: banished ``text-zinc-600`` and ``text-zinc-100`` so each remaining shade carries one role (``zinc-900`` primary, ``zinc-700`` body, ``zinc-500`` secondary/label, ``zinc-400`` muted, ``zinc-200`` on-dark). Section labels (SectionHeader, inline ``<h2>`` labels) lift from 600 to 500; body paragraphs lift from 600 to 700; ghost button text moves from 600 to 700.
+- **Corner radii**: retired bare ``rounded`` (20 sites swept to explicit ``rounded-md``) and ``rounded-2xl`` (PermissionsDialog + RequestUnavailable fold to ``rounded-xl`` so dialog chrome matches card chrome).
+- **Borders**: 2 accidental ``border-zinc-300`` sites fold to canonical ``border-zinc-200``.
+- **Shadows**: ``.minds-card`` baseline has no shadow; the ``interactive`` Card flag adds ``hover:shadow-sm``. Non-clickable cards (PermissionsHeader, the Latchkey permission cards, Associate) read as flat surfaces.
+- **StatusBadge**: the ``warn`` variant drops its one-off border so all five variants share a uniform pill treatment.
+
+CSS classes anchor a few JS-rendered surfaces that can't call JinjaX: ``.minds-card`` (Card shell), ``.spinner`` / ``.spinner-accent`` (Spinner), ``.code-pill`` (inline mono pill in Sharing).
+
+A new ``apps/minds/imbue/minds/desktop_client/templates/README.md`` documents the rule ("use a primitive before reaching for inline Tailwind"), the catalog, where the shared tokens live, the visual-diff workflow, and the JinjaX gotchas the branch shook out (Python-keyword props, nested ``{# #}`` comments, literal ``<Tag>`` in docstrings, ``:attr="..."`` for component-tag dynamic attributes, ``!important`` on the ghost-Button link-style recipe).
+
+``apps/minds/scripts/visual_diff.py``: the screenshot step now waits for Tailwind to inject its generated stylesheet before snapping (was a flat 400ms timeout that produced unstyled screenshots on slow machines or when ``tailwind.js`` was missing). The compare report's per-scenario thumbnails open a click-through lightbox: click image swaps A/B, ``←``/``→`` step between differing scenarios, ``Esc`` closes.
+
+Visible end-user impact is small and is mostly subtle visual polish: the auth-flow CTAs gain canonical ``p-10`` padding (~2-4px shifts), the Landing project-row icon buttons darken slightly under the ghost variant, the auth pages' "Sign in"/"Back to" links pick up consistent ``font-medium`` styling, and a couple of misaligned form-control padding pairs now line up vertically. The ``Configure...`` disclosure on the Create form correctly renders at ``text-xs font-normal`` after a follow-up to add ``!important`` to the link-style recipe overrides.
+
+## 2026-06-04
+
+Migrate the desktop client's templates from Jinja2 macros + `{% extends %}` to JinjaX components. UI primitives (Button, Card, Notice, Spinner, TextInput, PageContainer, Opt) and layout (Base, AuthBase) are now `.jinja` components composed via `<Component>` tags. Each page is a PascalCase component under `templates/pages/` (and auth pages under `templates/auth/`). The permission-request dialog is decomposed into five components (`PermissionsDialog`, `PermissionsHeader`, `PermissionsForm`, `PermissionsManualCredentials`, `PermissionsError`). The dev styleguide page (`/_dev/styleguide`) gains examples for the new components.
+
+No user-visible behavior changes -- HTML output stays semantically identical. Internal: `templates.py` now exposes a `CATALOG` constant in place of `JINJA_ENV`; the public `render_*` functions keep their signatures.
+
+- Disable the Modal provider in the Electron desktop-client e2e test (`test_create_local_docker_workspace_via_electron`) by setting `MNGR__PROVIDERS__MODAL__IS_ENABLED=false` for the Electron child process. The test creates a local Docker workspace and is given no Modal credentials, so the spawned `mngr`'s provider discovery was logging a "Modal is not authorized" warning every ~10s for the whole run; disabling the provider keeps the logs clean.
+
+Desktop app auto-update and developer-tooling fixes (extracted from the larger minds onboarding work for standalone review).
+
+- Auto-update: packaged builds now prompt to install a downloaded update. ToDesktop's runtime defaults `showInstallAndRestartPrompt` to `"never"`, so users saw "downloading in the background..." and were never prompted again; it is now set to `"always"`. ToDesktop is only initialized in packaged builds -- in dev its constructor threw on macOS (Squirrel is not linked in the unsigned binary), so dev launches now skip it.
+- Added a `Check for Updates...` item to the application menu that triggers a check and reports the result (update found / up to date / unavailable / error), with the unavailable message worded for the build type (dev vs unreleased draft).
+- Added a `View` menu with `Toggle Developer Tools` (Alt+Cmd+I), zoom controls, and fullscreen. The default Electron DevTools shortcut crashed because the app uses `BaseWindow` + `WebContentsView` rather than a `BrowserWindow`.
+- `MINDS_OPEN_DEVTOOLS=1` auto-opens detached DevTools on the content view at launch.
+- Startup env-setup failures are now logged to the console in addition to being shown in the error window.
+
+- Fixed `minds pool {list,create,destroy}` leaking the Neon pool DSN (which
+  embeds the DB username + password) into the `Running: ...` log line whenever
+  `--database-url` was passed explicitly. The DSN is now masked before the
+  command is rendered for logging; the real subprocess still receives the
+  unredacted value. The secret-masking logic that `mngr forward`'s
+  `--preauth-cookie` redaction already used is now a shared
+  `imbue.minds.utils.secret_redaction.redact_secret_flag_values` helper.
+
+Documented why `scripts/launch-and-verify.sh` and `scripts/first-message-verify.sh` intentionally use `set -uo pipefail` (omitting `-e`): both handle errors explicitly via a `fail` helper, `PIPESTATUS`, retry loops that depend on commands exiting non-zero, and diagnostic blocks on failure. No runtime behavior changed.
+
+The minds desktop client no longer runs a second discovery observer. Its `mngr forward` subprocess is now launched with `--observe-via-file`, so it tails the shared discovery events file written by the single `mngr observe` under `mngr latchkey forward` instead of spawning its own. Provider-set changes (enable/disable, signin/signout/OAuth) now refresh discovery solely by bouncing the detached `mngr latchkey forward` supervisor; minds no longer sends SIGHUP to `mngr forward` (its `bounce_observe` path was removed). Behavior is unchanged from the user's perspective.
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.
+
 ## 2026-06-04
 
 Bump Latchkey version to 2.15.1. to include the playwright compatibility fix.
