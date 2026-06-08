@@ -206,7 +206,17 @@
     // Main pushes the new value on workspace-delete / sign-out / any other
     // update so the bar tracks the source of truth even when this renderer
     // wasn't the one that triggered the change.
+    //
+    // Scope: ``setLastWorkspaceAgentId`` in main broadcasts to *every*
+    // chrome view across every window, so a non-null update fired because
+    // *another* window opened a workspace must not clobber the accent of
+    // a window that is actively showing its own workspace. Gate non-null
+    // updates on ``currentTitleAgentId === null`` (i.e. this window is on
+    // Home / sign-in / some non-workspace URL). ``null`` updates
+    // (workspace deleted, signed out) still land everywhere so the bar
+    // is cleared globally on those events.
     window.minds.onLastWorkspaceAgentIdChanged(function (agentId) {
+      if (agentId && currentTitleAgentId) return;
       applyTitleAccent(agentId || null);
     });
   } else {
