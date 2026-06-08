@@ -1077,7 +1077,13 @@ function setLastWorkspaceAgentId(agentId) {
   const normalized = typeof agentId === 'string' && agentId ? agentId : null;
   if (normalized === lastWorkspaceAgentId) return;
   lastWorkspaceAgentId = normalized;
-  saveSessionState();
+  // Skip the on-disk flush during teardown: ``saveSessionState`` walks the
+  // live ``bundles`` Set, and that Set shrinks as each window's ``closed``
+  // handler runs during shutdown. The close handler and ``before-quit`` save
+  // already gate on ``isShuttingDown`` / ``bundles.size`` for the same
+  // reason -- a late SSE-driven call here must not clobber the legitimate
+  // pre-teardown snapshot with a partial windows array.
+  if (!isShuttingDown) saveSessionState();
   // Push the (possibly null) value to every chrome view so renderers that
   // weren't the source of the change still update. The chrome.js handler
   // is idempotent on no-op.
