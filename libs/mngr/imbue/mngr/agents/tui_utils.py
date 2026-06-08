@@ -204,19 +204,17 @@ def send_enter_via_tmux_wait_for_hook(
     waiter has registered (signals wake exactly one waiter; if none exists
     the signal is lost).
 
-    ``queue_log_path_template`` lets us confirm submission the moment the
-    message is *enqueued*, concurrently with waiting for the hook signal. The
-    hook fires only when the prompt reaches the model (its ``UserPromptSubmit``
-    moment), which for a message sent to a busy agent is when the agent finally
-    dequeues it -- potentially many minutes later. Claude records an ``enqueue``
-    event the instant a message is accepted into its queue, so when a log path
-    is supplied we poll for a fresh enqueue alongside the hook wait and succeed
-    on whichever lands first. This keeps the call fast (well under any
-    front-door HTTP/proxy timeout) for busy agents while preserving the hook as
-    the confirmation for cases that never enqueue a model prompt (e.g. the
-    ``/clear`` and ``/compact`` TUI-local commands, whose signal is fired from
-    SessionStart). ``None`` disables the enqueue path and waits on the hook
-    alone (the original behavior, used by non-Claude TUIs).
+    ``queue_log_path_template`` (when supplied by an agent whose TUI records an
+    ``enqueue`` event in its transcript log the instant a message is accepted
+    into its queue) lets the call also confirm submission from that log,
+    watched *concurrently* with the hook signal. This matters because the hook
+    may only fire once the prompt reaches the model -- for a message sent to a
+    busy agent that is when it is finally dequeued, potentially much later --
+    whereas the enqueue event is recorded immediately on acceptance. We poll
+    for a fresh enqueue alongside the hook wait and succeed on whichever lands
+    first, keeping the call fast (well under any front-door HTTP/proxy timeout)
+    for busy agents while the hook still covers submissions that record no
+    enqueue event. ``None`` waits on the hook alone (the original behavior).
 
     Raises ``SendMessageError`` on timeout.
     """
@@ -309,13 +307,13 @@ def _build_signal_or_enqueue_command(
     A single remote command so the two conditions are watched concurrently with
     no dangling process: it registers the (full-timeout) hook waiter in the
     background -- which writes a sentinel file on success, preserving the
-    register-before-Enter ordering so the signal is never missed (this is what
-    keeps ``/clear``/``/compact`` working, since they only ever fire the
-    signal) -- sends Enter, then polls both the sentinel and the enqueue log
-    until either confirms or the deadline passes. Exit 0 = confirmed, non-zero =
+    register-before-Enter ordering so the signal is never missed (which matters
+    for submissions that only ever fire the signal, never recording an enqueue)
+    -- sends Enter, then polls both the sentinel and the enqueue log until
+    either confirms or the deadline passes. Exit 0 = confirmed, non-zero =
     timeout.
 
-    Claude writes an ``enqueue`` event to its transcript event log the instant a
+    The agent's transcript event log records an ``enqueue`` event the instant a
     message enters its queue; a baseline is captured before Enter so only a
     newer enqueue counts. ISO-8601 timestamps compare correctly as plain
     strings, and an empty baseline sorts before any real timestamp.
