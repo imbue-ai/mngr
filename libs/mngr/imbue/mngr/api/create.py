@@ -210,8 +210,14 @@ def create(
     is_new_host = isinstance(target_host, NewHostOptions)
     # Resolve the provider that owns a newly-created host so we can tear it down
     # if the rest of the create fails (None when adopting an existing host).
+    # Pass is_for_host_creation=True so backends with one-time bootstrap (Modal's
+    # per-user environment) don't raise ProviderEmptyError here: this is the
+    # create path, and resolve_target_host below constructs the same (cached)
+    # instance with is_for_host_creation=True to actually create the host.
     new_host_provider: ProviderInstanceInterface | None = (
-        get_provider_instance(target_host.provider, mngr_ctx) if isinstance(target_host, NewHostOptions) else None
+        get_provider_instance(target_host.provider, mngr_ctx, is_for_host_creation=True)
+        if isinstance(target_host, NewHostOptions)
+        else None
     )
     with log_span("Resolving target host"):
         host = resolve_target_host(target_host, mngr_ctx)

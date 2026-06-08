@@ -9,9 +9,9 @@ from imbue.imbue_common.primitives import NonEmptyStr
 IMBUE_CLOUD_BACKEND_NAME: Final[str] = "imbue_cloud"
 
 # OVH-US datacenters the imbue_cloud host pool can land VPSes in. Used to
-# validate the ``region`` / ``preferred_region`` create-path knobs client-side
-# (the connector itself accepts any string and simply matches the column). Kept
-# small and explicit on purpose; extend when the pool gains new datacenters.
+# validate the ``region`` create-path knob client-side (the connector itself
+# accepts any string and simply matches the column). Kept small and explicit on
+# purpose; extend when the pool gains new datacenters.
 KNOWN_OVH_US_REGIONS: Final[frozenset[str]] = frozenset({"US-EAST-VA", "US-WEST-OR"})
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")

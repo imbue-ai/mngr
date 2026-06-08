@@ -945,20 +945,15 @@ class FakeCursor:
         if "from pool_hosts" in query_lower and "status = 'available'" in query_lower:
             # The connector serialises the request attributes via json.dumps
             # before passing them to the SQL bind parameter, so we always get
-            # a JSON string here. Region knobs (if present) follow it in the
-            # param tuple in SQL clause order: hard ``region`` (WHERE) then
-            # ``preferred_region`` (ORDER BY).
+            # a JSON string here. A hard ``region`` (WHERE clause), if present,
+            # follows it in the param tuple.
             raw = params[0]
             requested = json.loads(raw) if isinstance(raw, str) else dict(raw)
-            next_param_idx = 1
+            # A hard ``region`` bind param, when present, always immediately
+            # follows the attributes JSON param (index 0), so its index is 1.
             hard_region: str | None = None
             if "and region = %s" in query_lower:
-                hard_region = params[next_param_idx]
-                next_param_idx += 1
-            preferred_region: str | None = None
-            if "order by (region = %s) desc" in query_lower:
-                preferred_region = params[next_param_idx]
-                next_param_idx += 1
+                hard_region = params[1]
             candidate_rows = [
                 row
                 for row in self._backend.pool_rows
@@ -966,13 +961,6 @@ class FakeCursor:
                 and _attributes_contain(_row_attributes(row), requested)
                 and (hard_region is None or row.region == hard_region)
             ]
-            # Mirror ``(region = preferred) DESC NULLS LAST, created_at ASC``:
-            # region matches first, then the rest in insertion (created_at) order.
-            if preferred_region is not None:
-                candidate_rows = sorted(
-                    candidate_rows,
-                    key=lambda row: 0 if row.region == preferred_region else 1,
-                )
             if candidate_rows:
                 chosen = candidate_rows[0]
                 self._results = [

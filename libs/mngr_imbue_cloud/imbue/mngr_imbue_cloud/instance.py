@@ -1166,7 +1166,6 @@ class ImbueCloudProvider(BaseProviderInstance):
                     attributes=parsed.attributes,
                     token=token,
                     region=parsed.region,
-                    preferred_region=parsed.preferred_region,
                 )
             case FastMode.PREVENT:
                 return self._create_host_slow_path(
@@ -1181,7 +1180,6 @@ class ImbueCloudProvider(BaseProviderInstance):
                     authorized_keys=authorized_keys,
                     passthrough_build_args=parsed.passthrough_build_args,
                     region=parsed.region,
-                    preferred_region=parsed.preferred_region,
                 )
             case _ as unreachable:
                 assert_never(unreachable)
@@ -1193,7 +1191,6 @@ class ImbueCloudProvider(BaseProviderInstance):
         attributes: LeaseAttributes,
         token: SecretStr,
         region: str | None,
-        preferred_region: str | None,
     ) -> Host:
         """Lease an exact-attribute pool host and adopt its pre-baked agent.
 
@@ -1210,7 +1207,6 @@ class ImbueCloudProvider(BaseProviderInstance):
                 public_key_text,
                 str(name),
                 region=region,
-                preferred_region=preferred_region,
             )
         except ImbueCloudLeaseUnavailableError as exc:
             self._discard_pending_keypair(tmp_private_key, tmp_public_key)
@@ -1267,7 +1263,6 @@ class ImbueCloudProvider(BaseProviderInstance):
         authorized_keys: Sequence[str] | None,
         passthrough_build_args: tuple[str, ...],
         region: str | None,
-        preferred_region: str | None,
     ) -> Host:
         """Lease any available host (relaxed attributes), nuke its container, and rebuild it.
 
@@ -1288,15 +1283,13 @@ class ImbueCloudProvider(BaseProviderInstance):
         tmp_private_key, tmp_public_key, public_key_text = self._prepare_pending_keypair()
         try:
             # Region constraints are NOT relaxed: a hard ``region`` requirement
-            # still applies to the rebuilt host, and ``preferred_region`` still
-            # biases which available host we pick before rebuilding.
+            # still applies to the rebuilt host.
             lease_result = self.client.lease_host(
                 token,
                 relaxed_attributes,
                 public_key_text,
                 str(name),
                 region=region,
-                preferred_region=preferred_region,
             )
         except ImbueCloudLeaseUnavailableError:
             # Genuinely no available host in the pool -- nothing was leased, so

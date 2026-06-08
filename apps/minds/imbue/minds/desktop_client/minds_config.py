@@ -23,6 +23,19 @@ from imbue.minds.errors import MindsConfigError
 _CONFIG_FILENAME: Final[str] = "config.toml"
 
 
+def _as_str_keyed_dict(value: object) -> dict[str, object] | None:
+    """Return ``value`` as a concretely-typed ``dict[str, object]``, or None if it isn't a mapping.
+
+    The TOML loader yields dynamically-typed nested values, so a sub-table read
+    out of the raw config is statically ``object``. Re-materializing it into a
+    fresh ``dict[str, object]`` gives downstream code typed key/value access (and
+    a private copy that's safe to mutate) without resorting to ``cast``.
+    """
+    if not isinstance(value, dict):
+        return None
+    return {str(key): item for key, item in value.items()}
+
+
 class MindsConfig(MutableModel):
     """Thread-safe configuration manager for ``~/.minds/config.toml``."""
 
@@ -80,27 +93,34 @@ class MindsConfig(MutableModel):
                 pass
             self._write_raw(data)
 
-    def get_preferred_region(self) -> str | None:
-        """Return the preferred OVH datacenter for imbue_cloud leases, or None.
+    def get_region(self, provider_name: str) -> str | None:
+        """Return the last-used region for a provider, or None if never set.
 
-        Resolved from the user's IP geolocation when the create page is opened
-        and passed to ``mngr create`` as a soft ``-b preferred_region=`` knob.
+        Stored under ``[providers.<provider_name>].region`` so each
+        region-bearing provider (e.g. ``imbue_cloud``, ``vultr``) keeps its own
+        last-used value. The create form defaults to this; on a successful
+        create the chosen region is written back via :meth:`set_region`.
         """
         with self._lock:
             data = self._read_raw()
-            value = data.get("preferred_region")
+            providers = _as_str_keyed_dict(data.get("providers"))
+            if providers is None:
+                return None
+            provider = _as_str_keyed_dict(providers.get(provider_name))
+            if provider is None:
+                return None
+            value = provider.get("region")
             return str(value) if value is not None else None
 
-    def set_preferred_region(self, region: str | None) -> None:
-        """Set or clear the preferred OVH datacenter for imbue_cloud leases."""
+    def set_region(self, provider_name: str, region: str) -> None:
+        """Persist the last-used region for a provider under ``[providers.<provider_name>]``."""
         with self._lock:
             data = self._read_raw()
-            if region is not None:
-                data["preferred_region"] = region
-            elif "preferred_region" in data:
-                del data["preferred_region"]
-            else:
-                pass
+            providers = _as_str_keyed_dict(data.get("providers")) or {}
+            provider = _as_str_keyed_dict(providers.get(provider_name)) or {}
+            provider["region"] = region
+            providers[provider_name] = provider
+            data["providers"] = providers
             self._write_raw(data)
 
     def get_auto_open_requests_panel(self) -> bool:

@@ -32,22 +32,26 @@ def test_clear_default_account_id(tmp_path: Path) -> None:
     assert config.get_default_account_id() is None
 
 
-def test_default_preferred_region_is_none(tmp_path: Path) -> None:
+def test_default_region_is_none(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
-    assert config.get_preferred_region() is None
+    assert config.get_region("imbue_cloud") is None
 
 
-def test_set_and_get_preferred_region(tmp_path: Path) -> None:
+def test_set_and_get_region_per_provider(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
-    config.set_preferred_region("US-WEST-OR")
-    assert config.get_preferred_region() == "US-WEST-OR"
+    config.set_region("imbue_cloud", "US-WEST-OR")
+    config.set_region("vultr", "lhr")
+    assert config.get_region("imbue_cloud") == "US-WEST-OR"
+    assert config.get_region("vultr") == "lhr"
+    # A provider with no stored region still reads as None.
+    assert config.get_region("docker") is None
 
 
-def test_clear_preferred_region(tmp_path: Path) -> None:
+def test_set_region_overwrites_previous_value(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
-    config.set_preferred_region("US-EAST-VA")
-    config.set_preferred_region(None)
-    assert config.get_preferred_region() is None
+    config.set_region("imbue_cloud", "US-EAST-VA")
+    config.set_region("imbue_cloud", "US-WEST-OR")
+    assert config.get_region("imbue_cloud") == "US-WEST-OR"
 
 
 def test_set_and_get_auto_open_requests_panel(tmp_path: Path) -> None:

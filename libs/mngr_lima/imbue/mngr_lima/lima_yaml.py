@@ -2,6 +2,7 @@ import os
 import platform
 import tempfile
 from pathlib import Path
+from typing import Final
 
 import yaml
 from loguru import logger
@@ -10,6 +11,34 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_AARCH64
 from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_X86_64
 from imbue.mngr_lima.constants import lima_host_data_disk_mount_path
+
+# Exact Docker Engine version installed inside the Lima VM. Pinned so every minds
+# workspace host runs an identical Docker regardless of provider. We hardcode the
+# version here (rather than importing from mngr_vps_docker) to avoid a cross-plugin
+# dependency, but it is deliberately kept the same as
+# ``mngr_vps_docker.host_setup.PINNED_DOCKER_APT_VERSION`` so lima and the remote
+# VPS providers stay in lockstep. The Lima VM is Debian 12 "bookworm" (see
+# ``constants.DEFAULT_IMAGE_URL_*``), so this bookworm-scoped apt version is valid.
+PINNED_DOCKER_APT_VERSION: Final[str] = "5:29.5.1-1~debian.12~bookworm"
+
+# Install the pinned Docker Engine from Docker's official apt repo (the same way
+# mngr_vps_docker does), instead of Debian's unpinned ``docker.io`` package.
+# ``--allow-downgrades`` plus the exact ``=version`` pin makes the pinned version
+# authoritative in both directions; containerd.io / buildx / compose track the
+# repo's current build, matching Docker's own install docs. Requires curl and
+# ca-certificates, which the provisioning script installs earlier.
+_DOCKER_INSTALL_BLOCK: Final[str] = f"""\
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+. /etc/os-release
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${{VERSION_CODENAME}} stable" > /etc/apt/sources.list.d/docker.list
+apt-get update -qq
+apt-get install -y -qq --allow-downgrades \\
+    docker-ce={PINNED_DOCKER_APT_VERSION} docker-ce-cli={PINNED_DOCKER_APT_VERSION} \\
+    containerd.io docker-buildx-plugin docker-compose-plugin
+systemctl enable docker
+systemctl start docker"""
 
 
 def _get_default_image_url(
@@ -313,10 +342,11 @@ def _build_docker_provisioning_script(
 #!/bin/bash
 set -eux -o pipefail
 
-# Install Docker plus the runtime deps the per-host btrfs snapshot helper needs.
+# Install the runtime deps the per-host btrfs snapshot helper needs, plus curl /
+# ca-certificates required to add Docker's apt repo (Docker itself is installed
+# from that pinned official repo just below, not from Debian's unpinned package).
 export DEBIAN_FRONTEND=noninteractive
 PKGS_TO_INSTALL=""
-command -v docker >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL docker.io"
 command -v mkfs.btrfs >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL btrfs-progs"
 command -v inotifywait >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL inotify-tools"
 command -v jq >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL jq"
@@ -329,7 +359,8 @@ if [ -n "$PKGS_TO_INSTALL" ]; then
     apt-get update -qq && apt-get install -y -qq $PKGS_TO_INSTALL
 fi
 
-systemctl enable --now docker
+# Install the pinned Docker Engine from Docker's official apt repo.
+{_DOCKER_INSTALL_BLOCK}
 {gvisor_install_block}{data_disk_block}
 mkdir -p /run/sshd
 
