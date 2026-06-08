@@ -15,6 +15,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr import hookimpl
 from imbue.mngr.api.discover import _all_identifiers_found
+from imbue.mngr.api.discover import _discover_provider_hosts_and_agents
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.discover import warn_on_duplicate_host_names
 from imbue.mngr.api.discovery_events import get_discovery_events_path
@@ -38,7 +39,9 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.provider_config_registry import _provider_config_registry
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderDiscoveryError
 from imbue.mngr.errors import ProviderEmptyError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -1301,6 +1304,70 @@ class _RaisingDiscoveryProviderInstance(MockProviderInstance):
         include_destroyed: bool = False,
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
         raise MngrError("simulated discovery failure from test")
+
+
+class _UnavailableDiscoveryProviderInstance(MockProviderInstance):
+    """Provider whose backend is unreachable -- raises ProviderUnavailableError."""
+
+    def discover_hosts_and_agents(
+        self,
+        cg: ConcurrencyGroup,
+        include_destroyed: bool = False,
+    ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
+        raise ProviderUnavailableError(self.name, "backend offline")
+
+
+@pytest.mark.allow_warnings(match=r"Skipping provider .* during discovery \(unavailable\)")
+def test_discover_provider_hosts_and_agents_skips_unavailable_provider(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """An unreachable backend is skipped during discovery, not fatal.
+
+    Regression test: a single offline provider (e.g. a Docker daemon that is
+    down) must not abort discovery for every other provider, so commands like
+    `mngr rsync <local-agent>` keep working. The provider contributes no hosts
+    and no exception escapes.
+    """
+    provider = _UnavailableDiscoveryProviderInstance(
+        name=ProviderInstanceName("offline-provider"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
+
+    _discover_provider_hosts_and_agents(
+        provider,
+        agents_by_host,
+        include_destroyed=True,
+        results_lock=Lock(),
+        cg=temp_mngr_ctx.concurrency_group,
+    )
+
+    assert agents_by_host == {}
+
+
+def test_discover_provider_hosts_and_agents_wraps_non_availability_errors(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A non-availability discovery failure still raises ProviderDiscoveryError.
+
+    Only ProviderUnavailableError is treated as "skip this provider"; any other
+    failure must still surface (wrapped for per-provider attribution).
+    """
+    provider = _RaisingDiscoveryProviderInstance(
+        name=ProviderInstanceName("raising-provider"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    with pytest.raises(ProviderDiscoveryError):
+        _discover_provider_hosts_and_agents(
+            provider,
+            {},
+            include_destroyed=True,
+            results_lock=Lock(),
+            cg=temp_mngr_ctx.concurrency_group,
+        )
 
 
 class _RaisingDetailProviderInstance(MockProviderInstance):

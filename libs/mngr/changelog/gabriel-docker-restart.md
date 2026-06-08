@@ -11,7 +11,15 @@ The Docker provider's `discover_hosts` now raises `ProviderUnavailableError` whe
 the daemon is unreachable instead of returning `[]`. Like the Modal and Imbue
 Cloud providers, it now propagates a discovery failure rather than swallowing it
 into an empty list, so an unreachable daemon can no longer be mistaken for "this
-provider has zero hosts". Discovery failures are skipped per-provider by the same
-existing handlers (GC skips the provider; `mngr list` reports it as unavailable). As a result, `mngr` commands that scan all providers now surface a clear
+provider has zero hosts". Discovery failures are skipped per-provider by the
+existing handlers (GC skips the provider; `mngr list` reports it as unavailable).
+
+Multi-provider discovery (`discover_hosts_and_agents`, used by `mngr rsync`,
+`git`, `find`, `message`, ...) now also skips an unreachable provider and
+continues with the ones that are available, per the documented
+`ProviderUnavailableError` contract. Previously a single offline backend would
+abort the whole command; now, for example, `mngr rsync <local-agent>` still works
+when an unrelated Docker daemon is down. Genuine (non-availability) discovery
+errors still surface as before. As a result, `mngr` commands that scan all providers now surface a clear
 "provider unavailable" error when Docker is off, rather than silently omitting
 Docker agents.
