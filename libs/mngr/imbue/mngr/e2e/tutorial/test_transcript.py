@@ -129,7 +129,12 @@ def _create_claude_task_with_transcript(e2e: E2eSession, host_dir: Path, sleep_v
     is then written into the agent's events directory so the role-filtering
     behavior can be verified.
     """
-    _create_my_task(e2e, sleep_value)
+    expect(
+        e2e.run(
+            f"mngr create my-task --type command --no-ensure-clean --no-connect -- sleep {sleep_value}",
+            comment=f"create my-task (sleep {sleep_value})",
+        )
+    ).to_succeed()
 
     # The agent's state lives at $MNGR_HOST_DIR/agents/<agent_id>/. Exactly one
     # agent exists in this isolated host dir, so glob for it.
