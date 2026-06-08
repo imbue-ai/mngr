@@ -1165,6 +1165,25 @@ async def amain() -> int:
             await snap_page(win, "17-home-both-tiles")
             logger.info("home page shows both tiles: {} and {}", HOST_NAME, HOST_NAME_2)
 
+            # Iter 13 (click tile to navigate): real users open chat by
+            # clicking the workspace tile, not by typing the chat URL. The
+            # tile's onclick handler routes through /goto/<agent_id>/ which
+            # mngr_forward translates into the agent-<hex>.localhost host.
+            # Click W1's tile, wait for the URL to carry the agent-<hex>
+            # host, snap, then navigate back to home so the destroy flow
+            # below proceeds from a known starting page.
+            logger.info("=== iter 13: click W1 tile to navigate to chat ===")
+            chat_url_re = re.compile(r"agent-[a-f0-9]+\.localhost")
+            w1_tile_locator = win.locator(f"text=/{re.escape(HOST_NAME)}/").first
+            await w1_tile_locator.wait_for(state="visible", timeout=10_000)
+            await w1_tile_locator.click()
+            await win.wait_for_url(chat_url_re, timeout=30_000)
+            await snap_page(win, "17b-w1-via-tile-click")
+            if not chat_url_re.search(win.url):
+                raise E2EFailure(f"[tile-click] expected agent-<hex>.localhost after click, got {win.url!r}")
+            logger.info("[tile-click] PASS: W1 tile click landed at {}", win.url)
+            await win.goto(origin + "/")
+
             # 18-22. Destroy W2 via the UI (gear icon -> WorkspaceSettings ->
             # destroy-btn -> destroy-confirm-btn), poll status to completion,
             # then assert (a) the landing page drops W2's tile while keeping
@@ -1186,9 +1205,24 @@ async def amain() -> int:
             await win.goto(origin + f"/workspace/{w2_agent_id}/settings")
             await win.wait_for_selector("#destroy-btn", state="visible", timeout=30_000)
             await snap_page(win, "18-w2-settings-page")
+
+            # Iter 12 (Cancel modal): real users click Destroy by accident or
+            # change their mind. Verify the Cancel button dismisses the modal
+            # without firing any /api/destroy-agent call, leaving W2 alive.
             await win.click("#destroy-btn")
             await win.wait_for_selector("#destroy-confirm-btn", state="visible", timeout=5_000)
-            await snap_page(win, "18b-w2-destroy-confirm-dialog")
+            await snap_page(win, "18b-w2-destroy-modal-opened")
+            await win.click("#destroy-cancel-btn")
+            await win.wait_for_selector("#destroy-confirm-btn", state="hidden", timeout=5_000)
+            await snap_page(win, "18b2-w2-cancelled-modal-dismissed")
+            # The settings page should still render the destroy button
+            # (proof we didn't navigate away and the page is responsive).
+            await win.wait_for_selector("#destroy-btn", state="visible", timeout=5_000)
+
+            # Now do the real destroy: reopen modal, click Confirm.
+            await win.click("#destroy-btn")
+            await win.wait_for_selector("#destroy-confirm-btn", state="visible", timeout=5_000)
+            await snap_page(win, "18b3-w2-destroy-modal-reopened")
             await win.click("#destroy-confirm-btn")
             # The confirm handler POSTs /api/destroy-agent then redirects to
             # /; wait for the navigation, then snap the in-flight state.
