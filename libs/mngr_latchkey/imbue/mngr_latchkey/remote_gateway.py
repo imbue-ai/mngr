@@ -298,11 +298,7 @@ def _build_gateway_start_script(outer_port: int, encryption_key: str) -> str:
     ``LATCHKEY_DISABLE_CREDENTIALS_REFRESH=1`` is set so the VPS gateway never
     refreshes OAuth credentials. The credentials here are a synced *copy* of the
     desktop's store (see :func:`sync_credentials`); the desktop-side latchkey is
-    the single owner of credential refresh. If this remote instance also
-    refreshed, the two would race to rotate the same refresh token -- each
-    refresh invalidates the previous token -- which would exhaust the user's
-    token and break the desktop's credentials. The remote gateway therefore uses
-    the synced credentials as-is and lets the desktop keep them fresh.
+    the single owner of credential refresh.
     """
     # Detach from the SSH session: nohup + closed stdin + redirected stdio so
     # the channel can close while the gateway keeps running.
