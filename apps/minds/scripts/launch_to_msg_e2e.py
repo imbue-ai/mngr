@@ -1188,9 +1188,7 @@ async def amain() -> int:
             await win.wait_for_url(w1_url_re, timeout=30_000)
             await snap_page(win, "17b-w1-via-tile-click")
             if w1_agent_host not in win.url:
-                raise E2EFailure(
-                    f"[tile-click] expected W1 agent host {w1_agent_host!r} in URL, got {win.url!r}"
-                )
+                raise E2EFailure(f"[tile-click] expected W1 agent host {w1_agent_host!r} in URL, got {win.url!r}")
             logger.info("[tile-click] PASS: W1 tile click landed at {}", win.url)
             await win.goto(origin + "/")
 
