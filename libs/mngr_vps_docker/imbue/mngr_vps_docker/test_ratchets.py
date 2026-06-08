@@ -114,7 +114,11 @@ def test_prevent_namedtuple() -> None:
 
 
 def test_prevent_yaml_usage() -> None:
-    rc.check_yaml_usage(_DIR, snapshot(0))
+    # 3 = cloud_init_test.py parses the user_data it generates to assert the SSH
+    # key lands at the correct nesting. cloud-init user_data is YAML by spec, so
+    # this tests the format we are forced to emit; it does not introduce new YAML
+    # config. (import yaml + yaml.safe_load + the test function name.)
+    rc.check_yaml_usage(_DIR, snapshot(3))
 
 
 def test_prevent_functools_partial() -> None:

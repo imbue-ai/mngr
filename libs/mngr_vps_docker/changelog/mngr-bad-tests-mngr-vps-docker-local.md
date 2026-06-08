@@ -15,7 +15,8 @@ Test-quality cleanup of the mngr_vps_docker unit tests (no production code chang
 - `cloud_init_test.py`: replaced the loose bag-of-substrings generation checks
   with a single full `inline_snapshot` of the rendered user_data, so the
   load-bearing YAML indentation and key placement (the embedded SSH private key
-  in particular) are pinned exactly.
+  in particular) are pinned exactly, plus a companion test that parses the
+  output as YAML and asserts the private key lands at the correct nesting.
 - `host_store_test.py`: `test_list_persisted_agent_data_reads_all_agents_in_one_round_trip`
   now asserts the read call count does not grow with agent count (2 vs 5) rather
   than pinning a bare literal, and documents that the call-count assertion
@@ -25,4 +26,7 @@ Test-quality cleanup of the mngr_vps_docker unit tests (no production code chang
   round-trip tests; the remaining default/wire-value contract tests carry a
   comment marking them deliberate change-detectors.
 - `test_ratchets.py`: tightened the `init_methods_in_non_exception_classes`
-  ratchet from 1 to 0 (the recorded count was stale; actual is 0).
+  ratchet from 1 to 0 (the recorded count was stale; actual is 0), and bumped
+  `yaml_usage` to 3 for the cloud-init YAML-parse test above (the ratchet
+  prevents introducing new YAML config, not parsing the cloud-init YAML format
+  we are forced to emit).

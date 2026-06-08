@@ -1,5 +1,6 @@
 """Tests for cloud-init user_data generation."""
 
+import yaml
 from inline_snapshot import snapshot
 
 from imbue.mngr_vps_docker.cloud_init import _indent
@@ -165,3 +166,31 @@ def test_generate_cloud_init_includes_gvisor_install_when_requested() -> None:
     assert "docker info" in result
     # gnupg is installed with the base packages (needed for the Docker apt key).
     assert "gnupg" in result
+
+
+def test_generate_cloud_init_parses_as_yaml_with_key_at_correct_nesting() -> None:
+    # Beyond the textual snapshot, prove the output is well-formed YAML and that
+    # the private key lands under ``ssh_keys.ed25519_private`` with its content
+    # intact -- a wrong-indentation regression would either fail to parse here
+    # or surface the key at the wrong nesting level, which a substring check
+    # could never catch. (cloud-init user_data is YAML by definition; this test
+    # parses the format we are forced to emit, it does not introduce new YAML.)
+    result = generate_cloud_init_user_data(
+        host_private_key=_SAMPLE_PRIVATE_KEY,
+        host_public_key=_SAMPLE_PUBLIC_KEY,
+        install_gvisor_runtime=False,
+    )
+    assert result.startswith("#cloud-config\n")
+
+    parsed = yaml.safe_load(result)
+    # The block scalar preserves the key content (with a trailing newline).
+    assert parsed["ssh_keys"]["ed25519_private"].strip() == _SAMPLE_PRIVATE_KEY
+    assert parsed["ssh_keys"]["ed25519_public"] == _SAMPLE_PUBLIC_KEY
+    assert parsed["ssh_pwauth"] is False
+    assert parsed["ssh_deletekeys"] is True
+    # The provisioning commands are emitted as a list of runcmd shell scripts;
+    # the Docker install and ready-marker steps must survive the YAML round-trip.
+    runcmd_joined = "\n".join(parsed["runcmd"])
+    assert "systemctl enable docker" in runcmd_joined
+    assert "systemctl start docker" in runcmd_joined
+    assert "touch /var/run/mngr-ready" in runcmd_joined
