@@ -166,7 +166,16 @@ def _search_issues_via_gh_cli(search_text: str, cg: ConcurrencyGroup) -> Existin
 # random or dynamic (memory addresses, random IDs, timestamps, etc.) that
 # prevents a substring match against existing issues.
 def search_for_existing_issue(search_text: str, cg: ConcurrencyGroup) -> ExistingIssue | None:
-    """Search for an existing GitHub issue matching the error message."""
+    """Search for an existing GitHub issue matching the error message.
+
+    Returns None when no matching issue is found OR when both the GitHub-API and
+    gh-CLI search backends fail. This is a deliberate fail-soft: a transient
+    search failure should not block a user from filing an issue, so the caller
+    treats None as "no duplicate found" and opens the new-issue form. The
+    trade-off is that a search outage is indistinguishable from "no duplicate",
+    so the user may occasionally file a duplicate -- an acceptable cost versus
+    blocking issue reporting entirely.
+    """
     try:
         return _search_issues_via_github_api(search_text, cg)
     except IssueSearchError:
