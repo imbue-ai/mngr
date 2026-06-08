@@ -20,6 +20,7 @@ from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 
 
@@ -52,6 +53,7 @@ class FakeAgent(FrozenModel):
 class FakeHost(MutableModel):
     """Minimal test double for OnlineHostInterface that executes commands locally."""
 
+    id: HostId = Field(default_factory=HostId.generate, description="Unique identifier for this host")
     is_local: bool = Field(default=True, description="Whether this is a local host")
     host_dir: Path = Field(default_factory=lambda: Path("/fake/host_dir"), description="Host state directory")
     ssh_info: tuple[str, str, int, Path] | None = Field(
