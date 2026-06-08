@@ -14,22 +14,16 @@ from pydantic import ConfigDict
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.imbue_common.pure import pure
 from imbue.mngr.api.create import create as api_create
 from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.api.events import read_event_content
-from imbue.mngr.api.events import try_build_events_target_for_agent
 from imbue.mngr.api.message import send_message_to_agents
 from imbue.mngr.api.providers import get_local_host
-from imbue.mngr.cli.common_opts import apply_settings_to_config
-from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
-from imbue.mngr.interfaces.agent import AgentInterface
-from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
+from imbue.mngr.interfaces.host import AgentTmuxOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -38,13 +32,22 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentNameStyle
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import ErrorBehavior
-from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 from imbue.mngr.utils.jsonl_warn import split_complete_lines
 from imbue.mngr.utils.name_generator import generate_agent_name
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_claude.plugin import ClaudeAgent
+from imbue.mngr_robinhood.agent_runtime import AGENT_DEAD_STATES
+from imbue.mngr_robinhood.agent_runtime import AGENT_READY_TIMEOUT_SECONDS
+from imbue.mngr_robinhood.agent_runtime import POLL_INTERVAL_SECONDS
+from imbue.mngr_robinhood.agent_runtime import TERMINAL_STOP_REASONS
+from imbue.mngr_robinhood.agent_runtime import TURN_END_NO_PROGRESS_TIMEOUT_SECONDS
+from imbue.mngr_robinhood.agent_runtime import apply_unattended_settings
+from imbue.mngr_robinhood.agent_runtime import build_events_target
+from imbue.mngr_robinhood.agent_runtime import build_pass_env_vars
+from imbue.mngr_robinhood.agent_runtime import destroy_agent
+from imbue.mngr_robinhood.agent_runtime import normalize_credentials_env
 from imbue.mngr_robinhood.data_types import ArgPartition
 from imbue.mngr_robinhood.data_types import ResultMeta
 from imbue.mngr_robinhood.input_modes import iter_user_prompts
@@ -52,19 +55,8 @@ from imbue.mngr_robinhood.output_modes import StreamingOutputWriter
 from imbue.mngr_robinhood.output_modes import monotonic_ms_since
 from imbue.mngr_robinhood.raw_transcript import RAW_TRANSCRIPT_PATH
 from imbue.mngr_robinhood.raw_transcript import RawTranscriptParser
-
-# Settings overrides applied to mngr_ctx so the spawned claude agent runs
-# unattended. The two ``settings_overrides`` flags are normally added by
-# ``mngr_claude`` only when ``ProvisioningContext.is_unattended`` is true,
-# which is computed as ``not host.is_local``; robinhood always runs
-# on the local host, so we set them explicitly to avoid hangs on the
-# "bypass permissions mode" and "skip dangerous mode" prompts.
-_UNATTENDED_SETTINGS: Final[tuple[str, ...]] = (
-    "agent_types.claude.auto_dismiss_dialogs=true",
-    "agent_types.claude.auto_allow_permissions=true",
-    "agent_types.claude.settings_overrides.skipDangerousModePermissionPrompt=true",
-    "agent_types.claude.settings_overrides.bypassPermissionsModeAccepted=true",
-)
+from imbue.mngr_robinhood.stream_buffer import buffer_body
+from imbue.mngr_robinhood.stream_buffer import compute_stream_delta
 
 # Extra settings applied when the caller requests live streaming (via
 # --include-partial-messages or --stream-plain-text). These enable the
@@ -79,66 +71,6 @@ _STREAMING_SETTINGS: Final[tuple[str, ...]] = (
     "agent_types.claude.settings_overrides.model=sonnet",
     "agent_types.claude.settings_overrides.fastMode=false",
 )
-
-# Env var prefixes that mngr's own ``_collect_agent_env_vars`` sets per-agent
-# (state dir, work dir, ids, ...). Forwarding the parent process's values for
-# any of these would *override* the spawned agent's correct values at the
-# "explicit env_vars" step of env-var collection, breaking the readiness
-# hook (which writes ``$MNGR_AGENT_STATE_DIR/session_started`` and would
-# otherwise touch the parent's state dir), the background-tasks script, the
-# common-transcript writer, and anything else keyed on the per-agent state
-# dir. Filtered out below in ``_build_pass_env_vars``.
-_PER_AGENT_ENV_VARS_TO_DROP: Final[frozenset[str]] = frozenset(
-    {
-        "MNGR_AGENT_ID",
-        "MNGR_AGENT_NAME",
-        "MNGR_AGENT_STATE_DIR",
-        "MNGR_AGENT_WORK_DIR",
-        "MNGR_HOST_DIR",
-        "LLM_USER_PATH",
-    }
-)
-
-# Poll cadence for end-of-turn detection plus transcript tailing.
-_POLL_INTERVAL_SECONDS: Final[float] = 0.1
-
-# Generous readiness timeout: claude needs time to start, dismiss dialogs,
-# and reach the prompt-ready state in a fresh worktree before the first
-# message is delivered. mngr's 10-second default is too short here.
-_AGENT_READY_TIMEOUT_SECONDS: Final[float] = 120.0
-
-
-# Lifecycle states that mean the agent is no longer alive. Reaching one of
-# these mid-turn is a failure: the agent will never produce another
-# assistant_message, so the caller treats this as ``EXIT_CLAUDE_ERROR`` with
-# the state name in the error envelope. STOPPED/DONE are the natural
-# end-of-life states, REPLACED means the agent's tmux pane was hijacked by
-# another process, and RUNNING_UNKNOWN_AGENT_TYPE means mngr no longer
-# recognizes the agent type so it cannot reason about its state.
-_AGENT_DEAD_STATES: Final[frozenset[AgentLifecycleState]] = frozenset(
-    {
-        AgentLifecycleState.STOPPED,
-        AgentLifecycleState.DONE,
-        AgentLifecycleState.REPLACED,
-        AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
-    }
-)
-
-# Claude API stop_reason values that mean "this assistant message is the LAST
-# one of the turn". Anything else (notably ``tool_use``, or a missing
-# stop_reason) means more events are still coming -- either later cycles
-# within the same turn, or a follow-up message that hasn't been mirrored from
-# claude's per-session JSONL into events.jsonl yet.
-_TERMINAL_STOP_REASONS: Final[frozenset[str]] = frozenset({"end_turn", "stop_sequence", "max_tokens"})
-
-# Safety net for ``_wait_for_turn_end``: if the transcript stops growing for
-# this long while the agent is still alive, bail out and finalize with
-# whatever we have. The legitimate maximum gap between assistant events
-# inside a single turn is bounded by the longest tool the agent might run
-# (long bash builds, slow MCP calls), so this needs to be very generous --
-# we'd rather wait than truncate. A user who wants tighter control wraps
-# ``mngr robinhood`` in ``timeout(1)`` per the spec.
-_TURN_END_NO_PROGRESS_TIMEOUT_SECONDS: Final[float] = 600.0
 
 EXIT_SUCCESS: Final[int] = 0
 EXIT_CLAUDE_ERROR: Final[int] = 1
@@ -163,7 +95,7 @@ class _RunState(FrozenModel):
 class _TranscriptReadFailureWarner(MutableModel):
     """Emit at most one warning per run for non-ENOENT transcript-read failures.
 
-    ``_drain_new_events`` is called every ``_POLL_INTERVAL_SECONDS`` (~100ms).
+    ``_drain_new_events`` is called every ``POLL_INTERVAL_SECONDS`` (~100ms).
     If the read fails for a persistent reason other than "file not yet
     created" (e.g. permission denied, host unreachable), logging on every
     poll would flood stderr with hundreds of identical warnings per minute.
@@ -211,7 +143,7 @@ class _StreamBufferConsumer(MutableModel):
         except (FileNotFoundError, OSError, MngrError):
             # The buffer may not exist yet (watcher still starting up); benign.
             return
-        if _buffer_body(content).strip():
+        if buffer_body(content).strip():
             self.last_content = content
         # During streaming, only emit complete lines; the still-streaming last
         # line is held back because its rendering churns as it grows (e.g. an
@@ -241,99 +173,6 @@ class _StreamBufferConsumer(MutableModel):
         self.last_content = ""
 
 
-@pure
-def _buffer_body(buffer_content: str) -> str:
-    """Return the body (everything after the id line) of a stream_buffer snapshot."""
-    lines = buffer_content.split("\n")
-    return "\n".join(lines[1:]) if len(lines) > 1 else ""
-
-
-@pure
-def compute_stream_delta(buffer_content: str, emitted_body: str, is_flush: bool) -> tuple[str, str]:
-    """Compute the new assistant-text delta from a stream_buffer snapshot.
-
-    The buffer's first line is the last-complete-assistant id; the remaining
-    lines are the in-progress body. Returns ``(delta, new_emitted_body)``.
-
-    When ``is_flush`` is False, only the *complete* lines are considered (the
-    last, still-streaming line is withheld) so the churning tail is never emitted
-    mid-stream. When ``is_flush`` is True (turn end), the whole body is considered
-    so the final line is delivered. A prefix-extension of ``emitted_body`` yields
-    just the appended suffix; a non-prefix body (a new message) yields the whole
-    new body.
-    """
-    body = _buffer_body(buffer_content)
-    visible = body if is_flush else _complete_lines_prefix(body)
-    if visible == "" or visible == emitted_body:
-        return "", emitted_body
-    if visible.startswith(emitted_body):
-        return visible[len(emitted_body) :], visible
-    # A stale, shorter snapshot that the emitted text already covers: keep going.
-    if emitted_body.startswith(visible):
-        return "", emitted_body
-    # Divergence: the body is neither an extension nor a prefix of what we've
-    # emitted. This happens when the rendered text shifts slightly (e.g. Claude
-    # collapses the blank line around a horizontal rule as a paragraph streams in)
-    # and -- across turns -- when a new message begins. Emit only the part of the
-    # body past the longest common prefix with what we already emitted, never
-    # re-emitting the common prefix (plain-text output cannot be unprinted, so
-    # re-emitting would duplicate everything from the divergence point back to the
-    # start). At worst a small amount of already-printed text is left stale.
-    common = _common_prefix_length(emitted_body, visible)
-    return visible[common:], visible
-
-
-@pure
-def _common_prefix_length(first: str, second: str) -> int:
-    """Return the length of the longest common prefix of two strings."""
-    limit = min(len(first), len(second))
-    index = 0
-    while index < limit and first[index] == second[index]:
-        index += 1
-    return index
-
-
-@pure
-def _complete_lines_prefix(body: str) -> str:
-    """Return ``body`` up to and including its last newline (the complete lines).
-
-    The text after the last newline is the still-streaming line and is withheld.
-    Returns "" when there is no newline (only a single, in-progress line so far).
-    """
-    last_newline = body.rfind("\n")
-    if last_newline == -1:
-        return ""
-    return body[: last_newline + 1]
-
-
-def _normalize_credentials_env() -> None:
-    """Unset ``ORIGINAL_CLAUDE_CONFIG_DIR`` so mngr_claude reads credentials
-    from the live ``$CLAUDE_CONFIG_DIR``.
-
-    When ``mngr robinhood`` runs from inside another mngr claude agent,
-    the parent process has ``ORIGINAL_CLAUDE_CONFIG_DIR=~/.claude`` (set by
-    that parent agent's ``modify_env_vars``) and ``CLAUDE_CONFIG_DIR`` set to
-    the parent agent's per-agent config dir. mngr_claude's credentials sync
-    reads via ``get_user_claude_config_dir()``, which prefers
-    ``ORIGINAL_CLAUDE_CONFIG_DIR`` -> ``~/.claude`` -- but on machines where
-    the user has never run ``claude login`` outside of mngr, ``~/.claude/``
-    has no ``primaryApiKey`` or ``.credentials.json``, so the sync is a no-op
-    and the spawned claude boots without auth.
-
-    Dropping ``ORIGINAL_CLAUDE_CONFIG_DIR`` here makes
-    ``get_user_claude_config_dir()`` fall through to ``CLAUDE_CONFIG_DIR``
-    (per its existing resolution order). On this machine that is the parent
-    agent's per-agent dir, which DOES have credentials because the parent
-    agent's own provisioning copied them there. The new agent's
-    per-agent provisioning then copies from THAT dir into the spawned
-    agent's config dir, and claude boots correctly.
-
-    Safe in the no-parent-agent case too: ``ORIGINAL_CLAUDE_CONFIG_DIR`` is
-    not normally set in a plain shell, so the pop is a no-op there.
-    """
-    os.environ.pop("ORIGINAL_CLAUDE_CONFIG_DIR", None)
-
-
 def run(
     mngr_ctx: MngrContext,
     partition: ArgPartition,
@@ -345,9 +184,9 @@ def run(
 
     Returns the integer exit code the caller should pass to ``ctx.exit()``.
     """
-    _normalize_credentials_env()
+    normalize_credentials_env()
     is_streaming_requested = partition.include_partial_messages or partition.stream_plain_text
-    mngr_ctx = _apply_unattended_settings(mngr_ctx, _STREAMING_SETTINGS if is_streaming_requested else ())
+    mngr_ctx = apply_unattended_settings(mngr_ctx, _STREAMING_SETTINGS if is_streaming_requested else ())
 
     try:
         prompts = iter_user_prompts(
@@ -377,22 +216,8 @@ def run(
         exit_code = _run_with_agent(mngr_ctx, partition, first_prompt, prompts, stdout, start_time, state_holder)
     finally:
         if state_holder:
-            _destroy_agent(state_holder[0].agent, state_holder[0].host)
+            destroy_agent(state_holder[0].agent, state_holder[0].host)
     return exit_code
-
-
-def _apply_unattended_settings(mngr_ctx: MngrContext, extra_settings: tuple[str, ...] = ()) -> MngrContext:
-    """Inject the claude agent-type config overrides for unattended operation.
-
-    ``extra_settings`` (e.g. streaming overrides) are merged in the same call so
-    the ``settings_overrides`` dict is assembled in one shot.
-    """
-    updated_config = apply_settings_to_config(
-        mngr_ctx.config,
-        _UNATTENDED_SETTINGS + extra_settings,
-        mngr_ctx.config.disabled_plugins,
-    )
-    return mngr_ctx.model_copy_update(to_update(mngr_ctx.field_ref().config, updated_config))
 
 
 def _run_with_agent(
@@ -416,7 +241,7 @@ def _run_with_agent(
     source_location = HostLocation(host=local_host, path=cwd)
 
     agent_name = _build_agent_name()
-    pass_env_vars = _build_pass_env_vars()
+    pass_env_vars = build_pass_env_vars()
     options = CreateAgentOptions(
         agent_type=AgentTypeName("claude"),
         name=agent_name,
@@ -426,7 +251,12 @@ def _run_with_agent(
         agent_args=partition.pass_through_agent_args,
         label_options=AgentLabelOptions(labels={"created-by": "robinhood"}),
         environment=pass_env_vars,
-        ready_timeout_seconds=_AGENT_READY_TIMEOUT_SECONDS,
+        ready_timeout_seconds=AGENT_READY_TIMEOUT_SECONDS,
+        tmux=AgentTmuxOptions(
+            width=partition.tmux_width,
+            height=partition.tmux_height,
+            window_size=partition.tmux_window_size,
+        ),
     )
 
     try:
@@ -451,7 +281,7 @@ def _run_with_agent(
         # Destroy the just-created agent before returning so the unexpected-
         # type path does not leak a live agent on the host.
         logger.error("Unexpected agent type from api_create: {!r}", type(result.agent).__name__)
-        _destroy_agent(result.agent, result.host)
+        destroy_agent(result.agent, result.host)
         return EXIT_MNGR_ERROR
     agent = result.agent
     host = result.host
@@ -480,7 +310,7 @@ def _run_with_agent(
     # below raises an unexpected exception.
     state_holder_out.append(state)
 
-    events_target = _build_events_target(mngr_ctx, agent)
+    events_target = build_events_target(mngr_ctx, agent)
     if events_target is None:
         error_text = f"Cannot read events for agent {agent.name} (no online host or volume)"
         logger.error("{}", error_text)
@@ -552,33 +382,6 @@ def _build_agent_name() -> AgentName:
     return AgentName(f"robinhood-{base}")
 
 
-def _build_pass_env_vars() -> AgentEnvironmentOptions:
-    """Forward variables from the current process environment to the agent.
-
-    Filters out the per-agent ``MNGR_*`` / ``LLM_USER_PATH`` env vars that
-    mngr's base ``_collect_agent_env_vars`` sets specifically for the new
-    agent. Forwarding the parent process's values for those would clobber
-    the spawned agent's correct values during env-var collection and break
-    the readiness hook, the background-tasks script, and the common-
-    transcript writer (all of which key on ``$MNGR_AGENT_STATE_DIR``).
-    Everything else (auth, locale, model overrides, etc.) is passed through.
-    """
-    pairs = tuple(
-        EnvVar(key=key, value=value) for key, value in os.environ.items() if key not in _PER_AGENT_ENV_VARS_TO_DROP
-    )
-    return AgentEnvironmentOptions(env_vars=pairs)
-
-
-def _build_events_target(mngr_ctx: MngrContext, agent: ClaudeAgent) -> EventsTarget | None:
-    return try_build_events_target_for_agent(
-        mngr_ctx=mngr_ctx,
-        agent_id=agent.id,
-        agent_name=str(agent.name),
-        host_id=agent.host_id,
-        provider_name=LOCAL_PROVIDER_NAME,
-    )
-
-
 def _send_user_turn(mngr_ctx: MngrContext, agent: ClaudeAgent, prompt: str) -> None:
     """Deliver a follow-up prompt to the running agent via ``send_message_to_agents``."""
     include_filter = f'id == "{agent.id}"'
@@ -611,12 +414,12 @@ class _TurnEndTicker(MutableModel):
        :attr:`baseline_assistant_count`. This is the authoritative
        end-of-turn signal: the LAST message of the turn has been mirrored
        into events.jsonl and we are done.
-    2. **Agent died** -- lifecycle state in :data:`_AGENT_DEAD_STATES`
+    2. **Agent died** -- lifecycle state in :data:`AGENT_DEAD_STATES`
        (STOPPED / DONE / REPLACED / RUNNING_UNKNOWN_AGENT_TYPE). The agent
        will never produce another message; the caller treats this as a
        claude-side failure.
     3. **No-progress safety timeout** -- if the writer has not seen a new
-       assistant_message for :data:`_TURN_END_NO_PROGRESS_TIMEOUT_SECONDS`,
+       assistant_message for :data:`TURN_END_NO_PROGRESS_TIMEOUT_SECONDS`,
        bail with ``AgentLifecycleState.WAITING`` and a WARNING. This is a
        safety net for pathological cases (``stream_transcript.sh`` dies,
        claude is wedged without writing to its session file, etc.); in
@@ -667,7 +470,7 @@ class _TurnEndTicker(MutableModel):
         description="``time.monotonic()`` snapshot of the last tick that observed forward progress",
     )
     no_progress_timeout_seconds: float = Field(
-        default=_TURN_END_NO_PROGRESS_TIMEOUT_SECONDS,
+        default=TURN_END_NO_PROGRESS_TIMEOUT_SECONDS,
         description="Bail after this many seconds without any new assistant_message events",
     )
 
@@ -686,11 +489,11 @@ class _TurnEndTicker(MutableModel):
             self.last_progress_at = time.monotonic()
         if (
             self.writer.assistant_message_count > self.baseline_assistant_count
-            and self.writer.last_assistant_stop_reason in _TERMINAL_STOP_REASONS
+            and self.writer.last_assistant_stop_reason in TERMINAL_STOP_REASONS
         ):
             return AgentLifecycleState.WAITING
         state = self.get_lifecycle_state()
-        if state in _AGENT_DEAD_STATES:
+        if state in AGENT_DEAD_STATES:
             return state
         if time.monotonic() - self.last_progress_at > self.no_progress_timeout_seconds:
             logger.warning(
@@ -719,7 +522,7 @@ def _wait_for_turn_end(
 
     Returns ``(final_state, new_seen_bytes)``. The success path returns
     :data:`AgentLifecycleState.WAITING` -- the canonical "turn over, ready
-    for next prompt" state. Any state in :data:`_AGENT_DEAD_STATES`
+    for next prompt" state. Any state in :data:`AGENT_DEAD_STATES`
     (STOPPED / DONE / REPLACED / RUNNING_UNKNOWN_AGENT_TYPE) is the failure
     path: the agent died mid-turn and the caller treats this as a claude-
     side failure. The returned offset must be threaded back into the next
@@ -764,7 +567,7 @@ def _wait_for_turn_end(
     result, _, _ = poll_for_value(
         producer=ticker.tick,
         timeout=outer_timeout_seconds,
-        poll_interval=_POLL_INTERVAL_SECONDS,
+        poll_interval=POLL_INTERVAL_SECONDS,
     )
     if result is None:
         logger.warning(
@@ -843,23 +646,6 @@ def _finalize_run(
     writer.finalize(meta, turn_count=turn_count)
 
 
-def _destroy_agent(agent: AgentInterface, host: OnlineHostInterface) -> None:
-    """Best-effort: stop and destroy the agent, swallowing cleanup errors.
-
-    Typed against :class:`AgentInterface` rather than :class:`ClaudeAgent` so
-    the agent-type-mismatch cleanup path in :func:`_run_with_agent` can call
-    it on the unnarrowed ``api_create`` result without an extra cast.
-    """
-    try:
-        host.stop_agents([agent.id])
-    except (OSError, MngrError) as exc:
-        logger.warning("Failed to stop agent {}: {}", agent.name, exc)
-    try:
-        host.destroy_agent(agent)
-    except (OSError, MngrError) as exc:
-        logger.warning("Failed to destroy agent {}: {}", agent.name, exc)
-
-
 class _DestroyOnSignal(MutableModel):
     """Context manager: traps SIGINT/SIGTERM, destroys the agent, re-raises.
 
@@ -888,7 +674,7 @@ class _DestroyOnSignal(MutableModel):
 
     def _on_signal(self, signum: int, _frame: object) -> None:
         logger.warning("Received signal {}; destroying agent {}", signum, self.state.agent.name)
-        _destroy_agent(self.state.agent, self.state.host)
+        destroy_agent(self.state.agent, self.state.host)
         signal.signal(signal.SIGINT, self.original_int)
         signal.signal(signal.SIGTERM, self.original_term)
         os.kill(os.getpid(), signum)

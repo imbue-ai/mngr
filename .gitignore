@@ -250,6 +250,7 @@
 
 # TMR output directories (reports + test outputs)
 **/tmr_*/
+**/tmr-report/
 
 # Active session marker file (used to detect interrupted sessions)
 **/.claude/active
@@ -352,3 +353,6 @@ apps/minds_workspace_server/package-lock.json
 
 # Playwright MCP scratch artifacts (mock screenshots, page snapshots)
 **/.playwright-mcp/
+
+# tmr (task-runner) orchestration scratch report
+tmr-report/

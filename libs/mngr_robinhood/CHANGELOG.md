@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `mngr robinhood` can now surface an approximate, live view of the response as it is produced, sourced from the spawned agent's tmux-based `stream_buffer` (see `imbue-mngr-claude`). `--include-partial-messages` is now accepted (previously rejected) — with `--output-format stream-json` it emits claude-native `stream_event` / `content_block_delta` / `text_delta` events as the response streams, followed by the authoritative `assistant` message from the transcript (matching claude's native partial-message ordering). A new `--stream-plain-text` flag, with the default text output, streams response text to stdout incrementally and suppresses the trailing full-text dump so streamed content is not duplicated. The orchestrator reads `stream_buffer` over the host inside its existing end-of-turn poll loop, diffing the cumulative body against what it last emitted (prefix-extension → append delta; reset → new message) so deltas are pure appends; the `result` envelope and final `assistant` message remain the source of truth.
+
+### Changed
+
+- Changed: When either streaming flag is set, robinhood enables the streaming watcher on the spawned agent (`streaming_snapshot_interval_seconds = 0.25`) and defaults the model to sonnet (so fast mode is off and streaming is observable); a user-passed `--model` still takes precedence. Both flags are consumed by the wrapper and not forwarded to the spawned claude. `--include-partial-messages` requires `--output-format stream-json`, and `--stream-plain-text` requires the default text output; mismatches exit with code 2.
+
 ## [v0.1.0] - 2026-06-05
 
 ### Added

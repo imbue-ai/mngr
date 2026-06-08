@@ -2,7 +2,13 @@ from collections.abc import Mapping
 from typing import Final
 
 from imbue.imbue_common.pure import pure
+from imbue.mngr.primitives import TmuxHeight
+from imbue.mngr.primitives import TmuxWidth
+from imbue.mngr.primitives import TmuxWindowSize
 from imbue.mngr_robinhood.data_types import ArgPartition
+from imbue.mngr_robinhood.data_types import DEFAULT_ROBINHOOD_TMUX_HEIGHT
+from imbue.mngr_robinhood.data_types import DEFAULT_ROBINHOOD_TMUX_WIDTH
+from imbue.mngr_robinhood.data_types import DEFAULT_ROBINHOOD_TMUX_WINDOW_SIZE
 from imbue.mngr_robinhood.data_types import InputFormat
 from imbue.mngr_robinhood.data_types import OutputFormat
 from imbue.mngr_robinhood.errors import UnsupportedClaudeFlagError
@@ -26,6 +32,12 @@ _SIMULATED_VALUE_FLAGS: Final[frozenset[str]] = frozenset(
     {
         "--input-format",
         "--output-format",
+        # tmux window sizing for the spawned agent (consumed by the wrapper, not
+        # forwarded to claude). Defaults are large + pinned so streamed text is not
+        # hard-wrapped at a narrow pane width.
+        "--tmux-width",
+        "--tmux-height",
+        "--tmux-window-size",
     }
 )
 
@@ -95,6 +107,13 @@ _OUTPUT_FORMAT_BY_TOKEN: Final[Mapping[str, OutputFormat]] = {
     "stream-json": OutputFormat.STREAM_JSON,
 }
 
+_TMUX_WINDOW_SIZE_BY_TOKEN: Final[Mapping[str, TmuxWindowSize]] = {
+    "manual": TmuxWindowSize.MANUAL,
+    "latest": TmuxWindowSize.LATEST,
+    "largest": TmuxWindowSize.LARGEST,
+    "smallest": TmuxWindowSize.SMALLEST,
+}
+
 
 @pure
 def _split_equals(token: str) -> tuple[str, str | None]:
@@ -119,6 +138,29 @@ def _resolve_output_format(value: str) -> OutputFormat:
     return resolved
 
 
+def _resolve_tmux_width(value: str) -> TmuxWidth:
+    try:
+        return TmuxWidth(int(value))
+    except ValueError:
+        raise UnsupportedClaudeFlagError(f"--tmux-width must be a positive integer (got {value!r})") from None
+
+
+def _resolve_tmux_height(value: str) -> TmuxHeight:
+    try:
+        return TmuxHeight(int(value))
+    except ValueError:
+        raise UnsupportedClaudeFlagError(f"--tmux-height must be a positive integer (got {value!r})") from None
+
+
+def _resolve_tmux_window_size(value: str) -> TmuxWindowSize:
+    resolved = _TMUX_WINDOW_SIZE_BY_TOKEN.get(value)
+    if resolved is None:
+        raise UnsupportedClaudeFlagError(
+            f"--tmux-window-size must be 'manual', 'latest', 'largest', or 'smallest' (got {value!r})"
+        )
+    return resolved
+
+
 def partition_args(argv: tuple[str, ...]) -> ArgPartition:
     """Split argv into our simulated flags, the positional prompt, and the pass-through tail.
 
@@ -134,6 +176,9 @@ def partition_args(argv: tuple[str, ...]) -> ArgPartition:
     replay_user_messages = False
     include_partial_messages = False
     stream_plain_text = False
+    tmux_width = DEFAULT_ROBINHOOD_TMUX_WIDTH
+    tmux_height = DEFAULT_ROBINHOOD_TMUX_HEIGHT
+    tmux_window_size = DEFAULT_ROBINHOOD_TMUX_WINDOW_SIZE
     pass_through: list[str] = []
     positional_prompt: str | None = None
 
@@ -174,6 +219,12 @@ def partition_args(argv: tuple[str, ...]) -> ArgPartition:
                 input_format = _resolve_input_format(value)
             elif flag == "--output-format":
                 output_format = _resolve_output_format(value)
+            elif flag == "--tmux-width":
+                tmux_width = _resolve_tmux_width(value)
+            elif flag == "--tmux-height":
+                tmux_height = _resolve_tmux_height(value)
+            elif flag == "--tmux-window-size":
+                tmux_window_size = _resolve_tmux_window_size(value)
             else:
                 raise UnsupportedClaudeFlagError(f"unexpected simulated flag: {flag}")
             continue
@@ -208,6 +259,9 @@ def partition_args(argv: tuple[str, ...]) -> ArgPartition:
         replay_user_messages=replay_user_messages,
         include_partial_messages=include_partial_messages,
         stream_plain_text=stream_plain_text,
+        tmux_width=tmux_width,
+        tmux_height=tmux_height,
+        tmux_window_size=tmux_window_size,
         pass_through_agent_args=tuple(pass_through),
         positional_prompt=positional_prompt,
     )

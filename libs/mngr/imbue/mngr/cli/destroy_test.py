@@ -9,6 +9,7 @@ from click.testing import CliRunner
 
 from imbue.mngr.cli.destroy import DestroyCliOptions
 from imbue.mngr.cli.destroy import _DestroyTargets
+from imbue.mngr.cli.destroy import _emit_dry_run_entries
 from imbue.mngr.cli.destroy import _OfflineHostToDestroy
 from imbue.mngr.cli.destroy import _destroy_emptied_hosts
 from imbue.mngr.cli.destroy import _output_result
@@ -79,6 +80,7 @@ def test_destroy_cli_options_can_be_instantiated() -> None:
         remove_created_branch=False,
         allow_worktree_removal=True,
         sessions=(),
+        dry_run=False,
         output_format="human",
         quiet=False,
         verbose=0,
@@ -466,3 +468,61 @@ def test_destroy_emptied_hosts_does_nothing_for_empty_input(temp_mngr_ctx: MngrC
         output_opts=OutputOptions(output_format=OutputFormat.HUMAN),
     )
     # No assertions on side effects; we're just verifying it doesn't crash.
+
+
+# =============================================================================
+# --dry-run: preview targets without destroying anything.
+# =============================================================================
+
+
+def test_destroy_dry_run_output_human_lists_agents_and_marks_offline(capsys: pytest.CaptureFixture[str]) -> None:
+    """Dry-run HUMAN output names each agent that would be destroyed and marks offline ones."""
+    entries = [
+        {"name": "agent-a", "host": "host-1", "offline": "false"},
+        {"name": "agent-b", "host": "host-2", "offline": "true"},
+    ]
+    _emit_dry_run_entries(entries, OutputOptions(output_format=OutputFormat.HUMAN))
+    captured = capsys.readouterr()
+    assert "Would destroy 2 agent(s)" in captured.out
+    assert "agent-a@host-1" in captured.out
+    assert "agent-b@host-2 (offline)" in captured.out
+    # An online agent must NOT be annotated as offline.
+    assert "agent-a@host-1 (offline)" not in captured.out
+
+
+def test_destroy_dry_run_output_json_reports_count(capsys: pytest.CaptureFixture[str]) -> None:
+    """Dry-run JSON output is machine-readable and flags dry_run=True with a count."""
+    entries = [{"name": "agent-x", "host": "host-1", "offline": "false"}]
+    _emit_dry_run_entries(entries, OutputOptions(output_format=OutputFormat.JSON))
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
+    assert data["dry_run"] is True
+    assert data["count"] == 1
+    assert data["agents"][0]["name"] == "agent-x"
+
+
+def test_destroy_dry_run_output_format_template(capsys: pytest.CaptureFixture[str]) -> None:
+    """Dry-run honors a custom --format template, emitting one line per agent."""
+    entries = [
+        {"name": "agent-a", "host": "host-1", "offline": "false"},
+        {"name": "agent-b", "host": "host-2", "offline": "true"},
+    ]
+    _emit_dry_run_entries(entries, OutputOptions(output_format=OutputFormat.HUMAN, format_template="{name}"))
+    captured = capsys.readouterr()
+    assert "agent-a" in captured.out
+    assert "agent-b" in captured.out
+
+
+def test_destroy_dry_run_empty_input_is_noop(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """'-' with empty stdin plus --dry-run is a no-op (mirrors filtered pipeline with no matches)."""
+    result = cli_runner.invoke(
+        destroy,
+        ["-", "--force", "--dry-run"],
+        input="",
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+    assert result.exit_code == 0

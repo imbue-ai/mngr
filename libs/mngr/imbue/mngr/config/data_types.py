@@ -710,7 +710,7 @@ class MngrConfig(FrozenModel):
     )
     connect_command: str | None = Field(
         default=None,
-        description="Custom command to run instead of the builtin connect when create or start connects to agents. "
+        description="Custom command to run instead of the builtin connect when create, start, or connect connects to agents. "
         "The environment variables MNGR_AGENT_NAME and MNGR_SESSION_NAME are set before running the command.",
     )
     is_nested_tmux_allowed: bool = Field(
@@ -1032,3 +1032,6 @@ class CreateCliOptions(CommonCliOptions):
     upload_file: tuple[str, ...]
     update: bool
     yes: bool
+    tmux_width: int | None
+    tmux_height: int | None
+    tmux_window_size: str | None
