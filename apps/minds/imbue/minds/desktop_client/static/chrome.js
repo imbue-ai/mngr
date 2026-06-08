@@ -256,6 +256,15 @@
         row.className = 'sidebar-item cursor-pointer text-sm font-medium text-zinc-200 rounded-md mx-1.5 my-0.5 py-2.5 pl-4 pr-3 transition-colors hover:bg-white/5';
         row.textContent = w.name || w.id;
         row.setAttribute('data-agent-id', w.id);
+        // Retained-but-unverified workspace (its provider's last discovery poll
+        // errored): append an amber dot. The row stays fully clickable.
+        if (w.is_stale) {
+          row.classList.add('is-stale');
+          var staleDot = document.createElement('span');
+          staleDot.className = 'sidebar-stale-dot inline-block w-1.5 h-1.5 ml-1.5 rounded-full bg-amber-400/80 align-middle';
+          staleDot.title = "This workspace's provider had a discovery error; its status is unverified (still usable).";
+          row.appendChild(staleDot);
+        }
         if (typeof w.accent === 'string') {
           row.style.setProperty('--workspace-accent', w.accent);
         } else {

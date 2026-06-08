@@ -1,0 +1,21 @@
+{#def name, width="w-full", extra="" #}
+{#
+  Styled <select>. Matches the focus-ring token used across the app.
+  Children should be a sequence of <option> elements; the caller owns
+  per-option selected/disabled state. Usage:
+    <Select name="launch_mode" id="launch_mode" width="w-48">
+      {% for mode in launch_modes %}
+        <option value="{{ mode.value }}" {% if mode.value == selected %}selected{% endif %}>{{ mode.value | lower }}</option>
+      {% endfor %}
+    </Select>
+
+  ``width`` is a Tailwind width utility (default ``w-full``); pass
+  ``w-48`` etc. when the select sits beside a label in a justify-between
+  row.
+
+  Any HTML attribute (id=, disabled, data-*) flows through via JinjaX's
+  attrs passthrough. The visual shell (border, padding, text size,
+  focus ring) comes from the shared ``INPUT_BASE`` catalog global.
+#}
+{%- set _cls = width ~ " " ~ INPUT_BASE ~ " rounded-md " ~ extra -%}
+<select {{ attrs.render(name=name, classes=_cls) }}>{{ content }}</select>

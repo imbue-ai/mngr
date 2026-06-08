@@ -1,0 +1,132 @@
+{#def agent_id, status_text, accent, expected_duration_seconds #}
+{#
+  Progress page shown while an agent is being created. The page is keyed
+  by creation_id (passed as agent_id here -- a minds-internal in-flight
+  handle) rather than the canonical agent_id, because the canonical id
+  only comes into existence once the inner mngr create returns.
+  expected_duration_seconds drives the client-side time-based progress
+  bar (eases toward ~80% over this duration).
+#}
+{% set _body_style = "--workspace-accent: " ~ accent ~ ";" %}
+{% set _scripts %}
+<script src="/_static/creating.js" defer></script>
+{% endset %}
+{% set _card = "screen mx-auto w-full max-w-[640px] bg-white border border-zinc-200 rounded-xl shadow-sm p-6" %}
+<Base title="Creating your project..."
+      body_class="bg-zinc-50 text-zinc-900 font-sans antialiased page-workspace flex items-center justify-center min-h-screen p-6"
+      body_style={{ _body_style }}
+      scripts={{ _scripts }}>
+  <main id="onboarding"
+        class="w-full"
+        data-agent-id="{{ agent_id }}"
+        data-expected-duration-seconds="{{ expected_duration_seconds }}">
+
+    {# Question 1: data preference (static descriptions) #}
+    <section class="{{ _card }}" data-screen="q1" data-question="data_preference">
+      <div class="flex items-center justify-between mb-4">
+        <span class="flex items-center gap-2 text-xs text-zinc-400">
+          <span class="inline-block w-1.5 h-1.5 rounded-full bg-blue-600 animate-pulse"></span>Creating workspace
+        </span>
+        <span class="text-xs text-zinc-400">1 of 3</span>
+      </div>
+      <h2 class="text-lg font-semibold leading-snug mb-4">Is it OK if I get to know you?</h2>
+      <div class="flex flex-col gap-2.5">
+        <Opt val="CONVENIENCE" title="I want convenience" desc="Import as much data as you can." />
+        <Opt val="PRIVACY" title="I want privacy" desc="Gather minimal data and show me before using it. No data leaves your computer." selected />
+        <Opt val="CONTROL" title="I want full control" desc="Gather no data." />
+      </div>
+      <div class="flex items-center justify-between mt-6">
+        <span></span>
+        <Button variant="primary" extra="js-next">Next</Button>
+      </div>
+    </section>
+
+    {# Question 2: what to start with (editable options) #}
+    <section class="{{ _card }} hidden" data-screen="q2" data-question="initial_problem">
+      <div class="flex items-center justify-between mb-4">
+        <span class="flex items-center gap-2 text-xs text-zinc-400">
+          <span class="inline-block w-1.5 h-1.5 rounded-full bg-blue-600 animate-pulse"></span>Creating workspace
+        </span>
+        <span class="text-xs text-zinc-400">2 of 3</span>
+      </div>
+      <h2 class="text-lg font-semibold leading-snug mb-4">What should we start with?</h2>
+      <div class="flex flex-col gap-2.5">
+        <Opt val="custom" title="Describe the problem you want to solve" desc="Tell me in your own words what you'd like to work on." editable selected placeholder="e.g. Help me keep track of follow-ups across email and Slack in one place." />
+      </div>
+      <h2 class="text-lg font-semibold leading-snug mt-6 mb-4">Or start with a template:</h2>
+      <div class="flex flex-col gap-2.5">
+        <Opt val="tasks" title="Task management" desc="Build a system to help me organize my tasks and get work done." editable preset="Build a system to help me organize my tasks and get work done." />
+        <Opt val="inbox" title="Inbox triage" desc="Set up systems to help summarize, label, and respond to my messages." editable preset="Set up systems to help summarize, label, and respond to my messages." />
+        <Opt val="news" title="News digest" desc="Create a daily or weekly summary of the information that matters to me." editable preset="Create a daily or weekly summary of the information that matters to me." />
+        <Opt val="dashboard" title="Create a dashboard" desc="Build an interactive website that I can share with others." editable preset="Build an interactive website that I can share with others." />
+      </div>
+      <div class="flex items-center justify-between mt-6">
+        <Button variant="ghost" extra="js-back">Back</Button>
+        <Button variant="primary" extra="js-next">Next</Button>
+      </div>
+    </section>
+
+    {# Question 3: permissions preference (editable options) #}
+    <section class="{{ _card }} hidden" data-screen="q3" data-question="permissions_preference">
+      <div class="flex items-center justify-between mb-4">
+        <span class="flex items-center gap-2 text-xs text-zinc-400">
+          <span class="inline-block w-1.5 h-1.5 rounded-full bg-blue-600 animate-pulse"></span>Creating workspace
+        </span>
+        <span class="text-xs text-zinc-400">3 of 3</span>
+      </div>
+      <h2 class="text-lg font-semibold leading-snug mb-4">How do you want to deal with permissions?</h2>
+      <div class="flex flex-col gap-2.5">
+        <Opt val="safety" title="I want safety" desc="Access only the minimal information you need to accomplish my goals, and always ask me before doing anything potentially dangerous." editable selected rows={{ 4 }} preset="Access only the minimal information you need to accomplish my goals, and always ask me before doing anything potentially dangerous." />
+        <Opt val="convenience" title="I want convenience" desc="Default to broader permissions so you can work more autonomously -- I'll be careful about what I give you access to." editable rows={{ 4 }} preset="Default to broader permissions so you can work more autonomously -- I'll be careful about what I give you access to." />
+      </div>
+      <div class="flex items-center justify-between mt-6">
+        <Button variant="ghost" extra="js-back">Back</Button>
+        <Button variant="primary" extra="js-next">Done</Button>
+      </div>
+    </section>
+
+    {# Loading screen: full-width, not constrained to the question card. #}
+    {# Holds two mutually exclusive sub-views (progress vs. failure) plus a #}
+    {# shared logs/details footer, so the streamed logs stay in one place #}
+    {# regardless of which sub-view is showing. #}
+    <section class="screen hidden w-full" data-screen="loading">
+      {# Progress sub-view: shown while creation is in flight. #}
+      <div id="progress-view">
+        <div class="text-center pt-2 pb-1">
+          <div class="text-lg font-semibold mb-1.5">Setting up your workspace</div>
+          <p id="tip" class="text-[13px] text-zinc-500 min-h-[34px] leading-snug transition-opacity"></p>
+        </div>
+        <div class="h-1.5 bg-zinc-100 rounded-full overflow-hidden">
+          <div id="bar-fill" class="h-full w-0 rounded-full bg-blue-600 transition-[width] duration-300 ease-out"></div>
+        </div>
+      </div>
+
+      {# Failure sub-view: revealed by creating.js the moment creation fails. #}
+      <div id="failure-view" class="hidden">
+        <div class="text-center pt-2 pb-1">
+          <div class="text-lg font-semibold mb-1.5 text-red-600">We couldn't set up your workspace</div>
+          <p class="text-[13px] text-zinc-500 leading-snug">Setup stopped before your workspace was ready.</p>
+        </div>
+        <Notice variant="error">
+          <span id="error-message" class="font-mono text-[12.5px] break-words whitespace-pre-wrap"></span>
+        </Notice>
+        <div class="flex items-center justify-center gap-2 mt-4">
+          <ButtonLink href="/create" variant="primary">Back to setup</ButtonLink>
+          <ButtonLink href="/" variant="ghost">Home</ButtonLink>
+        </div>
+      </div>
+
+      {# Shared footer: live stage caption + collapsible logs. #}
+      <div class="flex items-center justify-between mt-2.5 text-[11.5px] text-zinc-400">
+        <span id="stage">{{ status_text }}</span>
+        <button type="button" id="details-toggle"
+                class="js-details inline-flex items-center gap-1 text-zinc-400 hover:text-zinc-700 cursor-pointer">
+          Show details
+        </button>
+      </div>
+      <div id="logs"
+           class="hidden mt-3 p-3 bg-zinc-900 text-zinc-200 font-mono text-xs rounded-xl max-h-[260px] overflow-y-auto whitespace-pre-wrap border border-zinc-900"></div>
+    </section>
+
+  </main>
+</Base>

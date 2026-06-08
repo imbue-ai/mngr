@@ -37,6 +37,7 @@ from imbue.mngr.hosts.common import build_ssh_transport_command
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import UncommittedChangesMode
+from imbue.mngr.utils.deps import SSH
 from imbue.mngr.utils.git_utils import get_current_branch
 from imbue.mngr.utils.git_utils import is_git_repository
 
@@ -308,6 +309,9 @@ def _build_git_url_and_env(
     """
     if remote_host.is_local:
         return str(remote_path), {**os.environ, "GIT_LFS_SKIP_PUSH": "1"} if is_push else None
+    # Talking to a remote host means git shells out to the ssh binary (via
+    # GIT_SSH_COMMAND); ssh is optional, so surface a clear error if it's absent.
+    SSH.require()
     ssh_info = remote_host.get_ssh_connection_info()
     assert ssh_info is not None, "Remote host must provide SSH connection info"
     known_hosts_file = get_ssh_known_hosts_file(remote_host)

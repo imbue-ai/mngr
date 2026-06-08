@@ -1,0 +1,60 @@
+{#def accounts, default_account_id, enabled_by_user_id #}
+{#
+  Manage accounts page. Lists each signed-in account with its
+  workspace count, default-account marker, and per-account
+  set-default / log-out controls.
+
+  enabled_by_user_id maps each account's user_id to whether its
+  [providers.imbue_cloud_<slug>] block is enabled in settings.toml.
+  A "Signed out" indicator surfaces when an account is present (still
+  in sessions.json) but the user disabled the block via the providers
+  panel.
+#}
+<Base title="Manage Accounts">
+  <PageContainer>
+    <h1 class="text-xl font-semibold text-zinc-900 leading-tight mb-5">Manage Accounts</h1>
+
+    {% if accounts %}
+      {% for acct in accounts %}
+        {% set acct_enabled = enabled_by_user_id.get(acct.user_id | string, True) %}
+        <Card layout="row-spread">
+          <div>
+            <div class="font-medium">
+              {{ acct.email }}
+              {% if not acct_enabled %}
+                <StatusBadge variant="warn" size="xs" extra="ml-2" title="Session was rejected by the server. Sign in again to re-enable.">Signed out</StatusBadge>
+              {% endif %}
+            </div>
+            <div class="text-xs text-zinc-400">
+              {{ acct.workspace_ids | length }} workspace(s)
+              {% if acct.user_id | string == default_account_id %} &middot; Default{% endif %}
+            </div>
+          </div>
+          <div class="flex gap-2">
+            {% if not acct_enabled %}
+              <ButtonLink href="/auth/login" variant="primary">Sign in again</ButtonLink>
+            {% endif %}
+            {% if acct.user_id | string != default_account_id %}
+              <form method="POST" action="/accounts/set-default">
+                <input type="hidden" name="user_id" value="{{ acct.user_id }}">
+                <ButtonSubmit variant="secondary">Set default</ButtonSubmit>
+              </form>
+            {% else %}
+              <span class="inline-flex items-center justify-center px-3.5 py-2 rounded-md font-medium text-sm bg-zinc-100 text-zinc-900 border border-zinc-200 opacity-60 cursor-default">Default</span>
+            {% endif %}
+            <form method="POST" action={{ "/accounts/" ~ acct.user_id ~ "/logout" }}>
+              <ButtonSubmit variant="danger">Log out</ButtonSubmit>
+            </form>
+          </div>
+        </Card>
+      {% endfor %}
+    {% else %}
+      <p class="text-zinc-500">No accounts logged in.</p>
+    {% endif %}
+
+    <div class="mt-4">
+      <ButtonLink href="/auth/login" variant="primary">Add account</ButtonLink>
+    </div>
+    <div class="mt-4"><Link href="/">&larr; Back to projects</Link></div>
+  </PageContainer>
+</Base>

@@ -1,7 +1,7 @@
 """Tests for renaming agents.
 
-The tests are intentionally kept as separate functions (not parametrized) so that
-each one has a 1:1 correspondence with a tutorial script block.
+The tutorial only contains an informational comment about ``mngr rename`` and
+no executable block, so these tests live outside the tutorial/ subdirectory.
 """
 
 import json
@@ -17,10 +17,6 @@ from imbue.skitwright.expect import expect
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_and_rename_agent(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # "rename" is an experimental command. See "mngr rename --help" for current usage.
-    """)
-
     expect(
         e2e.run(
             "mngr create my-task --type command --no-ensure-clean -- sleep 100104",
@@ -35,7 +31,6 @@ def test_create_and_rename_agent(e2e: E2eSession) -> None:
     expect(rename_result).to_succeed()
     expect(rename_result.stdout).to_contain("my-task -> renamed-task")
 
-    # Verify via JSON list that only the new name exists and agent is still alive
     list_result = e2e.run(
         "mngr list --format json",
         comment="Verify only the new name appears and agent is still alive",
@@ -45,7 +40,6 @@ def test_create_and_rename_agent(e2e: E2eSession) -> None:
     agent_names = [a["name"] for a in agents]
     assert agent_names == ["renamed-task"], f"Expected only 'renamed-task', got {agent_names}"
 
-    # Verify the renamed agent is still functional
     exec_result = e2e.run(
         "mngr exec renamed-task 'ps aux | grep sleep'",
         comment="Verify the renamed agent is still running its command",

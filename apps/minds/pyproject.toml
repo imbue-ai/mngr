@@ -13,6 +13,7 @@ dependencies = [
     "imbue-common",
     "itsdangerous>=2.2.0",
     "jinja2>=3.1.0",
+    "jinjax>=0.45",
     "loguru",
     "imbue-mngr",
     "imbue-mngr-forward",

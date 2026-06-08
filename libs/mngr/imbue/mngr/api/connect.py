@@ -11,8 +11,10 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NestedTmuxError
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.utils.deps import SSH
 from imbue.mngr.utils.duration import parse_duration_to_seconds
 from imbue.mngr.utils.interactive_subprocess import run_interactive_subprocess
 from imbue.mngr.utils.polling import poll_until
@@ -75,6 +77,16 @@ def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path) -> str
     activity_dir = host_dir / "activity"
     activity_file = activity_dir / "ssh"
     signal_file = host_dir / "signals" / session_name
+    # Force a terminal resize after attaching to trigger SIGWINCH delivery, but
+    # skip it when the agent's window is pinned ("manual" window-size) so the
+    # configured dimensions survive an interactive attach. The check runs on the
+    # remote host at attach time (window-size is a window option, read via -wv).
+    agent_window_target = TmuxWindowTarget(session_name=session_name, window=0).as_shell_arg()
+    resize_step = (
+        f"(sleep 3; "
+        f'if [ "$(tmux show-options -t {agent_window_target} -wv window-size 2>/dev/null)" != manual ]; then '
+        f"{build_post_attach_resize_script(session_name)}; fi) 2>/dev/null & "
+    )
     # Use single quotes around most things to avoid shell expansion issues,
     # but the paths need to be interpolated
     return (
@@ -84,8 +96,7 @@ def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path) -> str
         f'printf \'{{\\n  "time": %d,\\n  "ssh_pid": %d\\n}}\\n\' "$TIME_MS" "$$" > \'{activity_file}\'; '
         f"sleep 5; done) & "
         "MNGR_ACTIVITY_PID=$!; "
-        # Force a terminal resize after attaching to trigger SIGWINCH delivery.
-        f"(sleep 3; {build_post_attach_resize_script(session_name)}) 2>/dev/null & "
+        f"{resize_step}"
         # actually attach. Route the -t target through TmuxSessionTarget so the
         # = exact-match prefix and shell-escaping rule are uniform with the rest
         # of the codebase (see TmuxSessionTarget docstring for the prefix-matching
@@ -114,7 +125,11 @@ def build_ssh_base_args(
 
     Raises MngrError if no known_hosts file is configured and
     is_unknown_host_allowed is False.
+    Raises BinaryNotInstalledError if the ssh binary is not installed (ssh is an
+    optional dependency, only needed to attach to remote agents).
     """
+    SSH.require()
+
     pyinfra_host = host.connector.host
     ssh_host = pyinfra_host.name
     ssh_user = pyinfra_host.data.get("ssh_user")

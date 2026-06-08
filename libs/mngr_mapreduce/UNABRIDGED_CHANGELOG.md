@@ -2,6 +2,35 @@
 
 This file contains the full, verbatim per-PR entries for the `mngr_mapreduce` library. For the curated summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-04
+
+Updated the `get_local_host` import to its new canonical home in `imbue.mngr.api.providers` (it previously lived in `imbue.mngr.cli.headless_runner`). No behavior change.
+
+## 2026-06-04
+
+- `sanitize_for_agent_name` now also strips trailing hyphens after the 40-char truncation, not just before it. Without this, a task slug whose 40th character was a hyphen (e.g. `test_create_modal_idle_mode_ssh_timeout_300`) produced `test-create-modal-idle-mode-ssh-timeout-`, which `AgentName` rejects as "alphanumeric with dashes/underscores allowed in the middle". TMR runs against the e2e test corpus hit this for the first time once `test_create_modal_idle_mode_ssh_timeout_300` landed.
+
+## 2026-06-03
+
+Restored the project's `changelog/` directory by re-adding the `.gitkeep` that every project keeps to hold per-PR entries. The directory had vanished on `main` after a changelog-consolidation run emptied it (it never had a `.gitkeep`), which broke the repo-wide `test_every_project_has_changelog_layout` check for everyone who merged `main`. No functional or user-facing change to `mngr_mapreduce`.
+
+- The reducer agent now benefits from the same snapshot-based code reuse optimization as mappers: when the run uses a snapshot, the reducer's host is pre-created so the agent's source is git-worktreed off the snapshot's `/code` instead of re-uploaded from the laptop. Previously only mappers (which shared a pre-created host pool) hit this fast path; the reducer always re-uploaded the source.
+
+## 2026-06-02
+
+Simplified exception handlers now that `AgentError` is a `MngrError` subclass: the redundant
+`AgentError` entry in the `except (MngrError, AgentError, ...)` guards in launching and the CLI
+has been removed. No behavior change -- agent errors are still caught and handled the same way.
+
+Simplified exception handlers now that `HostError` is a `MngrError` subclass: the redundant
+`HostError` entry in the `except (MngrError, HostError, ...)` guards in launching and the CLI
+has been removed. `AgentError` (still a `BaseMngrError`, not a `MngrError`) is retained. No
+behavior change.
+
+## 2026-06-01
+
+Restored the `changelog/` directory by adding a `.gitkeep` placeholder. The directory had vanished from git after a consolidation run deleted its last entry file (git does not track empty directories), which broke the `test_every_project_has_changelog_layout` meta-ratchet. The `.gitkeep` keeps the directory tracked even when it holds no pending entries, matching every other project. No production code change.
+
 ## 2026-05-29
 
 Move post-finalize ``stop_agent_on_host`` calls off the polling loop's main thread.

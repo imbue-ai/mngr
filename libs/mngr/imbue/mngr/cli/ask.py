@@ -15,11 +15,11 @@ from loguru import logger
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr import resources as mngr_resources
+from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.headless_runner import accumulate_chunks
 from imbue.mngr.cli.headless_runner import ephemeral_work_location
-from imbue.mngr.cli.headless_runner import get_local_host
 from imbue.mngr.cli.headless_runner import headless_agent_output
 from imbue.mngr.cli.headless_runner import stream_or_accumulate_response
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata

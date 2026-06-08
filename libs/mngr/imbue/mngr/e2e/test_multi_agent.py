@@ -41,37 +41,6 @@ def test_multiple_agents_coexist(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
-def test_destroy_all_via_stdin(e2e: E2eSession) -> None:
-    # Pin a unique sleep value per agent so leaked processes trace back to the specific create call.
-    for name, sleep_seconds in [("agent-x", 100102), ("agent-y", 100120)]:
-        expect(
-            e2e.run(
-                f"mngr create {name} --type command --no-ensure-clean --no-connect -- sleep {sleep_seconds}",
-                comment=f"Create {name}",
-            )
-        ).to_succeed()
-
-    list_result = e2e.run("mngr list", comment="Verify both agents exist")
-    expect(list_result).to_succeed()
-    expect(list_result.stdout).to_contain("agent-x")
-    expect(list_result.stdout).to_contain("agent-y")
-
-    # Destroy all by piping ids through stdin
-    destroy_result = e2e.run(
-        "mngr list --ids | mngr destroy - --force",
-        comment="Destroy all agents via stdin piping",
-    )
-    expect(destroy_result).to_succeed()
-
-    list_after = e2e.run("mngr list", comment="Verify no agents remain")
-    expect(list_after).to_succeed()
-    expect(list_after.stdout).to_contain("No agents found")
-
-
-@pytest.mark.rsync
-@pytest.mark.release
-@pytest.mark.tmux
-@pytest.mark.modal
 def test_list_filter_by_state(e2e: E2eSession) -> None:
     # Pin a unique sleep value per agent so leaked processes trace back to the specific create call.
     for name, sleep_seconds in [("running-agent", 100103), ("stopped-agent", 100121)]:

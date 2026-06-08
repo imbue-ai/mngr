@@ -1,0 +1,45 @@
+{#def agent_id, agent_name, pid, status, accent #}
+{#
+  Detail page for an in-flight or recently-completed destroy. Polls
+  /api/destroying/<agent_id>/{status,log} to keep its log tail and status
+  badge up to date; once status flips to "done" it redirects to /.
+#}
+{% set _body_style = "--workspace-accent: " ~ accent ~ ";" %}
+{% set _scripts %}
+<script src="/_static/destroying.js" defer></script>
+{% endset %}
+<Base title={{ "Destroying: " ~ agent_name }}
+      body_class="bg-zinc-50 text-zinc-900 font-sans antialiased page-workspace"
+      body_style={{ _body_style }}
+      scripts={{ _scripts }}>
+  <PageContainer>
+    <div id="destroying-page" data-agent-id="{{ agent_id }}" data-pid="{{ pid }}" data-initial-status="{{ status }}">
+      <h1 class="text-xl font-semibold text-zinc-900 leading-tight">Destroying {{ agent_name }}</h1>
+      <p class="text-xs text-zinc-400 mb-4">{{ agent_id }} &middot; pid {{ pid }}</p>
+
+      <div id="destroying-status" class="my-4 flex items-center gap-2">
+        {% if status == 'running' %}
+          <Spinner />
+          <span id="status-text" class="text-zinc-700">Running...</span>
+        {% elif status == 'failed' %}
+          <StatusBadge variant="error">Failed</StatusBadge>
+        {% else %}
+          <StatusBadge variant="success">Done</StatusBadge>
+        {% endif %}
+      </div>
+
+      <h2 class="text-sm font-medium text-zinc-500 mt-6 mb-2">Log</h2>
+      <div id="destroying-log"
+           class="p-3 bg-zinc-900 text-zinc-200 font-mono text-xs rounded-xl max-h-[420px] overflow-y-auto whitespace-pre-wrap border border-zinc-900"></div>
+
+      <div id="destroying-actions" class="mt-6 flex gap-3 hidden">
+        <Button variant="primary" id="destroying-retry-btn">Retry</Button>
+        <Button variant="secondary" id="destroying-dismiss-btn">Dismiss</Button>
+      </div>
+
+      <div class="mt-8">
+        <Link href="/">&larr; Back to projects</Link>
+      </div>
+    </div>
+  </PageContainer>
+</Base>

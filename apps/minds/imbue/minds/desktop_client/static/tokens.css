@@ -8,7 +8,7 @@
  * Chrome colors / focus rings / link color are not tokens here -- chrome
  * uses raw Tailwind classes (bg-zinc-900, text-zinc-200, border-white/10,
  * focus:ring-blue-600/15, ...) directly. The only token consumed by
- * non-styleguide code is --shadow-seam (titlebar drop shadow, chrome.html)
+ * non-styleguide code is --shadow-seam (titlebar drop shadow, templates/pages/Chrome.jinja)
  * and the implicit --workspace-accent (set per-workspace via inline
  * style, consumed by the .page-workspace / .accent-spine / .sidebar-item
  * / .accent-swatch rules below).
@@ -74,6 +74,41 @@ html {
 }
 
 /*
+ * Shared card surface (bg, border, rounded corners). No baseline shadow
+ * -- non-clickable cards read as flat surfaces; the Card.jinja
+ * ``interactive`` prop adds ``hover:shadow-sm`` so clickable cards lift
+ * slightly on hover. The Card.jinja component composes this with
+ * Tailwind utilities for layout (flex/justify) and padding. JS-rendered
+ * surfaces that can't call the Jinja component -- e.g. the providers
+ * list in templates/pages/Landing.jinja -- reference the same class
+ * string so one edit here re-styles every card. Values mirror the
+ * Tailwind utilities they replace: bg-white, border border-zinc-200,
+ * rounded-xl.
+ */
+.minds-card {
+  background: #ffffff;
+  border: 1px solid #e4e4e7;
+  border-radius: 0.75rem;
+}
+
+/*
+ * Inline ``<code>`` pill: light-gray rounded chip for service names,
+ * file paths, etc. inline inside prose. The pill style is used by
+ * Sharing.jinja's heading + sharing.js (which rebuilds that heading
+ * via DOM methods after toggling the share state), so factoring the
+ * recipe into one CSS class keeps the two sides from drifting.
+ * Tailwind equivalents:
+ *   bg-zinc-100 rounded-md px-1.5 py-0.5 font-mono text-[0.95em]
+ */
+.code-pill {
+  background: #f4f4f5;
+  border-radius: 0.375rem;
+  padding: 0.125rem 0.375rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.95em;
+}
+
+/*
  * Onboarding option cards (creating-page question flow). Selection state
  * and the editable-textarea reveal are driven by the `.opt-selected` class
  * (toggled by static/creating.js); kept here rather than as Tailwind
@@ -134,6 +169,16 @@ html {
   border-top-color: #18181b;
   border-radius: 50%;
   animation: spin 800ms linear infinite;
+}
+/*
+ * Accent-toned spinner: blue ring + saturated blue top, used inside
+ * primary-action affordances (the backup-export "downloading..."
+ * indicator). The base ``.spinner`` provides geometry + animation;
+ * ``.spinner-accent`` only overrides the colors.
+ */
+.spinner-accent {
+  border-color: #93c5fd; /* blue-300 */
+  border-top-color: #2563eb; /* blue-600 */
 }
 @keyframes spin {
   to {

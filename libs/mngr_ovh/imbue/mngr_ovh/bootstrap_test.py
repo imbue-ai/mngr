@@ -16,6 +16,7 @@ from imbue.mngr_ovh.bootstrap import _load_private_key
 from imbue.mngr_ovh.bootstrap import bootstrap_root_authorized_keys_via_user
 from imbue.mngr_ovh.bootstrap import install_required_outer_packages
 from imbue.mngr_ovh.bootstrap import pin_host_key_via_tofu
+from imbue.mngr_ovh.bootstrap import purge_qemu_packages
 from imbue.mngr_ovh.bootstrap import verify_root_ssh
 from imbue.mngr_ovh.bootstrap import wait_for_ssh_after_rebuild
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
@@ -462,4 +463,69 @@ def test_install_required_outer_packages_raises_when_apt_fails(tmp_path: Path) -
                 known_hosts_path=known_hosts_path,
                 timeout_seconds=5.0,
                 packages=("rsync",),
+            )
+
+
+def test_purge_qemu_packages_runs_detect_then_purge_as_root(tmp_path: Path) -> None:
+    """Successful path runs the detect-then-purge command as root."""
+    private_key_path = _make_private_key(tmp_path)
+    known_hosts_path = tmp_path / "known_hosts"
+    known_hosts_path.write_text("vps-x ssh-ed25519 AAAA\n")
+    exec_commands: list[str] = []
+    seen_users: list[str | None] = []
+
+    def fake_connect(self: paramiko.SSHClient, **kwargs: Any) -> None:
+        seen_users.append(kwargs.get("username"))
+
+    def fake_exec(self: paramiko.SSHClient, command: str, **_kwargs: Any) -> Any:
+        exec_commands.append(command)
+        return _stub_paramiko_exec(stdout="", stderr="", exit_status=0)
+
+    with (
+        patch.object(paramiko.SSHClient, "connect", autospec=True, side_effect=fake_connect),
+        patch.object(paramiko.SSHClient, "load_host_keys", autospec=True, return_value=None),
+        patch.object(paramiko.SSHClient, "exec_command", autospec=True, side_effect=fake_exec),
+        patch.object(paramiko.SSHClient, "close", autospec=True, return_value=None),
+    ):
+        purge_qemu_packages(
+            hostname="vps-x",
+            port=22,
+            private_key_path=private_key_path,
+            known_hosts_path=known_hosts_path,
+            timeout_seconds=5.0,
+        )
+
+    # The purge connects as root (authorized_keys already in /root) and gates
+    # the destructive apt-get purge behind the dpkg detection probe so a
+    # qemu-free image is a clean no-op rather than an apt glob error.
+    assert seen_users == ["root"]
+    assert len(exec_commands) == 1
+    cmd = exec_commands[0]
+    assert "dpkg -l | grep -q qemu" in cmd
+    assert "apt-get purge --auto-remove -y 'qemu*'" in cmd
+    assert "DEBIAN_FRONTEND=noninteractive" in cmd
+
+
+def test_purge_qemu_packages_raises_when_purge_fails(tmp_path: Path) -> None:
+    """A non-zero exit from the purge surfaces as VpsProvisioningError so provisioning aborts."""
+    private_key_path = _make_private_key(tmp_path)
+    known_hosts_path = tmp_path / "known_hosts"
+    known_hosts_path.write_text("vps-x ssh-ed25519 AAAA\n")
+
+    def fake_exec(self: paramiko.SSHClient, command: str, **_kwargs: Any) -> Any:
+        return _stub_paramiko_exec(stdout="", stderr="E: dpkg was interrupted", exit_status=100)
+
+    with (
+        patch.object(paramiko.SSHClient, "connect", autospec=True, return_value=None),
+        patch.object(paramiko.SSHClient, "load_host_keys", autospec=True, return_value=None),
+        patch.object(paramiko.SSHClient, "exec_command", autospec=True, side_effect=fake_exec),
+        patch.object(paramiko.SSHClient, "close", autospec=True, return_value=None),
+    ):
+        with pytest.raises(VpsProvisioningError, match="apt-get purge qemu"):
+            purge_qemu_packages(
+                hostname="vps-x",
+                port=22,
+                private_key_path=private_key_path,
+                known_hosts_path=known_hosts_path,
+                timeout_seconds=5.0,
             )

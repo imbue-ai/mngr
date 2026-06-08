@@ -56,7 +56,6 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.utils.polling import wait_for
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 
@@ -1523,104 +1522,6 @@ def test_auto_open_toggle(tmp_path: Path) -> None:
 
     config = MindsConfig(data_dir=tmp_path)
     assert config.get_auto_open_requests_panel() is False
-
-
-_TEST_PREAUTH_COOKIE = "test-preauth-cookie-value"
-_TEST_MNGR_FORWARD_PORT = 8421
-
-
-def _build_refresh_test_app(
-    tmp_path: Path,
-    resolver: MngrCliBackendResolver,
-) -> tuple[FastAPI, list[httpx.Request]]:
-    """Wire a desktop client app for refresh-event tests.
-
-    Returns the app and a ``received`` list that captures every
-    ``httpx.Request`` the app's http_client sees. The caller is
-    responsible for entering the TestClient context (or deliberately
-    skipping it to exercise the pre-lifespan code path).
-    """
-    received: list[httpx.Request] = []
-
-    async def _capture(request: httpx.Request) -> httpx.Response:
-        received.append(request)
-        return httpx.Response(200, json={"ok": True})
-
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture))
-
-    app = create_desktop_client(
-        auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
-        backend_resolver=resolver,
-        http_client=http_client,
-        session_store=make_session_store_for_test(tmp_path),
-        minds_config=MindsConfig(data_dir=tmp_path),
-        request_inbox=RequestInbox(),
-        paths=WorkspacePaths(data_dir=tmp_path),
-        mngr_forward_port=_TEST_MNGR_FORWARD_PORT,
-        mngr_forward_preauth_cookie=_TEST_PREAUTH_COOKIE,
-    )
-    return app, received
-
-
-def test_refresh_event_posts_to_system_interface_broadcast(tmp_path: Path) -> None:
-    """A refresh event on the mngr event stream triggers a POST to the
-    plugin so the system interface broadcasts. The request connects to the
-    plugin on loopback, carries the agent's ``agent-<hex>.localhost`` vhost in
-    the ``Host`` header, and carries the ``mngr_forward_session`` cookie (set
-    to the preauth value minds wired in)."""
-    agent_id = AgentId()
-    service_name = "web"
-
-    resolver = make_resolver_with_data(
-        agents_json=make_agents_json(agent_id),
-        service_logs={str(agent_id): make_service_log("system_interface", "http://ws-backend:9000")},
-    )
-    app, received = _build_refresh_test_app(tmp_path, resolver)
-
-    with TestClient(app):
-        raw_line = json.dumps({"source": "refresh", "type": "refresh_service", "service_name": service_name})
-        resolver._fire_on_refresh(str(agent_id), raw_line)
-        wait_for(
-            lambda: len(received) > 0,
-            timeout=2.0,
-            poll_interval=0.02,
-            error_message="refresh broadcast POST never arrived",
-        )
-
-    assert len(received) == 1, f"expected one POST, got {len(received)}: {[str(r.url) for r in received]}"
-    request = received[0]
-    assert request.method == "POST"
-    expected_url = f"http://127.0.0.1:{_TEST_MNGR_FORWARD_PORT}/api/refresh-service/{service_name}/broadcast"
-    assert str(request.url) == expected_url
-    # The agent vhost rides in the Host header so routing does not need DNS.
-    assert request.headers.get("host") == f"{agent_id}.localhost"
-    cookie_header = request.headers.get("cookie", "")
-    assert f"mngr_forward_session={_TEST_PREAUTH_COOKIE}" in cookie_header
-
-
-def test_refresh_event_before_lifespan_is_dropped_without_raising(tmp_path: Path) -> None:
-    """A refresh event that fires before the app's lifespan has run does not crash.
-
-    Reproduces the startup-ordering race: in production, stream_manager.start()
-    runs before uvicorn.run(app), so refresh events can arrive in the window
-    between create_desktop_client (which registers the callback) and the
-    lifespan startup (which captures the event loop). The callback must drop
-    the event rather than raising AttributeError on app.state.event_loop.
-    """
-    agent_id = AgentId()
-
-    resolver = make_resolver_with_data(
-        agents_json=make_agents_json(agent_id),
-        service_logs={str(agent_id): make_service_log("system_interface", "http://ws-backend:9000")},
-    )
-    _app, received = _build_refresh_test_app(tmp_path, resolver)
-
-    # Deliberately do NOT enter a TestClient context -- the lifespan has never
-    # fired, so app.state.event_loop is still None.
-    raw_line = json.dumps({"source": "refresh", "service_name": "web"})
-    resolver._fire_on_refresh(str(agent_id), raw_line)
-
-    assert received == []
 
 
 # -- system-interface restart + recovery tests --

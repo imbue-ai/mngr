@@ -1,1 +1,0 @@
-Updated the root `.minds/template/ovh.sh` secret template comment to note that the OVH AK/AS/CK credentials are now pushed to Modal (as the `ovh-<tier>` secret) for the connector's runtime cleanup of released pool hosts, not just read on the operator's machine during deploy/destroy. Also adds the blueprint plan for the leased-host cleanup work.

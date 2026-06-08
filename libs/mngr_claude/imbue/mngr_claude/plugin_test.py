@@ -4288,7 +4288,7 @@ def test_write_generated_files_writes_through_symlink_safely(tmp_path: Path, tem
     # Only settings.json, no installed_plugins.json (as happens for local hosts)
     generated_files = {Path("settings.json"): '{"some": "setting"}'}
 
-    _write_generated_files(host, config_dir, generated_files, temp_mngr_ctx)
+    _write_generated_files(host, config_dir, generated_files)
 
     # The symlink and source file should both be untouched
     assert symlink.is_symlink()
@@ -4316,7 +4316,7 @@ def test_write_generated_files_breaks_symlink_before_writing(tmp_path: Path, tem
     rewritten_content = '{"rewritten": true}'
     generated_files = {Path("plugins") / "known_marketplaces.json": rewritten_content}
 
-    _write_generated_files(host, config_dir, generated_files, temp_mngr_ctx)
+    _write_generated_files(host, config_dir, generated_files)
 
     # The symlink should be replaced with a regular file containing the rewritten content
     assert not symlink.is_symlink()

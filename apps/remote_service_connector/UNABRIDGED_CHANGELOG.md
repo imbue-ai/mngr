@@ -4,6 +4,41 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-04
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.
+
+## 2026-06-03
+
+Releasing a leased pool host now actually cleans it up instead of just marking it `released`. The release route runs a best-effort, idempotent chain inline: it flips the row to a new `removing` status, strips the per-lease OVH IAM tags (`minds_env`, `mngr-host-id`) while keeping `mngr-provider=ovh`, cancels the VPS in OVH (`deleteAtExpiration=true`, by service name), then deletes the DB row -- leaving the host recyclable for the next pool bake. The release returns 200 as soon as the row reaches `removing` (so OVH flakiness never blocks the caller) and treats an already-gone row as `already_released`. A new hourly Modal cron (`cleanup_removing_pool_hosts`) mops up any row left in `removing` by a crashed/timed-out release. OVH calls are made directly via the official `ovh` SDK (added to the image), and the connector now receives an `ovh-<tier>` Modal secret. The `cleanup_released_hosts.py` script was rewritten into a broad, dry-run-by-default operator runbook that tag-scans the OVH account and cleans every `mngr-provider` VPS (protecting those backing an `available`/`leased` row unless `--include-active`).
+
+Fixed a pool-host teardown bug where released VPSes were never actually
+cancelled (they kept running and billing) with no error surfaced anywhere.
+
+Root cause: the bake wrote the mngr `host_id` into `pool_hosts.vps_instance_id`
+instead of the OVH service name, so every connector OVH teardown call
+(`vps_urn_for` / `set_delete_at_expiration`) targeted a nonexistent service and
+404'd -- and the failure was swallowed into a warning while the release reported
+success.
+
+- `POST /hosts/{id}/release` is now **synchronous**: it strips the per-lease OVH
+  tags, cancels the VPS, and deletes the row, and returns 200 only when every
+  step succeeds. On failure it returns 5xx and leaves the row `removing` so the
+  client (or the hourly sweep backstop) retries. `_finish_releasing_pool_host`
+  no longer swallows OVH/DB errors -- a release that can't cancel the VPS reports
+  failure instead of a false success. Added `PoolHostCleanupError` and mapped it
+  plus `OvhApiError`/`OvhHttpError` in `raise_as_http`.
+- `cleanup_released_hosts.py` now keys its active-row protection and its
+  cleaned-host DB match on `vps_address` (the real OVH service name), not
+  `vps_instance_id`. Previously the mismatch meant the runbook protected nothing
+  and would have cancelled live leased/available hosts.
+- New migration `006_fix_vps_instance_id.sql` backfills existing rows whose
+  `vps_instance_id` still holds a `host-...` id.
+
+Replaced the `PAID_ACCOUNT_SUFFIXES` env-var allowlist with two database tables (`paid_domains`, `paid_emails`) for tracking paid users. A caller is "paid" when their verified email has an active (`is_paid = true`) row matching the full email or its exact domain. The check is cached in-memory (configurable via `MINDS_PAID_LIST_CACHE_TTL_SECONDS`, default 60s, `0` disables) and fails closed on database errors. Added admin-key-authenticated CRUD endpoints (`/paid/domains/*`, `/paid/emails/*`) gated by `MINDS_PAID_ADMIN_KEY` (folded into the `supertokens` secret); these endpoints reject SuperTokens/tunnel tokens, and the key is rejected on all other routes. Removals are soft deletes (`is_paid = false`) so paid history is retained. Added migration `005_paid_lists.sql`.
+
+Also added a configurable `scaledown_window` to the connector Modal function, driven by `MINDS_CONNECTOR_SCALEDOWN_WINDOW` (from the tier's `[scaledown_window].connector` in `deploy.toml`). `0` (default) keeps Modal's own default; dev tiers set it high (~10 min) so the no-warm-pool connector stays hot across a dev session.
+
 ## 2026-05-29
 
 Added R2 bucket routes (`/buckets/*` and `/bucket-keys/*`), gated to paid

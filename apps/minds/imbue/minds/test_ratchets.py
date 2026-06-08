@@ -79,7 +79,7 @@ def test_prevent_builtin_exception_raises() -> None:
 
 
 def test_prevent_silent_decode_error_catches() -> None:
-    rc.check_silent_decode_error_catches(_DIR, snapshot(12))
+    rc.check_silent_decode_error_catches(_DIR, snapshot(11))
 
 
 # --- Import style ---
@@ -338,6 +338,10 @@ def test_prevent_cast_usage() -> None:
 
 def test_prevent_assert_isinstance() -> None:
     rc.check_assert_isinstance(_DIR, snapshot(0))
+
+
+def test_prevent_per_file_host_upload() -> None:
+    rc.check_per_file_host_upload(_DIR, snapshot(0))
 
 
 # --- Project-level checks ---

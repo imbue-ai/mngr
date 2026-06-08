@@ -4,6 +4,41 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-05
+
+- Added to the release tooling's publish graph (`scripts/utils.py`). It will be offered for first publication to PyPI on the next release. No runtime change.
+
+## 2026-06-04
+
+Recycled OVH VPSes now receive the new bake's extra IAM tags (e.g. `minds_env=<env>`), overwriting any stale value left by the previous owner. Previously the recycle path only swapped `mngr-host-id` and skipped extra tags entirely, so a pool host provisioned by recycling a cancelled VPS carried no `minds_env` tag (or a stale one). That made it invisible to env-scoped discovery/teardown (`minds env destroy`, which enumerates VPSes by the `minds_env` IAM tag) and obscured which env actually owns a recycled host. Fresh-order behavior is unchanged.
+
+Fresh-order pool bakes no longer fail intermittently with "Action not available while there are running tasks on the VPS". OVH's task listing is eventually consistent, so the pre-`/rebuild` drain could report no active tasks while OVH still rejected the rebuild because the post-delivery `deliverVm` task was in flight. The rebuild POST is now retried (re-draining each round, up to 5 minutes) until OVH accepts it, treating OVH's own rejection -- not the laggy task listing -- as the authoritative "task still running" signal. Non-task-related rebuild errors still surface immediately.
+
+The `PUT /vps/{s}/serviceInfos` cancel/un-cancel call (`set_renew_at_expiration`) now also retries transient transport failures (dropped connection / timeout), not just the "subscription is not active yet" billing-propagation case. This hardens the failure-cleanup cancel path, where a single dropped connection previously leaked a freshly-ordered month of billing. Non-transient API errors (other 400s/404s/5xx) still surface immediately.
+
+OVH-provisioned hosts now have OVH automated backups disabled. As the final bootstrap step, the OVH provider purges all `qemu*` packages (`apt-get purge --auto-remove 'qemu*'`) over SSH on each freshly-ordered or recycled VPS. OVH backups drive the image's `qemu-guest-agent` to freeze the guest filesystem, which caused serious runtime problems on the agent; removing qemu removes the mechanism the backups hook into. The purge runs on both the fresh-order and recycle paths (rebuilding the OS reinstalls the agent), and a failure aborts provisioning so no host is left running with backups enabled. mngr also never orders an OVH backup option in the order/cart flow (now covered by a regression test). Existing already-running OVH hosts are not swept; they pick up the purge when next recycled.
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.
+
+## 2026-06-03
+
+Discovery no longer masks failures as "zero hosts". `_list_provider_vps_hostnames`
+previously caught any IAM-listing error and returned an empty list, so a
+transient OVH outage / expired credentials looked identical to a real empty
+result -- which the discovery layer can't distinguish, and which defeats mngr's
+"mark hosts UNKNOWN when a provider's discovery fails" safeguard. It now lets the
+error propagate (the genuinely-unconfigured case is still the early-return), so
+`mngr list --on-error continue` records the failure instead of silently dropping
+live hosts.
+
+## 2026-06-02
+
+Collapsed redundant `except` clauses: clauses listing `VpsApiError` / `VpsProvisioningError`
+alongside `MngrError` now catch just `MngrError` (those VPS errors are already `MngrError`
+subclasses via `VpsDockerError`). No behavior change.
+
+- pyproject.toml: align `imbue-mngr*==` pin stragglers with the satellites bumped in main's `e22e7010e` release commit. Several `imbue-mngr-*` libs still pinned to older versions even though `libs/mngr` had moved to 0.2.10; building the apps/minds ToDesktop bundle from main today would fail at `uv lock` in `apps/minds/scripts/build.js` because the workspace constraint graph is unsatisfiable. Day-to-day dev hides this because `[tool.uv.sources]` redirects every `imbue-mngr-*` to its workspace path, bypassing the `==` pin.
+
 ## 2026-05-29
 
 User-visible: minds workspaces running on OVH (docker-on-VPS) hosts can now

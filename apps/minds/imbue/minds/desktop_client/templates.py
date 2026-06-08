@@ -1,10 +1,15 @@
 """HTML rendering for the desktop client.
 
-Each ``render_*`` function is a thin wrapper around a Jinja2 template that
-lives under ``templates/`` in this directory. Tests call these functions
-directly; the FastAPI route handlers call them the same way. Keeping the
-public signatures stable lets the unit tests keep working without caring
-that we moved from inline strings to file-based templates.
+Each ``render_*`` function is a thin wrapper around a JinjaX component
+under ``templates/`` in this directory, rendered through the shared
+``CATALOG``. Primitive components (Button, Card, Notice, Spinner,
+TextInput, Opt, ...) and the page layout (``Base``) sit at the top of
+``templates/``; full pages live under ``templates/pages/`` as PascalCase
+``.jinja`` files; auth pages and the OAuth icon component live under
+``templates/auth/``. Tests call these functions directly; the FastAPI
+route handlers call them the same way. The public signatures are stable
+so neither callers nor tests have to know the templates moved from raw
+Jinja2 macros + ``{% extends %}`` to JinjaX components.
 """
 
 import hashlib
@@ -16,8 +21,8 @@ from pathlib import Path
 from typing import Final
 
 from jinja2 import Environment
-from jinja2 import FileSystemLoader
 from jinja2 import select_autoescape
+from jinjax import Catalog
 
 from imbue.imbue_common.pure import pure
 from imbue.minds.bootstrap import DEFAULT_MINDS_ROOT_NAME
@@ -35,10 +40,118 @@ from imbue.mngr_forward.loading_page import render_loading_page
 
 TEMPLATE_DIR: Final[Path] = Path(__file__).resolve().parent / "templates"
 
-JINJA_ENV: Final[Environment] = Environment(
-    loader=FileSystemLoader(str(TEMPLATE_DIR)),
-    autoescape=select_autoescape(default_for_string=True, default=True),
+# Shared Tailwind class strings for the three button components
+# (Button.jinja, ButtonLink.jinja, ButtonSubmit.jinja). Exposed as JinjaX
+# Catalog globals so a single edit here updates every button variant; the
+# alternative -- inlining the same class string in three sibling templates
+# -- drifted across files trivially. Surface as uppercase to match the
+# `CATALOG` constant convention and to mark them as Jinja globals (not
+# per-render context).
+#
+# Size axis is independent of variant -- size dictates geometry (padding,
+# radius, font weight, text size), variant dictates color. ``md`` is the
+# default in-flow button; ``lg`` is the prominent block CTA used on the
+# auth flow; ``icon`` is a square padding for icon-only buttons (e.g. the
+# restart / settings icons in the Landing project row).
+_BTN_BASE: Final[str] = (
+    "inline-flex items-center justify-center gap-1.5 leading-tight "
+    "transition-colors disabled:opacity-30 disabled:cursor-not-allowed "
+    "cursor-pointer no-underline whitespace-nowrap"
 )
+_BTN_SIZES: Final[Mapping[str, str]] = {
+    "md": "px-3.5 py-2 rounded-md font-medium text-sm",
+    "lg": "px-4 py-3 rounded-lg font-semibold text-base",
+    "icon": "p-1.5 rounded-md font-medium text-sm",
+}
+_BTN_VARIANTS: Final[Mapping[str, str]] = {
+    "primary": "bg-zinc-900 text-zinc-50 border border-transparent hover:bg-zinc-800",
+    "secondary": "bg-zinc-100 text-zinc-900 border border-zinc-200 hover:bg-zinc-200",
+    "danger": "bg-red-50 text-red-600 border border-red-200 hover:bg-red-100",
+    "success": "bg-emerald-800 text-emerald-50 border border-transparent hover:bg-emerald-900",
+    "ghost": "bg-transparent text-zinc-700 border border-transparent hover:bg-zinc-100 hover:text-zinc-900",
+}
+
+# Shared Tailwind class string for the three form-control components
+# (TextInput.jinja, Select.jinja, Textarea.jinja). Exposed as a Catalog
+# global so the focus-ring token, border, padding and text size live in
+# exactly one place. Width and border-radius vary per-component so they
+# are NOT included here -- each component sets its own.
+_INPUT_BASE: Final[str] = (
+    "px-3 py-2.5 text-sm border border-zinc-200 bg-white text-zinc-900 "
+    "outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15"
+)
+
+# Inner SVG path data for the lucide-style 24x24 stroke icons. The
+# Icon24.jinja component wraps these in the canonical stroke shell
+# (fill=none, stroke=currentColor, stroke-width=2, stroke-linecap=round,
+# stroke-linejoin=round). The dict is the single source of truth -- to
+# add or swap an icon, edit one entry here.
+_ICONS_24: Final[Mapping[str, str]] = {
+    "sidebar": '<rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/>',
+    "home": '<path d="M3 12L12 3l9 9"/><path d="M5 10v10a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V10"/>',
+    "back": '<polyline points="15 18 9 12 15 6"/>',
+    "forward": '<polyline points="9 6 15 12 9 18"/>',
+    "messages": '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+    "restart": '<path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/>',
+    "settings": (
+        '<circle cx="12" cy="12" r="3"/>'
+        '<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06'
+        "a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09"
+        "A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83"
+        "l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09"
+        "A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83"
+        "l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09"
+        "a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83"
+        "l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09"
+        'a1.65 1.65 0 0 0-1.51 1z"/>'
+    ),
+    "external": (
+        '<path d="M14 3h7v7"/><path d="M10 14L21 3"/>'
+        '<path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/>'
+    ),
+}
+
+# 12x12 chrome glyph path data (minimize / maximize / close). Title-bar
+# window controls only; rendered through Icon12.jinja, which wraps these
+# in the same stroke shell as Icon24 but with the smaller viewBox + size.
+_ICONS_12: Final[Mapping[str, str]] = {
+    "minimize": '<line x1="2" y1="6" x2="10" y2="6"/>',
+    "maximize": '<rect x="2" y="2" width="8" height="8" rx="0.5"/>',
+    "close": '<line x1="2" y1="2" x2="10" y2="10"/><line x1="10" y1="2" x2="2" y2="10"/>',
+}
+
+
+def _build_catalog() -> Catalog:
+    """Build the JinjaX Catalog used to render every desktop-client template.
+
+    JinjaX builds its own internal Jinja Environment but copies autoescape +
+    filters from any seed env you pass in. We seed with the same autoescape
+    config the old standalone JINJA_ENV used so user-controlled strings (form
+    errors, agent IDs, etc.) stay HTML-escaped exactly as before.
+
+    ``BTN_BASE`` / ``BTN_VARIANTS`` are exposed as Jinja globals so the
+    three button components can share a single source of truth instead of
+    each redeclaring the same class string + variants map.
+    """
+    seed_env = Environment(
+        autoescape=select_autoescape(default_for_string=True, default=True),
+    )
+    catalog = Catalog(
+        jinja_env=seed_env,
+        globals={
+            "BTN_BASE": _BTN_BASE,
+            "BTN_SIZES": _BTN_SIZES,
+            "BTN_VARIANTS": _BTN_VARIANTS,
+            "INPUT_BASE": _INPUT_BASE,
+            "ICONS_24": _ICONS_24,
+            "ICONS_12": _ICONS_12,
+        },
+    )
+    catalog.add_folder(str(TEMPLATE_DIR))
+    return catalog
+
+
+CATALOG: Final[Catalog] = _build_catalog()
 
 
 # -- Per-workspace identity color --
@@ -103,8 +216,8 @@ def render_landing_page(
     envelope-stream consumer hasn't completed initial agent discovery yet.
     """
     agent_accents = {str(aid): workspace_accent(str(aid)) for aid in accessible_agent_ids}
-    template = JINJA_ENV.get_template("landing.html")
-    return template.render(
+    return CATALOG.render(
+        "pages.Landing",
         agent_ids=accessible_agent_ids,
         agent_accents=agent_accents,
         mngr_forward_origin=mngr_forward_origin,
@@ -213,8 +326,8 @@ def render_create_form(
     effective_backup_encryption = (
         backup_encryption_method if backup_encryption_method is not None else BackupEncryptionMethod.NO_PASSWORD
     )
-    template = JINJA_ENV.get_template("create.html")
-    return template.render(
+    return CATALOG.render(
+        "pages.Create",
         git_url=effective_url,
         host_name=effective_name,
         branch=effective_branch,
@@ -298,8 +411,8 @@ def render_creating_page(
     truth for caption resolution (consistent with the SSE status events).
     """
     status_text = status_text_for(str(info.status), error=info.error, launch_mode=info.launch_mode)
-    template = JINJA_ENV.get_template("creating.html")
-    return template.render(
+    return CATALOG.render(
+        "pages.Creating",
         agent_id=creation_id,
         status_text=status_text,
         accent=workspace_accent(str(creation_id)),
@@ -312,30 +425,30 @@ def render_creating_page(
 @pure
 def render_welcome_page() -> str:
     """Render the welcome/splash page for first-time users."""
-    return JINJA_ENV.get_template("welcome.html").render()
+    return CATALOG.render("pages.Welcome")
 
 
 @pure
 def render_login_page() -> str:
     """Render the login prompt page for unauthenticated users."""
-    return JINJA_ENV.get_template("login.html").render()
+    return CATALOG.render("pages.Login")
 
 
 @pure
 def render_login_redirect_page(one_time_code: OneTimeCode) -> str:
     """Render the JS redirect page that forwards to /authenticate."""
-    return JINJA_ENV.get_template("login_redirect.html").render(one_time_code=one_time_code)
+    return CATALOG.render("pages.LoginRedirect", one_time_code=one_time_code)
 
 
 @pure
 def render_auth_error_page(message: str) -> str:
     """Render an error page for failed authentication."""
-    return JINJA_ENV.get_template("auth_error.html").render(message=message)
+    return CATALOG.render("pages.AuthError", message=message)
 
 
 def render_request_unavailable_page(message: str) -> str:
     """Render the page shown when a request is already resolved or missing."""
-    return JINJA_ENV.get_template("request_unavailable.html").render(message=message)
+    return CATALOG.render("pages.RequestUnavailable", message=message)
 
 
 # CSS for the recovery page's restart controls, appended to the shared
@@ -879,7 +992,8 @@ def render_destroying_page(
     value (``running``/``failed``/``done``) so the page renders correctly
     even before the first poll completes.
     """
-    return JINJA_ENV.get_template("destroying.html").render(
+    return CATALOG.render(
+        "pages.Destroying",
         agent_id=str(agent_id),
         agent_name=agent_name,
         pid=pid,
@@ -910,7 +1024,8 @@ def render_chrome_page(
     In Electron mode, the iframe and browser sidebar are hidden via JS; the content
     and sidebar are handled by separate WebContentsViews.
     """
-    return JINJA_ENV.get_template("chrome.html").render(
+    return CATALOG.render(
+        "pages.Chrome",
         is_mac=is_mac,
         is_authenticated=is_authenticated,
         mngr_forward_origin=mngr_forward_origin,
@@ -928,7 +1043,8 @@ def render_sidebar_page(mngr_forward_origin: str = "") -> str:
     ``data-mngr-forward-origin`` so sidebar.js can build the cross-origin
     ``/goto/<agent>/`` URL the plugin serves.
     """
-    return JINJA_ENV.get_template("sidebar.html").render(
+    return CATALOG.render(
+        "pages.Sidebar",
         mngr_forward_origin=mngr_forward_origin,
     )
 
@@ -954,7 +1070,8 @@ def render_sharing_editor(
     ``mngr_forward_origin`` is the bare origin of the ``mngr forward`` plugin;
     the workspace link in the page title points at ``{mngr_forward_origin}/goto/<agent>/``.
     """
-    return JINJA_ENV.get_template("sharing.html").render(
+    return CATALOG.render(
+        "pages.Sharing",
         title=title,
         agent_id=agent_id,
         service_name=service_name,
@@ -989,7 +1106,8 @@ def render_workspace_settings(
     Interactivity for the setup flow lives in ``static/workspace_settings.js``,
     which reads the agent id from the page's ``data-agent-id`` attribute.
     """
-    return JINJA_ENV.get_template("workspace_settings.html").render(
+    return CATALOG.render(
+        "pages.WorkspaceSettings",
         agent_id=agent_id,
         ws_name=ws_name,
         current_account=current_account,
@@ -1009,12 +1127,12 @@ def render_dev_styleguide_page() -> str:
 
     The page is a hand-authored catalog of UI patterns and tokens. When a
     new ``:root`` token is added to ``static/tokens.css``, add a swatch
-    in ``templates/dev_styleguide.html`` with ``data-token="--<name>"``
-    on its wrapper -- the ``templates_test.py`` ratchet cross-checks the
-    set of declared ``:root`` tokens against the set of ``data-token``
-    swatches and fails if either side drifts.
+    in ``templates/pages/DevStyleguide.jinja`` with
+    ``data-token="--<name>"`` on its wrapper -- the ``templates_test.py``
+    ratchet cross-checks the set of declared ``:root`` tokens against the
+    set of ``data-token`` swatches and fails if either side drifts.
     """
-    return JINJA_ENV.get_template("dev_styleguide.html").render()
+    return CATALOG.render("pages.DevStyleguide")
 
 
 @pure
@@ -1031,7 +1149,8 @@ def render_accounts_page(
     present (still in sessions.json) but the user disabled the block
     via the providers panel.
     """
-    return JINJA_ENV.get_template("accounts.html").render(
+    return CATALOG.render(
+        "pages.Accounts",
         accounts=accounts,
         default_account_id=default_account_id or "",
         enabled_by_user_id=dict(enabled_by_user_id or {}),

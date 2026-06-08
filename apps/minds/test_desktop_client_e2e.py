@@ -138,6 +138,11 @@ def test_create_local_docker_workspace_via_electron(
     # avoid here.
     ensure_minds_env_defaults(setenv=monkeypatch.setenv)
 
+    # No Modal creds in this local-Docker test, so the Electron-spawned `mngr`'s
+    # provider discovery would otherwise log "Modal is not authorized" every ~10s.
+    # The env is inherited by the Electron child via `_build_electron_env`.
+    monkeypatch.setenv("MNGR__PROVIDERS__MODAL__IS_ENABLED", "false")
+
     fct_path = resolve_fct_path(tmp_path)
     workspace_name = f"forever-{get_short_random_string()}"
     debug_port = find_free_port()

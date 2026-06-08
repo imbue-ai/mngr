@@ -1,3 +1,4 @@
+import os
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from imbue.modal_proxy.data_types import FileEntryType
 from imbue.modal_proxy.data_types import StreamType
 from imbue.modal_proxy.direct import DirectApp
 from imbue.modal_proxy.direct import DirectImage
+from imbue.modal_proxy.direct import DirectModalInterface
 from imbue.modal_proxy.direct import DirectSecret
 from imbue.modal_proxy.direct import DirectVolume
 from imbue.modal_proxy.direct import _should_retry_volume_op
@@ -25,10 +27,12 @@ from imbue.modal_proxy.direct import _unwrap_app
 from imbue.modal_proxy.direct import _unwrap_image
 from imbue.modal_proxy.direct import _unwrap_secret
 from imbue.modal_proxy.direct import _unwrap_volume
+from imbue.modal_proxy.errors import ModalProxyAppLockedError
 from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyPermissionDeniedError
 from imbue.modal_proxy.errors import ModalProxyRateLimitError
 from imbue.modal_proxy.errors import ModalProxyTypeError
+from imbue.modal_proxy.errors import is_app_locked_error
 from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.interface import ImageInterface
 from imbue.modal_proxy.interface import SecretInterface
@@ -224,3 +228,79 @@ def test_translate_permission_denied_to_permission_denied_error() -> None:
 )
 def test_should_retry_volume_op(exc: BaseException, expected: bool) -> None:
     assert _should_retry_volume_op(exc) is expected
+
+
+# --- App-locked detection tests ---
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        pytest.param(
+            "The selected app is locked - probably due to a concurrent modification",
+            True,
+            id="real_modal_message",
+        ),
+        pytest.param("ERROR: the SELECTED APP IS LOCKED right now", True, id="case_insensitive"),
+        pytest.param("Failed to deploy snapshot.py: some other error", False, id="unrelated_error"),
+        pytest.param("", False, id="empty"),
+    ],
+)
+def test_is_app_locked_error(message: str, expected: bool) -> None:
+    assert is_app_locked_error(message) is expected
+
+
+# --- Deploy retry tests ---
+
+# The real Modal message; deploy must classify this as retryable.
+_LOCKED_APP_MESSAGE = "Error: The selected app is locked - probably due to a concurrent modification"
+
+
+def _write_fake_modal(bin_dir: Path, counter_file: Path, *, fail_times: int, error_message: str) -> None:
+    """Install a fake ``modal`` executable on PATH that fails the first ``fail_times`` invocations.
+
+    Each call increments ``counter_file``; while the count is within
+    ``fail_times`` it prints ``error_message`` to stderr and exits 1, otherwise
+    it exits 0. This lets deploy retry tests run hermetically without Modal
+    credentials or network access.
+    """
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    script = bin_dir / "modal"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        f'counter="{counter_file}"\n'
+        'n=$(cat "$counter" 2>/dev/null || echo 0)\n'
+        "n=$((n + 1))\n"
+        'echo "$n" > "$counter"\n'
+        f'if [ "$n" -le {fail_times} ]; then\n'
+        f'  echo "{error_message}" >&2\n'
+        "  exit 1\n"
+        "fi\n"
+        "exit 0\n"
+    )
+    script.chmod(0o755)
+
+
+def test_deploy_retries_on_locked_app_then_succeeds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bin_dir = tmp_path / "bin"
+    counter = tmp_path / "count"
+    _write_fake_modal(bin_dir, counter, fail_times=1, error_message=_LOCKED_APP_MESSAGE)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+    # Should ride through the transient lock and return normally.
+    DirectModalInterface().deploy(tmp_path / "snapshot.py", app_name="my-app")
+
+    assert counter.read_text().strip() == "2", "expected one failed attempt followed by a successful retry"
+
+
+def test_deploy_does_not_retry_on_non_lock_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bin_dir = tmp_path / "bin"
+    counter = tmp_path / "count"
+    _write_fake_modal(bin_dir, counter, fail_times=10, error_message="Error: image build failed")
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+    with pytest.raises(ModalProxyError) as exc_info:
+        DirectModalInterface().deploy(tmp_path / "snapshot.py", app_name="my-app")
+
+    assert not isinstance(exc_info.value, ModalProxyAppLockedError)
+    assert counter.read_text().strip() == "1", "non-lock failures must not be retried"

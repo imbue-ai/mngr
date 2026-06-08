@@ -1,5 +1,0 @@
-Add a styleguide page at `/_dev/styleguide` showing the design tokens and a small catalog of UI patterns (titlebar, sidebar items, accent spine, focus ring, shadow seam, spinner, buttons, notices, hue picker). Visible in every tier including production. Pattern demos match the actual Tailwind classes the chrome / sidebar / inputs use.
-
-Cleaned up `static/tokens.css` to remove tokens that nothing in the app actually consumes: `--bg-chrome*`, `--border-chrome`, `--text-chrome*`, `--link`, `--focus-ring`. Only `--shadow-seam` remains in `:root` (chrome uses raw Tailwind classes for the rest). `--workspace-accent` is unaffected (it's the per-workspace inline-style hue consumed by the `.page-workspace` / `.accent-spine` / `.sidebar-item` / `.accent-swatch` rules).
-
-Added a drift-guard ratchet: token swatches in the styleguide carry `data-token="--<name>"`, and `templates_test.py` asserts that set equals the `:root` declarations in `tokens.css`. Adding a token without a swatch (or removing a token without removing the swatch) now fails the test.

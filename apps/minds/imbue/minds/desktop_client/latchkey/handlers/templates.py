@@ -1,20 +1,19 @@
 """Latchkey permission-dialog HTML rendering.
 
-The generic permission dialog (``templates/permissions.html``) is
-backend-agnostic: it provides page chrome, header, rationale, form
-scaffolding, action buttons, and submission JS that any permission
-backend can inherit. This module wraps the two latchkey-specific child
-templates -- one per sibling handler in this package -- in typed render
-functions:
+The generic permission dialog chrome is provided by the
+``PermissionsDialog`` JinjaX component (plus the smaller PermissionsHeader,
+PermissionsForm, PermissionsManualCredentials, and PermissionsError
+components). Subpage components live under ``templates/pages/`` and
+compose those primitives. This module wraps the two latchkey-specific
+subpages in typed render functions:
 
-* :func:`render_predefined_permission_dialog` wraps
-  ``templates/latchkey_predefined_permission.html``, which fills the
-  generic blocks with a checkbox per detent permission schema and the
-  auth-browser progress notice;
-* :func:`render_file_sharing_permission_dialog` wraps
-  ``templates/latchkey_file_sharing_permission.html``, which fills the
-  generic blocks with a single hidden ``approve=yes`` checkbox so the
-  base form's submit handler treats the dialog as a plain yes/no.
+* :func:`render_predefined_permission_dialog` renders the
+  ``pages.LatchkeyPredefinedPermission`` component (checkbox per detent
+  permission schema, with the auth-browser progress notice);
+* :func:`render_file_sharing_permission_dialog` renders the
+  ``pages.LatchkeyFileSharingPermission`` component (single hidden
+  ``permissions=file-sharing`` input so the dialog reads as a plain
+  yes/no for the requested path).
 
 Keeping these renderers next to the handlers (rather than in the shared
 ``desktop_client/templates.py``) keeps the latchkey-shaped function
@@ -26,7 +25,7 @@ from collections.abc import Sequence
 
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
-from imbue.minds.desktop_client.templates import JINJA_ENV
+from imbue.minds.desktop_client.templates import CATALOG
 from imbue.minds.desktop_client.templates import workspace_accent
 
 
@@ -52,7 +51,8 @@ def render_predefined_permission_dialog(
     ``mngr_forward_origin`` is the bare origin of the ``mngr forward`` plugin;
     the workspace link in the dialog points at ``{mngr_forward_origin}/goto/<agent>/``.
     """
-    return JINJA_ENV.get_template("latchkey_predefined_permission.html").render(
+    return CATALOG.render(
+        "pages.LatchkeyPredefinedPermission",
         agent_id=agent_id,
         request_id=request_id,
         ws_name=ws_name,
@@ -82,7 +82,8 @@ def render_file_sharing_permission_dialog(
     """Render the file-sharing permission approval dialog.
 
     Mirrors the predefined dialog's chrome, header, rationale card, and
-    submission JS (via the shared ``templates/permissions.html`` base);
+    submission JS (via the shared ``PermissionsDialog`` /
+    ``PermissionsHeader`` / ``PermissionsForm`` JinjaX components);
     swaps the per-permission checkbox list for a short explanation of
     what the agent will be allowed to do with the path.
 
@@ -94,7 +95,8 @@ def render_file_sharing_permission_dialog(
     ``mngr_forward_origin`` is the bare origin of the ``mngr forward`` plugin;
     the workspace link in the dialog points at ``{mngr_forward_origin}/goto/<agent>/``.
     """
-    return JINJA_ENV.get_template("latchkey_file_sharing_permission.html").render(
+    return CATALOG.render(
+        "pages.LatchkeyFileSharingPermission",
         agent_id=agent_id,
         request_id=request_id,
         ws_name=ws_name,

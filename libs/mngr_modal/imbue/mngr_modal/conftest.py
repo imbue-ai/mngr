@@ -43,7 +43,6 @@ from imbue.mngr.utils.testing import read_shared_modal_env_name
 from imbue.mngr.utils.testing import register_modal_test_app
 from imbue.mngr.utils.testing import register_modal_test_environment
 from imbue.mngr.utils.testing import register_modal_test_volume
-from imbue.mngr.utils.testing import setup_mngr_test_environment
 from imbue.mngr.utils.testing import worker_modal_app_names
 from imbue.mngr.utils.testing import worker_modal_environment_names
 from imbue.mngr.utils.testing import worker_modal_volume_names
@@ -54,7 +53,7 @@ from imbue.mngr_modal.constants import MODAL_TEST_APP_PREFIX
 from imbue.mngr_modal.instance import ModalProviderInstance
 from imbue.mngr_modal.testing import make_testing_modal_interface
 from imbue.mngr_modal.testing import make_testing_provider
-from imbue.modal_proxy.testing import TestingModalInterface
+from imbue.modal_proxy.testing import FakeModalInterface
 
 
 def make_modal_provider_real(
@@ -385,31 +384,35 @@ def initial_snapshot_provider(
 # =============================================================================
 
 
+# The developer's real ~/.modal.toml, resolved at import time -- before any
+# test's autouse HOME-isolation fixture redirects HOME to a temp dir. Modal
+# credentials must come from the real home, not the per-test temp home.
+_REAL_MODAL_TOML_PATH = Path(os.path.expanduser("~/.modal.toml"))
+
+
 @pytest.fixture(autouse=True)
-def setup_test_mngr_env(
-    tmp_home_dir: Path,
-    temp_host_dir: Path,
-    mngr_test_prefix: str,
-    mngr_test_root_name: str,
-    monkeypatch: pytest.MonkeyPatch,
-    _isolate_tmux_server: None,
-) -> Generator[None, None, None]:
-    """Set up environment variables for all tests, including Modal tokens.
+def _load_modal_test_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Load Modal credentials from the real ~/.modal.toml into the test env.
 
-    This overrides mngr's setup_test_mngr_env to additionally load Modal
-    credentials from ~/.modal.toml before HOME is overridden.
+    This complements -- rather than overrides -- the base autouse
+    setup_test_mngr_env that every mngr plugin gets via
+    register_plugin_test_fixtures: that fixture isolates HOME, and this one
+    layers the Modal tokens on top so real-Modal tests can authenticate.
+
+    The two are independent autouse fixtures setting independent env vars
+    (HOME vs MODAL_TOKEN_*), so their relative order does not matter. The real
+    ~/.modal.toml path is captured at import time, so reading it is unaffected by
+    the HOME override regardless of which fixture runs first. Consuming packages
+    (e.g. mngr_claude) pull this in via pytest_plugins without it clobbering
+    their base HOME isolation.
     """
-    modal_toml_path = Path(os.path.expanduser("~/.modal.toml"))
-    if modal_toml_path.exists():
-        for value in toml.load(modal_toml_path).values():
-            if value.get("active", ""):
-                monkeypatch.setenv("MODAL_TOKEN_ID", value.get("token_id", ""))
-                monkeypatch.setenv("MODAL_TOKEN_SECRET", value.get("token_secret", ""))
-                break
-
-    setup_mngr_test_environment(tmp_home_dir, temp_host_dir, mngr_test_prefix, mngr_test_root_name, monkeypatch)
-
-    yield
+    if not _REAL_MODAL_TOML_PATH.exists():
+        return
+    for value in toml.load(_REAL_MODAL_TOML_PATH).values():
+        if value.get("active", ""):
+            monkeypatch.setenv("MODAL_TOKEN_ID", value.get("token_id", ""))
+            monkeypatch.setenv("MODAL_TOKEN_SECRET", value.get("token_secret", ""))
+            break
 
 
 @pytest.fixture(scope="session")
@@ -703,20 +706,20 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 # =============================================================================
 # Testing Modal Interface fixtures
 #
-# These fixtures provide a ModalProviderInstance backed by TestingModalInterface
+# These fixtures provide a ModalProviderInstance backed by FakeModalInterface
 # for testing mngr_modal business logic without Modal credentials or SSH.
 # =============================================================================
 
 
 @pytest.fixture
-def testing_modal(tmp_path: Path, cg: ConcurrencyGroup) -> TestingModalInterface:
+def testing_modal(tmp_path: Path, cg: ConcurrencyGroup) -> FakeModalInterface:
     return make_testing_modal_interface(tmp_path, cg)
 
 
 @pytest.fixture
 def testing_provider(
     temp_mngr_ctx: MngrContext,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> Generator[ModalProviderInstance, None, None]:
     provider = make_testing_provider(temp_mngr_ctx, testing_modal)
     yield provider
@@ -726,7 +729,7 @@ def testing_provider(
 @pytest.fixture
 def testing_provider_no_host_volume(
     temp_mngr_ctx: MngrContext,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> Generator[ModalProviderInstance, None, None]:
     provider = make_testing_provider(temp_mngr_ctx, testing_modal, is_host_volume_created=False)
     yield provider

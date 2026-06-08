@@ -186,7 +186,7 @@ def test_provision_is_idempotent_on_reprovision(local_host: Host, tmp_path: Path
 
 def test_provision_does_not_chain_prior_agents_shim(local_host: Host, tmp_path: Path) -> None:
     """Re-provisioning in the same ``work_dir`` but with a *different* state_dir
-    (a fresh agent, as ``mngr uncapped-claude`` does on every invocation) must
+    (a fresh agent, as ``mngr robinhood`` does on every invocation) must
     not pull the host-stable shim path into the new sidecar -- otherwise the
     shim would invoke itself when chaining and infinite-loop. The provisioner's
     own write_path of settings.local.json IS the stable shim, so capture from

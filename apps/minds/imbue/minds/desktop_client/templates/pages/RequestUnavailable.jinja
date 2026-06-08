@@ -1,0 +1,46 @@
+{#def message #}
+{#
+  Shown when a permission-request page is opened but the request is no
+  longer actionable (already granted/denied, or doesn't exist). Mirrors
+  the permissions dialog's modal chrome (transparent body, dim backdrop,
+  centered card) so it reads as the same dialog when hosted in the desktop
+  client's overlay view, and degrades to a dimmed centered card in a
+  browser.
+#}
+{% set _scripts %}
+<script>
+  window.closePermissionDialog = function () {
+    if (window.minds && window.minds.closeModal) {
+      window.minds.closeModal();
+    } else {
+      window.location.href = "/";
+    }
+  };
+  window.onBackdropClick = function (event) {
+    if (event.target && event.target.id === "permissions-backdrop") {
+      window.closePermissionDialog();
+    }
+  };
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") window.closePermissionDialog();
+  });
+</script>
+{% endset %}
+<Base title="Request unavailable"
+      body_class="bg-transparent text-zinc-900 font-sans antialiased"
+      scripts={{ _scripts }}>
+  <div id="permissions-backdrop"
+       class="fixed inset-0 bg-black/40 flex items-center justify-center p-6"
+       onclick="onBackdropClick(event)">
+    <div class="relative w-full max-w-[460px] bg-white border border-zinc-200 rounded-xl shadow-xl overflow-hidden">
+      <DialogCloseButton onclick="closePermissionDialog()" />
+      <div class="p-6 sm:p-7">
+        <h1 class="text-xl font-semibold text-zinc-900 leading-tight pr-8">This permission request is no longer available</h1>
+        <p class="mt-2 text-zinc-700">{{ message }}</p>
+        <div class="flex justify-end mt-6">
+          <Button variant="primary" onclick="closePermissionDialog()">Close</Button>
+        </div>
+      </div>
+    </div>
+  </div>
+</Base>

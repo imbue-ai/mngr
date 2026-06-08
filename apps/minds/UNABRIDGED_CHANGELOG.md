@@ -4,6 +4,574 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-06
+
+Large pass over the desktop client's HTML templates to extract recurring inline Tailwind patterns into JinjaX primitives. The change set is mostly internal -- rendered behavior is preserved -- but a few visual tweaks ride along.
+
+New / generalized primitives (under ``apps/minds/imbue/minds/desktop_client/templates/``):
+
+- ``Card`` (rewritten): ``layout`` (``block`` / ``row`` / ``row-spread``), ``padding`` (``default`` / ``tight``), ``interactive``, ``tag`` (``div`` / ``a`` / ``button``), ``href``, plus JinjaX ``attrs`` passthrough for arbitrary HTML attributes. The visual shell moves into a shared ``.minds-card`` CSS class in ``tokens.css`` so JS-rendered surfaces (the Landing providers panel) reference one source of truth.
+- ``CardPage`` (renamed from ``auth/AuthBase``): centered-card layout used by the auth flow + the Create workspace form. ``padding="default"`` (``p-10``, auth) or ``"form"`` (``p-6``, Create); ``max_width`` is a Tailwind utility. The Login / AuthError pages now go through this primitive instead of hand-rolling the centered card.
+- ``Button`` / ``ButtonLink`` / ``ButtonSubmit``: add a ``size`` axis (``md`` default, ``lg`` for prominent block CTAs, ``icon`` for square padding). Disabled buttons fade to ``opacity-30`` (was ``opacity-50``). All three now use JinjaX ``attrs.render()`` passthrough.
+- ``TitlebarButton``: new primitive for the dark title-bar window controls. ``variant="nav"`` (left-side icons) / ``"control"`` (min/max/close); ``tone="default"`` / ``"danger"`` (close button's red hover).
+- ``Link``: new primitive for inline ``text-blue-600 hover:underline`` anchors. ``weight="regular"`` (default) or ``"medium"`` for the auth-flow tab-switch / back-link affordances.
+- ``Select`` / ``Textarea``: new primitives sharing TextInput's focus-ring token via a new ``INPUT_BASE`` catalog global.
+- ``FormLabel``: new primitive for form-field labels. ``inline=False`` (block, mb-1.5) or ``inline=True`` (sits beside its control). Prop is ``target=`` (the HTML ``for`` attribute id).
+- ``Icon24`` / ``Icon12``: new primitives wrapping the 24x24 lucide stroke icons + the 12x12 title-bar chrome glyphs. Path data lives in ``ICONS_24`` / ``ICONS_12`` dicts in ``templates.py``.
+- ``Notice``: drops the bespoke ``extra`` prop in favor of attrs passthrough so callers can pass ``id=``, ``class="hidden"``, ``data-*`` alongside ``variant=``.
+- ``auth.OauthButton``: new primitive composing ``auth.OauthIcon`` + the brand label, picked by ``provider="google"|"github"``.
+- ``Spinner``: gains ``tone="accent"`` (blue ring) for primary-action spinners; old inline ``border-blue-300 border-t-blue-600 animate-spin`` patterns migrate to ``<Spinner tone="accent">``.
+
+Standardization sweeps:
+
+- **Text colors**: banished ``text-zinc-600`` and ``text-zinc-100`` so each remaining shade carries one role (``zinc-900`` primary, ``zinc-700`` body, ``zinc-500`` secondary/label, ``zinc-400`` muted, ``zinc-200`` on-dark). Section labels (SectionHeader, inline ``<h2>`` labels) lift from 600 to 500; body paragraphs lift from 600 to 700; ghost button text moves from 600 to 700.
+- **Corner radii**: retired bare ``rounded`` (20 sites swept to explicit ``rounded-md``) and ``rounded-2xl`` (PermissionsDialog + RequestUnavailable fold to ``rounded-xl`` so dialog chrome matches card chrome).
+- **Borders**: 2 accidental ``border-zinc-300`` sites fold to canonical ``border-zinc-200``.
+- **Shadows**: ``.minds-card`` baseline has no shadow; the ``interactive`` Card flag adds ``hover:shadow-sm``. Non-clickable cards (PermissionsHeader, the Latchkey permission cards, Associate) read as flat surfaces.
+- **StatusBadge**: the ``warn`` variant drops its one-off border so all five variants share a uniform pill treatment.
+
+CSS classes anchor a few JS-rendered surfaces that can't call JinjaX: ``.minds-card`` (Card shell), ``.spinner`` / ``.spinner-accent`` (Spinner), ``.code-pill`` (inline mono pill in Sharing).
+
+A new ``apps/minds/imbue/minds/desktop_client/templates/README.md`` documents the rule ("use a primitive before reaching for inline Tailwind"), the catalog, where the shared tokens live, the visual-diff workflow, and the JinjaX gotchas the branch shook out (Python-keyword props, nested ``{# #}`` comments, literal ``<Tag>`` in docstrings, ``:attr="..."`` for component-tag dynamic attributes, ``!important`` on the ghost-Button link-style recipe).
+
+``apps/minds/scripts/visual_diff.py``: the screenshot step now waits for Tailwind to inject its generated stylesheet before snapping (was a flat 400ms timeout that produced unstyled screenshots on slow machines or when ``tailwind.js`` was missing). The compare report's per-scenario thumbnails open a click-through lightbox: click image swaps A/B, ``←``/``→`` step between differing scenarios, ``Esc`` closes.
+
+Visible end-user impact is small and is mostly subtle visual polish: the auth-flow CTAs gain canonical ``p-10`` padding (~2-4px shifts), the Landing project-row icon buttons darken slightly under the ghost variant, the auth pages' "Sign in"/"Back to" links pick up consistent ``font-medium`` styling, and a couple of misaligned form-control padding pairs now line up vertically. The ``Configure...`` disclosure on the Create form correctly renders at ``text-xs font-normal`` after a follow-up to add ``!important`` to the link-style recipe overrides.
+
+## 2026-06-04
+
+Migrate the desktop client's templates from Jinja2 macros + `{% extends %}` to JinjaX components. UI primitives (Button, Card, Notice, Spinner, TextInput, PageContainer, Opt) and layout (Base, AuthBase) are now `.jinja` components composed via `<Component>` tags. Each page is a PascalCase component under `templates/pages/` (and auth pages under `templates/auth/`). The permission-request dialog is decomposed into five components (`PermissionsDialog`, `PermissionsHeader`, `PermissionsForm`, `PermissionsManualCredentials`, `PermissionsError`). The dev styleguide page (`/_dev/styleguide`) gains examples for the new components.
+
+No user-visible behavior changes -- HTML output stays semantically identical. Internal: `templates.py` now exposes a `CATALOG` constant in place of `JINJA_ENV`; the public `render_*` functions keep their signatures.
+
+- Disable the Modal provider in the Electron desktop-client e2e test (`test_create_local_docker_workspace_via_electron`) by setting `MNGR__PROVIDERS__MODAL__IS_ENABLED=false` for the Electron child process. The test creates a local Docker workspace and is given no Modal credentials, so the spawned `mngr`'s provider discovery was logging a "Modal is not authorized" warning every ~10s for the whole run; disabling the provider keeps the logs clean.
+
+Desktop app auto-update and developer-tooling fixes (extracted from the larger minds onboarding work for standalone review).
+
+- Auto-update: packaged builds now prompt to install a downloaded update. ToDesktop's runtime defaults `showInstallAndRestartPrompt` to `"never"`, so users saw "downloading in the background..." and were never prompted again; it is now set to `"always"`. ToDesktop is only initialized in packaged builds -- in dev its constructor threw on macOS (Squirrel is not linked in the unsigned binary), so dev launches now skip it.
+- Added a `Check for Updates...` item to the application menu that triggers a check and reports the result (update found / up to date / unavailable / error), with the unavailable message worded for the build type (dev vs unreleased draft).
+- Added a `View` menu with `Toggle Developer Tools` (Alt+Cmd+I), zoom controls, and fullscreen. The default Electron DevTools shortcut crashed because the app uses `BaseWindow` + `WebContentsView` rather than a `BrowserWindow`.
+- `MINDS_OPEN_DEVTOOLS=1` auto-opens detached DevTools on the content view at launch.
+- Startup env-setup failures are now logged to the console in addition to being shown in the error window.
+
+- Fixed `minds pool {list,create,destroy}` leaking the Neon pool DSN (which
+  embeds the DB username + password) into the `Running: ...` log line whenever
+  `--database-url` was passed explicitly. The DSN is now masked before the
+  command is rendered for logging; the real subprocess still receives the
+  unredacted value. The secret-masking logic that `mngr forward`'s
+  `--preauth-cookie` redaction already used is now a shared
+  `imbue.minds.utils.secret_redaction.redact_secret_flag_values` helper.
+
+Documented why `scripts/launch-and-verify.sh` and `scripts/first-message-verify.sh` intentionally use `set -uo pipefail` (omitting `-e`): both handle errors explicitly via a `fail` helper, `PIPESTATUS`, retry loops that depend on commands exiting non-zero, and diagnostic blocks on failure. No runtime behavior changed.
+
+The minds desktop client no longer runs a second discovery observer. Its `mngr forward` subprocess is now launched with `--observe-via-file`, so it tails the shared discovery events file written by the single `mngr observe` under `mngr latchkey forward` instead of spawning its own. Provider-set changes (enable/disable, signin/signout/OAuth) now refresh discovery solely by bouncing the detached `mngr latchkey forward` supervisor; minds no longer sends SIGHUP to `mngr forward` (its `bounce_observe` path was removed). Behavior is unchanged from the user's perspective.
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.
+
+## 2026-06-04
+
+Bump Latchkey version to 2.15.1. to include the playwright compatibility fix.
+
+A workspace no longer flickers out of the minds desktop list when its provider has a transient discovery error. Minds now retains agents/hosts whose provider errored on a poll and marks the affected workspaces stale (an amber dot in the sidebar) while keeping them fully clickable; they are only removed on an explicit destroy or a later clean poll. On the same provider-set changes that already bounce minds' own `mngr forward` observe (provider enable/disable, imbue_cloud account add on signin, account removal on signout/OAuth), minds now also bounces the detached `mngr latchkey forward` supervisor so latchkey's discovery stays in lockstep without a full minds restart.
+
+## 2026-06-03
+
+Workspace creation failures are now surfaced clearly on the creating/onboarding page. Previously a failure only flipped a small, faint caption to "Failed: ..." while the heading still read "Setting up your workspace", the progress bar froze partway, and the rotating tips kept cycling -- making it easy to miss that creation had failed. Now a failure immediately replaces the progress UI (from whatever onboarding screen the user is on) with a prominent error state: a red "We couldn't set up your workspace" heading, the underlying error message in a red box, the rotating tips stopped, and "Back to setup" / "Home" buttons to recover. The collapsible "Show details" log remains available.
+
+Fixed workspace creation failing when the source repository's requested branch is not the default branch.
+
+- Cloning a remote repo for a non-default branch previously failed with `pathspec '<branch>' did not match any file(s) known to git`. The remote clone used `git clone --depth 1`, which (implying `--single-branch`) fetches only the default branch, so the requested branch's ref was never downloaded and the subsequent checkout could not find it.
+- `clone_git_repo` now takes an optional `branch` and, when given, clones with `--single-branch --branch <branch>`: only that branch is fetched (still cheaper than a full clone) but its complete, non-shallow history is present. The remote create path passes the requested branch through.
+- The shallow (`--depth 1`) clone is gone entirely. Besides the checkout failure, a shallow clone could not be mirror-pushed into the agent container's bare repo (`mngr create` rejects it with "shallow update not allowed"); a single-branch clone keeps the full ancestry that push requires.
+- Requesting a branch that does not exist on the remote now fails cleanly at clone time rather than later at checkout.
+- This generalizes (and supersedes) an earlier imbue_cloud-only fix: every launch mode reaches `mngr create`'s git-mirror push for a cloned-repo source (a git repo plus a new host always resolves to `TransferMode.GIT_MIRROR`), so a shallow clone is never safe for any mode, not just imbue_cloud. The mode-specific `_may_shallow_clone_remote_repo` helper is therefore removed in favor of always cloning a single branch non-shallow.
+
+Tear out the unused refresh-event plumbing from `minds.desktop_client`:
+
+- Drop `REFRESH_EVENT_SOURCE_NAME`, `_on_refresh_callbacks`, and the `add_on_refresh_callback` / `remove_on_refresh_callback` / `fire_on_refresh` APIs from `MngrCliBackendResolver`.
+- Remove the `_handle_refresh_event_callback`, `_dispatch_refresh_broadcast`, `_parse_refresh_service_name`, and `_log_refresh_dispatch_result` helpers from `desktop_client.app`, along with the `_refresh_event_apps` registry and its callback registration.
+- Stop dispatching the per-agent `refresh` event source in the `forward_cli` envelope consumer.
+- Remove the now-dead refresh integration tests in `desktop_client.test_desktop_client` and the `forward_cli_test` envelope dispatch test for refresh.
+
+The refresh-via-desktop-client mechanism has been superseded by an `open_tab` WebSocket broadcast from the workspace server, so the desktop-client-mediated refresh path is no longer wired up.
+
+Workspace web content can now open a permission request from inside the workspace by posting a `minds:open-request-modal` message (with a request id) to `window.parent`. In the desktop app the content view gains a minimal, allowlist-only relay preload (no `window.minds` bridge) that forwards just this message to the main process, which validates the id and opens the same modal overlay the requests-panel card click uses. In browser mode the shell navigates the content iframe to the request page instead, since there is no overlay. Messages are only honoured from the workspace content frame and only for well-formed request ids.
+
+Fixed a bug where re-opening a permission request that had already been approved or denied still showed the actionable grant/deny form (letting it be resolved a second time). The request page now shows a "This permission request is no longer available" notice for already-resolved or missing requests, and the grant/deny endpoints reject a repeat action on a resolved request with a 409 instead of re-applying it.
+
+`minds env deploy` now pushes an `ovh-<tier>` Modal secret (from Vault `secrets/minds/<tier>/ovh`) alongside the other per-env connector secrets. The remote_service_connector needs OVH AK/AS/CK at runtime so its release route and hourly cleanup cron can strip per-lease tags and cancel released pool VPSes directly.
+
+Fixed several bugs in `minds env deploy` / `recover` and the workspace-create
+flow, surfaced while standing up a fresh dev environment:
+
+- Deploy now pushes the `ovh` per-env Modal Secret. The remote-service-connector
+  app references `ovh-<tier>-<deploy_id>` via `Secret.from_name` (its release
+  route + cleanup cron sign OVH API calls at runtime), but the `ovh` entry was
+  missing from every tier's `deploy.toml` `[secrets].services` list, so
+  `modal deploy rsc-<tier>` failed with "Secret ... not found in environment".
+  Added `ovh` to the dev/staging/production/ci lists and added a regression test
+  asserting each tier's `secrets.services` matches `per_env_secret_services()`.
+- `minds env recover` now runs non-interactively. The Modal app-stop step ran
+  `modal app stop` without `-y`, which aborts with "no interactive terminal
+  detected" whenever recover runs without a TTY (auto-rollback after a failed
+  deploy, CI, background runs). Added `-y`.
+- `minds env recover` is now re-runnable. The Neon instant-restore step was not
+  idempotent: a recover that failed a later step left the pre-restore preserve
+  branch behind, so re-running returned 409 ("branch with that name already
+  exists") and could never delete its recover-target file. The restore now
+  treats that 409 as "already restored" and proceeds.
+- `minds env deploy` now exits non-zero when a failed deploy rolls back. The
+  failure path execs into `minds env recover`, which inherits the exit code; a
+  successful rollback therefore reported the *failed* deploy as success (exit 0),
+  masking it from callers / CI. `recover` gained a hidden `--from-failed-deploy`
+  flag (passed only by that auto-rollback exec) that forces a non-zero exit even
+  when the rollback itself succeeds.
+- `minds env activate` no longer dead-locks the recover flow. The blanket
+  "refuse activation while ANY recover-target file exists" guard created a
+  catch-22: `minds env recover` requires an activated env, but activation was
+  blocked by the failed env's own recover-target -- so you could never activate
+  the env to recover it. Activation now allows activating an env that has its
+  own pending recover-target (surfacing any *other* envs' targets as a warning),
+  and only hard-refuses when the pending target(s) belong solely to other envs.
+- Fixed a `ty` error / runtime breakage in workspace creation from a bad merge:
+  `_MngrCreateAttemptParams` still carried a `gh_token` field (and passed it to
+  `run_mngr_create`) after `GH_TOKEN` had been removed end-to-end as unused, so
+  the param no longer matched `run_mngr_create`'s signature and the field was
+  never supplied at the construction site. Removed the leftover `gh_token`.
+- Fixed the imbue_cloud fast->slow path fallback. minds decided whether to fall
+  back from `fast_mode=require` by substring-matching `"FastPathUnavailableError"`
+  in `mngr create`'s output, but mngr surfaces that error as a clean
+  `Error: <message>` with no class name -- so the marker never matched and the
+  create failed instead of falling back to the slow (rebuild) path. minds now
+  parses the structured `{"event":"error","error_class":...}` JSONL record (see
+  the mngr-side change), threading `error_class` through `_CreateEventCapture` ->
+  `MngrCommandError` and branching on it in `_create_imbue_cloud_with_fallback`.
+
+Also resolved a `runtime/secrets` path collision that broke Cloudflare tunnel
+sharing whenever host backups were configured:
+
+- `runtime/secrets` is now consistently a *directory* of per-secret `*.env`
+  files inside the workspace, rather than a single shared file. Host backups
+  already wrote `runtime/secrets/restic.env` (forcing the directory form),
+  which broke the Cloudflare tunnel runner (it read `runtime/secrets` as a
+  file and crashed with `IsADirectoryError`) and the Telegram injector (it
+  appended to `runtime/secrets`, which fails against a directory).
+- The Cloudflare tunnel token now lives at
+  `runtime/secrets/cloudflare_tunnel.env`; `inject_tunnel_token_into_agent`
+  writes that file (overwrite in place, no more line-strip dance).
+- Added `clear_tunnel_token_from_agent`, called from the workspace
+  disassociation handler after the tunnel is deleted, so the agent's
+  cloudflare-tunnel service stops `cloudflared` instead of spinning against a
+  now-deleted tunnel. Previously nothing ever cleared the token.
+- The Telegram bot token now lives at `runtime/secrets/telegram.env`
+  (overwrite in place) so it no longer collides with the other secrets.
+
+Dev tooling: the minds desktop client launchers now pin Node automatically.
+
+- Added `apps/minds/scripts/select_node_version.sh`, a sourced helper that
+  selects the Node version pinned in `apps/minds/.nvmrc` (via nvm) before
+  launching the client, so pnpm/npm's `engine-strict` check passes regardless
+  of the shell's default Node. It's a no-op when the active Node already
+  matches, and errors with an actionable hint (e.g. `nvm install <version>`)
+  rather than auto-installing.
+- `apps/minds/scripts/propagate_changes` now sources that helper before
+  restarting the desktop client (`electron_start`), so the iteration loop no
+  longer fails with `ERR_PNPM_UNSUPPORTED_ENGINE` when the shell's Node has
+  drifted off the pin.
+
+`minds pool destroy` now does a full teardown: it injects the activated tier's
+OVH credentials from Vault (like `minds pool create`) and forwards to the admin
+command, which cancels the OVH VPS before dropping the row -- so destroying a
+pool host can no longer leave a stranded, still-billing VPS. Pass
+`--skip-vps-cancel` only when the VPS is already gone.
+
+Vault reads now distinguish "secret absent" from a transient failure. Added
+`VaultSecretNotFoundError` (raised when the Vault CLI exits 2 / "No value
+found"); `minds env deploy`'s optional-OVH-entry fallback now catches only that,
+so a transient/auth Vault error no longer gets silently turned into empty OVH
+credentials (which would deploy a broken `ovh` Modal Secret on a Vault blip).
+
+Fixed a slow-path create failure on shared tiers (staging / production). The
+create form there defaults to the remote FCT URL, which minds shallow-cloned;
+the imbue_cloud slow path then transfers the clone to the leased host via mngr's
+git-mirror push, which git rejects for shallow history ("shallow update not
+allowed") -- so any create that fell back to the slow path (no fast/adopt match)
+failed outright. minds now full-clones the remote URL (a single-branch,
+non-shallow clone), mirroring the local-worktree branch that already
+full-cloned for the same reason.
+
+The sharing editor now waits for Cloudflare Access to go live before showing the
+URL as ready. After enabling sharing, Cloudflare can take a few seconds to
+publish the Access application at the edge; until then the hostname does not
+return the Access login redirect, so the link looked broken. The editor now
+shows a brief "Provisioning share..." state and polls a new desktop-client
+endpoint (`GET /api/sharing-readiness/{agent_id}/{service_name}?url=...`) that
+probes the hostname for the Access 302. It reveals the link as soon as the edge
+is live, or after a short client-side timeout with a "may take a moment to
+become reachable" note. Probing happens in minds (not the connector), so the
+connector request stays short and the browser drives the wait.
+
+Dropped the `paid-accounts` service from every tier's deploy config and from the per-env deploy secret list, since paid-user tracking moved from the `PAID_ACCOUNT_SUFFIXES` Modal secret to database tables managed via the connector's admin API. The paid-list admin API key (`MINDS_PAID_ADMIN_KEY`) and cache TTL now ship in the existing `supertokens` secret. Updated the vault-setup and staging-bringup docs accordingly.
+
+Added a per-tier `[scaledown_window]` deploy.toml block (connector / litellm_proxy seconds) threaded into each `modal deploy` so containers stay hot for a configurable idle window. Dev defaults to 600s (10 min) so its no-warm-pool apps don't cold-boot every request; staging/production and the ci/test tier omit it (Modal default), so deployment tests still tear containers down promptly.
+
+Added a per-tier `[paid]` deploy.toml block (`domains` / `emails`) that `minds env deploy` seeds (seed-if-absent) into the connector's `paid_domains` / `paid_emails` tables right after the schema migrations. All four tiers (dev, ci, staging, production) default `domains = ["imbue.com"]` so the team can use paid features on a fresh env without manual setup. Seeding uses `INSERT ... ON CONFLICT DO NOTHING`, so a redeploy never re-activates an entry an operator soft-removed.
+
+imbue_cloud workspace creation now falls back automatically. Minds runs
+`mngr create` with `fast_mode=require` first (adopt a matching pre-baked pool
+host); if no exact match is available the provider raises
+`FastPathUnavailableError`, and minds retries the same create with
+`fast_mode=prevent`, which leases any available pool host and rebuilds it from
+the FCT Dockerfile. The user-facing creation log states which path was taken.
+
+## 2026-06-02
+
+Add a styleguide page at `/_dev/styleguide` showing the design tokens and a small catalog of UI patterns (titlebar, sidebar items, accent spine, focus ring, shadow seam, spinner, buttons, notices, hue picker). Visible in every tier including production. Pattern demos match the actual Tailwind classes the chrome / sidebar / inputs use.
+
+Cleaned up `static/tokens.css` to remove tokens that nothing in the app actually consumes: `--bg-chrome*`, `--border-chrome`, `--text-chrome*`, `--link`, `--focus-ring`. Only `--shadow-seam` remains in `:root` (chrome uses raw Tailwind classes for the rest). `--workspace-accent` is unaffected (it's the per-workspace inline-style hue consumed by the `.page-workspace` / `.accent-spine` / `.sidebar-item` / `.accent-swatch` rules).
+
+Added a drift-guard ratchet: token swatches in the styleguide carry `data-token="--<name>"`, and `templates_test.py` asserts that set equals the `:root` declarations in `tokens.css`. Adding a token without a swatch (or removing a token without removing the swatch) now fails the test.
+
+- External links clicked anywhere in the desktop app (agent content, sidebar, request panels, or the title bar) now open in the user's default browser instead of taking over the in-app workspace view or spawning a bare app window. This covers both ordinary link clicks and `target="_blank"` / `window.open` popups. In-app navigation (the app's own pages and `agent-<id>.localhost` workspace pages) is unchanged.
+- When the OS has no app registered to handle a link (most commonly a `mailto:` or `tel:` link with no mail client or dialer configured), the failed open no longer silently does nothing: the app now shows a notification and copies the link (or, for `mailto:`/`tel:`, the bare email address / phone number) to the clipboard so the click is recoverable.
+- Malformed external links (e.g. an `https://` URL with a stray space or parenthesis baked into it, as agents sometimes produce) are now also sent to the browser instead of opening a blank, chrome-less in-app window that fails to load.
+
+Tiered system-interface restart for the minds recovery flow.
+
+- When a workspace's system interface stops responding, minds shows a
+  recovery page. While it is checking host health or a restart is in
+  flight it shows a single "Loading workspace" state and refreshes itself
+  until the workspace is back.
+- The recovery page picks its tier from the workspace host's state and
+  recovers with no clicks where it safely can. A running container gets a
+  surgical system-interface restart (which does not interrupt your
+  agents); a fully stopped container gets a full restart immediately
+  (nothing is running, so there is nothing to interrupt). Only an
+  ambiguous host state falls back to a confirmed "Restart workspace"
+  button.
+- The recovery page's pre-restart prompt and its post-failure state are
+  now one identical "Workspace unresponsive" page: same heading, same
+  body, a "Restart workspace" button, and a collapsed error detail that
+  appears only when a restart actually failed (expandable, and it wraps
+  instead of overflowing its container). The post-failure state no
+  longer says "Restart failed" -- the automatic restart runs invisibly
+  behind the "Loading workspace" state, so naming a failed attempt the
+  user never saw was just confusing.
+- The surgical restart cleanly stops and starts the system-services
+  agent instead of poking its tmux window; the full restart bounces the
+  whole workspace container.
+- The recovery page's loading state is visually consistent with the
+  forwarding plugin's "Loading workspace" loader, so the two pages a user
+  may see during recovery look like one page.
+- The sidebar workspace context menu gains a "Restart workspace…" entry
+  (with a confirmation, since it interrupts every agent), and the home
+  page gains a per-workspace restart button.
+- Opening a workspace whose container has been stopped now routes to the
+  recovery page (and serves the styled "Loading workspace" loader)
+  instead of flashing a raw error.
+- The recovery page's "Loading workspace" state no longer shows the
+  explanatory "This page will reload automatically..." line -- it just
+  shows the heading.
+- The recovery page now auto-refreshes on a 1s cadence rather than
+  1.5s, so its self-reload coincides with a completed rotation of the
+  loading spinner instead of jumping the spinner back mid-rotation.
+- The recovery page no longer flashes up for a workspace that is actually
+  healthy. A workspace is now only treated as stuck after the background
+  probe loop confirms it unreachable with a sustained run of failed HTTP
+  probes; a single transient backend hiccup (such as a recycled SSE
+  stream) merely starts active probing instead of triggering recovery.
+- The forwarding plugin now reports every non-2xx backend response (it no
+  longer pre-filters to specific status codes), so minds decides which
+  ones matter: only connection-level failures and infrastructure 5xx
+  (502/503/504) enroll an agent for active probing. Application errors
+  (app 500s, ordinary 4xx) are ignored on the failure-envelope path and
+  left for the background probe to adjudicate.
+- Minds' HTTP calls through the forwarding plugin -- the
+  workspace-readiness / health probes and the refresh-service broadcast
+  POST -- now connect to the plugin over loopback and carry the agent's
+  ``agent-<hex>.localhost`` vhost in the ``Host`` header, instead of
+  putting the subdomain in the request URL. The plugin already routes on
+  the ``Host`` header, so this makes those calls independent of
+  ``*.localhost`` name resolution, which is not available on every host.
+- Recovery diagnostics: the recovery page now runs a batched in-container
+  probe (``tmux ls``, ``services.toml`` declaration parse, ``ss``/``curl``
+  on the system-interface inner port) plus a plugin resolver-snapshot
+  read, and surfaces the results inline. A collapsed Diagnostics
+  ``<details>`` block carries the raw observations (host / SSH /
+  services-agent state / services.toml / in-container probe / plugin
+  resolver) and copyable SSH connection strings for the workspace host,
+  with a page-level "Copy diagnostics" button. Probes only run on
+  recovery-page load (RESTARTING refreshes skip probing); normal healthy
+  operation generates no new probe traffic.
+- New "Workspace misconfigured" recovery tier: when ``services.toml`` is
+  missing ``[services.system_interface]`` (the only condition where no
+  restart can possibly help), the recovery page renders dedicated copy
+  explaining that a restart will not help and offers a secondary "Try
+  restart anyway" affordance rather than auto-dispatching.
+- Auto-escalate to host-restart when the SSH transport to a RUNNING host
+  is down (the probe sentinel never returns). The page renders the
+  shared "Workspace unresponsive" state, and the primary button is
+  rebound to the host restart; bouncing a live container still requires
+  explicit consent, so no auto-dispatch.
+- The recovery probe runs over ``mngr exec`` with a 5s hard ceiling
+  bounded by ``--no-start`` and ``--quiet``, so a wedged container
+  cannot gate the recovery UI and a probe will never accidentally start
+  a stopped host.
+- On every non-HEALTHY -> HEALTHY tracker transition, the system
+  interface health tracker now fires an on-recovery callback. Minds
+  wires it to a loguru INFO line so the final recovery is visible in
+  the log alongside the per-probe diagnostics line.
+- Fix a race during sidebar-initiated workspace restarts where the
+  recovery page would briefly redirect back to the workspace, then
+  flip back to "Loading workspace" once the container actually went
+  down. The background health probe loop now skips RESTARTING agents
+  -- only the restart worker (which probes after its ``mngr stop``
+  completes) can transition an in-flight restart to HEALTHY, so a
+  probe of the still-alive pre-restart system interface can no longer
+  prematurely declare recovery.
+- Recovery-page diagnostics now show the raw ``mngr list`` invocation
+  that fed every host-state field. The host-health endpoint surfaces:
+  - The exact shell-quoted command (``mngr_list_command``), the raw
+    ``stdout`` / ``stderr``, and the subprocess ``exit_code``. The
+    diagnostics menu renders them verbatim, so the user can read the
+    listing directly (which agents, which host states, which
+    per-provider errors) instead of relying on minds' summarization,
+    and can paste the command into a terminal to re-run it outside
+    minds.
+  - ``mngr_list_error``: a one-line summary of why ``mngr list`` did
+    not exit cleanly -- whether the subprocess errored, the payload's
+    per-provider ``errors`` array was non-empty, or the listing timed
+    out. When set, the diagnostics menu surfaces it so the user can
+    tell that the issue lives in a sibling workspace's host rather
+    than their own.
+  - ``plugin_resolver_has_services``: a self-describing boolean
+    derived from the existing ``plugin_resolver_services`` map, named
+    for what it means rather than asking the reader to compute it.
+- The host-state ``mngr list`` is now scoped to this workspace's chat
+  agent + system-services agent via a CEL ``id == ...`` include, and
+  runs with ``--on-error continue`` so per-provider errors do not blank
+  out the entire diagnostic. The recovery page therefore renders
+  meaningful per-workspace data even when an unrelated host on the same
+  provider is wedged.
+- Quieter recovery-probe logs. The on-recovery INFO line now carries a
+  compact summary of the cached probe (host state, ssh_dead,
+  is_misconfigured, services-agent lifecycle, plugin discovery, probe
+  inner port + curl status) instead of dumping the full
+  ``HostHealthResponse`` JSON -- the JSON dump otherwise carried
+  multi-KB ``mngr_list_*`` and ``probe.raw_stdout`` payloads with no
+  programmatic consumer. The recovery probe's ``mngr exec`` subprocess
+  also no longer emits a per-failure WARNING with its long
+  base64-encoded inner script in the argv: probe failures (e.g. SSH
+  transport down on a stopped host) are an expected diagnostic outcome
+  already captured by the Layer-2 host-state INFO line via
+  ``ssh_dead=True``. Restart-step and ``mngr list`` failures still emit
+  the WARNING as before.
+- A transient discovery loss (e.g. SSH dying inside a docker container)
+  no longer kicks the user out of an open workspace window to the
+  landing page. Electron now only navigates the content view to landing
+  when the workspace was explicitly destroyed -- the chrome SSE
+  ``workspaces`` payload includes a ``destroying_agent_ids`` list, and
+  the desktop client remembers which agent ids it has ever seen
+  destroying. When a workspace disappears from the live workspaces list,
+  Electron checks that set; if the id is not there, the existing
+  recovery flow handles the unresponsive workspace via the
+  ``system_interface_status`` SSE event, with no nav.
+- Minds now records the last-good per-host agent topology to a persistent
+  ``last_good_agent_topology.json`` under the data directory, updated
+  whenever discovery completely enumerates a host (its system-services
+  agent is present). ``get_system_services_agent_id`` runs the same
+  host-and-name search over the live snapshot first and falls back to this
+  topology when live discovery has lost the host (the SSH-dead failure
+  mode), so a restart can still address the system-services agent for
+  ``mngr stop`` / ``mngr start``. Without this, a restart attempted while
+  the docker provider could not enumerate agents would fail with "Could
+  not locate the system-services agent for this workspace." A host whose
+  enumeration is incomplete -- or that has dropped out of discovery
+  entirely -- keeps its last complete record, so a partial or empty
+  snapshot never erases a still-needed pairing (e.g. one wedged workspace
+  among several healthy ones).
+- Recovery diagnostics rewritten as a flat probe list. The host-health
+  endpoint now returns ``probes: [{question, command, output, answer},
+  ...]`` plus a derived ``dispatch_tier`` enum
+  (``interface_unresponsive``/``host_offline``/``host_unresponsive``/``workspace_misconfigured``)
+  instead of the
+  prior natural-language fields (``reachable``, ``host_offline``,
+  ``ssh_dead``, ``is_misconfigured``, ``host_state``,
+  ``services_agent_state``, ``ssh_connections``, ``mngr_list_*``,
+  ``plugin_resolver_*``). The recovery page renders each probe as a row
+  with a check/x/? glyph and an expander showing the exact command and
+  raw output, so the JSON object and the rendered view are kept simple
+  and consistent. The page's restart-tier dispatch is now a single
+  switch over ``dispatch_tier``. The cached probe-on-recovery INFO log
+  and its ``_HostHealthCache`` holder were dropped along the way.
+- The recovery page's "Loading workspace" state now hides the
+  Diagnostics dropdown and clears the cached host-health payload, so a
+  stale diagnostic from the previous tick does not linger on the page
+  while a fresh check is in flight (the previous behavior was to leave
+  the diagnostic visible after clicking "Restart workspace", which made
+  the dropdown look like fresh data when it was already stale).
+- The recovery page's restart-failed state now shows the failure error
+  details and the diagnostics list together (in separate elements),
+  instead of replacing the diagnostics with just the error. The page
+  re-runs the host-health probe (with auto-dispatch off so it does not
+  stack another restart attempt) so the user can see both the failure
+  reason and the current probe answers at once.
+- The post-restart startup-wait budget is now tier-aware. A surgical
+  (in-place) restart still waits 15s, but a host restart -- which
+  cold-boots the whole container -- now waits 30s before declaring the
+  attempt failed. The previous shared 15s budget routinely bounced a
+  still-booting workspace to the "Workspace unresponsive" page even
+  though the container came up healthy moments later.
+- A failed restart is no longer a dead end. The "Workspace unresponsive"
+  page (restart-failed state) now polls in the background and, the moment
+  the workspace's system interface answers again (the background health
+  probe recovers it on its own -- e.g. a cold boot that finished just
+  after the restart worker's wait elapsed), returns the user to the
+  workspace automatically. Previously the page sat unresponsive until the
+  user manually navigated away and back. The poll uses a lightweight
+  redirect check, so the displayed failure reason and diagnostics stay
+  put and the heavy host-health probe is not re-run on each tick.
+- The auto-dispatched host restart (chosen only when the container is
+  already fully stopped) now skips the redundant ``mngr stop --stop-host``
+  step and cold-boots straight away, shaving a full ``mngr`` invocation
+  off the recovery path. The manual "Restart workspace" button and the
+  SSH-dead escalation still stop first, since they may target a
+  still-running container.
+- The "Is anything listening on the system-interface inner port?"
+  diagnostic no longer depends on ``ss``. The agent container image ships
+  no ``iproute2``, so the previous ``ss -ltnp`` probe always failed with a
+  bare ``FileNotFoundError(2, 'No such file or directory')`` -- which read
+  like the port was down when really the tool was simply absent. The probe
+  now scans ``/proc/net/tcp{,6}`` in pure Python for a TCP_LISTEN socket on
+  the inner port (decoding the listen address to ``ip:port``), so it works
+  on the stock image and answers the question accurately.
+- Every recovery-diagnostic row now shows a complete, copy-pasteable command
+  whose stdout is exactly the output rendered beside it -- previously the
+  command was the data-fetch call while the output was a value minds derived
+  from it (e.g. command ``mngr list ... --format json`` but output
+  ``RUNNING``), so the two did not correspond. Now:
+  - The container-running and services-agent-registered rows pipe ``mngr
+    list`` through ``jq -r`` to print exactly the extracted ``.host.state`` /
+    ``.state`` (with a ``no host row`` / ``no agent row`` fallback line when
+    the row is absent). The synthetic ``state=`` prefix is gone.
+  - The in-container checks (services.toml declaration, inner-port LISTEN
+    scan, local curl) are wrapped as ``mngr exec <services-agent-id>
+    '<check>' --no-start --quiet`` so an operator can run them from the same
+    place ``mngr`` lives, without opening a shell inside the container. Each
+    inner check prints exactly the row's output: ``declared``/``MISSING`` for
+    services.toml, decoded ``LISTEN ip:port`` lines (or ``(no LISTEN socket on
+    port N)``) for the port scan, and the bare HTTP status code for curl.
+  - The "can we run a command inside" row shows the real batched ``mngr
+    exec`` and renders its verbatim stdout (the sentinel followed by the JSON
+    payload).
+  - The plugin-resolver row is the lone exception: its datum lives in minds'
+    own memory (fed by the forward-plugin event stream) and has no in-container
+    reproduction, so it stays a clearly-labelled internal observation.
+- The workspace-readiness / health probes hit `/` and treat any 200 as
+  "ready", deliberately decoupled from whatever application happens to be
+  running inside the workspace. The probe makes no assumption about which
+  app answers on the inner port or which routes it implements -- it only
+  confirms that some web server is up and serving 200s for `GET /`.
+- The recovery-page diagnostic that curls the inner web server inside the
+  container targets `/`, for the same reason: it confirms a web server is
+  answering on the inner port without coupling to any app-specific route.
+  The diagnostic row reads "Does the inner web server answer GET / inside
+  the container?" and its copy-pasteable `curl` command reflects the `/`
+  path.
+- The "Workspace unresponsive" page was restyled for a clearer hierarchy.
+  The "Restart workspace" button is now the page's focal point -- a
+  full-width primary button directly under the message -- rather than being
+  sandwiched between the error and diagnostics dropdowns. The error and
+  diagnostics disclosures are grouped together below the button under a
+  muted "Troubleshooting" label, restyled from the heavy amber-filled boxes
+  into quiet white cards with faint borders, a subtle shadow, and a chevron
+  affordance (including on each diagnostic-question row). The troubleshooting
+  block hides itself entirely whenever neither disclosure is showing, so the
+  divider and label never appear over an empty section. Most users only ever
+  need the button; the dropdowns are now visibly secondary, for the rare
+  deep-debugging case.
+- The Diagnostics menu regains a "Copy SSH command" button beside "Copy
+  diagnostics". It copies a ready-to-run ``ssh -i <key> -p <port>
+  <user>@<host>`` for the workspace host -- the same command mngr emits for
+  the host. The per-host SSH command was previously surfaced in the
+  diagnostics block but was dropped when the host-health response was
+  narrowed to the flat probe list. It is now rendered server-side from the
+  backend resolver's SSH info, so the host-health response stays narrow. The
+  button is shown for every workspace (Docker, Lima, and remote hosts are all
+  reached over SSH) and omitted only in the brief window before discovery has
+  surfaced the host's SSH info.
+- When the recovery page's ``mngr list`` host-state lookup does not exit
+  cleanly (e.g. it times out, or a provider is unreachable) and so returns no
+  row for this workspace, the "container running" and "system-services agent
+  registered" diagnostic rows now show the failure reason (``mngr list
+  failed: ...``) in place of a bare "no row", so the user can tell the
+  listing failed rather than concluding the host or agent is genuinely
+  absent. When the listing still returns this workspace's own row despite a
+  non-clean exit, the real row is shown as before.
+- The "Workspace unresponsive" recovery page no longer pushes its heading and
+  "Restart workspace" button off-screen when several Troubleshooting
+  disclosures are expanded. The card is now capped to the viewport height and
+  laid out as a vertical stack: the heading and the restart button stay pinned
+  at the top, and only the troubleshooting block (error details + diagnostics)
+  scrolls internally once its content overflows. Previously the whole card grew
+  past the viewport and, because it is vertically centered, the heading and
+  button slid above the top edge out of reach of the page scrollbar.
+- Fix: a misconfigured workspace (``services.toml`` missing
+  ``[services.system_interface]``) now renders the "Workspace misconfigured"
+  page even after a failed restart. Previously the misconfigured tier was only
+  honored on the live stuck/probe entry path; on the ``restart_failed`` entry
+  path -- which is exactly where a misconfigured workspace ends up once its
+  undeclared interface fails to come back up -- the recovery page
+  short-circuited to the generic "Workspace unresponsive" state before
+  inspecting the dispatch tier, so the diagnostic correctly flagged the missing
+  block while the page still implied a restart could help. The
+  ``workspace_misconfigured`` check now runs ahead of the no-auto-dispatch
+  short-circuit, so this tier is honored on every entry path.
+- Internal: the ``mngr`` subprocess helper that drives the restart steps and
+  the host-health probe returns stdout on a clean exit and raises a single
+  ``MngrCommandError`` for any non-clean outcome (timeout, nonzero exit, or
+  failure to launch), matching how the rest of minds shells out to ``mngr``
+  (``run_mngr_create``, the destroy cleanup). A restart step marks the workspace
+  "Restart failed" with the reason; the host-health probe threads it into its
+  response.
+- The host-health ``mngr list`` probe scopes discovery to the workspace's own
+  provider via ``--provider``, so an unrelated provider being unreachable cannot
+  blank out this workspace's host state. If a sibling host on the same provider
+  fails discovery while this workspace needs recovery, the recovery page falls
+  back to a manual "Restart workspace" click instead of auto-dispatching.
+
+The typed `GET /permissions/available` catalog entry (`AvailableServiceEntry`) now carries detent's `$comment` summaries: a scope-level `description`, and a `permissions` list whose elements are `AvailablePermission` objects (`name` plus an optional `description`) instead of bare strings. Both descriptions are optional/default-empty so older catalogs still validate.
+
+The predefined permission request dialog now reads those descriptions through the services catalog (`ServicePermissionInfo` gained a scope `description` and a `description_by_permission_name` map) and shows each permission's summary, when present, beside its name (at the same font size as the name). The default view renders the to-be-granted permissions as a checkmark-led list. The scope-level summary is not surfaced on the dialog.
+
+Fixed the desktop app's live permission-request notifications, which previously never updated: the requests badge, the requests-panel auto-open, and the in-panel list only refreshed after the user manually closed and reopened the panel.
+
+Two root causes:
+
+- The chrome SSE stream keyed its change detection off the bare pending-request *count*. Because latchkey requests are deduplicated by `(agent_id, scope, request_type)`, re-requesting the same scope (or resolving one request while another arrives) keeps the count constant while the contents change, so no update was emitted. The stream now diffs a content-based payload (`count` plus the ordered list of pending `request_ids`) and emits whenever the pending *set* changes. The SSE event was renamed from `request_count` to `requests` to reflect that it carries the id list, not just a count.
+
+- The Electron main-process SSE consumer (`runChromeSSELoop`) wedged permanently the first time the auth-cookie sync forced a reconnect: `req.abort()` does not emit a terminal event on Electron's `ClientRequest`, so the awaited connection promise never resolved and the live consumer died seconds after launch. The loop now resolves that promise directly on a forced reconnect (via a shared finish ref) instead of relying on `'abort'`/`'close'` events, the latter of which fired eagerly on healthy streaming responses and caused a reconnect storm that leaked backend SSE generators and exhausted the connection pool.
+
+In the Electron consumer, the requests panel now refreshes whenever the pending id set changes (not only on a count increase), and auto-open triggers when a genuinely new request id appears (so approving/denying never reopens a panel the user closed).
+
+Permission request dialogs now open in a modal overlay instead of replacing the main content window.
+
+When a user clicks a permission request card in the side panel, the request page (`/requests/<event_id>`) now opens in a transparent full-content-area overlay (`modalView`) stacked above the workspace, with a dim backdrop. The workspace view is never navigated away, so the user keeps the context of their work; dismissing the dialog (via Approve/Deny, the close button, a backdrop click, or Escape) returns them to exactly where they were. Opened directly in a browser with no modal host, the page degrades to a dimmed, centered card and dismissal navigates home.
+
+Permission requests are no longer collapsed by service/scope/path. The request inbox now keys pending requests solely by request ID, so every distinct request the agent makes shows as its own card. Previously, multiple requests sharing the same agent, scope, and permissions were merged into one, making Approve/Deny appear to do nothing (a hidden duplicate would surface in place of the resolved one). Redeliveries of the same request (same request ID) are still collapsed so the panel does not duplicate cards.
+
+Reworked the workspace creation flow into a guided onboarding experience.
+
+- The Create Workspace form is now name-first: just a workspace name and a Create button up front, with a "Configure..." disclosure for the compute / AI / backup providers and a nested "Show advanced settings" disclosure for the repository, branch, and GH_TOKEN. The account selector moved to a compact menu at the top right.
+- After clicking Create, the workspace is created in the background while the user answers three short onboarding questions. If creation finishes before they're done, they go straight into the workspace; otherwise they see a styled loading screen with a progress bar, rotating tips, and a "Show details" toggle over the live creation log.
+- The three questions wire up minimal behavior (each is optional):
+  - "Is it OK if I get to know you?" runs a small local scan of your machine (your name) and saves it to `~/.minds/user_context/<creation-id>.json` unless you choose full control.
+  - "What should we start with?" sends your description to the workspace's chat agent once it comes online.
+  - "How do you want to deal with permissions?" is written into the workspace's Claude memory at `runtime/memory/permissions_preferences.md`.
+- `POST /api/create-agent` now accepts optional `user_data_preference`, `initial_problem`, and `permissions_preference` fields; omitting them preserves the previous behavior. A new `POST /api/create-agent/{id}/onboarding` endpoint backs the form flow.
+
+`apps/minds/scripts/build_test.py` no longer silently skips in CI. PR #1772 renamed `apps/minds/todesktop.json` to `apps/minds/todesktop.js`, so `test_bundled_limactl_is_signed_with_virtualization_entitlement` evaluates the config via `node` and carried `skipif(node is None)` -- which skipped silently on the Node-less offload image. Now that Node is installed in the shared mngr image, the `skipif` is removed: the test runs on offload and asserts Node is present, so a missing Node is a hard failure rather than a silent skip.
+
 ## 2026-06-01
 
 The latchkey services catalog now maps each raw service name to a list of scope entries instead of a single entry, so one service can expose more than one detent scope. `LatchkeyGatewayClient.get_available_services` now returns `dict[str, tuple[AvailableServiceEntry, ...]]`, and `ServicesCatalog.get` / `ServicesCatalog.as_mapping` now return a tuple of `ServicePermissionInfo` per service. Per-scope lookup via `ServicesCatalog.get_by_scope` is unchanged.

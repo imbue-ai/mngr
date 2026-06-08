@@ -1,0 +1,34 @@
+{#def title="Minds", body_class="bg-zinc-50 text-zinc-900 font-sans antialiased", body_style="", body_attrs="", head="", scripts="" #}
+{#
+  Base layout. Every page wraps its content in this component.
+  Pulls in the Tailwind Play CDN JS (downloaded once into /_static/tailwind.js
+  and served locally, so this is offline-safe after the first fetch) plus the
+  hand-written tokens.css. The Play CDN script generates utility classes at
+  runtime, so there is no "rebuild when you add a class" step.
+
+  Args:
+    title       contents. Defaults to "Minds".
+    body_class  classes on body. Default is the light page surface.
+    body_style  inline style on body. Used to set --workspace-accent on
+                in-workspace pages so the top stripe picks up the
+                deterministic per-project color.
+    body_attrs  extra attributes on body, as a raw HTML fragment (e.g.
+                'data-is-mac="true" data-mngr-forward-origin="..."').
+    head        extra head content (page-specific link/meta tags). HTML.
+    scripts     script tags emitted just before /body. HTML. Prefer
+                src=/_static/foo.js over inline JS.
+#}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>{{ title }}</title>
+  <script src="/_static/tailwind.js"></script>
+  <link rel="stylesheet" href="/_static/tokens.css">
+  {{ head }}
+</head>
+<body class="{{ body_class }}" style="{{ body_style }}" {{ body_attrs }}>
+  {{ content }}
+  {{ scripts }}
+</body>
+</html>

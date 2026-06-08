@@ -1,1 +1,0 @@
-`minds env deploy` now pushes an `ovh-<tier>` Modal secret (from Vault `secrets/minds/<tier>/ovh`) alongside the other per-env connector secrets. The remote_service_connector needs OVH AK/AS/CK at runtime so its release route and hourly cleanup cron can strip per-lease tags and cancel released pool VPSes directly.

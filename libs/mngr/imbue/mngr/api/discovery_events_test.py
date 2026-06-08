@@ -42,8 +42,10 @@ from imbue.mngr.api.discovery_events import make_discovered_provider
 from imbue.mngr.api.discovery_events import make_full_discovery_snapshot_event
 from imbue.mngr.api.discovery_events import make_host_discovery_event
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
+from imbue.mngr.api.discovery_events import partition_removed_agents_by_provider_error
 from imbue.mngr.api.discovery_events import resolve_hosts_for_identifiers
 from imbue.mngr.api.discovery_events import resolve_provider_names_for_identifiers
+from imbue.mngr.api.discovery_events import tail_discovery_events_file
 from imbue.mngr.api.discovery_events import write_full_discovery_snapshot
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -1237,6 +1239,67 @@ def test_discovery_stream_tail_preserves_partial_writes(tmp_path: Path) -> None:
     assert parsed_ids == {str(event_1.event_id), str(event_2.event_id)}
 
 
+def test_tail_discovery_events_file_emits_cached_snapshot_then_tails(temp_config: MngrConfig) -> None:
+    """tail_discovery_events_file emits the latest cached snapshot on attach, then
+    picks up events appended by another writer -- a pure consumer that never polls."""
+    events_path = get_discovery_events_path(temp_config)
+    cached_agent = make_test_discovered_agent()
+    write_full_discovery_snapshot(temp_config, (cached_agent,), ())
+
+    captured_lines: list[str] = []
+    stop_event = threading.Event()
+    tail = threading.Thread(
+        target=tail_discovery_events_file,
+        args=(events_path, stop_event, captured_lines.append),
+        daemon=True,
+    )
+    tail.start()
+    try:
+        # The cached snapshot is emitted immediately on attach.
+        poll_until(lambda: len(captured_lines) >= 1, timeout=5.0)
+        snapshot = parse_discovery_event_line(captured_lines[0])
+        assert isinstance(snapshot, FullDiscoverySnapshotEvent)
+        assert any(agent.agent_id == cached_agent.agent_id for agent in snapshot.agents)
+
+        # An event appended by another writer afterwards is tailed.
+        appended_agent = make_test_discovered_agent()
+        emit_agent_discovered(temp_config, appended_agent)
+        poll_until(lambda: len(captured_lines) >= 2, timeout=5.0)
+    finally:
+        stop_event.set()
+        tail.join(timeout=5.0)
+
+    appended = parse_discovery_event_line(captured_lines[-1])
+    assert isinstance(appended, AgentDiscoveryEvent)
+    assert appended.agent.agent_id == appended_agent.agent_id
+
+
+def test_tail_discovery_events_file_waits_for_absent_file(temp_config: MngrConfig) -> None:
+    """If the events file does not exist yet, the tailer waits for it rather than
+    failing, then emits events once a writer creates it (the minds startup race)."""
+    events_path = get_discovery_events_path(temp_config)
+    assert not events_path.exists()
+
+    captured_lines: list[str] = []
+    stop_event = threading.Event()
+    tail = threading.Thread(
+        target=tail_discovery_events_file,
+        args=(events_path, stop_event, captured_lines.append),
+        daemon=True,
+    )
+    tail.start()
+    try:
+        # Create the file (with a snapshot) only after the tailer is already running.
+        write_full_discovery_snapshot(temp_config, (make_test_discovered_agent(),), ())
+        poll_until(lambda: len(captured_lines) >= 1, timeout=5.0)
+    finally:
+        stop_event.set()
+        tail.join(timeout=5.0)
+
+    assert len(captured_lines) >= 1
+    assert isinstance(parse_discovery_event_line(captured_lines[0]), FullDiscoverySnapshotEvent)
+
+
 def test_emit_lines_from_offset_warns_on_corruption_across_calls(tmp_path: Path) -> None:
     """Regression test: a single shared warner across phase reads must surface
     mid-file corruption that straddles phase boundaries.
@@ -1390,3 +1453,58 @@ def test_rotate_discovery_events_cleans_up_old_rotated_files(tmp_path: Path) -> 
     rotated = sorted(f for f in tmp_path.iterdir() if f.name.startswith("events.jsonl."))
     # With max_rotated_count=1, only the newest file should remain
     assert len(rotated) == 1
+
+
+# -- partition_removed_agents_by_provider_error --
+
+
+def _provider_error(provider_name: ProviderInstanceName) -> DiscoveryError:
+    return DiscoveryError(type_name="RuntimeError", message="discovery failed", provider_name=provider_name)
+
+
+def test_partition_retains_agent_whose_provider_errored() -> None:
+    """An absent agent whose provider is currently errored is retained, not dropped."""
+    errored = ProviderInstanceName("imbue_cloud")
+    partition = partition_removed_agents_by_provider_error(
+        removed_agent_ids={"agent-1"},
+        provider_name_by_prior_agent_id={"agent-1": str(errored)},
+        error_by_provider_name={errored: _provider_error(errored)},
+    )
+    assert partition.retained == frozenset({"agent-1"})
+    assert partition.dropped == frozenset()
+
+
+def test_partition_drops_agent_whose_provider_succeeded() -> None:
+    """An absent agent whose provider is not errored is dropped (confirmed gone)."""
+    partition = partition_removed_agents_by_provider_error(
+        removed_agent_ids={"agent-1"},
+        provider_name_by_prior_agent_id={"agent-1": "local"},
+        error_by_provider_name={},
+    )
+    assert partition.retained == frozenset()
+    assert partition.dropped == frozenset({"agent-1"})
+
+
+def test_partition_drops_agent_with_unknown_prior_provider() -> None:
+    """An absent agent with no recorded prior provider is dropped (unattributable)."""
+    errored = ProviderInstanceName("imbue_cloud")
+    partition = partition_removed_agents_by_provider_error(
+        removed_agent_ids={"agent-1"},
+        provider_name_by_prior_agent_id={},
+        error_by_provider_name={errored: _provider_error(errored)},
+    )
+    assert partition.retained == frozenset()
+    assert partition.dropped == frozenset({"agent-1"})
+
+
+def test_partition_splits_mixed_removed_agents_by_their_providers() -> None:
+    """Each removed agent is classified independently by its own prior provider."""
+    errored = ProviderInstanceName("imbue_cloud")
+    healthy = ProviderInstanceName("local")
+    partition = partition_removed_agents_by_provider_error(
+        removed_agent_ids={"agent-errored", "agent-healthy"},
+        provider_name_by_prior_agent_id={"agent-errored": str(errored), "agent-healthy": str(healthy)},
+        error_by_provider_name={errored: _provider_error(errored)},
+    )
+    assert partition.retained == frozenset({"agent-errored"})
+    assert partition.dropped == frozenset({"agent-healthy"})

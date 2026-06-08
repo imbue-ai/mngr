@@ -58,6 +58,21 @@ _REQUIRED_OUTER_PACKAGES: tuple[str, ...] = ("rsync", "inotify-tools", "jq")
 # fine bake.
 _OUTER_PACKAGES_INSTALL_TIMEOUT_SECONDS: float = 300.0
 
+# OVH's classic-VPS images ship ``qemu-guest-agent``, which lets the OVH
+# hypervisor run automated backups by freezing the guest filesystem. That
+# freeze causes serious runtime problems on the agent, so we purge every
+# ``qemu*`` package on each provisioned VPS to remove the mechanism the
+# backups hook into. ``dpkg -l | grep qemu`` is the detection probe; only
+# when it matches do we run ``apt-get purge`` -- a glob that matches no
+# package would otherwise make apt exit non-zero. The purge re-runs on the
+# recycle path because rebuilding the OS reinstalls the image's qemu agent.
+_PURGE_QEMU_COMMAND: str = (
+    "set -e && "
+    "if dpkg -l | grep -q qemu; then "
+    "DEBIAN_FRONTEND=noninteractive apt-get purge --auto-remove -y 'qemu*'; "
+    "fi"
+)
+
 
 class _SilentAcceptHostKeyPolicy(paramiko.MissingHostKeyPolicy):
     """Paramiko policy that silently accepts any host key on first sight.
@@ -285,6 +300,51 @@ def install_required_outer_packages(
                 command_timeout_seconds=_OUTER_PACKAGES_INSTALL_TIMEOUT_SECONDS,
             )
             logger.info("Installed required outer packages on {}: {}", hostname, list(packages))
+        finally:
+            client.close()
+
+
+def purge_qemu_packages(
+    *,
+    hostname: str,
+    port: int,
+    private_key_path: Path,
+    known_hosts_path: Path,
+    timeout_seconds: float,
+) -> None:
+    """Remove all ``qemu*`` packages from the OVH outer host to disable OVH backups.
+
+    OVH automated backups rely on the image's ``qemu-guest-agent``, whose
+    filesystem-freeze hangs the VPS. Purging qemu removes the mechanism the
+    backups hook into. Detects qemu first (``dpkg -l | grep qemu``) so the
+    step is a clean no-op on an image that ships none, rather than failing on
+    an apt glob that matches nothing.
+
+    Runs as the final outer-bootstrap step (after
+    ``install_required_outer_packages``) on both the fresh-order and recycle
+    paths -- the recycle path rebuilds the OS, which reinstalls qemu, so the
+    purge has to re-run there too. A failure raises ``VpsProvisioningError``
+    so the caller's create-cleanup tears down the VPS instead of leaving a
+    host running with backups enabled.
+    """
+    with log_span("Purging qemu packages on OVH VPS {}:{}", hostname, port):
+        client = _connect_with_retry(
+            hostname=hostname,
+            port=port,
+            ssh_user="root",
+            private_key_path=private_key_path,
+            known_hosts_path=known_hosts_path,
+            timeout_seconds=timeout_seconds,
+            failure_label="SSH as root for purging qemu packages",
+        )
+        try:
+            _run_or_raise(
+                client,
+                _PURGE_QEMU_COMMAND,
+                failure_label="apt-get purge qemu*",
+                command_timeout_seconds=_OUTER_PACKAGES_INSTALL_TIMEOUT_SECONDS,
+            )
+            logger.info("Purged qemu packages on {} (OVH automated backups disabled)", hostname)
         finally:
             client.close()
 

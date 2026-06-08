@@ -5,6 +5,7 @@ import pytest
 
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.desktop_client import templates as _templates_module
+from imbue.minds.desktop_client.templates import CATALOG
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
@@ -438,10 +439,10 @@ def test_render_recovery_page_promotes_button_above_troubleshooting() -> None:
     assert button_pos < block_pos < error_pos < debug_pos
 
 
-def test_render_dev_styleguide_page_surfaces_tokens_and_macro_widgets() -> None:
+def test_render_dev_styleguide_page_surfaces_tokens_and_component_widgets() -> None:
     """The styleguide must surface the live ``:root`` tokens and render
-    each catalog widget through its real macro (so the catalog can't drift
-    silently from the macros it documents)."""
+    each catalog widget through its real JinjaX component (so the catalog
+    can't drift silently from the components it documents)."""
     html = render_dev_styleguide_page()
     assert "--shadow-seam" in html
     # The accent picker section is a separate runtime variable, not a :root token.
@@ -457,9 +458,10 @@ def test_render_dev_styleguide_page_surfaces_tokens_and_macro_widgets() -> None:
         "Notices",
     ):
         assert header in html, f"missing pattern: {header}"
-    # The buttons / notices / inputs are rendered through _macros.html; these
-    # assertions verify that the macro output (button label, notice copy, input
-    # name) actually reaches the rendered page.
+    # The buttons / notices / inputs are rendered through their JinjaX
+    # components (Button, Notice, TextInput); these assertions verify that
+    # the component output (button label, notice copy, input name) actually
+    # reaches the rendered page.
     assert ">Primary<" in html and ">Danger<" in html
     assert "All set: action completed." in html
     assert 'name="styleguide-focus-ring-input"' in html
@@ -480,6 +482,494 @@ def test_dev_styleguide_token_swatches_enumerate_root_declarations() -> None:
     assert declared == surfaced, (
         f"tokens.css :root declares {sorted(declared)} but the styleguide "
         f"surfaces {sorted(surfaced)}. Add or remove a "
-        f'`data-token="--<name>"` swatch in templates/dev_styleguide.html '
+        f'`data-token="--<name>"` swatch in templates/pages/DevStyleguide.jinja '
         f"to match."
     )
+
+
+# -- JinjaX component-level tests ----------------------------------------
+#
+# These exercise each individual component in isolation through the shared
+# CATALOG so we catch regressions in any one component without rendering a
+# whole page.
+
+
+def test_button_link_renders_anchor_with_href() -> None:
+    html = CATALOG.render("ButtonLink", href="/create", _content="Create")
+    # attrs.render() sorts attributes alphabetically, so href ends up after
+    # class. Assert presence rather than ordering.
+    assert html.startswith("<a ")
+    assert 'href="/create"' in html
+    assert ">Create</a>" in html
+
+
+def test_button_renders_each_variant_class_set() -> None:
+    # The five variants should each contribute their own background class.
+    variants_to_class = {
+        "primary": "bg-zinc-900",
+        "secondary": "bg-zinc-100",
+        "danger": "bg-red-50",
+        "success": "bg-emerald-800",
+        "ghost": "bg-transparent",
+    }
+    for variant, css_class in variants_to_class.items():
+        html = CATALOG.render("Button", variant=variant, _content="X")
+        assert css_class in html, f"variant={variant} missing {css_class}"
+
+
+def test_button_submit_has_form_attribute_when_passed() -> None:
+    html = CATALOG.render("ButtonSubmit", form="my-form", _content="Save")
+    assert 'type="submit"' in html
+    assert 'form="my-form"' in html
+
+
+def test_button_default_size_uses_md_geometry() -> None:
+    html = CATALOG.render("Button", variant="primary", _content="X")
+    # md size = px-3.5 py-2 rounded-md font-medium text-sm
+    assert "px-3.5" in html
+    assert "py-2" in html
+    assert "rounded-md" in html
+    assert "font-medium" in html
+    assert "text-sm" in html
+    # Should not pick up lg-specific classes
+    assert "py-3" not in html
+    assert "rounded-lg" not in html
+    assert "font-semibold" not in html
+
+
+def test_button_size_lg_uses_block_cta_geometry() -> None:
+    html = CATALOG.render("Button", variant="primary", size="lg", block=True, _content="Sign in")
+    assert "py-3" in html
+    assert "rounded-lg" in html
+    assert "font-semibold" in html
+    assert "text-base" in html
+    assert "w-full" in html
+
+
+def test_button_size_icon_uses_square_padding() -> None:
+    html = CATALOG.render("Button", variant="ghost", size="icon", _content="<svg/>")
+    assert "p-1.5" in html
+    # No horizontal/vertical padding mismatch (only one padding utility)
+    assert "px-3.5" not in html
+    assert "py-2 " not in html and not html.rstrip().endswith("py-2")
+
+
+def test_button_passes_through_arbitrary_attrs() -> None:
+    # JinjaX attrs.render() flows through undeclared HTML attributes like
+    # title, aria-label, and data-*, so callers don't have to enumerate
+    # them as props on the component.
+    html = CATALOG.render(
+        "Button",
+        variant="ghost",
+        size="icon",
+        _content="<svg/>",
+        _attrs={"title": "Restart", "aria-label": "Restart workspace", "data-x": "y"},
+    )
+    assert 'title="Restart"' in html
+    assert 'aria-label="Restart workspace"' in html
+    assert 'data-x="y"' in html
+
+
+def test_titlebar_button_default_is_nav_variant() -> None:
+    html = CATALOG.render("TitlebarButton", _content="<svg/>")
+    # nav variant => w-8 h-7 rounded active:bg-white/10
+    assert "w-8" in html
+    assert "h-7" in html
+    assert "active:bg-white/10" in html
+    # default tone => hover lifts to white/5 + zinc-200 text
+    assert "hover:bg-white/5" in html
+    assert "hover:text-zinc-200" in html
+    # Window-control geometry should NOT bleed into nav
+    assert "w-9" not in html
+    assert "h-[38px]" not in html
+
+
+def test_titlebar_button_control_variant_renders_window_control_geometry() -> None:
+    html = CATALOG.render("TitlebarButton", variant="control", _content="<svg/>")
+    assert "w-9" in html
+    assert "h-[38px]" in html
+    assert "rounded-none" in html
+
+
+def test_titlebar_button_danger_tone_applies_red_hover() -> None:
+    html = CATALOG.render("TitlebarButton", variant="control", tone="danger", _content="<svg/>")
+    assert "hover:bg-red-600" in html
+    assert "hover:text-white" in html
+    # The default tone's hover should be replaced, not merged.
+    assert "hover:bg-white/5" not in html
+
+
+def test_notice_renders_each_variant() -> None:
+    variants_to_class = {
+        "info": "bg-blue-50",
+        "warn": "bg-amber-50",
+        "success": "bg-emerald-50",
+        "error": "bg-red-50",
+    }
+    for variant, css_class in variants_to_class.items():
+        html = CATALOG.render("Notice", variant=variant, _content="msg")
+        assert css_class in html
+        assert "msg" in html
+
+
+def test_card_renders_default_slot() -> None:
+    html = CATALOG.render("Card", _content="<p>body</p>")
+    assert "<p>body</p>" in html
+    # The visual shell (bg/border/rounded; no baseline shadow) is in the
+    # ``.minds-card`` CSS class in tokens.css; the rendered HTML carries
+    # the class name rather than the underlying Tailwind utilities.
+    assert "minds-card" in html
+    # Default padding is "default" -> p-4.
+    assert "p-4" in html
+
+
+def test_card_row_spread_layout_adds_justify_between() -> None:
+    html = CATALOG.render("Card", layout="row-spread", _content="x")
+    assert "justify-between" in html
+    assert "items-center" in html
+
+
+def test_card_row_layout_omits_justify_between() -> None:
+    html = CATALOG.render("Card", layout="row", _content="x")
+    assert "items-center" in html
+    assert "justify-between" not in html
+
+
+def test_card_tight_padding_uses_px4_py25() -> None:
+    html = CATALOG.render("Card", padding="tight", _content="x")
+    assert "px-4" in html
+    assert "py-2.5" in html
+    assert "p-4 " not in html and not html.rstrip().endswith("p-4")
+
+
+def test_card_tag_anchor_renders_anchor_with_href() -> None:
+    html = CATALOG.render("Card", tag="a", href="/x", _content="body")
+    assert "<a " in html
+    assert 'href="/x"' in html
+    # Anchors auto-disable underline + inherit text color so a Card anchor
+    # doesn't read like a regular hyperlink.
+    assert "no-underline" in html
+    assert "text-inherit" in html
+
+
+def test_card_interactive_adds_hover_classes() -> None:
+    plain = CATALOG.render("Card", _content="x")
+    interactive = CATALOG.render("Card", interactive=True, _content="x")
+    assert "hover:border-zinc-300" not in plain
+    assert "hover:border-zinc-300" in interactive
+    assert "cursor-pointer" in interactive
+
+
+def test_form_label_default_is_block_with_mb_1_5() -> None:
+    # The prop is ``target`` rather than ``for`` because JinjaX parses
+    # the prop declaration block as a Python function signature, and
+    # ``for`` is a reserved keyword. The rendered HTML still uses the
+    # standard HTML ``for`` attribute.
+    html = CATALOG.render("FormLabel", target="email", _content="Email")
+    assert 'for="email"' in html
+    assert "block" in html
+    assert "mb-1.5" in html
+    assert "text-sm" in html
+    assert "font-medium" in html
+    assert "text-zinc-900" in html
+
+
+def test_form_label_inline_drops_block_and_mb() -> None:
+    html = CATALOG.render("FormLabel", target="x", inline=True, _content="Provider")
+    # Inline layout: no block / mb classes (the parent flex row handles
+    # spacing), but the shared color and weight tokens remain.
+    assert "block" not in html
+    assert "mb-1.5" not in html
+    assert "text-sm" in html
+    assert "font-medium" in html
+
+
+def test_oauth_button_renders_google_label_and_brand_icon_with_hook_class() -> None:
+    html = CATALOG.render("auth.OauthButton", provider="google")
+    # The .oauth-btn hook is load-bearing -- static/auth.js queries for
+    # it to enable/disable all OAuth buttons as a group.
+    assert "oauth-btn" in html
+    # Label text + data-oauth provider attr.
+    assert "Continue with Google" in html
+    assert 'data-oauth="google"' in html
+    # Brand glyph from auth.OauthIcon is composed inline. The path
+    # fragment is one of the four <path d="..."> values unique to
+    # Google's blue triangle.
+    assert "M22.56 12.25" in html
+
+
+def test_oauth_button_github_uses_github_label_and_glyph() -> None:
+    html = CATALOG.render("auth.OauthButton", provider="github")
+    assert "Continue with GitHub" in html
+    assert 'data-oauth="github"' in html
+    # Path fragment that opens GitHub's mark glyph.
+    assert "M12 0C5.37 0 0 5.37" in html
+
+
+def test_card_page_default_padding_and_max_width() -> None:
+    html = CATALOG.render("CardPage", title="x", _content="<p>body</p>")
+    # Card surface: bg/border/rounded/shadow + p-10 + max-w-[420px] + w-full.
+    assert "bg-white" in html
+    assert "rounded-xl" in html
+    assert "shadow-sm" in html
+    assert "p-10" in html
+    assert "max-w-[420px]" in html
+    assert "<p>body</p>" in html
+    # The body is flex-centered around the card.
+    assert "flex items-center justify-center min-h-screen" in html
+
+
+def test_card_page_form_padding_uses_p6() -> None:
+    html = CATALOG.render("CardPage", title="x", padding="form", max_width="max-w-[520px]", _content="x")
+    assert "p-6" in html
+    assert "p-10" not in html
+    assert "max-w-[520px]" in html
+
+
+def test_icon24_renders_with_stroke_shell_and_default_size() -> None:
+    # ``home`` is one of the icons in the ICONS_24 catalog global.
+    html = CATALOG.render("Icon24", name="home")
+    # Stroke-based shell attrs applied uniformly.
+    assert 'viewBox="0 0 24 24"' in html
+    assert 'fill="none"' in html
+    assert 'stroke="currentColor"' in html
+    assert 'stroke-width="2"' in html
+    assert 'aria-hidden="true"' in html
+    # Default size = md = w-4 h-4.
+    assert "w-4 h-4" in html
+    # Path data from the catalog flows through unescaped.
+    assert '<path d="M3 12L12 3l9 9"/>' in html
+
+
+def test_icon24_size_axis() -> None:
+    for size, css_class in (("sm", "w-3.5 h-3.5"), ("md", "w-4 h-4"), ("lg", "w-5 h-5")):
+        html = CATALOG.render("Icon24", name="home", size=size)
+        assert css_class in html
+
+
+def test_icon12_renders_with_w3_h3_size_and_12_viewbox() -> None:
+    html = CATALOG.render("Icon12", name="close")
+    assert 'viewBox="0 0 12 12"' in html
+    assert "w-3 h-3" in html
+    # Two lines forming the X.
+    assert '<line x1="2" y1="2" x2="10" y2="10"/>' in html
+    assert '<line x1="10" y1="2" x2="2" y2="10"/>' in html
+
+
+def test_spinner_renders_for_each_size() -> None:
+    for size, css_class in (("sm", "w-3.5"), ("md", "w-[18px]"), ("lg", "w-8")):
+        html = CATALOG.render("Spinner", size=size)
+        assert 'class="spinner' in html
+        assert css_class in html
+
+
+def test_spinner_default_tone_omits_accent_class() -> None:
+    html = CATALOG.render("Spinner", size="sm")
+    assert "spinner-accent" not in html
+
+
+def test_spinner_accent_tone_adds_accent_class() -> None:
+    html = CATALOG.render("Spinner", size="sm", tone="accent")
+    assert "spinner-accent" in html
+
+
+def test_oauth_icon_google_includes_google_svg_path() -> None:
+    html = CATALOG.render("auth.OauthIcon", provider="google")
+    # One of the four <path d="..."> values unique to the Google glyph
+    # (the blue triangle); shows the right SVG was selected.
+    assert "M22.56 12.25" in html
+
+
+def test_oauth_icon_github_includes_github_svg_path() -> None:
+    html = CATALOG.render("auth.OauthIcon", provider="github")
+    # The opening of GitHub's mark path.
+    assert "M12 0C5.37 0 0 5.37" in html
+
+
+def test_oauth_icon_unknown_provider_renders_nothing_visible() -> None:
+    # Defensive: the icon component has no fallback path, so an unexpected
+    # provider just produces empty output (no exception).
+    html = CATALOG.render("auth.OauthIcon", provider="not-a-provider").strip()
+    assert html == ""
+
+
+def test_text_input_default_radius_is_md() -> None:
+    html = CATALOG.render("TextInput", name="email")
+    assert "rounded-md" in html
+    assert "rounded-lg" not in html
+
+
+def test_text_input_radius_lg_for_auth_cards() -> None:
+    html = CATALOG.render("TextInput", name="email", radius="lg")
+    assert "rounded-lg" in html
+    assert "rounded-md" not in html
+
+
+def test_text_input_autocomplete_and_minlength_pass_through() -> None:
+    html = CATALOG.render(
+        "TextInput",
+        name="password",
+        type="password",
+        radius="lg",
+        autocomplete="new-password",
+        minlength=8,
+    )
+    assert 'autocomplete="new-password"' in html
+    assert 'minlength="8"' in html
+
+
+def test_text_input_omits_autocomplete_and_minlength_when_unset() -> None:
+    html = CATALOG.render("TextInput", name="email")
+    assert "autocomplete=" not in html
+    assert "minlength=" not in html
+
+
+def test_text_input_passes_through_arbitrary_attrs() -> None:
+    # attrs.render() flows undeclared HTML attributes (readonly, onkeydown,
+    # data-*) so callers don't enumerate each as a prop.
+    html = CATALOG.render(
+        "TextInput",
+        name="email",
+        _attrs={"id": "new-email", "onkeydown": "addEmail()", "data-x": "y"},
+    )
+    assert 'id="new-email"' in html
+    assert 'onkeydown="addEmail()"' in html
+    assert 'data-x="y"' in html
+
+
+def test_select_renders_with_option_children_and_focus_ring() -> None:
+    html = CATALOG.render(
+        "Select",
+        name="launch_mode",
+        _content='<option value="LIMA">lima</option>',
+    )
+    assert "<select" in html
+    assert 'name="launch_mode"' in html
+    assert '<option value="LIMA">lima</option>' in html
+    # Inherits the shared INPUT_BASE focus ring.
+    assert "focus:border-blue-600" in html
+    assert "focus:ring-2" in html
+    # Default width is w-full.
+    assert "w-full" in html
+
+
+def test_select_honors_width_prop() -> None:
+    html = CATALOG.render("Select", name="x", width="w-48", _content="")
+    assert "w-48" in html
+    # Default w-full should be replaced, not added alongside.
+    assert " w-full " not in html
+
+
+def test_link_regular_uses_blue_underline_recipe() -> None:
+    html = CATALOG.render("Link", href="/x", _content="back").strip()
+    assert "<a " in html
+    assert 'href="/x"' in html
+    assert "text-blue-600" in html
+    assert "hover:underline" in html
+    assert "font-medium" not in html
+
+
+def test_link_medium_weight_adds_font_medium() -> None:
+    html = CATALOG.render("Link", href="/x", weight="medium", _content="Sign in")
+    assert "font-medium" in html
+
+
+def test_link_passes_through_arbitrary_attrs() -> None:
+    html = CATALOG.render(
+        "Link",
+        href="https://example.com",
+        _content="docs",
+        _attrs={"target": "_blank", "rel": "noopener"},
+    )
+    assert 'target="_blank"' in html
+    assert 'rel="noopener"' in html
+
+
+def test_textarea_renders_value_in_content_with_shared_shell() -> None:
+    html = CATALOG.render(
+        "Textarea",
+        name="env",
+        value="line1\nline2",
+        rows=6,
+        extra="font-mono",
+    )
+    assert "<textarea" in html
+    assert 'name="env"' in html
+    assert 'rows="6"' in html
+    assert "line1\nline2" in html
+    assert "font-mono" in html
+    assert "focus:border-blue-600" in html
+
+
+def test_section_header_plain_has_no_divider_classes() -> None:
+    html = CATALOG.render("SectionHeader", _content="Account")
+    assert "Account" in html
+    assert "border-t" not in html
+    assert "mt-8" not in html
+
+
+def test_section_header_divider_renders_top_border() -> None:
+    html = CATALOG.render("SectionHeader", divider=True, _content="Sharing")
+    assert "Sharing" in html
+    assert "border-t" in html
+    assert "border-zinc-200" in html
+    assert "mt-8" in html
+    assert "pt-5" in html
+
+
+def test_dialog_close_button_renders_x_svg_and_onclick() -> None:
+    html = CATALOG.render("DialogCloseButton", onclick="closePermissionDialog()")
+    assert 'aria-label="Close"' in html
+    assert 'onclick="closePermissionDialog()"' in html
+    # The X-glyph path data fragment that identifies the close SVG.
+    assert "M4.22 4.22a.75.75 0 0 1 1.06 0L10 8.94" in html
+
+
+def test_dialog_close_button_id_optional() -> None:
+    without_id = CATALOG.render("DialogCloseButton", onclick="x()")
+    with_id = CATALOG.render("DialogCloseButton", id="my-close", onclick="x()")
+    assert "id=" not in without_id
+    assert 'id="my-close"' in with_id
+
+
+def test_modal_renders_hidden_overlay_with_default_card() -> None:
+    html = CATALOG.render("Modal", id="my-dialog", _content="<p>body</p>")
+    assert 'id="my-dialog"' in html
+    assert "hidden fixed inset-0 z-50" in html
+    assert "bg-black/30" in html
+    assert "<p>body</p>" in html
+
+
+def test_modal_card_extra_appends_to_inner_card_classes() -> None:
+    html = CATALOG.render("Modal", id="x", card_extra="text-left", _content="hi")
+    # The card_extra value lands on the inner card div, NOT on the outer overlay.
+    assert "text-left" in html
+
+
+def test_status_badge_renders_each_variant_class_set() -> None:
+    variants_to_class = {
+        "neutral": "bg-zinc-100",
+        "success": "bg-emerald-100",
+        "error": "bg-red-100",
+        "warn": "bg-amber-100",
+        "info": "bg-blue-100",
+    }
+    for variant, css_class in variants_to_class.items():
+        html = CATALOG.render("StatusBadge", variant=variant, _content="x")
+        assert css_class in html, f"variant={variant} missing {css_class}"
+
+
+def test_status_badge_size_xs_uses_text_xs() -> None:
+    html = CATALOG.render("StatusBadge", size="xs", _content="x")
+    assert "text-xs" in html
+    assert "text-sm" not in html
+
+
+def test_status_badge_title_renders_when_present() -> None:
+    html = CATALOG.render("StatusBadge", title="why this is shown", _content="x")
+    assert 'title="why this is shown"' in html
+
+
+def test_status_badge_title_omitted_when_empty() -> None:
+    html = CATALOG.render("StatusBadge", _content="x")
+    assert "title=" not in html

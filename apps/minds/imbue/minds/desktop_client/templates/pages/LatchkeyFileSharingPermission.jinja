@@ -1,0 +1,54 @@
+{#def agent_id, request_id, ws_name, rationale, file_path, access, access_human_label, display_name, accent, mngr_forward_origin #}
+{#
+  Latchkey file-sharing permission request dialog. Composes the
+  Permissions* components; provides a single hidden checked
+  ``name="permissions"`` input so the Approve button enables on first
+  paint (file sharing has no per-permission choice).
+#}
+<PermissionsDialog :display_name="display_name" :accent="accent">
+  <PermissionsHeader :display_name="display_name" :ws_name="ws_name" :agent_id="agent_id" :rationale="rationale" />
+
+  <PermissionsForm :request_id="request_id">
+    {# Single summary sentence (mirroring the predefined dialog's simple view)
+       naming the requesting workspace, the access level, and that the grant
+       is host-wide, followed by a white card showing the absolute file
+       path and an access badge. #}
+    <p class="text-sm text-zinc-700 mb-3">
+      {% if access == 'WRITE' %}
+        Approving will grant {{ ws_name or agent_id }} and its sibling agents
+        <strong>read and write</strong> access (including delete) to the following file/directory:
+      {% else %}
+        Approving will grant {{ ws_name or agent_id }} and its sibling agents
+        <strong>read-only</strong> access to the following file:
+      {% endif %}
+    </p>
+    <Card layout="row">
+      <code class="text-sm font-mono text-zinc-900 break-all flex-1 min-w-0">{{ file_path }}</code>
+      {# Access mode badge -- emerald tint for read-only, amber for
+         read+write so the broader grant stands out visually. #}
+      {% if access == 'WRITE' %}
+        <span class="shrink-0 text-xs font-semibold uppercase tracking-wide px-2 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-200">
+          {{ access_human_label }}
+        </span>
+      {% else %}
+        <span class="shrink-0 text-xs font-semibold uppercase tracking-wide px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200">
+          {{ access_human_label }}
+        </span>
+      {% endif %}
+    </Card>
+    {# Hidden checked input named ``permissions`` so the base dialog's
+       updateApproveState enables the Approve button on first paint:
+       there is no per-permission choice in this flow, the request itself
+       already names the single (path, access) pair. #}
+    <input type="checkbox" name="permissions" value="file-sharing" checked hidden>
+  </PermissionsForm>
+
+  <div id="permissions-progress" class="hidden mt-4">
+    <Notice variant="info">
+      <span class="font-medium">Granting permission...</span>
+    </Notice>
+  </div>
+
+  <PermissionsManualCredentials />
+  <PermissionsError />
+</PermissionsDialog>

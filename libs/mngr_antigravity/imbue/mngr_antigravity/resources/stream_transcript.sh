@@ -6,12 +6,15 @@
 # Multiple agy instances on the same host share that brain/ directory, so a
 # naive watch-all would interleave foreign conversations into our output.
 #
-# To scope the watch to *this* agent, we read agy's own `--log-file` output
-# (configured by AntigravityAgent.assemble_command) for lines of the form
-#   `Created conversation <uuid>`
-# Every uuid that appears in our agy log file is owned by this agent. New
-# conversation IDs can appear at any time -- /fork, /new, resume -- so the
-# discovery step re-runs every poll cycle.
+# To scope the watch to *this* agent, we read the per-agent conversation-ids
+# file that the PreInvocation capture hook maintains
+# (capture_conversation_id.sh; see CONVERSATION_IDS_FILENAME in
+# antigravity_config.py). Every uuid recorded there is owned by this agent.
+# New conversation IDs can appear at any time -- /fork, /new, /switch, resume
+# -- so the discovery step re-runs every poll cycle. (Earlier versions grepped
+# agy's --log-file for `Created conversation <uuid>` lines; the hook is the
+# single source of truth now, which also avoids depending on agy's log
+# wording.)
 #
 # Per-conversation offsets are stored in
 # <agent-state-dir>/plugin/antigravity/.transcript_offsets/<conv_id>
@@ -35,13 +38,14 @@
 # Environment:
 #   MNGR_AGENT_STATE_DIR        - agent state directory (contains commands/)
 #   ANTIGRAVITY_APP_DATA_DIR    - agy app-data dir (default ~/.gemini/antigravity-cli)
-#   ANTIGRAVITY_AGY_LOG_FILE    - agy --log-file location (required)
 
 set -euo pipefail
 
 AGENT_DATA_DIR="${MNGR_AGENT_STATE_DIR:?MNGR_AGENT_STATE_DIR must be set}"
-AGY_LOG_FILE="${ANTIGRAVITY_AGY_LOG_FILE:?ANTIGRAVITY_AGY_LOG_FILE must be set}"
 APP_DATA_DIR="${ANTIGRAVITY_APP_DATA_DIR:-$HOME/.gemini/antigravity-cli}"
+# Conversation-ids file written by capture_conversation_id.sh; kept in sync
+# with CONVERSATION_IDS_FILENAME in antigravity_config.py.
+CONVERSATION_IDS_FILE="$AGENT_DATA_DIR/antigravity_conversation_ids"
 OUTPUT_FILE="$AGENT_DATA_DIR/logs/antigravity_transcript/events.jsonl"
 OFFSET_DIR="$AGENT_DATA_DIR/plugin/antigravity/.transcript_offsets"
 POLL_INTERVAL=1
@@ -84,22 +88,22 @@ _transcript_path() {
     echo "$APP_DATA_DIR/brain/$1/.system_generated/logs/transcript.jsonl"
 }
 
-# Discover conversation IDs owned by this agent by scanning agy's log.
+# Discover conversation IDs owned by this agent from the capture-hook file.
 #
-# agy writes `Created conversation <uuid>` to its --log-file every time it
-# opens a new conversation (new session, /fork, /new). Resumed conversations
-# (-c / --conversation) emit `Resumed conversation <uuid>` -- we accept both
-# verbs. The log is re-scanned on every poll cycle; this is cheap relative
-# to the JSONL emit step and keeps the implementation stateless.
+# capture_conversation_id.sh appends a uuid to CONVERSATION_IDS_FILE whenever
+# the active conversation changes (new session, /fork, /new, /switch, resume).
+# We read every distinct uuid from it. The file is re-read on every poll
+# cycle; this is cheap relative to the JSONL emit step and keeps the
+# implementation stateless. The grep validates the uuid shape defensively so a
+# stray line can't inject a bogus conversation id.
 #
 # Echoes one uuid per line.
 _find_conversation_ids() {
-    if [ ! -f "$AGY_LOG_FILE" ]; then
+    if [ ! -f "$CONVERSATION_IDS_FILE" ]; then
         return 0
     fi
     # uuid pattern: 8-4-4-4-12 hex chars
-    grep -oE "(Created|Resumed) conversation [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}" "$AGY_LOG_FILE" 2>/dev/null \
-        | awk '{print $3}' \
+    grep -oE "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" "$CONVERSATION_IDS_FILE" 2>/dev/null \
         | sort -u
 }
 
@@ -225,7 +229,7 @@ main() {
     fi
 
     log_info "Stream transcript started"
-    log_info "  Agy log file: $AGY_LOG_FILE"
+    log_info "  Conversation IDs file: $CONVERSATION_IDS_FILE"
     log_info "  App data dir: $APP_DATA_DIR"
     log_info "  Output: $OUTPUT_FILE"
     log_info "  Poll interval: ${POLL_INTERVAL}s"

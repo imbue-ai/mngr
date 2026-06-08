@@ -34,11 +34,11 @@ members = [
     "imbue-mngr-pair",
     "imbue-mngr-pi-coding",
     "imbue-mngr-recursive",
+    "imbue-mngr-robinhood",
     "imbue-mngr-schedule",
     "imbue-mngr-tmr",
     "imbue-mngr-ttyd",
     "imbue-mngr-tutor",
-    "imbue-mngr-uncapped-claude",
     "imbue-mngr-usage",
     "imbue-mngr-vps-docker",
     "imbue-mngr-vultr",
@@ -607,6 +607,24 @@ wheels = [
 ]
 
 [[package]]
+name = "claude-agent-sdk"
+version = "0.2.86"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "mcp" },
+    { name = "sniffio" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/06/e1/10df0065dc9cb14c6591a3c917a63ee2a27a159b6f9876b0fb0babe0eef8/claude_agent_sdk-0.2.86.tar.gz", hash = "sha256:078f4bca0278bbad3183635f553e184857405adaff44afd31f61f6af9e62a65a", size = 252061, upload-time = "2026-05-22T22:25:13.515Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1c/91/46765917de445c2e020ba795beeb2079b73e099475cd7045c637a8fb9ff1/claude_agent_sdk-0.2.86-py3-none-macosx_11_0_arm64.whl", hash = "sha256:9e0a8e247d136d5301a8891d775b7c2fdf7c569d1a88462540b88a2529343c27", size = 63055147, upload-time = "2026-05-22T22:25:17.431Z" },
+    { url = "https://files.pythonhosted.org/packages/97/11/5bfc017619e6d4ad5281fab07b640a56107856bcd33321179b01d82a6887/claude_agent_sdk-0.2.86-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:d60fa40e3a17d8aa2bf86d366a13c6713599428a16a9ab33be8a84323656a70a", size = 65089918, upload-time = "2026-05-22T22:25:21.06Z" },
+    { url = "https://files.pythonhosted.org/packages/dc/a2/a9ec0d6753552e7e0858bf62acd308cf9b28b8b9966720d733194973ce93/claude_agent_sdk-0.2.86-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:67c02ba60ed24d8457ed1183ce55d398f0d4117ea86b1a463fddc5781799773f", size = 72726163, upload-time = "2026-05-22T22:25:25.699Z" },
+    { url = "https://files.pythonhosted.org/packages/f3/fa/b6ee8a922c0b2be6827daef17d1ef79371ab41dde0879614bfa9dd82a4a7/claude_agent_sdk-0.2.86-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:a1f481ba887b355dd93fe56cd7123ff77690ab32ac8fa55fbc38bc77c3566eba", size = 72887673, upload-time = "2026-05-22T22:25:31.003Z" },
+    { url = "https://files.pythonhosted.org/packages/d7/8a/7f90a8bd940e6f5a487a2113654027eae5d0f2107322457cb289f63c34df/claude_agent_sdk-0.2.86-py3-none-win_amd64.whl", hash = "sha256:28089d0d03e563494e24a2d079d80966c2a3c85014e35a15ff49572e7a555b56", size = 73511261, upload-time = "2026-05-22T22:25:36.868Z" },
+]
+
+[[package]]
 name = "click"
 version = "8.3.3"
 source = { registry = "https://pypi.org/simple" }
@@ -641,7 +659,7 @@ wheels = [
 
 [[package]]
 name = "concurrency-group"
-version = "0.1.18"
+version = "0.1.19"
 source = { editable = "libs/concurrency_group" }
 dependencies = [
     { name = "imbue-common" },
@@ -1610,11 +1628,11 @@ wheels = [
 
 [[package]]
 name = "idna"
-version = "3.14"
+version = "3.16"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/05/b1/efac073e0c297ecf2fb33c346989a529d4e19164f1759102dee5953ee17e/idna-3.14.tar.gz", hash = "sha256:466d810d7a2cc1022bea9b037c39728d51ae7dad40d480fc9b7d7ecf98ba8ee3", size = 198272, upload-time = "2026-05-10T20:32:15.935Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1a/88/bcf9709822fe69d02c2a6a77956c98ce6ea8ca8767a9aadcedc7eb6a2390/idna-3.16.tar.gz", hash = "sha256:d7a6da03db833450fca25d2358ac9ff06cd624577a4aea3a596d5c0f77b8e03d", size = 203770, upload-time = "2026-05-22T00:16:18.781Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/6c/3c/3f62dee257eb3d6b2c1ef2a09d36d9793c7111156a73b5654d2c2305e5ce/idna-3.14-py3-none-any.whl", hash = "sha256:e677eaf072e290f7b725f9acf0b3a2bd55f9fd6f7c70abe5f0e34823d0accf69", size = 72184, upload-time = "2026-05-10T20:32:14.295Z" },
+    { url = "https://files.pythonhosted.org/packages/94/16/70255075a9859a0e3adb789b68ceb0e210dec03934245fd98d248226572f/idna-3.16-py3-none-any.whl", hash = "sha256:cc246e3a3f89580c3a951b5ad298ca4638078b2cdd4f115654332b5c26daded5", size = 74165, upload-time = "2026-05-22T00:16:16.698Z" },
 ]
 
 [[package]]
@@ -1670,7 +1688,7 @@ dev = [
 
 [[package]]
 name = "imbue-common"
-version = "0.1.18"
+version = "0.1.19"
 source = { editable = "libs/imbue_common" }
 dependencies = [
     { name = "click" },
@@ -1700,7 +1718,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "imbue-mngr"
-version = "0.2.10"
+version = "0.2.11"
 source = { editable = "libs/mngr" }
 dependencies = [
     { name = "cel-python" },
@@ -1759,7 +1777,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-antigravity"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "libs/mngr_antigravity" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -1770,7 +1788,7 @@ requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-claude"
-version = "0.2.10"
+version = "0.2.11"
 source = { editable = "libs/mngr_claude" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -1833,7 +1851,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-file"
-version = "0.1.7"
+version = "0.1.8"
 source = { editable = "libs/mngr_file" }
 dependencies = [
     { name = "click-option-group" },
@@ -1924,7 +1942,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-kanpan"
-version = "0.2.10"
+version = "0.2.11"
 source = { editable = "libs/mngr_kanpan" }
 dependencies = [
     { name = "click" },
@@ -1954,6 +1972,7 @@ dependencies = [
     { name = "pluggy" },
     { name = "psutil" },
     { name = "pydantic" },
+    { name = "watchdog" },
 ]
 
 [package.metadata]
@@ -1968,11 +1987,12 @@ requires-dist = [
     { name = "pluggy", specifier = ">=1.0" },
     { name = "psutil", specifier = ">=5.9" },
     { name = "pydantic", specifier = ">=2.0" },
+    { name = "watchdog", specifier = ">=4.0" },
 ]
 
 [[package]]
 name = "imbue-mngr-lima"
-version = "0.1.3"
+version = "0.1.4"
 source = { editable = "libs/mngr_lima" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -1998,7 +2018,7 @@ requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-modal"
-version = "0.2.10"
+version = "0.2.11"
 source = { editable = "libs/mngr_modal" }
 dependencies = [
     { name = "dockerfile-parse" },
@@ -2017,7 +2037,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-notifications"
-version = "0.1.7"
+version = "0.1.8"
 source = { editable = "libs/mngr_notifications" }
 dependencies = [
     { name = "click-option-group" },
@@ -2032,7 +2052,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-opencode"
-version = "0.2.10"
+version = "0.2.11"
 source = { editable = "libs/mngr_opencode" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -2060,7 +2080,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-pair"
-version = "0.2.10"
+version = "0.2.11"
 source = { editable = "libs/mngr_pair" }
 dependencies = [
     { name = "click-option-group" },
@@ -2075,7 +2095,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-pi-coding"
-version = "0.1.7"
+version = "0.1.8"
 source = { editable = "libs/mngr_pi_coding" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -2086,7 +2106,7 @@ requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-recursive"
-version = "0.1.7"
+version = "0.1.8"
 source = { editable = "libs/mngr_recursive" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -2098,6 +2118,31 @@ requires-dist = [
     { name = "imbue-mngr", editable = "libs/mngr" },
     { name = "watchdog", specifier = ">=4.0" },
 ]
+
+[[package]]
+name = "imbue-mngr-robinhood"
+version = "0.1.0"
+source = { editable = "libs/mngr_robinhood" }
+dependencies = [
+    { name = "claude-agent-sdk" },
+    { name = "imbue-mngr" },
+    { name = "imbue-mngr-claude" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest-asyncio" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "claude-agent-sdk", specifier = ">=0.1.0" },
+    { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "imbue-mngr-claude", editable = "libs/mngr_claude" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest-asyncio", specifier = ">=0.24.0" }]
 
 [[package]]
 name = "imbue-mngr-schedule"
@@ -2147,7 +2192,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-ttyd"
-version = "0.1.7"
+version = "0.1.8"
 source = { editable = "libs/mngr_ttyd" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -2158,7 +2203,7 @@ requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-tutor"
-version = "0.2.10"
+version = "0.2.11"
 source = { editable = "libs/mngr_tutor" }
 dependencies = [
     { name = "click" },
@@ -2171,21 +2216,6 @@ requires-dist = [
     { name = "click", specifier = ">=8.0" },
     { name = "click-option-group", specifier = ">=0.5.6" },
     { name = "imbue-mngr", editable = "libs/mngr" },
-]
-
-[[package]]
-name = "imbue-mngr-uncapped-claude"
-version = "0.1.0"
-source = { editable = "libs/mngr_uncapped_claude" }
-dependencies = [
-    { name = "imbue-mngr" },
-    { name = "imbue-mngr-claude" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "imbue-mngr", editable = "libs/mngr" },
-    { name = "imbue-mngr-claude", editable = "libs/mngr_claude" },
 ]
 
 [[package]]
@@ -2209,7 +2239,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-vps-docker"
-version = "0.1.3"
+version = "0.1.4"
 source = { editable = "libs/mngr_vps_docker" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -2220,7 +2250,7 @@ requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-vultr"
-version = "0.1.3"
+version = "0.1.4"
 source = { editable = "libs/mngr_vultr" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -2237,7 +2267,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-wait"
-version = "0.1.7"
+version = "0.1.8"
 source = { editable = "libs/mngr_wait" }
 dependencies = [
     { name = "click-option-group" },
@@ -2338,6 +2368,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/df/bf/f7da0350254c0ed7c72f3e33cef02e048281fec7ecec5f032d4aac52226b/jinja2-3.1.6.tar.gz", hash = "sha256:0137fb05990d35f1275a587e9aee6d56da821fc83491a0fb838183be43f66d6d", size = 245115, upload-time = "2025-03-05T20:05:02.478Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl", hash = "sha256:85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67", size = 134899, upload-time = "2025-03-05T20:05:00.369Z" },
+]
+
+[[package]]
+name = "jinjax"
+version = "0.63"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jinja2" },
+    { name = "markupsafe" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6c/11/d86874087e96cd56fd59050b9a87beede2fa8ea6e1b16632324ae9d2f828/jinjax-0.63.tar.gz", hash = "sha256:2cab0bb8e336a0a12a46541e407ad002bc70f3408a36d2a560215ac791fee006", size = 31431, upload-time = "2025-12-03T20:07:03.788Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/74/8d/6c52f82511e523e4ef219bcdb2b601991f71995662b5a2e55f85a6ef8adb/jinjax-0.63-py3-none-any.whl", hash = "sha256:74b0c9a6dc360ed4b9d3ef26dd46e280d61f89ce847d0f29dd876f2f062fdd94", size = 20224, upload-time = "2025-12-03T20:07:04.815Z" },
 ]
 
 [[package]]
@@ -2715,6 +2758,7 @@ dependencies = [
     { name = "imbue-mngr-vps-docker" },
     { name = "itsdangerous" },
     { name = "jinja2" },
+    { name = "jinjax" },
     { name = "loguru" },
     { name = "modal" },
     { name = "paramiko" },
@@ -2745,6 +2789,7 @@ requires-dist = [
     { name = "imbue-mngr-vps-docker", editable = "libs/mngr_vps_docker" },
     { name = "itsdangerous", specifier = ">=2.2.0" },
     { name = "jinja2", specifier = ">=3.1.0" },
+    { name = "jinjax", specifier = ">=0.45" },
     { name = "loguru" },
     { name = "modal", specifier = ">=1.4.3" },
     { name = "paramiko", specifier = ">=3.0" },
@@ -2804,7 +2849,7 @@ requires-dist = [
 
 [[package]]
 name = "modal-proxy"
-version = "0.1.11"
+version = "0.1.12"
 source = { editable = "libs/modal_proxy" }
 dependencies = [
     { name = "concurrency-group" },
@@ -3718,6 +3763,19 @@ wheels = [
 ]
 
 [[package]]
+name = "pytest-asyncio"
+version = "1.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pytest" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/90/2c/8af215c0f776415f3590cac4f9086ccefd6fd463befeae41cd4d3f193e5a/pytest_asyncio-1.3.0.tar.gz", hash = "sha256:d7f52f36d231b80ee124cd216ffb19369aa168fc10095013c6b014a34d3ee9e5", size = 50087, upload-time = "2025-11-10T16:07:47.256Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e5/35/f8b19922b6a25bc0880171a2f1a003eaeb93657475193ab516fd87cac9da/pytest_asyncio-1.3.0-py3-none-any.whl", hash = "sha256:611e26147c7f77640e6d0a92a38ed17c3e9848063698d5c93d5aa7aa11cebff5", size = 15075, upload-time = "2025-11-10T16:07:45.537Z" },
+]
+
+[[package]]
 name = "pytest-cov"
 version = "7.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -4085,7 +4143,7 @@ wheels = [
 
 [[package]]
 name = "resource-guards"
-version = "0.1.7"
+version = "0.1.8"
 source = { editable = "libs/resource_guards" }
 dependencies = [
     { name = "pluggy" },
@@ -4525,15 +4583,15 @@ wheels = [
 
 [[package]]
 name = "starlette"
-version = "1.0.0"
+version = "1.0.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
     { name = "typing-extensions", marker = "python_full_version < '3.13'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/81/69/17425771797c36cded50b7fe44e850315d039f28b15901ab44839e70b593/starlette-1.0.0.tar.gz", hash = "sha256:6a4beaf1f81bb472fd19ea9b918b50dc3a77a6f2e190a12954b25e6ed5eea149", size = 2655289, upload-time = "2026-03-22T18:29:46.779Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/08/a3/84e821cc54b4ab50ae6dbc6ac3800a651b65ec35f045cc73785380654057/starlette-1.0.1.tar.gz", hash = "sha256:512399c5f1de7fac99c88572212ded9ddeddef2fb32afa82d724000e88b38f4f", size = 2659596, upload-time = "2026-05-21T21:58:58.433Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0b/c9/584bc9651441b4ba60cc4d557d8a547b5aff901af35bda3a4ee30c819b82/starlette-1.0.0-py3-none-any.whl", hash = "sha256:d3ec55e0bb321692d275455ddfd3df75fff145d009685eb40dc91fc66b03d38b", size = 72651, upload-time = "2026-03-22T18:29:45.111Z" },
+    { url = "https://files.pythonhosted.org/packages/ec/e1/b2df4bc09a1e51ff664c1e17018a4274b42e5e9352e4a478ea540512dc88/starlette-1.0.1-py3-none-any.whl", hash = "sha256:7c0e69b2ee1c848bd54669d908500117a3ee13de603a21427e5c6fc1adf98dcd", size = 72802, upload-time = "2026-05-21T21:58:56.551Z" },
 ]
 
 [[package]]

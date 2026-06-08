@@ -16,6 +16,7 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import RandomId
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.imbue_common.primitives import PositiveInt
 from imbue.imbue_common.pure import pure
 
 # === Enums ===
@@ -90,6 +91,33 @@ class IdleMode(UpperCaseStrEnum):
     RUN = auto()
     CUSTOM = auto()
     DISABLED = auto()
+
+
+class TmuxWindowSize(UpperCaseStrEnum):
+    """Resize policy for an agent's tmux window (tmux ``window-size`` option).
+
+    The lowercase of each value is exactly the token tmux accepts. ``MANUAL``
+    pins the window to its configured size and never auto-resizes to attached
+    clients; ``LATEST`` (tmux's own default) sizes to the most recent client;
+    ``LARGEST`` / ``SMALLEST`` size to the largest / smallest attached client.
+    """
+
+    MANUAL = auto()
+    LATEST = auto()
+    LARGEST = auto()
+    SMALLEST = auto()
+
+
+class TmuxWidth(PositiveInt):
+    """Width, in columns, of an agent's tmux window. Must be > 0."""
+
+    ...
+
+
+class TmuxHeight(PositiveInt):
+    """Height, in rows, of an agent's tmux window. Must be > 0."""
+
+    ...
 
 
 class ActivitySource(UpperCaseStrEnum):

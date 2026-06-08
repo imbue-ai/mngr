@@ -4,6 +4,35 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-06
+
+Added approximate response streaming for Claude agents, driven by watching the agent's tmux pane.
+
+- New `streaming_snapshot_interval_seconds` (float, default `0.0`) on the `claude` agent type config. When `> 0`, a background watcher polls the agent's tmux pane every N seconds and writes the in-progress assistant text to `$MNGR_AGENT_STATE_DIR/plugin/claude/stream_buffer`. When `<= 0` (the default) the watcher is neither provisioned nor run, so existing behavior is unchanged.
+- `stream_buffer` format: line 1 is the `uuid` of the last *complete* assistant message (empty string if none yet, read from `logs/claude_transcript/events.jsonl`), and lines 2+ are the in-progress assistant text reverse-mapped from the terminal rendering back into markdown. It is written atomically (temp file + `mv`), cleared on watcher startup, and emptied (body cleared, id line kept) when the agent goes idle.
+- New self-contained watcher script `resources/stream_snapshot.py` (stdlib-only, like `sync_keychain_credentials.py`). It captures the pane with `tmux capture-pane -e -J` (ANSI codes preserved, soft-wraps rejoined), identifies the latest assistant-text block by the `●` marker's color (assistant markers are the achromatic default text color; chromatic tool-call and mid-gray status markers are ignored), and reverse-maps bold/italic, inline code, links (OSC 8 hyperlinks), blockquotes, lists, code blocks, and tables (box-drawing back to pipe syntax). The pure parsing functions are unit-tested directly against real captured fixtures.
+- The body is strict-append within a message: successive visible-pane snapshots are overlap-stitched (longest suffix/prefix line match) so the full message is reconstructed as it scrolls; a stale shorter snapshot that is a prefix of the accumulated body is ignored, and a genuinely non-overlapping snapshot resets to a new message. A trailing table is held back until its raw form is stable across polls, then rendered, and each successive render is a superset of the previous one so the rendered body never shrinks or duplicates.
+- The poll interval is provisioned to a per-agent file (`plugin/claude/stream_interval`) that the watcher reads at runtime, rather than relying on env-var propagation into the background-tasks subshell. `claude_background_tasks.sh` launches and restarts the watcher whenever the script is present (the provision-time presence check is the single gate, like the common-transcript converter). Provisioning fails fast if streaming is enabled but the host lacks `python3`.
+- Added `ClaudeAgent.get_stream_buffer_path()` so other code (e.g. `mngr robinhood`) can locate and read the buffer.
+
+Not in scope: perfect markdown fidelity, heading-level or code-block-language recovery, reasoning/"thinking" block streaming, streaming for non-claude agent types, and any new top-level `mngr` CLI command to read the buffer.
+
+## 2026-06-05
+
+Internal refactor (no behavior change): `ClaudeAgent._find_git_source_path` now delegates to the shared core helper `imbue.mngr.utils.git_utils.find_git_source_path` instead of inlining the `find_git_common_dir` + parent logic, which was duplicated in the `antigravity` plugin.
+
+Updated changelog references following the `mngr_uncapped_claude` plugin rename:
+mentions of the `mngr uncapped-claude` command in this project's changelog now
+read `mngr robinhood`. No code changes.
+
+## 2026-06-04
+
+Replaced the module-local `_get_local_host` helper with the shared `get_local_host` from `imbue.mngr.api.providers` (deduplication; no behavior change).
+
+## 2026-06-02
+
+- pyproject.toml: align `imbue-mngr*==` pin stragglers with the satellites bumped in main's `e22e7010e` release commit. Several `imbue-mngr-*` libs still pinned to older versions even though `libs/mngr` had moved to 0.2.10; building the apps/minds ToDesktop bundle from main today would fail at `uv lock` in `apps/minds/scripts/build.js` because the workspace constraint graph is unsatisfiable. Day-to-day dev hides this because `[tool.uv.sources]` redirects every `imbue-mngr-*` to its workspace path, bypassing the `==` pin.
+
 ## 2026-06-01
 
 Fixed `--adopt-session` rejecting valid Claude agent subtypes. It now accepts any agent type that resolves to a Claude agent (including config-defined templates like `write-plus` whose `parent_type` chain reaches `claude`), instead of only the literal `claude` type name. The check routes through the centralized `resolve_agent_type` registry rather than a string comparison.
@@ -67,7 +96,7 @@ streamer and common-transcript converter for stopped agents.
 
 Fix the intro in `UNABRIDGED_CHANGELOG.md` so it references the correct entries directory. The path was `changelog/<project>/` (which never existed); the actual layout is `<project_dir>/changelog/`.
 
-`resolve_shared_claude_config_dir()` (used when a claude agent opts into `use_env_config_dir=True`) now falls back to `~/.claude/` when `$CLAUDE_CONFIG_DIR` is unset, instead of raising. The fallback matches claude's own default, so callers can treat that flag as a pure "don't touch the config dir" knob even on machines where the user never sets `CLAUDE_CONFIG_DIR`. Also drops `ORIGINAL_CLAUDE_CONFIG_DIR` from the agent env in the `mngr uncapped-claude` flow so credential sync reads from the live `$CLAUDE_CONFIG_DIR` (matters when uncapped-claude is invoked from inside another mngr claude agent).
+`resolve_shared_claude_config_dir()` (used when a claude agent opts into `use_env_config_dir=True`) now falls back to `~/.claude/` when `$CLAUDE_CONFIG_DIR` is unset, instead of raising. The fallback matches claude's own default, so callers can treat that flag as a pure "don't touch the config dir" knob even on machines where the user never sets `CLAUDE_CONFIG_DIR`. Also drops `ORIGINAL_CLAUDE_CONFIG_DIR` from the agent env in the `mngr robinhood` flow so credential sync reads from the live `$CLAUDE_CONFIG_DIR` (matters when robinhood is invoked from inside another mngr claude agent).
 
 ## 2026-05-20
 

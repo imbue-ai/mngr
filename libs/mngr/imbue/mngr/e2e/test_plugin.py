@@ -9,14 +9,6 @@ from imbue.skitwright.expect import expect
 
 
 @pytest.mark.release
-def test_plugin_list_shows_installed(e2e: E2eSession) -> None:
-    result = e2e.run("mngr plugin list", comment="List all installed plugins")
-    expect(result).to_succeed()
-    # The dev environment always has the claude plugin registered
-    expect(result.stdout).to_contain("claude")
-
-
-@pytest.mark.release
 def test_plugin_disable_enable_roundtrip(e2e: E2eSession) -> None:
     # Disable a plugin
     disable_result = e2e.run(

@@ -477,3 +477,18 @@ def find_git_common_dir(path: Path, cg: ConcurrencyGroup) -> Path | None:
     except ProcessError as e:
         logger.trace("Failed to find main .git dir: {}", e)
         return None
+
+
+def find_git_source_path(path: Path, cg: ConcurrencyGroup) -> Path | None:
+    """Find the source repository root for ``path``, if it is inside a git repo.
+
+    Returns the parent of the git common dir (the source repo root) -- for a
+    worktree this is the main repository, for a regular checkout it is the repo
+    itself -- or ``None`` if ``path`` is not inside a git repo. The source-path
+    concept is what lets a single trust grant cover every worktree of the same
+    repo: it is the durable thing agent plugins persist.
+    """
+    git_common_dir = find_git_common_dir(path, cg)
+    if git_common_dir is None:
+        return None
+    return git_common_dir.parent

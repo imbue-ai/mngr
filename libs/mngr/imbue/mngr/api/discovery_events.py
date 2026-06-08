@@ -4,6 +4,7 @@ import threading
 from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
+from collections.abc import Set as AbstractSet
 from datetime import datetime
 from datetime import timezone
 from enum import auto
@@ -131,9 +132,15 @@ class FullDiscoverySnapshotEvent(EventEnvelope):
     """A full snapshot of all agents and hosts from a complete discovery scan.
 
     Always emitted on every discovery poll, including when zero providers
-    succeeded. Consumers treat this as authoritative state: previously-known
-    agents and hosts for providers in ``error_by_provider_name`` MUST NOT be
-    retained (their state is genuinely unknown, not just stale).
+    succeeded. A snapshot is authoritative *only* for providers that
+    succeeded on this poll. Previously-known agents and hosts whose provider
+    is in ``error_by_provider_name`` MUST be retained from prior consumer
+    state and surfaced as unknown/stale -- their absence from this snapshot
+    reflects the errored poll, not a confirmed removal. A retained item is
+    dropped only on an explicit destroy event or a subsequent *successful*
+    (non-errored) snapshot of its provider that shows it absent. See
+    :func:`partition_removed_agents_by_provider_error`, the shared helper
+    every consumer uses to make this decision.
     """
 
     type: Literal[DiscoveryEventType.DISCOVERY_FULL] = DiscoveryEventType.DISCOVERY_FULL
@@ -196,15 +203,63 @@ _DISCOVERY_EVENT_ADAPTER: Final[TypeAdapter[DiscoveryEvent]] = TypeAdapter(Disco
 
 @pure
 def get_discovery_events_dir(config: MngrConfig) -> Path:
-    """Return the directory for discovery event files."""
-    host_dir = Path(config.default_host_dir).expanduser()
-    return host_dir / "events" / "mngr" / "discovery"
+    """Return the directory for discovery event files.
+
+    Both the snapshot writers (under ``list_agents``) and the reader/tail in
+    ``run_discovery_stream`` / ``tail_discovery_events_file`` derive their path from
+    this function, so every mngr process on the same host dir reads and writes a
+    single shared discovery log.
+    """
+    return config.default_host_dir.expanduser() / "events" / "mngr" / "discovery"
 
 
 @pure
 def get_discovery_events_path(config: MngrConfig) -> Path:
     """Return the path to the discovery events JSONL file."""
     return get_discovery_events_dir(config) / "events.jsonl"
+
+
+# === Provider-error retention ===
+
+
+class RemovedAgentPartition(FrozenModel):
+    """How a snapshot's removed agents split by their prior provider's error state.
+
+    ``retained`` are agents absent from the new snapshot whose prior provider
+    is currently errored: their state is unknown, not gone, so the consumer
+    keeps them. ``dropped`` are agents the consumer should now forget (their
+    provider succeeded and still omitted them, or it is unknown).
+    """
+
+    retained: frozenset[str] = Field(description="Agent id strings to keep despite absence from the snapshot")
+    dropped: frozenset[str] = Field(description="Agent id strings to drop (confirmed gone or unattributable)")
+
+
+@pure
+def partition_removed_agents_by_provider_error(
+    removed_agent_ids: AbstractSet[str],
+    provider_name_by_prior_agent_id: Mapping[str, str],
+    error_by_provider_name: Mapping[ProviderInstanceName, DiscoveryError],
+) -> RemovedAgentPartition:
+    """Split removed agent ids into those to retain vs drop, by provider error state.
+
+    An agent absent from a fresh snapshot is *retained* when its prior provider
+    is in ``error_by_provider_name`` -- the snapshot omitted it only because
+    that provider's discovery raised this poll, so its state is unknown rather
+    than confirmed gone. Every other removed agent is *dropped*. Shared by all
+    discovery-snapshot consumers so the retention rule has exactly one
+    definition (see :class:`FullDiscoverySnapshotEvent`).
+    """
+    errored_provider_names = {str(name) for name in error_by_provider_name}
+    retained: set[str] = set()
+    dropped: set[str] = set()
+    for agent_id_str in removed_agent_ids:
+        prior_provider_name = provider_name_by_prior_agent_id.get(agent_id_str)
+        if prior_provider_name is not None and prior_provider_name in errored_provider_names:
+            retained.add(agent_id_str)
+        else:
+            dropped.add(agent_id_str)
+    return RemovedAgentPartition(retained=frozenset(retained), dropped=frozenset(dropped))
 
 
 # === Conversion Helpers ===
@@ -984,6 +1039,70 @@ def _emit_lines_from_offset(
     return offset + bytes_consumed
 
 
+def _emit_latest_cached_snapshot(
+    events_path: Path,
+    warner: MalformedJsonLineWarner,
+    emitted_event_ids: set[str],
+    emit_lock: Lock,
+    on_line: Callable[[str], None] | None,
+) -> tuple[int, bool]:
+    """Emit lines from the latest full snapshot on disk, if any.
+
+    Returns the byte offset up to which the file was consumed (the starting offset
+    for a subsequent tail) and whether a cached snapshot was actually emitted. When
+    the file is absent the offset is 0; when it exists but holds no full snapshot the
+    offset is the current file size (so the tail only sees newly-appended lines).
+    """
+    if not events_path.exists():
+        return 0, False
+    snapshot_offset = find_latest_full_snapshot_offset(events_path)
+    if snapshot_offset <= 0:
+        return events_path.stat().st_size, False
+    consumed_offset = _emit_lines_from_offset(
+        events_path, snapshot_offset, warner, emitted_event_ids, emit_lock, on_line
+    )
+    return consumed_offset, True
+
+
+def tail_discovery_events_file(
+    events_path: Path,
+    stop_event: threading.Event,
+    on_line: Callable[[str], None],
+) -> None:
+    """Emit the latest cached discovery snapshot, then tail the file for appended events.
+
+    A pure *consumer* of an existing discovery event log: unlike ``run_discovery_stream``
+    it never polls providers or writes snapshots. Intended for a process that observes
+    the discovery stream produced by *another* ``mngr observe --discovery-only`` (e.g.
+    ``mngr forward --observe-via-file``). Blocks until ``stop_event`` is set, so callers
+    run it on a dedicated thread.
+
+    Tolerates the file being absent when called (the tail loop waits for it to appear)
+    and being truncated/rotated while tailing (it resets and re-reads), reusing the same
+    tail loop ``run_discovery_stream`` relies on. The latest cached snapshot is emitted
+    up front so a consumer attaching mid-stream is populated immediately.
+    """
+    emitted_event_ids: set[str] = set()
+    emit_lock = Lock()
+    warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
+    # Emit from the latest full snapshot on disk so a consumer attaching mid-stream
+    # is populated immediately. ``find_latest_full_snapshot_offset`` returns 0 when
+    # the file is absent or holds no snapshot yet *and* when the snapshot is the very
+    # first line; reading from that offset covers all three (the dedup set keeps a
+    # later real snapshot from double-emitting), so unlike ``run_discovery_stream``'s
+    # writer-side fast path we never skip an offset-0 snapshot.
+    if events_path.exists():
+        snapshot_offset = find_latest_full_snapshot_offset(events_path)
+        initial_offset = _emit_lines_from_offset(
+            events_path, snapshot_offset, warner, emitted_event_ids, emit_lock, on_line
+        )
+    else:
+        initial_offset = 0
+    _discovery_stream_tail_events_file(
+        events_path, initial_offset, stop_event, emitted_event_ids, emit_lock, warner, on_line
+    )
+
+
 def _write_unfiltered_full_snapshot(mngr_ctx: MngrContext) -> None:
     """Run an unfiltered list to trigger a full discovery snapshot event.
 
@@ -1043,10 +1162,11 @@ def run_discovery_stream(
     ``ErrorBehavior.CONTINUE`` so a snapshot is emitted on every poll, even
     when some providers raised. Per-provider failures land in the snapshot's
     ``error_by_provider_name`` field; consumers treat each snapshot as
-    authoritative state and drop previously-known agents/hosts for any
-    provider that errored on this poll. Providers are responsible for retrying
-    their own transient failures before raising -- there is no top-level
-    retry layer here.
+    authoritative only for providers that succeeded, retaining previously-known
+    agents/hosts for any provider that errored on this poll (and surfacing them
+    as unknown/stale) rather than dropping them. Providers are responsible for
+    retrying their own transient failures before raising -- there is no
+    top-level retry layer here.
 
     1. Emit from the latest cached snapshot on disk (instant, if available)
     2. Run a full sync in the background to update the event stream
@@ -1064,18 +1184,12 @@ def run_discovery_stream(
     # warning when the next phase or the tail reads valid data after it.
     warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
 
-    # Phase 1: emit from the latest cached snapshot on disk (fast path)
-    has_cached_snapshot = False
-    # Default to file size; overridden below to the byte position phase 1
-    # actually consumed so the tail thread re-reads any trailing partial line.
-    initial_offset = events_path.stat().st_size if events_path.exists() else 0
-    if events_path.exists():
-        snapshot_offset = find_latest_full_snapshot_offset(events_path)
-        if snapshot_offset > 0:
-            has_cached_snapshot = True
-            initial_offset = _emit_lines_from_offset(
-                events_path, snapshot_offset, warner, emitted_event_ids, emit_lock, on_line
-            )
+    # Phase 1: emit from the latest cached snapshot on disk (fast path). The
+    # returned offset is the byte position actually consumed so the tail thread
+    # re-reads any trailing partial line.
+    initial_offset, has_cached_snapshot = _emit_latest_cached_snapshot(
+        events_path, warner, emitted_event_ids, emit_lock, on_line
+    )
 
     # Phase 2: start tailing the events file for new events
     stop_event = threading.Event()
