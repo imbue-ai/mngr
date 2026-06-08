@@ -32,6 +32,24 @@ def test_clear_default_account_id(tmp_path: Path) -> None:
     assert config.get_default_account_id() is None
 
 
+def test_default_preferred_region_is_none(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    assert config.get_preferred_region() is None
+
+
+def test_set_and_get_preferred_region(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    config.set_preferred_region("US-WEST-OR")
+    assert config.get_preferred_region() == "US-WEST-OR"
+
+
+def test_clear_preferred_region(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    config.set_preferred_region("US-EAST-VA")
+    config.set_preferred_region(None)
+    assert config.get_preferred_region() is None
+
+
 def test_set_and_get_auto_open_requests_panel(tmp_path: Path) -> None:
     """Setting auto_open_requests_panel persists correctly."""
     config = _make_config(tmp_path)

@@ -37,6 +37,7 @@ import httpx
 from loguru import logger
 from playwright.sync_api import Browser
 from playwright.sync_api import Page
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 from imbue.minds.config.loader import repo_tier_client_config_path
@@ -78,6 +79,15 @@ _CDP_READY_TIMEOUT_SECONDS: Final[int] = 120
 _BACKEND_READY_TIMEOUT_SECONDS: Final[int] = 120
 _CREATE_FORM_TIMEOUT_SECONDS: Final[int] = 600
 _SYSTEM_INTERFACE_TIMEOUT_SECONDS: Final[int] = 180
+
+# The onboarding wizard's screen-advance is driven by creating.js, a deferred
+# script that attaches its ``.js-next`` click handlers after the page renders.
+# Playwright's ``click`` waits for the button to be visible/stable but not for
+# that handler to be wired up, so an early click can silently no-op and leave
+# the wizard on the same screen. We click and confirm the screen advanced,
+# retrying the click if it was lost.
+_ONBOARDING_ADVANCE_TIMEOUT_MS: Final[int] = 5_000
+_ONBOARDING_CLICK_ATTEMPTS: Final[int] = 3
 
 # Pre-tested CSS selector against the system_interface frontend at
 # .external_worktrees/forever-claude-template/apps/system_interface/.
@@ -459,6 +469,31 @@ def _ensure_field_value(page: Page, selector: str, expected_value: str) -> None:
     page.fill(selector, expected_value)
 
 
+def _advance_onboarding_screen(page: Page, screen_name: str) -> None:
+    """Click an onboarding screen's Next button and confirm the wizard advanced.
+
+    Waits for the screen's ``.js-next`` to be visible, clicks it, then waits for
+    that button to become hidden (``creating.js``'s ``showScreen`` toggles the
+    leaving screen's ``hidden`` class). Retries the click because Playwright's
+    ``click`` can land before the deferred ``creating.js`` attaches its handlers,
+    silently no-opping; without the retry the wizard appears stuck on the next
+    screen. Raises ``AssertionError`` if the screen never advances.
+    """
+    next_button = f'[data-screen="{screen_name}"] .js-next'
+    page.wait_for_selector(next_button, state="visible", timeout=10_000)
+    for _attempt in range(_ONBOARDING_CLICK_ATTEMPTS):
+        page.click(next_button)
+        try:
+            page.wait_for_selector(next_button, state="hidden", timeout=_ONBOARDING_ADVANCE_TIMEOUT_MS)
+            return
+        except PlaywrightTimeoutError:
+            logger.warning("Onboarding screen {!r} did not advance after click; retrying", screen_name)
+    raise AssertionError(
+        f"Onboarding screen {screen_name!r} did not advance after {_ONBOARDING_CLICK_ATTEMPTS} "
+        "clicks of its Next button (creating.js handlers may not have attached)"
+    )
+
+
 def destroy_agent_best_effort(workspace_name: str) -> None:
     """Tear down the mngr agent created during a run. Always survives.
 
@@ -555,10 +590,18 @@ def create_workspace_via_electron(
                 # finished, otherwise via the loading screen, which redirects
                 # once creation completes).
                 page.wait_for_selector("#onboarding", state="attached", timeout=10_000)
-                for question_screen in ("q1", "q2", "q3"):
-                    next_button = f'[data-screen="{question_screen}"] .js-next'
-                    page.wait_for_selector(next_button, state="visible", timeout=10_000)
-                    page.click(next_button)
+                # Walk the three onboarding questions, accepting each
+                # pre-selected default. q1/q2 advance to the next question
+                # screen; confirm each advance (retrying the click) to absorb
+                # the creating.js handler-attach race. The final (q3) Next runs
+                # finishQuestions(), which shows the loading screen or redirects
+                # straight to the workspace -- the wait_for_url below covers that
+                # transition, and by q3 creating.js has long since loaded.
+                _advance_onboarding_screen(page, "q1")
+                _advance_onboarding_screen(page, "q2")
+                q3_next_button = '[data-screen="q3"] .js-next'
+                page.wait_for_selector(q3_next_button, state="visible", timeout=10_000)
+                page.click(q3_next_button)
 
                 page.wait_for_url(
                     _AGENT_SUBDOMAIN_PATTERN,

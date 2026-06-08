@@ -214,6 +214,38 @@ def test_build_mngr_create_command_omits_fast_mode_when_unset() -> None:
     assert "fast_mode" not in joined
 
 
+def test_build_mngr_create_command_forwards_preferred_region_for_imbue_cloud() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.IMBUE_CLOUD,
+        host_name=HostName("hello"),
+        imbue_cloud_account="alice@imbue.com",
+        imbue_cloud_preferred_region="US-WEST-OR",
+    )
+    # The soft region preference must reach mngr as a -b build arg.
+    assert "preferred_region=US-WEST-OR" in command
+
+
+def test_build_mngr_create_command_omits_preferred_region_when_unset() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.IMBUE_CLOUD,
+        host_name=HostName("hello"),
+        imbue_cloud_account="alice@imbue.com",
+    )
+    joined = " ".join(command)
+    assert "preferred_region" not in joined
+
+
+def test_build_mngr_create_command_ignores_preferred_region_for_docker() -> None:
+    # The region preference is imbue_cloud-only; other launch modes drop it.
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+        imbue_cloud_preferred_region="US-WEST-OR",
+    )
+    joined = " ".join(command)
+    assert "preferred_region" not in joined
+
+
 def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
     """Empty / ``None`` ``latchkey_env`` opts the host out of latchkey wiring entirely."""
     for latchkey_env in (None, {}):

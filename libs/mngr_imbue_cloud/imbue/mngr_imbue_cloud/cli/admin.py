@@ -196,8 +196,8 @@ _GITIGNORE_RSYNC_FILTER: Final[str] = ":- .gitignore"
 _INSERT_POOL_HOST_SQL: Final[str] = (
     "INSERT INTO pool_hosts "
     "(id, vps_address, vps_instance_id, agent_id, host_id, host_name, ssh_port, ssh_user, "
-    "container_ssh_port, status, attributes, created_at) "
-    "VALUES (%s, %s, %s, %s, %s, %s, 22, 'root', %s, 'available', %s::jsonb, NOW())"
+    "container_ssh_port, status, attributes, region, created_at) "
+    "VALUES (%s, %s, %s, %s, %s, %s, 22, 'root', %s, 'available', %s::jsonb, %s, NOW())"
 )
 
 
@@ -210,7 +210,10 @@ def build_pool_host_insert_values(
     host_name: str,
     container_ssh_port: int,
     attributes_json: str,
-) -> tuple[str, str, str, str, str, str, int, str]:
+    # OVH datacenter code the VPS was ordered in; persisted so the connector can
+    # apply region-aware lease filtering/ordering.
+    region: str,
+) -> tuple[str, str, str, str, str, str, int, str, str]:
     """Build the value tuple for :data:`_INSERT_POOL_HOST_SQL`.
 
     ``vps_instance_id`` MUST be the OVH service name -- it is what every
@@ -233,6 +236,7 @@ def build_pool_host_insert_values(
         host_name,
         container_ssh_port,
         attributes_json,
+        region,
     )
 
 
@@ -715,6 +719,7 @@ def _create_single_pool_host(
                         host_name=host_name,
                         container_ssh_port=_CONTAINER_SSH_PORT,
                         attributes_json=_json.dumps(attributes),
+                        region=region,
                     ),
                 )
     finally:

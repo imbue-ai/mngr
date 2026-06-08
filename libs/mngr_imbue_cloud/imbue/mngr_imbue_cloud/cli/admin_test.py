@@ -155,9 +155,11 @@ def test_pool_host_insert_writes_service_name_into_vps_instance_id() -> None:
         host_name="my-host",
         container_ssh_port=_CONTAINER_SSH_PORT,
         attributes_json="{}",
+        region="US-EAST-VA",
     )
     column_to_value = _insert_column_to_value(values)
     assert column_to_value["vps_instance_id"] == "vps-deadbeef.vps.ovh.us"
+    assert column_to_value["region"] == "US-EAST-VA"
     assert column_to_value["vps_instance_id"] != "host-bbbb"
     # Sanity: host_id still lands in its own column.
     assert column_to_value["host_id"] == "host-bbbb"
