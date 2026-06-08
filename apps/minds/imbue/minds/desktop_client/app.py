@@ -362,7 +362,7 @@ def _handle_landing_page(
         html = render_login_page()
         return HTMLResponse(content=html)
 
-    all_agent_ids = backend_resolver.list_known_workspace_ids()
+    all_agent_ids = backend_resolver.list_active_workspace_ids()
     paths: WorkspacePaths | None = request.app.state.api_v1_paths
     destroying_status_by_agent_id = _resolve_destroying_for_landing(paths, all_agent_ids)
 
@@ -434,7 +434,7 @@ def _handle_post_login_redirect(
     """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=302, headers={"Location": "/login"})
-    has_any_workspace = bool(backend_resolver.list_known_workspace_ids())
+    has_any_workspace = bool(backend_resolver.list_active_workspace_ids())
     destination = "/accounts" if has_any_workspace else "/"
     return Response(status_code=302, headers={"Location": destination})
 
@@ -480,7 +480,7 @@ def _handle_backup_status_api(
     if paths is None:
         return Response(content="{}", media_type="application/json")
     root_concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
-    agent_ids = backend_resolver.list_known_workspace_ids()
+    agent_ids = backend_resolver.list_active_workspace_ids()
     status_by_agent_id = compute_backup_status_for_workspaces(paths, agent_ids, parent_cg=root_concurrency_group)
     # Workspace creation time lets the landing page show "Created N ago" instead
     # of a scary "No backups" for a freshly-created, not-yet-backed-up workspace.
@@ -1359,7 +1359,7 @@ def _resolve_destroying_for_landing(
 
 def _agent_in_resolver(request: Request, agent_id: AgentId) -> bool:
     backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
-    return agent_id in backend_resolver.list_known_workspace_ids()
+    return agent_id in backend_resolver.list_active_workspace_ids()
 
 
 async def _handle_destroy_agent_api(
@@ -1506,7 +1506,7 @@ def _handle_destroying_page(
     if paths is None:
         return Response(status_code=404, content="No record")
     parsed_id = AgentId(agent_id)
-    in_resolver = parsed_id in backend_resolver.list_known_workspace_ids()
+    in_resolver = parsed_id in backend_resolver.list_active_workspace_ids()
     record = read_destroying(parsed_id, paths, agent_in_resolver=in_resolver)
     if record is None:
         return Response(status_code=404, content="No record")
@@ -1750,7 +1750,7 @@ async def _handle_chrome_events(
             session_store: MultiAccountSessionStore | None = request.app.state.session_store
             paths: WorkspacePaths | None = request.app.state.api_v1_paths
             last_workspace_data = _build_workspace_list(backend_resolver, session_store)
-            last_destroying_ids = _destroying_agent_ids(paths, backend_resolver.list_known_workspace_ids())
+            last_destroying_ids = _destroying_agent_ids(paths, backend_resolver.list_active_workspace_ids())
             has_accounts = bool(session_store and session_store.list_accounts())
             yield "data: {}\n\n".format(
                 json.dumps(
@@ -1835,7 +1835,7 @@ async def _handle_chrome_events(
                     yield "data: {}\n\n".format(json.dumps(_system_interface_status_payload(tracker, aid_str, status)))
 
                 current_data = _build_workspace_list(backend_resolver, session_store)
-                current_destroying_ids = _destroying_agent_ids(paths, backend_resolver.list_known_workspace_ids())
+                current_destroying_ids = _destroying_agent_ids(paths, backend_resolver.list_active_workspace_ids())
                 if current_data != last_workspace_data or current_destroying_ids != last_destroying_ids:
                     last_workspace_data = current_data
                     last_destroying_ids = current_destroying_ids
@@ -1997,7 +1997,7 @@ def _build_workspace_list(
     retained-but-unverified (they remain fully interactive).
     """
     errored_provider_names = {str(name) for name in backend_resolver.get_provider_errors()}
-    agent_ids = backend_resolver.list_known_workspace_ids()
+    agent_ids = backend_resolver.list_active_workspace_ids()
     workspaces: list[dict[str, str]] = []
     for aid in agent_ids:
         info = backend_resolver.get_agent_display_info(aid)

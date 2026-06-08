@@ -44,23 +44,33 @@ recovery/host-health page queries it (`app._run_host_health_probe` →
 "restore from backup" view is lost by hiding destroyed hosts from the active
 list; mngr still persists the destroyed host for its window.
 
-## Proposed fix (not yet implemented)
+## Implemented fix
 
-Thread `host_state` from discovery into `ParsedAgentsResult`, then treat a host
-in a terminal `DESTROYED` state as gone:
+`host_state` is threaded from discovery into the front end, and a host in a
+terminal `DESTROYED` state is treated as gone:
 
-1. Capture `DiscoveredHost.host_state` per host in the resolver snapshot.
-2. Exclude `DESTROYED`-state agents from `list_known_workspace_ids()` (or at
-   least from the Landing list + the `read_destroying` "still present" check).
+1. `ParsedAgentsResult` carries `host_state_by_host_id` (a `host_id -> HostState`
+   map). `EnvelopeStreamConsumer` populates it from the full discovery
+   snapshot's `hosts`, and keeps it fresh via the delta events
+   (`HostDiscoveryEvent`, and `HostDestroyedEvent` which marks the host
+   `DESTROYED` immediately). `parse_agents_from_json` fills it from the
+   `host.state` field of `mngr list --format json` for the on-demand path.
+2. The resolver exposes `get_host_state(host_id)` and a derived
+   `list_active_workspace_ids()` that drops agents whose host is `DESTROYED`.
+   `list_known_workspace_ids()` is left as the full set so a future
+   restore view can still enumerate destroyed workspaces.
+3. Every active surface (the Landing list, the workspace chrome list, the
+   backup-status panel, and the destroy-status checks that feed
+   `read_destroying`) calls `list_active_workspace_ids()`.
 
 Result: destroyed workspaces drop off the active list, `read_destroying` returns
 `DONE` (no more bogus `FAILED`), and the destroyed-host info remains available
 for restore via the existing host-state path.
 
-Design choice to settle when implementing: filter `DESTROYED` centrally in the
-resolver (everything downstream treats them as gone) vs. expose `host_state` and
-let each consumer decide (Landing + destroy-check filter; a future restore view
-explicitly includes destroyed hosts). The latter is preferred.
+We chose to expose `host_state` and let each consumer decide (rather than
+filtering `DESTROYED` centrally inside `list_known_workspace_ids()`), so a future
+restore view can opt into the full set while every current surface opts into the
+active-only set.
 
 ## Not the cause
 
