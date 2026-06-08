@@ -149,7 +149,7 @@ def test_message_filtered_via_stdin(e2e: E2eSession) -> None:
     # produce an empty id list -- otherwise the no-op path would not be the one
     # under test.
     list_result = e2e.run(
-        'mngr list --include \'host.provider == "modal"\' --ids',
+        "mngr list --include 'host.provider == \"modal\"' --ids",
         comment="the filter matches no agents, so the id list is empty",
         timeout=60.0,
     )
@@ -188,7 +188,7 @@ def test_message_filtered_via_stdin_delivers_to_matching_agents(e2e: E2eSession)
     # not the human names, so assert on the count of matched ids here and defer
     # the name-level check to the delivery output below.
     list_result = e2e.run(
-        'mngr list --include \'host.provider == "local"\' --ids',
+        "mngr list --include 'host.provider == \"local\"' --ids",
         comment="list the ids of agents matching the filter",
         timeout=60.0,
     )

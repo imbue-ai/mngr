@@ -195,14 +195,12 @@ def test_git_merge_agent_branch(e2e: E2eSession) -> None:
     """)
     _create_my_task(e2e, 100926)
     # The agent's branch is created at the caller's HEAD, so it must exist.
-    expect(
-        e2e.run("git rev-parse --verify mngr/my-task", comment="confirm the agent's branch exists")
-    ).to_succeed()
+    expect(e2e.run("git rev-parse --verify mngr/my-task", comment="confirm the agent's branch exists")).to_succeed()
     # Give the branch real work to integrate: have the agent commit a new file
     # on its own branch, so the merge below is not a no-op fast-forward.
     expect(
         e2e.run(
-            'mngr exec my-task \'echo agent-change > agent_work.txt && '
+            "mngr exec my-task 'echo agent-change > agent_work.txt && "
             'git add agent_work.txt && git commit -m "agent work"\'',
             comment="have the agent commit work on its branch",
         )

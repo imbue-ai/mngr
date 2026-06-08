@@ -156,9 +156,7 @@ def test_start_dry_run(e2e: E2eSession) -> None:
 
     # Capture every agent's lifecycle state before the dry-run so we can prove
     # the dry-run leaves all of them untouched.
-    state_before = e2e.run(
-        "mngr list --format '{name}={state}'", comment="capture agent state before the dry-run"
-    )
+    state_before = e2e.run("mngr list --format '{name}={state}'", comment="capture agent state before the dry-run")
     expect(state_before).to_succeed()
 
     dry_run = e2e.run("mngr list --ids | mngr start - --dry-run", comment="dry-run to see what would happen")
@@ -215,9 +213,7 @@ def test_stop_archive(e2e: E2eSession) -> None:
     # The agent is now archived: it carries the 'archived_at' label and so
     # shows up under --archived. List queries are scoped to the local provider
     # to avoid enumerating remote providers (which the test never uses).
-    archived_result = e2e.run(
-        "mngr list --provider local --archived", comment="verify my-task is now archived"
-    )
+    archived_result = e2e.run("mngr list --provider local --archived", comment="verify my-task is now archived")
     expect(archived_result).to_succeed()
     expect(archived_result.stdout).to_contain("my-task")
 
@@ -344,9 +340,7 @@ def test_stop_dry_run(e2e: E2eSession) -> None:
         mngr list --ids | mngr stop - --dry-run
     """)
     _create_my_task(e2e, 100512)
-    dry_run_result = e2e.run(
-        "mngr list --ids | mngr stop - --dry-run", comment="dry-run to see what would be stopped"
-    )
+    dry_run_result = e2e.run("mngr list --ids | mngr stop - --dry-run", comment="dry-run to see what would be stopped")
     expect(dry_run_result).to_succeed()
     # The dry-run must report the agent that would be stopped...
     expect(dry_run_result.stdout).to_contain("Would stop")

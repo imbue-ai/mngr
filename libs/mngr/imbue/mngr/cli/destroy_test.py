@@ -9,9 +9,9 @@ from click.testing import CliRunner
 
 from imbue.mngr.cli.destroy import DestroyCliOptions
 from imbue.mngr.cli.destroy import _DestroyTargets
-from imbue.mngr.cli.destroy import _emit_dry_run_entries
 from imbue.mngr.cli.destroy import _OfflineHostToDestroy
 from imbue.mngr.cli.destroy import _destroy_emptied_hosts
+from imbue.mngr.cli.destroy import _emit_dry_run_entries
 from imbue.mngr.cli.destroy import _output_result
 from imbue.mngr.cli.destroy import destroy
 from imbue.mngr.cli.destroy import get_agent_name_from_session

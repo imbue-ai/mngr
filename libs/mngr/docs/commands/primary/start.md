@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr start [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--restart] [--no-resume] [--connect]
+mngr start [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--restart] [--no-resume] [--connect] [--dry-run]
 ```
 
 Start stopped agent(s).
@@ -49,6 +49,7 @@ mngr start [OPTIONS] [AGENTS]...
 | ---- | ---- | ----------- | ------- |
 | `--restart` | boolean | Stop the agent first if it is already running, ensuring a clean start. | `False` |
 | `--no-resume` | boolean | Skip sending the resume message after starting. | `False` |
+| `--dry-run` | boolean | Show what would be started without actually starting anything | `False` |
 | `--connect`, `--no-connect` | boolean | Connect to the agent after starting (only valid for single agent) | `False` |
 | `--connect-command` | text | Command to run instead of the builtin connect. MNGR_AGENT_NAME and MNGR_SESSION_NAME env vars are set. | None |
 
@@ -104,6 +105,12 @@ $ mngr start my-agent --connect
 
 ```bash
 $ mngr list --ids | mngr start -
+```
+
+**Preview what would be started**
+
+```bash
+$ mngr list --ids | mngr start - --dry-run
 ```
 
 **Custom format template output**

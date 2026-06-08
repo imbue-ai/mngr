@@ -272,9 +272,7 @@ def test_troubleshoot_destroy_and_recreate_modal(e2e: E2eSession) -> None:
     agents_after = [a for a in json.loads(after.stdout)["agents"] if a["name"] == "my-task"]
     assert len(agents_after) == 1, f"expected exactly one my-task after recreate, got {agents_after}"
     recreated_host = agents_after[0]["host"]["name"]
-    assert recreated_host != original_host, (
-        f"recreate should land on a fresh host, but reused {original_host!r}"
-    )
+    assert recreated_host != original_host, f"recreate should land on a fresh host, but reused {original_host!r}"
 
 
 @pytest.mark.release
