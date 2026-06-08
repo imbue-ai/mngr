@@ -35,7 +35,7 @@ Not every candidate resolves to a code change. Sometimes the right conclusion is
 
 ## Reporting
 
-For each finding, the `Recommendation` should be a concrete fix, e.g.: rewrite the assertion to check the operation's effect (with the specific value/snapshot to assert); add the missing empty/boundary/branch case; replace the inline fake with the shared `mock_*_test.py` implementation or a real object; make IDs unique with `uuid4().hex`; replace sleep-based synchronization with polling on a condition; move the test to the correct file/marker for its type; or split a class-grouped test into module-level `test_` functions. If a flagged test turns out to be adequate, recommend the brief clarifying comment that explains why (e.g. why this assertion is sufficient, or why this case is the only reachable one).
+For each finding, the `Recommendation` should be a concrete fix, e.g.: rewrite the assertion to check the operation's effect (with the specific value/snapshot to assert); add the missing empty/boundary/branch case; replace the inline fake with the shared `mock_*_test.py` implementation or a real object; make IDs unique with `uuid4().hex`; replace sleep-based synchronization with polling on a condition; move the test to the correct file/marker for its type; or split a class-grouped test into module-level `test_` functions. If a flagged test turns out to be adequate, recommend the brief clarifying comment that explains why (e.g. why this assertion is sufficient, or why a loose bound cannot be tightened without making the test flaky).
 
 Do NOT report issues that are already covered by an existing FIXME.
 
