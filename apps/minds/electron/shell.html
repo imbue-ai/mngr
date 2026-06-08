@@ -197,7 +197,7 @@
 
     if (window.minds) {
       var loadingStatus = document.getElementById('loading-status');
-      // Warm launches finish well under 20s; only reveal the status line
+      // Warm launches finish well under 10s; only reveal the status line
       // when the wordmark genuinely looks frozen.
       var latestStatus = '';
       var revealed = false;
@@ -208,7 +208,7 @@
       setTimeout(function() {
         revealed = true;
         loadingStatus.textContent = latestStatus;
-      }, 20000);
+      }, 10000);
       window.minds.onErrorDetails(function(data) {
         document.body.classList.add('error');
         errorView.style.display = 'flex';
