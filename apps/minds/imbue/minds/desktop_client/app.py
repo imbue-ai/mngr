@@ -4063,6 +4063,47 @@ def _run_system_interface_health_probe_loop(
 # immediate re-read, so the steady-state cadence can be slow.
 _LOCAL_LIVENESS_POLL_INTERVAL_SECONDS: Final[float] = 60.0
 
+# Fallback re-check cadence while the poll waits for discovery's first snapshot.
+# The resolver's on-change callback wakes the wait the instant providers land, so
+# this only guards against a missed wake-up -- it must never strand the poll.
+_LOCAL_DISCOVERY_READY_RECHECK_SECONDS: Final[float] = 1.0
+
+
+def _wait_for_first_discovery_snapshot(
+    backend_resolver: MngrCliBackendResolver,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """Block until discovery delivers its first full snapshot, or shutdown begins.
+
+    The liveness poll is started before ``mngr forward`` discovery has run (so its
+    read-only ``mngr list`` overlaps the rest of startup). Until the first full
+    snapshot lands, the resolver knows no providers, so a read could not map any
+    local mind to its provider backend -- it would classify every mind as UNKNOWN.
+    A full snapshot is the event that populates the provider list and stamps
+    ``last_full_snapshot_at``; gating on that (rather than
+    ``has_completed_initial_discovery``, which an incremental agent event flips
+    before any provider data arrives) guarantees the first read can actually
+    classify each mind.
+
+    We wake on the resolver's on-change callback so the wait ends within
+    milliseconds of that snapshot, falling back to a short re-check so a missed
+    wake-up can never strand the poll.
+    """
+    wakeup = threading.Event()
+    backend_resolver.add_on_change_callback(wakeup.set)
+    try:
+        while not root_concurrency_group.is_shutting_down():
+            # Clear before checking so an on-change that fires between the check
+            # and the wait is never lost (it leaves the event set, so wait returns
+            # at once).
+            wakeup.clear()
+            _, last_full_snapshot_at = backend_resolver.get_freshness_timestamps()
+            if last_full_snapshot_at is not None:
+                return
+            wakeup.wait(timeout=_LOCAL_DISCOVERY_READY_RECHECK_SECONDS)
+    finally:
+        backend_resolver.remove_on_change_callback(wakeup.set)
+
 
 def _read_local_mind_states(
     backend_resolver: BackendResolverInterface,
@@ -4116,7 +4157,7 @@ def start_local_liveness_poll_loop(
 
 def _run_local_liveness_poll_loop(
     liveness_tracker: LocalMindLivenessTracker,
-    backend_resolver: BackendResolverInterface,
+    backend_resolver: MngrCliBackendResolver,
     mngr_binary: str,
     mngr_host_dir: Path,
     refresh_event: threading.Event,
@@ -4124,9 +4165,12 @@ def _run_local_liveness_poll_loop(
 ) -> None:
     """Loop body for the local-mind liveness poll thread.
 
-    Re-reads on a fixed interval, but wakes early whenever ``refresh_event`` is
-    set by a Start/Stop action so a user-initiated change converges at once.
+    Blocks the first read until discovery has delivered its first full snapshot
+    (so providers are known and each mind can be classified), then re-reads on a
+    fixed interval -- waking early whenever ``refresh_event`` is set by a
+    Start/Stop action so a user-initiated change converges at once.
     """
+    _wait_for_first_discovery_snapshot(backend_resolver, root_concurrency_group)
     while not root_concurrency_group.is_shutting_down():
         state_by_agent_id = _read_local_mind_states(
             backend_resolver=backend_resolver,

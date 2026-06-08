@@ -2,13 +2,16 @@
 running-minds lookup, the SSE payload helper, and the landing-page controls."""
 
 import re
+import threading
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 
 from starlette.testclient import TestClient
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.app import _local_mind_state_payload
+from imbue.minds.desktop_client.app import _wait_for_first_discovery_snapshot
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
@@ -219,3 +222,68 @@ def test_landing_page_unknown_local_mind_shows_neither_control(tmp_path: Path) -
 
     assert _button_display(html, "landing-start-btn") == "none"
     assert _button_display(html, "landing-stop-btn") == "none"
+
+
+# -- liveness poll discovery gate --
+
+
+def _run_gate_in_thread(resolver: MngrCliBackendResolver, group: ConcurrencyGroup) -> threading.Event:
+    """Run the first-read gate in a daemon thread; the returned event fires on return."""
+    done = threading.Event()
+
+    def _run() -> None:
+        _wait_for_first_discovery_snapshot(resolver, group)
+        done.set()
+
+    threading.Thread(target=_run, name="test-liveness-gate", daemon=True).start()
+    return done
+
+
+def test_liveness_gate_blocks_until_first_full_snapshot() -> None:
+    """The poll's first read waits for discovery instead of reading empty + sleeping a full tick."""
+    resolver = MngrCliBackendResolver()
+    group = ConcurrencyGroup(name="test-liveness-gate-snapshot")
+    done = _run_gate_in_thread(resolver, group)
+
+    # No full snapshot yet -> the gate is still blocking.
+    assert not done.wait(timeout=0.2)
+
+    # An empty-provider snapshot still releases the gate: it keys on "a full
+    # snapshot landed" (providers are now authoritative), not on providers being
+    # non-empty -- so a host with no local minds never strands the poll.
+    resolver.update_providers(
+        providers=(),
+        error_by_provider_name={},
+        last_full_snapshot_at=datetime.now(timezone.utc),
+    )
+
+    # The on-change fired by the snapshot wakes the gate at once.
+    assert done.wait(timeout=2.0)
+
+
+def test_liveness_gate_returns_when_snapshot_already_present() -> None:
+    """A snapshot that landed before the poll started releases the gate without waiting."""
+    resolver = MngrCliBackendResolver()
+    resolver.update_providers(
+        providers=(),
+        error_by_provider_name={},
+        last_full_snapshot_at=datetime.now(timezone.utc),
+    )
+    group = ConcurrencyGroup(name="test-liveness-gate-present")
+
+    done = _run_gate_in_thread(resolver, group)
+
+    assert done.wait(timeout=2.0)
+
+
+def test_liveness_gate_unblocks_on_shutdown() -> None:
+    """Shutdown releases the gate even if no snapshot ever arrives, so the poll thread exits."""
+    resolver = MngrCliBackendResolver()
+    group = ConcurrencyGroup(name="test-liveness-gate-shutdown")
+    done = _run_gate_in_thread(resolver, group)
+
+    assert not done.wait(timeout=0.2)
+
+    group.shutdown()
+
+    assert done.wait(timeout=2.0)
