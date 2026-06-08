@@ -154,7 +154,8 @@ CATALOG: Final[Catalog] = _build_catalog()
 
 # -- Per-workspace identity color --
 # See docs on workspace_accent() for why OKLCH + fixed L/C + SHA-256-derived
-# hue. Mirrored on the JS side (static/chrome.js, static/sidebar.js).
+# hue. Mirrored on the JS side in static/workspace_accent.js (the shared
+# window.mindsAccent helper consumed by chrome.js and sidebar.js).
 
 # Lightness percent and chroma for the OKLCH workspace accent. Fixed across
 # all workspaces so the only axis of variation is the hue. The accent fills
