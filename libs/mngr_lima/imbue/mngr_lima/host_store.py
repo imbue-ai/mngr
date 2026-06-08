@@ -45,6 +45,30 @@ class LimaHostConfig(FrozenModel):
             "the bind-mount layout."
         ),
     )
+    is_host_in_docker: bool = Field(
+        default=False,
+        description=(
+            "Whether the agent runs inside a Docker container in the VM (True) "
+            "or directly in the VM (False, today's default). Locked in at "
+            "create_host time so lifecycle operations replay the right setup."
+        ),
+    )
+    container_name: str | None = Field(
+        default=None,
+        description="Name of the agent's Docker container in the VM (is_host_in_docker mode only).",
+    )
+    container_host_port: int | None = Field(
+        default=None,
+        description=(
+            "Host-side localhost port that Lima forwards to the container's sshd "
+            "(is_host_in_docker mode only). Stable across VM restarts because it "
+            "is baked into the persisted Lima portForwards config."
+        ),
+    )
+    base_image: str | None = Field(
+        default=None,
+        description="Container base image (or built image tag) used for the agent container (is_host_in_docker mode only).",
+    )
 
 
 class HostRecord(FrozenModel):
