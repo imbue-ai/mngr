@@ -23,6 +23,19 @@ from imbue.minds.errors import MindsConfigError
 _CONFIG_FILENAME: Final[str] = "config.toml"
 
 
+def _as_str_keyed_dict(value: object) -> dict[str, object] | None:
+    """Return ``value`` as a concretely-typed ``dict[str, object]``, or None if it isn't a mapping.
+
+    The TOML loader yields dynamically-typed nested values, so a sub-table read
+    out of the raw config is statically ``object``. Re-materializing it into a
+    fresh ``dict[str, object]`` gives downstream code typed key/value access (and
+    a private copy that's safe to mutate) without resorting to ``cast``.
+    """
+    if not isinstance(value, dict):
+        return None
+    return {str(key): item for key, item in value.items()}
+
+
 class MindsConfig(MutableModel):
     """Thread-safe configuration manager for ``~/.minds/config.toml``."""
 
@@ -90,11 +103,11 @@ class MindsConfig(MutableModel):
         """
         with self._lock:
             data = self._read_raw()
-            providers = data.get("providers")
-            if not isinstance(providers, dict):
+            providers = _as_str_keyed_dict(data.get("providers"))
+            if providers is None:
                 return None
-            provider = providers.get(provider_name)
-            if not isinstance(provider, dict):
+            provider = _as_str_keyed_dict(providers.get(provider_name))
+            if provider is None:
                 return None
             value = provider.get("region")
             return str(value) if value is not None else None
@@ -103,14 +116,8 @@ class MindsConfig(MutableModel):
         """Persist the last-used region for a provider under ``[providers.<provider_name>]``."""
         with self._lock:
             data = self._read_raw()
-            providers = data.get("providers")
-            if not isinstance(providers, dict):
-                providers = {}
-            provider = providers.get(provider_name)
-            if not isinstance(provider, dict):
-                provider = {}
-            # Set the value before re-attaching the sub-table: tomlkit copies a
-            # plain dict on assignment, so mutating it afterwards would not persist.
+            providers = _as_str_keyed_dict(data.get("providers")) or {}
+            provider = _as_str_keyed_dict(providers.get(provider_name)) or {}
             provider["region"] = region
             providers[provider_name] = provider
             data["providers"] = providers
