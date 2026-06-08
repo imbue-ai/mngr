@@ -195,9 +195,22 @@
 
     if (window.minds) {
       var loadingStatus = document.getElementById('loading-status');
+      // Suppress the progress line for the first 20s: any normal warm
+      // launch finishes well within that window, and flashing a uv-stderr
+      // line for 200ms on the way to the home page is more confusing
+      // than helpful. Past 20s we're in the cold-install territory where
+      // a frozen-looking wordmark genuinely looks broken to the user
+      // (per Josh's PR comment), so reveal the freshest status then.
+      var latestStatus = '';
+      var revealed = false;
       window.minds.onStatusUpdate(function(message) {
-        loadingStatus.textContent = message || '';
+        latestStatus = message || '';
+        if (revealed) loadingStatus.textContent = latestStatus;
       });
+      setTimeout(function() {
+        revealed = true;
+        loadingStatus.textContent = latestStatus;
+      }, 20000);
       window.minds.onErrorDetails(function(data) {
         document.body.classList.add('error');
         errorView.style.display = 'flex';
