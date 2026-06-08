@@ -1,6 +1,7 @@
 import json
 import os
 import shlex
+import shutil
 import subprocess
 from contextlib import contextmanager
 from datetime import datetime
@@ -673,7 +674,7 @@ def test_build_readiness_hooks_config_has_session_start_hook() -> None:
     assert "SessionStart" in config["hooks"]
     assert len(config["hooks"]["SessionStart"]) == 1
     hooks = config["hooks"]["SessionStart"][0]["hooks"]
-    assert len(hooks) == 4
+    assert len(hooks) == 5
 
     # First hook: creates session_started file for polling-based detection
     assert hooks[0]["type"] == "command"
@@ -715,6 +716,17 @@ def test_build_readiness_hooks_config_has_session_start_hook() -> None:
     assert "compact" in submit_signal_hook
     assert "_MNGR_SOURCE" in submit_signal_hook
 
+    # Fifth hook: on startup/resume, resets the stale 'active'/'permissions_waiting'
+    # markers left over from a turn abandoned by an abnormal exit, so the agent does
+    # not report RUNNING forever after a restart. compact is excluded (mid-turn).
+    reset_markers_hook = hooks[4]["command"]
+    assert hooks[4]["type"] == "command"
+    assert "_MNGR_SOURCE" in reset_markers_hook
+    assert "startup|resume" in reset_markers_hook
+    assert "compact" not in reset_markers_hook
+    assert 'rm -f "$MNGR_AGENT_STATE_DIR/active"' in reset_markers_hook
+    assert "permissions_waiting" in reset_markers_hook
+
 
 @pytest.mark.parametrize(
     "hook_name, expected_substrings",
@@ -753,6 +765,72 @@ def test_build_readiness_hooks_config_has_notification_idle_hook() -> None:
     assert "MNGR_AGENT_STATE_DIR" in hook["command"]
     assert "active" in hook["command"]
     assert "permissions_waiting" in hook["command"]
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq is required to run the SessionStart hook command")
+@pytest.mark.parametrize(
+    "source, should_clear",
+    [
+        ("startup", True),
+        ("resume", True),
+        ("compact", False),
+        ("clear", False),
+    ],
+)
+def test_session_start_hook_resets_stale_active_marker(tmp_path: Path, source: str, should_clear: bool) -> None:
+    """The SessionStart hook clears a stale 'active' marker on startup/resume only.
+
+    A turn abandoned by an abnormal exit (e.g. a container restart) leaves the
+    'active' marker set, because the Stop hook never ran to remove it. On the
+    next startup/resume -- where a fresh Claude process is provably not mid-turn
+    -- the marker must be reset so get_lifecycle_state stops reporting RUNNING
+    forever. ``compact`` and ``clear`` fire mid-conversation and must leave the
+    marker untouched (compact in particular happens while Claude is active).
+    """
+    state_dir = tmp_path / "state"
+    host_dir = tmp_path / "host"
+    state_dir.mkdir()
+    host_dir.mkdir()
+    active_marker = state_dir / "active"
+    active_marker.touch()
+    (state_dir / "permissions_waiting").touch()
+
+    config = build_readiness_hooks_config()
+    # hooks[4] is the marker-reset hook (asserted in
+    # test_build_readiness_hooks_config_has_session_start_hook).
+    command = config["hooks"]["SessionStart"][0]["hooks"][4]["command"]
+
+    result = subprocess.run(
+        ["bash", "-c", command],
+        input=json.dumps({"session_id": "sess-1", "source": source}),
+        env={
+            "MAIN_CLAUDE_SESSION_ID": "sess-1",
+            "MNGR_AGENT_STATE_DIR": str(state_dir),
+            "MNGR_HOST_DIR": str(host_dir),
+            "PATH": os.environ.get("PATH", ""),
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, f"hook failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+
+    marker_was_cleared = not active_marker.exists()
+    assert marker_was_cleared == should_clear, (
+        f"source={source!r}: expected active marker "
+        f"{'cleared' if should_clear else 'kept'}, but it was "
+        f"{'absent' if marker_was_cleared else 'present'}"
+    )
+
+    activity_log = host_dir / "events" / "mngr" / "activity" / "events.jsonl"
+    # An activity event is emitted only when the markers are actually reset, so
+    # `mngr observe` re-fetches the now-WAITING state promptly.
+    assert activity_log.exists() == should_clear
+
+    # The restart-boundary marker is recorded only on a fresh (startup/resume)
+    # process, never on a mid-turn compaction/clear.
+    process_started_marker = state_dir / "claude_process_started"
+    assert process_started_marker.exists() == should_clear
 
 
 def test_build_readiness_hooks_config_all_commands_guard_on_main_session() -> None:
