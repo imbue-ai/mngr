@@ -183,25 +183,30 @@
         each example.
       </p>
 
-      {# Titlebar buttons #}
+      {# Titlebar buttons. Demo container paints the full-width accent
+         bar (oklch(80% 0.1 230)) and sets --titlebar-fg to the contrast
+         pick the workspace_accent helper would make for that lightness
+         ("0 0 0", since L=0.8 >= 0.5), so the page title + nav-button
+         glyphs render against the bar exactly as they do in Chrome.jinja. #}
       <div class="mb-6">
         <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Titlebar buttons</div>
-        <div class="rounded-lg overflow-hidden border border-zinc-200 bg-zinc-900">
-          <div class="h-[38px] flex items-center select-none border-b border-white/10 px-1">
+        <div class="rounded-lg overflow-hidden border border-zinc-200"
+             style="--titlebar-bg: oklch(80% 0.1 230); --titlebar-fg: 0 0 0;">
+          <div class="h-[38px] flex items-center select-none px-1"
+               style="background-color: var(--titlebar-bg);">
             <div class="flex gap-0.5">
               <TitlebarButton title="Projects"><Icon24 name="sidebar" /></TitlebarButton>
               <TitlebarButton title="Home"><Icon24 name="home" /></TitlebarButton>
               <TitlebarButton title="Back"><Icon24 name="back" /></TitlebarButton>
               <TitlebarButton title="Forward"><Icon24 name="forward" /></TitlebarButton>
             </div>
-            <div class="flex-1 flex items-center justify-center gap-2 px-2 min-w-0">
-              <span class="accent-swatch w-2.5 h-2.5 rounded-sm shrink-0"></span>
-              <span class="text-zinc-200 text-xs whitespace-nowrap overflow-hidden text-ellipsis">my-workspace</span>
+            <div class="flex-1 flex items-center justify-center px-2 min-w-0">
+              <span class="titlebar-title text-xs whitespace-nowrap overflow-hidden text-ellipsis">my-workspace</span>
             </div>
             <TitlebarButton title="Requests" extra="relative"><Icon24 name="messages" /></TitlebarButton>
           </div>
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">TitlebarButton.jinja (variant="nav")</div>
+        <div class="mt-1 text-[11px] text-zinc-500 font-mono">TitlebarButton.jinja (variant="nav") + .titlebar-title (tokens.css)</div>
       </div>
 
       {# Notification badge #}
