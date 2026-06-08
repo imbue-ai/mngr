@@ -4,6 +4,25 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-04
+
+Retry `modal deploy` when Modal reports "The selected app is locked - probably due to a concurrent modification".
+
+Modal serializes mutations to a single app, so two operations targeting the same app name concurrently (e.g. parallel `mngr create` against the same persistent provider app, which redeploys the snapshot/shutdown function on every create) would race and one would fail with an app-lock error. The lock is transient -- it clears as soon as the conflicting operation finishes -- so `DirectModalInterface.deploy` now classifies it as a new retryable `ModalProxyAppLockedError` and rides through it with exponential backoff. Non-lock deploy failures are still raised immediately without retry.
+
+This also removes a frequent flake in the Modal acceptance tests, where many subprocess `mngr create` tests share one persistent app within a shared-environment offload run and deploy into it concurrently.
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.
+
+Renamed the in-memory Modal test doubles from the `Testing*` prefix to the
+repo-standard `Fake*` prefix: `FakeModalInterface`, `FakeApp`, `FakeSandbox`,
+`FakeVolume`, `FakeSecret`, `FakeImage`, `FakeFunction`, `FakeExecProcess`,
+`FakeExecOutput`. This matches the dominant `Fake*` convention for test doubles
+across the codebase, accurately describes them (working in-memory/local
+implementations, not mocks/stubs), and stops pytest from trying to collect them
+as test classes (the old `Testing*` names matched `python_classes = Test*`,
+which produced "cannot collect test class" warnings). No behavior change.
+
 ## 2026-05-28
 
 # Dropped redundant per-project ty/ruff ratchet tests

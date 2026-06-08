@@ -238,14 +238,16 @@
 # Local working / scratch markdown (not committed)
 **/*.local.md
 
-# so the user can make their own notification script
-**/scripts/notify_user.local.sh
+# Local working / scratch shell scripts (not committed)
+# (covers user notification scripts like scripts/notify_user.local.sh, too)
+**/*.local.sh
 
 # Test output files (slow tests, coverage summaries)
 **/.test_output/
 
 # TMR output directories (reports + test outputs)
 **/tmr_*/
+**/tmr-report/
 
 # Active session marker file (used to detect interrupted sessions)
 **/.claude/active
@@ -343,3 +345,6 @@
 
 # Playwright MCP scratch artifacts (mock screenshots, page snapshots)
 **/.playwright-mcp/
+
+# tmr (task-runner) orchestration scratch report
+**/tmr-report/

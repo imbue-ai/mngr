@@ -1,1 +1,0 @@
-Updated the repo-root local-dev LiteLLM proxy config (`litellm_proxy/config.yaml`) to expose the full current Anthropic Claude lineup (Opus 4.8/4.7/4.6/4.5/4.1, Sonnet 4.6/4.5, Haiku 4.5, plus the dated Opus 4 / Sonnet 4 ids) with inline per-token pricing. This file is kept in sync with `apps/modal_litellm/app.py` by a drift test.

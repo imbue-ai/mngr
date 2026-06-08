@@ -28,6 +28,7 @@ Only after doing all of the above should you begin writing code.
 
 # Important commands and conventions:
 
+- The `mngr` on your PATH is the dev shim (`scripts/mngr`), which routes `mngr` (and anything that shells out to it, e.g. minds) to the checkout you're working in instead of a stale global install. A pre-commit hook installs it automatically (a symlink in `~/.local/bin`) and verifies it's on PATH; if it fails, put `~/.local/bin` on your PATH ahead of any venv bin (then `hash -r`) -- do not bypass it.
 - Never run `uv sync`, always run `uv sync --all-packages` instead
 - Never pipe the output of a non-instant command through `grep`, `jq`, `awk`, `head`, `tail`, or similar without preserving the full output. If you later need something that was discarded, you have to rerun the entire command. Instead, write the output to a file first and then filter the file, or use `tee` to capture and filter simultaneously (e.g. `some_command | tee /tmp/some_command_output.txt | grep pattern`).
 

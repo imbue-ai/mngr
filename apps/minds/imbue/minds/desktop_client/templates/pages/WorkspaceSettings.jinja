@@ -1,4 +1,4 @@
-{#def agent_id, ws_name, current_account, accounts, servers, telegram_state, accent #}
+{#def agent_id, ws_name, current_account, accounts, servers, telegram_state, accent, is_leased_imbue_cloud=False #}
 {#
   Workspace settings page. Account section, sharing servers list,
   optional Telegram setup, and the danger-zone destroy flow.
@@ -7,6 +7,11 @@
     - None        : no Telegram orchestrator; section hidden
     - "active"    : Telegram already set up for this workspace
     - "pending"   : show the setup button
+
+  is_leased_imbue_cloud is True for workspaces running on a host leased from
+  Imbue Cloud. Such hosts are permanently bound to the leasing account to avoid
+  confusing "account mixing", so the account section shows the bound account
+  with a disabled Disassociate control and offers no association controls.
 #}
 {% set _body_style = "--workspace-accent: " ~ accent ~ ";" %}
 {% set _scripts %}
@@ -68,9 +73,18 @@
 
       <SectionHeader>Account</SectionHeader>
       <div id="account-section">
-      {% if current_account %}
+      {% if is_leased_imbue_cloud %}
+        {% if current_account %}
+          <p>Associated with: <strong>{{ current_account.email }}</strong></p>
+        {% endif %}
+        <Notice variant="info">
+          This workspace runs on a host leased from Imbue Cloud, so its account
+          association is fixed and cannot be changed.
+        </Notice>
+        <Button variant="danger" id="disassociate-btn" disabled>Disassociate</Button>
+      {% elif current_account %}
         <p>Associated with: <strong>{{ current_account.email }}</strong></p>
-        <Notice variant="warn" extra="my-3">
+        <Notice variant="warn">
           Disassociating will remove all sharing (tunnels) for this workspace.
           You will need to set up sharing again after re-associating.
         </Notice>
@@ -83,10 +97,10 @@
 
       <SectionHeader divider>Sharing</SectionHeader>
       {% for server in servers %}
-        <CardRow>
+        <Card layout="row-spread">
           <span class="font-medium">{{ server }}</span>
           <ButtonLink href={{ "/sharing/" ~ agent_id ~ "/" ~ server }} variant="secondary">Manage sharing</ButtonLink>
-        </CardRow>
+        </Card>
       {% else %}
         <p class="text-zinc-500">No servers discovered for this workspace.</p>
       {% endfor %}
@@ -107,7 +121,7 @@
 
       <Modal id="destroy-dialog">
         <h2 class="text-lg font-semibold text-zinc-900 mb-3">Destroy project?</h2>
-        <p class="text-sm text-zinc-600 mb-4">This will permanently destroy <strong>{{ ws_name }}</strong> and all its data. This action cannot be undone.</p>
+        <p class="text-sm text-zinc-700 mb-4">This will permanently destroy <strong>{{ ws_name }}</strong> and all its data. This action cannot be undone.</p>
         <div class="flex justify-end gap-3">
           <Button variant="secondary" id="destroy-cancel-btn">Cancel</Button>
           <Button variant="danger" id="destroy-confirm-btn">Destroy</Button>
@@ -115,7 +129,7 @@
       </Modal>
 
       <div class="mt-8">
-        <a href="/" class="text-blue-600 hover:underline">&larr; Back to projects</a>
+        <Link href="/">&larr; Back to projects</Link>
       </div>
     </div>
   </PageContainer>

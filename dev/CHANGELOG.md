@@ -8,6 +8,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Added
 
+- Added: `blueprint/claude-stream-buffer/plan-claude-stream-buffer.md` — design plan for approximate Claude response streaming via the mngr tmux session (implemented in `imbue-mngr-claude` and `imbue-mngr-robinhood`).
 - Added: New direct dependencies recorded in `uv.lock` to support the minds WebDAV file-server mount: `wsgidav` and `a2wsgi`.
 - Added: Daily TMR cron at 08:00 UTC via a new `TMR (scheduled)` workflow that gates on a prior periodic PR (`tmr-periodic` label, 4-day window) and invokes the main `TMR` workflow via `workflow_call`; manual `workflow_dispatch` runs are unaffected by the gate.
 - Added: `just minds-test-electron` recipe that wraps the new Electron acceptance test in `xvfb-run -a`; the `test-docker` CI job now installs Node, pnpm, xvfb, and apps/minds pnpm dependencies.
@@ -25,6 +26,9 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `markdown-it-py` is now an explicit (rather than only transitive) dependency in the lockfile; mngr uses rich's CommonMark parser directly to rewrite links when rendering help topics for the terminal.
 - Added: `specs/discovery-provider-error-resilience.md` documenting the two remaining discovery-resilience loose threads from the workspace-flicker debugging — retaining known hosts/agents through a transient provider discovery error, and bouncing/restarting the latchkey forward on the same triggers minds uses for its own observe.
 - Added: New design / implementation blueprints under `blueprint/` — `tiered-restart-v2/plan-tiered-restart-v2.md` (two-tier minds workspace recovery flow and the `mngr stop --stop-host` flag), the error-hierarchy collapse plan, `paid-user-tables/` (implementation blueprint backing the move from a Modal-secret allowlist to DB tables), and `imbue-cloud-slow-path/` (imbue_cloud robust fast/slow-path host-leasing change).
+- Added: New `audit-ci` Claude skill (`.claude/skills/audit-ci/SKILL.md`) documenting how to audit recent CI runs for anomalies (warnings, uncached/rebuilt docker images, flaky/slow tests, regressions). Explains the repo's counterintuitive CI layout (test results live in separately-synthesized `Unit + Integration Tests` / `Acceptance Tests` check-runs shown as "in 0s" rather than in the workflow jobs) and includes calibration notes to avoid common false positives.
+- Added: New blueprint plans under `blueprint/` — `jinjax-migration/` (apps/minds template migration to JinjaX) and `disable-ovh-qemu-backups/` (disabling OVH-side VPS backups by purging qemu at the OVH provider level).
+- Added: New dedicated `.github/workflows/release-tests.yml` workflow that runs the release tests on `workflow_dispatch` (trigger against `main` to validate a commit before cutting a release) and on `v*` tag pushes (a backstop record). `scripts/release.py` now prints an advisory warning before the release confirmation prompt if the Release Tests workflow has not passed on the exact commit being tagged.
 
 ### Changed
 
@@ -57,6 +61,13 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Added `libs/mngr_mapreduce` to the workspace; the root `pyproject.toml` now collects coverage for `imbue.mngr_mapreduce`.
 - Changed: Dropped the now-removed `--use-snapshot` flag from `.github/workflows/tmr.yml` so scheduled / manual TMR runs don't fail at invocation (snapshot building on `--provider modal` is automatic now), and refreshed the stale `--use-snapshot` comment in `.github/workflows/tmr-reintegrate.yml`.
 - Changed: Spec file-tree listings under `specs/electron-desktop-app/` (`concise.md` + `spec.md`) now show `todesktop.js` instead of `todesktop.json`, tracking the apps/minds rename.
+- Changed: Speed up the `test-offload` and `test-offload-acceptance` checkouts: instead of `fetch-depth: 0` (which fetches the full history of *every* branch), do a default shallow checkout and then `git fetch --unshallow` only the current ref. Offload needs the full ancestry of HEAD to find its checkpoint commit and thin-diff against it, but not other branches; on a repo with many branches the all-branches fetch can add minutes to each run.
+- Changed: Removed the dead "release" branch apparatus from CI. There is no `release` branch — releases are cut from `main` as `v*` tags — so the old `test-release` / `test-docker-release` jobs (gated to `refs/heads/release` push) never ran. `ci.yml` no longer references the release branch (dropped the `release` push trigger and the four `github.ref != 'refs/heads/release'` job guards); the two release-test jobs move to the new `release-tests.yml` workflow. Refreshed the stale "Release Tests" description in `style_guide.md` and dropped the dead `release` branch from the changelog-ratchet PR-branch skip in `test_meta_ratchets.py`.
+- Changed: Bumped GitHub Actions pinned to Node.js-20 runtimes (deprecated by GitHub; forced to Node 24 starting 2026-06-16) to their latest Node.js-24 majors: `actions/cache` v4→v5, `actions/upload-artifact` v4→v7, `actions/setup-node` v4→v6, `actions/checkout` v4→v6 (`vet.yml`), `extractions/setup-just` v2→v4, `mikepenz/action-junit-report` v5→v6, and `astral-sh/setup-uv` v6→v7. Removes the Node.js-20 deprecation warnings from CI logs.
+- Changed: Updated the repo-root local-dev LiteLLM proxy config (`litellm_proxy/config.yaml`) to expose the full current Anthropic Claude lineup (Opus 4.8/4.7/4.6/4.5/4.1, Sonnet 4.6/4.5, Haiku 4.5, plus the dated Opus 4 / Sonnet 4 ids) with inline per-token pricing. Kept in sync with `apps/modal_litellm/app.py` by a drift test.
+- Changed: `scripts/install.sh` now invokes the reworked dependencies command as `mngr dependencies --install interactive --scope core` (was `mngr dependencies -i`), so a missing optional dependency (`ssh`/`rsync`/`unison`/`claude`) no longer trips the installer warning — only missing core dependencies (`git`/`tmux`/`jq`) do.
+- Changed: Updated root-level references for the `mngr_uncapped_claude` → `mngr_robinhood` plugin rename: top-level `README.md` sub-projects list, `--cov=imbue.mngr_robinhood` in root `pyproject.toml`, the `robinhood` entry in `scripts/make_cli_docs.py`'s secondary-command set, the `specs/robinhood/` spec directory, and `uv.lock`.
+- Changed: Release tooling (`scripts/utils.py`) — added `imbue-mngr-usage`, `imbue-mngr-claude-usage`, `imbue-mngr-forward`, `imbue-mngr-latchkey`, `imbue-mngr-imbue-cloud`, `imbue-mngr-ovh`, `imbue-mngr-schedule`, and `imbue-mngr-robinhood` to the hard-coded `PACKAGES` publish graph so they are version-bumped, pin-aligned, and offered for first publication by `scripts/release.py`. Their internal dependency pins were realigned to current workspace versions to satisfy `test_internal_dep_pins_are_consistent`.
 
 ### Removed
 
@@ -67,6 +78,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Fixed: TMR workflows (`tmr.yml`, `tmr-reintegrate.yml`) now re-assert `mngr tmr`'s exit code via `exit "${PIPESTATUS[0]}"` after the `| tee tmr-report/events.jsonl` pipeline, so a failed run is no longer reported as successful when `pipefail` fails to propagate the left-side failure.
 - Fixed: Tightened the `test_every_project_has_changelog_layout` meta-ratchet to also require a `.gitkeep` inside each project's `changelog/` directory. Previously only the directory's existence was checked, so a newly added project with no `.gitkeep` would pass until a later consolidation run drained its entries and the empty directory silently vanished from git.
+
+### Security
+
+- Security: Upgraded two vulnerable transitive dependencies in `uv.lock` to their fixed versions (surfaced by `uv audit`): `idna` 3.14→3.16 and `starlette` 1.0.0→1.0.1.
 
 ## 2026-05-13
 

@@ -35,6 +35,7 @@ import argparse
 import difflib
 import html
 import http.server
+import json
 import re
 import shutil
 import socket
@@ -71,10 +72,11 @@ from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_creating_page
 from imbue.minds.desktop_client.templates import render_destroying_page
 from imbue.minds.desktop_client.templates import render_dev_styleguide_page
+from imbue.minds.desktop_client.templates import render_inbox_page
+from imbue.minds.desktop_client.templates import render_inbox_unavailable_fragment
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
-from imbue.minds.desktop_client.templates import render_request_unavailable_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
@@ -365,7 +367,7 @@ def _build_scenarios() -> list[Scenario]:
         Scenario(name="chrome_non_mac_auth", builder=lambda: render_chrome_page(is_mac=False, is_authenticated=True)),
         # -- Sidebar -----------------------------------------------------
         Scenario(name="sidebar", builder=lambda: render_sidebar_page(mngr_forward_origin="http://localhost:8421")),
-        # -- Login / login_redirect / auth_error / request_unavailable ---
+        # -- Login / login_redirect / auth_error / inbox_unavailable / inbox_empty ---
         Scenario(name="login", builder=render_login_page),
         Scenario(
             name="login_redirect",
@@ -376,8 +378,12 @@ def _build_scenarios() -> list[Scenario]:
             builder=lambda: render_auth_error_page(message="This code has already been used."),
         ),
         Scenario(
-            name="request_unavailable",
-            builder=lambda: render_request_unavailable_page(message="This request was already granted."),
+            name="inbox_unavailable_fragment",
+            builder=lambda: render_inbox_unavailable_fragment(message="This request was already granted."),
+        ),
+        Scenario(
+            name="inbox_empty",
+            builder=lambda: render_inbox_page(cards=[], selected_id="", detail_html="", is_empty=True),
         ),
         # -- Dev styleguide ----------------------------------------------
         Scenario(name="dev_styleguide", builder=render_dev_styleguide_page),
@@ -532,9 +538,21 @@ def _screenshot_all(scenarios: list[Scenario], png_dir: Path, port: int) -> None
                 target = f"http://127.0.0.1:{port}/html/{sc.name}.html"
                 try:
                     page.goto(target, wait_until="networkidle", timeout=15000)
-                    # Tailwind Play CDN generates the utility styles at
-                    # runtime; give it a beat to settle before snapshotting.
-                    page.wait_for_timeout(400)
+                    # Tailwind Play CDN generates utility styles at runtime
+                    # by injecting a large ``<style>`` element into the
+                    # document head once it has parsed every class name on
+                    # the page. ``networkidle`` doesn't guarantee that has
+                    # happened: the script tag is requested, but the script
+                    # itself still runs asynchronously after the network
+                    # settles. Wait for the generated stylesheet to be
+                    # present (and non-trivial in size) before snapping --
+                    # otherwise we screenshot the unstyled "ASCII-art"
+                    # version of the page.
+                    page.wait_for_function(
+                        "() => Array.from(document.head.querySelectorAll('style'))"
+                        "  .some(s => s.textContent.length > 1000)",
+                        timeout=10000,
+                    )
                     for action in sc.interactions:
                         action(page)
                     page.screenshot(path=str(png_dir / f"{sc.name}.png"), full_page=True)
@@ -738,24 +756,76 @@ def _do_compare(label_a: str, label_b: str) -> Path:
     return report_path
 
 
+# CSS for the report page. Lives at module scope as a triple-quoted
+# string rather than a list of per-line ``"..."`` entries inside
+# ``_render_report`` so the source-file lines that contain a leading
+# CSS id selector (a ``#`` after some whitespace) don't trip the
+# ``trailing-comments`` ratchet -- the regex treats a leading ``"``
+# as code and a later ``#`` as the start of a trailing comment, which
+# is correct for Python but wrong for CSS-inside-a-string.
+_REPORT_CSS: Final[str] = """
+body { font: 14px -apple-system, system-ui, sans-serif; margin: 24px; color: #18181b; }
+table { border-collapse: collapse; width: 100%; }
+th, td { border: 1px solid #e4e4e7; padding: 8px; vertical-align: top; text-align: left; }
+th { background: #fafafa; position: sticky; top: 0; }
+td.shots { width: 50%; }
+td.shots .thumb { display: block; cursor: zoom-in; background: none; border: 1px solid #d4d4d8; padding: 0; width: 100%; }
+td.shots .thumb img { display: block; max-width: 100%; }
+td.shots .thumb:focus { outline: 2px solid #2563eb; outline-offset: 2px; }
+pre { background: #fafafa; padding: 8px; overflow: auto; max-height: 280px; font-size: 12px; }
+.verdict-ok { color: #047857; font-weight: 600; }
+.verdict-cosmetic { color: #525252; font-weight: 600; }
+.verdict-differs { color: #b91c1c; font-weight: 600; }
+.verdict-missing { color: #92400e; font-weight: 600; }
+#lightbox { position: fixed; inset: 0; background: rgba(0,0,0,0.85); display: none;
+  flex-direction: column; z-index: 1000; padding: 16px; }
+#lightbox.open { display: flex; }
+#lightbox-header { display: flex; align-items: center; gap: 16px; color: #fafafa;
+  font: 13px -apple-system, system-ui, sans-serif; padding: 4px 8px; }
+#lightbox-title { font-weight: 600; flex: 1; }
+#lightbox-side { padding: 2px 8px; border-radius: 4px; background: rgba(255,255,255,0.15); font-family: ui-monospace, monospace; }
+#lightbox-counter { color: #d4d4d8; }
+#lightbox-close { background: none; border: 1px solid rgba(255,255,255,0.3); color: #fafafa;
+  cursor: pointer; padding: 4px 10px; border-radius: 4px; font-size: 14px; }
+#lightbox-close:hover { background: rgba(255,255,255,0.1); }
+#lightbox-stage { flex: 1; display: flex; align-items: center; justify-content: center;
+  overflow: auto; cursor: pointer; }
+#lightbox-img { max-width: 100%; max-height: 100%; border: 1px solid rgba(255,255,255,0.2); }
+#lightbox-hint { color: #a1a1aa; font-size: 12px; text-align: center; padding: 8px;
+  font-family: ui-monospace, monospace; }
+"""
+
+
 def _render_report(label_a: str, label_b: str, rows: list[dict[str, Any]]) -> str:
     """Hand-rolled HTML report -- no template engine to keep the tool
-    standalone (and to avoid bootstrapping JinjaX in this script)."""
+    standalone (and to avoid bootstrapping JinjaX in this script).
+
+    Each thumbnail in the table opens a click-through lightbox: the
+    lightbox shows one side at full size; clicking the image swaps to
+    the other side; left/right arrow keys step between scenarios that
+    actually differ (verdict ``differs``); Esc closes.
+    """
+    # Lightbox-eligible rows: only scenarios where both captures
+    # exist (excludes ``missing_in_*``). The lightbox is most useful
+    # for the ``differs`` rows, but we let ``cosmetic`` and ``ok`` in
+    # too so users can spot-check anything that draws their eye.
+    lightbox_rows = [r for r in rows if not r["verdict"].startswith("missing")]
+    differs_indices = [i for i, r in enumerate(lightbox_rows) if r["verdict"] == "differs"]
+    lightbox_payload = [
+        {
+            "name": r["name"],
+            "verdict": r["verdict"],
+            "src_a": r["png_a_rel"],
+            "src_b": r["png_b_rel"],
+        }
+        for r in lightbox_rows
+    ]
+
     parts = [
         "<!DOCTYPE html><html><head><meta charset='utf-8'>",
         f"<title>visual diff: {html.escape(label_a)} vs {html.escape(label_b)}</title>",
         "<style>",
-        "  body { font: 14px -apple-system, system-ui, sans-serif; margin: 24px; color: #18181b; }",
-        "  table { border-collapse: collapse; width: 100%; }",
-        "  th, td { border: 1px solid #e4e4e7; padding: 8px; vertical-align: top; text-align: left; }",
-        "  th { background: #fafafa; position: sticky; top: 0; }",
-        "  td.shots { width: 50%; }",
-        "  td.shots img { max-width: 100%; border: 1px solid #d4d4d8; }",
-        "  pre { background: #fafafa; padding: 8px; overflow: auto; max-height: 280px; font-size: 12px; }",
-        "  .verdict-ok { color: #047857; font-weight: 600; }",
-        "  .verdict-cosmetic { color: #525252; font-weight: 600; }",
-        "  .verdict-differs { color: #b91c1c; font-weight: 600; }",
-        "  .verdict-missing { color: #92400e; font-weight: 600; }",
+        _REPORT_CSS,
         "</style></head><body>",
         f"<h1>visual diff: <code>{html.escape(label_a)}</code> vs <code>{html.escape(label_b)}</code></h1>",
         f"<p>"
@@ -768,7 +838,10 @@ def _render_report(label_a: str, label_b: str, rows: list[dict[str, Any]]) -> st
         f"<p style='font-size:13px;color:#525252'>"
         f"<strong>ok</strong> = PNG byte-identical. "
         f"<strong>cosmetic</strong> = no PNGs, HTML normalizes equal. "
-        f"<strong>differs</strong> = real visual or structural difference."
+        f"<strong>differs</strong> = real visual or structural difference. "
+        f"Click a thumbnail to open the lightbox; click the lightbox image to swap "
+        f"between A &amp; B; &larr; / &rarr; step between the {len(differs_indices)} "
+        f"differing scenario(s); Esc closes."
         f"</p>",
         "<table><thead><tr>"
         "<th>scenario</th><th>verdict</th>"
@@ -777,6 +850,9 @@ def _render_report(label_a: str, label_b: str, rows: list[dict[str, Any]]) -> st
         "<th>structural HTML diff</th>"
         "</tr></thead><tbody>",
     ]
+    # Track lightbox index alongside table iteration so the data-* hook
+    # on each thumbnail points to the right entry in the JS payload.
+    lightbox_index = 0
     for row in rows:
         verdict = row["verdict"]
         if verdict == "ok":
@@ -792,12 +868,110 @@ def _render_report(label_a: str, label_b: str, rows: list[dict[str, Any]]) -> st
         if verdict.startswith("missing"):
             parts.append("<td colspan='3'>(scenario only in one capture)</td>")
         else:
-            parts.append(f"<td class='shots'><img src='{html.escape(row['png_a_rel'])}' alt=''></td>")
-            parts.append(f"<td class='shots'><img src='{html.escape(row['png_b_rel'])}' alt=''></td>")
+            # Each thumbnail is a <button> so it picks up keyboard focus
+            # and Enter activates it; data-lightbox-* tells the JS which
+            # entry / side to open.
+            parts.append(
+                f"<td class='shots'>"
+                f"<button class='thumb' type='button' data-lightbox-index='{lightbox_index}' data-lightbox-side='a'>"
+                f"<img src='{html.escape(row['png_a_rel'])}' alt=''></button></td>"
+            )
+            parts.append(
+                f"<td class='shots'>"
+                f"<button class='thumb' type='button' data-lightbox-index='{lightbox_index}' data-lightbox-side='b'>"
+                f"<img src='{html.escape(row['png_b_rel'])}' alt=''></button></td>"
+            )
             parts.append(f"<td><div>png: <code>{html.escape(row['png_status'])}</code></div>")
             parts.append(f"<pre>{html.escape(row['html_diff'])}</pre></td>")
+            lightbox_index += 1
         parts.append("</tr>")
-    parts.append("</tbody></table></body></html>")
+    parts.append("</tbody></table>")
+
+    # Lightbox overlay markup.
+    parts.append(
+        "<div id='lightbox' role='dialog' aria-hidden='true'>"
+        "  <div id='lightbox-header'>"
+        "    <span id='lightbox-title'></span>"
+        "    <span id='lightbox-side'></span>"
+        "    <span id='lightbox-counter'></span>"
+        "    <button id='lightbox-close' type='button' aria-label='Close'>Close (Esc)</button>"
+        "  </div>"
+        "  <div id='lightbox-stage'><img id='lightbox-img' alt=''></div>"
+        "  <div id='lightbox-hint'>click image to swap A &harr; B &middot; "
+        "&larr; / &rarr; for next/previous differing scenario &middot; Esc to close</div>"
+        "</div>"
+    )
+
+    # Lightbox JS. Payload is a data island so we can index into it
+    # without escaping HTML attributes character-by-character.
+    parts.append("<script id='lightbox-data' type='application/json'>")
+    parts.append(json.dumps({"rows": lightbox_payload, "differs": differs_indices}))
+    parts.append("</script>")
+    parts.append(
+        "<script>(function(){"
+        "  var data = JSON.parse(document.getElementById('lightbox-data').textContent);"
+        "  var rows = data.rows, differs = data.differs;"
+        "  var lb = document.getElementById('lightbox');"
+        "  var img = document.getElementById('lightbox-img');"
+        "  var title = document.getElementById('lightbox-title');"
+        "  var sideEl = document.getElementById('lightbox-side');"
+        "  var counter = document.getElementById('lightbox-counter');"
+        "  var labels = {a: " + json.dumps(label_a) + ", b: " + json.dumps(label_b) + "};"
+        "  var idx = -1, side = 'a';"
+        "  function show(i, s){"
+        "    if (i < 0 || i >= rows.length) return;"
+        "    idx = i; side = s;"
+        "    var r = rows[i];"
+        "    img.src = (s === 'a') ? r.src_a : r.src_b;"
+        "    title.textContent = r.name + '  [' + r.verdict + ']';"
+        "    sideEl.textContent = (s === 'a' ? 'A: ' : 'B: ') + labels[s];"
+        "    var dpos = differs.indexOf(i);"
+        "    counter.textContent = dpos >= 0"
+        "      ? ('differs ' + (dpos + 1) + ' / ' + differs.length)"
+        "      : ('scenario ' + (i + 1) + ' / ' + rows.length);"
+        "    lb.classList.add('open');"
+        "    lb.setAttribute('aria-hidden', 'false');"
+        "  }"
+        "  function close(){ lb.classList.remove('open'); lb.setAttribute('aria-hidden', 'true'); idx = -1; }"
+        "  function swap(){ if (idx < 0) return; show(idx, side === 'a' ? 'b' : 'a'); }"
+        # Step through differs first; if no differs, step through all rows.
+        "  function step(delta){"
+        "    if (idx < 0) return;"
+        "    if (differs.length === 0){ show((idx + delta + rows.length) % rows.length, side); return; }"
+        "    var dpos = differs.indexOf(idx);"
+        "    if (dpos === -1){"
+        # Currently on a non-differ row: jump to the nearest differ in the requested direction.
+        "      var i = idx + delta;"
+        "      while (i >= 0 && i < rows.length && differs.indexOf(i) === -1) i += delta;"
+        "      if (i < 0 || i >= rows.length) i = delta > 0 ? differs[0] : differs[differs.length - 1];"
+        "      show(i, side);"
+        "      return;"
+        "    }"
+        "    var next = (dpos + delta + differs.length) % differs.length;"
+        "    show(differs[next], side);"
+        "  }"
+        # Wire thumbnail clicks.
+        "  document.querySelectorAll('.thumb').forEach(function(btn){"
+        "    btn.addEventListener('click', function(){"
+        "      show(parseInt(btn.dataset.lightboxIndex, 10), btn.dataset.lightboxSide);"
+        "    });"
+        "  });"
+        "  document.getElementById('lightbox-close').addEventListener('click', close);"
+        # Click on the image (or its stage) toggles side; click outside both closes.
+        "  document.getElementById('lightbox-stage').addEventListener('click', function(){ swap(); });"
+        # Background click on the lightbox itself (outside the stage) closes.
+        "  lb.addEventListener('click', function(e){ if (e.target === lb) close(); });"
+        "  document.addEventListener('keydown', function(e){"
+        "    if (!lb.classList.contains('open')) return;"
+        "    if (e.key === 'Escape'){ close(); return; }"
+        "    if (e.key === 'ArrowLeft'){ step(-1); e.preventDefault(); return; }"
+        "    if (e.key === 'ArrowRight'){ step(1); e.preventDefault(); return; }"
+        # Up/down toggles A<->B as an alternative to clicking.
+        "    if (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === ' '){ swap(); e.preventDefault(); return; }"
+        "  });"
+        "})();</script>"
+    )
+    parts.append("</body></html>")
     return "".join(parts)
 
 

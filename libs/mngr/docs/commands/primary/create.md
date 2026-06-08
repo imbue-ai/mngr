@@ -75,6 +75,9 @@ mngr create [OPTIONS] [POSITIONAL_NAME] [POSITIONAL_AGENT_TYPE] [AGENT_ARGS]...
 | `-w`, `--extra-window` | text | Run extra command in additional window. Use name="command" to set window name. Note: ALL_UPPERCASE names (e.g., FOO="bar") are treated as env var assignments, not window names | None |
 | `--label` | text | Agent label KEY=VALUE [repeatable] [experimental] | None |
 | `--project` | text | Project name for the agent (sets the 'project' label; '.' inherits from source agent's project label when --from references an agent, else uses the source's git remote origin, else the source's folder name) [default: .] | `.` |
+| `--tmux-width` | integer | Width (columns) of the agent's tmux window [default: 200] | None |
+| `--tmux-height` | integer | Height (rows) of the agent's tmux window [default: 50] | None |
+| `--tmux-window-size` | choice (`manual` &#x7C; `latest` &#x7C; `largest` &#x7C; `smallest`) | tmux window resize policy; 'manual' pins the window to its width/height and never resizes on attach [default: latest] | None |
 
 ## Host Options
 

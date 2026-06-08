@@ -468,24 +468,32 @@ class ProviderInstanceConfig(FrozenModel):
     def merge_with(self, override: "ProviderInstanceConfig") -> "ProviderInstanceConfig":
         """Merge this config with an override config.
 
-        All fields flip to assign-by-default: override wins if not None.
-        Lists / dicts / sets are replaced rather than appended; use the
-        ``field__extend`` operator to opt into additive behavior.
+        Uses ``model_fields_set`` so an override only replaces the fields it
+        actually set; fields the override left untouched keep the base value.
+        This matches ``AgentTypeConfig`` / ``PluginConfig`` and is what keeps a
+        higher-precedence layer that touches a single field (e.g. a create
+        template's ``--setting providers.<name>.is_enabled=true``) from
+        silently resetting every other provider field -- like
+        ``is_host_in_docker`` -- back to its model default. Relying on
+        "override wins unless its value is None" was wrong here: a field whose
+        default is a non-None value (a ``bool`` default of ``False``, an empty
+        tuple, ...) would clobber the base even when the override never set it.
+
+        Aggregate fields still flip to assign-by-default: a list / dict / set
+        the override explicitly sets replaces the base value rather than
+        appending. Use the ``field__extend`` operator for additive behavior.
         """
-        # Ensure override is same type as self
         if not isinstance(override, self.__class__):
             raise ConfigParseError(f"Cannot merge {self.__class__.__name__} with different provider config type")
 
+        explicitly_set = override.model_fields_set
+        if not explicitly_set:
+            return self
         base_values = self.model_dump()
         override_values = override.model_dump()
-        merged_values: dict[str, Any] = {}
-        for field_name in self.__class__.model_fields:
-            if field_name == "backend":
-                # Backend identifies the config class itself; always take it from override.
-                merged_values[field_name] = override_values[field_name]
-                continue
-            override_value = override_values[field_name]
-            merged_values[field_name] = override_value if override_value is not None else base_values[field_name]
+        merged_values: dict[str, Any] = dict(base_values)
+        for field_name in explicitly_set:
+            merged_values[field_name] = override_values[field_name]
         return self.__class__(**merged_values)
 
 
@@ -761,7 +769,7 @@ class MngrConfig(FrozenModel):
     )
     connect_command: str | None = Field(
         default=None,
-        description="Custom command to run instead of the builtin connect when create or start connects to agents. "
+        description="Custom command to run instead of the builtin connect when create, start, or connect connects to agents. "
         "The environment variables MNGR_AGENT_NAME and MNGR_SESSION_NAME are set before running the command.",
     )
     is_nested_tmux_allowed: bool = Field(
@@ -1098,3 +1106,6 @@ class CreateCliOptions(CommonCliOptions):
     upload_file: tuple[str, ...]
     update: bool
     yes: bool
+    tmux_width: int | None
+    tmux_height: int | None
+    tmux_window_size: str | None

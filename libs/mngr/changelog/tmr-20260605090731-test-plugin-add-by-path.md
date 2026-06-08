@@ -1,0 +1,1 @@
+Strengthened the `mngr plugin add --path` e2e tutorial test to assert a clean abort (exit code 1) with an `Aborted` message and no traceback or click usage error, rather than only checking for a non-zero exit code. This verifies the `--path` option is recognized and the command fails gracefully when the path cannot be installed.

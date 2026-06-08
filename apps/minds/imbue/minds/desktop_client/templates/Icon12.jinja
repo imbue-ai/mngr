@@ -1,0 +1,17 @@
+{#def name, extra="" #}
+{#
+  12x12 title-bar window-control glyph (minimize / maximize / close).
+  Sized at ``w-3 h-3`` -- there's no size axis because these only live
+  inside a TitlebarButton variant="control" element, which is itself
+  ``w-9 h-[38px]`` and expects a 12px glyph.
+
+  ``name`` picks from the ``ICONS_12`` catalog global in templates.py.
+
+  Usage: place an Icon12 component inside a TitlebarButton variant
+  "control", e.g. with name="close" for the X glyph on the close
+  button.
+#}
+<svg class="w-3 h-3 {{ extra }}" viewBox="0 0 12 12"
+     fill="none" stroke="currentColor" stroke-width="2"
+     stroke-linecap="round" stroke-linejoin="round"
+     aria-hidden="true">{{ ICONS_12[name] | safe }}</svg>

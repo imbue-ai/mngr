@@ -19,10 +19,12 @@ def test_send_message_raises_dialog_detected_when_dialog_visible(
     """send_message should raise DialogDetectedError when a dialog is blocking the pane."""
     agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
     session_name = agent.session_name
+    window_name = agent.mngr_ctx.config.tmux.primary_window_name
 
     try:
+        # Name the primary window so it matches agent.tmux_target (which targets by name).
         agent.host.execute_idempotent_command(
-            f"tmux new-session -d -s '{session_name}' 'echo \"Yes, I trust this folder\"; sleep 847601'",
+            f"tmux new-session -d -s '{session_name}' -n '{window_name}' 'echo \"Yes, I trust this folder\"; sleep 847601'",
             timeout_seconds=5.0,
         )
 
@@ -53,10 +55,12 @@ def test_send_message_does_not_raise_dialog_detected_when_no_dialog(
     # for a tmux wait-for signal that will never arrive (no real Claude process)
     agent.enter_submission_timeout_seconds = 1.0
     session_name = agent.session_name
+    window_name = agent.mngr_ctx.config.tmux.primary_window_name
 
     try:
+        # Name the primary window so it matches agent.tmux_target (which targets by name).
         agent.host.execute_idempotent_command(
-            f"tmux new-session -d -s '{session_name}' 'echo \"Normal output here\"; sleep 847602'",
+            f"tmux new-session -d -s '{session_name}' -n '{window_name}' 'echo \"Normal output here\"; sleep 847602'",
             timeout_seconds=5.0,
         )
 

@@ -54,6 +54,18 @@ class DockerProviderConfig(ProviderInstanceConfig):
         default=(),
         description="Default docker run arguments applied to all containers (e.g., '--cpus=2', '--memory=4g')",
     )
+    docker_runtime: str | None = Field(
+        default=None,
+        description=(
+            "Container runtime to pass to `docker run --runtime` (e.g. 'runsc' for gVisor). "
+            "When None (the default), no `--runtime` flag is added and Docker uses its configured "
+            "default (normally 'runc'). The named runtime must be installed and registered with the "
+            "Docker daemon on the host, otherwise container creation fails with Docker's native "
+            "'unknown runtime' error. Override per-invocation/environment via "
+            "MNGR__PROVIDERS__<NAME>__DOCKER_RUNTIME (e.g. set to 'runc' to force the default runtime "
+            "where gVisor is unavailable, such as CI)."
+        ),
+    )
     default_idle_timeout: int = Field(
         default=800,
         description="Default host idle timeout in seconds",

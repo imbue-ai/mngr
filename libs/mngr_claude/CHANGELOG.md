@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Approximate response streaming for Claude agents, driven by watching the agent's tmux pane. A new `streaming_snapshot_interval_seconds` (float, default `0.0`) on the `claude` agent type config enables a background watcher that writes the in-progress assistant text to `$MNGR_AGENT_STATE_DIR/plugin/claude/stream_buffer` every N seconds; `<= 0` (the default) leaves existing behavior unchanged. The buffer is written atomically (temp file + `mv`) with line 1 carrying the `uuid` of the last complete assistant message and lines 2+ the in-progress text reverse-mapped from the terminal rendering back into markdown; it is cleared on watcher startup and emptied (body cleared, id line kept) when the agent goes idle.
+- Added: `resources/stream_snapshot.py` watcher script (stdlib-only) that captures the tmux pane via `tmux capture-pane -e -J`, identifies the latest assistant-text block by the `●` marker's color (assistant markers are the achromatic default text color; chromatic tool-call and mid-gray status markers are ignored), and reverse-maps bold/italic, inline code, OSC 8 links, blockquotes, lists, code blocks, and tables (box-drawing back to pipe syntax). Body is strict-append within a message via overlap-stitched snapshots; trailing tables are held back until raw form is stable. The poll interval is provisioned to a per-agent `plugin/claude/stream_interval` file rather than env-var propagated; provisioning fails fast if streaming is enabled but the host lacks `python3`.
+- Added: `ClaudeAgent.get_stream_buffer_path()` so other code (e.g. `mngr robinhood`) can locate and read the buffer.
+
+## [v0.2.11] - 2026-06-05
+
 ### Fixed
 
 - Fixed: Aligned the workspace's `imbue-mngr*==` pin stragglers in `pyproject.toml` with the satellites bumped in main's release commit. Previously the workspace constraint graph was unsatisfiable, which would have broken the `apps/minds` ToDesktop bundle build at `uv lock` time (day-to-day dev hides this because `[tool.uv.sources]` redirects every `imbue-mngr-*` to its workspace path, bypassing the `==` pin).

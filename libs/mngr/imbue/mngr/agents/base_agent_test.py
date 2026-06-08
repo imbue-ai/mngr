@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.base_agent import quote_agent_args
 from imbue.mngr.cli.testing import create_test_agent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
@@ -74,10 +75,13 @@ def _create_running_agent(
         agent_class=BaseAgent,
     )
     session_name = f"{test_agent.mngr_ctx.config.prefix}{test_agent.name}"
+    window_name = test_agent.mngr_ctx.config.tmux.primary_window_name
 
-    # Create a tmux session and run the expected command
+    # Create a tmux session and run the expected command. The primary window is
+    # named to match production (and thus the agent's tmux_target), which targets
+    # the window by name rather than the literal :0 index.
     test_agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s '{session_name}' 'sleep {sleep_duration}'",
+        f"tmux new-session -d -s '{session_name}' -n '{window_name}' 'sleep {sleep_duration}'",
         timeout_seconds=5.0,
     )
 
@@ -145,10 +149,12 @@ def test_lifecycle_state_running_unknown_agent_type_when_different_process_exist
         is_type_registered=False,
     )
     session_name = f"{unregistered_agent.mngr_ctx.config.prefix}{unregistered_agent.name}"
+    window_name = unregistered_agent.mngr_ctx.config.tmux.primary_window_name
 
-    # Create a tmux session with a different command (cat waits for input indefinitely)
+    # Create a tmux session with a different command (cat waits for input indefinitely).
+    # The window is named to match the agent's tmux_target (which targets by name).
     unregistered_agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s '{session_name}' 'cat'",
+        f"tmux new-session -d -s '{session_name}' -n '{window_name}' 'cat'",
         timeout_seconds=5.0,
     )
 
@@ -170,11 +176,13 @@ def test_lifecycle_state_done_when_no_process_in_pane(
 ) -> None:
     """Test that agent is DONE when tmux session exists but no process is running."""
     session_name = f"{test_agent.mngr_ctx.config.prefix}{test_agent.name}"
+    window_name = test_agent.mngr_ctx.config.tmux.primary_window_name
 
-    # Create a tmux session, then manually stop the process inside it
-    # First create it with a long-running command
+    # Create a tmux session with the primary window named to match the agent's
+    # tmux_target (which targets by name). The session's shell has no child
+    # process, so the agent reports DONE.
     test_agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s '{session_name}'",
+        f"tmux new-session -d -s '{session_name}' -n '{window_name}'",
         timeout_seconds=5.0,
     )
 
@@ -197,10 +205,12 @@ def test_lifecycle_state_waiting_when_no_active_file(
 ) -> None:
     """Test that agent is WAITING when tmux session exists with expected process but no active file."""
     session_name = f"{test_agent.mngr_ctx.config.prefix}{test_agent.name}"
+    window_name = test_agent.mngr_ctx.config.tmux.primary_window_name
 
-    # Create a tmux session and run the expected command
+    # Create a tmux session and run the expected command. The primary window is
+    # named to match the agent's tmux_target (which targets by name).
     test_agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s '{session_name}' 'sleep 1000'",
+        f"tmux new-session -d -s '{session_name}' -n '{window_name}' 'sleep 1000'",
         timeout_seconds=5.0,
     )
 
@@ -224,10 +234,12 @@ def test_lifecycle_state_running_when_active_file_created(
 ) -> None:
     """Test that agent transitions from WAITING to RUNNING when active file is created."""
     session_name = f"{test_agent.mngr_ctx.config.prefix}{test_agent.name}"
+    window_name = test_agent.mngr_ctx.config.tmux.primary_window_name
 
-    # Create a tmux session and run the expected command
+    # Create a tmux session and run the expected command. The primary window is
+    # named to match the agent's tmux_target (which targets by name).
     test_agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s '{session_name}' 'sleep 1000'",
+        f"tmux new-session -d -s '{session_name}' -n '{window_name}' 'sleep 1000'",
         timeout_seconds=5.0,
     )
 
@@ -508,6 +520,46 @@ def test_assemble_command_appends_agent_args(
         command_override=None,
     )
     assert result == CommandString("my-cmd --extra arg")
+
+
+def test_quote_agent_args_quotes_special_chars_and_leaves_plain_args() -> None:
+    """quote_agent_args wraps values needing escaping and leaves already-safe tokens untouched."""
+    assert quote_agent_args(()) == ()
+    assert quote_agent_args(("--flag", "value")) == ("--flag", "value")
+    assert quote_agent_args(("--model", "Gemini 3.5 Flash (Medium)")) == (
+        "--model",
+        "'Gemini 3.5 Flash (Medium)'",
+    )
+
+
+def test_assemble_command_shell_quotes_agent_args_with_special_chars(
+    local_provider: LocalProviderInstance,
+    temp_work_dir: Path,
+) -> None:
+    """agent_args with spaces/parens are shell-quoted so the command stays valid.
+
+    Regression test: passing ``--model "Gemini 3.5 Flash (Medium)"`` used to splice
+    the raw value into the shell-evaluated command, so bash word-split it and parsed
+    ``(Medium)`` as a subshell ("syntax error near unexpected token `('").
+    """
+    config = AgentTypeConfig(command=CommandString("agy"))
+    agent = create_test_agent(
+        local_provider,
+        temp_work_dir,
+        agent_config=config,
+        agent_type=None,
+        extra_data=None,
+        agent_class=BaseAgent,
+    )
+
+    result = agent.assemble_command(
+        host=agent.host,
+        agent_args=("--model", "Gemini 3.5 Flash (Medium)"),
+        command_override=None,
+    )
+    assert result == CommandString("agy --model 'Gemini 3.5 Flash (Medium)'")
+    # The model value must be a single shell token (no bare parens/spaces).
+    assert "'Gemini 3.5 Flash (Medium)'" in str(result)
 
 
 def test_assemble_command_appends_both_cli_and_agent_args(

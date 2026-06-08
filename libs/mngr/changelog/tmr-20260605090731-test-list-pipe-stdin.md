@@ -1,0 +1,1 @@
+Fixed the `test_list_pipe_stdin` e2e tutorial test (covering `mngr list --format "{id}" | head -n 2 | mngr list --stdin`): removed the incorrect `@pytest.mark.modal` mark (the list pipeline never invokes Modal) and gave it a realistic timeout, then improved it to create a real agent and verify that ids piped through `mngr list --stdin` actually filter the listing.

@@ -31,6 +31,7 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
+from imbue.mngr.agents.base_agent import quote_agent_args
 from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
@@ -68,7 +69,7 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import TransferMode
-from imbue.mngr.utils.git_utils import find_git_common_dir
+from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_claude import hookimpl
 from imbue.mngr_claude import resources as _claude_resources
@@ -277,6 +278,14 @@ class ClaudeAgentConfig(AgentTypeConfig):
         "When set, mngr never writes to the user's Claude config; the user is responsible for "
         "interactive `claude` setup (trust dialogs, onboarding, credentials) ahead of time. "
         "Other sync/override/auto-dismiss fields on this config are silently ignored in this mode.",
+    )
+    streaming_snapshot_interval_seconds: float = Field(
+        default=0.0,
+        description="Poll interval (in seconds) for the tmux-based response-streaming watcher. When > 0, a "
+        "background watcher periodically captures the agent's tmux pane, reverse-maps the rendered "
+        "assistant text back into markdown, and writes it to "
+        "$MNGR_AGENT_STATE_DIR/plugin/claude/stream_buffer. When <= 0 (the default), the watcher is "
+        "not provisioned or run.",
     )
 
 
@@ -1059,6 +1068,12 @@ _CLAUDE_ALWAYS_PROVISIONED_SCRIPT_NAMES: Final[tuple[str, ...]] = (
     "sync_keychain_credentials.py",
 )
 
+# The tmux-based response-streaming watcher. Provisioned only when
+# streaming_snapshot_interval_seconds > 0; claude_background_tasks.sh launches it
+# when it finds the script on disk (the presence check is the single gate, just
+# like common_transcript.sh).
+_CLAUDE_STREAM_SNAPSHOT_SCRIPT_NAME: Final[str] = "stream_snapshot.py"
+
 
 def _provision_claude_always_on_scripts(
     host: OnlineHostInterface,
@@ -1077,6 +1092,42 @@ def _provision_claude_always_on_scripts(
     """
     scripts = {name: _load_claude_resource_script(name) for name in _CLAUDE_ALWAYS_PROVISIONED_SCRIPT_NAMES}
     provision_scripts_to_commands_dir(host, agent_state_dir, scripts, concurrency_group)
+
+
+def _check_python3_available(host: OnlineHostInterface) -> None:
+    """Raise PluginMngrError if python3 is not available on the host.
+
+    The response-streaming watcher is a python script, so the host must have a
+    python3 interpreter when streaming is enabled.
+    """
+    result = host.execute_idempotent_command("command -v python3", timeout_seconds=10.0)
+    if not result.success:
+        raise PluginMngrError(
+            "streaming_snapshot_interval_seconds > 0 requires python3 on the agent host, "
+            "but no python3 interpreter was found. Install python3 on the host or set "
+            "streaming_snapshot_interval_seconds = 0 to disable response streaming."
+        )
+
+
+def _provision_stream_snapshot_script(
+    host: OnlineHostInterface,
+    agent_state_dir: Path,
+    interval_seconds: float,
+    concurrency_group: ConcurrencyGroup,
+) -> None:
+    """Provision the response-streaming watcher script and its poll-interval file.
+
+    The interval is written to a file (rather than passed via an env var) because
+    env-var propagation into the background-tasks subshell that launches the
+    watcher is unreliable; the watcher reads the interval from this file at
+    runtime via $MNGR_AGENT_STATE_DIR, which it always has.
+    """
+    script = _load_claude_resource_script(_CLAUDE_STREAM_SNAPSHOT_SCRIPT_NAME)
+    provision_scripts_to_commands_dir(
+        host, agent_state_dir, {_CLAUDE_STREAM_SNAPSHOT_SCRIPT_NAME: script}, concurrency_group
+    )
+    interval_path = agent_state_dir / "plugin" / "claude" / "stream_interval"
+    host.write_file(interval_path, f"{interval_seconds}\n".encode(), "0644")
 
 
 def _has_api_credentials_available(
@@ -1398,6 +1449,16 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
             return resolve_shared_claude_config_dir()
         return self._get_agent_dir() / "plugin" / "claude" / "anthropic"
 
+    def get_stream_buffer_path(self) -> Path:
+        """Return the path to this agent's response-streaming buffer file.
+
+        Written by the stream_snapshot.py watcher when
+        streaming_snapshot_interval_seconds > 0. The first line is the uuid of
+        the last complete assistant message; the remaining lines are the
+        in-progress assistant text reverse-mapped to markdown.
+        """
+        return self._get_agent_dir() / "plugin" / "claude" / "stream_buffer"
+
     def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
         """Add CLAUDE_CONFIG_DIR and ORIGINAL_CLAUDE_CONFIG_DIR.
 
@@ -1540,13 +1601,9 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         agent_uuid = str(self.id.get_uuid())
 
         # Build the additional arguments (cli_args from config + agent_args from CLI).
-        # cli_args reach here already shell-safe (string-form configs are split with non-POSIX
-        # shlex that preserves quotes). agent_args, by contrast, are raw argv strings passed
-        # through Click as click.UNPROCESSED -- the OS shell stripped quote chars when it built
-        # argv at invocation time, so we must re-quote each element before splicing it into a
-        # shell command string.
-        quoted_agent_args = tuple(shlex.quote(arg) for arg in agent_args)
-        all_extra_args = self.agent_config.cli_args + quoted_agent_args
+        # cli_args arrive already shell-safe; agent_args are raw argv and must be quoted
+        # before being spliced into this shell-evaluated command (see ``quote_agent_args``).
+        all_extra_args = self.agent_config.cli_args + quote_agent_args(agent_args)
         args_str = " ".join(all_extra_args) if all_extra_args else ""
 
         # Read the latest session ID from the tracking file written by the SessionStart hook.
@@ -1800,12 +1857,11 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         """Find the source repo path for the agent's work_dir, if it's a git worktree or mirror.
 
         Returns the parent of the git common dir (the source repo root),
-        or None if work_dir is not inside a git repo.
+        or None if work_dir is not inside a git repo. Delegates to the shared
+        core helper ``imbue.mngr.utils.git_utils.find_git_source_path`` (also
+        used by ``mngr_antigravity``).
         """
-        git_common_dir = find_git_common_dir(self.work_dir, concurrency_group)
-        if git_common_dir is None:
-            return None
-        return git_common_dir.parent
+        return find_git_source_path(self.work_dir, concurrency_group)
 
     def _setup_per_agent_config_dir(
         self,
@@ -1971,6 +2027,18 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
             )
             provision_raw_transcript_scripts(self, host, self._get_agent_dir(), concurrency_group)
             maybe_provision_common_transcript_scripts(self, host, self._get_agent_dir(), concurrency_group)
+
+            # Provision the response-streaming watcher only when enabled. Its
+            # presence on disk is what makes claude_background_tasks.sh launch
+            # it, so a disabled interval simply means the script is absent.
+            if config.streaming_snapshot_interval_seconds > 0:
+                _check_python3_available(host)
+                _provision_stream_snapshot_script(
+                    host,
+                    self._get_agent_dir(),
+                    config.streaming_snapshot_interval_seconds,
+                    concurrency_group,
+                )
 
             if host.is_local and not config.use_env_config_dir:
                 # Determine the source path for trust extension

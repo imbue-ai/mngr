@@ -13,6 +13,7 @@ from imbue.mngr.config.completion_cache import CompletionCacheData
 from imbue.mngr.config.completion_cache import get_completion_cache_dir
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.provider_config_registry import list_registered_provider_backend_names
+from imbue.mngr.plugin_catalog import get_installable_packages
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.utils.click_utils import detect_alias_to_canonical
@@ -23,8 +24,8 @@ from imbue.mngr.utils.pydantic_utils import unwrap_optional
 # Maps command name -> list of source identifier lists per position.
 # Each inner list contains source names for that position (empty = freeform).
 # For variadic commands (nargs=None), the last entry repeats.
-# Source identifiers: "agent_names", "host_names", "plugin_names", "config_keys",
-# "help_targets"
+# Source identifiers: "agent_names", "host_names", "plugin_names",
+# "catalog_packages", "installed_packages", "config_keys", "help_targets"
 _POSITIONAL_COMPLETION_SPEC: Final[dict[str, list[list[str]]]] = {
     "archive": [["agent_names"]],
     "capture": [["agent_names"]],
@@ -51,6 +52,8 @@ _POSITIONAL_COMPLETION_SUBCOMMAND_SPEC: Final[dict[str, list[list[str]]]] = {
     "snapshot.create": [["agent_names"]],
     "snapshot.destroy": [["agent_names"]],
     "snapshot.list": [["agent_names"]],
+    "plugin.add": [["catalog_packages"]],
+    "plugin.remove": [["installed_packages"]],
     "plugin.enable": [["plugin_names"]],
     "plugin.disable": [["plugin_names"]],
     "config.get": [["config_keys"]],
@@ -324,6 +327,7 @@ def write_cli_completions_cache(
     mngr_ctx: MngrContext | None = None,
     registered_agent_types: list[str] | None = None,
     topic_names: list[str] | None = None,
+    installed_plugin_packages: list[str] | None = None,
 ) -> None:
     """Write all CLI commands, options, and choices to the completions cache (best-effort).
 
@@ -343,6 +347,12 @@ def write_cli_completions_cache(
     command names they form the completion candidates for the ``mngr help``
     positional argument. The caller passes these because help topics live in the
     cli layer, which this (config-layer) writer must not import.
+
+    installed_plugin_packages are the package names currently installed as
+    plugins (uv-tool receipt extras); they are the completion candidates for the
+    ``mngr plugin remove`` positional argument. The caller passes these for the
+    same layering reason as topic_names: the uv-tool receipt helper transitively
+    imports the cli layer, which this writer must not depend on.
 
     Catches OSError from cache writes so filesystem failures do not break
     CLI commands. Other exceptions are allowed to propagate.
@@ -433,6 +443,11 @@ def write_cli_completions_cache(
                 if cmd_name in canonical_names and data_key in dynamic_as_dict:
                     option_choices[opt_key] = dynamic_as_dict[data_key]
 
+        # Static catalog package names for `mngr plugin add` completion. Sourced
+        # from the plugin catalog (the same store the `mngr extras` install wizard
+        # uses), not from the runtime context, so it is always available.
+        catalog_package_names = sorted({entry.package_name for entry in get_installable_packages()})
+
         cache_data = CompletionCacheData(
             commands=all_command_names,
             aliases=alias_to_canonical,
@@ -444,6 +459,8 @@ def write_cli_completions_cache(
             host_name_options=sorted(host_name_opts),
             plugin_name_options=sorted(set(plugin_name_opts)),
             plugin_names=dynamic.plugin_names if dynamic is not None else [],
+            catalog_package_names=catalog_package_names,
+            installed_plugin_package_names=sorted(set(installed_plugin_packages or [])),
             config_keys=dynamic.config_keys if dynamic is not None else [],
             positional_nargs_by_command=positional_nargs_by_command,
             positional_completions=positional_completions,
@@ -453,5 +470,5 @@ def write_cli_completions_cache(
 
         cache_path = get_completion_cache_dir() / COMPLETION_CACHE_FILENAME
         atomic_write(cache_path, json.dumps(cache_data._asdict()))
-    except OSError:
-        logger.debug("Failed to write CLI completions cache")
+    except OSError as e:
+        logger.warning("Failed to write CLI completions cache: {}", e)

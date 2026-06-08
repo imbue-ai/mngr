@@ -676,7 +676,8 @@ def test_stream_output_surfaces_pane_capture_when_files_missing(
 
     # Start a session that immediately prints error text and exits.
     # Using a command argument to new-session ensures the text is in the
-    # pane buffer without needing send-keys + sleep.
+    # pane buffer without needing send-keys + sleep. The primary window is named
+    # so it matches agent.tmux_target (which targets the window by name).
     subprocess.run(
         [
             "tmux",
@@ -684,6 +685,8 @@ def test_stream_output_surfaces_pane_capture_when_files_missing(
             "-d",
             "-s",
             session,
+            "-n",
+            agent.mngr_ctx.config.tmux.primary_window_name,
             "-x",
             "200",
             "-y",
