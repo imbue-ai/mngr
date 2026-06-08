@@ -1204,18 +1204,23 @@ function handleChromeSSEEvent(evt) {
     }
 
     updateAllOsTitles();
-  } else if (evt.type === 'auth_status') {
-    // Clear the stored accent on account-level sign-out (true -> false
-    // transition). Without this guard the bar would stay tinted with the
-    // last-opened workspace's color on the sign-in page. We only fire on
-    // the transition so the initial unauthenticated SSE snapshot doesn't
-    // clobber a value that was just hydrated from disk.
-    const prev = latestChromeState.authStatus;
-    const wasSignedIn = !!(prev && prev.signed_in);
-    const isSignedIn = !!evt.signed_in;
-    if (wasSignedIn && !isSignedIn) {
+  } else if (evt.type === 'auth_required') {
+    // Clear the stored accent on the authenticated -> unauthenticated
+    // boundary (account sign-out or session expiration). Without this
+    // the bar would stay tinted with the last-opened workspace's color
+    // on the sign-in page. The SSE endpoint emits ``auth_required`` and
+    // closes whenever the request is unauthenticated, so a mid-session
+    // sign-out manifests here as: stream that was delivering
+    // ``workspaces`` -> stream closes -> reconnect after 1.5s ->
+    // ``auth_required`` payload. ``latestChromeState.workspaces`` is only
+    // ever set from the ``workspaces`` branch above, so its non-null
+    // state is a stable "we have been authenticated this session" flag --
+    // and gating on it leaves a freshly-hydrated ``lastWorkspaceAgentId``
+    // alone during the cold-start unauthenticated path.
+    if (latestChromeState.workspaces !== null) {
       setLastWorkspaceAgentId(null);
     }
+  } else if (evt.type === 'auth_status') {
     latestChromeState.authStatus = evt;
   } else if (evt.type === 'requests') {
     const prevIds = latestChromeState.requestIds || [];
