@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-06
+
+Added `blueprint/claude-stream-buffer/plan-claude-stream-buffer.md`, the design plan for approximate Claude response streaming via the mngr tmux session (implemented in `imbue-mngr-claude` and `imbue-mngr-robinhood`).
+
 ## 2026-06-05
 
 - Release tooling (`scripts/utils.py`): added `imbue-mngr-usage`, `imbue-mngr-claude-usage`, `imbue-mngr-forward`, `imbue-mngr-latchkey`, `imbue-mngr-imbue-cloud`, `imbue-mngr-ovh`, `imbue-mngr-schedule`, and `imbue-mngr-robinhood` to the hard-coded `PACKAGES` publish graph so they are version-bumped, pin-aligned, and offered for first publication by `scripts/release.py`. Their internal dependency pins were realigned to the current workspace versions to satisfy `test_internal_dep_pins_are_consistent`.

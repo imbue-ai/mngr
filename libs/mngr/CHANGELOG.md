@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: Regenerated `docs/commands/secondary/robinhood.md` CLI help doc to document the new `--include-partial-messages` and `--stream-plain-text` streaming flags (implemented in `imbue-mngr-robinhood`).
+
 ## [v0.2.11] - 2026-06-05
 
 ### Added
