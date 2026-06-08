@@ -15,9 +15,8 @@
 // over SSE and this helper is only used when that field is missing.
 (function () {
   // Fixed lightness / chroma for the workspace accent. Mirrored in
-  // templates.py. 80% L / 0.1 C is calmer than the prior 65 / 0.15 so
-  // the full-width titlebar reads as a chrome surface rather than a
-  // saturated highlight.
+  // templates.py. A light / low-saturation tone so the full-width
+  // titlebar reads as a chrome surface rather than a saturated highlight.
   var ACCENT_L = 80;
   var ACCENT_C = 0.1;
   // Threshold for choosing a contrasting foreground. Above this L the
