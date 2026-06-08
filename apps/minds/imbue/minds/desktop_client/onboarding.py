@@ -62,9 +62,13 @@ PERMISSIONS_PREFERENCES_REMOTE_PATH: Final[str] = "/mngr/code/runtime/memory/per
 # used only to drive the client-side progress-bar animation on the
 # creating page (the bar eases toward ~80% over this duration). These are
 # rough estimates, not guarantees.
+# LIMA now boots a VM *and* builds the project image inside it (the agent runs
+# in a Docker container in the VM), so a cold create is closer to a VPS build
+# than the old run-directly-in-the-VM path -- bump its progress-bar estimate
+# accordingly.
 EXPECTED_CREATION_DURATION_SECONDS_BY_LAUNCH_MODE: Final[dict[LaunchMode, float]] = {
     LaunchMode.DOCKER: 30.0,
-    LaunchMode.LIMA: 300.0,
+    LaunchMode.LIMA: 600.0,
     LaunchMode.CLOUD: 300.0,
     LaunchMode.IMBUE_CLOUD: 30.0,
 }
@@ -207,9 +211,15 @@ class OnboardingApplier(MutableModel):
         description="Max time to wait for ``mngr create`` to publish the canonical agent id before giving up on Q3.",
     )
     chat_agent_message_timeout_seconds: float = Field(
-        default=600.0,
+        default=3600.0,
         frozen=True,
-        description="Max time to keep retrying the Q2 message until the bootstrap-created chat agent accepts it.",
+        description=(
+            "Max time to keep retrying the Q2 message until the bootstrap-created chat agent accepts it. "
+            "Set generously (1 hour) because the chat agent can take a long time to come online: a cold "
+            "lima create boots a VM and builds the in-VM image first, and the user may still need to finish "
+            "logging in to their AI provider before the agent will accept the message. This is not provider-"
+            "specific -- it just has to outlast the slowest realistic 'workspace fully ready to chat' path."
+        ),
     )
     poll_interval_seconds: float = Field(
         default=2.0,

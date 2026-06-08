@@ -31,6 +31,7 @@ import base64
 import os
 import secrets
 import shlex
+from typing import Final
 
 from loguru import logger
 from pydantic import Field
@@ -57,6 +58,11 @@ _RESTIC_ENV_REMOTE_PATH = "runtime/secrets/restic.env"
 _RESTIC_ENV_MODE = "600"
 # Bytes of entropy for the per-workspace repository password.
 _WORKSPACE_PASSWORD_ENTROPY_BYTES = 32
+# Hard cap for a single ``mngr exec`` round-trip into the workspace. A healthy
+# host answers in well under a second; this bounds a single hung call so the
+# surrounding retry loop (see ``AgentCreator._provision_backups``) can move on
+# rather than blocking its whole budget on one stuck exec.
+_MNGR_EXEC_TIMEOUT_SECONDS: Final[float] = 60.0
 
 _CANONICAL_ENV_HEADER = (
     "# Managed by minds. Definitive copy of this workspace's restic backup\n"
@@ -146,6 +152,7 @@ def _run_mngr_exec(
     with cg:
         return cg.run_process_to_completion(
             command=[MNGR_BINARY, "exec", str(agent_id), command_str],
+            timeout=_MNGR_EXEC_TIMEOUT_SECONDS,
             is_checked_after=False,
         )
 

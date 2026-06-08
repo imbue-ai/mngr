@@ -18,7 +18,7 @@
   <PageContainer>
     <h1 id="page-heading" class="text-2xl font-semibold text-zinc-900 leading-tight">
       Share <code class="code-pill">{{ service_name }}</code>
-      in <Link href="{{ mngr_forward_origin }}/goto/{{ agent_id }}/">{{ ws_name or agent_id }}</Link>
+      in <Link href={{ mngr_forward_origin ~ "/goto/" ~ agent_id ~ "/" }}>{{ ws_name or agent_id }}</Link>
       {% if account_email %}(<Link href="/accounts">{{ account_email }}</Link>){% endif %}?
     </h1>
 

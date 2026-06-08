@@ -20,6 +20,7 @@ import httpx
 import pytest
 from pydantic import AnyUrl
 from pydantic import Field
+from pydantic import PrivateAttr
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -35,15 +36,18 @@ from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_
 from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
+from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.primitives import AIProvider
+from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
@@ -212,6 +216,48 @@ def test_build_mngr_create_command_omits_fast_mode_when_unset() -> None:
     )
     joined = " ".join(command)
     assert "fast_mode" not in joined
+
+
+def test_build_mngr_create_command_forwards_region_for_imbue_cloud() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.IMBUE_CLOUD,
+        host_name=HostName("hello"),
+        imbue_cloud_account="alice@imbue.com",
+        region="US-WEST-OR",
+    )
+    # The explicit region must reach mngr as a hard -b region= build arg.
+    assert "region=US-WEST-OR" in command
+
+
+def test_build_mngr_create_command_forwards_region_for_vultr() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.CLOUD,
+        host_name=HostName("hello"),
+        region="lhr",
+    )
+    # Vultr takes the region as the --vps-region build arg.
+    assert "--vps-region=lhr" in command
+
+
+def test_build_mngr_create_command_omits_region_when_unset() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.IMBUE_CLOUD,
+        host_name=HostName("hello"),
+        imbue_cloud_account="alice@imbue.com",
+    )
+    joined = " ".join(command)
+    assert "region=" not in joined
+
+
+def test_build_mngr_create_command_ignores_region_for_docker() -> None:
+    # Region is meaningful only for region-bearing providers; DOCKER drops it.
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+        region="US-WEST-OR",
+    )
+    joined = " ".join(command)
+    assert "region=" not in joined and "vps-region" not in joined
 
 
 def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
@@ -400,6 +446,19 @@ def test_clone_git_repo_raises_on_missing_branch(tmp_path: Path) -> None:
         clone_git_repo(GitUrl("file://{}".format(origin)), dest, branch=GitBranch("nonexistent"))
 
 
+class _RecordingNotificationDispatcher(NotificationDispatcher):
+    """Test-only NotificationDispatcher that records dispatch calls instead of dispatching."""
+
+    _recorded: list[tuple[NotificationRequest, str]] = PrivateAttr(default_factory=list)
+
+    def dispatch(self, request: NotificationRequest, agent_display_name: str) -> None:
+        self._recorded.append((request, agent_display_name))
+
+    @property
+    def recorded(self) -> list[tuple[NotificationRequest, str]]:
+        return self._recorded
+
+
 def _make_test_creator(
     tmp_path,
     *,
@@ -409,6 +468,9 @@ def _make_test_creator(
     poll_interval_seconds: float = 0.05,
     probe_timeout_seconds: float = 0.5,
     system_interface_health_tracker: SystemInterfaceHealthTracker | None = None,
+    notification_dispatcher: NotificationDispatcher | None = None,
+    backup_setup_retry_budget_seconds: float = 0.0,
+    backup_setup_retry_wait_seconds: float = 0.0,
 ) -> AgentCreator:
     paths = WorkspacePaths(data_dir=tmp_path)
     cg = ConcurrencyGroup(name="agent-creator-test")
@@ -416,13 +478,16 @@ def _make_test_creator(
     return AgentCreator(
         paths=paths,
         root_concurrency_group=cg,
-        notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
+        notification_dispatcher=notification_dispatcher
+        or NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
         mngr_forward_port=mngr_forward_port,
         mngr_forward_preauth_cookie=preauth_cookie,
         workspace_ready_timeout_seconds=timeout_seconds,
         workspace_ready_poll_interval_seconds=poll_interval_seconds,
         workspace_ready_probe_timeout_seconds=probe_timeout_seconds,
         system_interface_health_tracker=system_interface_health_tracker or SystemInterfaceHealthTracker(),
+        backup_setup_retry_budget_seconds=backup_setup_retry_budget_seconds,
+        backup_setup_retry_wait_seconds=backup_setup_retry_wait_seconds,
     )
 
 
@@ -461,6 +526,34 @@ def _start_scripted_server(not_ready_count: int) -> tuple[HTTPServer, threading.
     thread.start()
     port = server.server_address[1]
     return server, thread, port
+
+
+def test_provision_backups_notifies_user_after_retry_budget_exhausted(tmp_path) -> None:
+    """A backup setup that keeps failing notifies the user once the retry budget is spent.
+
+    Uses an API_KEY request with no RESTIC_REPOSITORY, which fails deterministically
+    (no network) on every attempt. With a zero-second budget the loop makes a single
+    attempt, then gives up and dispatches exactly one notification -- and must not let
+    the exception escape the detached-thread entry point.
+    """
+    dispatcher = _RecordingNotificationDispatcher(is_electron=False, is_macos=False)
+    creator = _make_test_creator(
+        tmp_path,
+        notification_dispatcher=dispatcher,
+        backup_setup_retry_budget_seconds=0.0,
+        backup_setup_retry_wait_seconds=0.0,
+    )
+    request = BackupSetupRequest(backup_provider=BackupProvider.API_KEY, api_key_env_text="")
+
+    creator._provision_backups(
+        agent_id=AgentId.generate(),
+        host_id="host-00000000000000000000000000000000",
+        backup_request=request,
+    )
+
+    assert len(dispatcher.recorded) == 1
+    notification, _agent_display_name = dispatcher.recorded[0]
+    assert notification.title == "Backup setup failed"
 
 
 def test_wait_for_workspace_ready_short_circuits_when_disabled(tmp_path) -> None:
