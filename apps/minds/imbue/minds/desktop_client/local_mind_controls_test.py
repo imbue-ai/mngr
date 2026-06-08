@@ -1,6 +1,7 @@
 """TestClient coverage for the local-mind Start/Stop endpoints, the quit-prompt
 running-minds lookup, the SSE payload helper, and the landing-page controls."""
 
+import re
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -128,20 +129,54 @@ def test_running_local_minds_empty_without_concurrency_group(tmp_path: Path) -> 
 # -- landing page integration --
 
 
-def test_landing_page_shows_start_stop_for_local_mind(tmp_path: Path) -> None:
-    """A local (docker) workspace renders the Start/Stop controls + seeded state, not Restart."""
+def _button_display(html: str, button_class: str) -> str:
+    """Return the inline ``display`` value rendered on a landing control button.
+
+    Returns ``"none"`` when the button is hidden, ``""`` when shown. Visibility is
+    driven by inline ``display`` (not a ``.hidden`` class) because the button base
+    class is ``inline-flex`` and would otherwise win and show both buttons.
+    """
+    match = re.search(button_class + r'[^>]*?style="([^"]*)"', html)
+    assert match is not None, f"{button_class} not found with a style attribute"
+    return "none" if "display:none" in match.group(1) else ""
+
+
+def test_landing_page_stopped_local_mind_shows_only_start(tmp_path: Path) -> None:
     agent = AgentId.generate()
-    resolver = _resolver_with_local_agent(agent)
     tracker = LocalMindLivenessTracker()
     tracker.set_state(agent, LocalMindState.STOPPED)
-    client, auth_store = _make_client(tmp_path, resolver, tracker)
+    client, auth_store = _make_client(tmp_path, _resolver_with_local_agent(agent), tracker)
     _authenticate(client, auth_store)
 
-    response = client.get("/")
+    html = client.get("/").text
 
-    assert response.status_code == 200
-    html = response.text
-    assert "landing-start-btn" in html
-    assert "landing-stop-btn" in html
-    # The seeded liveness is embedded so the page renders correct controls pre-SSE.
-    assert "STOPPED" in html
+    # Exactly one control is visible: Start (the container is stopped), not Stop.
+    assert _button_display(html, "landing-start-btn") == ""
+    assert _button_display(html, "landing-stop-btn") == "none"
+    assert "Restart workspace" not in html
+
+
+def test_landing_page_running_local_mind_shows_only_stop(tmp_path: Path) -> None:
+    agent = AgentId.generate()
+    tracker = LocalMindLivenessTracker()
+    tracker.set_state(agent, LocalMindState.RUNNING)
+    client, auth_store = _make_client(tmp_path, _resolver_with_local_agent(agent), tracker)
+    _authenticate(client, auth_store)
+
+    html = client.get("/").text
+
+    assert _button_display(html, "landing-stop-btn") == ""
+    assert _button_display(html, "landing-start-btn") == "none"
+
+
+def test_landing_page_unknown_local_mind_shows_neither_control(tmp_path: Path) -> None:
+    """Before the poll knows the container state, neither Start nor Stop is shown."""
+    agent = AgentId.generate()
+    # No tracker state set -> defaults to UNKNOWN.
+    client, auth_store = _make_client(tmp_path, _resolver_with_local_agent(agent), LocalMindLivenessTracker())
+    _authenticate(client, auth_store)
+
+    html = client.get("/").text
+
+    assert _button_display(html, "landing-start-btn") == "none"
+    assert _button_display(html, "landing-stop-btn") == "none"

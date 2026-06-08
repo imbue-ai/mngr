@@ -177,6 +177,17 @@ function getMostRecentWindow() {
   return null;
 }
 
+// Whether ``bundle`` is the only still-open window. The `close` event fires
+// before `closed` (which removes the bundle from the set), so the closing
+// bundle is still counted here; "last" therefore means exactly one live window.
+function isLastLiveWindow(bundle) {
+  let liveCount = 0;
+  for (const b of bundles) {
+    if (!b.window.isDestroyed()) liveCount += 1;
+  }
+  return liveCount <= 1 && !bundle.window.isDestroyed();
+}
+
 function focusBundle(bundle) {
   if (!bundle || bundle.window.isDestroyed()) return;
   if (bundle.window.isMinimized()) bundle.window.restore();
@@ -336,7 +347,19 @@ function wireBundleWindowEvents(bundle) {
   // so we can still reach the child webContents. BaseWindow does not guarantee
   // destruction of child WebContentsView render processes on its own; leaking
   // them across create/close cycles eventually starves new ones of resources.
-  win.on('close', () => {
+  win.on('close', (event) => {
+    // Closing the LAST window quits the app (the backend shuts down with it),
+    // so route that close through the quit sequence -- which shows the
+    // local-mind shutdown prompt BEFORE the window disappears. If the user
+    // proceeds, the quit sequence sets isShuttingDown and re-closes everything
+    // (this handler then falls through to teardown); if they cancel, the window
+    // stays open. Non-last windows, and closes once a quit is already underway,
+    // fall straight through to normal teardown.
+    if (!isShuttingDown && !isQuitSequenceRunning && getBackendProcess() && isLastLiveWindow(bundle)) {
+      event.preventDefault();
+      runQuitSequence();
+      return;
+    }
     // Snapshot session state on every manual window close: by the time
     // `before-quit` fires on the `window-all-closed` path, every bundle has
     // already been removed from `bundles` by its `closed` handler, so saving
