@@ -8,3 +8,5 @@ Fixed several over-defensive edge-case handlers that could silently mask failure
 - `ShutdownEvent()` constructed bare is now always safe to call `is_set()` on.
 
 New library error types `ProcessInvariantError` and `ProcessTerminationError`.
+
+Follow-up: fixed a memory-visibility race in `RunningProcess.poll()` exposed by the stricter invariant above. When the run thread had just finished, `poll()` read `_completed_process` without synchronizing against the thread's write, so under load it could observe a stale `None` and raise a spurious `ProcessInvariantError`. `poll()` now `join()`s the finished thread first, establishing a happens-before edge that makes the result visible (and surfacing any captured exception), before deciding the invariant was violated. The invariant still fires loudly for a genuinely resultless, exceptionless thread.
