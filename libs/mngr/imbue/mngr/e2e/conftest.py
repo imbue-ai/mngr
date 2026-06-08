@@ -5,6 +5,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import textwrap
 import threading

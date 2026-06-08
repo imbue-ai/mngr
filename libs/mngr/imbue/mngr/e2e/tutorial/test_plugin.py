@@ -5,6 +5,7 @@ each one has a 1:1 correspondence with a tutorial script block.
 """
 
 import re
+import json
 import tomllib
 from pathlib import Path
 
