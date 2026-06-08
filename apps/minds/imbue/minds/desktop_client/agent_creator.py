@@ -30,6 +30,11 @@ import httpx
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
+from tenacity import RetryCallState
+from tenacity import Retrying
+from tenacity import retry_if_exception_type
+from tenacity import stop_after_delay
+from tenacity import wait_fixed
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.enums import UpperCaseStrEnum
@@ -1044,6 +1049,21 @@ class AgentCreator(MutableModel):
         frozen=True,
         description="Per-request timeout for the readiness probe HTTP GET.",
     )
+    backup_setup_retry_budget_seconds: float = Field(
+        default=300.0,
+        frozen=True,
+        description=(
+            "Total wall-clock budget for retrying backup setup on the detached thread. "
+            "The workspace is ready before this thread runs, but a slow host's mngr exec can "
+            "still race the agent's reachability; we retry transient failures within this budget "
+            "before giving up and notifying the user. Never blocks the create call."
+        ),
+    )
+    backup_setup_retry_wait_seconds: float = Field(
+        default=10.0,
+        frozen=True,
+        description="Wait between backup-setup retry attempts.",
+    )
 
     # In-flight creation state is keyed by ``str(CreationId)`` because the
     # canonical ``AgentId`` doesn't exist until ``mngr create`` returns.
@@ -1581,21 +1601,49 @@ class AgentCreator(MutableModel):
     ) -> None:
         """Detached-thread entry point: configure restic backups for the new host.
 
-        Failures are surfaced as an OS notification (a normal error popup)
-        and logged; they are non-fatal to the already-created workspace --
-        the user can configure backups later.
+        ``configure_backups_for_host`` is idempotent, so we retry it within a
+        bounded wall-clock budget: by the time this thread runs the workspace
+        readiness probe has already passed, but a slow host's ``mngr exec`` can
+        still race the agent's reachability for a while after that. Transient
+        failures are retried quietly (debug-logged per attempt); only if the
+        whole budget is exhausted do we surface an OS notification. Either way
+        this is non-fatal to the already-created workspace -- the user can
+        configure backups later -- and it never blocks the create call.
         """
-        try:
-            configure_backups_for_host(
-                agent_id=agent_id,
-                host_id=host_id,
-                request=backup_request,
-                imbue_cloud_cli=self.imbue_cloud_cli,
-                paths=self.paths,
-                parent_cg=self.root_concurrency_group,
+
+        def _log_retry(retry_state: RetryCallState) -> None:
+            outcome = retry_state.outcome
+            failure = outcome.exception() if outcome is not None else None
+            logger.debug(
+                "Backup setup attempt {} for agent {} failed ({}); retrying",
+                retry_state.attempt_number,
+                agent_id,
+                failure,
             )
+
+        try:
+            for attempt in Retrying(
+                retry=retry_if_exception_type((BackupProvisioningError, ImbueCloudCliError)),
+                stop=stop_after_delay(self.backup_setup_retry_budget_seconds),
+                wait=wait_fixed(self.backup_setup_retry_wait_seconds),
+                before_sleep=_log_retry,
+                reraise=True,
+            ):
+                with attempt:
+                    configure_backups_for_host(
+                        agent_id=agent_id,
+                        host_id=host_id,
+                        request=backup_request,
+                        imbue_cloud_cli=self.imbue_cloud_cli,
+                        paths=self.paths,
+                        parent_cg=self.root_concurrency_group,
+                    )
         except (BackupProvisioningError, ImbueCloudCliError) as exc:
-            logger.opt(exception=exc).warning("Failed to configure backups for agent {}", agent_id)
+            logger.opt(exception=exc).warning(
+                "Failed to configure backups for agent {} after {:.0f}s of retries",
+                agent_id,
+                self.backup_setup_retry_budget_seconds,
+            )
             self.notification_dispatcher.dispatch(
                 NotificationRequest(
                     title="Backup setup failed",
