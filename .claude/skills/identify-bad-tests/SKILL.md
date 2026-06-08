@@ -31,7 +31,7 @@ Judge every test along two axes.
 
 **Is it well-formed and properly structured?** Flag divergences from the style guide and the CLAUDE.md test conventions: wrong test type, location, or marker for the dependencies it actually uses; classes used to group test functions; undescriptive names; misuse of `parametrize`; missing edge / branch / empty-collection cases; snapshot misuse (hand-written expected values that just duplicate the code, or oversized inline snapshots that should be hashed); and fixture problems -- a test that hand-rolls setup a shared fixture already provides (`temp_host_dir`, `temp_mngr_ctx`, `local_provider`, etc.) instead of reusing it, or defines fixtures in the test file rather than in `conftest.py`.
 
-Not every candidate resolves to a code change. Sometimes the right conclusion is that the test is adequate as written but it is not obvious *why* -- the assertion that looks weak is actually sufficient, or the case that looks missing is genuinely unreachable. There, the remedy is a brief comment recording that reasoning, which is a useful outcome in its own right; report it the same way, with that comment as the recommendation.
+Not every candidate resolves to a code change. Sometimes the right conclusion is that the test is adequate as written but it is not obvious *why* -- the assertion that looks weak is actually sufficient because the exact value is pinned by another test, or a loose bound cannot be tightened without making the test flaky under shared state. There, the remedy is a brief comment recording that reasoning, which is a useful outcome in its own right; report it the same way, with that comment as the recommendation.
 
 ## Reporting
 
