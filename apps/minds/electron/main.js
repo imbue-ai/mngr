@@ -1482,6 +1482,12 @@ async function onReady() {
   await syncContentCookiesToDefaultSession();
 
   initialBundle = createBundle();
+  // Apply saved bounds before the loading screen renders so the window doesn't
+  // jump from default-centered to its restored position once content loads.
+  const initialSavedState = loadSessionState();
+  if (initialSavedState.length > 0) {
+    restoreWindowBounds(initialBundle, initialSavedState[0]);
+  }
   await runStartupSequence(initialBundle);
 }
 
