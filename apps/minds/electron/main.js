@@ -26,6 +26,15 @@ app.setPath('userData', paths.getDataDir());
 
 const isMac = process.platform === 'darwin';
 const TITLEBAR_HEIGHT = 38;
+// Corner radius applied to the content WebContentsView's top edge, so the
+// workspace content visually "tucks under" the accent-colored titlebar. The
+// rounded cutouts at the top reveal whatever sits behind the view; we extend
+// the chromeView's height by this much (see ``updateBundleBounds``) so the
+// chromeView's accent-colored body background paints behind the cutouts.
+// Native ``setBorderRadius`` rounds all four corners; the bottom corners
+// reveal the BaseWindow background, which is acceptable on macOS (the OS
+// already draws an outer window rounding that visually contains them).
+const CONTENT_CORNER_RADIUS = 16;
 const SIDEBAR_WIDTH = 260;
 const CONTENT_PARTITION = 'persist:workspace-content';
 
@@ -233,7 +242,17 @@ function updateBundleBounds(bundle) {
   }
 
   if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
-    bundle.chromeView.setBounds({ x: 0, y: 0, width, height: TITLEBAR_HEIGHT });
+    // Extend the chromeView a corner-radius worth of pixels past the
+    // titlebar's visual bottom edge so the chromeView paints accent
+    // color behind the contentView's rounded top-corner cutouts. The
+    // titlebar's own HTML still renders at y=0..TITLEBAR_HEIGHT; the
+    // extra strip below is just the chromeView's body background.
+    bundle.chromeView.setBounds({
+      x: 0,
+      y: 0,
+      width,
+      height: TITLEBAR_HEIGHT + CONTENT_CORNER_RADIUS,
+    });
   }
   if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
     bundle.contentView.setBounds({
@@ -306,6 +325,15 @@ function createBundleWebContentsViews(win) {
       nodeIntegration: false,
     },
   });
+  // Round the content view's corners so its top edge visually tucks under
+  // the accent-colored titlebar. The chromeView (extended below the titlebar
+  // in ``updateBundleBounds``) paints accent color behind the rounded
+  // cutouts. Note from Electron docs: ``setBorderRadius`` rounds the
+  // RENDERED region, but the view's bounds rect still captures clicks --
+  // so a click in a top corner cutout hits this contentView, which is
+  // fine (the cutouts are at the top of the workspace content, not over
+  // chrome affordances).
+  contentView.setBorderRadius(CONTENT_CORNER_RADIUS);
   win.contentView.addChildView(chromeView);
   win.contentView.addChildView(contentView);
 
@@ -911,6 +939,9 @@ function prepareAllWindowsForRetry() {
           nodeIntegration: false,
         },
       });
+      // Match the rounding applied in createBundleWebContentsViews so the
+      // post-retry contentView keeps the same tucked-under appearance.
+      contentView.setBorderRadius(CONTENT_CORNER_RADIUS);
       bundle.contentView = contentView;
       bundle.window.contentView.addChildView(contentView);
       registerShortcutsFor(bundle, contentView.webContents);

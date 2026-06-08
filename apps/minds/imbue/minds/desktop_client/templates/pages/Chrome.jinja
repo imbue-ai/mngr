@@ -32,8 +32,13 @@
 <script src="/_static/workspace_accent.js" defer></script>
 <script src="/_static/chrome.js" defer></script>
 {% endset %}
+{# Body background tracks --titlebar-bg so the iframe's rounded top corners
+   (browser mode) and the chromeView's extension strip (Electron mode) both
+   reveal accent color through the curve. Falls back to zinc-900 when no
+   workspace is active. #}
 <Base title="Minds"
-      body_class="font-sans antialiased bg-zinc-900"
+      body_class="font-sans antialiased"
+      body_style="background-color: var(--titlebar-bg, #18181b);"
       head={{ _head }}
       body_attrs={{ _body_attrs }}
       scripts={{ _scripts }}>
@@ -77,6 +82,6 @@
 
   <iframe id="content-frame"
           src="/"
-          class="fixed left-[6px] top-[38px] border-0 rounded-xl bg-zinc-50"
+          class="fixed left-[6px] top-[38px] border-0 rounded-2xl bg-zinc-50"
           style="width: calc(100% - 12px); height: calc(100% - 44px); box-shadow: 0 1px 0 rgba(255,255,255,0.05) inset;"></iframe>
 </Base>
