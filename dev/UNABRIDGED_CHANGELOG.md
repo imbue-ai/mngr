@@ -4,6 +4,24 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-07
+
+Added the blueprint plan `blueprint/mngr-agent-sdk/plan-mngr-agent-sdk.md` describing the
+mngr-backed Claude Agent SDK (`imbue.mngr_robinhood.agent_sdk`). The implementation itself lives
+under `libs/mngr_robinhood` (see that project's changelog).
+
+Excluded the new opt-in live Claude Agent SDK test suite from CI by adding `and not sdk_live`
+to both pytest filter expressions in `offload-modal.toml`. Added a `just test-sdk-live` recipe
+that sets `RUN_SDK_LIVE_TESTS=1` and runs the `sdk_live`-marked tests in `libs/mngr_robinhood`.
+
+# Blueprint plan for finishing the mngr-backed Agent SDK
+
+Added the implementation plan at `blueprint/finish-agent-sdk/plan-finish-agent-sdk.md` describing
+how the remaining control surfaces of the mngr-backed Agent SDK are completed (see the
+`libs/mngr_robinhood` changelog entry for the user-visible behavior).
+
+Added a blueprint design doc (`blueprint/tmux-window-size/`) describing the configurable tmux window-size feature implemented in this branch.
+
 ## 2026-06-06
 
 Added `blueprint/claude-stream-buffer/plan-claude-stream-buffer.md`, the design plan for approximate Claude response streaming via the mngr tmux session (implemented in `imbue-mngr-claude` and `imbue-mngr-robinhood`).

@@ -6,6 +6,11 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Public `set_command(command)` setter on `AgentInterface` / `BaseAgent`, alongside the existing `get_command` and mirroring the other certified field setters (`set_labels`, `set_is_start_on_boot`, ...). Persists the agent's stored launch command through the standard atomic write + external-storage save path, so callers can update the command an agent re-runs on its next start/restart without reaching into the agent's on-disk `data.json` directly.
+- Added: Per-agent tmux window sizing and resize policy on `mngr create` via `--tmux-width`, `--tmux-height`, and `--tmux-window-size` (`manual|latest|largest|smallest`). Settings are persisted on the agent (in `data.json`) and applied on every (re)start, surviving `stop`/`start`, `clone`, `migrate`, and `snapshot`; provider-agnostic (local, docker, modal, remote). Defaults are unchanged (`200x50` with tmux's default resize-on-attach); `manual` pins the window to its configured size so it is never resized when a client attaches. `mngr connect` skips its post-attach resize for a `manual`-window agent, so the pinned dimensions survive an interactive attach.
+
 ### Changed
 
 - Changed: Regenerated `docs/commands/secondary/robinhood.md` CLI help doc to document the new `--include-partial-messages` and `--stream-plain-text` streaming flags (implemented in `imbue-mngr-robinhood`).
