@@ -291,3 +291,18 @@ def test_extract_assistant_text_none_for_text_free_message() -> None:
 def test_extract_assistant_text_none_for_non_assistant_line() -> None:
     assert extract_assistant_text(json.dumps({"type": "result", "is_error": False})) is None
     assert extract_assistant_text("garbage") is None
+
+
+def test_extract_assistant_text_none_when_content_not_list() -> None:
+    # Typed validation fails (content is a string, not a block list); the lenient fallback also
+    # finds no text and returns None rather than raising.
+    line = _assistant_line({"id": "m1", "role": "assistant", "content": "not_a_list"})
+    assert parse_assistant_message({"id": "m1", "role": "assistant", "content": "not_a_list"}) is None
+    assert extract_assistant_text(line) is None
+
+
+def test_extract_message_start_id_none_for_malformed_message_start() -> None:
+    # A message_start whose inner `message` is structurally invalid fails validation, so no id is
+    # surfaced -- the caller simply loses the deltas-vs-summary correlation, text still streams.
+    line = json.dumps(wrap_stream_event({"type": "message_start", "message": "not_a_dict"}, "sess-1"))
+    assert extract_message_start_id(line) is None
