@@ -534,9 +534,15 @@ def _persist_region_for_launch_mode(
     provider_key = _region_provider_key_for_launch_mode(launch_mode)
     if minds_config is None or provider_key is None or not region:
         return
+    # Best-effort: this runs inside the ``on_created`` callback, which the agent
+    # creator invokes inside a try/except that marks the create FAILED on any
+    # raised exception. A region-persist failure must never flip an
+    # already-successful create. ``set_region`` -> ``_write_raw`` can raise a bare
+    # ``OSError`` (disk full / permission) in addition to ``MindsConfigError``, so
+    # swallow both at debug level.
     try:
         minds_config.set_region(provider_key, region)
-    except MindsConfigError as exc:
+    except (MindsConfigError, OSError) as exc:
         logger.debug("Failed to persist region {} for provider {}: {}", region, provider_key, exc)
 
 

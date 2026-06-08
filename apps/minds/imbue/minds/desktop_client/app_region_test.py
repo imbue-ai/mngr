@@ -64,3 +64,18 @@ def test_persist_region_is_noop_for_region_less_provider(tmp_path: Path) -> None
     _persist_region_for_launch_mode(config, LaunchMode.DOCKER, "US-EAST-VA")
     assert config.get_region("imbue_cloud") is None
     assert config.get_region("vultr") is None
+
+
+def test_persist_region_swallows_config_write_failure(tmp_path: Path) -> None:
+    """A config write failure (OSError) must not escape -- it runs inside on_created,
+    whose caller would otherwise mark the already-successful create as FAILED.
+
+    Pointing the config's data_dir at an existing regular file makes
+    ``set_region`` -> ``_write_raw`` -> ``data_dir.mkdir(...)`` raise a bare OSError
+    (FileExistsError), which the persist helper must catch.
+    """
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("")
+    config = MindsConfig(data_dir=blocker / "config-root")
+    # Must not raise; the failure is swallowed at debug level.
+    _persist_region_for_launch_mode(config, LaunchMode.CLOUD, "lhr")
