@@ -172,7 +172,8 @@ def test_tracker_set_state_fires_on_change_only_on_change() -> None:
     tracker.add_on_change_callback(lambda aid, state: changes.append((str(aid), state)))
 
     tracker.set_state(agent, LocalMindState.RUNNING)
-    tracker.set_state(agent, LocalMindState.RUNNING)  # no-op, same state
+    # A repeat of the same state must not re-fire on-change.
+    tracker.set_state(agent, LocalMindState.RUNNING)
     tracker.set_state(agent, LocalMindState.STOPPED)
 
     assert changes == [(str(agent), LocalMindState.RUNNING), (str(agent), LocalMindState.STOPPED)]
