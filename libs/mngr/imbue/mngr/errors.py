@@ -172,6 +172,10 @@ class DuplicateAgentNameError(AgentError):
         super().__init__(f"An agent named '{agent_name}' already exists on this host (ID: {existing_agent_id})")
 
 
+class AgentStateInconsistencyError(AgentError, RuntimeError):
+    """Raised when an agent found during discovery is no longer present on the live host."""
+
+
 class AgentStartError(AgentError):
     """Failed to start an agent's tmux session."""
 
@@ -446,6 +450,14 @@ class ConfigKeyNotFoundError(ConfigError, KeyError):
 
 class ConfigStructureError(ConfigError, TypeError):
     """Invalid configuration structure."""
+
+
+class InvalidKeyPathError(ConfigError, ValueError):
+    """Raised when a config key path is empty or otherwise malformed."""
+
+
+class DockerConfigValidationError(ConfigError, ValueError):
+    """Raised when Docker provider config fields are mutually inconsistent."""
 
 
 class UnknownAgentTypeError(ConfigError):

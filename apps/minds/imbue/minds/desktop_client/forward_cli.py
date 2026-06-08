@@ -52,6 +52,7 @@ from imbue.minds.desktop_client.backend_resolver import parse_service_log_record
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
+from imbue.minds.errors import EnvelopeStreamConsumerError
 from imbue.minds.utils.secret_redaction import redact_secret_flag_values
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
@@ -173,7 +174,7 @@ class EnvelopeStreamConsumer(MutableModel):
         dispatched against an empty callback list.
         """
         if self._process is not None:
-            raise RuntimeError("EnvelopeStreamConsumer.attach already called")
+            raise EnvelopeStreamConsumerError("EnvelopeStreamConsumer.attach already called")
         self._process = process
 
     def start(self, concurrency_group: ConcurrencyGroup) -> None:
@@ -183,7 +184,7 @@ class EnvelopeStreamConsumer(MutableModel):
         need to see the very first envelope have been registered.
         """
         if self._process is None:
-            raise RuntimeError("EnvelopeStreamConsumer.start called before attach")
+            raise EnvelopeStreamConsumerError("EnvelopeStreamConsumer.start called before attach")
         concurrency_group.start_new_thread(
             target=self._read_stdout_loop,
             name="mngr-forward-stdout-reader",
