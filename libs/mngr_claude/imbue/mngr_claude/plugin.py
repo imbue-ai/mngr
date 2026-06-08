@@ -1557,15 +1557,17 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
                 "This may indicate a trust dialog appeared or Claude Code failed to start.",
             )
 
-    def _build_background_tasks_command(self, session_name: str) -> str:
+    def _build_background_tasks_command(self, session_name: str, primary_window_name: str) -> str:
         """Build a shell command that starts the background tasks script.
 
         The background tasks script (provisioned to $MNGR_AGENT_STATE_DIR/commands/)
         handles both activity tracking and transcript export. It runs in the
-        background while the tmux session is alive.
+        background while the tmux session is alive. ``primary_window_name`` is
+        passed through so the response-streaming watcher captures the agent pane
+        by window name rather than the literal :0 index (base-index agnostic).
         """
         script_path = "$MNGR_AGENT_STATE_DIR/commands/claude_background_tasks.sh"
-        return f"( {script_path} {shlex.quote(session_name)} ) &"
+        return f"( {script_path} {shlex.quote(session_name)} {shlex.quote(primary_window_name)} ) &"
 
     def assemble_command(
         self,
@@ -1637,7 +1639,9 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
 
         # Build the background tasks command (activity tracking + transcript export)
         session_name = self.session_name
-        background_cmd = self._build_background_tasks_command(session_name)
+        background_cmd = self._build_background_tasks_command(
+            session_name, self.mngr_ctx.config.tmux.primary_window_name
+        )
 
         # Combine: start background tasks, export env (including session ID), then run the main command (and make sure we get rid of the session started marker on each run so that wait_for_ready_signal works correctly for both new and resumed sessions)
         return CommandString(
