@@ -14,7 +14,6 @@ from typing import Any
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
-from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.polling import poll_until
 from imbue.skitwright.expect import expect
 
@@ -156,44 +155,6 @@ def _create_claude_task_with_transcript(e2e: E2eSession, host_dir: Path, sleep_v
     (events_dir / "events.jsonl").write_text(
         "\n".join(json.dumps(event) for event in _SAMPLE_TRANSCRIPT_EVENTS) + "\n"
     )
-
-
-def _materialize_claude_agent_with_transcript(
-    host_dir: Path,
-    work_dir: Path,
-    agent_name: str,
-    events: list[dict[str, object]],
-) -> None:
-    """Write a stopped claude agent and its common transcript directly to disk.
-
-    ``mngr transcript`` only works on agent types that produce a common
-    transcript (claude, antigravity); a ``command`` agent legitimately has
-    none, so the cheap ``sleep`` stand-in used by the other tutorial tests
-    cannot exercise this command. Claude itself cannot run in CI, so instead
-    we materialize the exact on-disk state a real claude conversation leaves
-    behind -- a ``data.json`` of type ``claude`` plus the
-    ``claude/common_transcript`` events file -- and then run the real
-    ``mngr transcript`` subprocess against it. This mirrors how the
-    transcript unit tests stage their agents (see
-    ``imbue.mngr.cli.testing.create_agent_with_sample_transcript``).
-    """
-    agent_id = str(AgentId.generate())
-    agent_dir = host_dir / "agents" / agent_id
-    transcript_dir = agent_dir / "events" / "claude" / "common_transcript"
-    transcript_dir.mkdir(parents=True)
-    (agent_dir / "data.json").write_text(
-        json.dumps(
-            {
-                "id": agent_id,
-                "name": agent_name,
-                "type": "claude",
-                "command": "claude",
-                "work_dir": str(work_dir),
-                "create_time": "2026-01-01T00:00:00+00:00",
-            }
-        )
-    )
-    (transcript_dir / "events.jsonl").write_text("\n".join(json.dumps(event) for event in events) + "\n")
 
 
 @pytest.mark.rsync
