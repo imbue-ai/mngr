@@ -1,0 +1,5 @@
+Fixed mngr's Claude hooks leaking into "normal" (non-mngr) Claude config. mngr previously wrote its readiness/credential/permission hooks into the project's `.claude/settings.local.json`, which plain `claude` runs in that directory also read -- so the hooks (e.g. an activity-event `mkdir`) fired outside mngr where `$MNGR_AGENT_STATE_DIR`/`$MNGR_HOST_DIR` are unset, producing errors like `mkdir: cannot create directory '/events': Permission denied`.
+
+mngr now writes all of its own hooks to a private per-agent file, `$MNGR_AGENT_STATE_DIR/plugin/claude/mngr_managed_settings.json`, and launches `claude --settings <that file>`. The file is owned outright by mngr and rewritten fresh on every provision, so there is no cross-version accumulation and nothing lands in a file plain `claude` reads. The launch command only passes `--settings` when the file exists, so agents created by an older mngr still start.
+
+Note: this stops *new* leaks; it does not remove hooks already written into existing `settings.local.json` files by a prior mngr -- clean those up manually if present.

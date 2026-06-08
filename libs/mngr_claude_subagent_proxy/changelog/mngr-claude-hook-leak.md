@@ -1,0 +1,3 @@
+The subagent-proxy's own hooks (PROXY spawn/cleanup/reap, DENY deny/reap, and the proxy-child permission auto-allow) now go into the agent's private mngr-managed settings file (`$MNGR_AGENT_STATE_DIR/plugin/claude/mngr_managed_settings.json`, loaded via `claude --settings`) instead of the project's `.claude/settings.local.json`. This keeps mngr-injected hooks out of the "normal" Claude config that plain (non-mngr) `claude` reads.
+
+The plugin still operates on `settings.local.json` (and plugin-cache `hooks.json` files) for the one thing that genuinely concerns the *user's* hooks: wrapping user-defined Stop/SubagentStop commands with the `MNGR_CLAUDE_SUBAGENT_PROXY_CHILD` guard so they no-op inside spawned proxy children. That behavior is unchanged.

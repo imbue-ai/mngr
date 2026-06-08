@@ -76,6 +76,7 @@ from imbue.mngr_claude import resources as _claude_resources
 from imbue.mngr_claude.claude_config import ClaudeDirectoryNotTrustedError
 from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
 from imbue.mngr_claude.claude_config import ClaudeOnboardingNotCompletedError
+from imbue.mngr_claude.claude_config import MANAGED_SETTINGS_RELATIVE_PATH
 from imbue.mngr_claude.claude_config import acknowledge_cost_threshold
 from imbue.mngr_claude.claude_config import add_claude_trust_for_path
 from imbue.mngr_claude.claude_config import auto_dismiss_claude_dialogs
@@ -89,6 +90,7 @@ from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.claude_config import find_project_config
 from imbue.mngr_claude.claude_config import find_user_claude_config
 from imbue.mngr_claude.claude_config import get_claude_config_dir
+from imbue.mngr_claude.claude_config import get_managed_settings_path
 from imbue.mngr_claude.claude_config import get_user_claude_config_dir
 from imbue.mngr_claude.claude_config import is_effort_callout_dismissed
 from imbue.mngr_claude.claude_config import is_onboarding_completed
@@ -1615,6 +1617,18 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
             f' export MAIN_CLAUDE_SESSION_ID="${{_MNGR_READ_SID:-{agent_uuid}}}"'
         )
 
+        # Load mngr's hooks from the per-agent managed settings file rather than
+        # the project's settings.local.json (which plain ``claude`` would also
+        # read). The `if [ -f ]; then ... fi` form always exits 0 -- even when
+        # the file is absent -- so it does not short-circuit the `&&` chain
+        # below; the existence guard lets an agent created by an older mngr
+        # (no managed file) still launch, just without the --settings flag.
+        managed_settings_shell_path = f"$MNGR_AGENT_STATE_DIR/{'/'.join(MANAGED_SETTINGS_RELATIVE_PATH)}"
+        settings_arg_setup = (
+            f'_MNGR_SETTINGS_ARG=""; if [ -f "{managed_settings_shell_path}" ]; then'
+            f' _MNGR_SETTINGS_ARG="--settings {managed_settings_shell_path}"; fi'
+        )
+
         # Build both command variants using the dynamic session ID.
         # Use $CLAUDE_CONFIG_DIR (set in the agent's env file) to find session files
         # in the per-agent config dir rather than ~/.claude/. Session files on disk
@@ -1623,8 +1637,8 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         # the end of assemble_command would spawn a fresh `claude --session-id
         # <agent_uuid>` without surfacing any error -- so an adopted session
         # would appear to do nothing.
-        resume_cmd = f'( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && {base} --resume "$MAIN_CLAUDE_SESSION_ID"'
-        create_cmd = f"{base} --session-id {agent_uuid}"
+        resume_cmd = f'( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && {base} $_MNGR_SETTINGS_ARG --resume "$MAIN_CLAUDE_SESSION_ID"'
+        create_cmd = f"{base} $_MNGR_SETTINGS_ARG --session-id {agent_uuid}"
 
         # Append additional args to both commands if present
         if args_str:
@@ -1634,6 +1648,9 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         # Build the environment exports
         # IS_SANDBOX is only set for remote hosts (not local)
         env_exports = f"export IS_SANDBOX=1 && {sid_export}" if not host.is_local else sid_export
+        # Resolve the --settings flag (kept after the env exports so it runs in
+        # the same shell as the resume/create commands that consume the var).
+        env_exports = f"{env_exports} && {settings_arg_setup}"
 
         # Build the background tasks command (activity tracking + transcript export)
         session_name = f"{self.mngr_ctx.config.prefix}{self.name}"
@@ -1744,70 +1761,44 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         return transfers
 
     def _configure_agent_hooks(self, host: OnlineHostInterface) -> None:
-        """Configure Claude hooks in the agent's work_dir.
+        """Write mngr's Claude hooks to the per-agent managed settings file.
 
-        Writes hooks to .claude/settings.local.json in the agent's work_dir:
+        Hooks are loaded at launch via ``claude --settings`` (see
+        ``assemble_command``) from a file mngr fully owns under the agent
+        state dir, rather than the project's ``.claude/settings.local.json``
+        (which plain, non-mngr ``claude`` runs in that directory would also
+        read -- see ``get_managed_settings_path``). The file is overwritten
+        fresh on every provision, so there is no cross-version accumulation
+        and a single deterministic build is the whole content.
+
+        Always written:
         - Readiness hooks that signal when Claude is actively processing by
           creating/removing an 'active' file in the agent's state directory.
+
+        Conditionally added:
         - On macOS with sync_credentials_on_login enabled, a
           Notification:auth_success hook that propagates keychain credentials
           to all per-agent entries after login.
-
-        When auto_allow_permissions is True, also adds a hook that auto-allows
-        all permission dialogs so Claude never pauses for approval.
-
-        Skips if hooks already exist.
+        - When auto_allow_permissions is True, a hook that auto-allows all
+          permission dialogs so Claude never pauses for approval.
         """
-        # Future improvement: use `claude --settings <path>` to load hooks from
-        # outside the worktree (e.g. the agent state dir), eliminating the need
-        # to write to .claude/settings.local.json and check that it's gitignored.
-        settings_relative = Path(".claude") / "settings.local.json"
-        settings_path = self.work_dir / settings_relative
-
-        # Check gitignore. During create(), preflight_check already verified
-        # this on the source; this check runs on the destination as a defense
-        # in depth.
-        _check_settings_local_gitignored(host, self.work_dir, require_repo_rule=False)
-
-        hooks_config = build_readiness_hooks_config()
-
-        # Read existing settings if present
-        existing_settings: dict[str, Any] = {}
-        try:
-            content = host.read_text_file(settings_path)
-            existing_settings = json.loads(content)
-        except FileNotFoundError:
-            pass
-
-        # Merge readiness hooks, checking for duplicates
-        is_changed = False
-        merged = merge_hooks_config(existing_settings, hooks_config)
+        # Start fresh: mngr owns this file outright, so the build is the whole
+        # content (no read-merge of prior generations). merge_hooks_config is
+        # reused only to compose the optional configs onto the base.
+        merged = build_readiness_hooks_config()
 
         # Conditionally add credential sync hooks (macOS only)
         if self.agent_config.sync_credentials_on_login and is_macos():
-            credential_hooks = build_credential_sync_hooks_config()
-            merged_with_creds = merge_hooks_config(merged or existing_settings, credential_hooks)
-            if merged_with_creds is not None:
-                merged = merged_with_creds
-
-        if merged is None:
-            logger.debug("Readiness hooks already configured in {}", settings_path)
-            merged = existing_settings
-        else:
-            is_changed = True
+            merged = merge_hooks_config(merged, build_credential_sync_hooks_config()) or merged
 
         # Merge permission auto-allow hooks if configured
         if self.agent_config.auto_allow_permissions:
-            permission_hooks = build_permission_auto_allow_hooks_config()
-            merged_with_permissions = merge_hooks_config(merged, permission_hooks)
-            if merged_with_permissions is not None:
-                merged = merged_with_permissions
-                is_changed = True
+            merged = merge_hooks_config(merged, build_permission_auto_allow_hooks_config()) or merged
 
-        if not is_changed:
-            return
-
-        # Write the merged settings
+        settings_path = get_managed_settings_path(self._get_agent_dir())
+        # The plugin/claude/ parent may not exist yet (e.g. in use_env_config_dir
+        # mode, where the per-agent config dir is not provisioned), so create it.
+        host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(settings_path.parent))}", timeout_seconds=5.0)
         with log_span("Configuring agent hooks in {}", settings_path):
             host.write_text_file(settings_path, json.dumps(merged, indent=2) + "\n")
 

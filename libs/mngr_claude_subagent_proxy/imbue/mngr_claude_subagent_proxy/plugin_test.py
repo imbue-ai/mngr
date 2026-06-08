@@ -10,9 +10,11 @@ import pytest
 
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import PluginName
+from imbue.mngr_claude.claude_config import get_managed_settings_path
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_claude_subagent_proxy.data_types import SubagentProxyMode
 from imbue.mngr_claude_subagent_proxy.data_types import SubagentProxyPluginConfig
@@ -58,19 +60,24 @@ def fake_host(host_dir: Path) -> FakeHost:
     return FakeHost(host_dir)
 
 
+def _managed_settings_path(host_dir: Path, agent_id: AgentId) -> Path:
+    """Path of the agent's mngr-managed Claude settings file (where proxy hooks go)."""
+    return get_managed_settings_path(get_agent_state_dir_path(host_dir, agent_id))
+
+
 def test_plugin_hooks_register_on_claude_agent(work_dir: Path, fake_host: FakeHost) -> None:
     """The plugin's provisioning hook wires up hooks and the proxy agent.
 
     This is the golden-path CI check: verify that invoking on_after_provisioning
     for a Claude agent writes the mngr-proxy agent definition and merges the
-    python-module hooks into .claude/settings.local.json.
+    python-module hooks into the agent's mngr-managed settings file.
     """
     agent_id = AgentId.generate()
     agent = FakeAgent(agent_id, work_dir, ClaudeAgentConfig())
 
     _provision(agent, fake_host, None)
 
-    settings_path = work_dir / ".claude" / "settings.local.json"
+    settings_path = _managed_settings_path(fake_host.host_dir, agent_id)
     assert settings_path.exists()
     settings = json.loads(settings_path.read_text())
     hooks = settings["hooks"]
@@ -172,10 +179,13 @@ def test_plugin_allows_mngr_baseline_stop_hook_for_subagent_proxy_child(work_dir
 
     _provision(agent, fake_host, None)
 
+    # The inherited mngr baseline Stop hook is recognized as safe and left in
+    # settings.local.json; the proxy's own hooks go to the managed file.
     settings = json.loads(settings_path.read_text())
-    hooks = settings["hooks"]
-    assert "Stop" in hooks
-    assert "PreToolUse" in hooks
+    assert "Stop" in settings["hooks"]
+
+    managed = json.loads(_managed_settings_path(fake_host.host_dir, agent.id).read_text())
+    assert "PreToolUse" in managed["hooks"]
 
 
 def test_plugin_preserves_stop_hooks_for_top_level_agent(work_dir: Path, fake_host: FakeHost) -> None:
@@ -414,7 +424,7 @@ def test_deny_mode_installs_pretooluse_deny_and_sessionstart_reaper(
 
     _provision(agent, fake_host, ctx)
 
-    settings_path = work_dir / ".claude" / "settings.local.json"
+    settings_path = _managed_settings_path(fake_host.host_dir, agent.id)
     assert settings_path.exists()
     settings = json.loads(settings_path.read_text())
     hooks = settings["hooks"]
@@ -583,7 +593,7 @@ def test_proxy_mode_default_when_config_absent(
     # temp_mngr_ctx has no subagent_proxy plugin config -- defaults apply.
     _provision(agent, fake_host, temp_mngr_ctx)
 
-    settings = json.loads((work_dir / ".claude" / "settings.local.json").read_text())
+    settings = json.loads(_managed_settings_path(fake_host.host_dir, agent.id).read_text())
     hooks = settings["hooks"]
     # PROXY mode installs all three hook events.
     assert "PreToolUse" in hooks
@@ -600,7 +610,7 @@ def test_explicit_proxy_mode_installs_full_proxy_hooks(
 
     _provision(agent, fake_host, ctx)
 
-    settings = json.loads((work_dir / ".claude" / "settings.local.json").read_text())
+    settings = json.loads(_managed_settings_path(fake_host.host_dir, agent.id).read_text())
     hooks = settings["hooks"]
     pre_cmd = hooks["PreToolUse"][0]["hooks"][0]["command"]
     assert "imbue.mngr_claude_subagent_proxy.hooks.spawn" in pre_cmd
@@ -608,18 +618,18 @@ def test_explicit_proxy_mode_installs_full_proxy_hooks(
     assert "SessionStart" in hooks
 
 
-def test_deny_mode_merges_into_existing_settings_local_json(
+def test_deny_mode_merges_into_existing_managed_settings(
     work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
 ) -> None:
-    """Deny mode preserves pre-existing entries in settings.local.json.
+    """Deny mode preserves pre-existing entries in the managed settings file.
 
-    mngr_claude provisioning writes its readiness / user-prompt hooks
-    before this plugin runs (we are ``trylast``). Deny mode must merge
-    its single PreToolUse:Agent entry without clobbering those.
+    mngr_claude provisioning writes its readiness / user-prompt hooks into the
+    managed settings file before this plugin runs (we are ``trylast``). Deny
+    mode must merge its single PreToolUse:Agent entry without clobbering those.
     """
-    claude_dir = work_dir / ".claude"
-    claude_dir.mkdir()
-    (claude_dir / "settings.local.json").write_text(
+    managed_path = _managed_settings_path(fake_host.host_dir, agent_id := AgentId.generate())
+    managed_path.parent.mkdir(parents=True, exist_ok=True)
+    managed_path.write_text(
         json.dumps(
             {
                 "hooks": {
@@ -641,11 +651,11 @@ def test_deny_mode_merges_into_existing_settings_local_json(
         + "\n"
     )
     ctx = _ctx_with_plugin_config(temp_mngr_ctx, SubagentProxyPluginConfig(mode=SubagentProxyMode.DENY))
-    agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
+    agent = FakeAgent(agent_id, work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
 
     _provision(agent, fake_host, ctx)
 
-    settings = json.loads((claude_dir / "settings.local.json").read_text())
+    settings = json.loads(managed_path.read_text())
     hooks = settings["hooks"]
     assert "UserPromptSubmit" in hooks
     assert "PreToolUse" in hooks
@@ -663,9 +673,10 @@ def test_plugin_strip_hooks_is_safe_when_settings_missing(work_dir: Path, fake_h
 
     _provision(agent, fake_host, None)
 
-    # Provisioning still wrote the merged settings (PreToolUse/PostToolUse/SessionStart),
-    # and the to-be-stripped keys were never present to begin with.
-    settings_path = work_dir / ".claude" / "settings.local.json"
+    # Provisioning still wrote the merged managed settings
+    # (PreToolUse/PostToolUse/SessionStart), and the to-be-stripped keys were
+    # never present to begin with.
+    settings_path = _managed_settings_path(fake_host.host_dir, agent_id)
     assert settings_path.exists()
     settings = json.loads(settings_path.read_text())
     hooks = settings["hooks"]
