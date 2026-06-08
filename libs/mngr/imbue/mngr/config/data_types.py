@@ -1032,3 +1032,6 @@ class CreateCliOptions(CommonCliOptions):
     upload_file: tuple[str, ...]
     update: bool
     yes: bool
+    tmux_width: int | None
+    tmux_height: int | None
+    tmux_window_size: str | None

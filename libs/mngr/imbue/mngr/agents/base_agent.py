@@ -141,6 +141,11 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         cmd = data.get("command")
         return CommandString(cmd) if cmd else CommandString("bash")
 
+    def set_command(self, command: CommandString) -> None:
+        data = self._read_data()
+        data["command"] = str(command)
+        self._write_data(data)
+
     def get_labels(self) -> dict[str, str]:
         data = self._read_data()
         return data.get("labels", {})

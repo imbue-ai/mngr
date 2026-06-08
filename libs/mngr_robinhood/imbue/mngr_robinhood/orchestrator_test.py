@@ -4,18 +4,19 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
+from imbue.mngr_robinhood.agent_runtime import build_pass_env_vars
 from imbue.mngr_robinhood.data_types import OutputFormat
 from imbue.mngr_robinhood.orchestrator import _StreamBufferConsumer
 from imbue.mngr_robinhood.orchestrator import _TranscriptReadFailureWarner
 from imbue.mngr_robinhood.orchestrator import _TurnEndTicker
 from imbue.mngr_robinhood.orchestrator import _build_agent_name
-from imbue.mngr_robinhood.orchestrator import _build_pass_env_vars
 from imbue.mngr_robinhood.orchestrator import _build_result_meta
-from imbue.mngr_robinhood.orchestrator import compute_stream_delta
 from imbue.mngr_robinhood.orchestrator import monotonic_ms_since
 from imbue.mngr_robinhood.output_modes import StreamingOutputWriter
 from imbue.mngr_robinhood.raw_transcript import RawTranscriptParser
@@ -25,58 +26,6 @@ def test_build_agent_name_has_robinhood_prefix() -> None:
     name = _build_agent_name()
     assert str(name).startswith("robinhood-")
     assert len(str(name)) > len("robinhood-")
-
-
-def test_compute_stream_delta_single_partial_line_held_back() -> None:
-    # A single, still-streaming line (no newline yet) is withheld during streaming.
-    delta, emitted = compute_stream_delta("uuid-1\nHello world", "", is_flush=False)
-    assert delta == ""
-    assert emitted == ""
-
-
-def test_compute_stream_delta_emits_complete_lines_only() -> None:
-    # Only the complete line (up to the last newline) is emitted; "line two" held.
-    delta, emitted = compute_stream_delta("uuid-1\nline one\nline two", "", is_flush=False)
-    assert delta == "line one\n"
-    assert emitted == "line one\n"
-
-
-def test_compute_stream_delta_prefix_extension_complete_lines() -> None:
-    delta, emitted = compute_stream_delta("uuid-1\nline one\nline two\nline three", "line one\n", is_flush=False)
-    assert delta == "line two\n"
-    assert emitted == "line one\nline two\n"
-
-
-def test_compute_stream_delta_no_change() -> None:
-    delta, emitted = compute_stream_delta("uuid-1\nline one\nstreaming", "line one\n", is_flush=False)
-    assert delta == ""
-    assert emitted == "line one\n"
-
-
-def test_compute_stream_delta_flush_emits_final_line() -> None:
-    # At flush (turn end) the withheld last line is delivered.
-    delta, emitted = compute_stream_delta("uuid-1\nline one\nline two", "line one\n", is_flush=True)
-    assert delta == "line two"
-    assert emitted == "line one\nline two"
-
-
-def test_compute_stream_delta_new_message_emits_after_common_prefix() -> None:
-    # A new message sharing no prefix is emitted whole.
-    delta, emitted = compute_stream_delta("uuid-2\nBrand new reply\n", "Old reply\n", is_flush=False)
-    assert delta == "Brand new reply\n"
-    assert emitted == "Brand new reply\n"
-
-
-def test_compute_stream_delta_divergence_does_not_reemit_common_prefix() -> None:
-    # The blank line after a horizontal rule collapses as the first paragraph
-    # streams in, so the body diverges from what was emitted. Only the text past
-    # the common prefix is emitted -- the title/rule are not re-printed.
-    emitted = "Title\n\n---\n\n"
-    delta, new_emitted = compute_stream_delta(
-        "id\nTitle\n\n---\nFor years he kept the light.\nmore", emitted, is_flush=False
-    )
-    assert delta == "For years he kept the light.\n"
-    assert new_emitted == "Title\n\n---\nFor years he kept the light.\n"
 
 
 class _FakeBufferHost:
@@ -115,14 +64,17 @@ def test_stream_consumer_emits_full_new_message_sharing_prefix_across_turns() ->
     )
 
     _drive_consumer_turn(consumer, host, ["id1\nThe answer is\n", "id1\nThe answer is 42.\nx"])
-    assert stdout.getvalue() == "The answer is\n 42.\nx"
+    # The continuation reflows "The answer is" onto the same line as "42."; the
+    # already-printed newline cannot be unprinted, and the redundant whitespace at
+    # the reflow boundary is collapsed rather than re-emitted.
+    assert stdout.getvalue() == "The answer is\n42.\nx"
 
     stdout.truncate(0)
     stdout.seek(0)
     _drive_consumer_turn(consumer, host, ["id2\nThe answer is\n", "id2\nThe answer is right.\nx"])
-    # The full new message is emitted; the shared "The answer is " prefix is not
-    # stripped (which would have produced "\n right.\nx").
-    assert stdout.getvalue() == "The answer is\n right.\nx"
+    # The full new message is emitted; the shared "The answer is" prefix is not
+    # stripped (which would have produced just "right.\nx" without the prefix).
+    assert stdout.getvalue() == "The answer is\nright.\nx"
 
     # A subsequent turn with no new output must not re-emit the prior content.
     stdout.truncate(0)
@@ -131,22 +83,37 @@ def test_stream_consumer_emits_full_new_message_sharing_prefix_across_turns() ->
     assert stdout.getvalue() == ""
 
 
-def test_compute_stream_delta_empty_body_after_idle() -> None:
-    # When the watcher empties the body at turn end, only the id line remains.
-    delta, emitted = compute_stream_delta("uuid-1", "previous text", is_flush=False)
-    assert delta == ""
-    assert emitted == "previous text"
-
-
-def test_compute_stream_delta_stale_shorter_snapshot_ignored() -> None:
-    delta, emitted = compute_stream_delta("uuid-1\nline one\n", "line one\nline two\n", is_flush=True)
-    assert delta == ""
-    assert emitted == "line one\nline two\n"
-
-
 def test_build_pass_env_vars_is_populated() -> None:
-    options = _build_pass_env_vars()
+    options = build_pass_env_vars()
     assert len(options.env_vars) > 0
+
+
+def test_build_pass_env_vars_drops_kitty_terminal_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    # KITTY_* terminal-emulator vars (notably KITTY_SHELL_INTEGRATION) wedge a headless tmux
+    # agent's login-shell startup, so they must not be forwarded into the sourced env file.
+    monkeypatch.setenv("KITTY_SHELL_INTEGRATION", "enabled")
+    monkeypatch.setenv("KITTY_WINDOW_ID", "1")
+    monkeypatch.setenv("ROBINHOOD_TEST_FORWARDABLE_VAR", "keep-me")
+    options = build_pass_env_vars()
+    forwarded_keys = {env_var.key for env_var in options.env_vars}
+    assert not any(key.startswith("KITTY_") for key in forwarded_keys)
+    # Guard against a vacuous test: a benign var injected alongside is still forwarded.
+    assert "ROBINHOOD_TEST_FORWARDABLE_VAR" in forwarded_keys
+
+
+def test_build_pass_env_vars_drops_caller_tmux_session_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    # When ``mngr robinhood`` runs from inside a tmux session, forwarding the caller's TMUX /
+    # TMUX_PANE points the spawned (headless, own-tmux) agent's tmux machinery at the parent's pane,
+    # so the agent never signals readiness and create hangs. These must not be forwarded.
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,12345,7")
+    monkeypatch.setenv("TMUX_PANE", "%48")
+    monkeypatch.setenv("ROBINHOOD_TEST_FORWARDABLE_VAR", "keep-me")
+    options = build_pass_env_vars()
+    forwarded_keys = {env_var.key for env_var in options.env_vars}
+    assert "TMUX" not in forwarded_keys
+    assert "TMUX_PANE" not in forwarded_keys
+    # Guard against a vacuous test: a benign var injected alongside is still forwarded.
+    assert "ROBINHOOD_TEST_FORWARDABLE_VAR" in forwarded_keys
 
 
 def test_build_result_meta_records_error_text() -> None:

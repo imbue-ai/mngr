@@ -119,12 +119,14 @@ def test_prevent_hardcoded_guarded_binary() -> None:
 
 
 def test_prevent_num_prefix() -> None:
-    # Misfires: both violations are the `"num_turns"` string key emitted to
-    # match claude -p's native --output-format=json wire shape (see
-    # output_modes.build_result_envelope and the corresponding test
-    # asserting on the wire shape). Renaming the key would break the
-    # drop-in compatibility this plugin exists to provide.
-    rc.check_num_prefix(_DIR, snapshot(2))
+    # Misfires: all violations are the external `num_turns` name, which we cannot rename.
+    # Two are the `"num_turns"` string key emitted to match claude -p's native
+    # --output-format=json wire shape (see output_modes.build_result_envelope and the
+    # corresponding test asserting on the wire shape). The other two are reads of the Claude
+    # Agent SDK's documented `ResultMessage.num_turns` field in the live SDK test suite
+    # (test_sdk_types.py and test_sdk_types_detail.py). Renaming any would break compatibility
+    # or break the tests.
+    rc.check_num_prefix(_DIR, snapshot(4))
 
 
 def test_prevent_trailing_comments() -> None:

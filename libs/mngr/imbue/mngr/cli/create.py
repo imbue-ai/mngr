@@ -69,6 +69,7 @@ from imbue.mngr.interfaces.host import AgentGitOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import AgentLifecycleOptions
 from imbue.mngr.interfaces.host import AgentProvisioningOptions
+from imbue.mngr.interfaces.host import AgentTmuxOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HOST_PROVISIONING_FIELD_MAP
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
@@ -96,6 +97,9 @@ from imbue.mngr.primitives import NewAgentLocation
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
+from imbue.mngr.primitives import TmuxHeight
+from imbue.mngr.primitives import TmuxWidth
+from imbue.mngr.primitives import TmuxWindowSize
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.utils.duration import parse_duration_to_seconds
@@ -361,6 +365,24 @@ class _CreateCommand(click.Command):
     "--project",
     default=".",
     help="Project name for the agent (sets the 'project' label; '.' inherits from source agent's project label when --from references an agent, else uses the source's git remote origin, else the source's folder name) [default: .]",
+)
+@optgroup.option(
+    "--tmux-width",
+    type=int,
+    default=None,
+    help="Width (columns) of the agent's tmux window [default: 200]",
+)
+@optgroup.option(
+    "--tmux-height",
+    type=int,
+    default=None,
+    help="Height (rows) of the agent's tmux window [default: 50]",
+)
+@optgroup.option(
+    "--tmux-window-size",
+    type=click.Choice(["manual", "latest", "largest", "smallest"]),
+    default=None,
+    help="tmux window resize policy; 'manual' pins the window to its width/height and never resizes on attach [default: latest]",
 )
 @optgroup.group("Host Options")
 @optgroup.option(
@@ -1544,6 +1566,12 @@ def _parse_agent_opts(
     # Parse worktree base folder
     parsed_worktree_base_folder = Path(opts.worktree_base_folder).expanduser() if opts.worktree_base_folder else None
 
+    tmux_options = AgentTmuxOptions(
+        width=TmuxWidth(opts.tmux_width) if opts.tmux_width is not None else None,
+        height=TmuxHeight(opts.tmux_height) if opts.tmux_height is not None else None,
+        window_size=TmuxWindowSize(opts.tmux_window_size.upper()) if opts.tmux_window_size is not None else None,
+    )
+
     agent_opts = CreateAgentOptions(
         agent_id=AgentId(opts.id) if opts.id else None,
         agent_type=AgentTypeName(resolved_agent_type),
@@ -1560,6 +1588,7 @@ def _parse_agent_opts(
         lifecycle=lifecycle,
         label_options=label_options,
         provisioning=provisioning,
+        tmux=tmux_options,
         source_agent_state_location=source_agent_state_location,
     )
     return agent_opts, has_explicit_base

@@ -59,6 +59,22 @@ observable); a user-passed `--model` still takes precedence. The streamed text i
 best-effort: the `result` envelope (and, in stream-json, the final `assistant`
 message) remain the source of truth.
 
+## tmux window size
+
+The streamed response is reverse-mapped from the spawned agent's rendered tmux
+pane, so the pane width determines where lines hard-wrap in the output. `mngr
+robinhood` therefore creates its agent in a large, pinned window by default
+(`2048` columns x `256` rows, resize policy `manual`) so the streamed text is not
+chopped at a narrow width. Override with:
+
+- `--tmux-width <columns>` (default `2048`)
+- `--tmux-height <rows>` (default `256`)
+- `--tmux-window-size manual|latest|largest|smallest` (default `manual`; `manual`
+  pins the window to the given size and never resizes it)
+
+These flags are consumed by the wrapper and not forwarded to the spawned claude;
+an invalid value exits with code 2.
+
 ## Flags not supported in v1
 
 The following `claude` flags are explicitly rejected (exit code 2):
@@ -72,3 +88,69 @@ The following `claude` flags are explicitly rejected (exit code 2):
 - `--session-id`
 
 Every other `claude` flag is forwarded verbatim to the spawned agent.
+
+## mngr-backed Agent SDK (`imbue.mngr_robinhood.agent_sdk`)
+
+This package also exposes a drop-in re-implementation of the
+[Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/python.md) Python surface that is
+backed by mngr instead of a directly-spawned `claude` subprocess. Import `query` /
+`ClaudeAgentOptions` / `ClaudeSDKClient` (and the session functions) from
+`imbue.mngr_robinhood.agent_sdk` instead of from `claude_agent_sdk`; every *type* is re-exported
+verbatim, so `isinstance` checks and field shapes are identical. Each session is a
+`robinhood-`prefixed mngr claude agent, driven through the in-process mngr API and read back from
+its native transcript.
+
+Supported control surfaces and how they map onto mngr:
+
+- `can_use_tool` + `hooks` — served by a local HTTP bridge: the agent is launched with a
+  `--settings` file whose hook commands POST each event to the bridge, which runs the in-process
+  Python callback and returns claude's hook JSON (allow / deny / `updated_input`); denials surface
+  in `ResultMessage.permission_denials`.
+- `interrupt()` — stops the agent mid-turn; the response stream ends at a `ResultMessage` and the
+  next `query()` restarts-with-resume.
+- `set_model` / `set_permission_mode` — rewrite the agent's stored launch command with the new
+  configuration and restart it on the resumed session.
+- `get_server_info()` — runs a one-shot `claude` stream-json probe for the real commands / output
+  style, cached per session.
+- `total_cost_usd` — computed from per-turn token usage times a per-model price table (approximate).
+- `include_partial_messages` -> `StreamEvent` — when set, the agent's tmux pane is watched and the
+  reconstructed assistant text is wrapped as the claude-native partial-event sequence
+  (`message_start` -> `content_block_delta`(`text_delta`)* -> `message_stop`). Approximate (text is
+  reconstructed from the rendered pane, not claude's token-level deltas) and best-effort; the
+  authoritative `AssistantMessage` still arrives from the transcript, and `usage`/`total_cost_usd`
+  remain on the final `ResultMessage`.
+
+Documented limitations (real-SDK-only):
+
+- `fork_session` raises `AgentSdkNotImplementedError`. claude's `--fork-session` does not assign a
+  new session id when driven interactively over an adopted, resumed session (the forked turn is
+  written under the source id), so a faithful fork cannot be produced on this transport.
+- The agent is not hermetic from the host's claude config -- it must load real settings to
+  authenticate -- whereas the real SDK with `setting_sources=[]` is hermetic.
+
+## Running the live SDK tests
+
+This project contains an opt-in, live integration suite (`imbue/mngr_robinhood/test_sdk_*.py`)
+that verifies the documented `query()` and `ClaudeSDKClient` interfaces of the Claude Agent SDK
+end-to-end against the real API. The tests are clean-room: they import only documented public
+names from `claude_agent_sdk` and assert the documented behavior.
+
+The suite is parametrized by the `sdk` fixture over **two targets**: `real_sdk` (the real
+`claude_agent_sdk` package, run via `claude --print`) and `mngr_sdk` (this module, which drives an
+interactive `claude` agent in tmux). Every test runs against both unless it exercises a surface the
+mngr transport cannot provide (currently only `fork_session`), which is
+gated to `real_sdk` via the `requires_native_sdk` fixture. The mngr target therefore needs a local
+`claude` CLI and `tmux` on PATH. Use `-k mngr_sdk` / `-k real_sdk` to run a single target.
+
+These tests make real, paid API calls, so they are **excluded from every CI run** (via the
+`sdk_live` marker, which is filtered out in `offload-modal.toml`) and only run when explicitly
+opted in. Each test runs the agent in an isolated temp directory.
+
+To run them, export a first-party `ANTHROPIC_API_KEY` and set `RUN_SDK_LIVE_TESTS=1`:
+
+```bash
+set -a; source .env; set +a   # exports ANTHROPIC_API_KEY from a local .env
+just test-sdk-live
+```
+
+If `RUN_SDK_LIVE_TESTS=1` and `ANTHROPIC_API_KEY` are not both set, the suite is skipped.
