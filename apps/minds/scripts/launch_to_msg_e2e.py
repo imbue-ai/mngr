@@ -1176,7 +1176,7 @@ async def amain() -> int:
             w1_hex_match = re.search(r"//(agent-[a-f0-9]+)\.localhost", w1_result.chat_url)
             if not w1_hex_match:
                 raise E2EFailure(f"[tile-click] could not extract W1 agent_id from {w1_result.chat_url!r}")
-            w1_agent_host = w1_hex_match.group(1)  # e.g. "agent-abc123..."
+            w1_agent_host = w1_hex_match.group(1)
             # Exact-text match: HOST_NAME (e.g. "e2e172219") is a substring
             # of HOST_NAME_2 (e.g. "e2e172219-b"), so a regex/substring
             # selector would match W2's tile first. Quoted text= is
