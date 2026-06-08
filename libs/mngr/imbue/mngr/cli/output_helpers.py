@@ -80,15 +80,20 @@ def read_tty_choice(prompt: str) -> str:
     When a script is invoked via ``curl ... | bash``, stdin is the pipe
     from curl, not the terminal.  This function opens /dev/tty directly
     so interactive prompts still work.  Returns an empty string if
-    /dev/tty is unavailable (e.g. in CI).
+    /dev/tty is unavailable (e.g. in CI) -- intentionally the same value as
+    an empty Enter, since callers treat "" as the safe "skip" default for both
+    the no-tty and empty-line cases.
     """
     try:
-        with open("/dev/tty") as tty:
-            sys.stdout.write(prompt)
-            sys.stdout.flush()
-            return tty.readline().strip()
+        tty = open("/dev/tty")
     except OSError:
         return ""
+    # Only the open() can raise the "no controlling terminal" OSError; a failure
+    # during the prompt/read below is a real error and should propagate.
+    with tty:
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
+        return tty.readline().strip()
 
 
 class AbortError(BaseException):
