@@ -1,5 +1,4 @@
 import asyncio
-import html
 import json
 import os
 import queue
@@ -112,11 +111,13 @@ from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_creating_page
 from imbue.minds.desktop_client.templates import render_destroying_page
 from imbue.minds.desktop_client.templates import render_dev_styleguide_page
+from imbue.minds.desktop_client.templates import render_inbox_list_fragment
+from imbue.minds.desktop_client.templates import render_inbox_page
+from imbue.minds.desktop_client.templates import render_inbox_unavailable_fragment
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_recovery_page
-from imbue.minds.desktop_client.templates import render_request_unavailable_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
@@ -2862,95 +2863,207 @@ async def _handle_workspace_disassociate(
     return Response(status_code=303, headers={"Location": f"/workspace/{agent_id}/settings"})
 
 
-# -- Requests panel routes --
+# -- Inbox routes --
 
 
-def _handle_requests_panel(
-    request: Request,
-    auth_store: AuthStoreDep,
-) -> Response:
-    """Render the right-side requests inbox panel."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return HTMLResponse(content="<p>Not authenticated</p>")
+def _build_inbox_cards(request: Request) -> list[Mapping[str, str]]:
+    """Build the inbox card dicts for the current pending requests.
+
+    Each card carries the fields the InboxList JinjaX component reads:
+    ``id``, ``kind_label``, ``ws_name``, ``display_name``, ``accent``.
+    Order matches ``RequestInbox.get_pending_requests`` --
+    most-recent-first.
+    """
     inbox: RequestInbox | None = request.app.state.request_inbox
     pending = inbox.get_pending_requests() if inbox else []
-    minds_config: MindsConfig | None = request.app.state.minds_config
-    auto_open = minds_config.get_auto_open_requests_panel() if minds_config else True
-
-    cards = []
     backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
     handlers: tuple[RequestEventHandler, ...] = request.app.state.request_event_handlers
+    # Map ws_name -> "homepage agent id" so the card accent matches the
+    # color the homepage tile and the titlebar use for that workspace
+    # name. Each minds workspace owns two sibling mngr agents -- a
+    # user-facing claude agent + a ``system-services`` agent. Latchkey
+    # permission requests are filed by ``system-services``, so
+    # ``req.agent_id`` is the sibling-not-shown-on-homepage. Computing
+    # accent off the homepage agent's id keeps the inbox color in sync
+    # with the rest of the UI. Falls back to keying off ``ws_name`` if
+    # no discovered agent claims that workspace (e.g. a freshly-arrived
+    # request whose host hasn't been re-discovered yet).
+    primary_agent_id_by_ws_name: dict[str, str] = {}
+    for aid in backend_resolver.list_known_workspace_ids():
+        wn = backend_resolver.get_workspace_name(aid)
+        if wn and wn not in primary_agent_id_by_ws_name:
+            primary_agent_id_by_ws_name[wn] = str(aid)
+    cards: list[Mapping[str, str]] = []
     for req in pending:
         handler = find_handler_for_event(handlers, req)
         if handler is not None:
             kind_label = handler.kind_label()
-            display_label = handler.display_name_for_event(req)
+            display_name = handler.display_name_for_event(req)
         else:
             # Fall through: unknown request type. Should never happen in
             # practice -- a request without a registered handler can't be
             # rendered or resolved -- but we still surface it in the
-            # panel so the user sees something is wrong.
+            # inbox so the user sees something is wrong.
             kind_label = "request"
-            display_label = ""
+            display_name = ""
         parsed_id = AgentId(req.agent_id)
         ws_name = backend_resolver.get_workspace_name(parsed_id) or ""
         if not ws_name:
             info = backend_resolver.get_agent_display_info(parsed_id)
             ws_name = info.agent_name if info else req.agent_id[:16]
-        event_id = str(req.event_id)
-        # Encode as JSON for safe embedding in the JS call, then HTML-escape
-        # the result so it is also safe inside the double-quoted onclick
-        # attribute. This is defense-in-depth: req.agent_id is validated as
-        # an AgentId above, but req.event_id is only required to be a
-        # non-empty string by its type, and relying on upstream validation
-        # at each interpolation site is fragile.
-        event_id_attr = html.escape(json.dumps(event_id), quote=True)
-        agent_id_attr = html.escape(json.dumps(req.agent_id), quote=True)
+        accent_key = primary_agent_id_by_ws_name.get(ws_name, ws_name)
         cards.append(
-            f'<div class="req-card" onclick="navigateToRequest({event_id_attr}, {agent_id_attr})">'
-            f'<div style="font-size:13px;color:#e2e8f0;font-weight:500;">{kind_label}: {ws_name}</div>'
-            f'<div style="font-size:12px;color:#64748b;margin-top:2px;">{display_label}</div></div>'
+            {
+                "id": str(req.event_id),
+                "kind_label": kind_label,
+                "ws_name": ws_name,
+                "display_name": display_name,
+                "accent": workspace_accent(accent_key),
+            }
         )
+    return cards
 
-    html_content = (
-        '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Requests</title>'
-        "<style>body{font-family:-apple-system,sans-serif;background:#0f172a;color:#cbd5e1;"
-        "margin:0;padding:0;overflow-y:auto;height:100vh;}"
-        "h2{font-size:15px;color:#e2e8f0;padding:12px;margin:0;border-bottom:1px solid #334155;}"
-        ".req-card{padding:10px 12px;margin:2px 0;cursor:pointer;border-radius:6px;transition:background 100ms;}"
-        ".req-card:hover{background:rgba(255,255,255,0.06);}"
-        "</style></head>"
-        f"<body>"
-        f"<script>"
-        f"function navigateToRequest(eventId, agentId) {{"
-        f"  if (window.minds && window.minds.navigateToRequest) {{"
-        f"    window.minds.navigateToRequest(agentId, eventId);"
-        f"  }} else if (window.minds) {{"
-        f'    window.minds.navigateContent("/requests/" + eventId);'
-        f"  }} else {{"
-        f'    window.top.location = "/requests/" + eventId;'
-        f"  }}"
-        f"}}"
-        f"</script>"
-        f"<h2>Requests ({len(pending)})</h2>"
-        f"<div>{''.join(cards) if cards else '<p style=padding:12px;color:#64748b;>No pending requests.</p>'}</div>"
-        f'<div style="position:fixed;bottom:0;left:0;right:0;padding:12px;border-top:1px solid #334155;'
-        f'background:#0f172a;">'
-        f'<label style="font-size:12px;color:#94a3b8;cursor:pointer;">'
-        f'<input type="checkbox" {"checked" if auto_open else ""} '
-        f"onchange=\"fetch('/_chrome/requests-auto-open',{{method:'POST',headers:{{'Content-Type':"
-        f"'application/json'}},body:JSON.stringify({{enabled:this.checked}})}})\"> "
-        f"Auto-open on new request</label></div>"
-        "</body></html>"
+
+def _resolve_inbox_selection(
+    request: Request,
+    selected_id: str,
+    backend_resolver: BackendResolverInterface,
+) -> tuple[str, str]:
+    """Resolve ``?selected=<id>`` to ``(selected_id, detail_html)``.
+
+    Returns the id that should be highlighted in the left list and the
+    HTML to embed in the right pane. Falls back to the first pending
+    request when ``selected_id`` is empty; returns an "unavailable"
+    fragment when the id is unknown or already resolved. ``selected_id``
+    is the empty string if the inbox is empty or no item could be
+    resolved.
+    """
+    inbox: RequestInbox | None = request.app.state.request_inbox
+    if inbox is None:
+        return "", ""
+    pending = inbox.get_pending_requests()
+    if not pending:
+        return "", ""
+
+    handlers: tuple[RequestEventHandler, ...] = request.app.state.request_event_handlers
+    target = None
+    if selected_id:
+        candidate = inbox.get_request_by_id(selected_id)
+        if candidate is not None and not inbox.is_request_resolved(selected_id):
+            target = candidate
+    if target is None and selected_id:
+        # Caller asked for a specific id but it can't be resolved: keep
+        # the master list on its server-rendered default ordering and
+        # surface the "no longer available" message in the right pane.
+        return "", render_inbox_unavailable_fragment(
+            message="It may have expired, or it was opened from an old link.",
+        )
+    if target is None:
+        target = pending[0]
+
+    handler = find_handler_for_event(handlers, target)
+    if handler is None:
+        return str(target.event_id), (f"<p>No handler registered for request type {target.request_type!r}</p>")
+    detail_html = handler.render_request_detail_fragment(
+        req_event=target,
+        backend_resolver=backend_resolver,
+        mngr_forward_origin=_get_mngr_forward_origin(request),
     )
-    return HTMLResponse(content=html_content)
+    return str(target.event_id), detail_html
+
+
+def _handle_inbox_page(
+    request: Request,
+    auth_store: AuthStoreDep,
+    backend_resolver: BackendResolverDep,
+) -> Response:
+    """Render the full inbox modal page (``GET /inbox``)."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return HTMLResponse(content="<p>Not authenticated</p>")
+    cards = _build_inbox_cards(request)
+    selected_query = request.query_params.get("selected", "")
+    selected_id, detail_html = _resolve_inbox_selection(request, selected_query, backend_resolver)
+    minds_config: MindsConfig | None = request.app.state.minds_config
+    auto_open = minds_config.get_auto_open_requests_panel() if minds_config else True
+    return HTMLResponse(
+        content=render_inbox_page(
+            cards=cards,
+            selected_id=selected_id,
+            detail_html=detail_html,
+            is_empty=len(cards) == 0,
+            auto_open=auto_open,
+        )
+    )
+
+
+def _handle_inbox_list_fragment(
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Return the left-list fragment (``GET /inbox/list``)."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return HTMLResponse(content="<p>Not authenticated</p>")
+    cards = _build_inbox_cards(request)
+    return HTMLResponse(content=render_inbox_list_fragment(cards=cards, selected_id=""))
+
+
+def _handle_inbox_detail_fragment(
+    request_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+    backend_resolver: BackendResolverDep,
+) -> Response:
+    """Return the right-pane detail fragment (``GET /inbox/detail/{id}``).
+
+    Resolved or unknown ids get the "no longer available" fragment with
+    HTTP 200 so the shell JS can innerHTML-swap it directly.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return HTMLResponse(content="<p>Not authenticated</p>")
+    inbox: RequestInbox | None = request.app.state.request_inbox
+    if inbox is None:
+        # The InboxUnavailable heading reads "This permission request is no
+        # longer available", which makes no sense when the issue is that there
+        # is no inbox at all. Drop the supporting message so only the heading
+        # shows; the template treats an empty message as the no-extra-copy case.
+        return HTMLResponse(content=render_inbox_unavailable_fragment())
+    req_event = inbox.get_request_by_id(request_id)
+    if req_event is None:
+        return HTMLResponse(
+            content=render_inbox_unavailable_fragment(
+                message="It may have expired, or it was opened from an old link.",
+            ),
+        )
+    if inbox.is_request_resolved(request_id):
+        return HTMLResponse(
+            content=render_inbox_unavailable_fragment(message="It has already been processed."),
+        )
+    handlers: tuple[RequestEventHandler, ...] = request.app.state.request_event_handlers
+    handler = find_handler_for_event(handlers, req_event)
+    if handler is None:
+        return HTMLResponse(
+            content=f"<p>No handler registered for request type {req_event.request_type!r}</p>",
+            status_code=500,
+        )
+    return HTMLResponse(
+        content=handler.render_request_detail_fragment(
+            req_event=req_event,
+            backend_resolver=backend_resolver,
+            mngr_forward_origin=_get_mngr_forward_origin(request),
+        )
+    )
 
 
 async def _handle_requests_auto_open(
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """Toggle the auto-open setting for the requests panel."""
+    """Toggle the auto-open setting for the inbox modal.
+
+    The route URL and on-disk setting key keep ``requests-panel`` /
+    ``auto_open_requests_panel`` for backward compatibility (see
+    :class:`MindsConfig`); "panel" here now refers to the inbox modal.
+    """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
     minds_config: MindsConfig | None = request.app.state.minds_config
@@ -2981,53 +3094,6 @@ def _resolve_ws_name_and_account(
     has_account = account is not None
     accounts = session_store.list_accounts() if session_store else []
     return ws_name, account_email, has_account, accounts
-
-
-def _handle_request_page(
-    request_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
-    backend_resolver: BackendResolverDep,
-) -> Response:
-    """Render the request editing page.
-
-    Dispatches by request type to the registered
-    :class:`RequestEventHandler`. The route layer is intentionally
-    agnostic about what each request kind looks like: it authenticates,
-    looks up the event, and forwards to the handler.
-    """
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated")
-    inbox: RequestInbox | None = request.app.state.request_inbox
-    if inbox is None:
-        return HTMLResponse(content="<p>Request inbox not available</p>", status_code=500)
-    req_event = inbox.get_request_by_id(request_id)
-    if req_event is None:
-        return HTMLResponse(
-            content=render_request_unavailable_page(message="It may have expired, or it was opened from an old link."),
-            status_code=404,
-        )
-    # A granted/denied request lingers in the append-only log, so re-rendering
-    # the grant/deny form would let the user act on it again. Show a friendly
-    # "no longer available" page instead.
-    if inbox.is_request_resolved(request_id):
-        return HTMLResponse(
-            content=render_request_unavailable_page(message="It has already been processed."),
-            status_code=200,
-        )
-
-    handlers: tuple[RequestEventHandler, ...] = request.app.state.request_event_handlers
-    handler = find_handler_for_event(handlers, req_event)
-    if handler is None:
-        return HTMLResponse(
-            content=f"<p>No handler registered for request type {req_event.request_type!r}</p>",
-            status_code=500,
-        )
-    return handler.render_request_page(
-        req_event=req_event,
-        backend_resolver=backend_resolver,
-        mngr_forward_origin=_get_mngr_forward_origin(request),
-    )
 
 
 def _handle_sharing_page(
@@ -3375,7 +3441,7 @@ def _handle_request_event_callback(agent_id_str: str, raw_line: str) -> None:
     After mutating the inbox, fires the resolver's change notification so
     the chrome SSE wakes up and pushes the new ``requests`` payload immediately
     (otherwise it would lag up to 30s for the next poll tick, breaking the
-    requests panel auto-open and badge UX).
+    inbox modal auto-open and badge UX).
 
     ``LATCHKEY_PERMISSION`` events from the JSONL stream are ignored
     here: latchkey 2.9.0 ships a gateway extension that owns the
@@ -3599,9 +3665,10 @@ def create_desktop_client(
     app.post("/workspace/{agent_id}/disassociate")(_handle_workspace_disassociate)
 
     # Request inbox routes
-    app.get("/_chrome/requests-panel")(_handle_requests_panel)
+    app.get("/inbox")(_handle_inbox_page)
+    app.get("/inbox/list")(_handle_inbox_list_fragment)
+    app.get("/inbox/detail/{request_id}")(_handle_inbox_detail_fragment)
     app.post("/_chrome/requests-auto-open")(_handle_requests_auto_open)
-    app.get("/requests/{request_id}")(_handle_request_page)
     app.post("/requests/{request_id}/grant")(_handle_request_grant)
     app.post("/requests/{request_id}/deny")(_handle_request_deny)
 
