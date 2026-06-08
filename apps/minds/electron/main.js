@@ -2324,8 +2324,11 @@ ipcMain.on('open-log-file', () => {
 
 // Landing-page Stop button: show a native confirmation, then issue the host
 // stop ourselves. The SSE drives the row from running -> stopped once it lands.
+// Only content-relay-preload.js can emit this channel (for an allowlisted
+// `minds:confirm-stop-mind` postMessage); we re-validate the id here against the
+// same conservative agent-id shape (never trust the renderer).
 ipcMain.on('confirm-stop-mind', async (event, agentId, name) => {
-  if (!agentId) return;
+  if (typeof agentId !== 'string' || !/^agent-[a-f0-9]{1,64}$/i.test(agentId)) return;
   const bundle = getBundleFromEvent(event) || getMostRecentWindow();
   const parentWindow = bundle && !bundle.window.isDestroyed() ? bundle.window : null;
   const options = {
