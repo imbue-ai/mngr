@@ -40,6 +40,8 @@ from imbue.mngr.cli.create import create as create_command
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.config.provider_config_registry import _provider_config_registry
 from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
@@ -47,6 +49,7 @@ from imbue.mngr.hosts.tmux import build_tmux_capture_pane_command
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import SnapshotInfo
+from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.plugins import hookspecs
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
@@ -57,10 +60,12 @@ from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
+from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.providers.registry import _backend_registry
 from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.utils.env_utils import TEST_ENV_PATTERN
 from imbue.mngr.utils.env_utils import TEST_ENV_PREFIX
@@ -880,6 +885,40 @@ def make_ctx_with_plugins(
     for plugin in plugins:
         pm.register(plugin)
     return mngr_ctx.model_copy_update(to_update(mngr_ctx.field_ref().pm, pm))
+
+
+@contextmanager
+def register_test_backend(
+    name: str,
+    backend: type[ProviderBackendInterface],
+    config: type[ProviderInstanceConfig],
+) -> Generator[None, None, None]:
+    """Temporarily register a backend + config under ``name`` in the module-global registries.
+
+    Seeds both ``_backend_registry`` (in providers.registry) and
+    ``_provider_config_registry`` (in config.provider_config_registry) for the
+    duration of the context, then restores any prior values on exit. Use this
+    instead of hand-rolled ``try/finally del`` so an interrupted test cannot leak
+    a half-registered backend into other tests in the same worker.
+
+    Raises ``MngrError`` if ``name`` is already present in either registry, since
+    clobbering a real backend would silently corrupt state for the rest of the
+    session.
+    """
+    backend_key = ProviderBackendName(name)
+    if backend_key in _backend_registry:
+        raise MngrError(f"Backend {name!r} is already registered in _backend_registry; refusing to clobber it.")
+    if backend_key in _provider_config_registry:
+        raise MngrError(
+            f"Backend {name!r} is already registered in _provider_config_registry; refusing to clobber it."
+        )
+    _backend_registry[backend_key] = backend
+    _provider_config_registry[backend_key] = config
+    try:
+        yield
+    finally:
+        _backend_registry.pop(backend_key, None)
+        _provider_config_registry.pop(backend_key, None)
 
 
 def make_test_agent_details(
