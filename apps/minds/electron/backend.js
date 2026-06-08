@@ -204,17 +204,17 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
 
         uvBin = uvPath;
         args = [
-          // -v lifts INFO-level logs (lifecycle: "mngr observe started",
-          // "observe exited unexpectedly", etc.) into minds.log so user bug
-          // reports contain enough context to debug "Discovering agents..."
-          // hangs. Single v keeps noise manageable; -vv (DEBUG) is dev-only.
           'run', '--project', pyprojectDir,
           // --active makes uv use VIRTUAL_ENV (~/.minds/.venv) instead of
           // <project>/.venv, which is inside the signed .app bundle and
           // read-only on macOS. Without this, `uv run` tries to create
           // .venv inside the bundle and fails with "Operation not permitted".
           '--active',
+          // -v sets the stderr threshold to DEBUG so
+          // the subprocess's mngr forward / agent-creation / restic
+          // lifecycle traces land in minds.log for bug reports.
           'minds', '-v', '--format', 'jsonl',
+          // The --log-file JSONL sink is already DEBUG regardless of -v.
           '--log-file', path.join(logDir, 'minds-events.jsonl'),
           'run',
           '--host', '127.0.0.1',
