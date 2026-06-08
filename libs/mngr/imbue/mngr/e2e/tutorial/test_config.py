@@ -4,6 +4,7 @@ Each test corresponds 1:1 to a tutorial script block.
 """
 
 import shlex
+from pathlib import Path
 
 import pytest
 
