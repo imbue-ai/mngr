@@ -186,10 +186,6 @@ def send_enter_and_poll_for_cleared_indicator(
     )
 
 
-# FIXME: this function could be improved by having a single command that is
-# running on the host, checking *either* condition (eg, whether we've seen a
-# new enqueue event OR we've seen the wait-for signal) since either one is
-# sufficient for us to call it success.
 def send_enter_via_tmux_wait_for_hook(
     agent: BaseAgent[Any],
     tmux_target: TmuxWindowTarget,
@@ -208,12 +204,19 @@ def send_enter_via_tmux_wait_for_hook(
     waiter has registered (signals wake exactly one waiter; if none exists
     the signal is lost).
 
-    ``queue_log_path_template`` is an agent-specific fallback for cases where
-    the wait-for signal is lost (claude's hook occasionally misfires while
-    another message is being processed). If supplied, on timeout we re-read
-    the agent's transcript event log and accept the submission as long as a
-    new enqueue event has been recorded since the call began. ``None``
-    disables the fallback.
+    ``queue_log_path_template`` lets us confirm submission the moment the
+    message is *enqueued*, concurrently with waiting for the hook signal. The
+    hook fires only when the prompt reaches the model (its ``UserPromptSubmit``
+    moment), which for a message sent to a busy agent is when the agent finally
+    dequeues it -- potentially many minutes later. Claude records an ``enqueue``
+    event the instant a message is accepted into its queue, so when a log path
+    is supplied we poll for a fresh enqueue alongside the hook wait and succeed
+    on whichever lands first. This keeps the call fast (well under any
+    front-door HTTP/proxy timeout) for busy agents while preserving the hook as
+    the confirmation for cases that never enqueue a model prompt (e.g. the
+    ``/clear`` and ``/compact`` TUI-local commands, whose signal is fired from
+    SessionStart). ``None`` disables the enqueue path and waits on the hook
+    alone (the original behavior, used by non-Claude TUIs).
 
     Raises ``SendMessageError`` on timeout.
     """
@@ -253,24 +256,17 @@ def _send_enter_and_wait_for_signal(
     """Inner helper for send_enter_via_tmux_wait_for_hook; returns True on success."""
     start = time.time()
     full_timeout = timeout_seconds + 1
-    last_queue_timestamp = _get_last_queue_timestamp(agent, queue_log_path_template, full_timeout)
 
-    remaining_time = full_timeout - (time.time() - start)
-    if remaining_time < 0.0:
-        logger.warning(
-            "Negative remaining time for wait-for command: {:.2f}s (command execution took too long)",
-            remaining_time,
+    if queue_log_path_template is None:
+        cmd = _build_signal_only_command(full_timeout, wait_channel, tmux_target)
+    else:
+        cmd = _build_signal_or_enqueue_command(
+            agent, full_timeout, wait_channel, tmux_target, queue_log_path_template
         )
-        remaining_time = 5.0
 
-    # tmux_target.as_shell_arg() is already shell-quoted -- pass it as the
-    # bash positional $1 directly without a second round of shlex.quote.
-    cmd = (
-        f"bash -c '"
-        f'( sleep 0.1 && tmux send-keys -t "$1" Enter ) & '
-        f'timeout {full_timeout} tmux wait-for "$0"'
-        f"' {shlex.quote(wait_channel)} {tmux_target.as_shell_arg()}"
-    )
+    # Give the remote command a beat past its own internal deadline to return
+    # cleanly before the pyinfra-level timeout fires.
+    remaining_time = full_timeout + 5.0
     try:
         result = agent.host.execute_stateful_command(cmd, timeout_seconds=remaining_time)
     except TimeoutError:
@@ -280,40 +276,71 @@ def _send_enter_and_wait_for_signal(
         return False
     elapsed_ms = (time.time() - start) * 1000
     if result.success:
-        logger.trace("Received submission signal in {:.0f}ms", elapsed_ms)
+        logger.trace("Confirmed message submission in {:.0f}ms", elapsed_ms)
         return True
-
-    # The hook occasionally doesn't fire while another message is being processed;
-    # fall back to checking the agent's transcript log for a fresh enqueue event.
-    logger.debug("Timeout waiting for submission signal on channel {}, checking session log...", wait_channel)
-    remaining_time = full_timeout - (time.time() - start)
-    if remaining_time < 5.0:
-        remaining_time = 5.0
-    current_queue_timestamp = _get_last_queue_timestamp(agent, queue_log_path_template, remaining_time)
-    if current_queue_timestamp is not None and (
-        last_queue_timestamp is None or current_queue_timestamp > last_queue_timestamp
-    ):
-        logger.trace(
-            "Detected new enqueue event in session log with timestamp {}, confirming message submission",
-            current_queue_timestamp,
-        )
-        return True
-
     return False
 
 
-def _get_last_queue_timestamp(
-    agent: BaseAgent[Any],
-    queue_log_path_template: str | None,
-    timeout_seconds: float,
-) -> str | None:
-    if queue_log_path_template is None:
-        return None
-    env_command_prefix = agent.host.build_source_env_prefix(agent)
-    initial_read_queue_ops_result = agent.host.execute_idempotent_command(
-        f"""bash -c '{env_command_prefix} cat {queue_log_path_template} | grep "\\"operation\\":\\"enqueue\\"," | tail -n 1 | jq -r .timestamp'""",
-        timeout_seconds=timeout_seconds + 1,
+def _build_signal_only_command(full_timeout: float, wait_channel: str, tmux_target: TmuxWindowTarget) -> str:
+    """The original behavior: send Enter, then block on the hook's wait-for channel.
+
+    Used for TUIs with no enqueue log to watch. The waiter is started (in the
+    foreground here) before Enter is sent from a backgrounded subshell, so the
+    signal cannot fire before a waiter is registered (signals wake exactly one
+    waiter; a signal with none registered is lost).
+    """
+    return (
+        f"bash -c '"
+        f'( sleep 0.1 && tmux send-keys -t "$1" Enter ) & '
+        f'timeout {full_timeout} tmux wait-for "$0"'
+        f"' {shlex.quote(wait_channel)} {tmux_target.as_shell_arg()}"
     )
-    if initial_read_queue_ops_result.success:
-        return initial_read_queue_ops_result.stdout
-    return None
+
+
+def _build_signal_or_enqueue_command(
+    agent: BaseAgent[Any],
+    full_timeout: float,
+    wait_channel: str,
+    tmux_target: TmuxWindowTarget,
+    queue_log_path_template: str,
+) -> str:
+    """Succeed as soon as EITHER the hook signal fires OR a fresh enqueue appears.
+
+    A single remote command so the two conditions are watched concurrently with
+    no dangling process: it registers the (full-timeout) hook waiter in the
+    background -- which writes a sentinel file on success, preserving the
+    register-before-Enter ordering so the signal is never missed (this is what
+    keeps ``/clear``/``/compact`` working, since they only ever fire the
+    signal) -- sends Enter, then polls both the sentinel and the enqueue log
+    until either confirms or the deadline passes. Exit 0 = confirmed, non-zero =
+    timeout.
+
+    Claude writes an ``enqueue`` event to its transcript event log the instant a
+    message enters its queue; a baseline is captured before Enter so only a
+    newer enqueue counts. ISO-8601 timestamps compare correctly as plain
+    strings, and an empty baseline sorts before any real timestamp.
+    """
+    env_command_prefix = agent.host.build_source_env_prefix(agent)
+    # Reads the latest enqueue timestamp from the transcript event log; empty if
+    # none. Backslash-escaped quotes are interpreted by the inner bash -c.
+    read_enqueue_ts = (
+        f'{env_command_prefix} cat {queue_log_path_template} 2>/dev/null '
+        f'| grep "\\"operation\\":\\"enqueue\\"," | tail -n 1 | jq -r .timestamp 2>/dev/null'
+    )
+    script = (
+        'sig="$(mktemp)"; '
+        f'base="$({read_enqueue_ts})"; '
+        # Register the hook waiter first (full timeout), sentinel on success.
+        f'( timeout {full_timeout} tmux wait-for "$1" >/dev/null 2>&1 && echo 1 > "$sig" ) & '
+        # Then submit, after a beat so the waiter is registered.
+        '( sleep 0.1 && tmux send-keys -t "$2" Enter ) & '
+        f'end="$(( $(date +%s) + {int(full_timeout) + 1} ))"; '
+        'while [ "$(date +%s)" -lt "$end" ]; do '
+        'if [ -s "$sig" ]; then rm -f "$sig"; exit 0; fi; '
+        f'cur="$({read_enqueue_ts})"; '
+        'if [[ -n "$cur" && "$cur" > "$base" ]]; then rm -f "$sig"; exit 0; fi; '
+        "sleep 0.25; "
+        "done; "
+        'rm -f "$sig"; exit 1'
+    )
+    return f"bash -c {shlex.quote(script)} _ {shlex.quote(wait_channel)} {tmux_target.as_shell_arg()}"
