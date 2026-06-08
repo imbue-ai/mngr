@@ -22,11 +22,14 @@ from imbue.mngr.api.address_parsers import parse_host_name_or_id
 from imbue.mngr.api.address_parsers import parse_new_agent_location
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import AgentAddress
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentNameOrId
 from imbue.mngr.primitives import AgentOrHostAddress
 from imbue.mngr.primitives import HostAddress
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostLocationAddress
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostNameOrId
 from imbue.mngr.primitives import InvalidName
 from imbue.mngr.primitives import NewAgentLocation
@@ -117,6 +120,11 @@ class AgentNameOrIdParamType(click.ParamType):
     name = "agent_name_or_id"
 
     def convert(self, value: Any, param: click.Parameter | None, ctx: click.Context | None) -> AgentNameOrId:
+        # Guard against Click re-invoking convert on an already-converted value
+        # (e.g. defaults, or params reused across make_context), matching the
+        # sibling param types above.
+        if isinstance(value, (AgentId, AgentName)):
+            return value
         return _convert_with_user_input_error(parse_agent_name_or_id, value, param, ctx)
 
 
@@ -126,6 +134,11 @@ class HostNameOrIdParamType(click.ParamType):
     name = "host_name_or_id"
 
     def convert(self, value: Any, param: click.Parameter | None, ctx: click.Context | None) -> HostNameOrId:
+        # Guard against Click re-invoking convert on an already-converted value
+        # (e.g. defaults, or params reused across make_context), matching the
+        # sibling param types above.
+        if isinstance(value, (HostId, HostName)):
+            return value
         return _convert_with_user_input_error(parse_host_name_or_id, value, param, ctx)
 
 
