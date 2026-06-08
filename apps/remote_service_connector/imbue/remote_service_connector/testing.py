@@ -949,11 +949,11 @@ class FakeCursor:
             # follows it in the param tuple.
             raw = params[0]
             requested = json.loads(raw) if isinstance(raw, str) else dict(raw)
-            next_param_idx = 1
+            # A hard ``region`` bind param, when present, always immediately
+            # follows the attributes JSON param (index 0), so its index is 1.
             hard_region: str | None = None
             if "and region = %s" in query_lower:
-                hard_region = params[next_param_idx]
-                next_param_idx += 1
+                hard_region = params[1]
             candidate_rows = [
                 row
                 for row in self._backend.pool_rows
