@@ -1169,18 +1169,28 @@ async def amain() -> int:
             # clicking the workspace tile, not by typing the chat URL. The
             # tile's onclick handler routes through /goto/<agent_id>/ which
             # mngr_forward translates into the agent-<hex>.localhost host.
-            # Click W1's tile, wait for the URL to carry the agent-<hex>
-            # host, snap, then navigate back to home so the destroy flow
-            # below proceeds from a known starting page.
+            # Click W1's tile, wait for the URL to carry W1's SPECIFIC
+            # agent_id, snap, then navigate back to home so the destroy
+            # flow below proceeds from a known starting page.
             logger.info("=== iter 13: click W1 tile to navigate to chat ===")
-            chat_url_re = re.compile(r"agent-[a-f0-9]+\.localhost")
-            w1_tile_locator = win.locator(f"text=/{re.escape(HOST_NAME)}/").first
+            w1_hex_match = re.search(r"//(agent-[a-f0-9]+)\.localhost", w1_result.chat_url)
+            if not w1_hex_match:
+                raise E2EFailure(f"[tile-click] could not extract W1 agent_id from {w1_result.chat_url!r}")
+            w1_agent_host = w1_hex_match.group(1)  # e.g. "agent-abc123..."
+            # Exact-text match: HOST_NAME (e.g. "e2e172219") is a substring
+            # of HOST_NAME_2 (e.g. "e2e172219-b"), so a regex/substring
+            # selector would match W2's tile first. Quoted text= is
+            # exact-string (case-insensitive) and picks the right tile.
+            w1_tile_locator = win.locator(f'text="{HOST_NAME}"').first
             await w1_tile_locator.wait_for(state="visible", timeout=10_000)
             await w1_tile_locator.click()
-            await win.wait_for_url(chat_url_re, timeout=30_000)
+            w1_url_re = re.compile(re.escape(w1_agent_host) + r"\.localhost")
+            await win.wait_for_url(w1_url_re, timeout=30_000)
             await snap_page(win, "17b-w1-via-tile-click")
-            if not chat_url_re.search(win.url):
-                raise E2EFailure(f"[tile-click] expected agent-<hex>.localhost after click, got {win.url!r}")
+            if w1_agent_host not in win.url:
+                raise E2EFailure(
+                    f"[tile-click] expected W1 agent host {w1_agent_host!r} in URL, got {win.url!r}"
+                )
             logger.info("[tile-click] PASS: W1 tile click landed at {}", win.url)
             await win.goto(origin + "/")
 
