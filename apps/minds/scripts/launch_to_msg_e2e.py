@@ -992,6 +992,24 @@ async def amain() -> int:
                 "total_create_s": w1_result.total_create_s,
             }
 
+            # Iter 15 (reload chat persists state): real users hit F5 / Cmd-R
+            # in the chat tab. The chat must reattach to the agent's event
+            # stream and re-render history -- losing the pong reply would
+            # break the user's trust in the workspace as a persistent place.
+            logger.info("=== iter 15: reload W1 chat, verify history persists ===")
+            await win.reload(wait_until="domcontentloaded")
+            await asyncio.sleep(2)
+            body_after_reload = await win.evaluate("document.body.innerText")
+            pong_count = body_after_reload.lower().count(FIRST_EXPECT.lower())
+            if pong_count < 2:
+                raise E2EFailure(
+                    f"[reload] W1 chat lost history after reload: "
+                    f"expected >=2 occurrences of {FIRST_EXPECT!r}, got {pong_count} "
+                    f"(body len={len(body_after_reload)})"
+                )
+            await snap_page(win, "06b-w1-chat-after-reload")
+            logger.info("[reload] PASS: W1 chat history survives reload ({} 'pong' hits)", pong_count)
+
         if not SKIP_SLACK_FLOW:
             # 7. Slack mock setup
             logger.info("=== slack flow ===")
@@ -1213,6 +1231,16 @@ async def amain() -> int:
             await win.goto(origin + f"/workspace/{w2_agent_id}/settings")
             await win.wait_for_selector("#destroy-btn", state="visible", timeout=30_000)
             await snap_page(win, "18-w2-settings-page")
+
+            # Iter 14 (Back to projects link): real users navigate back from
+            # settings via the top-level link without ever opening the
+            # destroy modal. Verify the link returns to home, then re-enter
+            # settings to continue the destroy flow.
+            await win.click('text="Back to projects"')
+            await win.wait_for_url(origin + "/", timeout=10_000)
+            await snap_page(win, "18a-back-to-projects-from-settings")
+            await win.goto(origin + f"/workspace/{w2_agent_id}/settings")
+            await win.wait_for_selector("#destroy-btn", state="visible", timeout=30_000)
 
             # Iter 12 (Cancel modal): real users click Destroy by accident or
             # change their mind. Verify the Cancel button dismisses the modal
