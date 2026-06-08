@@ -781,7 +781,7 @@ def test_provision_writes_onboarding_seed(
     seed = json.loads(onboarding_path.read_text())
     assert seed == {
         "consumerOnboardingComplete": True,
-        "enterpriseOnboardingComplete": False,
+        "enterpriseOnboardingComplete": True,
         "onboardingComplete": True,
     }
 

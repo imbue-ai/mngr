@@ -234,10 +234,18 @@ def build_onboarding_seed() -> dict[str, Any]:
     (theme + ToS/telemetry) is gated by this file's presence/content, not by any
     ``settings.json`` key (verified empirically); without it agy intercepts the
     first message with the onboarding flow.
+
+    All three completion flags are marked ``True`` so the seed suppresses the NUX
+    regardless of how the user authenticated. agy runs a *separate* onboarding
+    flow for enterprise accounts gated on ``enterpriseOnboardingComplete``, so a
+    user logged in through an enterprise account is still intercepted unless that
+    flag is set too. Marking both account types complete is safe -- this file
+    only records that the first-run flow has been seen, and seeding the flag for
+    an account type the user does not have is inert.
     """
     return {
         "consumerOnboardingComplete": True,
-        "enterpriseOnboardingComplete": False,
+        "enterpriseOnboardingComplete": True,
         "onboardingComplete": True,
     }
 
