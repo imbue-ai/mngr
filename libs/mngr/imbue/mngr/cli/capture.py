@@ -65,7 +65,6 @@ def capture(ctx: click.Context, **kwargs: Any) -> None:
     if content is None:
         logger.error("Failed to capture pane content for agent {}", agent.name)
         ctx.exit(1)
-        return
 
     sys.stdout.write(content)
     if not content.endswith("\n"):
