@@ -247,8 +247,10 @@ uv tool upgrade imbue-mngr
 
 **For development:**
 ```bash
-git clone git@github.com:imbue-ai/mngr.git && cd mngr && uv sync --all-packages && uv tool install -e libs/mngr
+git clone git@github.com:imbue-ai/mngr.git && cd mngr && uv sync --all-packages
 ```
+
+A pre-commit hook installs a small `mngr` shim into `~/.local/bin` (make sure that's on your PATH) that always runs the checkout you're working in -- so editing the source, or switching git worktrees, takes effect immediately with no per-worktree setup. (Don't `uv tool install -e libs/mngr` for development: that pins a single global `mngr` to one clone, which silently runs the wrong code when you work in another worktree.)
 
 ## Shell completion
 

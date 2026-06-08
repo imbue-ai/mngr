@@ -50,7 +50,7 @@ Programmatic shutdowns (SIGTERM / SIGINT, e.g. `just minds-stop`) skip the promp
 
 ### Crash recovery
 
-If the backend exits unexpectedly, every open window switches to the error screen (chrome view expanded to fill the window, content/sidebar/requests-panel/modal views torn down) with the last lines from the log file. Clicking "Retry" from any window restarts the backend once; on success every window reloads to its pre-error URL.
+If the backend exits unexpectedly, every open window switches to the error screen (chrome view expanded to fill the window, content/sidebar/modal views torn down) with the last lines from the log file. Clicking "Retry" from any window restarts the backend once; on success every window reloads to its pre-error URL.
 
 ### Keyboard shortcuts
 
@@ -151,7 +151,7 @@ deploy-time secrets flow through HCP Vault.
 
 `~/.<root>/config.toml` is optional and holds user-personal
 preferences only (the default account for new workspaces, the
-auto-open behavior for the requests panel). It carries no tier-bound
+auto-open behavior for the inbox). It carries no tier-bound
 URL -- env selection happens via `MINDS_CLIENT_CONFIG_PATH` /
 `--config-file` as described above.
 

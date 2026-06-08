@@ -2,6 +2,7 @@ import os
 import platform
 import tempfile
 from pathlib import Path
+from typing import Final
 
 import yaml
 from loguru import logger
@@ -10,6 +11,34 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_AARCH64
 from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_X86_64
 from imbue.mngr_lima.constants import lima_host_data_disk_mount_path
+
+# Exact Docker Engine version installed inside the Lima VM. Pinned so every minds
+# workspace host runs an identical Docker regardless of provider. We hardcode the
+# version here (rather than importing from mngr_vps_docker) to avoid a cross-plugin
+# dependency, but it is deliberately kept the same as
+# ``mngr_vps_docker.host_setup.PINNED_DOCKER_APT_VERSION`` so lima and the remote
+# VPS providers stay in lockstep. The Lima VM is Debian 12 "bookworm" (see
+# ``constants.DEFAULT_IMAGE_URL_*``), so this bookworm-scoped apt version is valid.
+PINNED_DOCKER_APT_VERSION: Final[str] = "5:29.5.1-1~debian.12~bookworm"
+
+# Install the pinned Docker Engine from Docker's official apt repo (the same way
+# mngr_vps_docker does), instead of Debian's unpinned ``docker.io`` package.
+# ``--allow-downgrades`` plus the exact ``=version`` pin makes the pinned version
+# authoritative in both directions; containerd.io / buildx / compose track the
+# repo's current build, matching Docker's own install docs. Requires curl and
+# ca-certificates, which the provisioning script installs earlier.
+_DOCKER_INSTALL_BLOCK: Final[str] = f"""\
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+. /etc/os-release
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${{VERSION_CODENAME}} stable" > /etc/apt/sources.list.d/docker.list
+apt-get update -qq
+apt-get install -y -qq --allow-downgrades \\
+    docker-ce={PINNED_DOCKER_APT_VERSION} docker-ce-cli={PINNED_DOCKER_APT_VERSION} \\
+    containerd.io docker-buildx-plugin docker-compose-plugin
+systemctl enable docker
+systemctl start docker"""
 
 
 def _get_default_image_url(
@@ -63,6 +92,26 @@ def _disable_port_forwards_rules() -> list[dict]:
     ]
 
 
+def _docker_port_forward_rules(guest_port: int, host_port: int) -> list[dict]:
+    """Lima portForwards that expose the container's sshd on the host's loopback.
+
+    The single allow rule forwards the VM's loopback ``guest_port`` (where the
+    agent container publishes its sshd) to ``127.0.0.1:host_port`` on the host
+    machine. It is placed *before* the catch-all disable rules so it wins the
+    first-match evaluation; every other guest port stays unforwarded.
+    """
+    return [
+        {
+            "guestIP": "127.0.0.1",
+            "guestPortRange": [guest_port, guest_port],
+            "hostIP": "127.0.0.1",
+            "hostPortRange": [host_port, host_port],
+            "proto": "tcp",
+        },
+        *_disable_port_forwards_rules(),
+    ]
+
+
 def generate_default_lima_yaml(
     volume_host_path: Path | None,
     host_dir: str,
@@ -73,6 +122,11 @@ def generate_default_lima_yaml(
     host_public_key_openssh: str | None = None,
     host_data_disk_name: str | None = None,
     host_data_disk_size: str | None = None,
+    is_docker_mode: bool = False,
+    outer_authorized_public_key: str | None = None,
+    container_forward_guest_port: int | None = None,
+    container_forward_host_port: int | None = None,
+    install_gvisor_runtime: bool = False,
 ) -> dict:
     """Generate the default Lima YAML configuration.
 
@@ -100,6 +154,26 @@ def generate_default_lima_yaml(
     image_url = custom_image_url or _get_default_image_url(config_image_url_aarch64, config_image_url_x86_64)
     arch = _get_arch_string()
 
+    if is_docker_mode:
+        if container_forward_guest_port is None or container_forward_host_port is None:
+            raise MngrError("container forward ports are required when is_docker_mode is True")
+        port_forwards = _docker_port_forward_rules(container_forward_guest_port, container_forward_host_port)
+        provision_script = _build_docker_provisioning_script(
+            host_private_key_pem,
+            host_public_key_openssh,
+            outer_authorized_public_key=outer_authorized_public_key,
+            install_gvisor_runtime=install_gvisor_runtime,
+            host_data_disk_name=host_data_disk_name,
+        )
+    else:
+        port_forwards = _disable_port_forwards_rules()
+        provision_script = _build_provisioning_script(
+            host_private_key_pem,
+            host_public_key_openssh,
+            host_dir=host_dir,
+            host_data_disk_name=host_data_disk_name,
+        )
+
     config: dict = {
         "images": [
             {
@@ -107,17 +181,12 @@ def generate_default_lima_yaml(
                 "arch": arch,
             },
         ],
-        "portForwards": _disable_port_forwards_rules(),
+        "portForwards": port_forwards,
         # Provision required packages if not in the image
         "provision": [
             {
                 "mode": "system",
-                "script": _build_provisioning_script(
-                    host_private_key_pem,
-                    host_public_key_openssh,
-                    host_dir=host_dir,
-                    host_data_disk_name=host_data_disk_name,
-                ),
+                "script": provision_script,
             },
         ],
     }
@@ -155,6 +224,13 @@ def _build_provisioning_script(
     """Build the Lima ``provision[mode=system]`` script that installs required packages, configures sshd, optionally lands the btrfs host-data disk at the canonical mount point, and (when a keypair is supplied) installs it as the guest's ed25519 sshd host key."""
     host_key_block = _build_host_key_block(host_private_key_pem, host_public_key_openssh)
     host_data_disk_block = _build_host_data_disk_block(host_data_disk_name, host_dir)
+    # The btrfs data disk is formatted in-guest (see _build_format_and_mount_data_disk_block),
+    # so mkfs.btrfs must be present; minimal images (e.g. Debian genericcloud) don't ship it.
+    btrfs_pkg_line = (
+        '\ncommand -v mkfs.btrfs >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL btrfs-progs"'
+        if host_data_disk_name is not None
+        else ""
+    )
     return f"""\
 #!/bin/bash
 set -eux -o pipefail
@@ -168,7 +244,7 @@ command -v rsync >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL rsync"
 command -v curl >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL curl"
 command -v xxd >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL xxd"
 test -x /usr/sbin/sshd || PKGS_TO_INSTALL="$PKGS_TO_INSTALL openssh-server"
-test -f /etc/ssl/certs/ca-certificates.crt || PKGS_TO_INSTALL="$PKGS_TO_INSTALL ca-certificates"
+test -f /etc/ssl/certs/ca-certificates.crt || PKGS_TO_INSTALL="$PKGS_TO_INSTALL ca-certificates"{btrfs_pkg_line}
 
 if [ -n "$PKGS_TO_INSTALL" ]; then
     apt-get update -qq && apt-get install -y -qq $PKGS_TO_INSTALL
@@ -202,11 +278,131 @@ if [ "$SSH_KEY_CHANGED" = "1" ] || [ "$SSHD_CONFIG_CHANGED" = "1" ]; then
     systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null || true
 fi
 
-# Optional: if a Lima-managed btrfs additional disk was attached, symlink
-# host_dir to Lima's auto-mount path for that disk. No-op when the block
-# below is the inert comment placeholder.
+# Optional: if a btrfs additional disk was attached, format + mount it at the
+# canonical path and symlink host_dir to it. No-op when the block below is the
+# inert comment placeholder.
 {host_data_disk_block}
 """
+
+
+# Idempotent block that installs and registers the gVisor `runsc` runtime with the
+# in-VM Docker daemon via gVisor's official APT repository, then re-registers it
+# with `runsc install` and restarts Docker. Guarded so it is a no-op when runsc is
+# already registered (e.g. baked into the VM image).
+_GVISOR_RUNSC_INSTALL_BLOCK = """\
+if ! docker info 2>/dev/null | grep -q runsc; then
+    curl -fsSL https://gvisor.dev/archive.key | gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" > /etc/apt/sources.list.d/gvisor.list
+    apt-get update && apt-get install -y runsc
+    runsc install
+    systemctl restart docker
+fi"""
+
+
+def _build_docker_provisioning_script(
+    host_private_key_pem: str | None,
+    host_public_key_openssh: str | None,
+    outer_authorized_public_key: str | None,
+    install_gvisor_runtime: bool,
+    host_data_disk_name: str | None,
+) -> str:
+    """Build the Lima ``provision[mode=system]`` script for is_host_in_docker mode.
+
+    Unlike the default script, this does not install the in-VM agent toolchain
+    or symlink host_dir -- the agent runs inside a Docker container instead.
+    The VM only needs Docker, btrfs-progs, and the snapshot-helper's runtime
+    deps (inotify-tools, jq), plus key-based root SSH so mngr's "outer" can
+    drive docker/btrfs/systemctl as root. The injected ed25519 host key gives
+    the VM a known sshd identity (no TOFU). When ``install_gvisor_runtime`` is
+    True, an idempotent block installs and registers the gVisor ``runsc`` runtime.
+    When ``host_data_disk_name`` is set, the btrfs data disk is formatted +
+    mounted in-guest (Lima can't format it on minimal images that lack mkfs.btrfs).
+    """
+    host_key_block = _build_host_key_block(host_private_key_pem, host_public_key_openssh)
+    root_authorized_keys_block = _build_root_authorized_keys_block(outer_authorized_public_key)
+    data_disk_block = (
+        f"\n# Format + mount the btrfs data disk (Lima can't on minimal images).\n"
+        f"{_build_format_and_mount_data_disk_block(host_data_disk_name)}\n"
+        if host_data_disk_name is not None
+        else ""
+    )
+    gvisor_install_block = (
+        f"\n# Install and register the gVisor runsc runtime (idempotent).\n{_GVISOR_RUNSC_INSTALL_BLOCK}\n"
+        if install_gvisor_runtime
+        else ""
+    )
+    # The gVisor install block dearmors the archive key with `gpg`, which is not
+    # guaranteed to be present on minimal images; install gnupg when needed.
+    gvisor_pkg_line = (
+        '\ncommand -v gpg >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL gnupg"'
+        if install_gvisor_runtime
+        else ""
+    )
+    return f"""\
+#!/bin/bash
+set -eux -o pipefail
+
+# Install the runtime deps the per-host btrfs snapshot helper needs, plus curl /
+# ca-certificates required to add Docker's apt repo (Docker itself is installed
+# from that pinned official repo just below, not from Debian's unpinned package).
+export DEBIAN_FRONTEND=noninteractive
+PKGS_TO_INSTALL=""
+command -v mkfs.btrfs >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL btrfs-progs"
+command -v inotifywait >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL inotify-tools"
+command -v jq >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL jq"
+command -v rsync >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL rsync"
+command -v curl >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL curl"
+test -x /usr/sbin/sshd || PKGS_TO_INSTALL="$PKGS_TO_INSTALL openssh-server"
+test -f /etc/ssl/certs/ca-certificates.crt || PKGS_TO_INSTALL="$PKGS_TO_INSTALL ca-certificates"{gvisor_pkg_line}
+
+if [ -n "$PKGS_TO_INSTALL" ]; then
+    apt-get update -qq && apt-get install -y -qq $PKGS_TO_INSTALL
+fi
+
+# Install the pinned Docker Engine from Docker's official apt repo.
+{_DOCKER_INSTALL_BLOCK}
+{gvisor_install_block}{data_disk_block}
+mkdir -p /run/sshd
+
+# Install the caller-provided sshd host key (when given).
+SSH_KEY_CHANGED=0
+{host_key_block}
+
+# Allow key-based root login and raise SSH limits so mngr's outer (root) can
+# open enough concurrent channels during provisioning. The defaults
+# (MaxSessions=10) cause "no more sessions" errors under pyinfra concurrency.
+SSHD_CONFIG_CHANGED=0
+if ! grep -q '^MaxSessions' /etc/ssh/sshd_config 2>/dev/null; then
+    cat >> /etc/ssh/sshd_config <<SSHD_EOF
+MaxSessions 100
+MaxStartups 100:30:200
+PermitRootLogin prohibit-password
+SSHD_EOF
+    SSHD_CONFIG_CHANGED=1
+fi
+
+# Authorize mngr's outer client key for root so the outer host can run
+# docker / btrfs / systemctl as root over SSH.
+{root_authorized_keys_block}
+
+if [ "$SSH_KEY_CHANGED" = "1" ] || [ "$SSHD_CONFIG_CHANGED" = "1" ]; then
+    systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null || true
+fi
+"""
+
+
+def _build_root_authorized_keys_block(outer_authorized_public_key: str | None) -> str:
+    """Return a bash block that authorizes ``outer_authorized_public_key`` for root, or an inert comment."""
+    if outer_authorized_public_key is None:
+        return "# (no outer client key to authorize for root)"
+    return f"""\
+mkdir -p /root/.ssh
+chmod 700 /root/.ssh
+cat > /root/.ssh/authorized_keys <<'MNGR_LIMA_OUTER_KEY'
+{outer_authorized_public_key.strip()}
+MNGR_LIMA_OUTER_KEY
+chmod 600 /root/.ssh/authorized_keys
+chown -R root:root /root/.ssh"""
 
 
 def _build_host_data_disk_block(host_data_disk_name: str | None, host_dir: str) -> str:
@@ -223,25 +419,17 @@ def _build_host_data_disk_block(host_data_disk_name: str | None, host_dir: str) 
     if host_data_disk_name is None:
         return "# (no host-data disk attached; host_dir uses today's bind mount or local fs)"
     lima_mount = lima_host_data_disk_mount_path(host_data_disk_name)
+    format_and_mount_block = _build_format_and_mount_data_disk_block(host_data_disk_name)
     return f"""\
-# Wait for Lima to finish auto-mounting the additional btrfs disk.
-for _ in $(seq 1 60); do
-    if mountpoint -q {lima_mount}; then
-        break
-    fi
-    sleep 1
-done
-if ! mountpoint -q {lima_mount}; then
-    echo "ERROR: Lima additional disk not mounted at {lima_mount}" >&2
-    exit 1
-fi
+# Format + mount the additional btrfs disk ourselves (Lima can't on minimal images).
+{format_and_mount_block}
 
 # Open up the btrfs root so the Lima default (non-root) user can write to
 # host_dir without sudo (a fresh mkfs.btrfs leaves the root dir owned by
 # root:root with 0755). Mirrors the chmod 777 the script applies to /code.
 chmod 0777 {lima_mount}
 
-# Replace host_dir with a symlink to Lima's auto-mounted btrfs disk.
+# Replace host_dir with a symlink to the mounted btrfs disk.
 # ``ln -sfn`` alone won't replace an existing directory, so rm any real
 # dir first. Idempotent across re-runs.
 if [ -L {host_dir} ] || [ ! -e {host_dir} ]; then
@@ -249,6 +437,54 @@ if [ -L {host_dir} ] || [ ! -e {host_dir} ]; then
 else
     rm -rf {host_dir}
     ln -sfn {lima_mount} {host_dir}
+fi"""
+
+
+def _build_format_and_mount_data_disk_block(host_data_disk_name: str) -> str:
+    """Return a bash block that formats (if needed) and mounts the Lima btrfs data disk.
+
+    Minimal cloud images (e.g. Debian genericcloud) ship no ``mkfs.btrfs``, so
+    Lima's guestagent cannot format the ``format: true`` btrfs additionalDisk at
+    boot -- it partitions the disk but leaves it unformatted, and nothing mounts
+    at ``/mnt/lima-<name>``. ``btrfs-progs`` is installed earlier in the
+    provisioning script; here we format + mount the disk ourselves at exactly the
+    path Lima would have used, so the per-host btrfs subvolume can be created.
+
+    Idempotent: a no-op when already mounted, and ``mkfs`` runs only when the
+    device is not already btrfs (so re-provisioning and existing snapshot data
+    survive). The data disk is identified as the one ``disk``-type block device
+    that is not the root disk -- in this mode there is exactly one additional
+    disk. On later boots Lima's guestagent handles the mount itself (``btrfs-progs``
+    now persists in the image's root fs), so this is first-boot setup; the mount
+    path is the same either way.
+    """
+    lima_mount = lima_host_data_disk_mount_path(host_data_disk_name)
+    return f"""\
+if ! mountpoint -q {lima_mount}; then
+    DATA_ROOT_SRC="$(findmnt -no SOURCE /)"
+    DATA_ROOT_DISK="$(lsblk -no PKNAME "$DATA_ROOT_SRC" | head -1)"
+    if [ -z "$DATA_ROOT_DISK" ]; then
+        echo "ERROR: could not determine root disk for $DATA_ROOT_SRC; refusing to format data disk" >&2
+        exit 1
+    fi
+    DATA_DISK=""
+    for DATA_CANDIDATE in $(lsblk -dn -o NAME,TYPE | awk '$2=="disk"{{print $1}}'); do
+        if [ "$DATA_CANDIDATE" != "$DATA_ROOT_DISK" ]; then
+            DATA_DISK="$DATA_CANDIDATE"
+            break
+        fi
+    done
+    if [ -z "$DATA_DISK" ]; then
+        echo "ERROR: no additional data disk found to back {lima_mount}" >&2
+        exit 1
+    fi
+    DATA_PART="$(lsblk -ln -o NAME "/dev/$DATA_DISK" | sed -n '2p')"
+    DATA_DEV="/dev/${{DATA_PART:-$DATA_DISK}}"
+    if ! blkid -t TYPE=btrfs "$DATA_DEV" >/dev/null 2>&1; then
+        mkfs.btrfs -f "$DATA_DEV"
+    fi
+    mkdir -p {lima_mount}
+    mount "$DATA_DEV" {lima_mount}
 fi"""
 
 
