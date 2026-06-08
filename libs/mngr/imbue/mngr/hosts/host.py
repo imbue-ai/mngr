@@ -3006,7 +3006,7 @@ def _build_start_agent_shell_command(
 
     # Apply the requested resize policy (e.g. "manual" pins the window to the
     # dimensions above so attaching clients never resize it). window-size is a
-    # window option, so it is set on the agent's window (:0). When unset, tmux's
+    # window option, so it is set on the agent's primary window. When unset, tmux's
     # own default ("latest") is left in place -- today's behavior.
     if tmux_options.window_size is not None:
         steps.append(
@@ -3073,8 +3073,8 @@ def _build_start_agent_shell_command(
         steps.append(f"tmux select-window -t {quoted_exact_agent_window}")
 
     # Send the agent command as literal keys, then Enter to execute.
-    # Target window :0 explicitly so this works even after additional windows
-    # have been created (which changes the active window).
+    # Target the agent's primary window by name explicitly so this works even
+    # after additional windows have been created (which changes the active window).
     steps.append(f"tmux send-keys -t {quoted_exact_agent_window} -l -- {shlex.quote(command)}")
     steps.append(f"tmux send-keys -t {quoted_exact_agent_window} Enter")
 
@@ -3092,7 +3092,7 @@ def _build_start_agent_shell_command(
     )
     steps.append(activity_printf_cmd)
 
-    # Build the process activity monitor script (runs in the background, inspects window :0 where the agent is assumed to be running)
+    # Build the process activity monitor script (runs in the background, inspects the agent's primary window where the agent is assumed to be running)
     # Wait up to 10 seconds for the PANE_PID to appear (tmux can take a moment to start)
     max_wait_seconds = 10
     tmux_list_panes_cmd = f"tmux list-panes -t {quoted_exact_agent_window} -F '#{{pane_pid}}' 2>/dev/null | head -n 1"
