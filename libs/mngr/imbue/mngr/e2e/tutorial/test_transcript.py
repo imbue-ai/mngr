@@ -14,7 +14,6 @@ from typing import Any
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
-from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.polling import poll_until
 from imbue.skitwright.expect import expect
 
