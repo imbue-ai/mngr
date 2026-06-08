@@ -61,7 +61,7 @@
         </div>
         <div>
           <p class="text-xl font-semibold text-zinc-900">Standard page heading (h1)</p>
-          <p class="text-[11px] text-zinc-500 font-mono mt-0.5">text-xl font-semibold -- Landing, Login, AuthError, Destroying, RequestUnavailable, WorkspaceSettings, Accounts</p>
+          <p class="text-[11px] text-zinc-500 font-mono mt-0.5">text-xl font-semibold -- Landing, Login, AuthError, Destroying, InboxUnavailable, WorkspaceSettings, Accounts</p>
         </div>
         <div>
           <p class="text-lg font-semibold text-zinc-900">Section / modal heading (h2)</p>
@@ -119,9 +119,9 @@
 
     {# Corner-radius ramp. Bare ``rounded`` (Tailwind v3 default = 4px,
        == rounded-md) was banished in favor of explicit ``rounded-md``
-       everywhere for grep-ability. Cards / Modal / PermissionsDialog /
-       RequestUnavailable all use rounded-xl so dialog chrome and card
-       chrome share one shape; rounded-2xl was retired. #}
+       everywhere for grep-ability. Cards and Modal use rounded-xl so
+       confirmation-dialog chrome and card chrome share one shape;
+       rounded-2xl was retired. #}
     <section class="mb-12">
       <h2 class="text-lg font-semibold text-zinc-900 mb-1">Corner radius</h2>
       <p class="text-xs text-zinc-500 mb-4">

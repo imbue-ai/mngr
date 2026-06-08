@@ -1,11 +1,11 @@
 {#def request_id #}
 {#
-  The form wrapper used inside a PermissionsDialog. Action targets
-  /requests/<request_id>/grant. The content slot is the form body (the
-  backend-specific input controls). Approve/Deny buttons live in this
-  component; Approve starts disabled and is enabled by the dialog's
-  generic ``updateApproveState`` once any name="permissions" input is
-  checked.
+  The form wrapper used inside an inbox detail fragment. Action
+  targets /requests/<request_id>/grant. The content slot is the form
+  body (the backend-specific input controls). Approve/Deny buttons
+  live in this component; Approve starts disabled and is enabled by
+  the inbox shell's ``updateApproveState`` once any
+  name="permissions" input is checked.
 #}
 <form id="permissions-form" method="POST"
       action={{ "/requests/" ~ request_id ~ "/grant" }}

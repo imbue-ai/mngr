@@ -29,6 +29,7 @@ from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.connect import resolve_connect_command
 from imbue.mngr.api.connect import run_connect_command
 from imbue.mngr.api.create import create as api_create
+from imbue.mngr.api.create import destroy_new_host_on_create_failure
 from imbue.mngr.api.data_types import ConnectionOptions
 from imbue.mngr.api.data_types import CreateAgentResult
 from imbue.mngr.api.discover import discover_hosts_and_agents
@@ -80,6 +81,7 @@ from imbue.mngr.interfaces.host import NewHostBuildOptions
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.host import PROVISIONING_FIELD_MAP
+from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -960,6 +962,14 @@ def _create_agent(
         ),
     )
 
+    # Resolve the provider that owns a freshly-created host so the post-api_create
+    # edit-message send (which happens outside api_create's own teardown guard)
+    # can still tear the new host down on failure. None when we adopted an
+    # existing host -- in that case the guard below is a no-op and never destroys.
+    new_host_provider: ProviderInstanceInterface | None = None
+    if _is_creating_new_host(address, opts.new_host) and isinstance(resolved_target_host, NewHostOptions):
+        new_host_provider = get_provider_instance(resolved_target_host.provider, mngr_ctx)
+
     # Call the API create function
     with _editor_cleanup_scope(setup.editor_session):
         create_result = api_create(
@@ -971,13 +981,18 @@ def _create_agent(
 
         # If --edit-message was used, wait for editor and send the message.
         # Re-acquire the host lock to prevent idle shutdown while the user edits
-        # (api_create releases its lock before returning).
+        # (api_create releases its lock before returning). This send happens
+        # after api_create returns -- outside its teardown guard -- so wrap it in
+        # the same guard here: if the initial-message send fails for a host we
+        # just created, tear that host down (respecting the debug retain flag)
+        # rather than leaking it.
         if setup.editor_session is not None:
-            with create_result.host.lock_cooperatively():
-                _handle_editor_message(
-                    editor_session=setup.editor_session,
-                    agent=create_result.agent,
-                )
+            with destroy_new_host_on_create_failure(create_result.host, new_host_provider):
+                with create_result.host.lock_cooperatively():
+                    _handle_editor_message(
+                        editor_session=setup.editor_session,
+                        agent=create_result.agent,
+                    )
 
     return create_result, connection_opts
 

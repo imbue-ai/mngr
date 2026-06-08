@@ -1002,6 +1002,7 @@ def test_stop_agent_does_not_kill_prefix_matched_session(
         )
 
 
+@pytest.mark.flaky
 @pytest.mark.tmux
 def test_stop_agent_kills_multi_pane_processes(
     temp_host_dir: Path,

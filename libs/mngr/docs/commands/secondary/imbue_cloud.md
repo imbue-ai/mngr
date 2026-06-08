@@ -661,6 +661,7 @@ mngr imbue_cloud admin pool create [OPTIONS]
 | `--management-public-key-file` | path | Path to the management SSH public key | None |
 | `--database-url` | text | Neon PostgreSQL direct connection string for the pool DB. Defaults to MINDS_HOST_POOL_DSN env var, or the activated minds env's secrets.toml NEON_HOST_POOL_DSN field (so `minds env activate <dev-env>` is enough). Pass this explicitly when operating outside an activated env. | None |
 | `--mngr-source` | path | Path to the mngr monorepo root. If provided, rsyncs into the template's vendor/mngr/ before creating hosts. | None |
+| `--no-recycle` | boolean | Force a fresh OVH VPS order instead of reclaiming a cancelled VPS. By default the OVH provider recycles a cancelled (still-billable) VPS when one is available; pass this to test the fresh-provision path. Sets MNGR__PROVIDERS__OVH__ENABLE_RECYCLE_CANCELLED=false on the inner `mngr create`. | `True` |
 
 ## mngr imbue_cloud admin pool list
 
