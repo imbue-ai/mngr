@@ -25,7 +25,7 @@ from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 
 # Version of the upstream ``latchkey`` CLI to install on the VPS.
-LATCHKEY_VERSION: Final[str] = "2.15.1"
+LATCHKEY_VERSION: Final[str] = "2.15.2"
 
 # Port inside the container on which the VPS-resident gateway is reachable (the
 # VPS->container reverse tunnel binds it). Deliberately distinct from

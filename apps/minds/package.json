@@ -16,7 +16,7 @@
   },
   "dependencies": {
     "@todesktop/runtime": "^1.6.0",
-    "latchkey": "^2.15.1"
+    "latchkey": "^2.15.2"
   },
   "devDependencies": {
     "electron": "40.10.1",
