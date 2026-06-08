@@ -425,6 +425,17 @@ function createBundle() {
     updateOsTitle(bundle);
     sendCurrentWorkspaceToBundleViews(bundle);
     primeViewWithCachedChromeState(chromeView.webContents);
+    // Re-send modal state in case the modal opened before chrome.js
+    // attached its onModalStateChanged listener (e.g. requests panel
+    // auto-opens at startup faster than chrome.js loads). Electron IPC
+    // drops events with no listener, so the initial open: true is
+    // otherwise missed and the titlebar drag region wins over the
+    // modal's no-drag in the y=0..TITLEBAR strip.
+    if (bundle.modalVisible && !chromeView.webContents.isDestroyed()) {
+      try {
+        chromeView.webContents.send('modal-state-changed', { open: true });
+      } catch { /* noop */ }
+    }
   });
 
   wireContentViewEvents(bundle, contentView);
