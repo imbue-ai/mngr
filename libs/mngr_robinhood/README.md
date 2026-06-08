@@ -1,16 +1,15 @@
 # imbue-mngr-robinhood
 
-Drop-in replacement for `claude -p` that's implemented on top of `mngr`.
-
-The `mngr robinhood` command takes the same arguments as the regular
-`claude` CLI, always behaves as if `-p`/`--print` was passed, and routes
-the prompt through a fresh, ephemeral `mngr` claude agent. The agent runs
-in-place in the current directory, processes the prompt (or stream of
-prompts), and is destroyed when the command exits.
+`robinhood` is a drop-in replacement for `claude -p` that's implemented on top of `mngr`, 
+i.e., you can use your Max / Pro subscription
 
 ## Install
 
 ```bash
+# install mngr (if not already installed)
+curl -fsSL https://raw.githubusercontent.com/imbue-ai/mngr/main/scripts/install.sh | bash
+
+# either select the robinhood plugin while installing above, or run:
 uv tool install imbue-mngr-robinhood
 ```
 
@@ -39,6 +38,12 @@ printf '%s\n%s\n' \
 mngr robinhood --output-format stream-json --include-partial-messages "tell me a long story"
 mngr robinhood --stream-plain-text "tell me a long story"
 ```
+
+The `mngr robinhood` command takes the same arguments as the regular
+`claude` CLI, always behaves as if `-p`/`--print` was passed, and routes
+the prompt through a fresh, ephemeral `mngr` claude agent. The agent runs
+in-place in the current directory, processes the prompt (or stream of
+prompts), and is destroyed when the command exits.
 
 ## Streaming the response
 
@@ -89,7 +94,13 @@ The following `claude` flags are explicitly rejected (exit code 2):
 
 Every other `claude` flag is forwarded verbatim to the spawned agent.
 
-## mngr-backed Agent SDK (`imbue.mngr_robinhood.agent_sdk`)
+## Alternatives
+
+1. `robinhood` is Claude-specific.
+  For a better way of doing the same thing that is generic across agents, just use [mngr](../../README.md) directly: `mngr create --message "some prompt"` will create an agent and send a prompt to it. You can use `mngr transcript` to see the outputs, or `mngr wait` to wait for it to finish.
+2. Use `claude` with an API key
+
+# mngr-backed Agent SDK (experimental)
 
 This package also exposes a drop-in re-implementation of the
 [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/python.md) Python surface that is
@@ -120,6 +131,8 @@ Supported control surfaces and how they map onto mngr:
   authoritative `AssistantMessage` still arrives from the transcript, and `usage`/`total_cost_usd`
   remain on the final `ResultMessage`.
 
+## Limitations
+
 Documented limitations (real-SDK-only):
 
 - `fork_session` raises `AgentSdkNotImplementedError`. claude's `--fork-session` does not assign a
@@ -127,6 +140,17 @@ Documented limitations (real-SDK-only):
   written under the source id), so a faithful fork cannot be produced on this transport.
 - The agent is not hermetic from the host's claude config -- it must load real settings to
   authenticate -- whereas the real SDK with `setting_sources=[]` is hermetic.
+- Lots more, see: [here](./docs/sdk_divergences.md)
+
+Why so many limitations?
+
+Honestly the Claude Agent SDK is kind of a mess, 
+and I don't have a particular reason to make it work perfectly.
+There will always be some trade-offs--you'll have to decide how, exactly, to make them for your own use case. 
+Consider this implementation more of an example of how you could do it, or a starting point, rather than a finished product.
+
+Instead of using the proprietary Claude Agent SDK interface, you should try using [mngr](../../README.md) instead--
+its API is considerably cleaner, and it abstracts over a variety of different coding agents already.
 
 ## Running the live SDK tests
 
