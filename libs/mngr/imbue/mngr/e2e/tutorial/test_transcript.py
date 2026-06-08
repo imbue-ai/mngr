@@ -8,13 +8,8 @@ before exercising the transcript command.
 """
 
 import json
-
-import json
 from pathlib import Path
 from typing import Any
-
-import json
-from pathlib import Path
 
 import pytest
 

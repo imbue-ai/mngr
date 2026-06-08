@@ -182,13 +182,13 @@ def test_advanced_create_reuse_modal(e2e: E2eSession) -> None:
     # The tutorial relies on a default agent type; the isolated e2e environment
     # has none, so pin --type command (with a long sleep) to avoid modal claude
     # startup, matching the other modal tests in this file.
-    create_cmd = "mngr create --reuse --provider modal my-task --no-connect --no-ensure-clean --type command -- sleep 101020"
+    create_cmd = (
+        "mngr create --reuse --provider modal my-task --no-connect --no-ensure-clean --type command -- sleep 101020"
+    )
 
     # First create: my-task does not exist yet, so --reuse creates it (and, since
     # the Modal environment does not exist yet, bootstraps the environment too).
-    expect(
-        e2e.run(create_cmd, comment="use --reuse to make create idempotent", timeout=150.0)
-    ).to_succeed()
+    expect(e2e.run(create_cmd, comment="use --reuse to make create idempotent", timeout=150.0)).to_succeed()
 
     # Capture the agent ID of the newly created my-task agent.
     first_list = e2e.run(
@@ -213,9 +213,9 @@ def test_advanced_create_reuse_modal(e2e: E2eSession) -> None:
     )
     expect(second_list).to_succeed()
     second_ids = second_list.stdout.split()
-    assert (
-        second_ids == first_ids
-    ), f"Expected --reuse to reuse the same single agent; before={first_ids}, after={second_ids}"
+    assert second_ids == first_ids, (
+        f"Expected --reuse to reuse the same single agent; before={first_ids}, after={second_ids}"
+    )
 
 
 @pytest.mark.release

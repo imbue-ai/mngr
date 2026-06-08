@@ -1,4 +1,3 @@
-import json
 import os
 import pty
 import shlex
