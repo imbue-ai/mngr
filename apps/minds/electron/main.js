@@ -2242,16 +2242,11 @@ ipcMain.on('window-close', (event) => {
 // Renderer (chrome.js) asks for the persisted last-opened workspace agent id
 // on DOMContentLoaded so the titlebar accent can paint before any
 // ``current-workspace-changed`` event arrives. Synchronous-feeling via the
-// in-memory mirror -- no disk read per call.
+// in-memory mirror -- no disk read per call. Writes are driven exclusively
+// from main (``sendCurrentWorkspaceToBundleViews`` + SSE-driven cleanup);
+// there is no renderer-side setter.
 ipcMain.handle('get-last-workspace-agent-id', () => {
   return getLastWorkspaceAgentId();
-});
-
-// Renderer pushes a new value when the user explicitly switches workspaces.
-// Also used by the chrome.js "in active workspace but no stored value yet"
-// fallback to backfill on first paint.
-ipcMain.on('set-last-workspace-agent-id', (_event, agentId) => {
-  setLastWorkspaceAgentId(agentId);
 });
 
 // -- App lifecycle --
