@@ -66,32 +66,54 @@
   // Cleared back to defaults (dark bar, white foreground) when there's no
   // active workspace, so a sign-out / workspace-delete / freshly-launched
   // app renders the default zinc-900 chrome.
+  //
+  // ``currentTitleAgentId`` tracks the workspace ACTUALLY DISPLAYED in this
+  // window's content view -- it gates ``maybeRedirectToRecovery`` so a stuck
+  // agent only redirects this window when this window is the one showing it.
+  // It is intentionally separate from the ACCENT SOURCE (the persisted
+  // last-opened workspace), which can differ when another window opens a
+  // workspace while this one is on Home, sign-in, etc. Accent application
+  // must never write to ``currentTitleAgentId`` or trigger recovery, or a
+  // stuck agent in another window will hijack this window's content view.
   var currentTitleAgentId = null;
+  // Tracks the in-flight accent target so async ``getAccent`` / ``getForeground``
+  // callbacks can guard against landing after a newer accent application has
+  // already been kicked off. Independent of ``currentTitleAgentId`` so the
+  // accent-only call paths (bootstrap + ``onLastWorkspaceAgentIdChanged``)
+  // can apply colors without claiming to represent the displayed workspace.
+  var pendingAccentAgentId = null;
   function applyTitleAccent(agentId) {
     if (!agentId) {
+      pendingAccentAgentId = null;
       document.documentElement.style.removeProperty('--workspace-accent');
       document.documentElement.style.removeProperty('--titlebar-bg');
       document.documentElement.style.removeProperty('--titlebar-fg');
-      currentTitleAgentId = null;
       return;
     }
-    if (currentTitleAgentId !== agentId) {
+    pendingAccentAgentId = agentId;
+    getAccent(agentId, function (c) {
+      if (pendingAccentAgentId !== agentId) return;
+      document.documentElement.style.setProperty('--workspace-accent', c);
+      document.documentElement.style.setProperty('--titlebar-bg', c);
+    });
+    window.mindsAccent.getForeground(agentId, function (rgb) {
+      if (pendingAccentAgentId !== agentId) return;
+      document.documentElement.style.setProperty('--titlebar-fg', rgb);
+    });
+  }
+  // Update the "displayed workspace" tracker and trigger the recovery
+  // redirect when warranted. Called from the displayed-workspace sources
+  // (``onCurrentWorkspaceChanged`` in Electron, the URL-poll in browser mode)
+  // but NOT from the accent-only call paths.
+  function setDisplayedWorkspaceAgentId(agentId) {
+    if (currentTitleAgentId !== agentId && agentId) {
       // Agent identity changed -- clear the recovery-redirect lock so a
       // user who navigates back to a still-stuck workspace gets bounced
       // to recovery again instead of landing on the 503 page.
       delete redirectedAgents[agentId];
     }
-    currentTitleAgentId = agentId;
-    getAccent(agentId, function (c) {
-      if (currentTitleAgentId !== agentId) return;
-      document.documentElement.style.setProperty('--workspace-accent', c);
-      document.documentElement.style.setProperty('--titlebar-bg', c);
-    });
-    window.mindsAccent.getForeground(agentId, function (rgb) {
-      if (currentTitleAgentId !== agentId) return;
-      document.documentElement.style.setProperty('--titlebar-fg', rgb);
-    });
-    maybeRedirectToRecovery();
+    currentTitleAgentId = agentId || null;
+    if (currentTitleAgentId) maybeRedirectToRecovery();
   }
 
   // -- System-interface recovery redirect -----------------------------------
@@ -183,20 +205,18 @@
     // the recovery-page redirect lock, the last-opened workspace drives the
     // accent color.
     window.minds.onCurrentWorkspaceChanged(function (agentId) {
+      // Authoritative for what THIS window is displaying: drive both the
+      // recovery-redirect lock and the accent off the same event.
+      setDisplayedWorkspaceAgentId(agentId || null);
       if (agentId) {
         // Real workspace navigation -- apply the accent immediately. Main
         // also persists this id so it survives a restart; we don't need to
         // push it back over IPC here.
         applyTitleAccent(agentId);
-      } else {
-        // Navigated to a non-workspace URL (Home, etc.). Keep the bar
-        // tinted with whatever the last-opened workspace was; main owns
-        // clearing the accent (workspace deleted, user signed out) via
-        // ``onLastWorkspaceAgentIdChanged``. Clear ``currentTitleAgentId``
-        // so the recovery-redirect lock fires again if the user navigates
-        // back to a stuck workspace.
-        currentTitleAgentId = null;
       }
+      // Non-workspace URL (Home, etc.): leave the bar tinted with whatever
+      // the last-opened workspace was. Main owns clearing the accent
+      // (workspace deleted, user signed out) via ``onLastWorkspaceAgentIdChanged``.
     });
     // Bootstrap: paint the accent on chrome page load using the persisted
     // last-opened workspace, before any other IPC fires.
@@ -226,7 +246,9 @@
         if (t) document.getElementById('page-title').textContent = t;
         var loc = document.getElementById('content-frame').contentWindow.location.pathname;
         var m = loc.match(/^\/goto\/([^/]+)/);
-        applyTitleAccent(m ? m[1] : null);
+        var derivedAgentId = m ? m[1] : null;
+        setDisplayedWorkspaceAgentId(derivedAgentId);
+        applyTitleAccent(derivedAgentId);
       } catch (e) {}
     }, 500);
     document.getElementById('content-frame').addEventListener('load', refreshAuthStatus);
