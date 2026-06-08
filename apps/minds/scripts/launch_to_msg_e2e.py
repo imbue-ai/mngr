@@ -115,6 +115,11 @@ SCREENSHOT_DIR = Path(os.environ.get("LAUNCH_TO_MSG_SHOTS_DIR", "/tmp/launch-to-
 SLACK_MOCK_STATE = Path("/tmp/slack-mock")
 SLACK_MOCK_PORT = 8443  # plain HTTP; socat terminates TLS on :443
 LATCHKEY_DIR = MINDS_HOME / "latchkey"
+# The latchkey-gateway extension writes pending permission request files
+# here. Iter 10 reads this directory directly to verify that Claude
+# re-submits a permission request after a deny (rather than infer it
+# from the requests-panel UI, which doesn't auto-refresh).
+PERMISSION_REQUESTS_DIR = LATCHKEY_DIR / "permission_requests" / "v2"
 
 HOST_NAME = os.environ.get("HOST_NAME") or f"e2e{time.strftime('%H%M%S')}"
 HOST_NAME_2 = os.environ.get("HOST_NAME_2") or f"{HOST_NAME}-b"
@@ -1038,20 +1043,114 @@ async def amain() -> int:
                 await inp.press("Enter")
                 await snap_page(win, "07-slack-prompt-sent")
 
-                # 9. Wait for agent to emit permission request; click
-                # Requests button -> entry -> Approve.
-                #
-                # After Approve, the requests-panel window closes and
-                # Electron may shuffle the BrowserWindow z-order; ``win``
-                # can end up pointing at the Projects page. Re-resolve
-                # the chat panel each iteration so the canned-body check
-                # always reads from the right window.
+                # === Iter 10 Phase A: drive the FIRST permission request to DENY ===
+                # Real users sometimes click Deny by accident or change their
+                # mind. Drive the 3-stage state machine with decision="deny".
+                logger.info("=== Phase A: drive permission request -> DENY ===")
+                deny_stage = 0
+                deny_clicked = {}
+                deny_deadline = time.time() + DRIVE_SLACK_TIMEOUT
+                while time.time() < deny_deadline:
+                    chat_now = await find_chat_window(ctx)
+                    if chat_now is not None:
+                        win = chat_now
+                    if deny_stage >= 3:
+                        logger.info("[deny-phase] PASS: Deny click landed")
+                        break
+                    await _advance_approval(
+                        ctx, win, deny_stage, deny_clicked,
+                        decision="deny",
+                        snap_prefix_pair=(
+                            "07a-deny-stage0",
+                            "07b-deny-stage1",
+                            "07c-deny-stage2-pre",
+                            "07d-deny-stage2-post",
+                        ),
+                    )
+                    deny_stage = deny_clicked.get("stage", deny_stage)
+                    await asyncio.sleep(2)
+                else:
+                    await snap_page(win, "99-TIMEOUT-no-deny-click")
+                    raise E2EFailure(
+                        f"[deny-phase] Deny click did not land after {DRIVE_SLACK_TIMEOUT}s (stage={deny_stage})"
+                    )
+
+                # === Iter 10 Phase B: snapshot latchkey pending requests state ===
+                # The latchkey gateway extension stores each pending request
+                # as a single JSON file. Right after Deny, the previous
+                # request's file should be gone. Read directly from disk
+                # (not via the requests-panel UI, which is a stale render).
+                files_post_deny = _list_permission_request_files()
+                logger.info(
+                    "[deny-phase] latchkey pending files post-deny: {} -- {}",
+                    len(files_post_deny),
+                    [f.name for f in files_post_deny],
+                )
+
+                # === Iter 10 Phase C: kick the agent to re-request ===
+                # The latchkey skill (FCT) says to re-POST /permission-requests
+                # when a previous request was denied. The kick gives Claude
+                # the explicit user-side signal; without a follow-up the
+                # agent's slack tool sits on its polling loop until the
+                # request times out instead of self-triggering a re-ask.
+                logger.info("=== Phase C: kick agent to re-request after deny ===")
+                target = (await find_chat_window(ctx)) or win
+                retry_msg = (
+                    "I just denied that request by mistake -- please send a fresh "
+                    "Slack permission request via the latchkey skill (POST to "
+                    "/permission-requests). Then wait for me to approve it."
+                )
+                retry_inp = await target.wait_for_selector(
+                    'textarea, [contenteditable="true"]', timeout=10_000
+                )
+                await retry_inp.fill(retry_msg)
+                await retry_inp.press("Enter")
+                await snap_page(target, "07e-retry-after-deny-sent")
+
+                # === Iter 10 Phase D: wait for Claude to submit a NEW request ===
+                # Poll the latchkey dir directly. If a new file appears,
+                # Claude re-submitted -- proceed to the APPROVE phase. If
+                # nothing appears within 120s, surface that as the failure
+                # (instead of timing out in the approve loop with a misleading
+                # "no canned body" message).
+                logger.info("=== Phase D: wait for new pending file ===")
+                retry_deadline = time.time() + 120
+                new_file: Path | None = None
+                while time.time() < retry_deadline:
+                    files_now = _list_permission_request_files()
+                    new_names = {f.name for f in files_now} - {f.name for f in files_post_deny}
+                    if new_names:
+                        for f in files_now:
+                            if f.name in new_names:
+                                new_file = f
+                                break
+                        logger.info("[retry-phase] new pending file appeared: {}", new_file.name if new_file else "?")
+                        await snap_page(target, "07f-new-request-appeared")
+                        break
+                    await asyncio.sleep(3)
+                else:
+                    await snap_page(target, "99-TIMEOUT-no-retry-request")
+                    chat_body = await target.evaluate("document.body.innerText")
+                    raise E2EFailure(
+                        f"[retry-phase] no new permission request file in "
+                        f"{PERMISSION_REQUESTS_DIR} after 120s. Claude did not re-submit "
+                        f"after deny. Chat tail: ...{chat_body[-400:]!r}"
+                    )
+
+                # === Iter 10 Phase E: drive APPROVE on the new request ===
+                logger.info("=== Phase E: APPROVE the re-submitted request ===")
                 approval_stage = 0
                 deadline = time.time() + DRIVE_SLACK_TIMEOUT
                 clicked_at = {}
                 approved_request_urls: set[str] = set()
                 last_kick_at = 0.0  # monotonic timestamp of last kick
                 first_approve_at = 0.0
+                approve_snaps = (
+                    "07g-approve-stage0",
+                    "07h-approve-stage1",
+                    "07i-approve-stage2-pre",
+                    "07j-approve-stage2-post",
+                )
                 while time.time() < deadline:
                     chat_now = await find_chat_window(ctx)
                     if chat_now is not None:
@@ -1064,7 +1163,11 @@ async def amain() -> int:
                         break
 
                     if approval_stage < 3:
-                        await _advance_approval(ctx, win, approval_stage, clicked_at)
+                        await _advance_approval(
+                            ctx, win, approval_stage, clicked_at,
+                            decision="approve",
+                            snap_prefix_pair=approve_snaps,
+                        )
                         approval_stage = clicked_at.get("stage", approval_stage)
                         if approval_stage >= 3 and first_approve_at == 0.0:
                             first_approve_at = time.monotonic()
@@ -1554,8 +1657,44 @@ async def amain() -> int:
     return 0
 
 
-async def _advance_approval(ctx: BrowserContext, win: Page, stage: int, state: dict) -> None:
-    """One step of the 3-stage approval click. Updates state['stage']."""
+def _list_permission_request_files() -> list[Path]:
+    """Return current files in the latchkey gateway's pending-request dir.
+
+    Iter 10 reads this directly to verify whether Claude re-submitted a
+    new permission request after a deny (rather than infer from the
+    requests-panel UI, which doesn't auto-refresh between renders).
+    Each pending request lives at a single .json file in this dir; an
+    empty list means no requests are pending.
+    """
+    if not PERMISSION_REQUESTS_DIR.exists():
+        return []
+    return sorted(p for p in PERMISSION_REQUESTS_DIR.iterdir() if p.suffix == ".json")
+
+
+async def _advance_approval(
+    ctx: BrowserContext,
+    win: Page,
+    stage: int,
+    state: dict,
+    *,
+    decision: str = "approve",
+    snap_prefix_pair: tuple[str, str, str, str] = (
+        "07a-stage0-pre-click-requests",
+        "07b-stage1-pre-click-entry",
+        "07c-stage2-pre-click-approve",
+        "07d-stage2-post-approve",
+    ),
+) -> None:
+    """One step of the 3-stage permission click. Updates state['stage'].
+
+    ``decision`` selects the button at stage 2: ``"approve"`` (default)
+    or ``"deny"``. ``snap_prefix_pair`` is a 4-tuple of snap names for
+    stages 0-pre, 1-pre, 2-pre, 2-post; iter 10 swaps it twice so the
+    deny round and the approve round don't collide on names.
+    """
+    if decision not in ("approve", "deny"):
+        raise E2EFailure(f"_advance_approval: decision must be approve|deny, got {decision!r}")
+    snap_stage0, snap_stage1, snap_stage2_pre, snap_stage2_post = snap_prefix_pair
     # Stage 0: click Requests button to open the panel (skipped if
     # panel already auto-opened).
     if stage == 0:
@@ -1590,7 +1729,7 @@ async def _advance_approval(ctx: BrowserContext, win: Page, stage: int, state: d
                 btn = w.locator('button[title="Requests"]')
                 if await btn.count() > 0 and await btn.first.is_visible():
                     logger.info("clicking Requests button")
-                    await snap_page(w, "07a-stage0-pre-click-requests")
+                    await snap_page(w, snap_stage0)
                     await btn.first.click()
                     state["stage"] = 1
                     return
@@ -1615,42 +1754,51 @@ async def _advance_approval(ctx: BrowserContext, win: Page, stage: int, state: d
                     if txt in ("close", "cancel", "back", "requests"):
                         continue
                     logger.info("clicking permission entry via {!r}", sel)
-                    await snap_page(panel, "07b-stage1-pre-click-entry")
+                    await snap_page(panel, snap_stage1)
                     await loc.click()
                     state["stage"] = 2
                     return
             except Exception:
                 pass
 
-    # Stage 2: click Approve in the per-request detail window.
+    # Stage 2: click Approve or Deny in the per-request detail window.
     elif stage == 2:
+        button_text = "Approve" if decision == "approve" else "Deny"
         for w in all_pages(ctx):
             try:
                 if "/requests/" not in w.url:
                     continue
-                btn = w.locator('button:has-text("Approve")').first
+                btn = w.locator(f'button:has-text("{button_text}")').first
                 if await btn.count() > 0 and await btn.is_visible():
-                    logger.info("clicking Approve")
-                    await snap_page(w, "07c-stage2-pre-click-approve")
+                    logger.info("clicking {}", button_text)
+                    await snap_page(w, snap_stage2_pre)
                     await btn.click()
                     state["stage"] = 3
-                    # Snap a beat later so the post-approval state of the
-                    # request page (typically "Approved") is captured.
+                    # Snap a beat later. For approve the per-request page
+                    # stays open ("Approved"); for deny the window closes
+                    # so fall back to the chat window.
                     await asyncio.sleep(2)
+                    snap_target = w
+                    if decision == "deny":
+                        chat_after = await find_chat_window(ctx)
+                        if chat_after is not None:
+                            snap_target = chat_after
                     with contextlib.suppress(Exception):
-                        await snap_page(w, "07d-stage2-post-approve")
-                    # Surface latchkey-side authorisation failures
-                    # immediately rather than waiting DRIVE_SLACK_TIMEOUT
-                    # seconds for a timeout. The post-approve page renders
-                    # the error banner verbatim; parse the visible text and
-                    # raise so CI fails on the actual signal, not a timeout
-                    # that happens to coincide.
-                    with contextlib.suppress(Exception):
-                        body_text = await w.evaluate("document.body.innerText")
-                        if "Authorization failed" in body_text or "No browser configured" in body_text:
-                            raise RuntimeError(
-                                "07d shows authorization failure: " + body_text.replace("\n", " | ")[:400]
-                            )
+                        await snap_page(snap_target, snap_stage2_post)
+                    if decision == "approve":
+                        # Surface latchkey-side authorisation failures
+                        # immediately rather than waiting DRIVE_SLACK_TIMEOUT
+                        # seconds for a timeout. The post-approve page renders
+                        # the error banner verbatim; parse the visible text
+                        # and raise so CI fails on the actual signal, not a
+                        # timeout that happens to coincide.
+                        with contextlib.suppress(Exception):
+                            body_text = await w.evaluate("document.body.innerText")
+                            if "Authorization failed" in body_text or "No browser configured" in body_text:
+                                raise RuntimeError(
+                                    f"{snap_stage2_post} shows authorization failure: "
+                                    + body_text.replace("\n", " | ")[:400]
+                                )
                     # Kicks are sent from the main poll loop after a
                     # KICK_DELAY settle period; see slack-flow loop.
                     return
