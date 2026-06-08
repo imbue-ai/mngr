@@ -295,6 +295,26 @@ def run(
     # Start/Stop controls and the quit-time shutdown prompt; fed by the poll loop
     # started below and by the Start/Stop endpoints.
     local_mind_liveness_tracker = LocalMindLivenessTracker()
+    # The refresh event the Start/Stop endpoints poke to force an immediate poll
+    # re-read. Created here (rather than inside ``create_desktop_client``) so the
+    # poll loop can start *now* and share the same event with the app built below.
+    local_liveness_refresh_event = threading.Event()
+    # Start the local-mind liveness poll as early as possible -- before the
+    # blocking ``mngr forward`` listen-wait and the desktop-client build below --
+    # so its first (read-only) ``mngr list`` runs concurrently with the rest of
+    # startup. By the time uvicorn serves the landing page, the snapshot is
+    # already populated, so the initial render carries each local mind's status
+    # instead of rendering empty and waiting for a later SSE push. The poll only
+    # needs the backend resolver (which loads its last-good agent topology from
+    # disk at construction) and the concurrency group, both ready by now.
+    start_local_liveness_poll_loop(
+        liveness_tracker=local_mind_liveness_tracker,
+        backend_resolver=backend_resolver,
+        mngr_binary=MNGR_BINARY,
+        mngr_host_dir=mngr_host_dir,
+        refresh_event=local_liveness_refresh_event,
+        root_concurrency_group=root_concurrency_group,
+    )
     # The plugin reports every non-2xx response; minds decides which ones count.
     # Only connection-level failures and infrastructure 5xx enroll a suspect --
     # application errors are left for the background probe to adjudicate.
@@ -390,6 +410,7 @@ def run(
         root_concurrency_group=root_concurrency_group,
         system_interface_health_tracker=system_interface_health_tracker,
         local_mind_liveness_tracker=local_mind_liveness_tracker,
+        local_liveness_refresh_event=local_liveness_refresh_event,
         mngr_binary=MNGR_BINARY,
         mngr_host_dir=mngr_host_dir,
         minds_api_key=minds_api_key,
@@ -405,19 +426,6 @@ def run(
         backend_resolver=backend_resolver,
         mngr_forward_port=mngr_forward_port,
         mngr_forward_preauth_cookie=preauth_cookie,
-        root_concurrency_group=root_concurrency_group,
-    )
-
-    # Background poll that keeps each local mind's container-liveness fresh for
-    # the landing-page Start/Stop controls and the quit-time shutdown prompt.
-    # Uses the same refresh event the Start/Stop endpoints poke for an immediate
-    # re-read after a user-initiated change.
-    start_local_liveness_poll_loop(
-        liveness_tracker=local_mind_liveness_tracker,
-        backend_resolver=backend_resolver,
-        mngr_binary=MNGR_BINARY,
-        mngr_host_dir=mngr_host_dir,
-        refresh_event=app.state.local_liveness_refresh_event,
         root_concurrency_group=root_concurrency_group,
     )
 

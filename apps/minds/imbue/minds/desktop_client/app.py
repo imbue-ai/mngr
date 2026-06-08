@@ -3478,6 +3478,7 @@ def create_desktop_client(
     root_concurrency_group: ConcurrencyGroup | None = None,
     system_interface_health_tracker: SystemInterfaceHealthTracker | None = None,
     local_mind_liveness_tracker: LocalMindLivenessTracker | None = None,
+    local_liveness_refresh_event: threading.Event | None = None,
     mngr_binary: str = "mngr",
     mngr_host_dir: Path | None = None,
     minds_api_key: str | None = None,
@@ -3576,7 +3577,12 @@ def create_desktop_client(
     # Set by a Start/Stop action to ask the liveness poll loop to re-read
     # immediately instead of waiting for the next tick. Always present so the
     # stop/start endpoints can poke it even when no poll loop is running.
-    app.state.local_liveness_refresh_event = threading.Event()
+    # ``run.py`` injects the same event it already handed the poll loop (which it
+    # starts early, before this app is built); fall back to a fresh event when no
+    # poll loop is wired (test factories).
+    app.state.local_liveness_refresh_event = (
+        local_liveness_refresh_event if local_liveness_refresh_event is not None else threading.Event()
+    )
     app.state.mngr_binary = mngr_binary
     app.state.mngr_host_dir = mngr_host_dir if mngr_host_dir is not None else Path.home() / ".mngr"
     # Always-set (possibly None) so consumers can read directly via
