@@ -1,0 +1,1 @@
+Fixed missing imports and a missing fixture parameter in the e2e tutorial test suite (`json`, `re`, `Path`, `Any`, `sys`, `AgentId`, and the `temp_git_repo` fixture) that were introduced by a bulk merge and caused F821 errors. Also removed a now-unused `json` import and deduplicated stray imports in `test_transcript.py`. No user-facing behavior change.
