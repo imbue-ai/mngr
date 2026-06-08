@@ -1,0 +1,1 @@
+Strengthened the `mngr config path` e2e tutorial test (`test_config_path`) to verify actual behavior: it now asserts that all three scopes (user, project, local) are reported, that the user/local scopes resolve to `settings.toml` / `settings.local.toml`, and that the `(exists)`/`(not found)` annotation for each scope matches the real on-disk state.

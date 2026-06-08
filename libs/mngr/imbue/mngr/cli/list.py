@@ -75,6 +75,9 @@ _HEADER_LABELS: Final[dict[str, str]] = {
 # documented for CEL; the underlying attribute is host.provider_name.
 _FIELD_ALIASES: Final[dict[str, str]] = {
     "host.provider": "host.provider_name",
+    # `project` is the documented short form for the project label, mirroring
+    # the `--project` filter flag; the underlying data lives in labels.project.
+    "project": "labels.project",
 }
 
 
