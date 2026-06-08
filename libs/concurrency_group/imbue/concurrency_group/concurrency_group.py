@@ -236,10 +236,9 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
             remaining_timeout = self._get_remaining_timeout(start_time, timeout_seconds)
             # Thread.join(timeout=float("inf")) raises OverflowError, so convert to None (wait forever)
             join_timeout = None if remaining_timeout == float("inf") else remaining_timeout
-            try:
-                tracked_thread.thread.join(timeout=join_timeout)
-            except Exception:
-                pass
+            # Join without re-raising: strand failures are collected separately below and in
+            # _raise_if_any_strands_or_ancestors_failed. We only need to wait for the thread here.
+            tracked_thread.thread.join_without_raising(timeout=join_timeout)
             if tracked_thread.thread.is_alive():
                 message = (
                     f"Thread `{tracked_thread.thread.name} ({tracked_thread.thread.target_name})` "
