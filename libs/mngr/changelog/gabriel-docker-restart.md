@@ -8,10 +8,10 @@ then treated every volume as orphaned and deleted it -- wiping the per-host
 directories did not, so the containers could no longer be restarted).
 
 The Docker provider's `discover_hosts` now raises `ProviderUnavailableError` when
-the daemon is unreachable instead of returning `[]`, matching the Modal and Imbue
-Cloud providers. Discovery failures are now skipped per-provider by the same
-existing handlers (GC skips the provider; `mngr list` reports it as unavailable),
-so an unreachable daemon can no longer be mistaken for "this provider has zero
-hosts". As a result, `mngr` commands that scan all providers now surface a clear
+the daemon is unreachable instead of returning `[]`. Like the Modal and Imbue
+Cloud providers, it now propagates a discovery failure rather than swallowing it
+into an empty list, so an unreachable daemon can no longer be mistaken for "this
+provider has zero hosts". Discovery failures are skipped per-provider by the same
+existing handlers (GC skips the provider; `mngr list` reports it as unavailable). As a result, `mngr` commands that scan all providers now surface a clear
 "provider unavailable" error when Docker is off, rather than silently omitting
 Docker agents.
