@@ -1,51 +1,69 @@
-from imbue.minds.desktop_client.region_preference import _RefreshThrottle
-from imbue.minds.desktop_client.region_preference import region_from_geo_payload
-from imbue.minds.desktop_client.region_preference import resolve_nearest_region
+from imbue.minds.desktop_client.region_preference import GeoLocationCache
+from imbue.minds.desktop_client.region_preference import IMBUE_CLOUD_PROVIDER_KEY
+from imbue.minds.desktop_client.region_preference import VULTR_PROVIDER_KEY
+from imbue.minds.desktop_client.region_preference import default_region_for_provider
+from imbue.minds.desktop_client.region_preference import known_regions_for_provider
+from imbue.minds.desktop_client.region_preference import nearest_region_for_provider
+from imbue.minds.desktop_client.region_preference import provider_supports_region
+from imbue.minds.desktop_client.region_preference import resolve_default_region
 
 
-def test_resolve_nearest_region_picks_east_for_east_coast() -> None:
+def test_nearest_region_picks_east_for_east_coast() -> None:
     # New York City is closer to US-EAST-VA than US-WEST-OR.
-    assert resolve_nearest_region(40.71, -74.01) == "US-EAST-VA"
+    assert nearest_region_for_provider(IMBUE_CLOUD_PROVIDER_KEY, 40.71, -74.01) == "US-EAST-VA"
 
 
-def test_resolve_nearest_region_picks_west_for_west_coast() -> None:
+def test_nearest_region_picks_west_for_west_coast() -> None:
     # San Francisco is closer to US-WEST-OR.
-    assert resolve_nearest_region(37.77, -122.42) == "US-WEST-OR"
+    assert nearest_region_for_provider(IMBUE_CLOUD_PROVIDER_KEY, 37.77, -122.42) == "US-WEST-OR"
 
 
-def test_resolve_nearest_region_picks_nearest_for_far_away_user() -> None:
-    # London is far from both, but still resolves to the nearer (east) datacenter.
-    assert resolve_nearest_region(51.51, -0.13) == "US-EAST-VA"
-    # Tokyo is nearer the west-coast datacenter.
-    assert resolve_nearest_region(35.68, 139.69) == "US-WEST-OR"
+def test_nearest_region_for_vultr_picks_nearby_datacenter() -> None:
+    # Tokyo maps to Vultr's nrt (Tokyo) region.
+    assert nearest_region_for_provider(VULTR_PROVIDER_KEY, 35.68, 139.69) == "nrt"
+    # London maps to Vultr's lhr (London) region.
+    assert nearest_region_for_provider(VULTR_PROVIDER_KEY, 51.51, -0.13) == "lhr"
 
 
-def test_region_from_geo_payload_maps_valid_coordinates() -> None:
-    assert region_from_geo_payload({"latitude": 45.5, "longitude": -122.9}) == "US-WEST-OR"
+def test_nearest_region_for_unknown_provider_is_none() -> None:
+    assert nearest_region_for_provider("docker", 40.71, -74.01) is None
 
 
-def test_region_from_geo_payload_returns_none_for_missing_fields() -> None:
-    assert region_from_geo_payload({"city": "Nowhere"}) is None
+def test_provider_supports_region_only_for_imbue_cloud_and_vultr() -> None:
+    assert provider_supports_region(IMBUE_CLOUD_PROVIDER_KEY)
+    assert provider_supports_region(VULTR_PROVIDER_KEY)
+    assert not provider_supports_region("docker")
+    assert not provider_supports_region("lima")
 
 
-def test_region_from_geo_payload_returns_none_for_non_numeric() -> None:
-    assert region_from_geo_payload({"latitude": "north", "longitude": "west"}) is None
+def test_known_regions_and_defaults() -> None:
+    assert known_regions_for_provider(IMBUE_CLOUD_PROVIDER_KEY) == ("US-EAST-VA", "US-WEST-OR")
+    assert default_region_for_provider(IMBUE_CLOUD_PROVIDER_KEY) == "US-EAST-VA"
+    assert default_region_for_provider(VULTR_PROVIDER_KEY) == "ewr"
+    assert "ewr" in known_regions_for_provider(VULTR_PROVIDER_KEY)
 
 
-def test_region_from_geo_payload_returns_none_for_non_dict() -> None:
-    assert region_from_geo_payload("not json") is None
-    assert region_from_geo_payload(None) is None
+def test_resolve_default_region_prefers_configured_known_value() -> None:
+    cache = GeoLocationCache()
+    cache.set_coordinates((37.77, -122.42))  # San Francisco -> would be US-WEST-OR by geo
+    # A valid stored value wins over geolocation.
+    assert resolve_default_region(IMBUE_CLOUD_PROVIDER_KEY, "US-EAST-VA", cache) == "US-EAST-VA"
 
 
-def test_refresh_throttle_allows_first_then_blocks_within_interval() -> None:
-    throttle = _RefreshThrottle(interval_seconds=3600.0)
-    # First claim runs; an immediate second claim is throttled.
-    assert throttle.claim_if_due() is True
-    assert throttle.claim_if_due() is False
+def test_resolve_default_region_falls_back_to_geo_when_unconfigured() -> None:
+    cache = GeoLocationCache()
+    cache.set_coordinates((37.77, -122.42))  # San Francisco
+    assert resolve_default_region(IMBUE_CLOUD_PROVIDER_KEY, None, cache) == "US-WEST-OR"
 
 
-def test_refresh_throttle_allows_immediately_with_zero_interval() -> None:
-    # A zero interval means every claim is due (never throttled).
-    throttle = _RefreshThrottle(interval_seconds=0.0)
-    assert throttle.claim_if_due() is True
-    assert throttle.claim_if_due() is True
+def test_resolve_default_region_ignores_unknown_configured_value() -> None:
+    cache = GeoLocationCache()
+    cache.set_coordinates((40.71, -74.01))  # NYC -> US-EAST-VA by geo
+    # An unknown stored region is ignored; geo wins.
+    assert resolve_default_region(IMBUE_CLOUD_PROVIDER_KEY, "MARS-WEST-1", cache) == "US-EAST-VA"
+
+
+def test_resolve_default_region_falls_back_to_hardcoded_when_no_geo() -> None:
+    cache = GeoLocationCache()
+    # No coordinates and no configured value -> hardcoded default.
+    assert resolve_default_region(VULTR_PROVIDER_KEY, None, cache) == "ewr"

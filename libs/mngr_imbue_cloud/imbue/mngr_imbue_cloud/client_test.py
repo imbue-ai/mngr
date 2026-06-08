@@ -36,11 +36,10 @@ def _make_client(handler) -> tuple[ImbueCloudConnectorClient, httpx.MockTranspor
 
 def test_lease_host_503_raises_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        # Absent region knobs must not be sent so the connector treats them as
-        # unconstrained (and older connectors ignore the request unchanged).
+        # An absent region must not be sent so the connector treats the lease as
+        # region-agnostic.
         body = _json.loads(request.content)
         assert "region" not in body
-        assert "preferred_region" not in body
         return httpx.Response(503, json={"detail": "no match"})
 
     transport = httpx.MockTransport(handler)
@@ -61,9 +60,8 @@ def test_lease_host_success_parses_response(monkeypatch: pytest.MonkeyPatch) -> 
         assert body["attributes"] == {"cpus": 2}
         assert body["ssh_public_key"] == "ssh-ed25519 AAAA"
         assert body["host_name"] == "my-host"
-        # Region knobs ride alongside attributes as top-level fields only when set.
+        # The hard region rides alongside attributes as a top-level field when set.
         assert body["region"] == "US-EAST-VA"
-        assert body["preferred_region"] == "US-WEST-OR"
         return httpx.Response(
             200,
             json={
@@ -93,7 +91,6 @@ def test_lease_host_success_parses_response(monkeypatch: pytest.MonkeyPatch) -> 
         "ssh-ed25519 AAAA",
         "my-host",
         region="US-EAST-VA",
-        preferred_region="US-WEST-OR",
     )
     assert result.vps_address == "10.0.0.1"
     assert result.agent_id == "agent-abc"

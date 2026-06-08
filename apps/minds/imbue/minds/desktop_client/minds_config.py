@@ -80,27 +80,40 @@ class MindsConfig(MutableModel):
                 pass
             self._write_raw(data)
 
-    def get_preferred_region(self) -> str | None:
-        """Return the preferred OVH datacenter for imbue_cloud leases, or None.
+    def get_region(self, provider_name: str) -> str | None:
+        """Return the last-used region for a provider, or None if never set.
 
-        Resolved from the user's IP geolocation when the create page is opened
-        and passed to ``mngr create`` as a soft ``-b preferred_region=`` knob.
+        Stored under ``[providers.<provider_name>].region`` so each
+        region-bearing provider (e.g. ``imbue_cloud``, ``vultr``) keeps its own
+        last-used value. The create form defaults to this; on a successful
+        create the chosen region is written back via :meth:`set_region`.
         """
         with self._lock:
             data = self._read_raw()
-            value = data.get("preferred_region")
+            providers = data.get("providers")
+            if not isinstance(providers, dict):
+                return None
+            provider = providers.get(provider_name)
+            if not isinstance(provider, dict):
+                return None
+            value = provider.get("region")
             return str(value) if value is not None else None
 
-    def set_preferred_region(self, region: str | None) -> None:
-        """Set or clear the preferred OVH datacenter for imbue_cloud leases."""
+    def set_region(self, provider_name: str, region: str) -> None:
+        """Persist the last-used region for a provider under ``[providers.<provider_name>]``."""
         with self._lock:
             data = self._read_raw()
-            if region is not None:
-                data["preferred_region"] = region
-            elif "preferred_region" in data:
-                del data["preferred_region"]
-            else:
-                pass
+            providers = data.get("providers")
+            if not isinstance(providers, dict):
+                providers = {}
+            provider = providers.get(provider_name)
+            if not isinstance(provider, dict):
+                provider = {}
+            # Set the value before re-attaching the sub-table: tomlkit copies a
+            # plain dict on assignment, so mutating it afterwards would not persist.
+            provider["region"] = region
+            providers[provider_name] = provider
+            data["providers"] = providers
             self._write_raw(data)
 
     def get_auto_open_requests_panel(self) -> bool:

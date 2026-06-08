@@ -218,36 +218,46 @@ def test_build_mngr_create_command_omits_fast_mode_when_unset() -> None:
     assert "fast_mode" not in joined
 
 
-def test_build_mngr_create_command_forwards_preferred_region_for_imbue_cloud() -> None:
+def test_build_mngr_create_command_forwards_region_for_imbue_cloud() -> None:
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.IMBUE_CLOUD,
         host_name=HostName("hello"),
         imbue_cloud_account="alice@imbue.com",
-        imbue_cloud_preferred_region="US-WEST-OR",
+        region="US-WEST-OR",
     )
-    # The soft region preference must reach mngr as a -b build arg.
-    assert "preferred_region=US-WEST-OR" in command
+    # The explicit region must reach mngr as a hard -b region= build arg.
+    assert "region=US-WEST-OR" in command
 
 
-def test_build_mngr_create_command_omits_preferred_region_when_unset() -> None:
+def test_build_mngr_create_command_forwards_region_for_vultr() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.CLOUD,
+        host_name=HostName("hello"),
+        region="lhr",
+    )
+    # Vultr takes the region as the --vps-region build arg.
+    assert "--vps-region=lhr" in command
+
+
+def test_build_mngr_create_command_omits_region_when_unset() -> None:
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.IMBUE_CLOUD,
         host_name=HostName("hello"),
         imbue_cloud_account="alice@imbue.com",
     )
     joined = " ".join(command)
-    assert "preferred_region" not in joined
+    assert "region=" not in joined
 
 
-def test_build_mngr_create_command_ignores_preferred_region_for_docker() -> None:
-    # The region preference is imbue_cloud-only; other launch modes drop it.
+def test_build_mngr_create_command_ignores_region_for_docker() -> None:
+    # Region is meaningful only for region-bearing providers; DOCKER drops it.
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.DOCKER,
         host_name=HostName("hello"),
-        imbue_cloud_preferred_region="US-WEST-OR",
+        region="US-WEST-OR",
     )
     joined = " ".join(command)
-    assert "preferred_region" not in joined
+    assert "region=" not in joined and "vps-region" not in joined
 
 
 def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:

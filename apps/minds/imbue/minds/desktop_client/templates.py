@@ -283,6 +283,8 @@ def render_create_form(
     default_account_id: str = "",
     anthropic_api_key: str = "",
     error_message: str = "",
+    region_options_by_launch_mode: Mapping[str, Sequence[str]] | None = None,
+    region_selected_by_launch_mode: Mapping[str, str] | None = None,
 ) -> str:
     """Render the agent creation form page.
 
@@ -342,6 +344,10 @@ def render_create_form(
         default_account_id=default_account_id,
         anthropic_api_key=anthropic_api_key,
         error_message=error_message,
+        region_options_by_launch_mode={
+            key: list(value) for key, value in (region_options_by_launch_mode or {}).items()
+        },
+        region_selected_by_launch_mode=dict(region_selected_by_launch_mode or {}),
     )
 
 

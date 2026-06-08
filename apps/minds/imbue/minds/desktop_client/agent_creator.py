@@ -463,7 +463,7 @@ def _build_mngr_create_command(
     imbue_cloud_repo_url: str | None = None,
     imbue_cloud_branch_or_tag: str | None = None,
     imbue_cloud_fast_mode: str | None = None,
-    imbue_cloud_preferred_region: str | None = None,
+    region: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Build the ``mngr create`` command for a freshly-provisioned workspace.
@@ -597,6 +597,11 @@ def _build_mngr_create_command(
         case LaunchMode.CLOUD:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "vultr"])
             mngr_command.extend(_remote_host_env_flags())
+            # The user always picks a Vultr region in the create form (advanced
+            # settings). It is a hard placement requirement: the VPS is created
+            # in exactly this region.
+            if region:
+                mngr_command.extend(["-b", f"--vps-region={region}"])
         case LaunchMode.IMBUE_CLOUD:
             # imbue_cloud follows the same shape as the other modes: the
             # ``main`` + ``imbue_cloud`` templates set ``idle_mode = disabled``
@@ -616,12 +621,12 @@ def _build_mngr_create_command(
             # ``_run_imbue_cloud_create_with_fallback``).
             if imbue_cloud_fast_mode:
                 mngr_command.extend(["-b", f"fast_mode={imbue_cloud_fast_mode}"])
-            # ``preferred_region`` is a soft datacenter preference resolved from
-            # the user's IP geolocation. It only reorders the pool (a closer
-            # host wins) and never blocks the lease, so it's always safe to pass
-            # and never sent as a hard requirement from minds.
-            if imbue_cloud_preferred_region:
-                mngr_command.extend(["-b", f"preferred_region={imbue_cloud_preferred_region}"])
+            # ``region`` is the explicit datacenter the user picked in the create
+            # form (advanced settings). It is a hard requirement: the lease only
+            # adopts/leases a host in this region, and the user gets a clear
+            # "no capacity in <region>" error if none is available there.
+            if region:
+                mngr_command.extend(["-b", f"region={region}"])
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -785,7 +790,7 @@ def run_mngr_create(
     imbue_cloud_repo_url: str | None = None,
     imbue_cloud_branch_or_tag: str | None = None,
     imbue_cloud_fast_mode: str | None = None,
-    imbue_cloud_preferred_region: str | None = None,
+    region: str | None = None,
     anthropic_api_key: str | None = None,
     anthropic_base_url: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
@@ -822,7 +827,7 @@ def run_mngr_create(
         imbue_cloud_repo_url=imbue_cloud_repo_url,
         imbue_cloud_branch_or_tag=imbue_cloud_branch_or_tag,
         imbue_cloud_fast_mode=imbue_cloud_fast_mode,
-        imbue_cloud_preferred_region=imbue_cloud_preferred_region,
+        region=region,
         latchkey_env=latchkey_env,
     )
 
@@ -894,7 +899,7 @@ class _MngrCreateAttemptParams(FrozenModel):
     latchkey_env: Mapping[str, str] | None
     account_email: str | None
     branch_or_tag: str | None
-    preferred_region: str | None
+    region: str | None
     anthropic_api_key: str | None
     anthropic_base_url: str | None
     parent_cg: ConcurrencyGroup | None
@@ -925,7 +930,9 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         # to pick the right pool generation.
         imbue_cloud_branch_or_tag=(params.branch_or_tag if is_imbue_cloud and params.branch_or_tag else None),
         imbue_cloud_fast_mode=fast_mode,
-        imbue_cloud_preferred_region=(params.preferred_region if is_imbue_cloud and params.preferred_region else None),
+        # ``region`` is honored by both IMBUE_CLOUD (-b region=) and CLOUD/vultr
+        # (-b --vps-region=); the command builder ignores it for DOCKER/LIMA.
+        region=(params.region or None),
         anthropic_api_key=params.anthropic_api_key,
         anthropic_base_url=params.anthropic_base_url,
         parent_cg=params.parent_cg,
@@ -1089,7 +1096,7 @@ class AgentCreator(MutableModel):
         ai_provider: AIProvider = AIProvider.SUBSCRIPTION,
         account_email: str = "",
         branch_or_tag: str = "",
-        preferred_region: str = "",
+        region: str = "",
         anthropic_api_key: str = "",
         on_created: Callable[[AgentId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
@@ -1159,7 +1166,7 @@ class AgentCreator(MutableModel):
                 ai_provider,
                 account_email,
                 branch_or_tag,
-                preferred_region,
+                region,
                 anthropic_api_key,
                 on_created,
                 backup_request,
@@ -1219,7 +1226,7 @@ class AgentCreator(MutableModel):
         ai_provider: AIProvider,
         account_email: str = "",
         branch_or_tag: str = "",
-        preferred_region: str = "",
+        region: str = "",
         anthropic_api_key: str = "",
         on_created: Callable[[AgentId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
@@ -1426,7 +1433,7 @@ class AgentCreator(MutableModel):
                     latchkey_env=latchkey_setup.env,
                     account_email=account_email,
                     branch_or_tag=branch_or_tag,
-                    preferred_region=preferred_region,
+                    region=region,
                     anthropic_api_key=effective_anthropic_api_key,
                     anthropic_base_url=effective_anthropic_base_url,
                     parent_cg=self.root_concurrency_group,
