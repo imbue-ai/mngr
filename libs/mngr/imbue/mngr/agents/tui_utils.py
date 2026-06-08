@@ -295,6 +295,12 @@ def _build_signal_only_command(full_timeout: float, wait_channel: str, tmux_targ
     )
 
 
+# FIXME: this is fairly Claude-specific for an otherwise agent-agnostic module.
+# `queue_log_path_template` plus the hardcoded `"operation":"enqueue"` grep + jq
+# below assume Claude Code's transcript-event-log schema. It would be cleaner to
+# generalize: have the agent supply how to detect its own "message accepted"
+# marker (e.g. a command or matcher) so this module stays agent-neutral. (The
+# coupling predates this function -- it was previously in _get_last_queue_timestamp.)
 def _build_signal_or_enqueue_command(
     agent: BaseAgent[Any],
     full_timeout: float,
