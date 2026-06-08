@@ -1,4 +1,5 @@
 import json
+from typing import Any
 
 from anthropic.types import RawContentBlockDeltaEvent
 from anthropic.types import RawMessageStartEvent
@@ -232,7 +233,7 @@ def test_extract_text_delta_public_wrapper() -> None:
 # =============================================================================
 
 
-def _assistant_line(message: dict) -> str:
+def _assistant_line(message: dict[str, Any]) -> str:
     return json.dumps({"type": "assistant", "message": message, "session_id": "sess-1"})
 
 

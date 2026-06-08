@@ -170,16 +170,20 @@ def build_assistant_message(
     cannot model -- callers synthesizing only text/tool_use blocks never hit this, and surfacing
     it is preferable to silently emitting a malformed message.
     """
-    blocks = [_coerce_content_block(block) for block in content]
-    message = Message(
-        id=message_id,
-        type="message",
-        role="assistant",
-        model=model,
-        content=blocks,  # ty: ignore[invalid-argument-type]  # plain dicts validate into the block union
-        stop_reason=_coerce_stop_reason(stop_reason),
-        stop_sequence=None,
-        usage=_usage_or_zeroed(usage),
+    # Validate the assembled dict (plain content-block dicts and a usage dict included) in one pass
+    # rather than constructing Message() with mixed dict/model args -- model_validate takes Any, so
+    # the block union does not need a per-argument type cast.
+    message = Message.model_validate(
+        {
+            "id": message_id,
+            "type": "message",
+            "role": "assistant",
+            "model": model,
+            "content": [_coerce_content_block(block) for block in content],
+            "stop_reason": _coerce_stop_reason(stop_reason),
+            "stop_sequence": None,
+            "usage": _usage_or_zeroed(usage),
+        }
     )
     return message.model_dump()
 
@@ -209,14 +213,14 @@ def _coerce_stop_reason(stop_reason: str | None) -> StopReason | None:
 _STOP_REASONS: Final[frozenset[str]] = frozenset(StopReason.__args__)
 
 
-def _usage_or_zeroed(usage: Mapping[str, Any] | None) -> Usage:
-    """Validate ``usage`` into ``Usage`` when present and well-formed, else a zeroed stub."""
+def _usage_or_zeroed(usage: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Return a ``usage`` dict validated through ``Usage`` when present and well-formed, else zeroed."""
     if usage is not None:
         try:
-            return Usage.model_validate(dict(usage))
+            return Usage.model_validate(dict(usage)).model_dump()
         except ValidationError:
             logger.trace("assistant-message usage {!r} did not validate; using a zeroed stub", usage)
-    return Usage(input_tokens=0, output_tokens=0)
+    return {"input_tokens": 0, "output_tokens": 0}
 
 
 # ---------------------------------------------------------------------------
