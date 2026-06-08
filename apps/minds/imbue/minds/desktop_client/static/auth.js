@@ -61,7 +61,7 @@
       var data = await res.json();
       if (data.status === 'OK') {
         if (data.needsEmailVerification) window.location.href = '/auth/check-email';
-        else window.location.href = '/';
+        else window.location.href = '/post-login';
       } else if (data.status === 'WRONG_CREDENTIALS') {
         showError('signin', data.message);
       } else {
@@ -135,7 +135,7 @@
         if (s.state === 'done') {
           clearInterval(oauthPollInterval);
           oauthPollInterval = null;
-          window.location.href = '/accounts';
+          window.location.href = '/post-login';
           return;
         }
         if (s.state === 'error') {

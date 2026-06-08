@@ -4,6 +4,16 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-04
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.
+
+Marked the `TestRunInfo`, `TestResult`, and `TestMapReduceResult` result models
+with `__test__ = False` so pytest no longer attempts to collect them as test
+classes (their names start with "Test"). This silences the "cannot collect
+test class ... because it has a __init__ constructor" warnings in CI. No
+behavior change.
+
 ## 2026-05-28
 
 `mngr_tmr` is now a thin recipe on top of the new `mngr_mapreduce` framework. The `mngr tmr` CLI surface is unchanged for users; under the hood, all agent launching / polling / extraction code moved out, and TMR is now expressed as a `TestMapReduceRecipe` (in `imbue.mngr_tmr.recipe`) implementing discovery (pytest collect), prompt building, and the `on_mapper_finalized` / `on_reducer_finalized` hooks (which apply each agent's `branch.bundle` to the local repo). Server-side labels were renamed to `mapreduce_role` / `mapreduce_run_name` and the outputs-archive path was simplified to `plugin/mapreduce/outputs.tar.gz` — agents from older TMR runs are not discoverable by this version (run them down with the prior `mngr` build first).

@@ -8,7 +8,6 @@ import json
 import os
 import random
 import shlex
-import tempfile
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Mapping
@@ -32,11 +31,13 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
+from imbue.mngr.agents.base_agent import quote_agent_args
 from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
+from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -48,6 +49,7 @@ from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import is_macos
+from imbue.mngr.hosts.file_upload import upload_files_in_bulk
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
@@ -66,10 +68,8 @@ from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
-from imbue.mngr.primitives import HostName
-from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import TransferMode
-from imbue.mngr.utils.git_utils import find_git_common_dir
+from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_claude import hookimpl
 from imbue.mngr_claude import resources as _claude_resources
@@ -278,6 +278,14 @@ class ClaudeAgentConfig(AgentTypeConfig):
         "When set, mngr never writes to the user's Claude config; the user is responsible for "
         "interactive `claude` setup (trust dialogs, onboarding, credentials) ahead of time. "
         "Other sync/override/auto-dismiss fields on this config are silently ignored in this mode.",
+    )
+    streaming_snapshot_interval_seconds: float = Field(
+        default=0.0,
+        description="Poll interval (in seconds) for the tmux-based response-streaming watcher. When > 0, a "
+        "background watcher periodically captures the agent's tmux pane, reverse-maps the rendered "
+        "assistant text back into markdown, and writes it to "
+        "$MNGR_AGENT_STATE_DIR/plugin/claude/stream_buffer. When <= 0 (the default), the watcher is "
+        "not provisioned or run.",
     )
 
 
@@ -875,32 +883,16 @@ def _merge_keychain_api_key(
     claude_json_data["primaryApiKey"] = keychain_api_key
 
 
-def _get_local_host(mngr_ctx: MngrContext) -> OnlineHostInterface:
-    """Get the local host instance for file operations."""
-    local_host_ref = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx).get_host(HostName("localhost"))
-    if not isinstance(local_host_ref, OnlineHostInterface):
-        raise MngrError("Local host is not online")
-    return local_host_ref
-
-
 def _write_generated_files(
     host: OnlineHostInterface,
     config_dir: Path,
     generated_files: dict[Path, str],
-    mngr_ctx: MngrContext,
 ) -> None:
     """Write generated config files to the per-agent config dir.
 
     For local hosts, writes files directly. For remote hosts, stages
     files to a local temp dir and rsyncs them in a single call.
     """
-    file_summary = sorted((str(rel), len(content)) for rel, content in generated_files.items())
-    logger.debug(
-        "_write_generated_files: host.is_local={}, config_dir={}, files={}",
-        host.is_local,
-        config_dir,
-        file_summary,
-    )
     if host.is_local:
         for relative, content in generated_files.items():
             dest = config_dir / relative
@@ -913,39 +905,12 @@ def _write_generated_files(
                 dest.unlink()
             host.write_text_file(dest, content)
     else:
-        local_host = _get_local_host(mngr_ctx)
-        with tempfile.TemporaryDirectory(prefix="mngr-claude-") as staging:
-            for relative, content in generated_files.items():
-                staged = Path(staging) / relative
-                staged.parent.mkdir(parents=True, exist_ok=True)
-                staged.write_text(content)
-            staged_listing = sorted(p.relative_to(staging).as_posix() for p in Path(staging).rglob("*") if p.is_file())
-            logger.info(
-                "_write_generated_files: staged {} file(s) in {} -> {}",
-                len(staged_listing),
-                staging,
-                staged_listing,
-            )
-            try:
-                host.copy_directory(local_host, Path(staging), config_dir)
-            except MngrError as exc:
-                logger.opt(exception=exc).error(
-                    "_write_generated_files: copy_directory failed (staging={}, config_dir={})",
-                    staging,
-                    config_dir,
-                )
-                raise
-        # Verify the rsync deposited what we expected -- if files end up missing
-        # at config_dir despite a clean copy_directory return, we want loud
-        # evidence in the bake/provisioning logs (vs. the silent no-op pattern
-        # that surfaced as a FileNotFoundError much later in patch-claude-config).
-        ls_result = host.execute_idempotent_command(f"ls -la {shlex.quote(str(config_dir))}", timeout_seconds=10.0)
-        logger.info(
-            "_write_generated_files: post-rsync ls of {} (success={}): stdout={!r}",
-            config_dir,
-            ls_result.success,
-            ls_result.stdout.strip(),
-        )
+        # Remote host: transfer all generated files in a single rsync via the shared
+        # bulk-upload helper (config_dir is absolute, so remote_home is unused).
+        files: dict[Path, bytes | str | Path] = {
+            config_dir / relative: content for relative, content in generated_files.items()
+        }
+        upload_files_in_bulk(host, files, "", skip_missing=False)
 
 
 def _sync_user_resources(host: OnlineHostInterface, config_dir: Path, *, symlink: bool) -> None:
@@ -1004,13 +969,12 @@ def _sync_user_resources(host: OnlineHostInterface, config_dir: Path, *, symlink
 
 def _rsync_claude_home_directories(
     host: OnlineHostInterface,
-    local_host: OnlineHostInterface,
     local_claude_dir: Path,
     config_dir: Path,
 ) -> None:
     """Transfer directories and individual files from ~/.claude/ to a remote config dir using rsync.
 
-    Uses a single host.copy_directory (rsync) call with include/exclude filters
+    Uses a single host.copy_local_directory (rsync) call with include/exclude filters
     to transfer all directories (skills/, agents/, commands/, plugins/) and
     individual files (keybindings.json) at once. Generated files like
     settings.json are handled separately by the caller.
@@ -1028,7 +992,7 @@ def _rsync_claude_home_directories(
         return
     include_args.append("--exclude=*")
     with log_span("Rsyncing claude home directories to per-agent config dir"):
-        host.copy_directory(local_host, local_claude_dir, config_dir, extra_args=" ".join(include_args))
+        host.copy_local_directory(local_claude_dir, config_dir, " ".join(include_args))
 
 
 def _resolve_plugins_dir_sentinel(host: OnlineHostInterface) -> None:
@@ -1104,6 +1068,12 @@ _CLAUDE_ALWAYS_PROVISIONED_SCRIPT_NAMES: Final[tuple[str, ...]] = (
     "sync_keychain_credentials.py",
 )
 
+# The tmux-based response-streaming watcher. Provisioned only when
+# streaming_snapshot_interval_seconds > 0; claude_background_tasks.sh launches it
+# when it finds the script on disk (the presence check is the single gate, just
+# like common_transcript.sh).
+_CLAUDE_STREAM_SNAPSHOT_SCRIPT_NAME: Final[str] = "stream_snapshot.py"
+
 
 def _provision_claude_always_on_scripts(
     host: OnlineHostInterface,
@@ -1122,6 +1092,42 @@ def _provision_claude_always_on_scripts(
     """
     scripts = {name: _load_claude_resource_script(name) for name in _CLAUDE_ALWAYS_PROVISIONED_SCRIPT_NAMES}
     provision_scripts_to_commands_dir(host, agent_state_dir, scripts, concurrency_group)
+
+
+def _check_python3_available(host: OnlineHostInterface) -> None:
+    """Raise PluginMngrError if python3 is not available on the host.
+
+    The response-streaming watcher is a python script, so the host must have a
+    python3 interpreter when streaming is enabled.
+    """
+    result = host.execute_idempotent_command("command -v python3", timeout_seconds=10.0)
+    if not result.success:
+        raise PluginMngrError(
+            "streaming_snapshot_interval_seconds > 0 requires python3 on the agent host, "
+            "but no python3 interpreter was found. Install python3 on the host or set "
+            "streaming_snapshot_interval_seconds = 0 to disable response streaming."
+        )
+
+
+def _provision_stream_snapshot_script(
+    host: OnlineHostInterface,
+    agent_state_dir: Path,
+    interval_seconds: float,
+    concurrency_group: ConcurrencyGroup,
+) -> None:
+    """Provision the response-streaming watcher script and its poll-interval file.
+
+    The interval is written to a file (rather than passed via an env var) because
+    env-var propagation into the background-tasks subshell that launches the
+    watcher is unreliable; the watcher reads the interval from this file at
+    runtime via $MNGR_AGENT_STATE_DIR, which it always has.
+    """
+    script = _load_claude_resource_script(_CLAUDE_STREAM_SNAPSHOT_SCRIPT_NAME)
+    provision_scripts_to_commands_dir(
+        host, agent_state_dir, {_CLAUDE_STREAM_SNAPSHOT_SCRIPT_NAME: script}, concurrency_group
+    )
+    interval_path = agent_state_dir / "plugin" / "claude" / "stream_interval"
+    host.write_file(interval_path, f"{interval_seconds}\n".encode(), "0644")
 
 
 def _has_api_credentials_available(
@@ -1443,6 +1449,16 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
             return resolve_shared_claude_config_dir()
         return self._get_agent_dir() / "plugin" / "claude" / "anthropic"
 
+    def get_stream_buffer_path(self) -> Path:
+        """Return the path to this agent's response-streaming buffer file.
+
+        Written by the stream_snapshot.py watcher when
+        streaming_snapshot_interval_seconds > 0. The first line is the uuid of
+        the last complete assistant message; the remaining lines are the
+        in-progress assistant text reverse-mapped to markdown.
+        """
+        return self._get_agent_dir() / "plugin" / "claude" / "stream_buffer"
+
     def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
         """Add CLAUDE_CONFIG_DIR and ORIGINAL_CLAUDE_CONFIG_DIR.
 
@@ -1585,13 +1601,9 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         agent_uuid = str(self.id.get_uuid())
 
         # Build the additional arguments (cli_args from config + agent_args from CLI).
-        # cli_args reach here already shell-safe (string-form configs are split with non-POSIX
-        # shlex that preserves quotes). agent_args, by contrast, are raw argv strings passed
-        # through Click as click.UNPROCESSED -- the OS shell stripped quote chars when it built
-        # argv at invocation time, so we must re-quote each element before splicing it into a
-        # shell command string.
-        quoted_agent_args = tuple(shlex.quote(arg) for arg in agent_args)
-        all_extra_args = self.agent_config.cli_args + quoted_agent_args
+        # cli_args arrive already shell-safe; agent_args are raw argv and must be quoted
+        # before being spliced into this shell-evaluated command (see ``quote_agent_args``).
+        all_extra_args = self.agent_config.cli_args + quote_agent_args(agent_args)
         args_str = " ".join(all_extra_args) if all_extra_args else ""
 
         # Read the latest session ID from the tracking file written by the SessionStart hook.
@@ -1845,12 +1857,11 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         """Find the source repo path for the agent's work_dir, if it's a git worktree or mirror.
 
         Returns the parent of the git common dir (the source repo root),
-        or None if work_dir is not inside a git repo.
+        or None if work_dir is not inside a git repo. Delegates to the shared
+        core helper ``imbue.mngr.utils.git_utils.find_git_source_path`` (also
+        used by ``mngr_antigravity``).
         """
-        git_common_dir = find_git_common_dir(self.work_dir, concurrency_group)
-        if git_common_dir is None:
-            return None
-        return git_common_dir.parent
+        return find_git_source_path(self.work_dir, concurrency_group)
 
     def _setup_per_agent_config_dir(
         self,
@@ -1960,7 +1971,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
             if host.is_local:
                 _sync_user_resources(host, config_dir, symlink=config.symlink_user_resources)
             else:
-                _rsync_claude_home_directories(host, _get_local_host(mngr_ctx), source_claude_dir, config_dir)
+                _rsync_claude_home_directories(host, source_claude_dir, config_dir)
         if host.is_local:
             if config.convert_macos_credentials and is_macos():
                 _provision_keychain_credentials(config_dir, mngr_ctx.concurrency_group)
@@ -1968,7 +1979,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
                 _provision_local_credentials(host, config_dir, symlink=config.sync_credentials_on_login)
 
         # 3. Write generated files to config_dir
-        _write_generated_files(host, config_dir, generated_files, mngr_ctx)
+        _write_generated_files(host, config_dir, generated_files)
 
     def provision(
         self,
@@ -2016,6 +2027,18 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
             )
             provision_raw_transcript_scripts(self, host, self._get_agent_dir(), concurrency_group)
             maybe_provision_common_transcript_scripts(self, host, self._get_agent_dir(), concurrency_group)
+
+            # Provision the response-streaming watcher only when enabled. Its
+            # presence on disk is what makes claude_background_tasks.sh launch
+            # it, so a disabled interval simply means the script is absent.
+            if config.streaming_snapshot_interval_seconds > 0:
+                _check_python3_available(host)
+                _provision_stream_snapshot_script(
+                    host,
+                    self._get_agent_dir(),
+                    config.streaming_snapshot_interval_seconds,
+                    concurrency_group,
+                )
 
             if host.is_local and not config.use_env_config_dir:
                 # Determine the source path for trust extension
@@ -2429,7 +2452,7 @@ def _preserve_session_files(agent: ClaudeAgent, host: OnlineHostInterface) -> No
     dest_dir = _get_preserved_sessions_dir(agent)
 
     # Get a local host reference for copy_directory (needed for remote agents)
-    local_host = _get_local_host(agent.mngr_ctx)
+    local_host = get_local_host(agent.mngr_ctx)
 
     with log_span("Preserving session files for agent {}", agent.name):
         # Copy each available data category using copy_directory.

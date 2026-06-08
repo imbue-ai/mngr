@@ -39,6 +39,7 @@ from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_NAMEDTUPL
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_NUM_PREFIX
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_OS_FORK
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_PANDAS_IMPORT
+from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_PER_FILE_HOST_UPLOAD
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_PYTEST_MARK_INTEGRATION
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_RELATIVE_IMPORTS
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_RETURNS_IN_DOCSTRINGS
@@ -66,6 +67,7 @@ from imbue.imbue_common.ratchet_testing.ratchets import find_code_in_init_files
 from imbue.imbue_common.ratchet_testing.ratchets import find_if_elif_without_else
 from imbue.imbue_common.ratchet_testing.ratchets import find_init_methods_in_non_exception_classes
 from imbue.imbue_common.ratchet_testing.ratchets import find_inline_functions
+from imbue.imbue_common.ratchet_testing.ratchets import find_per_file_host_uploads_in_loops
 from imbue.imbue_common.ratchet_testing.ratchets import find_silent_decode_error_catches
 from imbue.imbue_common.ratchet_testing.ratchets import find_underscore_imports
 
@@ -372,6 +374,11 @@ def check_init_methods_in_non_exception_classes(source_dir: Path, max_count: int
 def check_cast_usage(source_dir: Path, max_count: int) -> None:
     chunks = find_cast_usages(source_dir)
     assert len(chunks) <= max_count, PREVENT_CAST_USAGE.format_failure(chunks)
+
+
+def check_per_file_host_upload(source_dir: Path, max_count: int) -> None:
+    chunks = find_per_file_host_uploads_in_loops(source_dir)
+    assert len(chunks) <= max_count, PREVENT_PER_FILE_HOST_UPLOAD.format_failure(chunks)
 
 
 def check_assert_isinstance(source_dir: Path, max_count: int) -> None:

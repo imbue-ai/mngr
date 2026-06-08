@@ -237,7 +237,8 @@ Destroy snapshots for agent host(s).
 
 Requires either --snapshot (to delete specific snapshots) or --all-snapshots
 (to delete all snapshots for the resolved hosts). A confirmation prompt is
-shown unless --force is specified.
+shown unless --force is specified. Pass --dry-run to preview what would be
+destroyed without deleting anything.
 
 Use '-' in place of agent names to read them from stdin, one per line.
 
@@ -264,6 +265,7 @@ mngr snapshot destroy [OPTIONS] [AGENTS]...
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `-f`, `--force` | boolean | Skip confirmation prompt | `False` |
+| `--dry-run` | boolean | Show what would be destroyed without actually destroying anything | `False` |
 
 ## Common
 
@@ -300,6 +302,12 @@ $ mngr snapshot destroy my-agent --all-snapshots --force
 
 ```bash
 $ mngr snapshot destroy agent1 agent2 --all-snapshots --force
+```
+
+**Preview what a destroy would remove**
+
+```bash
+$ mngr snapshot destroy my-agent --all-snapshots --dry-run
 ```
 
 ## See Also

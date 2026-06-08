@@ -31,15 +31,17 @@ contextBridge.exposeInMainWorld('minds', {
   onChromeEvent: (callback) => {
     ipcRenderer.on('chrome-event', (_event, data) => callback(data));
   },
+  onModalStateChanged: (callback) => {
+    ipcRenderer.on('modal-state-changed', (_event, data) => callback(data));
+  },
 
   // Sidebar
   toggleSidebar: () => ipcRenderer.send('toggle-sidebar'),
 
-  // Requests panel
-  toggleRequestsPanel: () => ipcRenderer.send('toggle-requests-panel'),
-  openRequestsPanel: () => ipcRenderer.send('open-requests-panel'),
+  // Inbox modal (formerly the right-side requests panel)
+  toggleInbox: () => ipcRenderer.send('toggle-inbox'),
 
-  // Modal overlay (e.g. permission request dialogs)
+  // Modal overlay close (used by the inbox shell and any one-off dialogs)
   closeModal: () => ipcRenderer.send('close-modal'),
 
   // Multi-window workspace actions

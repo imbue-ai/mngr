@@ -305,6 +305,13 @@ def test_setup_remote_config_dir_copies_resource_files(tmp_path: Path, pi_agent:
     host = _fake_host(tmp_path, is_local=False)
     config = PiCodingAgentConfig(sync_home_settings=True, sync_auth=False)
 
+    # Resource dirs are transferred via host.copy_local_directory (rsync). FakeHost's
+    # copy_local_directory does a local shutil copytree, so the files land under config_dir.
+    # NOTE: FakeHost ignores the rsync --include/--exclude args this code passes, so
+    # this test only confirms resource files get transferred -- it does NOT verify the
+    # include/exclude filtering (e.g. it would not catch a broken dir_name list). The
+    # real rsync filter mechanism is exercised by the host.copy_directory tests in
+    # libs/mngr (test_host.py).
     pi_agent._setup_remote_config_dir(host, config, config_dir, home)
 
     assert (config_dir / "skills" / "test-skill.md").read_text() == "# Test Skill"

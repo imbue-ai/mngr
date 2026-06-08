@@ -67,6 +67,25 @@ class VpsDockerProviderConfig(ProviderInstanceConfig):
         default=(),
         description="Default docker run arguments applied to all containers",
     )
+    docker_runtime: str | None = Field(
+        default=None,
+        description=(
+            "Container runtime to pass to `docker run --runtime` (e.g. 'runsc' for gVisor). "
+            "When None (the default), no `--runtime` flag is added and the VPS Docker daemon uses "
+            "its configured default. The named runtime must be installed and registered on the VPS "
+            "(see `install_gvisor_runtime`), otherwise container creation fails with Docker's native "
+            "'unknown runtime' error. Override via MNGR__PROVIDERS__<NAME>__DOCKER_RUNTIME."
+        ),
+    )
+    install_gvisor_runtime: bool = Field(
+        default=False,
+        description=(
+            "When True, VPS provisioning installs and registers the gVisor `runsc` runtime with the "
+            "Docker daemon (idempotent; a no-op when runsc is already present, e.g. baked into the "
+            "image). This only installs the runtime -- set `docker_runtime='runsc'` to actually run "
+            "containers under it."
+        ),
+    )
     builder: DockerBuilder = Field(
         default=DockerBuilder.DOCKER,
         description=(

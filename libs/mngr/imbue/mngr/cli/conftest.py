@@ -105,6 +105,9 @@ def default_create_cli_opts() -> CreateCliOptions:
         upload_file=(),
         update=False,
         yes=False,
+        tmux_width=None,
+        tmux_height=None,
+        tmux_window_size=None,
     )
 
 
@@ -128,6 +131,7 @@ def default_connect_cli_opts() -> ConnectCliOptions:
         start=True,
         reconnect=True,
         session_command=None,
+        connect_command=None,
         allow_unknown_host=False,
     )
 

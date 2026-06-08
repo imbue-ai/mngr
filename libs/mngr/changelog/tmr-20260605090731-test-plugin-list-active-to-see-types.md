@@ -1,0 +1,1 @@
+Strengthened the `test_plugin_list_active_to_see_types` e2e tutorial test to verify that `mngr plugin list --active` actually lists the built-in agent types (claude, codex, command) the tutorial discusses, instead of only asserting the command exits successfully.

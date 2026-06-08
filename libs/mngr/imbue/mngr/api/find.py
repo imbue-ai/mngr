@@ -49,8 +49,16 @@ def determine_resolved_path(
 
     Pure function that determines which path to use based on what's available.
     Raises UserInputError if path cannot be determined.
+
+    A *relative* path supplied alongside an agent reference is resolved against
+    that agent's work_dir: ``agent:foo/bar`` means ``foo/bar`` inside the
+    agent's worktree, not ``foo/bar`` relative to wherever the command happens
+    to be running. An *absolute* path is honored verbatim. When no path is given
+    at all, the agent's work_dir itself is used.
     """
     if parsed_path is not None:
+        if not parsed_path.is_absolute() and resolved_agent is not None and agent_work_dir_if_available is not None:
+            return agent_work_dir_if_available / parsed_path
         return parsed_path
     if resolved_agent is not None and agent_work_dir_if_available is not None:
         return agent_work_dir_if_available
