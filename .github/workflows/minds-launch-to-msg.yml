@@ -175,7 +175,25 @@ jobs:
           LATCHKEY_ENCRYPTION_KEY: ci-throwaway-build-smoketest-key-not-used-at-runtime
         run: |
           set -o pipefail
-          pnpm dist 2>&1 | tee /tmp/minds-dist.log
+          # ToDesktop's cloud builder fetches uv/restic/etc from
+          # github.com/<owner>/releases at sign time; transient HTTP 504s
+          # from GitHub's release CDN have killed several runs (e.g.
+          # 27123653171, 27124328081, 27124543177). Retry up to 3 times
+          # so a single 504 doesn't waste a 20-min build slot.
+          attempt=1
+          max_attempts=3
+          while true; do
+            if pnpm dist 2>&1 | tee /tmp/minds-dist.log; then
+              break
+            fi
+            if [[ $attempt -ge $max_attempts ]]; then
+              echo "::error::pnpm dist failed after $max_attempts attempts"
+              exit 1
+            fi
+            attempt=$((attempt + 1))
+            echo "::warning::pnpm dist failed (attempt $((attempt - 1)) of $max_attempts); retrying in 30s"
+            sleep 30
+          done
       - name: parse build URL
         id: parse
         if: steps.existing.outputs.url == ''
