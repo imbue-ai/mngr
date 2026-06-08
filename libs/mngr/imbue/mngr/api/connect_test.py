@@ -61,9 +61,10 @@ def test_build_ssh_activity_wrapper_script_attaches_to_tmux_session() -> None:
     """Test that the wrapper script attaches to the correct tmux session."""
     script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"), "agent")
 
-    # Target is rendered via TmuxSessionTarget.as_shell_arg(), which shell-quotes
-    # only if the name contains shell-special characters; '=mngr-my-agent' has
-    # none, so it appears unquoted.
+    # The attach command is built via build_attach_argv (raw `=name` from
+    # TmuxSessionTarget.as_target_arg) and rendered with shlex.join, which quotes a
+    # token only if it contains shell-special characters; '=mngr-my-agent' has none,
+    # so it appears unquoted.
     assert "tmux attach -t =mngr-my-agent" in script
 
 
