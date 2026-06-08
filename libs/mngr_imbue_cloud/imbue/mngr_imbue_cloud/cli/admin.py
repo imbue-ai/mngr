@@ -162,6 +162,11 @@ _BAKED_SERVICES_AGENT_NAME: Final[str] = "system-services"
 # mngr stop/start cycles inside the same container).
 _INITIAL_CHAT_SENTINEL_PATH: Final[str] = "/code/runtime/initial_chat_created"
 
+# mngr env-override key that turns off the OVH provider's cancelled-VPS recycling
+# for the inner ``mngr create``. Setting it forces a fresh OVH order instead of
+# reclaiming a cancelled VPS -- useful for testing the fresh-provision path.
+_OVH_ENABLE_RECYCLE_ENV_KEY: Final[str] = "MNGR__PROVIDERS__OVH__ENABLE_RECYCLE_CANCELLED"
+
 # 30 min: the inner ``mngr create ... --template ovh`` builds a fresh
 # Docker image on the leased VPS, which can take 10-20 min (network bound).
 # A previous 10-min cap occasionally killed otherwise-healthy provisions.
@@ -483,6 +488,7 @@ def _create_single_pool_host(
     database_url: str,
     region: str,
     extra_tags: tuple[str, ...],
+    is_recycle_enabled: bool,
 ) -> bool:
     """Create a single pool host. Returns True on success.
 
@@ -491,6 +497,10 @@ def _create_single_pool_host(
     ``KEY=VALUE`` strings forwarded as ``MNGR_VPS_EXTRA_TAGS`` to the inner
     ``mngr create``; ``mngr_ovh`` then attaches them as additional OVH IAM
     v2 tags alongside ``mngr-provider`` / ``mngr-host-id``.
+
+    When ``is_recycle_enabled`` is False, the inner ``mngr create`` gets the
+    ``MNGR__PROVIDERS__OVH__ENABLE_RECYCLE_CANCELLED=false`` env override so the
+    OVH provider orders a fresh VPS instead of reclaiming a cancelled one.
     """
     suffix = uuid4().hex
     # ``agent_name`` is the contract with ``ImbueCloudHost.create_agent_state``
@@ -542,12 +552,17 @@ def _create_single_pool_host(
         f"--vps-datacenter={region}",
     ]
 
-    pool_create_env: dict[str, str] | None = None
+    pool_create_env: dict[str, str] = {}
     if extra_tags:
-        pool_create_env = {"MNGR_VPS_EXTRA_TAGS": build_extra_tags_env_value(extra_tags)}
+        pool_create_env["MNGR_VPS_EXTRA_TAGS"] = build_extra_tags_env_value(extra_tags)
         logger.info("  Tagging VPS with extra tags: {}", pool_create_env["MNGR_VPS_EXTRA_TAGS"])
+    if not is_recycle_enabled:
+        pool_create_env[_OVH_ENABLE_RECYCLE_ENV_KEY] = "false"
+        logger.info("  Recycling disabled: forcing a fresh OVH VPS order (no cancelled-VPS reuse)")
 
-    create_result = _run_mngr_command(mngr_command, cwd=workspace_dir, is_streaming=True, extra_env=pool_create_env)
+    create_result = _run_mngr_command(
+        mngr_command, cwd=workspace_dir, is_streaming=True, extra_env=pool_create_env or None
+    )
     if create_result.returncode != 0:
         logger.error("mngr create failed: {}", create_result.stderr)
         return False
@@ -766,6 +781,18 @@ def _create_single_pool_host(
     default=None,
     help="Path to the mngr monorepo root. If provided, rsyncs into the template's vendor/mngr/ before creating hosts.",
 )
+@click.option(
+    "--no-recycle",
+    "is_recycle_enabled",
+    flag_value=False,
+    default=True,
+    help=(
+        "Force a fresh OVH VPS order instead of reclaiming a cancelled VPS. By default the OVH "
+        "provider recycles a cancelled (still-billable) VPS when one is available; pass this to "
+        "test the fresh-provision path. Sets MNGR__PROVIDERS__OVH__ENABLE_RECYCLE_CANCELLED=false "
+        "on the inner `mngr create`."
+    ),
+)
 def pool_create(
     count: int,
     region: str,
@@ -775,6 +802,7 @@ def pool_create(
     management_public_key_file: str,
     database_url: str | None,
     mngr_source: str | None,
+    is_recycle_enabled: bool,
 ) -> None:
     """Create pre-provisioned pool hosts."""
     resolved_database_url = _resolve_pool_database_url(database_url)
@@ -820,6 +848,7 @@ def pool_create(
                 database_url=resolved_database_url,
                 region=region,
                 extra_tags=tags,
+                is_recycle_enabled=is_recycle_enabled,
             )
         except (ConcurrencyGroupError, PoolBakeError, psycopg2.Error, OSError) as exc:
             logger.warning("[{}] Failed: {}", i, exc)

@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# mngr dev shim -- MNGR_DEV_SHIM_V1
+#
+# Routes `mngr ...` to the mngr checkout you are actually working in:
+#   - inside any mngr checkout/worktree (one that has libs/mngr): use THAT tree,
+#     so local edits take effect immediately with no reinstall.
+#   - anywhere else: fall back to the clone this shim is installed from,
+#     discovered from the shim's own path (no hard-coded per-user path).
+#
+# Install onto PATH with `just install-mngr-shim` (symlinks ~/.local/bin/mngr
+# here). A pre-commit hook (scripts/check_mngr_shim.sh) enforces that the `mngr`
+# on your PATH is this shim, so you can never silently run the wrong checkout.
+set -euo pipefail
+
+_resolve() {
+    # Portable `readlink -f` (macOS ships no GNU readlink by default).
+    local path=$1 target
+    while [ -L "$path" ]; do
+        target=$(readlink "$path")
+        case $target in
+            /*) path=$target ;;
+            *) path=$(cd -P "$(dirname "$path")" && cd -P "$(dirname "$target")" && pwd)/$(basename "$target") ;;
+        esac
+    done
+    printf '%s\n' "$(cd -P "$(dirname "$path")" && pwd)/$(basename "$path")"
+}
+
+if root=$(git rev-parse --show-toplevel 2>/dev/null) && [ -d "$root/libs/mngr" ]; then
+    uv_project=$root
+else
+    # Fall back to the checkout this shim physically lives in (discovered from
+    # the shim's own path -- no hard-coded path). Using --show-toplevel (not
+    # --git-common-dir) means a shim installed from a worktree resolves to THAT
+    # worktree, so tools whose cwd is outside any checkout (e.g. the temp dir
+    # minds runs `mngr create` from) still use the checkout you installed from.
+    shim=$(_resolve "${BASH_SOURCE[0]}")
+    if uv_project=$(git -C "$(dirname "$shim")" rev-parse --show-toplevel 2>/dev/null) && [ -d "$uv_project/libs/mngr" ]; then
+        :
+    else
+        echo "mngr: shim at $shim is not inside an mngr checkout" >&2
+        exit 1
+    fi
+fi
+
+exec uv run --project "$uv_project" mngr "$@"

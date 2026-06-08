@@ -1996,12 +1996,14 @@ version = "0.1.4"
 source = { editable = "libs/mngr_lima" }
 dependencies = [
     { name = "imbue-mngr" },
+    { name = "imbue-mngr-vps-docker" },
     { name = "pyyaml" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "imbue-mngr-vps-docker", editable = "libs/mngr_vps_docker" },
     { name = "pyyaml", specifier = ">=6.0" },
 ]
 
