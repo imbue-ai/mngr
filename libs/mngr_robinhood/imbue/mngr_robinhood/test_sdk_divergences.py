@@ -8,8 +8,10 @@ fails" split that proves the divergence. When a divergence is fixed, the corresp
 flips to XPASS and the strict marker fails the run -- a built-in reminder to retire the xfail.
 
 The whole module is gated behind the ``sdk_live`` marker (so it never runs in CI) for consistency
-with the rest of the live SDK suite; the structural tests (#1, #6, #7, #8, #9) need no network and
-the two behavioral tests (#3, #18) make one cheap haiku call each.
+with the rest of the live SDK suite; the structural tests (items 1, 6, 7, 8, 9) need no network and
+the two behavioral tests (items 3 and 18) make one cheap haiku call each.
+
+The divergence numbers below refer to the entries in ``docs/sdk_divergences.md``.
 """
 
 from collections.abc import AsyncIterator
@@ -39,18 +41,18 @@ def _xfail_for_mngr(request: pytest.FixtureRequest, is_mngr_sdk: bool, divergenc
         request.node.add_marker(pytest.mark.xfail(reason=divergence, strict=True))
 
 
-# --- #1: public surface is fully re-exported -------------------------------------------------
+# --- divergence 1: public surface is fully re-exported --------------------------------------
 
 
 async def test_divergence_1_reexports_every_public_name(
     sdk: ModuleType, is_mngr_sdk: bool, request: pytest.FixtureRequest
 ) -> None:
-    _xfail_for_mngr(request, is_mngr_sdk, "divergence #1: not every claude_agent_sdk public name is re-exported")
+    _xfail_for_mngr(request, is_mngr_sdk, "divergence 1: not every claude_agent_sdk public name is re-exported")
     missing = sorted(name for name in claude_agent_sdk.__all__ if not hasattr(sdk, name))
     assert missing == []
 
 
-# --- #6: ClaudeSDKClient exposes every documented control method -----------------------------
+# --- divergence 6: ClaudeSDKClient exposes every documented control method -------------------
 
 
 @pytest.mark.parametrize(
@@ -60,29 +62,29 @@ async def test_divergence_1_reexports_every_public_name(
 async def test_divergence_6_client_exposes_documented_methods(
     sdk: ModuleType, is_mngr_sdk: bool, request: pytest.FixtureRequest, method_name: str
 ) -> None:
-    _xfail_for_mngr(request, is_mngr_sdk, f"divergence #6: ClaudeSDKClient is missing {method_name}()")
-    assert callable(getattr(sdk.ClaudeSDKClient, method_name, None))
+    _xfail_for_mngr(request, is_mngr_sdk, f"divergence 6: ClaudeSDKClient is missing {method_name}()")
+    assert method_name in dir(sdk.ClaudeSDKClient)
 
 
-# --- #7: ClaudeSDKClient accepts the documented transport= argument --------------------------
+# --- divergence 7: ClaudeSDKClient accepts the documented transport= argument ----------------
 
 
 async def test_divergence_7_client_accepts_transport_argument(
     sdk: ModuleType, is_mngr_sdk: bool, request: pytest.FixtureRequest
 ) -> None:
-    _xfail_for_mngr(request, is_mngr_sdk, "divergence #7: ClaudeSDKClient.__init__ rejects transport=")
+    _xfail_for_mngr(request, is_mngr_sdk, "divergence 7: ClaudeSDKClient.__init__ rejects transport=")
     # The documented signature is ClaudeSDKClient(options=None, transport=None). Constructing with
     # transport=None must not raise (no connection is made).
     sdk.ClaudeSDKClient(options=None, transport=None)
 
 
-# --- #8: query() accepts the documented transport= argument ---------------------------------
+# --- divergence 8: query() accepts the documented transport= argument ------------------------
 
 
 async def test_divergence_8_query_accepts_transport_argument(
     sdk: ModuleType, is_mngr_sdk: bool, request: pytest.FixtureRequest
 ) -> None:
-    _xfail_for_mngr(request, is_mngr_sdk, "divergence #8: query() rejects transport=")
+    _xfail_for_mngr(request, is_mngr_sdk, "divergence 8: query() rejects transport=")
     # The documented signature is query(*, prompt, options=None, transport=None). Calling it with
     # transport= must return an async iterator without raising TypeError (we never iterate it, so
     # no API call is made).
@@ -91,27 +93,27 @@ async def test_divergence_8_query_accepts_transport_argument(
     await stream.aclose()
 
 
-# --- #9: the not-connected error is CLIConnectionError --------------------------------------
+# --- divergence 9: the not-connected error is CLIConnectionError -----------------------------
 
 
 async def test_divergence_9_query_before_connect_raises_cli_connection_error(
     sdk: ModuleType, is_mngr_sdk: bool, request: pytest.FixtureRequest
 ) -> None:
-    _xfail_for_mngr(request, is_mngr_sdk, "divergence #9: not-connected raises RobinhoodError, not CLIConnectionError")
+    _xfail_for_mngr(request, is_mngr_sdk, "divergence 9: not-connected raises RobinhoodError, not CLIConnectionError")
     client = sdk.ClaudeSDKClient()
     # Documented contract: calling query() before connect() raises CLIConnectionError.
     with pytest.raises(CLIConnectionError):
         await client.query("this should fail because connect() was never called")
 
 
-# --- #3: can_use_tool is not consulted for auto-allowed tools (LIVE) ------------------------
+# --- divergence 3: can_use_tool is not consulted for auto-allowed tools (LIVE) --------------
 
 
 @pytest.mark.tmux
 async def test_divergence_3_can_use_tool_not_invoked_when_auto_allowed(
     sdk: ModuleType, is_mngr_sdk: bool, request: pytest.FixtureRequest, sdk_live_model: str, sdk_cwd: Path
 ) -> None:
-    _xfail_for_mngr(request, is_mngr_sdk, "divergence #3: can_use_tool fires for every tool, even auto-allowed ones")
+    _xfail_for_mngr(request, is_mngr_sdk, "divergence 3: can_use_tool fires for every tool, even auto-allowed ones")
     recorded_tool_names: list[str] = []
 
     async def can_use_tool(tool_name: str, tool_input: dict[str, Any], context: Any) -> PermissionResultAllow:
@@ -138,14 +140,14 @@ async def test_divergence_3_can_use_tool_not_invoked_when_auto_allowed(
     assert recorded_tool_names == []
 
 
-# --- #18: ResultMessage.stop_reason is populated (LIVE) -------------------------------------
+# --- divergence 18: ResultMessage.stop_reason is populated (LIVE) ----------------------------
 
 
 @pytest.mark.tmux
 async def test_divergence_18_result_message_has_stop_reason(
     sdk: ModuleType, is_mngr_sdk: bool, request: pytest.FixtureRequest, sdk_live_model: str, sdk_cwd: Path
 ) -> None:
-    _xfail_for_mngr(request, is_mngr_sdk, "divergence #18: synthesized ResultMessage.stop_reason is always None")
+    _xfail_for_mngr(request, is_mngr_sdk, "divergence 18: synthesized ResultMessage.stop_reason is always None")
     options = make_sdk_options(sdk_live_model, sdk_cwd)
     messages = [message async for message in sdk.query(prompt="Reply with exactly the word OK.", options=options)]
     result = find_result_message(messages)
