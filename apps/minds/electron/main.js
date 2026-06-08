@@ -975,7 +975,16 @@ function reloadAllWindowsAfterRetry() {
 // pushed to it through the existing `status-update` IPC channel. Iterating an
 // empty `bundles` set makes this a natural no-op for a headless signal quit.
 
+// The most recent status pushed to the quitting page. The `#quitting` hash
+// seeds the page with this anyway, but an update can race ahead of the page
+// load (the first `Stopping N minds…` is sent right after `loadFile`, before
+// the renderer registers its listener), so each quitting screen re-pushes it
+// once it finishes loading -- otherwise that first update would be dropped and
+// the page would sit on `Quitting…` for the whole stop.
+let latestQuittingStatus = 'Quitting…';
+
 function showQuittingInAllWindows() {
+  latestQuittingStatus = 'Quitting…';
   for (const bundle of bundles) {
     if (bundle.window.isDestroyed()) continue;
     bundle.isQuittingState = true;
@@ -987,7 +996,11 @@ function showQuittingInAllWindows() {
       if (view && !view.webContents.isDestroyed()) view.setVisible(false);
     }
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
-      bundle.chromeView.webContents.loadFile(path.join(__dirname, 'shell.html'), { hash: 'quitting' });
+      const chromeContents = bundle.chromeView.webContents;
+      chromeContents.loadFile(path.join(__dirname, 'shell.html'), { hash: 'quitting' });
+      chromeContents.once('did-finish-load', () => {
+        if (!chromeContents.isDestroyed()) chromeContents.send('status-update', latestQuittingStatus);
+      });
     }
     updateBundleBounds(bundle);
   }
@@ -995,6 +1008,7 @@ function showQuittingInAllWindows() {
 
 // Broadcast a status line to every window currently showing the quitting page.
 function updateQuittingStatus(message) {
+  latestQuittingStatus = message;
   for (const bundle of bundles) {
     if (bundle.window.isDestroyed() || !bundle.isQuittingState) continue;
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
