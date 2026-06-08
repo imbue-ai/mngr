@@ -35,7 +35,9 @@ def test_list_current_project_only(e2e: E2eSession) -> None:
 
     # The tutorial command: list agents for a single project. The seeded agent
     # belongs to "my-project", so it must appear.
-    result = e2e.run("mngr list --project my-project", comment="list agents for the current project only", timeout=60.0)
+    result = e2e.run(
+        "mngr list --project my-project", comment="list agents for the current project only", timeout=60.0
+    )
     expect(result).to_succeed()
     expect(result.stdout).to_contain("project-filter-agent")
 

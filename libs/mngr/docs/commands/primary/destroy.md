@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr [destroy|rm] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [-f|--force] [-b|--remove-created-branch] [--[no-]gc] [--[no-]allow-worktree-removal]
+mngr [destroy|rm] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [-f|--force] [-b|--remove-created-branch] [--[no-]gc] [--[no-]allow-worktree-removal] [--dry-run]
 ```
 
 Destroy agent(s) and clean up resources.
@@ -52,6 +52,7 @@ mngr destroy [OPTIONS] [AGENTS]...
 | `--gc`, `--no-gc` | boolean | Run garbage collection after destroying agents to clean up orphaned resources (default: enabled) | `True` |
 | `-b`, `--remove-created-branch` | boolean | Delete the git branch that mngr created for the agent's work directory | `False` |
 | `--allow-worktree-removal`, `--no-allow-worktree-removal` | boolean | Allow GC to remove the git worktree directory (default: enabled) | `True` |
+| `--dry-run` | boolean | Show what would be destroyed without actually destroying anything | `False` |
 
 ## Common
 
@@ -113,6 +114,12 @@ $ mngr destroy --session mngr-my-agent
 
 ```bash
 $ mngr list --ids | mngr destroy - --force
+```
+
+**Preview what would be destroyed**
+
+```bash
+$ mngr list --ids | mngr destroy - --dry-run
 ```
 
 **Custom format template output**

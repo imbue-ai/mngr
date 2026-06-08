@@ -249,7 +249,7 @@ def test_list_compound_cel(e2e: E2eSession) -> None:
     # Baseline: the label clause on its own selects the backend agent and
     # excludes the frontend one.
     label_only = e2e.run(
-        'mngr list --include \'labels.team == "backend"\'',
+        "mngr list --include 'labels.team == \"backend\"'",
         comment="label clause alone selects the backend agent",
     )
     expect(label_only).to_succeed()
@@ -412,8 +412,7 @@ def test_list_jsonl_jq_stream(e2e: E2eSession) -> None:
     ).to_succeed()
     expect(
         e2e.run(
-            "mngr create low-task --label priority=low --type command"
-            " --no-connect --no-ensure-clean -- sleep 100000",
+            "mngr create low-task --label priority=low --type command --no-connect --no-ensure-clean -- sleep 100000",
             comment="seed a low-priority agent the filter must drop",
         )
     ).to_succeed()

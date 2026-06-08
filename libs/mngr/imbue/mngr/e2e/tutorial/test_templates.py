@@ -93,9 +93,9 @@ def test_create_template_short_form(e2e: E2eSession) -> None:
 
     # The modal-big template is substituted with transfer=none for this local
     # test, so the template taking effect means the agent runs in-place: its work
-    # directory is the session cwd rather than a generated worktree. Verify via
-    # exec (which targets the local agent directly, avoiding cross-provider
-    # discovery) so we assert the template's concrete effect, not just exit 0.
+    # directory is the session cwd rather than a generated worktree. Verify with
+    # `mngr exec`, which targets the local agent directly and avoids cross-provider
+    # discovery, so we assert the template's concrete effect, not just exit 0.
     session_pwd = e2e.run("pwd", comment="get the session cwd for comparison")
     expect(session_pwd).to_succeed()
     agent_pwd = e2e.run("mngr exec my-task pwd", comment="confirm the agent was created and runs in-place")

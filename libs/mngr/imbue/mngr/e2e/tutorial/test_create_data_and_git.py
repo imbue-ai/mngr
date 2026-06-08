@@ -97,7 +97,9 @@ def test_create_default_project_label(e2e: E2eSession) -> None:
         )
     ).to_succeed()
 
-    list_result = e2e.run("mngr list --format json", comment="Verify the default project label matches the repo folder name")
+    list_result = e2e.run(
+        "mngr list --format json", comment="Verify the default project label matches the repo folder name"
+    )
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     agents = parsed["agents"]

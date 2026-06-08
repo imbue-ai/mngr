@@ -6,6 +6,7 @@ each test creates a modal agent first.
 """
 
 import json
+import re
 
 import pytest
 
