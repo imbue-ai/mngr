@@ -267,6 +267,10 @@ def test_set_imbue_cloud_provider_for_account_writes_block(monkeypatch: pytest.M
         "account": "alice@example.com",
         "connector_url": _FAKE_CONNECTOR_URL,
         "is_enabled": True,
+        # Runsc + hardening args so the slow (rebuild) path runs under gVisor.
+        "docker_runtime": "runsc",
+        "install_gvisor_runtime": True,
+        "default_start_args": ["--workdir=/", "--security-opt=no-new-privileges"],
     }
 
 
@@ -434,6 +438,9 @@ def test_set_imbue_cloud_provider_for_account_repairs_missing_default_block_on_r
         'account = "josh@imbue.com"\n'
         f'connector_url = "{_FAKE_CONNECTOR_URL}"\n'
         "is_enabled = true\n"
+        'docker_runtime = "runsc"\n'
+        "install_gvisor_runtime = true\n"
+        'default_start_args = ["--workdir=/", "--security-opt=no-new-privileges"]\n'
     )
 
     changed = set_imbue_cloud_provider_for_account(

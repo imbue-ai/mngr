@@ -22,6 +22,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
@@ -83,8 +84,31 @@ class BackendResolverInterface(MutableModel, ABC):
 
         Default implementation returns all known agent IDs (no filtering).
         Subclasses with access to agent labels should override this.
+
+        This is the *full* set, including workspaces whose host has been
+        destroyed (retained for the provider's destroyed-host persistence
+        window). Active-workspace surfaces should call
+        :meth:`list_active_workspace_ids` instead; a restore view that needs
+        the destroyed ones uses this plus :meth:`get_host_state`.
         """
         return self.list_known_agent_ids()
+
+    def list_active_workspace_ids(self) -> tuple[AgentId, ...]:
+        """Return workspace agent IDs whose host is not in a terminal DESTROYED state.
+
+        Default implementation has no host-state data, so it returns the same
+        set as :meth:`list_known_workspace_ids`. Subclasses with discovery host
+        state should override to drop agents on DESTROYED hosts.
+        """
+        return self.list_known_workspace_ids()
+
+    def get_host_state(self, host_id: HostId) -> HostState | None:
+        """Return the last-known lifecycle state of a host, or None if unknown.
+
+        Default implementation has no host-state data and returns None.
+        Subclasses fed by discovery should override this.
+        """
+        return None
 
     @abstractmethod
     def list_services_for_agent(self, agent_id: AgentId) -> tuple[ServiceName, ...]:
@@ -193,6 +217,10 @@ class ParsedAgentsResult(FrozenModel):
         default_factory=dict,
         description="SSH info keyed by agent ID string, only for remote agents",
     )
+    host_state_by_host_id: Mapping[str, HostState] = Field(
+        default_factory=dict,
+        description="Host lifecycle state keyed by host ID string, for hosts whose state is known",
+    )
 
 
 def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
@@ -212,6 +240,7 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
     agents = data.get("agents", [])
     agent_ids: list[AgentId] = []
     ssh_info_by_id: dict[str, RemoteSSHInfo] = {}
+    host_state_by_host_id: dict[str, HostState] = {}
 
     for agent in agents:
         agent_id_str = agent.get("id")
@@ -222,6 +251,15 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
         host = agent.get("host")
         if host is None:
             continue
+
+        host_id_value = host.get("id")
+        state_value = host.get("state")
+        if isinstance(host_id_value, str) and isinstance(state_value, str):
+            try:
+                host_state_by_host_id[host_id_value] = HostState(state_value)
+            except ValueError:
+                logger.warning("Unknown host state {!r} for host {}", state_value, host_id_value)
+
         ssh = host.get("ssh")
         if ssh is None:
             continue
@@ -240,6 +278,7 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
     return ParsedAgentsResult(
         agent_ids=tuple(agent_ids),
         ssh_info_by_agent_id=ssh_info_by_id,
+        host_state_by_host_id=host_state_by_host_id,
     )
 
 
@@ -614,6 +653,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
         """Return agent IDs that are primary workspace agents.
 
         Filters for agents with both ``workspace`` and ``is_primary`` labels.
+        Includes workspaces on DESTROYED hosts; see the interface docstring.
         """
         with self._lock:
             return tuple(
@@ -621,6 +661,30 @@ class MngrCliBackendResolver(BackendResolverInterface):
                 for agent in self._agents_result.discovered_agents
                 if "workspace" in agent.labels and "is_primary" in agent.labels
             )
+
+    def list_active_workspace_ids(self) -> tuple[AgentId, ...]:
+        """Return primary workspace agent IDs whose host is not DESTROYED.
+
+        A destroyed host lingers in discovery for the provider's destroyed-host
+        persistence window; its workspace agents stay in the snapshot but should
+        drop off every active surface. Filtering here (rather than removing the
+        agents from the snapshot) keeps the full set available via
+        :meth:`list_known_workspace_ids` for a future restore view.
+        """
+        with self._lock:
+            host_state_by_host_id = self._agents_result.host_state_by_host_id
+            return tuple(
+                agent.agent_id
+                for agent in self._agents_result.discovered_agents
+                if "workspace" in agent.labels
+                and "is_primary" in agent.labels
+                and host_state_by_host_id.get(str(agent.host_id)) is not HostState.DESTROYED
+            )
+
+    def get_host_state(self, host_id: HostId) -> HostState | None:
+        """Return the last-known lifecycle state of a host from discovery, or None."""
+        with self._lock:
+            return self._agents_result.host_state_by_host_id.get(str(host_id))
 
     def get_workspace_name(self, agent_id: AgentId) -> str | None:
         """Return the workspace label value for an agent, or None."""

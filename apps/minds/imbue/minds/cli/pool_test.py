@@ -59,6 +59,7 @@ def test_build_create_admin_args_injects_minds_env_tag() -> None:
         management_public_key_file="/path/to/key.pub",
         database_url="postgres://example",
         mngr_source=None,
+        is_recycle_enabled=True,
     )
     # The --tag injection is the whole reason for this layer's existence.
     tag_index = args.index("--tag")
@@ -75,6 +76,7 @@ def test_build_create_admin_args_forwards_all_other_flags_verbatim() -> None:
         management_public_key_file="/path/to/key.pub",
         database_url="postgres://example",
         mngr_source="/path/to/mngr",
+        is_recycle_enabled=True,
     )
     assert args[0] == "create"
     assert args[args.index("--count") + 1] == "5"
@@ -96,8 +98,39 @@ def test_build_create_admin_args_omits_mngr_source_when_none() -> None:
         management_public_key_file="/k.pub",
         database_url="postgres://example",
         mngr_source=None,
+        is_recycle_enabled=True,
     )
     assert "--mngr-source" not in args
+
+
+def test_build_create_admin_args_omits_no_recycle_by_default() -> None:
+    args = build_create_admin_args(
+        env_name="alice",
+        count=1,
+        region="US-EAST-VA",
+        attributes_json="{}",
+        workspace_dir="/w",
+        management_public_key_file="/k.pub",
+        database_url="postgres://example",
+        mngr_source=None,
+        is_recycle_enabled=True,
+    )
+    assert "--no-recycle" not in args
+
+
+def test_build_create_admin_args_forwards_no_recycle_when_disabled() -> None:
+    args = build_create_admin_args(
+        env_name="alice",
+        count=1,
+        region="US-EAST-VA",
+        attributes_json="{}",
+        workspace_dir="/w",
+        management_public_key_file="/k.pub",
+        database_url="postgres://example",
+        mngr_source=None,
+        is_recycle_enabled=False,
+    )
+    assert "--no-recycle" in args
 
 
 def test_build_list_admin_args() -> None:
@@ -183,6 +216,7 @@ def test_pool_create_derives_production_from_default_root_name(
         management_public_key_file="/k.pub",
         database_url="postgres://example",
         mngr_source=None,
+        is_recycle_enabled=True,
     )
     tag_index = args.index("--tag")
     assert args[tag_index + 1] == "minds_env=production"

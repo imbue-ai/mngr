@@ -23,9 +23,7 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_ovh import hookimpl
 from imbue.mngr_ovh.bootstrap import bootstrap_root_authorized_keys_via_user
-from imbue.mngr_ovh.bootstrap import install_required_outer_packages
 from imbue.mngr_ovh.bootstrap import pin_host_key_via_tofu
-from imbue.mngr_ovh.bootstrap import purge_qemu_packages
 from imbue.mngr_ovh.bootstrap import verify_root_ssh
 from imbue.mngr_ovh.bootstrap import wait_for_ssh_after_rebuild
 from imbue.mngr_ovh.catalog import resolve_image_id
@@ -52,6 +50,7 @@ from imbue.mngr_ovh.pending_orders import write_pending_order_marker
 from imbue.mngr_ovh.recycle import abort_recycle
 from imbue.mngr_ovh.recycle import finalize_recycle
 from imbue.mngr_ovh.recycle import try_recycle_cancelled_vps
+from imbue.mngr_vps_docker.host_setup import apply_host_setup_on_outer
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
@@ -547,30 +546,24 @@ class OvhProvider(VpsDockerProvider):
                     known_hosts_path=self._vps_known_hosts_path(),
                     timeout_seconds=self.config.ssh_connect_timeout,
                 )
-                # OVH has no cloud-init, so the Debian 12 - Docker image's
-                # missing ``rsync`` (which the vps_docker build-context
-                # upload needs) has to be installed explicitly. Runs as the
-                # final outer-bootstrap step before the base
-                # VpsDockerProvider takes over.
-                install_required_outer_packages(
-                    hostname=service_name,
-                    port=22,
-                    private_key_path=vps_private_key_path,
-                    known_hosts_path=self._vps_known_hosts_path(),
-                    timeout_seconds=self.config.ssh_connect_timeout,
-                )
-                # OVH automated backups freeze the guest filesystem (via the
-                # image's qemu-guest-agent) and cause serious runtime problems,
-                # so purge all qemu packages. Runs on both the fresh-order and
-                # recycle paths -- the recycle rebuild reinstalls the agent.
-                # A failure aborts provisioning so no host runs with backups on.
-                purge_qemu_packages(
-                    hostname=service_name,
-                    port=22,
-                    private_key_path=vps_private_key_path,
-                    known_hosts_path=self._vps_known_hosts_path(),
-                    timeout_seconds=self.config.ssh_connect_timeout,
-                )
+                # OVH has no cloud-init, so the host-level setup that cloud-init
+                # backends (Vultr) get at first boot is applied here over SSH via
+                # the single shared source of truth (``apply_host_setup_on_outer``):
+                # pinned Docker, optional gVisor runsc (gated by
+                # ``install_gvisor_runtime``), sshd tuning, the base packages
+                # mngr_vps_docker needs (rsync/inotify-tools/jq), plus the
+                # OVH-specific qemu purge that disables the hypervisor's
+                # filesystem-freezing automated backups. Runs as the final
+                # outer-bootstrap step (on both the fresh-order and recycle
+                # paths -- the recycle rebuild reinstalls the qemu agent) before
+                # the base VpsDockerProvider takes over. Any failure raises and
+                # aborts provisioning, so no half-set-up host is handed back.
+                with self._make_outer_for_vps_ip(service_name) as outer:
+                    apply_host_setup_on_outer(
+                        outer,
+                        install_gvisor_runtime=self.config.install_gvisor_runtime,
+                        is_qemu_purge_enabled=True,
+                    )
                 # All post-claim steps succeeded. Ownership of both the
                 # recycle lock (recycle path) and the freshly-ordered
                 # VPS (fresh-order path) transfers to the caller -- on
