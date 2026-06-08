@@ -38,6 +38,7 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.cel_utils import compile_cel_sort_keys
@@ -860,8 +861,8 @@ def _format_value_as_string(value: Any) -> str:
         return ", ".join(f"{k}={v}" for k, v in value.items())
     elif isinstance(value, Enum):
         return str(value.value)
-    elif hasattr(value, "name") and hasattr(value, "id"):
-        # For objects like SnapshotInfo that have both name and id, prefer name
+    elif isinstance(value, SnapshotInfo):
+        # SnapshotInfo carries both name and id; prefer the name for display.
         return str(value.name)
     elif isinstance(value, (tuple, list)) and not isinstance(value, str):
         return ", ".join(_format_value_as_string(item) for item in value)
