@@ -507,7 +507,7 @@ jobs:
             echo "| Milestone | Per-window (.win.png) | Full-desktop (.desktop.png) |"
             echo "|---|---|---|"
           } >> "$GITHUB_STEP_SUMMARY"
-          for prefix in 00 01 02 03 04 04b 05 06 06b 07 07a 07b 07c 07d 08 09 10 10b 11 12 13 14 15 16 17 17b 17c 17d 18 18a 18b 18b2 18b3 18c 19 20 21 22 99; do
+          for prefix in 00 01 02 03 04 04b 05 06 06b 07 07a 07b 07c 07d 08 09 10 10b 11 12 13 14 15 16 17 17b 17c 17d 18 18a 18b 18b2 18b3 18c 19 20 21 22 23 24 25 26 27 99; do
             for win in "$shots_dir"/${prefix}-*.win.png; do
               [ -f "$win" ] || continue
               base=$(basename "$win" .win.png)

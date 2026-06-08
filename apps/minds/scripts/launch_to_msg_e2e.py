@@ -1461,6 +1461,81 @@ async def amain() -> int:
                 raise E2EFailure(f"[conflict-409] 409 body missing 'already exists' text: {conflict_resp['body']!r}")
             logger.info("[conflict-409] PASS: duplicate-name guard returned 409")
 
+        # Iter 9 (quit + relaunch): a user closes the Mac app, opens it
+        # again, and expects W1's chat to still work. Verifies session +
+        # mngr data survive the restart, the Electron shutdown chain
+        # leaves no orphans (port 8421 / mngr forward / latchkey gateway),
+        # and the new mngr_forward refreshes the subdomain auth cookie
+        # via /goto/<agent_id>/ so the W1 chat URL doesn't redirect to
+        # localhost on stale-cookie verification.
+        if w1_result is not None:
+            logger.info("=== iter 9: quit + relaunch ===")
+            events_offset_pre_relaunch = EVENTS_LOG.stat().st_size if EVENTS_LOG.exists() else 0
+
+            await browser.close()
+            minds_proc.terminate()
+            with contextlib.suppress(Exception):
+                minds_proc.wait(timeout=15)
+            # Sweep orphan mngr forward / latchkey gateway processes that
+            # the Electron shutdown chain sometimes leaves alive holding
+            # :8421. Without this, the new launch can land on a stale
+            # forwarder that lacks the new signing key entirely.
+            _kill_pgrep("mngr forward", "orphan mngr forward")
+            _kill_pgrep("mngr latchkey forward", "orphan mngr latchkey forward")
+            _kill_pgrep("latchkey gateway", "orphan latchkey gateway")
+            _kill_pgrep("mngr observe", "orphan mngr observe")
+            await asyncio.sleep(10)
+
+            cdp_port2 = _free_port()
+            logger.info("relaunching {} --remote-debugging-port={}", MINDS_APP_PATH, cdp_port2)
+            minds_proc = subprocess.Popen(
+                [str(MINDS_APP_PATH), f"--remote-debugging-port={cdp_port2}"],
+                env=env,
+                stdout=open("/tmp/minds-electron-relaunch.log", "w"),
+                stderr=subprocess.STDOUT,
+            )
+
+            cdp_url2 = await _wait_cdp(cdp_port2)
+            browser = await pw.chromium.connect_over_cdp(cdp_url2, timeout=60_000)
+            ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
+            for _ in range(60):
+                if ctx.pages:
+                    break
+                await asyncio.sleep(0.5)
+            if not ctx.pages:
+                raise E2EFailure("[relaunch] no Electron windows 30s after relaunch")
+            win = ctx.pages[0]
+            await snap_page(win, "23-after-relaunch")
+
+            base2 = await asyncio.get_event_loop().run_in_executor(None, wait_backend_url, events_offset_pre_relaunch)
+            logger.info("[relaunch] new backend up at {}", base2)
+            code2 = await asyncio.get_event_loop().run_in_executor(None, mint_one_time_code)
+            origin = base2
+            await win.goto(origin + "/authenticate?one_time_code=" + code2)
+            await snap_page(win, "24-after-relaunch-auth")
+
+            await win.goto(origin + "/")
+            await snap_page(win, "25-home-after-relaunch")
+            home_html = await win.content()
+            if HOST_NAME not in home_html:
+                raise E2EFailure(f"[relaunch] home page after relaunch missing W1 tile {HOST_NAME!r}")
+
+            # Send the unique-token follow-up. With the
+            # mngr_forward fix in place, a stale subdomain cookie on
+            # the chat URL self-heals via the /goto/<agent_id>/ bridge
+            # the bare-origin handler mints, so this navigation should
+            # succeed on the first try.
+            await _send_followup_and_verify(
+                win,
+                chat_url=w1_result.chat_url,
+                prompt="Reply with exactly the four characters: bump",
+                expect_token="bump",
+                snap_sent="26-w1-after-relaunch-sent",
+                snap_reply="27-w1-after-relaunch-reply",
+                label="w1-after-relaunch",
+            )
+            logger.info("[relaunch] PASS: W1 chat survived quit + relaunch")
+
         # Persist combined per-workspace timings as one artifact JSON
         # rather than two -- one file is easier to embed in the run
         # summary and to diff across runs.
