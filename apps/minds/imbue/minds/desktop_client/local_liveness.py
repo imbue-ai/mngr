@@ -147,10 +147,15 @@ def _build_backend_by_provider_name(backend_resolver: BackendResolverInterface) 
 
 
 def get_local_workspace_agent_ids(backend_resolver: BackendResolverInterface) -> tuple[AgentId, ...]:
-    """Return workspace agent ids whose host runs on a local provider backend (docker / lima)."""
+    """Return active workspace agent ids whose host runs on a local provider backend (docker / lima).
+
+    Scopes to ``list_active_workspace_ids`` (not the full ``list_known_workspace_ids``)
+    so destroyed-host workspaces -- which have no landing row -- are not tracked; the
+    Start/Stop controls and quit prompt are active-workspace surfaces.
+    """
     backend_by_provider_name = _build_backend_by_provider_name(backend_resolver)
     local_agent_ids: list[AgentId] = []
-    for agent_id in backend_resolver.list_known_workspace_ids():
+    for agent_id in backend_resolver.list_active_workspace_ids():
         info = backend_resolver.get_agent_display_info(agent_id)
         if info is None or info.provider_name is None:
             continue
