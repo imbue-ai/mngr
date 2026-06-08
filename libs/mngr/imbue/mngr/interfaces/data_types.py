@@ -396,24 +396,30 @@ class FileType(UpperCaseStrEnum):
     def from_stat_mode(cls, mode: int) -> "FileType":
         """Classify a ``stat``/``lstat`` ``st_mode`` into a :class:`FileType`.
 
-        Symlinks are reported as ``SYMLINK`` (callers should ``lstat`` so a
-        symlink is classified by its own mode rather than its target's).
+        Matches on the file-type bits (``S_IFMT``) against the seven standard
+        POSIX types. Symlinks are reported as ``SYMLINK`` (callers should
+        ``lstat`` so a symlink is classified by its own mode rather than its
+        target's). ``OTHER`` is reached only for non-standard type bits mngr
+        never creates -- e.g. a Solaris door/event-port or a BSD whiteout -- or
+        a mode with no recognized type bits.
         """
-        if stat.S_ISDIR(mode):
-            return cls.DIRECTORY
-        if stat.S_ISLNK(mode):
-            return cls.SYMLINK
-        if stat.S_ISREG(mode):
-            return cls.FILE
-        if stat.S_ISFIFO(mode):
-            return cls.PIPE
-        if stat.S_ISSOCK(mode):
-            return cls.SOCKET
-        if stat.S_ISBLK(mode):
-            return cls.BLOCK
-        if stat.S_ISCHR(mode):
-            return cls.CHARACTER
-        return cls.OTHER
+        match stat.S_IFMT(mode):
+            case stat.S_IFDIR:
+                return cls.DIRECTORY
+            case stat.S_IFLNK:
+                return cls.SYMLINK
+            case stat.S_IFREG:
+                return cls.FILE
+            case stat.S_IFIFO:
+                return cls.PIPE
+            case stat.S_IFSOCK:
+                return cls.SOCKET
+            case stat.S_IFBLK:
+                return cls.BLOCK
+            case stat.S_IFCHR:
+                return cls.CHARACTER
+            case _:
+                return cls.OTHER
 
 
 class VolumeFile(FrozenModel):
