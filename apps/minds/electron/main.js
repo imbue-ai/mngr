@@ -1,4 +1,4 @@
-const { BaseWindow, BrowserWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app, session, screen, dialog, clipboard } = require('electron');
+const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app, session, screen, dialog, clipboard } = require('electron');
 const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
@@ -233,12 +233,19 @@ function updateBundleBounds(bundle) {
   if (!bundle || bundle.window.isDestroyed()) return;
   const { width, height } = bundle.window.getContentBounds();
 
-  if (bundle.isErrorState || bundle.isLoadingState) {
+  if (bundle.isErrorState || bundle.isLoadingState || bundle.isQuittingState) {
+    // The chrome view takes over the whole window; every other view collapses
+    // to zero so the takeover screen (shell.html) is the only thing visible.
+    // For loading/error the auxiliary views are already absent, so the loop is
+    // a no-op there; the quitting flip leaves them present-but-hidden, so this
+    // guarantees none of them peek out from behind the full-window chrome view.
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
       bundle.chromeView.setBounds({ x: 0, y: 0, width, height });
     }
-    if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-      bundle.contentView.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+    for (const view of [bundle.contentView, bundle.sidebarView, bundle.requestsPanelView, bundle.modalView]) {
+      if (view && !view.webContents.isDestroyed()) {
+        view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+      }
     }
     return;
   }
@@ -433,6 +440,7 @@ function createBundle() {
     preErrorUrl: null,
     isErrorState: false,
     isLoadingState: true,
+    isQuittingState: false,
     _maximizedByUs: false,
     _boundsBeforeMaximize: null,
   };
@@ -957,6 +965,68 @@ function reloadAllWindowsAfterRetry() {
   }
 }
 
+// -- Quitting takeover --
+//
+// Once a quit has committed (isShuttingDown is set) every open window flips to
+// a full-window "quitting" screen. It reuses shell.html -- the same animated
+// wordmark as the startup loading screen -- loaded with a `#quitting` hash so
+// the page reveals a status line. updateBundleBounds collapses every other view
+// so the chrome view alone fills the window, and stop/teardown progress is
+// pushed to it through the existing `status-update` IPC channel. Iterating an
+// empty `bundles` set makes this a natural no-op for a headless signal quit.
+
+function showQuittingInAllWindows() {
+  for (const bundle of bundles) {
+    if (bundle.window.isDestroyed()) continue;
+    bundle.isQuittingState = true;
+    // Hide the auxiliary views (without tearing them down or clearing their
+    // visible flags) so the full-window chrome view is the only thing on
+    // screen, and restoreFromQuittingInAllWindows can bring back exactly what
+    // was open if the user backs out of the quit.
+    for (const view of [bundle.sidebarView, bundle.requestsPanelView, bundle.modalView]) {
+      if (view && !view.webContents.isDestroyed()) view.setVisible(false);
+    }
+    if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+      bundle.chromeView.webContents.loadFile(path.join(__dirname, 'shell.html'), { hash: 'quitting' });
+    }
+    updateBundleBounds(bundle);
+  }
+}
+
+// Broadcast a status line to every window currently showing the quitting page.
+function updateQuittingStatus(message) {
+  for (const bundle of bundles) {
+    if (bundle.window.isDestroyed() || !bundle.isQuittingState) continue;
+    if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+      bundle.chromeView.webContents.send('status-update', message);
+    }
+  }
+}
+
+// Reverse showQuittingInAllWindows. Used when the user backs out of an already
+// committed quit via the "could not be stopped" dialog's "Cancel quit": every
+// window returns to its normal layout with whatever views were open before the
+// flip (their pages were only hidden, never torn down).
+function restoreFromQuittingInAllWindows() {
+  for (const bundle of bundles) {
+    if (bundle.window.isDestroyed()) continue;
+    bundle.isQuittingState = false;
+    if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed() && backendBaseUrl) {
+      bundle.chromeView.webContents.loadURL(backendBaseUrl + '/_chrome');
+    }
+    if (bundle.sidebarView && bundle.sidebarVisible && !bundle.sidebarView.webContents.isDestroyed()) {
+      bundle.sidebarView.setVisible(true);
+    }
+    if (bundle.requestsPanelView && bundle.requestsPanelVisible && !bundle.requestsPanelView.webContents.isDestroyed()) {
+      bundle.requestsPanelView.setVisible(true);
+    }
+    if (bundle.modalView && bundle.modalVisible && !bundle.modalView.webContents.isDestroyed()) {
+      bundle.modalView.setVisible(true);
+    }
+    updateBundleBounds(bundle);
+  }
+}
+
 function readLastLogLines(lineCount) {
   try {
     const logPath = path.join(paths.getLogDir(), 'minds.log');
@@ -1454,49 +1524,15 @@ function postStopStateContainer() {
   });
 }
 
-// A small frameless "Stopping minds…" window shown while the host stops drain.
-// Native message boxes can't show progress, so this is a tiny static window.
-let stoppingProgressWindow = null;
-function showStoppingProgress(count) {
-  closeStoppingProgress();
-  const label = count === 1 ? 'Stopping 1 mind…' : `Stopping ${count} minds…`;
-  const docHtml = `<!doctype html><html><head><meta charset="utf-8"><style>
-    html,body{margin:0;height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#fff;color:#27272a}
-    .wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:14px}
-    .spinner{width:26px;height:26px;border:3px solid #e4e4e7;border-top-color:#52525b;border-radius:50%;animation:spin .8s linear infinite}
-    @keyframes spin{to{transform:rotate(360deg)}}
-    .label{font-size:14px}</style></head>
-    <body><div class="wrap"><div class="spinner"></div><div class="label">${label}</div></div></body></html>`;
-  stoppingProgressWindow = new BrowserWindow({
-    width: 320,
-    height: 150,
-    resizable: false,
-    minimizable: false,
-    maximizable: false,
-    fullscreenable: false,
-    frame: false,
-    alwaysOnTop: true,
-    show: true,
-    title: 'Stopping minds',
-  });
-  stoppingProgressWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(docHtml));
-}
-
-function closeStoppingProgress() {
-  if (stoppingProgressWindow && !stoppingProgressWindow.isDestroyed()) {
-    stoppingProgressWindow.destroy();
-  }
-  stoppingProgressWindow = null;
-}
-
 // Dispatch a stop for every running local mind, then poll until they are all
-// down (or the deadline passes). Returns true to proceed with the quit, false
-// to cancel it. On a failure to stop everything, offers Retry / Quit anyway /
-// Cancel.
+// down (or the deadline passes). Progress is shown in-page on the quitting
+// takeover screen (which the quit sequence has already flipped to) via
+// `status-update`. Returns true to proceed with the quit, false to cancel it.
+// On a failure to stop everything, offers Retry / Quit anyway / Cancel.
 async function stopAllLocalMindsThenDecide(running) {
   let remaining = running;
   while (true) {
-    showStoppingProgress(remaining.length);
+    updateQuittingStatus(remaining.length === 1 ? 'Stopping 1 mind…' : `Stopping ${remaining.length} minds…`);
     await Promise.all(remaining.map((mind) => postLocalMindStop(mind.id)));
     const deadline = Date.now() + LOCAL_MIND_STOP_DEADLINE_MS;
     let stillRunning = await getRunningLocalMinds();
@@ -1509,10 +1545,8 @@ async function stopAllLocalMindsThenDecide(running) {
       // minds-related container is left running. Best-effort -- it preserves its
       // volume and restarts on next use.
       await postStopStateContainer();
-      closeStoppingProgress();
       return true;
     }
-    closeStoppingProgress();
     const names = stillRunning.map((mind) => mind.name).join(', ');
     const { response } = await dialog.showMessageBox({
       type: 'warning',
@@ -1528,12 +1562,17 @@ async function stopAllLocalMindsThenDecide(running) {
   }
 }
 
-// On quit, offer to shut down any still-running local minds. Returns true to
-// proceed with the quit, false to cancel it (stay open).
-async function promptLocalMindShutdownAndMaybeStop() {
-  if (!getBackendProcess() || !backendBaseUrl) return true;
+// On quit, ask whether to shut down any still-running local minds. This is the
+// FIRST native prompt and runs BEFORE any window is flipped to the quitting
+// page, so cancelling here leaves the app fully intact with no visual change.
+// Returns a plan: `{ proceed, stop, running }`.
+//   proceed=false           -> user cancelled; stay open.
+//   proceed=true, stop=false -> quit now (no local minds, or "Leave running").
+//   proceed=true, stop=true  -> quit and stop `running` after the flip.
+async function promptLocalMindShutdown() {
+  if (!getBackendProcess() || !backendBaseUrl) return { proceed: true, stop: false, running: [] };
   const running = await getRunningLocalMinds();
-  if (running.length === 0) return true;
+  if (running.length === 0) return { proceed: true, stop: false, running: [] };
   const names = running.map((mind) => mind.name).join(', ');
   const { response } = await dialog.showMessageBox({
     type: 'question',
@@ -1547,9 +1586,9 @@ async function promptLocalMindShutdownAndMaybeStop() {
       + 'Shutting them down stops their agents and makes their services inaccessible '
       + '(your data is preserved and you can start them again).',
   });
-  if (response === 0) return false;
-  if (response === 1) return true;
-  return stopAllLocalMindsThenDecide(running);
+  if (response === 0) return { proceed: false, stop: false, running: [] };
+  if (response === 1) return { proceed: true, stop: false, running: [] };
+  return { proceed: true, stop: true, running };
 }
 
 function fetchInitialChromeState(timeoutMs = 4000) {
@@ -2387,16 +2426,25 @@ function initiateFullQuit() {
 let isQuitSequenceRunning = false;
 let isHeadlessQuit = false;
 
-// Single async chokepoint for quitting: optionally prompt to shut down running
-// local minds, then tear the backend down and quit. Cancelling the prompt
-// leaves the app running.
+// Single async chokepoint for quitting. The order is deliberate:
+//   1. Ask (first native prompt) whether to shut down running local minds.
+//      Cancelling here leaves the app fully intact -- no window has changed yet.
+//   2. Once the user has committed, flip every window to the quitting page so
+//      the teardown delay shows a clear "quitting" state instead of frozen UI.
+//   3. If they chose "Shut down", stop the local minds with progress rendered
+//      on that page. Backing out there (its native "Cancel quit") restores the
+//      windows and leaves the app running.
+//   4. Tear the backend down and quit.
 async function runQuitSequence() {
   if (isShuttingDown || isQuitSequenceRunning) return;
   isQuitSequenceRunning = true;
+
+  let plan = { proceed: true, stop: false, running: [] };
   try {
     if (!isHeadlessQuit) {
-      const shouldProceed = await promptLocalMindShutdownAndMaybeStop();
-      if (!shouldProceed) {
+      plan = await promptLocalMindShutdown();
+      if (!plan.proceed) {
+        // User cancelled before committing -- stay open, no visual change.
         isQuitSequenceRunning = false;
         return;
       }
@@ -2405,11 +2453,36 @@ async function runQuitSequence() {
     // A failure deciding the prompt must not strand the user unable to quit;
     // fall through to a normal shutdown.
     console.warn('[lifecycle] local-mind shutdown prompt failed, quitting anyway:', err);
+    plan = { proceed: true, stop: false, running: [] };
   }
+
+  // The quit is now committed. Flip every open window to the quitting page
+  // (a no-op for a headless quit, which has no interactive UI to update), then
+  // snapshot session state before teardown (the per-window `close` handler
+  // skips saving once isShuttingDown is set).
   isShuttingDown = true;
-  // Capture session state for every open window before teardown (the per-window
-  // `close` handler skips saving once isShuttingDown is set).
+  if (!isHeadlessQuit) showQuittingInAllWindows();
   if (bundles.size > 0) saveSessionState();
+
+  if (plan.stop && plan.running.length > 0) {
+    let shouldProceed = true;
+    try {
+      shouldProceed = await stopAllLocalMindsThenDecide(plan.running);
+    } catch (err) {
+      // A failure in the stop loop must not strand the user; quit anyway.
+      console.warn('[lifecycle] stopping local minds failed, quitting anyway:', err);
+    }
+    if (!shouldProceed) {
+      // User backed out via "Cancel quit" after committing -- undo the flip and
+      // return the app to its normal, running state.
+      restoreFromQuittingInAllWindows();
+      isShuttingDown = false;
+      isQuitSequenceRunning = false;
+      return;
+    }
+  }
+
+  updateQuittingStatus('Closing…');
   await shutdown();
   app.quit();
 }
