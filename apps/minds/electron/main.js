@@ -1408,6 +1408,35 @@ function postLocalMindStop(agentId) {
   });
 }
 
+// POST /api/local-minds/stop-state-container -- stops this env's mngr docker
+// "state container" (provider bookkeeping) so nothing minds-related is left
+// running after a full shutdown. Best-effort: resolves regardless of outcome.
+function postStopStateContainer() {
+  return new Promise((resolve) => {
+    if (!backendBaseUrl) {
+      resolve();
+      return;
+    }
+    let req;
+    try {
+      req = net.request({ url: backendBaseUrl + '/api/local-minds/stop-state-container', method: 'POST', useSessionCookies: true });
+    } catch {
+      resolve();
+      return;
+    }
+    let settled = false;
+    const settle = () => { if (!settled) { settled = true; resolve(); } };
+    const timer = setTimeout(() => { try { req.abort(); } catch { /* noop */ } settle(); }, LOCAL_MINDS_HTTP_TIMEOUT_MS);
+    req.on('response', (response) => {
+      response.on('data', () => {});
+      response.on('end', () => { clearTimeout(timer); settle(); });
+      response.on('error', () => { clearTimeout(timer); settle(); });
+    });
+    req.on('error', () => { clearTimeout(timer); settle(); });
+    req.end();
+  });
+}
+
 // A small frameless "Stopping minds…" window shown while the host stops drain.
 // Native message boxes can't show progress, so this is a tiny static window.
 let stoppingProgressWindow = null;
@@ -1458,8 +1487,15 @@ async function stopAllLocalMindsThenDecide(running) {
       await delayMs(LOCAL_MIND_STOP_POLL_INTERVAL_MS);
       stillRunning = await getRunningLocalMinds();
     }
+    if (stillRunning.length === 0) {
+      // Every workspace is down; also stop the mngr docker state container so no
+      // minds-related container is left running. Best-effort -- it preserves its
+      // volume and restarts on next use.
+      await postStopStateContainer();
+      closeStoppingProgress();
+      return true;
+    }
     closeStoppingProgress();
-    if (stillRunning.length === 0) return true;
     const names = stillRunning.map((mind) => mind.name).join(', ');
     const { response } = await dialog.showMessageBox({
       type: 'warning',

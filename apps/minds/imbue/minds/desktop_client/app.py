@@ -128,6 +128,8 @@ from imbue.minds.desktop_client.templates import workspace_accent
 from imbue.minds.desktop_client.tunnel_token_injection import clear_tunnel_token_from_agent
 from imbue.minds.desktop_client.tunnel_token_injection import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.webdav import create_webdav_app
+from imbue.minds.envs.docker_cleanup import DockerCleanupError
+from imbue.minds.envs.docker_cleanup import stop_active_env_state_container
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.primitives import AIProvider
@@ -2625,6 +2627,34 @@ def _handle_running_local_minds_api(
     return Response(content=json.dumps({"running": running}), media_type="application/json")
 
 
+def _handle_stop_local_state_container_api(
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Stop this env's mngr Docker state container, to fully free local resources at quit.
+
+    The docker provider keeps a singleton state container (``<MNGR_PREFIX>docker-
+    state-<user_id>``) holding host records; ``mngr stop --stop-host`` leaves it
+    running. The Electron quit flow calls this after all local minds are stopped
+    so nothing minds-related is left running. It stops (not removes) the
+    container -- the volume / records persist and it restarts on next use.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return _json_error("Not authenticated", status_code=403)
+    concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
+    if concurrency_group is None:
+        return Response(content=json.dumps({"stopped": False}), media_type="application/json")
+    try:
+        was_attempted = stop_active_env_state_container(
+            mngr_host_dir=request.app.state.mngr_host_dir,
+            parent_concurrency_group=concurrency_group,
+        )
+    except DockerCleanupError as exc:
+        logger.warning("Failed to stop the Docker state container at shutdown: {}", exc)
+        return _json_error(f"Could not stop the Docker state container: {exc}", status_code=500)
+    return Response(content=json.dumps({"stopped": was_attempted}), media_type="application/json")
+
+
 def _handle_host_health_probe_api(
     agent_id: str,
     request: Request,
@@ -3668,6 +3698,7 @@ def create_desktop_client(
     app.post("/api/agents/{agent_id}/stop-host")(_handle_stop_host_api)
     app.post("/api/agents/{agent_id}/start-host")(_handle_start_host_api)
     app.get("/api/local-minds/running")(_handle_running_local_minds_api)
+    app.post("/api/local-minds/stop-state-container")(_handle_stop_local_state_container_api)
 
     return app
 

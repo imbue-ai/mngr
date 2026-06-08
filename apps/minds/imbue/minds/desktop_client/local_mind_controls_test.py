@@ -126,6 +126,21 @@ def test_running_local_minds_empty_when_tracker_empty(tmp_path: Path) -> None:
     assert response.json() == {"running": []}
 
 
+def test_stop_state_container_requires_authentication(tmp_path: Path) -> None:
+    client, _ = _make_client(tmp_path, MngrCliBackendResolver(), LocalMindLivenessTracker())
+    response = client.post("/api/local-minds/stop-state-container")
+    assert response.status_code == 403
+
+
+def test_stop_state_container_noop_without_concurrency_group(tmp_path: Path) -> None:
+    """Without a concurrency group (test factory) the state-container stop is a no-op."""
+    client, auth_store = _make_client(tmp_path, MngrCliBackendResolver(), LocalMindLivenessTracker())
+    _authenticate(client, auth_store)
+    response = client.post("/api/local-minds/stop-state-container")
+    assert response.status_code == 200
+    assert response.json() == {"stopped": False}
+
+
 def test_running_local_minds_reads_tracker_without_subprocess(tmp_path: Path) -> None:
     """The quit-prompt lookup returns running minds straight from the tracker.
 
