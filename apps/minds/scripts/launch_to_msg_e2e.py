@@ -17,6 +17,9 @@ Flow:
   2. Workspace 1 (W1): click Create, fill form with HOST_NAME, wait for
      agent DONE, send first message ("pong"), wait for reply (screenshots
      03-06)
+  2b. Reload W1 chat (Cmd-R surrogate via win.reload), assert "pong"
+     history still rendered -- catches session/event-stream re-attach
+     regressions (screenshot 06b)
   3. Slack flow on W1 (if enabled): stand up local slack mock HTTPS
      server on :443 via sudo socat TLS-terminator, patch /etc/hosts,
      pre-seed latchkey slack credential, send slack prompt; click
@@ -30,10 +33,20 @@ Flow:
      (bong) (screenshots 13-16)
   6. Home-page tiles check: navigate to /, assert BOTH tiles render
      (screenshot 17)
+  6b. Click W1's tile, assert URL carries W1's specific agent-<hex>.localhost
+     -- exercises the tile.onclick + /goto/ route, not URL navigation
+     (screenshot 17b)
+  6c. /accounts page smoke: navigate to /accounts, assert renders
+     (screenshot 17c)
+  6d. W1 settings page renders: visit /workspace/<w1>/settings, assert
+     destroy button + HOST_NAME present in body (screenshot 17d)
   7. Destroy W2 via the UI (gear icon -> WorkspaceSettings page ->
-     Destroy button -> confirmation modal), poll until done, assert
-     home drops W2 tile; send a unique-token follow-up to W1 (bink),
-     verify reply (screenshots 18, 18b, 18c, 19-22)
+     "Back to projects" link round-trip [iter 14, screenshot 18a] ->
+     Destroy button -> modal Cancel-and-reopen round-trip [iter 12,
+     screenshots 18b/18b2/18b3] -> Destroy Confirm), poll until done,
+     assert home drops W2 tile; send a unique-token follow-up to W1
+     (bink), verify reply (screenshots 18, 18a, 18b, 18b2, 18b3, 18c,
+     19-22)
   8. mngr CLI from host: run `mngr list --format json` against the
      bundled host_dir, assert W1's host is listed AND W2's is gone
      -- cross-checks the destroy lifecycle from a different angle
