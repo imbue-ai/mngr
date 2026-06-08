@@ -27,3 +27,8 @@ Highlights:
   `RsyncResult`, `ListResult`, `AgentMatch`) that only re-tested the model layer.
 - Hardened the SIGWINCH delivery flaky test's catcher to re-arm in a loop (markers
   kept on the genuinely flaky tests per convention).
+- Consolidated per-file test doubles into shared infrastructure: a single
+  configurable online-host fake plus recording/offline/stop-failing provider doubles
+  in `mock_provider_test.py`, and `make_test_agent_observer`, `make_fixed_process_name_agent`,
+  `inject_provider_instance`, and `register_test_backend` helpers in `testing.py`,
+  replacing hand-rolled inline copies across the api test suite.
