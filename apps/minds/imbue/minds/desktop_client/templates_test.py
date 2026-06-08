@@ -14,7 +14,9 @@ from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_recovery_page
+from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
+from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
@@ -33,6 +35,42 @@ def test_render_landing_page_with_agents_lists_them_as_links() -> None:
     assert f"/goto/{_AGENT_B}/" in html
     assert str(_AGENT_A) in html
     assert str(_AGENT_B) in html
+
+
+def test_render_landing_page_settings_link_interpolates_agent_id() -> None:
+    # Regression: the settings gear is a <Button> (JinjaX component), so its
+    # onclick must use the `attr={{ expr }}` form -- a quoted `onclick="...{{ }}..."`
+    # is forwarded literally, which sent `/workspace/{{ agent_id }}/settings` to the
+    # server and 500'd the AgentId parse on destroy.
+    html = render_landing_page(accessible_agent_ids=(_AGENT_A,))
+    assert f"/workspace/{_AGENT_A}/settings" in html
+    assert "{{" not in html
+
+
+def test_render_workspace_settings_data_agent_id_interpolates() -> None:
+    html = render_workspace_settings(
+        agent_id=str(_AGENT_A),
+        ws_name="ws",
+        current_account=None,
+        accounts=(),
+        servers=(),
+    )
+    assert f'data-agent-id="{_AGENT_A}"' in html
+    assert "{{" not in html
+
+
+def test_render_sharing_editor_workspace_link_interpolates_agent_id() -> None:
+    # Regression: the workspace <Link href="...{{ }}..."> must interpolate
+    # (component quoted-attribute interpolation does not happen in JinjaX).
+    html = render_sharing_editor(
+        agent_id=str(_AGENT_A),
+        service_name="svc",
+        title="Share",
+        mngr_forward_origin="http://localhost:8421",
+        ws_name="ws",
+    )
+    assert f"/goto/{_AGENT_A}/" in html
+    assert "{{" not in html
 
 
 def test_render_landing_page_with_no_agents_shows_empty_state() -> None:
