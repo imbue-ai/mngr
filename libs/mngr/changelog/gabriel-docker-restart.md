@@ -19,7 +19,7 @@ Multi-provider discovery (`discover_hosts_and_agents`, used by `mngr rsync`,
 continues with the ones that are available, per the documented
 `ProviderUnavailableError` contract. Previously a single offline backend would
 abort the whole command; now, for example, `mngr rsync <local-agent>` still works
-when an unrelated Docker daemon is down. Genuine (non-availability) discovery
-errors still surface as before. As a result, `mngr` commands that scan all providers now surface a clear
-"provider unavailable" error when Docker is off, rather than silently omitting
-Docker agents.
+when an unrelated Docker daemon is down (the unavailable provider is skipped with
+a logged warning, contributing no hosts). Genuine (non-availability) discovery
+errors still surface as before. (`mngr list`, which has its own per-provider
+handling, reports the provider as unavailable rather than skipping silently.)
