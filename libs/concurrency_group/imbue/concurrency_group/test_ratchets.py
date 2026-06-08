@@ -49,11 +49,14 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    rc.check_broad_exception_catch(_DIR, snapshot(6))
+    rc.check_broad_exception_catch(_DIR, snapshot(5))
 
 
 def test_prevent_base_exception_catch() -> None:
-    rc.check_base_exception_catch(_DIR, snapshot(3))
+    # executor.py's submit._run intentionally catches BaseException to ensure the future always
+    # completes (mirrors the stdlib ThreadPoolExecutor); otherwise a BaseException from the task
+    # leaves result() hanging forever. This is a necessary, justified catch.
+    rc.check_base_exception_catch(_DIR, snapshot(4))
 
 
 def test_prevent_builtin_exception_raises() -> None:
