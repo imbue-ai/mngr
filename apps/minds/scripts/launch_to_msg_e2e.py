@@ -1058,7 +1058,10 @@ async def amain() -> int:
                         logger.info("[deny-phase] PASS: Deny click landed")
                         break
                     await _advance_approval(
-                        ctx, win, deny_stage, deny_clicked,
+                        ctx,
+                        win,
+                        deny_stage,
+                        deny_clicked,
                         decision="deny",
                         snap_prefix_pair=(
                             "07a-deny-stage0",
@@ -1100,9 +1103,7 @@ async def amain() -> int:
                     "Slack permission request via the latchkey skill (POST to "
                     "/permission-requests). Then wait for me to approve it."
                 )
-                retry_inp = await target.wait_for_selector(
-                    'textarea, [contenteditable="true"]', timeout=10_000
-                )
+                retry_inp = await target.wait_for_selector('textarea, [contenteditable="true"]', timeout=10_000)
                 await retry_inp.fill(retry_msg)
                 await retry_inp.press("Enter")
                 await snap_page(target, "07e-retry-after-deny-sent")
@@ -1164,7 +1165,10 @@ async def amain() -> int:
 
                     if approval_stage < 3:
                         await _advance_approval(
-                            ctx, win, approval_stage, clicked_at,
+                            ctx,
+                            win,
+                            approval_stage,
+                            clicked_at,
                             decision="approve",
                             snap_prefix_pair=approve_snaps,
                         )
