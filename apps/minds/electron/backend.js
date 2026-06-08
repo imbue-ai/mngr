@@ -314,11 +314,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         const text = data.toString();
         logStream.write(text);
         if (!isResolved) {
-          // Surface the freshest uv / minds stderr line on the splash so
-          // a cold first launch (uv downloading Python + installing the
-          // venv) doesn't look frozen on "Starting Minds...". Once the
-          // backend is up (isResolved) we stop overwriting the splash so
-          // any post-startup error context stays visible.
+          // Surface uv's freshest progress line on the splash so cold launch doesn't look frozen.
           const latest = text.split('\n').map(l => l.trim()).filter(Boolean).pop();
           if (latest) onProgress(latest);
         }

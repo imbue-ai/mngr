@@ -195,12 +195,8 @@
 
     if (window.minds) {
       var loadingStatus = document.getElementById('loading-status');
-      // Suppress the progress line for the first 20s: any normal warm
-      // launch finishes well within that window, and flashing a uv-stderr
-      // line for 200ms on the way to the home page is more confusing
-      // than helpful. Past 20s we're in the cold-install territory where
-      // a frozen-looking wordmark genuinely looks broken to the user
-      // (per Josh's PR comment), so reveal the freshest status then.
+      // Warm launches finish well under 20s; only reveal the status line
+      // when the wordmark genuinely looks frozen.
       var latestStatus = '';
       var revealed = false;
       window.minds.onStatusUpdate(function(message) {
