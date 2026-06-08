@@ -115,8 +115,7 @@ def test_create_in_place(e2e: E2eSession) -> None:
     # first line of stdout.
     exec_pwd = exec_result.stdout.splitlines()[0].strip()
     assert os.path.realpath(exec_pwd) == os.path.realpath(session_cwd), (
-        f"Expected the in-place agent to run in the session cwd.\n"
-        f"  exec pwd: {exec_pwd}\n  session cwd: {session_cwd}"
+        f"Expected the in-place agent to run in the session cwd.\n  exec pwd: {exec_pwd}\n  session cwd: {session_cwd}"
     )
 
 

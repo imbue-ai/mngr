@@ -3,7 +3,10 @@
 Each test corresponds 1:1 to a tutorial script block.
 """
 
+import json
+import re
 import shlex
+from pathlib import Path
 
 import pytest
 
@@ -241,7 +244,7 @@ def test_config_unset_missing_key(e2e: E2eSession, project_config_dir: Path) -> 
 
 
 @pytest.mark.release
-def test_config_edit(e2e: E2eSession) -> None:
+def test_config_edit(e2e: E2eSession, temp_git_repo: Path) -> None:
     e2e.write_tutorial_block("""
         # open the config file in your editor
         mngr config edit
