@@ -1,9 +1,0 @@
-{
-  "name": "imbue-mngr-skills",
-  "description": "Skills that teach Claude how to use mngr, e.g. to coordinate with other agents.",
-  "author": {
-    "name": "Imbue"
-  },
-  "repository": "https://github.com/imbue-ai/mngr",
-  "keywords": ["mngr"]
-}

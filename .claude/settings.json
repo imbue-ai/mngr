@@ -48,7 +48,7 @@
     "imbue-mngr": {
       "source": {
         "source": "github",
-        "repo": "imbue-ai/mngr"
+        "repo": "imbue-ai/mngr-claude-skills"
       }
     }
   },

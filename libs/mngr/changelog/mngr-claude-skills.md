@@ -1,13 +1,13 @@
-# Publish the agent-coordination Claude Code skills
+# Install the agent-coordination Claude Code skills
 
 `mngr extras claude-plugin` now installs more than just the code review
 plugin. It offers two Claude Code plugins and lets you install either or
 both:
 
 - `imbue-code-guardian` -- automated code review enforcement (unchanged).
-- `imbue-mngr-skills` -- the `message-agent`, `wait-for-agent`, and
-  `find-agent` skills for coordinating mngr agents, now published from a
-  marketplace hosted in the mngr repo itself.
+- `imbue-mngr-skills` -- the `message-agent`, `wait-for-agent`, `find-agent`,
+  and `mngr-help` skills for working with mngr, published from the dedicated
+  `imbue-ai/mngr-claude-skills` repo.
 
 With an interactive terminal the step shows a checkbox picker of the
 not-yet-installed plugins (all preselected; Space toggles, Enter confirms),

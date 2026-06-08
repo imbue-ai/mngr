@@ -167,9 +167,8 @@ class ClaudeCodePlugin(FrozenModel):
 _SUBPROCESS_ERRORS: Final[tuple[type[Exception], ...]] = (OSError, ProcessError, ConcurrencyExceptionGroup)
 
 
-# The Claude Code plugins mngr knows how to install. code-guardian lives in its
-# own repo because it is useful for any project; the agent-coordination skills
-# live in the mngr repo because they only make sense alongside mngr.
+# The Claude Code plugins mngr knows how to install. Each lives in its own
+# GitHub repo, published as a Claude Code plugin marketplace.
 _CLAUDE_CODE_PLUGINS: Final[tuple[ClaudeCodePlugin, ...]] = (
     ClaudeCodePlugin(
         name="imbue-code-guardian",
@@ -180,7 +179,7 @@ _CLAUDE_CODE_PLUGINS: Final[tuple[ClaudeCodePlugin, ...]] = (
     ClaudeCodePlugin(
         name="imbue-mngr-skills",
         description="Skills that teach Claude how to use mngr, e.g. to coordinate with other agents",
-        marketplace_repo="imbue-ai/mngr",
+        marketplace_repo="imbue-ai/mngr-claude-skills",
         install_ref="imbue-mngr-skills@imbue-mngr",
     ),
 )

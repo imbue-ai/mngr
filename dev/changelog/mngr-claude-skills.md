@@ -1,30 +1,18 @@
-# Add the imbue-mngr-skills Claude Code plugin
+# Point mngr at the imbue-mngr-skills Claude Code plugin
 
-The repo now hosts a Claude Code plugin marketplace at its root
-(`.claude-plugin/marketplace.json`), publishing the `imbue-mngr-skills`
-plugin under `plugins/imbue-mngr-skills/`. The plugin bundles skills that
-teach Claude how to use mngr: `message-agent`, `wait-for-agent`, and
-`find-agent` (coordinating with other agents), plus `mngr-help`, which has
-the agent run `mngr help` for context whenever mngr comes up (and points at
-`mngr ask`).
+The `imbue-mngr-skills` Claude Code plugin (the `message-agent`,
+`wait-for-agent`, `find-agent`, and `mngr-help` skills) is published from its
+own GitHub repo, `imbue-ai/mngr-claude-skills`, as a Claude Code plugin
+marketplace -- mirroring how `imbue-code-guardian` is distributed from its own
+repo.
 
-The skills prefer the installed `mngr` tool so they work in any project (not
-just the mngr monorepo), while also allowing `uv run mngr` for use inside the
-monorepo.
+This repo dogfoods the published plugin: `.claude/settings.json` registers the
+`imbue-mngr` marketplace from `imbue-ai/mngr-claude-skills` and enables
+`imbue-mngr-skills@imbue-mngr`, and `scripts/claude_update_plugin.sh` refreshes
+it on SessionStart alongside `imbue-code-guardian`.
 
-These skills previously lived only in this repo's project-level
-`.claude/skills/` directory; they have been moved into the plugin so any
-mngr user can install them for any project (via
-`claude plugin marketplace add imbue-ai/mngr` +
-`claude plugin install imbue-mngr-skills@imbue-mngr`, or `mngr extras
-claude-plugin`). The repo dogfoods the published plugin by enabling it in
-`.claude/settings.json`, mirroring how `imbue-code-guardian` is consumed.
-
-`message-agent` and `wait-for-agent` use the name you give them when it already
-looks like an agent name, and fall back to `find-agent` resolution only when it
-doesn't -- for example when you paste a `mngr/<branch>` name or describe the
-agent instead of naming it.
-
-`scripts/claude_update_plugin.sh` now refreshes `imbue-mngr-skills@imbue-mngr`
-on SessionStart alongside `imbue-code-guardian`, so the dogfooded skills stay
-current with the marketplace.
+These skills previously lived in this repo's project-level `.claude/skills/`
+directory; they have moved out to the dedicated repo so any mngr user can
+install them for any project (via `mngr extras claude-plugin`, or
+`claude plugin marketplace add imbue-ai/mngr-claude-skills` +
+`claude plugin install imbue-mngr-skills@imbue-mngr`).
