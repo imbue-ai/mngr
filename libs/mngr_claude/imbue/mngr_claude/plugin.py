@@ -54,8 +54,8 @@ from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.data_types import FileTransferSpec
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import RelativePath
-from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostFileReadInterface
 from imbue.mngr.interfaces.host import HostInterface
@@ -2413,10 +2413,10 @@ def _claude_preserved_items(is_shared_config: bool) -> list[PreservedItem]:
     """
     items: list[PreservedItem] = []
     if not is_shared_config:
-        items.append(PreservedItem(rel_path="plugin/claude/anthropic/projects", kind=VolumeFileType.DIRECTORY))
-    items.append(PreservedItem(rel_path="logs/claude_transcript", kind=VolumeFileType.DIRECTORY))
-    items.append(PreservedItem(rel_path="events/claude/common_transcript", kind=VolumeFileType.DIRECTORY))
-    items.append(PreservedItem(rel_path="claude_session_id_history", kind=VolumeFileType.FILE))
+        items.append(PreservedItem(rel_path="plugin/claude/anthropic/projects", kind=FileType.DIRECTORY))
+    items.append(PreservedItem(rel_path="logs/claude_transcript", kind=FileType.DIRECTORY))
+    items.append(PreservedItem(rel_path="events/claude/common_transcript", kind=FileType.DIRECTORY))
+    items.append(PreservedItem(rel_path="claude_session_id_history", kind=FileType.FILE))
     return items
 
 

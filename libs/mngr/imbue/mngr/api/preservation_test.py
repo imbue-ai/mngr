@@ -13,7 +13,8 @@ from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
 from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.interfaces.data_types import CertifiedHostData
-from imbue.mngr.interfaces.data_types import VolumeFileType
+from imbue.mngr.interfaces.data_types import FileType
+from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.interfaces.host import HostFileReadInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -22,11 +23,11 @@ from imbue.mngr.providers.local.instance import LocalProviderInstance
 
 def _claude_like_items() -> list[PreservedItem]:
     return [
-        PreservedItem(rel_path="plugin/claude/anthropic/projects", kind=VolumeFileType.DIRECTORY),
-        PreservedItem(rel_path="logs/claude_transcript", kind=VolumeFileType.DIRECTORY),
-        PreservedItem(rel_path="claude_session_id_history", kind=VolumeFileType.FILE),
+        PreservedItem(rel_path="plugin/claude/anthropic/projects", kind=FileType.DIRECTORY),
+        PreservedItem(rel_path="logs/claude_transcript", kind=FileType.DIRECTORY),
+        PreservedItem(rel_path="claude_session_id_history", kind=FileType.FILE),
         # An item that does not exist on the source -- must be skipped silently.
-        PreservedItem(rel_path="does/not/exist", kind=VolumeFileType.DIRECTORY),
+        PreservedItem(rel_path="does/not/exist", kind=FileType.DIRECTORY),
     ]
 
 
@@ -113,8 +114,77 @@ def test_offline_host_with_volume_reads_via_host_dir_paths(
     assert str(state_dir / "logs" / "claude_transcript" / "events.jsonl") in listed_paths
     assert all(Path(entry.path).is_absolute() for entry in listed)
 
-    mtime = host.get_file_mtime(state_dir / "claude_session_id_history")
+    history_path = state_dir / "claude_session_id_history"
+    mtime = host.get_file_mtime(history_path)
     assert isinstance(mtime, datetime)
+    # The reported mtime must match the file's real on-disk mtime (within the
+    # one-second resolution of the volume listing's integer timestamp), not just
+    # be some datetime.
+    real_mtime = datetime.fromtimestamp(history_path.stat().st_mtime, tz=timezone.utc)
+    assert abs((mtime - real_mtime).total_seconds()) <= 1.0
+    # A non-existent file yields None (the parent-listing scan falls through).
+    assert host.get_file_mtime(state_dir / "no_such_file") is None
+
+
+class _OneFileFailingReader(HostFileReadInterface):
+    """A reader where every declared file "exists" but reading one path raises.
+
+    Exercises ``preserve_agent_data``'s per-item failure isolation: one item's
+    read failure must be swallowed (logged) without aborting the remaining items
+    or the destruction that triggered preservation.
+    """
+
+    contents_by_path: dict[str, bytes]
+    failing_path: str
+
+    def read_file(self, path: Path) -> bytes:
+        key = str(path)
+        if key == self.failing_path:
+            raise OSError("simulated read failure")
+        return self.contents_by_path[key]
+
+    def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
+        return self.read_file(path).decode(encoding)
+
+    def path_exists(self, path: Path) -> bool:
+        return str(path) == self.failing_path or str(path) in self.contents_by_path
+
+    def get_file_mtime(self, path: Path) -> datetime | None:
+        return None
+
+    def list_directory(self, path: Path, *, recursive: bool = False) -> list[VolumeFile]:
+        return []
+
+
+@pytest.mark.allow_warnings
+def test_preserve_agent_data_isolates_per_item_read_failures(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """A single item that fails to read is skipped (warned), not fatal to the rest."""
+    state_dir = Path("/state")
+    items = [
+        PreservedItem(rel_path="good_before", kind=FileType.FILE),
+        PreservedItem(rel_path="bad", kind=FileType.FILE),
+        PreservedItem(rel_path="good_after", kind=FileType.FILE),
+    ]
+    reader = _OneFileFailingReader(
+        contents_by_path={
+            str(state_dir / "good_before"): b"before\n",
+            str(state_dir / "good_after"): b"after\n",
+        },
+        failing_path=str(state_dir / "bad"),
+    )
+    dest_root = tmp_path / "dest"
+
+    # Must not raise even though the middle item's read fails.
+    preserve_agent_data(items, reader, state_dir, dest_root, temp_mngr_ctx)
+
+    # The items on either side of the failure are still preserved.
+    assert (dest_root / "good_before").read_text() == "before\n"
+    assert (dest_root / "good_after").read_text() == "after\n"
+    # The failing item produced nothing.
+    assert not (dest_root / "bad").exists()
 
 
 def test_preserve_agent_data_offline_mirrors_layout(

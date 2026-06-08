@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
@@ -19,9 +20,9 @@ from imbue.mngr.errors import DuplicateAgentNameError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import ActivityConfig
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeFile
-from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.host import HostFileReadInterface
 from imbue.mngr.interfaces.host import HostFileWriteInterface
 from imbue.mngr.interfaces.host import HostInterface
@@ -414,8 +415,17 @@ class OfflineHostWithVolume(OfflineHost, HostFileReadInterface, HostFileWriteInt
         )
 
     def _to_volume_path(self, path: Path) -> str:
-        """Translate an absolute path under host_dir to a volume-relative path."""
-        candidate = Path(path)
+        """Translate an absolute path under host_dir to a volume-relative path.
+
+        The path is normalized lexically first (``os.path.normpath`` collapses
+        ``.``/``..`` without touching the filesystem), so a caller may address a
+        file with relative components -- e.g. ``<events>/../logs/...`` as
+        ``mngr_robinhood`` does for the raw transcript -- and we resolve it the
+        same way on every volume backend instead of relying on the backend to
+        interpret ``..``. A normalized path that still escapes ``host_dir`` then
+        surfaces as a clear error here rather than as a backend-specific failure.
+        """
+        candidate = Path(os.path.normpath(path))
         try:
             relative = candidate.relative_to(self.host_dir)
         except ValueError as e:
@@ -437,13 +447,16 @@ class OfflineHostWithVolume(OfflineHost, HostFileReadInterface, HostFileWriteInt
     def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
         """Write bytes to a file on the host volume.
 
-        ``mode`` cannot be applied through a volume write and is ignored (with a
-        warning) if supplied; ``is_atomic`` is likewise not honored.
+        Neither ``mode`` (volume writes cannot set file modes) nor ``is_atomic``
+        (the volume API has no atomic-rename primitive) can be honored here; each
+        is ignored with a warning if requested.
         """
         if mode is not None:
             logger.warning(
                 "File mode is not settable when writing to an offline host's volume; ignoring mode={}", mode
             )
+        if is_atomic:
+            logger.warning("Atomic writes are not supported on an offline host's volume; writing non-atomically")
         self.host_volume.write_files({self._to_volume_path(path): content})
 
     def write_text_file(self, path: Path, content: str, encoding: str = "utf-8", mode: str | None = None) -> None:
@@ -455,7 +468,13 @@ class OfflineHostWithVolume(OfflineHost, HostFileReadInterface, HostFileWriteInt
         return self.host_volume.path_exists(self._to_volume_path(path))
 
     def get_file_mtime(self, path: Path) -> datetime | None:
-        """Return the modification time of a file via its parent directory listing."""
+        """Return the modification time of a file via its parent directory listing.
+
+        The volume API has no per-path stat primitive, so this lists ``path``'s
+        parent directory and scans for the entry -- O(size of the parent
+        directory), and one ``listdir`` round-trip on remote-backed volumes. Fine
+        for occasional lookups; avoid calling it in a tight per-file loop.
+        """
         target = str(Path(path))
         for entry in self.list_directory(Path(path).parent):
             if entry.path == target:
@@ -486,7 +505,7 @@ class OfflineHostWithVolume(OfflineHost, HostFileReadInterface, HostFileWriteInt
                     size=entry.size,
                 )
             )
-            if recursive and entry.file_type == VolumeFileType.DIRECTORY:
+            if recursive and entry.file_type == FileType.DIRECTORY:
                 results.extend(self._list_volume_dir(entry.path, recursive))
         return results
 

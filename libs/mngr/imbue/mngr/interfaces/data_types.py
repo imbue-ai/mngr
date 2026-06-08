@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import stat
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -371,20 +372,69 @@ class SnapshotInfo(FrozenModel):
     )
 
 
-class VolumeFileType(UpperCaseStrEnum):
-    """Type of entry in a volume listing."""
+class FileType(UpperCaseStrEnum):
+    """Type of a filesystem entry in a directory listing.
+
+    The full set of POSIX entry types. Producers populate this to the fidelity
+    their source allows: a host (``OuterHost.list_directory``) classifies the
+    real ``stat`` mode and can report any of these values, while a bare
+    :class:`~imbue.mngr.interfaces.volume.Volume` typically only distinguishes
+    ``FILE`` from ``DIRECTORY`` (e.g. Modal's volume API exposes nothing finer),
+    so a volume-backed listing only ever yields those two.
+    """
 
     FILE = auto()
     DIRECTORY = auto()
+    SYMLINK = auto()
+    PIPE = auto()
+    SOCKET = auto()
+    BLOCK = auto()
+    CHARACTER = auto()
+    OTHER = auto()
+
+    @classmethod
+    def from_stat_mode(cls, mode: int) -> "FileType":
+        """Classify a ``stat``/``lstat`` ``st_mode`` into a :class:`FileType`.
+
+        Symlinks are reported as ``SYMLINK`` (callers should ``lstat`` so a
+        symlink is classified by its own mode rather than its target's).
+        """
+        if stat.S_ISDIR(mode):
+            return cls.DIRECTORY
+        if stat.S_ISLNK(mode):
+            return cls.SYMLINK
+        if stat.S_ISREG(mode):
+            return cls.FILE
+        if stat.S_ISFIFO(mode):
+            return cls.PIPE
+        if stat.S_ISSOCK(mode):
+            return cls.SOCKET
+        if stat.S_ISBLK(mode):
+            return cls.BLOCK
+        if stat.S_ISCHR(mode):
+            return cls.CHARACTER
+        return cls.OTHER
 
 
 class VolumeFile(FrozenModel):
-    """An entry listed from a volume directory."""
+    """An entry from a directory listing (on a volume or a host filesystem).
+
+    Despite the historical name, this is the shared listing-entry type returned
+    by every :class:`~imbue.mngr.interfaces.host.HostFileReadInterface`
+    ``list_directory`` implementation, not just bare volumes.
+    """
 
     path: str = Field(description="Path of the entry within the volume")
-    file_type: VolumeFileType = Field(description="Whether this entry is a file or directory")
+    file_type: FileType = Field(description="The kind of filesystem entry (file, directory, symlink, ...)")
     mtime: int = Field(description="Last modification time as Unix timestamp")
     size: int = Field(description="Size in bytes")
+    permissions: str | None = Field(
+        default=None,
+        description=(
+            "Permissions string (e.g. ``-rw-r--r--``) when the source can report it. "
+            "Hosts populate this from the entry's stat mode; bare volumes leave it None."
+        ),
+    )
 
 
 class VolumeInfo(FrozenModel):

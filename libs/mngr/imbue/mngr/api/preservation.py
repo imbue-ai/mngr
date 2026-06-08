@@ -32,7 +32,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
-from imbue.mngr.interfaces.data_types import VolumeFileType
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import HostFileReadInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
@@ -45,7 +45,7 @@ class PreservedItem(FrozenModel):
     """One file or directory to preserve, addressed relative to the agent state dir."""
 
     rel_path: str = Field(description="Path relative to the agent state directory")
-    kind: VolumeFileType = Field(description="Whether rel_path is a FILE or a DIRECTORY")
+    kind: FileType = Field(description="Whether rel_path is a FILE or a DIRECTORY")
 
 
 def get_preserved_agent_dir(host_dir: Path, agent_name: AgentName, agent_id: AgentId) -> Path:
@@ -98,7 +98,7 @@ def preserve_agent_data(
                     # diagnose why something did not get preserved.
                     logger.debug("Skipping preservation of {}: not present on source at {}", item.rel_path, src)
                     continue
-                if item.kind == VolumeFileType.FILE:
+                if item.kind == FileType.FILE:
                     _write_local_file(dest, source.read_file(src))
                 elif isinstance(source, OnlineHostInterface):
                     if local_host is None:
@@ -117,10 +117,19 @@ def _write_local_file(dest: Path, content: bytes) -> None:
     dest.write_bytes(content)
 
 
+# Only regular files are read and written byte-for-byte. Directories are
+# implied by the recursive walk (their files carry the full relative path), and
+# the remaining POSIX types (symlinks, devices, pipes, sockets) are deliberately
+# not reproduced: this reader path copies content, not filesystem structure. In
+# practice a volume-backed offline source only ever yields FILE/DIRECTORY, but
+# the set is explicit so a richer-typed source cannot silently change behavior.
+_PRESERVABLE_FILE_TYPES: frozenset[FileType] = frozenset({FileType.FILE})
+
+
 def _copy_tree_via_reader(source: HostFileReadInterface, src_dir: Path, dest_dir: Path) -> None:
     """Recursively copy a directory tree from a (volume-backed) reader to local disk."""
     for entry in source.list_directory(src_dir, recursive=True):
-        if entry.file_type != VolumeFileType.FILE:
+        if entry.file_type not in _PRESERVABLE_FILE_TYPES:
             continue
         relative = Path(entry.path).relative_to(src_dir)
         _write_local_file(dest_dir / relative, source.read_file(Path(entry.path)))

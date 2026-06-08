@@ -22,7 +22,6 @@ from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.interfaces.data_types import VolumeFile
-from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.primitives import AgentOrHostAddress
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr_file.cli.group import file_group
@@ -72,20 +71,13 @@ class _FileListCliOptions(CommonCliOptions):
 def _volume_file_to_entry(vf: VolumeFile) -> FileEntry:
     """Convert a ``VolumeFile`` (as returned by ``HostFileReadInterface.list_directory``) to a ``FileEntry``.
 
-    Permissions are always None: the read interface does not surface a mode
-    string, so the ``permissions`` field renders as ``-`` for both online and
-    offline hosts.
+    ``file_type`` and ``permissions`` are passed through verbatim. A host
+    (online, or local) classifies the full type set and surfaces a mode string;
+    a bare volume-backed offline host only distinguishes FILE from DIRECTORY and
+    leaves ``permissions`` None (rendered as ``-``).
     """
     name = vf.path.rsplit("/", 1)[-1] if "/" in vf.path else vf.path
-    match vf.file_type:
-        case VolumeFileType.FILE:
-            file_type = FileType.FILE
-        case VolumeFileType.DIRECTORY:
-            file_type = FileType.DIRECTORY
-        case _ as unreachable:
-            assert_never(unreachable)
-
-    size = vf.size if file_type != FileType.DIRECTORY else None
+    size = vf.size if vf.file_type != FileType.DIRECTORY else None
     modified = None
     if vf.mtime > 0:
         modified = datetime.fromtimestamp(vf.mtime, tz=timezone.utc).isoformat()
@@ -93,10 +85,10 @@ def _volume_file_to_entry(vf: VolumeFile) -> FileEntry:
     return FileEntry(
         name=name,
         path=vf.path,
-        file_type=file_type,
+        file_type=vf.file_type,
         size=size,
         modified=modified,
-        permissions=None,
+        permissions=vf.permissions,
     )
 
 

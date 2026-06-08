@@ -59,8 +59,8 @@ from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.common import LOCAL_CONNECTOR_NAME
 from imbue.mngr.interfaces.data_types import CommandResult
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import VolumeFile
-from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.host import OuterHostInterface
 
 
@@ -112,14 +112,21 @@ def _local_dir_entry(entry_path: str) -> VolumeFile | None:
 
     Classification uses ``lstat`` (does not follow symlinks) so it matches the
     remote SFTP listing, which also reports symlink attributes rather than their
-    targets -- local and remote agree on symlink-to-directory entries.
+    targets -- local and remote agree on the full entry type (symlinks classify
+    as ``SYMLINK``, devices/pipes/sockets as their own types) and on the mode
+    string surfaced as ``permissions``.
     """
     try:
         st = os.lstat(entry_path)
     except OSError:
         return None
-    file_type = VolumeFileType.DIRECTORY if stat.S_ISDIR(st.st_mode) else VolumeFileType.FILE
-    return VolumeFile(path=entry_path, file_type=file_type, mtime=int(st.st_mtime), size=st.st_size)
+    return VolumeFile(
+        path=entry_path,
+        file_type=FileType.from_stat_mode(st.st_mode),
+        mtime=int(st.st_mtime),
+        size=st.st_size,
+        permissions=stat.filemode(st.st_mode),
+    )
 
 
 def _list_directory_local(path: Path, recursive: bool) -> list[VolumeFile]:
@@ -149,8 +156,9 @@ def _sftp_walk(sftp: SFTPClient, dir_path: str, recursive: bool) -> list[VolumeF
 
     Entry paths are absolute (built from ``dir_path``). Classification uses the
     entry's own mode (SFTP reports symlink attributes, not their targets), so a
-    symlink to a directory is reported as a FILE, matching the local listing. A
-    directory that cannot be listed (e.g. does not exist) yields no entries.
+    symlink is reported as ``SYMLINK`` and is not descended into, matching the
+    ``lstat``-based local listing. A directory that cannot be listed (e.g. does
+    not exist) yields no entries.
     """
     try:
         attrs = sftp.listdir_attr(dir_path)
@@ -161,17 +169,24 @@ def _sftp_walk(sftp: SFTPClient, dir_path: str, recursive: bool) -> list[VolumeF
     entries: list[VolumeFile] = []
     for attr in attrs:
         entry_path = f"{base}/{attr.filename}"
-        is_dir = attr.st_mode is not None and stat.S_ISDIR(attr.st_mode)
-        file_type = VolumeFileType.DIRECTORY if is_dir else VolumeFileType.FILE
+        # SFTP may omit st_mode; without it we cannot classify, so fall back to
+        # FILE (and leave permissions None) rather than guessing.
+        if attr.st_mode is not None:
+            file_type = FileType.from_stat_mode(attr.st_mode)
+            permissions: str | None = stat.filemode(attr.st_mode)
+        else:
+            file_type = FileType.FILE
+            permissions = None
         entries.append(
             VolumeFile(
                 path=entry_path,
                 file_type=file_type,
                 mtime=int(attr.st_mtime) if attr.st_mtime is not None else 0,
                 size=int(attr.st_size) if attr.st_size is not None else 0,
+                permissions=permissions,
             )
         )
-        if recursive and is_dir:
+        if recursive and file_type == FileType.DIRECTORY:
             entries.extend(_sftp_walk(sftp, entry_path, recursive))
     return entries
 

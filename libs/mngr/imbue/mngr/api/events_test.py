@@ -1,6 +1,8 @@
 import json
 import queue as queue_mod
 import threading
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
 import pytest
@@ -35,8 +37,12 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MalformedJsonlLineError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
+from imbue.mngr.hosts.offline_host import make_readable_offline_host
+from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import VolumeFile
-from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.host import HostFileReadInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
@@ -91,6 +97,62 @@ def test_read_event_content_returns_file_contents(events_volume_target: tuple[Ev
     content = read_event_content(target, "test.log")
 
     assert content == snapshot("hello world\nsecond line\n")
+
+
+def _make_offline_volume_backed_host(local_provider, temp_mngr_ctx: MngrContext) -> OfflineHostWithVolume:
+    """Build an OfflineHostWithVolume over the local provider's volume (a stopped, readable host)."""
+    offline = OfflineHost(
+        id=local_provider.host_id,
+        provider_instance=local_provider,
+        mngr_ctx=temp_mngr_ctx,
+        certified_host_data=CertifiedHostData(
+            host_id=str(local_provider.host_id),
+            host_name="local",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        ),
+    )
+    readable = make_readable_offline_host(offline)
+    assert isinstance(readable, OfflineHostWithVolume), "local provider should expose a readable volume"
+    return readable
+
+
+def test_discover_and_read_events_through_offline_volume_backed_host(
+    local_provider,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Source discovery and content reads work end-to-end through the events API on a
+    volume-backed *offline* host -- not just an online one.
+
+    The online path is covered by ``events_volume_target`` elsewhere; this closes
+    the gap the dual-path collapse opened by routing the same ``discover_event_sources``
+    / ``read_event_content`` code through an ``OfflineHostWithVolume`` whose reads come
+    off the persisted volume rather than a live host.
+    """
+    host = _make_offline_volume_backed_host(local_provider, temp_mngr_ctx)
+    # A volume-backed offline host is a reader but explicitly NOT an online host.
+    assert isinstance(host, HostFileReadInterface)
+    assert not isinstance(host, OnlineHostInterface)
+
+    events_dir = host.host_dir / "events"
+    (events_dir / "messages").mkdir(parents=True)
+    (events_dir / "messages" / "events.jsonl").write_text(
+        '{"timestamp": "2026-01-01T00:00:00.000000000Z", "event_id": "e1", "source": "messages", "type": "msg"}\n'
+    )
+    # A root-level (empty source path) event file too.
+    (events_dir / "events.jsonl").write_text(
+        '{"timestamp": "2026-01-01T00:00:01.000000000Z", "event_id": "e2", "source": "", "type": "root"}\n'
+    )
+
+    target = EventsTarget(host=host, events_path=events_dir, display_name="offline host 'local'")
+
+    sources = discover_event_sources(target)
+    source_paths = {s.source_path for s in sources}
+    assert "messages" in source_paths
+    assert "" in source_paths
+
+    content = read_event_content(target, "messages/events.jsonl")
+    assert "e1" in content
 
 
 # =============================================================================
@@ -411,12 +473,12 @@ def test_sort_rotated_files_ignores_non_matching() -> None:
 
 def _file_entry(path: str) -> VolumeFile:
     """Build a FILE VolumeFile for an absolute path (mtime/size irrelevant here)."""
-    return VolumeFile(path=path, file_type=VolumeFileType.FILE, mtime=0, size=0)
+    return VolumeFile(path=path, file_type=FileType.FILE, mtime=0, size=0)
 
 
 def _dir_entry(path: str) -> VolumeFile:
     """Build a DIRECTORY VolumeFile for an absolute path."""
-    return VolumeFile(path=path, file_type=VolumeFileType.DIRECTORY, mtime=0, size=0)
+    return VolumeFile(path=path, file_type=FileType.DIRECTORY, mtime=0, size=0)
 
 
 def test_build_event_sources_from_listing_groups_by_directory() -> None:

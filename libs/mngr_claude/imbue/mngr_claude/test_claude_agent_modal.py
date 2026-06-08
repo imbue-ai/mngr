@@ -295,7 +295,7 @@ def test_destroy_modal_agent_preserves_sessions_locally(
     This verifies the preserve_sessions_on_destroy feature end-to-end:
     1. Create a Claude agent on Modal with a prompt (session data is generated during create)
     2. Destroy the agent (triggers session file preservation)
-    3. Verify that session files were pulled to the local preserved_sessions dir
+    3. Verify that session files were pulled to the local preserved/<name>--<id> dir
     """
     agent_name = f"test-claude-preserve-{get_short_random_string()}"
     _setup_claude_gitignore(temp_source_dir)

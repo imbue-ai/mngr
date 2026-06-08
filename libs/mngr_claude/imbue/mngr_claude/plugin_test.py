@@ -53,6 +53,9 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import TransferMode
+from imbue.mngr.providers.docker.host_store import HostRecord
+from imbue.mngr.providers.docker.instance import DockerProviderInstance
+from imbue.mngr.providers.docker.testing import make_docker_provider_with_local_volume
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.testing import init_git_repo
@@ -88,6 +91,7 @@ from imbue.mngr_claude.plugin import agent_field_generators
 from imbue.mngr_claude.plugin import approve_api_key_for_claude
 from imbue.mngr_claude.plugin import get_files_for_deploy
 from imbue.mngr_claude.plugin import on_before_create
+from imbue.mngr_claude.plugin import on_before_host_destroy
 from imbue.mngr_claude.plugin import register_cli_options
 
 # =============================================================================
@@ -4277,6 +4281,89 @@ def test_preserve_session_files_from_volume_no_data(
 
     dest_dir = get_local_preserved_agent_dir(temp_mngr_ctx, agent_name, agent_id)
     assert not dest_dir.exists()
+
+
+def _write_docker_agent_record(
+    host_id: HostId,
+    volume_root: Path,
+    agent_id: AgentId,
+    agent_name: AgentName,
+    *,
+    use_env_config_dir: bool,
+) -> None:
+    """Persist a Claude agent record so the offline host's discover_agents() returns it.
+
+    The docker host store reads agent records from ``host_state/<host_id>/*.json``
+    on its state volume (rooted at ``volume_root``).
+    """
+    record_dir = volume_root / "host_state" / str(host_id)
+    record_dir.mkdir(parents=True, exist_ok=True)
+    (record_dir / f"{agent_id}.json").write_text(
+        json.dumps(
+            {
+                "id": str(agent_id),
+                "name": str(agent_name),
+                "type": "claude",
+                "agent_config": {
+                    "preserve_sessions_on_destroy": True,
+                    "use_env_config_dir": use_env_config_dir,
+                },
+            }
+        )
+    )
+
+
+def _docker_host_volume_root(host_id: HostId, volume_root: Path) -> Path:
+    """Return the on-disk directory backing the host's file volume (its host_dir root)."""
+    vol_id = DockerProviderInstance._volume_id_for_host(host_id)
+    root = volume_root / "volumes" / str(vol_id)
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def test_on_before_host_destroy_offline_skips_projects_in_shared_config_mode(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """The offline destroy hook honors use_env_config_dir: the per-agent ``projects``
+    dir is skipped (it lives in the shared $CLAUDE_CONFIG_DIR) while the transcripts
+    and history are still preserved.
+
+    Exercises ``on_before_host_destroy`` end-to-end -- the HostFileReadInterface
+    guard, discover_agents, the use_env_config_dir extraction from raw certified
+    data, and the preserve call -- rather than calling ``preserve_agent_data``
+    directly as the other offline tests do.
+    """
+    host_id = HostId("host-0000000000000000000000000000beef")
+    agent_id = AgentId.generate()
+    agent_name = AgentName("test-offline-hook")
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    _write_docker_agent_record(host_id, tmp_path, agent_id, agent_name, use_env_config_dir=True)
+
+    record = HostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=str(host_id),
+            host_name="h",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+    )
+    host = provider._create_host_from_host_record(record)
+    assert isinstance(host, OfflineHostWithVolume)
+
+    # Populate the agent's on-volume state (under the host's file volume root),
+    # including the per-agent projects dir that shared-config mode must skip.
+    _populate_volume_session_files(_docker_host_volume_root(host_id, tmp_path), agent_id)
+
+    on_before_host_destroy(host, temp_mngr_ctx)
+
+    dest_dir = get_local_preserved_agent_dir(temp_mngr_ctx, agent_name, agent_id)
+    # Transcripts and history are preserved...
+    assert (dest_dir / "logs" / "claude_transcript" / "events.jsonl").exists()
+    assert (dest_dir / "events" / "claude" / "common_transcript" / "events.jsonl").exists()
+    assert (dest_dir / "claude_session_id_history").exists()
+    # ...but the per-agent projects dir is skipped in use_env_config_dir mode.
+    assert not (dest_dir / "plugin" / "claude" / "anthropic" / "projects").exists()
 
 
 def test_should_preserve_sessions_true_for_claude_agent() -> None:

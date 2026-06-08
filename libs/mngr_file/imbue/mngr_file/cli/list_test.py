@@ -11,7 +11,6 @@ from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import VolumeFile
-from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.providers.docker.host_store import HostRecord
@@ -52,7 +51,7 @@ def _make_file_entry(
 def test_volume_file_to_entry_file() -> None:
     vf = VolumeFile(
         path="/home/user/myfile.txt",
-        file_type=VolumeFileType.FILE,
+        file_type=FileType.FILE,
         mtime=1742558400,
         size=1024,
     )
@@ -63,25 +62,40 @@ def test_volume_file_to_entry_file() -> None:
     assert entry.size == 1024
     # mtime is rendered as an ISO timestamp in UTC.
     assert entry.modified == datetime.fromtimestamp(1742558400, tz=timezone.utc).isoformat()
-    # The read interface does not surface a mode string, so permissions is always None.
+    # permissions passes through from the VolumeFile; this one has none set.
     assert entry.permissions is None
 
 
+def test_volume_file_to_entry_passes_through_type_and_permissions() -> None:
+    # A host-produced VolumeFile carries the full type and a mode string; both
+    # flow through to the FileEntry unchanged.
+    vf = VolumeFile(
+        path="/home/user/link",
+        file_type=FileType.SYMLINK,
+        mtime=1742558400,
+        size=12,
+        permissions="lrwxr-xr-x",
+    )
+    entry = _volume_file_to_entry(vf)
+    assert entry.file_type == FileType.SYMLINK
+    assert entry.permissions == "lrwxr-xr-x"
+
+
 def test_volume_file_to_entry_directory_has_none_size() -> None:
-    vf = VolumeFile(path="/home/user/subdir", file_type=VolumeFileType.DIRECTORY, mtime=1742558400, size=4096)
+    vf = VolumeFile(path="/home/user/subdir", file_type=FileType.DIRECTORY, mtime=1742558400, size=4096)
     entry = _volume_file_to_entry(vf)
     assert entry.file_type == FileType.DIRECTORY
     assert entry.size is None
 
 
 def test_volume_file_to_entry_zero_mtime_yields_none_modified() -> None:
-    vf = VolumeFile(path="/home/user/f.txt", file_type=VolumeFileType.FILE, mtime=0, size=10)
+    vf = VolumeFile(path="/home/user/f.txt", file_type=FileType.FILE, mtime=0, size=10)
     entry = _volume_file_to_entry(vf)
     assert entry.modified is None
 
 
 def test_volume_file_to_entry_basename_of_root_level_path() -> None:
-    vf = VolumeFile(path="topfile", file_type=VolumeFileType.FILE, mtime=0, size=3)
+    vf = VolumeFile(path="topfile", file_type=FileType.FILE, mtime=0, size=3)
     entry = _volume_file_to_entry(vf)
     assert entry.name == "topfile"
 

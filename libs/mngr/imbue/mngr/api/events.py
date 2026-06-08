@@ -32,8 +32,8 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MalformedJsonlLineError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.offline_host import try_resolve_readable_host
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import VolumeFile
-from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.host import HostFileReadInterface
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -515,7 +515,7 @@ def _build_event_sources_from_listing(
     """
     files_by_dir: dict[str, list[str]] = {}
     for entry in entries:
-        if entry.file_type != VolumeFileType.FILE:
+        if entry.file_type != FileType.FILE:
             continue
         absolute = Path(entry.path)
         file_part = absolute.name

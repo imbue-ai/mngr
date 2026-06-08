@@ -28,7 +28,7 @@ from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
-from imbue.mngr.interfaces.data_types import VolumeFileType
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -1982,12 +1982,12 @@ def test_provider_instance_close(
 
 def test_proxy_file_entry_type_file_maps_to_volume_file() -> None:
     result = _proxy_file_entry_type_to_volume_file_type(ProxyFileEntryType.FILE)
-    assert result == VolumeFileType.FILE
+    assert result == FileType.FILE
 
 
 def test_proxy_file_entry_type_directory_maps_to_volume_directory() -> None:
     result = _proxy_file_entry_type_to_volume_file_type(ProxyFileEntryType.DIRECTORY)
-    assert result == VolumeFileType.DIRECTORY
+    assert result == FileType.DIRECTORY
 
 
 # ---------------------------------------------------------------------------

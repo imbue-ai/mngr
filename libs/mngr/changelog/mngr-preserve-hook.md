@@ -27,6 +27,15 @@ interface.
   agent-state-dir layout verbatim under `<local_host_dir>/preserved/<agent-name>--<agent-id>/`.
 - `OuterHost` gained a `list_directory()` implementation (local filesystem walk, or SFTP
   `listdir_attr` over the same paramiko channel used for remote file reads).
+- The listing-entry type `VolumeFile` is now the shared return type for every
+  `HostFileReadInterface.list_directory` (hosts as well as volumes). Its `file_type` uses the
+  full `FileType` enum (file, directory, symlink, pipe, socket, block, character, other), moved
+  into core `interfaces/data_types.py` from `mngr_file` (which now re-exports it), with a
+  canonical `FileType.from_stat_mode` classifier; `VolumeFile` also gained an optional
+  `permissions` string. Producers fill these to the fidelity their source allows: a host
+  classifies the real `stat`/`lstat` mode and reports a permissions string, while a bare volume
+  only distinguishes file vs. directory and leaves `permissions` None. (`VolumeFileType` is gone,
+  folded into `FileType`.)
 - New `HostFileWriteInterface` (`write_file`, `write_text_file`), the write companion to
   `HostFileReadInterface`. `OuterHostInterface` extends it (so every online host writes), and
   `OfflineHostWithVolume` implements it by writing the stopped host's volume (file modes are not
