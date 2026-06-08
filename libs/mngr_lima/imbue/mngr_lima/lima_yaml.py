@@ -19,7 +19,6 @@ from imbue.mngr_lima.constants import lima_host_data_disk_mount_path
 # ``mngr_vps_docker.host_setup.PINNED_DOCKER_APT_VERSION`` so lima and the remote
 # VPS providers stay in lockstep. The Lima VM is Debian 12 "bookworm" (see
 # ``constants.DEFAULT_IMAGE_URL_*``), so this bookworm-scoped apt version is valid.
-PINNED_DOCKER_VERSION: Final[str] = "29.5.1"
 PINNED_DOCKER_APT_VERSION: Final[str] = "5:29.5.1-1~debian.12~bookworm"
 
 # Install the pinned Docker Engine from Docker's official apt repo (the same way
