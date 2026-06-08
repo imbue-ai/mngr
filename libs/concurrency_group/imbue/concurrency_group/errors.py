@@ -82,3 +82,9 @@ class EnvironmentStoppedError(ConcurrencyGroupError):
     """Raised when the environment is stopped."""
 
     ...
+
+
+class ProcessTerminationError(ConcurrencyGroupError):
+    """Raised when a process could not be terminated even after a force kill."""
+
+    ...
