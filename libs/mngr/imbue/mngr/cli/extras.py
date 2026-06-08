@@ -165,7 +165,8 @@ def _install_completion(
             return False
         rc_path = _get_shell_rc(shell_type)
 
-    assert rc_path is not None  # shell_type is set, so rc_path was resolved
+    # shell_type is set at this point, so rc_path was resolved.
+    assert rc_path is not None
 
     if not auto:
         if not is_interactive_fn():

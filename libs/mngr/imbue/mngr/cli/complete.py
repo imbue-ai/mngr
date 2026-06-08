@@ -417,8 +417,8 @@ def main() -> None:
         else:
             # Only zsh and bash completion scripts exist; fail loudly rather than
             # silently emitting a bash script for an unsupported/typo'd shell.
-            sys.stderr.write(f"Unsupported shell: {shell!r}. Supported shells: zsh, bash.\n")
-            sys.exit(2)
+            # sys.exit(str) writes the message to stderr and exits non-zero.
+            sys.exit(f"Unsupported shell: {shell!r}. Supported shells: zsh, bash.")
         return
 
     completions = _get_completions()
