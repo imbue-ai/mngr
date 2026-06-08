@@ -2,6 +2,10 @@
 
 This file contains the full, verbatim per-PR entries for the `mngr_mapreduce` library. For the curated summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-08
+
+- Marked unpublished-on-purpose in `UNPUBLISHED_PACKAGES` (it is an internal map-reduce framework library with no CLI of its own, consumed only by recipes like `mngr_tmr`), so the release tooling will not offer it for publication. Its stale `imbue-mngr==0.1.6` pin is realigned to the current `0.2.10` so `uv lock` stays solvable. No runtime change.
+
 ## 2026-06-04
 
 Updated the `get_local_host` import to its new canonical home in `imbue.mngr.api.providers` (it previously lived in `imbue.mngr.cli.headless_runner`). No behavior change.

@@ -6,6 +6,11 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed: Antigravity onboarding seed now also skips agy's first-run NUX for users authenticated through an enterprise account, by marking `enterpriseOnboardingComplete` as `True` (previously `False`); enterprise-authenticated users were getting stuck in the enterprise onboarding flow on their first message.
+- Fixed: Passing a model name (or any value containing spaces or parentheses) as an `agy` argument — e.g. `--model "Gemini 3.5 Flash (Medium)"` — no longer breaks `mngr create` with a shell `syntax error near unexpected token '('`. The underlying fix is in `mngr` (`agent_args` are now shell-quoted in `BaseAgent.assemble_command`); this plugin inherits it. The supported `settings_overrides`/`model` path is unaffected.
+
 ## [v0.1.2] - 2026-06-05
 
 ### Added

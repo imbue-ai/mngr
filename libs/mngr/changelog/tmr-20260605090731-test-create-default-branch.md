@@ -1,1 +1,0 @@
-- Add an e2e release test (`test_create_default_branch_distinct_per_agent`) covering the tutorial's claim that `mngr create` creates a *separate* default branch *per agent*: it creates two agents and verifies each lands on its own distinct `mngr/<name>` branch (worktree HEAD checked via `mngr exec`), with both branches starting from the same base commit.

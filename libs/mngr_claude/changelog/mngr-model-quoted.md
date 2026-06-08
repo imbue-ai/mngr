@@ -1,1 +1,0 @@
-Internal refactor (no behavior change): the `claude` agent's `assemble_command` now shell-quotes its extra `agent_args` via the shared `quote_agent_args` helper instead of an inline `shlex.quote` loop. This is the same quoting the plugin already performed; it now shares one implementation (and one explanatory comment) with `BaseAgent`, so the two cannot drift.

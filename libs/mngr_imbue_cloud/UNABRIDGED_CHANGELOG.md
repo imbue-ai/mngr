@@ -4,6 +4,49 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-08
+
+The imbue_cloud slow (rebuild) path now re-applies the full idempotent host
+setup on the leased VPS before rebuilding the container: it ensures the pinned
+Docker version, installs/registers gVisor `runsc` if missing, tunes sshd, and
+installs the base packages. This runs after the old container is torn down and
+before the rebuild, and a failure is fatal. The result is that a workspace
+created via the slow path -- even against a host baked with an old version, or
+one baked before runsc existed -- comes up consistent and runs its agent
+container under gVisor.
+
+`ImbueCloudProviderConfig` now extends `VpsDockerProviderConfig`, so it carries
+`docker_runtime` / `install_gvisor_runtime` / `default_start_args`; the delegated
+vps_docker provider used for the rebuild forwards these, so the rebuilt container
+runs under `--runtime runsc` with the `--workdir=/` and
+`--security-opt=no-new-privileges` hardening args. These values are written into
+the per-account `[providers.imbue_cloud_<slug>]` block by minds bootstrap.
+
+Added a `--no-recycle` flag to `mngr imbue_cloud admin pool create`. By default
+the OVH provider reclaims a cancelled (still-billable) VPS when one is available;
+`--no-recycle` forces a fresh order instead (it sets
+`MNGR__PROVIDERS__OVH__ENABLE_RECYCLE_CANCELLED=false` on the inner `mngr create`),
+which makes it easy to exercise and test the fresh-provision path.
+
+Region-aware leasing for imbue_cloud hosts.
+
+- `mngr create` against imbue_cloud now accepts two new build-arg knobs: a hard `-b region=<datacenter>` requirement (only a host in that datacenter is leased, else the create fails) and a soft `-b preferred_region=<datacenter>` preference (a host in that datacenter is preferred, but any available host is still returned so the fast path is never blocked). Both are validated against the known OVH-US datacenters (`US-EAST-VA`, `US-WEST-OR`); an unknown value fails fast.
+- Both knobs are sent to the connector's lease endpoint as separate fields (not folded into the JSONB attribute filter) and are applied on both the fast (adopt) and slow (rebuild) create paths. A hard `region` is preserved through the slow path's attribute relaxation.
+- `mngr imbue_cloud admin pool add` now records the bake `--region` (OVH datacenter) into the new `pool_hosts.region` column so the connector can filter/order on it.
+
+- Removed the soft `preferred_region` lease knob. A lease now takes only the hard
+  `region` build arg (`-b region=<dc>`): when set, only a host in that OVH
+  datacenter is leased, otherwise the lease is region-agnostic.
+
+Tests now isolate $HOME the same way as every other mngr plugin: the project
+conftest calls `register_plugin_test_fixtures(globals())`, which brings in the
+autouse `setup_test_mngr_env` fixture. Previously this plugin's tests did not
+redirect $HOME, so running them on their own could read or write the real
+`~/.mngr` / `~/.claude.json`. Internal test-infrastructure change only; no
+user-facing behavior change.
+
+- Now auto-discovered as a publishable package by the release tooling (it is a standalone `mngr imbue_cloud` provider plugin, not minds-specific). It will be offered for first publication to PyPI on the next release. Its previously-unpinned internal deps (`imbue-mngr-vps-docker`, `imbue-common`) are now pinned with `==` to their current workspace versions, as a published wheel requires. No runtime change.
+
 ## 2026-06-05
 
 - Added to the release tooling's publish graph (`scripts/utils.py`). It will be offered for first publication to PyPI on the next release. Its previously-unpinned internal deps (`imbue-mngr-vps-docker`, `imbue-common`) are now pinned with `==` to their current workspace versions, as a published wheel requires. No runtime change.

@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-08
+
+- Now auto-discovered as a publishable package by the release tooling. This also fixes a latent bug: `imbue-mngr-schedule` is already listed in the mngr install catalog, so the wizard offered it even though it had never been published (a user picking it hit a PyPI 404). It will be offered for first publication on the next release. Its previously-unpinned internal deps (`imbue-mngr`, `imbue-common`, `imbue-mngr-modal`) are now pinned with `==` to their current workspace versions. No runtime change.
+
 ## 2026-06-05
 
 - Added to the release tooling's publish graph (`scripts/utils.py`). It will be offered for first publication to PyPI on the next release. Its previously-unpinned internal deps (`imbue-mngr`, `imbue-common`, `imbue-mngr-modal`) are now pinned with `==` to their current workspace versions, as a published wheel requires. No runtime change.
