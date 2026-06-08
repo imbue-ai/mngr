@@ -533,19 +533,25 @@ def test_docker_client_error_is_mngr_error_subclass(temp_mngr_ctx: MngrContext) 
 
 
 @pytest.mark.docker_sdk
-def test_discover_hosts_returns_empty_when_daemon_offline(temp_mngr_ctx: MngrContext) -> None:
-    """discover_hosts gracefully returns [] when Docker is unreachable."""
+def test_discover_hosts_raises_when_daemon_offline(temp_mngr_ctx: MngrContext) -> None:
+    """discover_hosts raises ProviderUnavailableError (not []) when Docker is unreachable.
+
+    Returning [] would let garbage collection treat an unreachable daemon as
+    "this provider has zero hosts" and delete every host's volume data. Raising
+    lets multi-provider callers (GC, listing) skip just this provider, the same
+    way the Modal and Imbue Cloud providers behave.
+    """
     provider = make_offline_docker_provider(temp_mngr_ctx)
-    result = provider.discover_hosts(cg=temp_mngr_ctx.concurrency_group)
-    assert result == []
+    with pytest.raises(ProviderUnavailableError, match="not available"):
+        provider.discover_hosts(cg=temp_mngr_ctx.concurrency_group)
 
 
 @pytest.mark.docker_sdk
-def test_discover_hosts_and_agents_returns_empty_when_daemon_offline(temp_mngr_ctx: MngrContext) -> None:
-    """discover_hosts_and_agents gracefully returns {} when Docker is unreachable."""
+def test_discover_hosts_and_agents_raises_when_daemon_offline(temp_mngr_ctx: MngrContext) -> None:
+    """discover_hosts_and_agents raises ProviderUnavailableError when Docker is unreachable."""
     provider = make_offline_docker_provider(temp_mngr_ctx)
-    result = provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
-    assert result == {}
+    with pytest.raises(ProviderUnavailableError, match="not available"):
+        provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
 
 
 # =========================================================================

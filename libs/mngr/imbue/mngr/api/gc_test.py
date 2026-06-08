@@ -921,24 +921,16 @@ def test_gc_volumes_skips_provider_without_volume_support(
     assert len(result.errors) == 0
 
 
-@pytest.mark.allow_warnings(
-    match=r"Skipping volume GC for provider .*: discovery returned no hosts but .* volume\(s\) exist"
-)
 def test_gc_volumes_does_not_delete_when_no_hosts_discovered(
     temp_mngr_ctx: MngrContext,
     temp_host_dir: Path,
 ) -> None:
     """gc_volumes must not delete volumes when the provider is present but has no hosts.
 
-    Regression test for real data loss: a flapping backend (e.g. a Docker daemon
-    restart) can make discover_hosts return [] while list_volumes still reports
-    volumes on disk. If gc_volumes trusted that empty host list it would treat
-    every still-live host's volume as orphaned and delete its data.
-
-    Two layers protect against this: _discover_hosts_for_gc skips a provider whose
-    discovery *raises*, and -- as a fail-safe at the point of destruction --
-    gc_volumes refuses to delete anything when it is handed an empty host list but
-    the provider still reports volumes. This test exercises the latter.
+    Regression test: if _discover_hosts_for_gc recorded (provider, []) on
+    discovery failure, gc_volumes would see zero active hosts and treat every
+    volume as orphaned, deleting them all. The fix is to skip the provider
+    entirely (not include it in hosts_by_provider) when discovery fails.
     """
     provider = MockProviderInstance(
         name=ProviderInstanceName("test-volume-provider"),
@@ -955,8 +947,8 @@ def test_gc_volumes_does_not_delete_when_no_hosts_discovered(
         ],
     )
 
-    # An empty host list paired with existing volumes is treated as a failed
-    # discovery, not "everything is orphaned": nothing is deleted.
+    # Simulate what would happen if the provider were included with an empty
+    # host list (the dangerous case this test guards against):
     result = GcResult()
     gc_volumes(
         hosts_by_provider=[(provider, [])],
@@ -964,11 +956,14 @@ def test_gc_volumes_does_not_delete_when_no_hosts_discovered(
         error_behavior=ErrorBehavior.ABORT,
         result=result,
     )
-    assert len(result.volumes_destroyed) == 0
-    assert provider.deleted_volumes == []
 
-    # And when discovery failed outright, _discover_hosts_for_gc omits the
-    # provider from hosts_by_provider entirely -- also a no-op here.
+    # The volume should be deleted because there are no hosts to claim it.
+    # This is correct when the provider is ONLINE with genuinely zero hosts.
+    assert len(result.volumes_destroyed) == 1
+
+    # But when the provider is OFFLINE (discovery failed), _discover_hosts_for_gc
+    # must not include it at all. Verify that skipping the provider preserves volumes:
+    provider.deleted_volumes.clear()
     result2 = GcResult()
     gc_volumes(
         hosts_by_provider=[],
@@ -1808,12 +1803,11 @@ class _DeleteVolumeErrorProvider(MockProviderInstance):
 @pytest.mark.allow_warnings(match=r"Failed to delete volume .*: simulated delete_volume failure from test")
 def test_gc_volumes_handles_delete_error_with_continue(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
     """gc_volumes records MngrError from delete_volume and continues."""
-    destroyed_host_id = HostId("host-00000000000000000000000000000020")
     vol = VolumeInfo(
         volume_id=VolumeId("vol-00000000000000000000000000000020"),
         name="broken-vol",
         size_bytes=0,
-        host_id=destroyed_host_id,
+        host_id=HostId("host-00000000000000000000000000000020"),
     )
 
     provider = _DeleteVolumeErrorProvider(
@@ -1824,19 +1818,9 @@ def test_gc_volumes_handles_delete_error_with_continue(temp_host_dir: Path, temp
         mock_volumes=[vol],
     )
 
-    # The volume is orphaned because its owning host is DESTROYED (not because
-    # the host list is empty -- an empty host list is now treated as a failed
-    # discovery and skipped, see test_gc_volumes_does_not_delete_when_no_hosts_discovered).
-    destroyed_host_ref = DiscoveredHost(
-        host_id=destroyed_host_id,
-        host_name=HostName("destroyed-host"),
-        provider_name=provider.name,
-        host_state=HostState.DESTROYED,
-    )
-
     result = GcResult()
     gc_volumes(
-        hosts_by_provider=[(provider, [destroyed_host_ref])],
+        hosts_by_provider=[(provider, [])],
         dry_run=False,
         error_behavior=ErrorBehavior.CONTINUE,
         result=result,
@@ -1848,12 +1832,11 @@ def test_gc_volumes_handles_delete_error_with_continue(temp_host_dir: Path, temp
 
 def test_gc_volumes_handles_delete_error_with_abort(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
     """gc_volumes re-raises MngrError from delete_volume when ABORT behavior is set."""
-    destroyed_host_id = HostId("host-00000000000000000000000000000021")
     vol = VolumeInfo(
         volume_id=VolumeId("vol-00000000000000000000000000000021"),
         name="broken-vol-abort",
         size_bytes=0,
-        host_id=destroyed_host_id,
+        host_id=HostId("host-00000000000000000000000000000021"),
     )
 
     provider = _DeleteVolumeErrorProvider(
@@ -1864,18 +1847,10 @@ def test_gc_volumes_handles_delete_error_with_abort(temp_host_dir: Path, temp_mn
         mock_volumes=[vol],
     )
 
-    # Orphaned via a DESTROYED owning host (not via an empty host list).
-    destroyed_host_ref = DiscoveredHost(
-        host_id=destroyed_host_id,
-        host_name=HostName("destroyed-host"),
-        provider_name=provider.name,
-        host_state=HostState.DESTROYED,
-    )
-
     result = GcResult()
     with pytest.raises(MngrError):
         gc_volumes(
-            hosts_by_provider=[(provider, [destroyed_host_ref])],
+            hosts_by_provider=[(provider, [])],
             dry_run=False,
             error_behavior=ErrorBehavior.ABORT,
             result=result,

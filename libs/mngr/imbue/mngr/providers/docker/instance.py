@@ -904,7 +904,7 @@ kill -TERM 1
                 filters={"label": [f"{LABEL_PROVIDER}={self.name}"]},
             )
         except docker.errors.DockerException as e:
-            raise MngrError(f"Cannot connect to Docker daemon: {e}") from e
+            raise ProviderUnavailableError(self.name, f"Cannot connect to Docker daemon: {e}") from e
 
         prefix = self.mngr_ctx.config.prefix
         filtered: list[docker.models.containers.Container] = []
@@ -1504,12 +1504,22 @@ kill -TERM 1
         """Discover all Docker container hosts."""
         processed_host_ids: set[HostId] = set()
 
+        # NEVER swallow a discovery failure into an empty list. An empty result
+        # must mean "this provider genuinely has zero hosts", never "the lookup
+        # failed". Garbage collection treats an empty host list as "every volume
+        # is orphaned" and would delete the per-host data of every still-live host
+        # (see _discover_hosts_for_gc and gc_volumes) -- which is exactly the data
+        # loss this fixes. Surface unavailability as ProviderUnavailableError so
+        # callers that span multiple providers (GC, listing, discovery) skip just
+        # this one, exactly as they already do for the Modal and Imbue Cloud
+        # providers. _list_containers already raises ProviderUnavailableError on a
+        # daemon connection failure; this also converts any other DockerException
+        # raised while reading host records.
         try:
             containers = self._list_containers()
             all_host_records = self._host_store.list_all_host_records()
-        except (MngrError, docker.errors.DockerException) as e:
-            logger.warning("Cannot list Docker hosts (Docker daemon unavailable?): {}", e)
-            return []
+        except docker.errors.DockerException as e:
+            raise ProviderUnavailableError(self.name, f"Cannot list Docker hosts: {e}") from e
 
         # Map running containers by host_id, and harvest host names from labels.
         # We use this map below instead of h.get_name() so building DiscoveredHosts

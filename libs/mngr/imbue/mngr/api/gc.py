@@ -518,30 +518,6 @@ def gc_volumes(
             # Get all volumes
             all_volumes = provider.list_volumes()
 
-            # Guard against catastrophic data loss from an unreliable discovery.
-            #
-            # gc_volumes deletes every volume not owned by a known, non-destroyed
-            # host. If discovery returned *no* hosts at all but the provider still
-            # reports volumes on disk, that is not a real "everything is orphaned"
-            # state -- it is the signature of a discovery that silently failed.
-            # The Docker provider, for example, intentionally returns [] from
-            # discover_hosts when its daemon is briefly unreachable (so `mngr list`
-            # stays usable); if the daemon then recovers before list_volumes runs,
-            # we would otherwise treat every still-live host's volume as orphaned
-            # and delete its data. A genuine "all hosts gone" state never reaches
-            # this branch, because destroying a host removes its volume together
-            # with its record -- so volumes with no owning host record at all only
-            # appear when discovery itself came up short.
-            if not host_refs and all_volumes:
-                logger.warning(
-                    "Skipping volume GC for provider {}: discovery returned no hosts but "
-                    "{} volume(s) exist on disk. Refusing to treat them as orphaned -- the "
-                    "backend may have been temporarily unavailable during discovery.",
-                    provider.name,
-                    len(all_volumes),
-                )
-                continue
-
             # Get volumes that are currently attached to non-destroyed hosts.
             # Destroyed hosts' volumes are considered orphaned and should be cleaned up.
             active_volume_ids = set()
