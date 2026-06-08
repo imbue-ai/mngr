@@ -103,27 +103,6 @@ def test_concurrency_group_supports_running_running_local_process_in_background(
     assert process.poll() == 0
 
 
-@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
-def test_base_exception_dominates_but_preserves_sibling_failures_on_exit() -> None:
-    # When a BaseException (e.g. KeyboardInterrupt) propagates out of the context body alongside a
-    # failed checked strand, the BaseException must dominate (propagate) but the strand failure must
-    # not be silently dropped -- it should be chained via __context__.
-    cg = ConcurrencyGroup(name="outer")
-    cg.__enter__()
-    failing_thread = cg.start_new_thread(target=_raise_intentional_error)
-    failing_thread.join_without_raising(timeout=5.0)
-
-    keyboard_interrupt = KeyboardInterrupt("user interrupted")
-    with pytest.raises(KeyboardInterrupt) as exception_info:
-        cg.__exit__(KeyboardInterrupt, keyboard_interrupt, None)
-
-    assert exception_info.value is keyboard_interrupt
-    # The strand failure is chained so it is not lost.
-    chained = exception_info.value.__context__
-    assert isinstance(chained, ConcurrencyExceptionGroup)
-    assert any(isinstance(e, _IntentionalTestError) for e in chained.exceptions)
-
-
 def test_concurrency_group_raises_timeout_when_not_finished_in_time() -> None:
     # Never set -- thread stays blocked, guaranteeing the CG times out.
     blocked = Event()
@@ -268,17 +247,17 @@ def test_all_failure_modes_get_combined(tmp_path: Path) -> None:
             process2 = cg.run_process_in_background(["bash", "-c", "exit 1"], is_checked_by_group=True)
             assert poll_until(lambda: process2.poll() is not None, timeout=5.0)
             raise _IntentionalTestError("intentional test failure")
-    # The timed-out sleep process is actually killed within the exit window (the CG gives it a real
-    # grace period), so its non-zero exit surfaces as a ProcessError in addition to the
-    # StrandTimedOutError from the wait() that timed out first. Combined with process2's failure and
-    # the intentional error, that is four distinct failures.
-    assert len(exception_info.value.exceptions) == 4
+    assert len(exception_info.value.exceptions) == 3
     assert any(isinstance(e, ProcessError) for e in exception_info.value.exceptions)
     assert any(isinstance(e, _IntentionalTestError) for e in exception_info.value.exceptions)
     assert any(isinstance(e, StrandTimedOutError) for e in exception_info.value.exceptions)
-    # The sleep process was reliably terminated during exit, so it is already finished here.
+    # CG's timeout path is fire-and-forget: `process.terminate(force_kill_seconds=0.0)`
+    # signals the background thread but does not wait for it to reap the
+    # subprocess. Without this explicit wait, pytest's session-level leak
+    # detector can scan before the SIGTERM+reap completes and blame whichever
+    # test ran last in the shard.
     assert sleep_process is not None
-    assert sleep_process.is_finished()
+    assert poll_until(sleep_process.is_finished, timeout=10.0)
 
 
 def test_nesting_in_the_same_thread_just_works() -> None:

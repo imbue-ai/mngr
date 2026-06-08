@@ -17,7 +17,6 @@ from typing import Sequence
 from loguru import logger
 
 from imbue.concurrency_group.errors import ProcessSetupError
-from imbue.concurrency_group.errors import ProcessTerminationError
 from imbue.concurrency_group.errors import ProcessTimeoutError
 from imbue.concurrency_group.event_utils import MutableEvent
 from imbue.concurrency_group.event_utils import ReadOnlyEvent
@@ -157,7 +156,7 @@ class OutputGatherer:
         ), self.stderr_container.in_progress_line.decode("utf-8", errors="replace")
 
 
-def _shutdown_popen(process: subprocess.Popen[bytes], command: str, shutdown_timeout_sec: float) -> int:
+def _shutdown_popen(process: subprocess.Popen[bytes], command: str, shutdown_timeout_sec: float) -> int | None:
     with log_span(
         "Aborting command (via sigterm to {}) due to signal...",
         process.pid,
@@ -172,15 +171,9 @@ def _shutdown_popen(process: subprocess.Popen[bytes], command: str, shutdown_tim
             try:
                 process.wait(timeout=2)
                 return process.returncode
-            except subprocess.TimeoutExpired as e:
-                # The process survived both SIGTERM and SIGKILL. Do not return None: that would
-                # become FinishedProcess.returncode=None, which check()/_cleanup treat as success,
-                # silently reporting a possibly-still-running runaway process as a clean completion.
+            except subprocess.TimeoutExpired:
                 logger.error("Process didn't die after kill()")
-                raise ProcessTerminationError(
-                    f"Process for command `{command}` (pid {process.pid}) could not be terminated "
-                    "even after a force kill."
-                ) from e
+                return None
 
 
 def _is_timeout(timeout_time: float | None = None) -> bool:

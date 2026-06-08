@@ -74,14 +74,6 @@ class ObservableThread(threading.Thread):
         super().join(timeout)
         self.maybe_raise()
 
-    def join_without_raising(self, timeout: float | None = None) -> None:
-        """Wait for thread completion without re-raising any captured exception.
-
-        Use this when the caller collects strand failures separately (e.g. via
-        `maybe_raise`/`exception_if_not_suppressed`) and only needs to wait for the thread.
-        """
-        super().join(timeout)
-
     def maybe_raise(self) -> None:
         exception = self.exception_if_not_suppressed
         if exception:

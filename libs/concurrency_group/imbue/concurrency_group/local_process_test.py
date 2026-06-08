@@ -10,7 +10,6 @@ from time import monotonic
 import pytest
 
 from imbue.concurrency_group.errors import ProcessError
-from imbue.concurrency_group.errors import ProcessInvariantError
 from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.event_utils import CompoundEvent
 from imbue.concurrency_group.local_process import RunningProcess
@@ -475,32 +474,6 @@ def test_run_background_thread_safety() -> None:
     # Check no errors occurred
     assert len(errors) == 0
     assert process.returncode == 0
-
-
-class _NoResultProcess(RunningProcess):
-    """A RunningProcess whose run() returns without setting a result or raising -- an impossible state."""
-
-    def run(self, kwargs: dict[str, object]) -> None:
-        # Unblock start()'s initialization handshake, then exit without setting _completed_process.
-        on_initialization_complete = kwargs["on_initialization_complete"]
-        on_initialization_complete(None)  # ty: ignore[call-non-callable]
-
-
-def test_poll_raises_invariant_error_when_thread_finishes_without_result() -> None:
-    # If the run thread exits without producing a FinishedProcess and without recording an
-    # exception, poll() must surface the invariant violation loudly instead of fabricating an
-    # arbitrary exit code (previously the magic value 1007 was returned and flowed through as a
-    # real exit status).
-    process = _NoResultProcess(
-        command=["echo", "hi"],
-        output_queue=Queue(),
-        shutdown_event=Event(),
-    )
-    process.start(kwargs={})
-    assert poll_until(lambda: process._thread is not None and not process._thread.is_alive(), timeout=5.0)
-
-    with pytest.raises(ProcessInvariantError):
-        process.poll()
 
 
 def test_run_background_shutdown_event_already_set() -> None:

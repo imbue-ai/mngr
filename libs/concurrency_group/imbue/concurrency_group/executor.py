@@ -45,11 +45,7 @@ class ConcurrencyGroupExecutor(AbstractContextManager):
             with self._semaphore:
                 try:
                     result = fn(*args, **kwargs)
-                # Catch BaseException (not just Exception) so the future always completes: a
-                # KeyboardInterrupt/SystemExit/GeneratorExit raised by fn would otherwise leave the
-                # future pending forever, hanging any caller blocked on result(). This mirrors the
-                # stdlib ThreadPoolExecutor's worker, which also routes BaseException to the future.
-                except BaseException as e:
+                except Exception as e:
                     future.set_exception(e)
                 else:
                     future.set_result(result)

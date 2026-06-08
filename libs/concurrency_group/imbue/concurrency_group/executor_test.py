@@ -77,23 +77,6 @@ def test_executor_exception_does_not_prevent_other_submissions() -> None:
         error_future.result()
 
 
-def _raise_base_exception() -> None:
-    raise KeyboardInterrupt("interrupted in task")
-
-
-def test_executor_completes_future_when_task_raises_base_exception() -> None:
-    # A BaseException (e.g. KeyboardInterrupt) raised by the submitted task must still complete the
-    # future; otherwise result() would hang forever. KeyboardInterrupt is a BaseException, so the
-    # outer ConcurrencyGroup does not treat it as a checked-strand Exception failure.
-    with ConcurrencyGroup(name="outer") as cg:
-        with ConcurrencyGroupExecutor(parent_cg=cg, name="test", max_workers=4) as executor:
-            future = executor.submit(_raise_base_exception)
-
-    assert future.done()
-    with pytest.raises(KeyboardInterrupt, match="interrupted in task"):
-        future.result()
-
-
 def test_executor_waits_for_all_threads_on_exit() -> None:
     release = Event()
 

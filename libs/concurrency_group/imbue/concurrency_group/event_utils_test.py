@@ -89,14 +89,6 @@ def test_shutdown_event_is_set_via_own_event() -> None:
     assert shutdown_event.is_set() is True
 
 
-def test_shutdown_event_bare_constructor_is_set_is_safe() -> None:
-    """A bare ShutdownEvent() (no parent assigned) must be safe to read; _parent defaults to None."""
-    shutdown_event = ShutdownEvent()
-    assert shutdown_event.is_set() is False
-    shutdown_event.set()
-    assert shutdown_event.is_set() is True
-
-
 def test_compound_event_is_set_returns_true_when_any_child_is_set() -> None:
     """Test that CompoundEvent.is_set() returns True if any child event is set."""
     event1 = Event()

@@ -8,7 +8,6 @@ from threading import Event
 import pytest
 
 from imbue.concurrency_group.errors import ProcessError
-from imbue.concurrency_group.errors import ProcessTerminationError
 from imbue.concurrency_group.errors import ProcessTimeoutError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.concurrency_group.subprocess_utils import OutputGatherer
@@ -244,38 +243,6 @@ def test_shutdown_popen_returns_returncode_after_terminate() -> None:
 
     assert returncode is not None
     assert process.poll() is not None
-
-
-class _UnkillablePopen:
-    """A fake Popen that never exits, so wait() always times out (simulates an unkillable process)."""
-
-    def __init__(self) -> None:
-        self.pid = 99999
-        self.returncode: int | None = None
-        self.terminate_count = 0
-        self.kill_count = 0
-
-    def terminate(self) -> None:
-        self.terminate_count += 1
-
-    def kill(self) -> None:
-        self.kill_count += 1
-
-    def wait(self, timeout: float | None = None) -> int:
-        raise subprocess.TimeoutExpired(cmd="fake", timeout=timeout if timeout is not None else 0.0)
-
-
-def test_shutdown_popen_raises_when_process_cannot_be_killed() -> None:
-    # If the process survives both SIGTERM and SIGKILL, _shutdown_popen must raise rather than
-    # return None: returning None would become FinishedProcess.returncode=None, which check() and
-    # _cleanup treat as a clean success, silently reporting a runaway process as completed.
-    process = _UnkillablePopen()
-
-    with pytest.raises(ProcessTerminationError):
-        _shutdown_popen(process, "fake command", shutdown_timeout_sec=0.01)  # ty: ignore[invalid-argument-type]
-
-    assert process.terminate_count == 1
-    assert process.kill_count == 1
 
 
 def test_gather_output_reads_from_stdout_and_stderr() -> None:

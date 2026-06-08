@@ -38,10 +38,6 @@ T = TypeVar("T")
 DEFAULT_EXIT_TIMEOUT_SECONDS: Final[float] = 10.0
 DEFAULT_SHUTDOWN_TIMEOUT_SECONDS: Final[float] = 10.0
 
-# Grace period to wait for a timed-out process's run thread to exit after we signal shutdown,
-# before concluding that it could not be killed.
-PROCESS_FORCE_KILL_GRACE_SECONDS: Final[float] = 5.0
-
 # Increase this if cleanup becomes a performance bottleneck.
 CLEANUP_INTERVAL_TICKS: Final[int] = 1
 # For each kind of strand, we don't need to keep too many failed ones around after cleanup.
@@ -150,7 +146,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
             self._exited_event.set()
 
     def _exit(self, exc_value: BaseException | None) -> None:
-        main_exception: BaseException | None = exc_value
+        main_exception: BaseException | None = exc_value if exc_value is not None else None
         timeout_exception_group: ConcurrencyExceptionGroup | None = None
         failure_exception_group: ConcurrencyExceptionGroup | None = None
 
@@ -190,33 +186,13 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
                 exceptions.append(ChildConcurrencyGroupDidNotExitError(child_message))
                 message = message or child_message
 
-        # Partition the accumulated failures: a non-Exception BaseException (e.g. KeyboardInterrupt,
-        # SystemExit) must dominate and propagate so the interrupt is honored, but we must not
-        # silently drop the sibling failures accumulated alongside it (the old code raised the
-        # first BaseException mid-loop, discarding everything else). We surface the first
-        # BaseException as the propagating error and chain the rest to it so they remain visible.
-        base_exceptions: list[BaseException] = [e for e in exceptions if not isinstance(e, Exception)]
-        checked_exceptions: list[Exception] = [e for e in exceptions if isinstance(e, Exception)]
-
-        if len(base_exceptions) > 0:
-            dominant_exception = base_exceptions[0]
-            # Chain any additional BaseExceptions (rare, e.g. multiple interrupts) onto the dominant
-            # one via __context__ so none are lost, then chain the Exception siblings as a group.
-            chained_context: BaseException | None = None
-            for additional_base_exception in base_exceptions[1:]:
-                additional_base_exception.__context__ = chained_context
-                chained_context = additional_base_exception
-            if len(checked_exceptions) > 0:
-                sibling_message = message or f"Additional failures in concurrency group: `{self.name}`."
-                sibling_group = ConcurrencyExceptionGroup(sibling_message, checked_exceptions)
-                sibling_group.__context__ = chained_context
-                chained_context = sibling_group
-            dominant_exception.__context__ = chained_context
-            raise dominant_exception
-
-        # Any non-Exception main_exception was partitioned into base_exceptions above and already
-        # raised, so a non-None main_exception here is guaranteed to be an Exception.
+        checked_exceptions: list[Exception] = []
+        for exception in exceptions:
+            if not isinstance(exception, Exception):
+                raise exception
+            checked_exceptions.append(exception)
         assert main_exception is None or isinstance(main_exception, Exception)
+
         if len(checked_exceptions) > 0:
             deduplicated_exceptions = _deduplicate_exceptions(tuple(checked_exceptions))
             assert message is not None
@@ -241,22 +217,9 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
                     command = error.cmd
                     stdout = process.read_stdout()[:1024]
                     stderr = process.read_stderr()[:1024]
-                    # Attempt to actually kill the process, giving it a real grace period to exit.
-                    # With force_kill_seconds=0.0 this would join with a zero timeout and almost
-                    # always raise TimeoutExpired right after a timeout, so the kill could not be
-                    # confirmed -- report whether we actually managed to terminate it.
-                    is_killed = True
-                    try:
-                        process.terminate(force_kill_seconds=PROCESS_FORCE_KILL_GRACE_SECONDS)
-                    except TimeoutExpired:
-                        is_killed = False
-                    if is_killed:
-                        outcome = "did not terminate in time and was killed."
-                    else:
-                        outcome = "did not terminate in time and could not be killed (it may still be running)."
                     message = "\n".join(
                         [
-                            f"Process {command} {outcome}",
+                            f"Process {command} did not terminate in time and was killed.",
                             f"Stdout: {stdout}",
                             f"Stderr: {stderr}",
                         ]
@@ -265,13 +228,18 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
                         raise StrandTimedOutError(message) from error
                     except StrandTimedOutError as e:
                         timeout_errors.append(e)
+                    try:
+                        process.terminate(force_kill_seconds=0.0)
+                    except TimeoutExpired:
+                        pass
         for tracked_thread in self._threads:
             remaining_timeout = self._get_remaining_timeout(start_time, timeout_seconds)
             # Thread.join(timeout=float("inf")) raises OverflowError, so convert to None (wait forever)
             join_timeout = None if remaining_timeout == float("inf") else remaining_timeout
-            # Join without re-raising: strand failures are collected separately below and in
-            # _raise_if_any_strands_or_ancestors_failed. We only need to wait for the thread here.
-            tracked_thread.thread.join_without_raising(timeout=join_timeout)
+            try:
+                tracked_thread.thread.join(timeout=join_timeout)
+            except Exception:
+                pass
             if tracked_thread.thread.is_alive():
                 message = (
                     f"Thread `{tracked_thread.thread.name} ({tracked_thread.thread.target_name})` "
