@@ -333,6 +333,11 @@ def _build_signal_or_enqueue_command(
     )
     script = (
         'sig="$(mktemp)"; '
+        # Clean up on every exit path: remove the sentinel file and reap any
+        # still-running background job (notably the hook waiter, which otherwise
+        # outlives a fast enqueue-win and would recreate "$sig" -- leaking the
+        # temp file -- when the hook finally fires). Runs exactly once on exit.
+        'trap \'p="$(jobs -p)"; [ -n "$p" ] && kill $p 2>/dev/null; rm -f "$sig"\' EXIT; '
         f'base="$({read_enqueue_ts})"; '
         # Register the hook waiter first (full timeout), sentinel on success.
         f'( timeout {full_timeout} tmux wait-for "$1" >/dev/null 2>&1 && echo 1 > "$sig" ) & '
@@ -340,11 +345,11 @@ def _build_signal_or_enqueue_command(
         '( sleep 0.1 && tmux send-keys -t "$2" Enter ) & '
         f'end="$(( $(date +%s) + {int(full_timeout) + 1} ))"; '
         'while [ "$(date +%s)" -lt "$end" ]; do '
-        'if [ -s "$sig" ]; then rm -f "$sig"; exit 0; fi; '
+        'if [ -s "$sig" ]; then exit 0; fi; '
         f'cur="$({read_enqueue_ts})"; '
-        'if [[ -n "$cur" && "$cur" > "$base" ]]; then rm -f "$sig"; exit 0; fi; '
+        'if [[ -n "$cur" && "$cur" > "$base" ]]; then exit 0; fi; '
         "sleep 0.25; "
         "done; "
-        'rm -f "$sig"; exit 1'
+        "exit 1"
     )
     return f"bash -c {shlex.quote(script)} _ {shlex.quote(wait_channel)} {tmux_target.as_shell_arg()}"
