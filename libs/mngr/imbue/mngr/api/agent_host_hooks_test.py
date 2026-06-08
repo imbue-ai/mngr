@@ -3,10 +3,6 @@
 Tests verify that hooks fire in the correct order during create and destroy flows.
 """
 
-from collections.abc import Generator
-from contextlib import contextmanager
-from datetime import datetime
-from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import cast
@@ -17,14 +13,11 @@ from imbue.mngr import hookimpl
 from imbue.mngr.api.cleanup import execute_cleanup
 from imbue.mngr.api.cleanup import find_agents_for_cleanup
 from imbue.mngr.api.create import create
-from imbue.mngr.api.providers import _instance_cache
 from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.api.testing import inject_provider_instance
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.agent import AgentInterface
-from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.host import CreateAgentOptions
-from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -38,7 +31,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
-from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.providers.mock_provider_test import OfflineHostDestroyableProvider
 from imbue.mngr.utils.testing import make_ctx_with_plugins
 from imbue.mngr.utils.testing import make_test_agent_details
 from imbue.mngr.utils.testing import tmux_session_cleanup
@@ -292,62 +285,6 @@ def test_create_without_work_dir_skips_file_copy_hooks(
 # --- Destroy flow tests ---
 
 
-@contextmanager
-def _injected_provider(
-    name: ProviderInstanceName,
-    mngr_ctx: MngrContext,
-    instance: LocalProviderInstance,
-) -> Generator[None, None, None]:
-    """Temporarily inject a provider instance into the provider cache.
-
-    execute_cleanup resolves the host's provider via get_provider_instance, which
-    consults this cache (keyed by (name, id(mngr_ctx))). Injecting lets a test drive
-    the real cleanup destroy path against a custom provider without going over the
-    network or touching real infrastructure.
-    """
-    cache_key = (name, id(mngr_ctx))
-    _instance_cache[cache_key] = instance
-    try:
-        yield
-    finally:
-        _instance_cache.pop(cache_key, None)
-
-
-class _OfflineHostDestroyableProvider(LocalProviderInstance):
-    """Local provider whose get_host() returns an OfflineHost and whose destroy_host()
-    succeeds (no-op).
-
-    Used to drive the real host-destroy path in execute_cleanup: when a cleanup target
-    resolves to an offline host, _execute_destroy fires on_before_host_destroy, calls
-    provider.destroy_host(), then fires on_host_destroyed. A plain LocalProviderInstance
-    cannot be used here because its destroy_host() always raises
-    LocalHostNotDestroyableError, which would short-circuit before on_host_destroyed.
-
-    get_host() has no return type annotation because it returns OfflineHost, which
-    satisfies HostInterface but is not a subclass of Host (the parent's declared return
-    type). Adding a return annotation would produce a type error.
-    """
-
-    def get_host(self, host: HostId | HostName):
-        host_id = host if isinstance(host, HostId) else HostId.generate()
-        now = datetime.now(timezone.utc)
-        certified_data = CertifiedHostData(
-            created_at=now,
-            updated_at=now,
-            host_id=str(host_id),
-            host_name="test-host-destroy-hooks",
-        )
-        return OfflineHost(
-            id=host_id,
-            certified_host_data=certified_data,
-            provider_instance=self,
-            mngr_ctx=self.mngr_ctx,
-        )
-
-    def destroy_host(self, host: HostInterface | HostId) -> None:
-        pass
-
-
 @pytest.mark.tmux
 def test_destroy_agent_hooks_fire_in_order(
     temp_mngr_ctx: MngrContext,
@@ -428,7 +365,7 @@ def test_host_destroy_hooks_fire_in_order(
     ctx = _make_tracker_ctx(temp_mngr_ctx, tracker)
 
     provider_name = ProviderInstanceName("offline-host-destroy-provider")
-    provider = _OfflineHostDestroyableProvider(
+    provider = OfflineHostDestroyableProvider(
         name=provider_name,
         host_dir=temp_host_dir,
         mngr_ctx=ctx,
@@ -443,7 +380,7 @@ def test_host_destroy_hooks_fire_in_order(
         provider_name=provider_name,
     )
 
-    with _injected_provider(provider_name, ctx, provider):
+    with inject_provider_instance(provider, ctx):
         result = execute_cleanup(
             mngr_ctx=ctx,
             agents=[agent_details],
