@@ -38,6 +38,7 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
@@ -861,8 +862,9 @@ def _format_value_as_string(value: Any) -> str:
         return ", ".join(f"{k}={v}" for k, v in value.items())
     elif isinstance(value, Enum):
         return str(value.value)
-    elif isinstance(value, SnapshotInfo):
-        # SnapshotInfo carries both name and id; prefer the name for display.
+    elif isinstance(value, (SnapshotInfo, HostDetails)):
+        # SnapshotInfo and HostDetails both carry name and id; prefer the name
+        # for display (e.g. a bare `host` field renders as the host name).
         return str(value.name)
     elif isinstance(value, (tuple, list)) and not isinstance(value, str):
         return ", ".join(_format_value_as_string(item) for item in value)

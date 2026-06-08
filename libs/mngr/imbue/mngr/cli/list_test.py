@@ -31,8 +31,10 @@ from imbue.mngr.cli.list import _sort_agents_by_cel
 from imbue.mngr.cli.list import _truncate_to_width
 from imbue.mngr.cli.list import list_command
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
@@ -159,6 +161,16 @@ def test_format_value_as_string_snapshot_uses_name() -> None:
     snapshot = _create_test_snapshot("my-snapshot", 0)
     result = _format_value_as_string(snapshot)
     assert result == "my-snapshot"
+
+
+def test_format_value_as_string_host_details_uses_name() -> None:
+    """_format_value_as_string should render a HostDetails (bare `host` field) as its name."""
+    host_details = HostDetails(
+        id=HostId.generate(),
+        name="my-host",
+        provider_name=ProviderInstanceName("local"),
+    )
+    assert _format_value_as_string(host_details) == "my-host"
 
 
 # =============================================================================
