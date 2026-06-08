@@ -507,30 +507,19 @@ def encode_claude_project_dir_name(path: Path) -> str:
 # Managed settings file (loaded via ``claude --settings``)
 # =============================================================================
 
-# Path, relative to the agent's state directory ($MNGR_AGENT_STATE_DIR), of the
-# file into which mngr writes ALL of its own Claude hooks. mngr launches
-# ``claude --settings <this file>`` so these hooks load as a command-line
-# settings layer that merges additively with the normal hierarchy.
-#
-# Why not the project's ``<work_dir>/.claude/settings.local.json``: Claude Code
-# reads settings.local.json for *every* session in that directory, including
-# plain (non-mngr) runs, so hooks placed there leak into normal config and fire
-# outside mngr (where $MNGR_AGENT_STATE_DIR / $MNGR_HOST_DIR are unset, producing
-# errors like ``mkdir: cannot create directory '/events'``). This file is private
-# to the agent: it lives under the agent state dir's ``plugin/claude/`` namespace
-# (alongside the per-agent config dir and stream buffers, and preserved/transferred
-# with the rest of ``plugin/`` on clone), and mngr rewrites it fresh on every
-# provision -- so there is no cross-version accumulation and nothing leaks into a
-# file that plain ``claude`` reads.
+# Path (relative to $MNGR_AGENT_STATE_DIR) of the file holding all of mngr's
+# Claude hooks, loaded via ``claude --settings``. It lives in the agent's private
+# state dir rather than the project's ``.claude/settings.local.json``, which
+# every claude session in that directory reads (including plain non-mngr ones) --
+# so mngr's hooks take effect only inside the agent and never run in a plain
+# ``claude`` session. mngr owns the file outright and rewrites it fresh each provision.
 MANAGED_SETTINGS_RELATIVE_PATH: Final[tuple[str, ...]] = ("plugin", "claude", "mngr_managed_settings.json")
 
 
 def get_managed_settings_path(agent_state_dir: Path) -> Path:
-    """Return the path to an agent's mngr-managed Claude settings file.
+    """Return the agent's mngr-managed Claude settings file under ``agent_state_dir``.
 
-    ``agent_state_dir`` is the agent's state directory (the on-disk location of
-    $MNGR_AGENT_STATE_DIR). See ``MANAGED_SETTINGS_RELATIVE_PATH`` for why mngr
-    keeps its hooks here rather than in the project's settings.local.json.
+    See ``MANAGED_SETTINGS_RELATIVE_PATH``.
     """
     return agent_state_dir.joinpath(*MANAGED_SETTINGS_RELATIVE_PATH)
 

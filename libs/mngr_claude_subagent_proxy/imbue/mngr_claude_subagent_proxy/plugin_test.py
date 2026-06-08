@@ -10,18 +10,25 @@ import pytest
 
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import PluginName
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
+from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr_claude.claude_config import get_managed_settings_path
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
+from imbue.mngr_claude_subagent_proxy._stop_hook_guard import PROXY_CHILD_GUARD_PREFIX
 from imbue.mngr_claude_subagent_proxy.data_types import SubagentProxyMode
 from imbue.mngr_claude_subagent_proxy.data_types import SubagentProxyPluginConfig
 from imbue.mngr_claude_subagent_proxy.plugin import CLAUDE_SUBAGENT_PROXY_PLUGIN_NAME
 from imbue.mngr_claude_subagent_proxy.plugin import SubagentProxyChildConfig
 from imbue.mngr_claude_subagent_proxy.plugin import UnguardedProjectStopHookError
 from imbue.mngr_claude_subagent_proxy.plugin import UnsupportedSubagentHookError
+from imbue.mngr_claude_subagent_proxy.plugin import _guard_user_stop_hooks_in_project_settings
 from imbue.mngr_claude_subagent_proxy.plugin import cascade_destroy_recorded_children
 from imbue.mngr_claude_subagent_proxy.plugin import on_after_provisioning
 from imbue.mngr_claude_subagent_proxy.plugin import on_before_agent_destroy
@@ -683,3 +690,75 @@ def test_plugin_strip_hooks_is_safe_when_settings_missing(work_dir: Path, fake_h
     assert "Stop" not in hooks
     assert "SubagentStop" not in hooks
     assert "PreToolUse" in hooks
+
+
+def _write_user_stop_hook(work_dir: Path) -> Path:
+    """Seed work_dir/.claude/settings.local.json with one user-defined Stop hook."""
+    claude_dir = work_dir / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    settings_path = claude_dir / "settings.local.json"
+    settings_path.write_text(
+        json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo user-stop"}]}]}}) + "\n"
+    )
+    return settings_path
+
+
+def test_guard_user_stop_hooks_raises_when_settings_local_not_gitignored(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """Guarding user Stop hooks refuses to dirty a non-gitignored settings.local.json.
+
+    This is the one place mngr still requires settings.local.json be gitignored:
+    wrapping the user's own Stop hooks would otherwise show as an unstaged change.
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    # No .gitignore entry: settings.local.json is not ignored.
+    init_git_repo(work_dir, initial_commit=False)
+    _write_user_stop_hook(work_dir)
+
+    with pytest.raises(PluginMngrError, match="not gitignored"):
+        _guard_user_stop_hooks_in_project_settings(host, work_dir)
+
+
+def test_guard_user_stop_hooks_wraps_when_gitignored(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """When settings.local.json is gitignored, user Stop hooks get the proxy-child guard."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    init_git_repo(work_dir, initial_commit=False)
+    (work_dir / ".gitignore").write_text(".claude/settings.local.json\n")
+    settings_path = _write_user_stop_hook(work_dir)
+
+    _guard_user_stop_hooks_in_project_settings(host, work_dir)
+
+    command = json.loads(settings_path.read_text())["hooks"]["Stop"][0]["hooks"][0]["command"]
+    assert PROXY_CHILD_GUARD_PREFIX in command
+
+
+def test_guard_user_stop_hooks_skips_gitignore_check_when_nothing_to_guard(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """The gitignore requirement applies only when there is a Stop hook to wrap.
+
+    A settings.local.json with no Stop/SubagentStop hooks is never written, so a
+    missing gitignore entry does not block provisioning.
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    # No .gitignore entry: settings.local.json is not ignored.
+    init_git_repo(work_dir, initial_commit=False)
+    claude_dir = work_dir / ".claude"
+    claude_dir.mkdir()
+    # Only a non-Stop user hook -- nothing for the proxy-child guard to wrap.
+    (claude_dir / "settings.local.json").write_text(
+        json.dumps(
+            {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "echo pre"}]}]}}
+        )
+        + "\n"
+    )
+
+    # Should not raise: no write happens, so the gitignore requirement never applies.
+    _guard_user_stop_hooks_in_project_settings(host, work_dir)

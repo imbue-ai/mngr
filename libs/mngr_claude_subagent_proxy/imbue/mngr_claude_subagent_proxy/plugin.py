@@ -27,6 +27,7 @@ from imbue.mngr_claude.claude_config import get_user_claude_config_dir
 from imbue.mngr_claude.claude_config import merge_hooks_config
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
+from imbue.mngr_claude.plugin import check_settings_local_gitignored
 from imbue.mngr_claude_subagent_proxy import hookimpl
 from imbue.mngr_claude_subagent_proxy import resources as _subagent_proxy_resources
 from imbue.mngr_claude_subagent_proxy._stop_hook_guard import MNGR_MANAGED_HOOK_MARKERS
@@ -241,14 +242,12 @@ def _write_mngr_subagents_skill(host: OnlineHostInterface, work_dir: Path) -> No
 def _merge_hooks_into_managed_settings(
     host: OnlineHostInterface, managed_settings_path: Path, hooks_config: dict[str, Any]
 ) -> None:
-    """Merge ``hooks_config`` into the agent's mngr-managed settings file.
+    """Layer ``hooks_config`` onto the agent's mngr-managed settings file.
 
-    mngr writes ALL of its own hooks into this per-agent file (loaded via
-    ``claude --settings``; see ``get_managed_settings_path``) rather than the
-    project's ``.claude/settings.local.json``, which plain ``claude`` would
-    also read. mngr_claude provisioning writes the base file (readiness hooks)
-    before this plugin's ``on_after_provisioning`` runs, so it normally
-    already exists; we read-merge-write to layer the proxy hooks on top.
+    mngr's hooks live in this per-agent file (loaded via ``claude --settings``;
+    see ``get_managed_settings_path``), not the project's settings.local.json.
+    mngr_claude provisioning writes the base file before this plugin's
+    ``on_after_provisioning`` runs, so it normally already exists.
     """
     existing_settings: dict[str, Any] = {}
     try:
@@ -265,28 +264,23 @@ def _merge_hooks_into_managed_settings(
     if merged is None:
         logger.debug("Subagent-proxy hooks already configured in {}", managed_settings_path)
         return
-    # mngr_claude provisioning normally creates the plugin/claude/ parent (and
-    # the base file) before this runs, but ensure it exists so this helper does
-    # not depend on that ordering.
+    # Ensure the parent exists so this doesn't depend on mngr_claude creating it first.
     host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(managed_settings_path.parent))}", timeout_seconds=5.0)
     host.write_text_file(managed_settings_path, json.dumps(merged, indent=2) + "\n")
 
 
 def _guard_user_stop_hooks_in_project_settings(host: OnlineHostInterface, work_dir: Path) -> None:
-    """Rewrite user-defined Stop/SubagentStop commands in the project's
-    ``.claude/settings.local.json`` to no-op when MNGR_CLAUDE_SUBAGENT_PROXY_CHILD=1.
+    """Wrap user Stop/SubagentStop hooks in ``.claude/settings.local.json`` with the
+    MNGR_CLAUDE_SUBAGENT_PROXY_CHILD guard so they no-op inside proxy children.
 
-    This stops user-installed Stop hooks (imbue-code-guardian's
-    stop_hook_orchestrator.sh, project-specific cleanup hooks, etc.) from
-    re-prompting spawned subagents into autofix/verify cycles. The wrap is
-    env-conditional so it is safe for the parent agent too: the parent's
-    MNGR_CLAUDE_SUBAGENT_PROXY_CHILD is unset, the guard falls through, and
-    the original command runs normally. Only spawned proxy children, which we
-    explicitly set the env var on at create time, see the no-op.
+    Without this, user-installed Stop hooks (imbue-code-guardian's
+    stop_hook_orchestrator.sh, project cleanup hooks, etc.) would re-prompt
+    spawned subagents into autofix/verify cycles. The wrap is env-conditional,
+    so the parent agent (env unset) still runs the original command. Targets
+    the *user's* hooks only; mngr's own hooks live in the managed settings file.
 
-    This targets the *user's* settings.local.json -- mngr's own hooks live in
-    the managed settings file and are already scoped via SESSION_GUARD, so
-    they don't need wrapping.
+    Writing settings.local.json must not dirty the worktree, so this requires
+    the file to be gitignored -- the one place that requirement still applies.
     """
     settings_path = work_dir / ".claude" / "settings.local.json"
     try:
@@ -297,6 +291,7 @@ def _guard_user_stop_hooks_in_project_settings(host: OnlineHostInterface, work_d
         logger.warning("Could not parse {}; skipping user Stop-hook guard pass", settings_path)
         return
     if guard_user_stop_hooks_against_proxy_children(settings):
+        check_settings_local_gitignored(host, work_dir)
         host.write_text_file(settings_path, json.dumps(settings, indent=2) + "\n")
 
 
@@ -663,6 +658,7 @@ def _strip_user_hooks_from_subagent(host: OnlineHostInterface, work_dir: Path) -
 
     if not stripped_any:
         return
+    check_settings_local_gitignored(host, work_dir)
     logger.info("Stripped user-configured hooks from spawned subagent settings at {}", settings_path)
     host.write_text_file(settings_path, json.dumps(settings, indent=2) + "\n")
 

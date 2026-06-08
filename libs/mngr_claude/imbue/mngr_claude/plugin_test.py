@@ -64,7 +64,6 @@ from imbue.mngr_claude.plugin import ProvisioningContext
 from imbue.mngr_claude.plugin import WaitingReason
 from imbue.mngr_claude.plugin import _build_install_command_hint
 from imbue.mngr_claude.plugin import _build_settings_json
-from imbue.mngr_claude.plugin import _check_settings_local_gitignored
 from imbue.mngr_claude.plugin import _claude_json_has_primary_api_key
 from imbue.mngr_claude.plugin import _generate_installed_plugins_content
 from imbue.mngr_claude.plugin import _generate_known_marketplaces_content
@@ -84,6 +83,7 @@ from imbue.mngr_claude.plugin import _should_preserve_sessions
 from imbue.mngr_claude.plugin import _write_generated_files
 from imbue.mngr_claude.plugin import agent_field_generators
 from imbue.mngr_claude.plugin import approve_api_key_for_claude
+from imbue.mngr_claude.plugin import check_settings_local_gitignored
 from imbue.mngr_claude.plugin import get_files_for_deploy
 from imbue.mngr_claude.plugin import on_before_create
 from imbue.mngr_claude.plugin import register_cli_options
@@ -898,116 +898,6 @@ def test_tui_ready_indicator_is_claude_code(
     assert agent.get_tui_ready_indicator() == "Claude Code"
 
 
-def test_preflight_check_raises_when_not_gitignored(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """preflight_check should raise when .claude/settings.local.json is not gitignored in source."""
-    host = local_provider.create_host(HostName("localhost"))
-    source_dir = tmp_path / "source"
-    source_dir.mkdir()
-    init_git_repo(source_dir, initial_commit=False)
-
-    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
-    config = ClaudeAgentConfig(check_installation=False)
-
-    with pytest.raises(PluginMngrError, match="not gitignored"):
-        ClaudeAgent.preflight_check(
-            source_host=host,
-            source_path=source_dir,
-            agent_options=options,
-            agent_config=config,
-            mngr_ctx=temp_mngr_ctx,
-        )
-
-
-def test_preflight_check_passes_when_gitignored(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """preflight_check should pass when .claude/settings.local.json is gitignored."""
-    host = local_provider.create_host(HostName("localhost"))
-    source_dir = tmp_path / "source"
-    source_dir.mkdir()
-    _init_git_with_gitignore(source_dir)
-
-    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
-    config = ClaudeAgentConfig(check_installation=False)
-
-    # Should not raise
-    ClaudeAgent.preflight_check(
-        source_host=host,
-        source_path=source_dir,
-        agent_options=options,
-        agent_config=config,
-        mngr_ctx=temp_mngr_ctx,
-    )
-
-
-def test_preflight_check_skips_when_not_git_repo(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """preflight_check should skip gitignore check when source is not a git repo."""
-    host = local_provider.create_host(HostName("localhost"))
-    source_dir = tmp_path / "source"
-    source_dir.mkdir()
-
-    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
-    config = ClaudeAgentConfig(check_installation=False)
-
-    # Should not raise (no git repo, no gitignore check)
-    ClaudeAgent.preflight_check(
-        source_host=host,
-        source_path=source_dir,
-        agent_options=options,
-        agent_config=config,
-        mngr_ctx=temp_mngr_ctx,
-    )
-
-
-def test_preflight_check_raises_when_only_global_gitignore(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """preflight_check should raise when .claude/settings.local.json is only in global gitignore.
-
-    Remote hosts don't have the user's global gitignore, so a rule that only
-    lives in the global config would cause provisioning to fail after expensive
-    host creation.
-    """
-    host = local_provider.create_host(HostName("localhost"))
-    source_dir = tmp_path / "source"
-    source_dir.mkdir()
-    init_git_repo(source_dir, initial_commit=False)
-
-    # Set up a "global" gitignore that covers the file, but no repo .gitignore
-    global_gitignore = tmp_path / "global_gitignore"
-    global_gitignore.write_text(".claude/settings.local.json\n")
-    subprocess.run(
-        ["git", "config", "core.excludesFile", str(global_gitignore)],
-        cwd=source_dir,
-        check=True,
-        capture_output=True,
-    )
-
-    # Verify the file IS ignored (via global)
-    check = subprocess.run(
-        ["git", "check-ignore", "-q", ".claude/settings.local.json"],
-        cwd=source_dir,
-        capture_output=True,
-    )
-    assert check.returncode == 0, "File should be ignored via global gitignore"
-
-    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
-    config = ClaudeAgentConfig(check_installation=False)
-
-    with pytest.raises(PluginMngrError, match="only gitignored via your global gitignore"):
-        ClaudeAgent.preflight_check(
-            source_host=host,
-            source_path=source_dir,
-            agent_options=options,
-            agent_config=config,
-            mngr_ctx=temp_mngr_ctx,
-        )
-
-
 def test_gitignore_check_passes_when_claude_is_symlink_and_resolved_path_gitignored(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
@@ -1025,7 +915,7 @@ def test_gitignore_check_passes_when_claude_is_symlink_and_resolved_path_gitigno
     (repo_dir / ".gitignore").write_text(".agents/settings.local.json\n")
 
     # Should not raise
-    _check_settings_local_gitignored(host, repo_dir, require_repo_rule=False)
+    check_settings_local_gitignored(host, repo_dir)
 
 
 def test_gitignore_check_raises_when_claude_is_symlink_and_resolved_path_not_gitignored(
@@ -1045,7 +935,7 @@ def test_gitignore_check_raises_when_claude_is_symlink_and_resolved_path_not_git
     (repo_dir / ".gitignore").write_text(".claude/settings.local.json\n")
 
     with pytest.raises(PluginMngrError, match="not gitignored") as exc_info:
-        _check_settings_local_gitignored(host, repo_dir, require_repo_rule=False)
+        check_settings_local_gitignored(host, repo_dir)
 
     # Error message should tell the user to add the resolved path, not the symlink path
     assert ".agents/settings.local.json" in str(exc_info.value)
@@ -1066,7 +956,7 @@ def test_gitignore_check_skips_when_claude_symlink_points_outside_repo(
     (repo_dir / ".claude").symlink_to(outside_dir)
 
     # Should not raise -- target is outside the repo, git won't track it
-    _check_settings_local_gitignored(host, repo_dir, require_repo_rule=False)
+    check_settings_local_gitignored(host, repo_dir)
 
 
 def _make_hooks_test_agent(

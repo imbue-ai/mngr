@@ -1185,10 +1185,9 @@ def _has_api_credentials_available(
     return False
 
 
-def _check_settings_local_gitignored(
+def check_settings_local_gitignored(
     host: OnlineHostInterface,
     repo_path: Path,
-    require_repo_rule: bool = False,
 ) -> None:
     """Verify .claude/settings.local.json is gitignored in the given repo path.
 
@@ -1198,12 +1197,6 @@ def _check_settings_local_gitignored(
     Raises PluginMngrError if the file is not gitignored. Silently returns
     if the path is not a git repository or if the .claude symlink target is
     outside the repo (since git won't track it).
-
-    When require_repo_rule is True, also verifies that the ignore rule comes
-    from the repository itself (not the user's global gitignore). This is
-    important for preflight checks: a global gitignore entry won't exist on
-    remote hosts, so the provisioning check would fail after expensive host
-    creation.
     """
     settings_relative = Path(".claude") / "settings.local.json"
 
@@ -1244,25 +1237,10 @@ def _check_settings_local_gitignored(
     if not result.success:
         raise PluginMngrError(
             f"'{settings_relative}' is not gitignored in {repo_path}.\n"
-            "mngr needs to write Claude hooks to this file, but it would appear as an unstaged change.\n"
+            "mngr writes to this file (to guard user-defined Stop hooks against proxy children), "
+            "but it would appear as an unstaged change.\n"
             f"Add '{settings_relative}' to your .gitignore and try again. (original error: {result.stderr})"
         )
-
-    if require_repo_rule:
-        # Re-check with global excludes disabled to see if the rule is from
-        # the repo itself. If only the global gitignore covers it, the remote
-        # host (which has no global gitignore) will fail during provisioning.
-        repo_only_result = host.execute_idempotent_command(
-            f"git -c core.excludesFile= check-ignore -q {shlex.quote(str(settings_relative))}",
-            cwd=repo_path,
-            timeout_seconds=5.0,
-        )
-        if not repo_only_result.success:
-            raise PluginMngrError(
-                f"'{settings_relative}' is only gitignored via your global gitignore, not in the repository at {repo_path}.\n"
-                "Remote hosts don't have your global gitignore, so this will fail during provisioning.\n"
-                f"Add '{settings_relative}' to your repository's .gitignore and try again."
-            )
 
 
 class DialogIndicator(FrozenModel, ABC):
@@ -1414,29 +1392,6 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
             timeout_seconds=self.enter_submission_timeout_seconds,
             queue_log_path_template=self._QUEUE_LOG_PATH_TEMPLATE,
         )
-
-    @classmethod
-    def preflight_check(
-        cls,
-        source_host: OnlineHostInterface,
-        source_path: Path,
-        agent_options: CreateAgentOptions,
-        agent_config: AgentTypeConfig,
-        mngr_ctx: MngrContext,
-    ) -> None:
-        """Validate that .claude/settings.local.json is gitignored in the source repo.
-
-        mngr's own readiness hooks now live in the per-agent managed settings
-        file (see get_managed_settings_path), not this file. But the
-        subagent_proxy plugin still modifies .claude/settings.local.json to
-        guard user-defined Stop/SubagentStop hooks, so if it's not gitignored
-        those edits would appear as an unstaged change. Checking early avoids
-        wasting time on host creation and work_dir setup before surfacing this error.
-
-        Uses require_repo_rule=True so that rules only in the user's global
-        gitignore are rejected -- remote hosts won't have the global config.
-        """
-        _check_settings_local_gitignored(source_host, source_path, require_repo_rule=True)
 
     def get_claude_config_dir(self) -> Path:
         """Return the Claude config directory for this agent.
@@ -1620,12 +1575,10 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
             f' export MAIN_CLAUDE_SESSION_ID="${{_MNGR_READ_SID:-{agent_uuid}}}"'
         )
 
-        # Load mngr's hooks from the per-agent managed settings file rather than
-        # the project's settings.local.json (which plain ``claude`` would also
-        # read). The `if [ -f ]; then ... fi` form always exits 0 -- even when
-        # the file is absent -- so it does not short-circuit the `&&` chain
-        # below; the existence guard lets an agent created by an older mngr
-        # (no managed file) still launch, just without the --settings flag.
+        # Load mngr's hooks via --settings from the managed file. The
+        # `if [ -f ]; then ... fi` form always exits 0 (even when the file is
+        # absent, e.g. an agent created by an older mngr), so it neither breaks
+        # the `&&` chain below nor passes --settings pointing at a missing path.
         managed_settings_shell_path = f"$MNGR_AGENT_STATE_DIR/{'/'.join(MANAGED_SETTINGS_RELATIVE_PATH)}"
         settings_arg_setup = (
             f'_MNGR_SETTINGS_ARG=""; if [ -f "{managed_settings_shell_path}" ]; then'
@@ -1764,30 +1717,22 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         return transfers
 
     def _configure_agent_hooks(self, host: OnlineHostInterface) -> None:
-        """Write mngr's Claude hooks to the per-agent managed settings file.
+        """Write mngr's Claude hooks to the agent's managed settings file.
 
-        Hooks are loaded at launch via ``claude --settings`` (see
-        ``assemble_command``) from a file mngr fully owns under the agent
-        state dir, rather than the project's ``.claude/settings.local.json``
-        (which plain, non-mngr ``claude`` runs in that directory would also
-        read -- see ``get_managed_settings_path``). The file is overwritten
-        fresh on every provision, so there is no cross-version accumulation
-        and a single deterministic build is the whole content.
+        Loaded at launch via ``claude --settings`` (see ``assemble_command``)
+        from a file mngr owns under the agent state dir -- not the project's
+        ``.claude/settings.local.json``, which plain ``claude`` also reads (see
+        ``get_managed_settings_path``). Overwritten fresh each provision, so it
+        never accumulates stale hooks.
 
-        Always written:
-        - Readiness hooks that signal when Claude is actively processing by
-          creating/removing an 'active' file in the agent's state directory.
-
-        Conditionally added:
-        - On macOS with sync_credentials_on_login enabled, a
-          Notification:auth_success hook that propagates keychain credentials
-          to all per-agent entries after login.
-        - When auto_allow_permissions is True, a hook that auto-allows all
-          permission dialogs so Claude never pauses for approval.
+        Always writes the readiness hooks (which mark the agent active/idle via
+        files in its state dir). Adds the macOS keychain-sync hook when
+        sync_credentials_on_login is set, and the permission auto-allow hook
+        when auto_allow_permissions is set.
         """
-        # Start fresh: mngr owns this file outright, so the build is the whole
-        # content (no read-merge of prior generations). merge_hooks_config is
-        # reused only to compose the optional configs onto the base.
+        # mngr owns this file outright, so the build is the whole content (no
+        # read-merge). merge_hooks_config only composes the optional configs onto
+        # the readiness base.
         merged = build_readiness_hooks_config()
 
         # Conditionally add credential sync hooks (macOS only)

@@ -62,10 +62,13 @@ class FakeHost(BaseFakeHost):
         timeout_seconds: float | None = None,
     ) -> CommandResult:
         self.executed_commands.append(command)
+        # check=False to mirror the real OnlineHostInterface contract: a non-zero
+        # exit is reported via CommandResult.success, not raised. Callers that care
+        # (e.g. check_settings_local_gitignored) branch on .success.
         completed = subprocess.run(
             command,
             shell=True,
-            check=True,
+            check=False,
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
