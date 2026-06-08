@@ -146,7 +146,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
             self._exited_event.set()
 
     def _exit(self, exc_value: BaseException | None) -> None:
-        main_exception: BaseException | None = exc_value if exc_value is not None else None
+        main_exception: BaseException | None = exc_value
         timeout_exception_group: ConcurrencyExceptionGroup | None = None
         failure_exception_group: ConcurrencyExceptionGroup | None = None
 
@@ -186,13 +186,33 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
                 exceptions.append(ChildConcurrencyGroupDidNotExitError(child_message))
                 message = message or child_message
 
-        checked_exceptions: list[Exception] = []
-        for exception in exceptions:
-            if not isinstance(exception, Exception):
-                raise exception
-            checked_exceptions.append(exception)
-        assert main_exception is None or isinstance(main_exception, Exception)
+        # Partition the accumulated failures: a non-Exception BaseException (e.g. KeyboardInterrupt,
+        # SystemExit) must dominate and propagate so the interrupt is honored, but we must not
+        # silently drop the sibling failures accumulated alongside it (the old code raised the
+        # first BaseException mid-loop, discarding everything else). We surface the first
+        # BaseException as the propagating error and chain the rest to it so they remain visible.
+        base_exceptions: list[BaseException] = [e for e in exceptions if not isinstance(e, Exception)]
+        checked_exceptions: list[Exception] = [e for e in exceptions if isinstance(e, Exception)]
 
+        if len(base_exceptions) > 0:
+            dominant_exception = base_exceptions[0]
+            # Chain any additional BaseExceptions (rare, e.g. multiple interrupts) onto the dominant
+            # one via __context__ so none are lost, then chain the Exception siblings as a group.
+            chained_context: BaseException | None = None
+            for additional_base_exception in base_exceptions[1:]:
+                additional_base_exception.__context__ = chained_context
+                chained_context = additional_base_exception
+            if len(checked_exceptions) > 0:
+                sibling_message = message or f"Additional failures in concurrency group: `{self.name}`."
+                sibling_group = ConcurrencyExceptionGroup(sibling_message, checked_exceptions)
+                sibling_group.__context__ = chained_context
+                chained_context = sibling_group
+            dominant_exception.__context__ = chained_context
+            raise dominant_exception
+
+        # Any non-Exception main_exception was partitioned into base_exceptions above and already
+        # raised, so a non-None main_exception here is guaranteed to be an Exception.
+        assert main_exception is None or isinstance(main_exception, Exception)
         if len(checked_exceptions) > 0:
             deduplicated_exceptions = _deduplicate_exceptions(tuple(checked_exceptions))
             assert message is not None

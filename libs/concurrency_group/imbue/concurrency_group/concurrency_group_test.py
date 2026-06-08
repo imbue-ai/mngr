@@ -103,6 +103,27 @@ def test_concurrency_group_supports_running_running_local_process_in_background(
     assert process.poll() == 0
 
 
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_base_exception_dominates_but_preserves_sibling_failures_on_exit() -> None:
+    # When a BaseException (e.g. KeyboardInterrupt) propagates out of the context body alongside a
+    # failed checked strand, the BaseException must dominate (propagate) but the strand failure must
+    # not be silently dropped -- it should be chained via __context__.
+    cg = ConcurrencyGroup(name="outer")
+    cg.__enter__()
+    failing_thread = cg.start_new_thread(target=_raise_intentional_error)
+    failing_thread.join_without_raising(timeout=5.0)
+
+    keyboard_interrupt = KeyboardInterrupt("user interrupted")
+    with pytest.raises(KeyboardInterrupt) as exception_info:
+        cg.__exit__(KeyboardInterrupt, keyboard_interrupt, None)
+
+    assert exception_info.value is keyboard_interrupt
+    # The strand failure is chained so it is not lost.
+    chained = exception_info.value.__context__
+    assert isinstance(chained, ConcurrencyExceptionGroup)
+    assert any(isinstance(e, _IntentionalTestError) for e in chained.exceptions)
+
+
 def test_concurrency_group_raises_timeout_when_not_finished_in_time() -> None:
     # Never set -- thread stays blocked, guaranteeing the CG times out.
     blocked = Event()
