@@ -26,6 +26,7 @@ from imbue.minds.desktop_client.app import _run_restart_sequence
 from imbue.minds.desktop_client.app import _ssh_command_for_agent
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
+from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
@@ -267,6 +268,106 @@ def test_landing_page_lists_single_agent(tmp_path: Path) -> None:
     response = client.get("/")
     assert response.status_code == 200
     assert str(agent_id) in response.text
+
+
+# -- Post-login redirect tests --
+
+
+def test_post_login_redirects_to_create_when_no_workspaces(tmp_path: Path) -> None:
+    """A just-signed-in user with no workspaces lands on the create screen (/)."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path, backend_resolver=backend_resolver, http_client=None
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/post-login", follow_redirects=False)
+    assert response.status_code == 302
+    assert response.headers["location"] == "/"
+
+
+def test_post_login_redirects_to_accounts_when_workspaces_exist(tmp_path: Path) -> None:
+    """A returning user who already has workspaces lands on the accounts page."""
+    agent_id = AgentId()
+    backend_resolver = StaticBackendResolver(
+        url_by_agent_and_service={str(agent_id): {"web": "http://backend"}},
+    )
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path, backend_resolver=backend_resolver, http_client=None
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/post-login", follow_redirects=False)
+    assert response.status_code == 302
+    assert response.headers["location"] == "/accounts"
+
+
+def test_post_login_redirects_to_login_when_unauthenticated(tmp_path: Path) -> None:
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    client, _auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path, backend_resolver=backend_resolver, http_client=None
+    )
+
+    response = client.get("/post-login", follow_redirects=False)
+    assert response.status_code == 302
+    assert response.headers["location"] == "/login"
+
+
+# -- Leased imbue_cloud host account-binding tests --
+
+
+class _LeasedImbueCloudResolver(StaticBackendResolver):
+    """Static resolver reporting every known agent as living on a leased imbue_cloud provider."""
+
+    def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
+        if agent_id in self.list_known_agent_ids():
+            return AgentDisplayInfo(
+                agent_name=str(agent_id),
+                host_id="host-leased",
+                provider_name="imbue_cloud_alice-imbue-com",
+            )
+        return None
+
+
+def _make_leased_host_client(tmp_path: Path) -> tuple[TestClient, FileAuthStore, AgentId]:
+    agent_id = AgentId()
+    backend_resolver = _LeasedImbueCloudResolver(
+        url_by_agent_and_service={str(agent_id): {"web": "http://backend"}},
+    )
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path, backend_resolver=backend_resolver, http_client=None
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+    return client, auth_store, agent_id
+
+
+def test_disassociate_leased_host_returns_403(tmp_path: Path) -> None:
+    client, _auth_store, agent_id = _make_leased_host_client(tmp_path)
+    response = client.post(f"/workspace/{agent_id}/disassociate", follow_redirects=False)
+    assert response.status_code == 403
+    assert "leased from imbue_cloud" in response.text
+
+
+def test_associate_leased_host_returns_403(tmp_path: Path) -> None:
+    client, _auth_store, agent_id = _make_leased_host_client(tmp_path)
+    response = client.post(
+        f"/workspace/{agent_id}/associate",
+        data={"user_id": "user-123"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 403
+    assert "leased from imbue_cloud" in response.text
+
+
+def test_settings_page_disables_disassociate_for_leased_host(tmp_path: Path) -> None:
+    client, _auth_store, agent_id = _make_leased_host_client(tmp_path)
+    response = client.get(f"/workspace/{agent_id}/settings")
+    assert response.status_code == 200
+    assert "leased from Imbue Cloud" in response.text
+    # The disassociate control is present but disabled, and there is no
+    # associate control (the Associate component renders a user_id select).
+    assert 'id="disassociate-btn"' in response.text
+    assert "disabled" in response.text
 
 
 # -- Agent default redirect tests --

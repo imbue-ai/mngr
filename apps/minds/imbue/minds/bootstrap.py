@@ -437,6 +437,18 @@ def _imbue_cloud_accounts_path(root_name: str) -> Path | None:
 
 _IMBUE_CLOUD_BACKEND_NAME: Final[str] = "imbue_cloud"
 
+# Runtime knobs written into each per-account ``[providers.imbue_cloud_<slug>]``
+# block so the imbue_cloud slow (rebuild) path runs the agent container under
+# gVisor with the runsc hardening args. These mirror the forever-claude-template
+# ``[providers.ovh]`` bake settings; ``ImbueCloudProviderConfig`` (which extends
+# ``VpsDockerProviderConfig``) forwards them onto the delegated vps_docker
+# provider, and ``install_gvisor_runtime`` also drives the slow path's SSH
+# host-setup so a leased host that lacks runsc has it installed before the
+# container is rebuilt under it.
+_IMBUE_CLOUD_DOCKER_RUNTIME: Final[str] = "runsc"
+_IMBUE_CLOUD_INSTALL_GVISOR_RUNTIME: Final[bool] = True
+_IMBUE_CLOUD_DEFAULT_START_ARGS: Final[tuple[str, ...]] = ("--workdir=/", "--security-opt=no-new-privileges")
+
 
 class BootstrapError(ValueError):
     """Raised when minds bootstrap can't compute a derived value (e.g. a slug from an empty email).
@@ -552,6 +564,9 @@ def set_imbue_cloud_provider_for_account(
         and existing.get("account") == email
         and existing.get("connector_url") == connector_url
         and existing_is_enabled == desired_is_enabled
+        and existing.get("docker_runtime") == _IMBUE_CLOUD_DOCKER_RUNTIME
+        and existing.get("install_gvisor_runtime") == _IMBUE_CLOUD_INSTALL_GVISOR_RUNTIME
+        and existing.get("default_start_args") == list(_IMBUE_CLOUD_DEFAULT_START_ARGS)
     ):
         return False
     new_block = tomlkit.table()
@@ -560,6 +575,11 @@ def set_imbue_cloud_provider_for_account(
     new_block["connector_url"] = connector_url
     if desired_is_enabled is not None:
         new_block["is_enabled"] = desired_is_enabled
+    # Run the rebuilt agent container under gVisor with the runsc hardening args
+    # (see the module constants above).
+    new_block["docker_runtime"] = _IMBUE_CLOUD_DOCKER_RUNTIME
+    new_block["install_gvisor_runtime"] = _IMBUE_CLOUD_INSTALL_GVISOR_RUNTIME
+    new_block["default_start_args"] = list(_IMBUE_CLOUD_DEFAULT_START_ARGS)
     providers[provider_name] = new_block
     _atomic_write_settings(settings_path, doc)
     logger.info("imbue_cloud provider {} registered in {}", provider_name, settings_path)

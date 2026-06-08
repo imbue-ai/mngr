@@ -80,6 +80,13 @@ from imbue.minds.desktop_client.onboarding import OnboardingApplier
 from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
 from imbue.minds.desktop_client.recovery_probe import build_host_health_response
 from imbue.minds.desktop_client.recovery_probe import build_probe_argv
+from imbue.minds.desktop_client.region_preference import GeoLocationCache
+from imbue.minds.desktop_client.region_preference import IMBUE_CLOUD_PROVIDER_KEY
+from imbue.minds.desktop_client.region_preference import VULTR_PROVIDER_KEY
+from imbue.minds.desktop_client.region_preference import default_region_for_provider
+from imbue.minds.desktop_client.region_preference import known_regions_for_provider
+from imbue.minds.desktop_client.region_preference import resolve_default_region
+from imbue.minds.desktop_client.region_preference import start_geo_detection
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import parse_request_event
@@ -120,6 +127,7 @@ from imbue.minds.desktop_client.tunnel_token_injection import clear_tunnel_token
 from imbue.minds.desktop_client.tunnel_token_injection import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.webdav import create_webdav_app
 from imbue.minds.errors import BackupProvisioningError
+from imbue.minds.errors import MindsConfigError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupEncryptionMethod
@@ -233,6 +241,12 @@ async def _managed_lifespan(
             follow_redirects=False,
             timeout=_PROXY_TIMEOUT_SECONDS,
         )
+    # Kick off the one-shot IP-geolocation lookup in the background so the create
+    # form can default each provider's region to the user's nearest datacenter.
+    geo_location_cache: GeoLocationCache = inner_app.state.geo_location_cache
+    geo_root_concurrency_group: ConcurrencyGroup | None = inner_app.state.root_concurrency_group
+    if geo_root_concurrency_group is not None:
+        start_geo_detection(geo_root_concurrency_group, geo_location_cache)
     try:
         yield
     finally:
@@ -361,7 +375,7 @@ def _handle_landing_page(
         html = render_login_page()
         return HTMLResponse(content=html)
 
-    all_agent_ids = backend_resolver.list_known_workspace_ids()
+    all_agent_ids = backend_resolver.list_active_workspace_ids()
     paths: WorkspacePaths | None = request.app.state.api_v1_paths
     destroying_status_by_agent_id = _resolve_destroying_for_landing(paths, all_agent_ids)
 
@@ -404,17 +418,132 @@ def _handle_landing_page(
     session_store: MultiAccountSessionStore | None = request.app.state.session_store
     minds_config: MindsConfig | None = request.app.state.minds_config
     agent_creator: AgentCreator | None = request.app.state.agent_creator
+    geo_cache: GeoLocationCache | None = request.app.state.geo_location_cache
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
     is_backup_password_saved = has_saved_backup_password(agent_creator.paths) if agent_creator is not None else False
+    region_options, region_selected = _build_region_form_context(minds_config, geo_cache)
     html = render_create_form(
         git_url=git_url,
         branch=branch,
         accounts=accounts,
         default_account_id=default_account_id or "",
         has_saved_backup_password=is_backup_password_saved,
+        region_options_by_launch_mode=region_options,
+        region_selected_by_launch_mode=region_selected,
     )
     return HTMLResponse(content=html)
+
+
+def _handle_post_login_redirect(
+    request: Request,
+    auth_store: AuthStoreDep,
+    backend_resolver: BackendResolverDep,
+) -> Response:
+    """Decide where a just-authenticated user lands (GET /post-login).
+
+    All sign-in paths (email/password, OAuth, post-email-verification) funnel
+    here. A user who already has workspaces goes to the account-management page
+    (the prior behavior); a user with none goes to ``/`` -- which renders the
+    create form -- so first-time users land on the new-workspace screen instead
+    of the account page.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=302, headers={"Location": "/login"})
+    has_any_workspace = bool(backend_resolver.list_active_workspace_ids())
+    destination = "/accounts" if has_any_workspace else "/"
+    return Response(status_code=302, headers={"Location": destination})
+
+
+def _region_provider_key_for_launch_mode(launch_mode: LaunchMode) -> str | None:
+    """Map a compute launch mode to its region-config provider key, or None if region-less.
+
+    Only ``IMBUE_CLOUD`` and ``CLOUD`` (Vultr) place a host in a chosen region;
+    ``DOCKER`` / ``LIMA`` run locally and have no region.
+    """
+    if launch_mode is LaunchMode.IMBUE_CLOUD:
+        return IMBUE_CLOUD_PROVIDER_KEY
+    if launch_mode is LaunchMode.CLOUD:
+        return VULTR_PROVIDER_KEY
+    return None
+
+
+def _default_region_for_provider_with_config(
+    provider_key: str,
+    minds_config: MindsConfig | None,
+    geo_cache: GeoLocationCache | None,
+) -> str:
+    """Resolve the default region to pre-select for a provider (config -> geo -> hardcoded)."""
+    configured = minds_config.get_region(provider_key) if minds_config is not None else None
+    if geo_cache is not None:
+        return resolve_default_region(provider_key, configured, geo_cache)
+    # No geo cache (e.g. tests): the stored value if it's a known region, else the hardcoded default.
+    if configured and configured in known_regions_for_provider(provider_key):
+        return configured
+    return default_region_for_provider(provider_key)
+
+
+def _build_region_form_context(
+    minds_config: MindsConfig | None,
+    geo_cache: GeoLocationCache | None,
+) -> tuple[dict[str, list[str]], dict[str, str]]:
+    """Build the per-launch-mode region options + pre-selected default for the create form.
+
+    Keyed by ``LaunchMode`` *value* (``IMBUE_CLOUD`` / ``CLOUD``) so the form JS
+    can look options up directly by the compute-provider dropdown's value.
+    """
+    options_by_launch_mode: dict[str, list[str]] = {}
+    selected_by_launch_mode: dict[str, str] = {}
+    for launch_mode, provider_key in (
+        (LaunchMode.IMBUE_CLOUD, IMBUE_CLOUD_PROVIDER_KEY),
+        (LaunchMode.CLOUD, VULTR_PROVIDER_KEY),
+    ):
+        options_by_launch_mode[launch_mode.value] = list(known_regions_for_provider(provider_key))
+        selected_by_launch_mode[launch_mode.value] = _default_region_for_provider_with_config(
+            provider_key, minds_config, geo_cache
+        )
+    return options_by_launch_mode, selected_by_launch_mode
+
+
+def _resolve_effective_region(
+    launch_mode: LaunchMode,
+    submitted_region: str,
+    minds_config: MindsConfig | None,
+    geo_cache: GeoLocationCache | None,
+) -> str:
+    """Resolve the region to actually create in for a submitted create request.
+
+    Honors the user's submitted value when it's a known region for the provider;
+    otherwise falls back to the same default precedence the form uses. Returns
+    "" for region-less providers (DOCKER / LIMA).
+    """
+    provider_key = _region_provider_key_for_launch_mode(launch_mode)
+    if provider_key is None:
+        return ""
+    if submitted_region and submitted_region in known_regions_for_provider(provider_key):
+        return submitted_region
+    return _default_region_for_provider_with_config(provider_key, minds_config, geo_cache)
+
+
+def _persist_region_for_launch_mode(
+    minds_config: MindsConfig | None,
+    launch_mode: LaunchMode,
+    region: str,
+) -> None:
+    """Persist the chosen region as the provider's new last-used default. Best-effort."""
+    provider_key = _region_provider_key_for_launch_mode(launch_mode)
+    if minds_config is None or provider_key is None or not region:
+        return
+    # Best-effort: this runs inside the ``on_created`` callback, which the agent
+    # creator invokes inside a try/except that marks the create FAILED on any
+    # raised exception. A region-persist failure must never flip an
+    # already-successful create. ``set_region`` -> ``_write_raw`` can raise a bare
+    # ``OSError`` (disk full / permission) in addition to ``MindsConfigError``, so
+    # swallow both at debug level.
+    try:
+        minds_config.set_region(provider_key, region)
+    except (MindsConfigError, OSError) as exc:
+        logger.debug("Failed to persist region {} for provider {}: {}", region, provider_key, exc)
 
 
 def _handle_backup_status_api(
@@ -434,7 +563,7 @@ def _handle_backup_status_api(
     if paths is None:
         return Response(content="{}", media_type="application/json")
     root_concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
-    agent_ids = backend_resolver.list_known_workspace_ids()
+    agent_ids = backend_resolver.list_active_workspace_ids()
     status_by_agent_id = compute_backup_status_for_workspaces(paths, agent_ids, parent_cg=root_concurrency_group)
     # Workspace creation time lets the landing page show "Created N ago" instead
     # of a scary "No backups" for a freshly-created, not-yet-backed-up workspace.
@@ -765,11 +894,15 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
     backup_master_password = str(form.get("backup_master_password", ""))
     is_save_backup_password = str(form.get("backup_save_password", "")).strip() != ""
     backup_api_key_env = str(form.get("backup_api_key_env", ""))
+    submitted_region = str(form.get("region", "")).strip()
 
     session_store_inst: MultiAccountSessionStore | None = request.app.state.session_store
+    minds_config: MindsConfig | None = request.app.state.minds_config
+    geo_cache: GeoLocationCache | None = request.app.state.geo_location_cache
 
     def _re_render_with_error(message: str, status: int = 400) -> Response:
         accounts_list = session_store_inst.list_accounts() if session_store_inst else []
+        region_options, region_selected = _build_region_form_context(minds_config, geo_cache)
         # Re-render with the user's submitted account_id pre-selected
         # (including "" -> "No account") rather than the config default,
         # so a validation error doesn't silently revert their choice.
@@ -780,6 +913,8 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
             launch_mode=launch_mode,
             ai_provider=ai_provider,
             accounts=accounts_list,
+            region_options_by_launch_mode=region_options,
+            region_selected_by_launch_mode=region_selected,
             default_account_id=account_id,
             anthropic_api_key=anthropic_api_key,
             backup_provider=backup_provider,
@@ -846,8 +981,18 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
     if is_imbue_cloud_compute and not branch_or_tag:
         branch_or_tag = resolve_template_version(git_url, branch, parent_cg=agent_creator.root_concurrency_group)
 
-    # Build a post-creation callback that injects the tunnel token
-    on_created = _build_on_created_callback(request, account_id)
+    # Resolve the explicit region the user chose (or the resolved default) and,
+    # on a successful create, persist it as the provider's new last-used default.
+    region = _resolve_effective_region(launch_mode, submitted_region, minds_config, geo_cache)
+
+    # Build a post-creation callback that injects the tunnel token, then also
+    # persists the chosen region (fires only after a successful create).
+    base_on_created = _build_on_created_callback(request, account_id)
+
+    def on_created(agent_id: AgentId) -> None:
+        if base_on_created is not None:
+            base_on_created(agent_id)
+        _persist_region_for_launch_mode(minds_config, launch_mode, region)
 
     # ``start_creation`` returns a CreationId (minds-internal handle for
     # tracking the in-flight create) -- the canonical AgentId only exists
@@ -862,6 +1007,7 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
         ai_provider=ai_provider,
         account_email=account_email,
         branch_or_tag=branch_or_tag,
+        region=region,
         anthropic_api_key=anthropic_api_key,
         on_created=on_created,
         backup_request=backup_request,
@@ -884,15 +1030,19 @@ def _handle_create_page(
     session_store: MultiAccountSessionStore | None = request.app.state.session_store
     minds_config: MindsConfig | None = request.app.state.minds_config
     agent_creator: AgentCreator | None = request.app.state.agent_creator
+    geo_cache: GeoLocationCache | None = request.app.state.geo_location_cache
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
     is_backup_password_saved = has_saved_backup_password(agent_creator.paths) if agent_creator is not None else False
+    region_options, region_selected = _build_region_form_context(minds_config, geo_cache)
     html = render_create_form(
         git_url=git_url,
         branch=branch,
         accounts=accounts,
         default_account_id=default_account_id or "",
         has_saved_backup_password=is_backup_password_saved,
+        region_options_by_launch_mode=region_options,
+        region_selected_by_launch_mode=region_selected,
     )
     return HTMLResponse(content=html)
 
@@ -959,6 +1109,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
     backup_api_key_env = str(body.get("backup_api_key_env", ""))
     anthropic_api_key = str(body.get("anthropic_api_key", "")).strip()
     account_id = str(body.get("account_id", "")).strip()
+    submitted_region = str(body.get("region", "")).strip()
     if not git_url:
         return Response(
             status_code=400,
@@ -1021,6 +1172,14 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
             media_type="application/json",
         )
 
+    # Resolve the explicit region (or its default) and persist it on success.
+    minds_config: MindsConfig | None = request.app.state.minds_config
+    geo_cache: GeoLocationCache | None = request.app.state.geo_location_cache
+    region = _resolve_effective_region(launch_mode, submitted_region, minds_config, geo_cache)
+
+    def _persist_region_on_created(agent_id: AgentId) -> None:
+        _persist_region_for_launch_mode(minds_config, launch_mode, region)
+
     creation_id = agent_creator.start_creation(
         git_url,
         host_name=host_name,
@@ -1028,7 +1187,9 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
         launch_mode=launch_mode,
         ai_provider=ai_provider,
         account_email=account_email,
+        region=region,
         anthropic_api_key=anthropic_api_key,
+        on_created=_persist_region_on_created,
         backup_request=backup_request,
     )
 
@@ -1302,7 +1463,7 @@ def _resolve_destroying_for_landing(
 
 def _agent_in_resolver(request: Request, agent_id: AgentId) -> bool:
     backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
-    return agent_id in backend_resolver.list_known_workspace_ids()
+    return agent_id in backend_resolver.list_active_workspace_ids()
 
 
 async def _handle_destroy_agent_api(
@@ -1449,7 +1610,7 @@ def _handle_destroying_page(
     if paths is None:
         return Response(status_code=404, content="No record")
     parsed_id = AgentId(agent_id)
-    in_resolver = parsed_id in backend_resolver.list_known_workspace_ids()
+    in_resolver = parsed_id in backend_resolver.list_active_workspace_ids()
     record = read_destroying(parsed_id, paths, agent_in_resolver=in_resolver)
     if record is None:
         return Response(status_code=404, content="No record")
@@ -1693,7 +1854,7 @@ async def _handle_chrome_events(
             session_store: MultiAccountSessionStore | None = request.app.state.session_store
             paths: WorkspacePaths | None = request.app.state.api_v1_paths
             last_workspace_data = _build_workspace_list(backend_resolver, session_store)
-            last_destroying_ids = _destroying_agent_ids(paths, backend_resolver.list_known_workspace_ids())
+            last_destroying_ids = _destroying_agent_ids(paths, backend_resolver.list_active_workspace_ids())
             has_accounts = bool(session_store and session_store.list_accounts())
             yield "data: {}\n\n".format(
                 json.dumps(
@@ -1778,7 +1939,7 @@ async def _handle_chrome_events(
                     yield "data: {}\n\n".format(json.dumps(_system_interface_status_payload(tracker, aid_str, status)))
 
                 current_data = _build_workspace_list(backend_resolver, session_store)
-                current_destroying_ids = _destroying_agent_ids(paths, backend_resolver.list_known_workspace_ids())
+                current_destroying_ids = _destroying_agent_ids(paths, backend_resolver.list_active_workspace_ids())
                 if current_data != last_workspace_data or current_destroying_ids != last_destroying_ids:
                     last_workspace_data = current_data
                     last_destroying_ids = current_destroying_ids
@@ -1940,7 +2101,7 @@ def _build_workspace_list(
     retained-but-unverified (they remain fully interactive).
     """
     errored_provider_names = {str(name) for name in backend_resolver.get_provider_errors()}
-    agent_ids = backend_resolver.list_known_workspace_ids()
+    agent_ids = backend_resolver.list_active_workspace_ids()
     workspaces: list[dict[str, str]] = []
     for aid in agent_ids:
         info = backend_resolver.get_agent_display_info(aid)
@@ -2569,6 +2730,23 @@ async def _handle_account_logout(
 # -- Workspace settings routes --
 
 
+_IMBUE_CLOUD_PROVIDER_PREFIX: Final[str] = "imbue_cloud_"
+
+
+def _is_leased_imbue_cloud_workspace(backend_resolver: BackendResolverInterface, agent_id: str) -> bool:
+    """Return True if the workspace runs on a host leased from imbue_cloud.
+
+    Leased hosts surface under a per-account provider instance named
+    ``imbue_cloud_<account-slug>`` (the bare singleton ``imbue_cloud`` provider
+    is hidden and never hosts a user workspace). The trailing-underscore prefix
+    matches the per-account instances while excluding that singleton.
+    """
+    info = backend_resolver.get_agent_display_info(AgentId(agent_id))
+    if info is None or info.provider_name is None:
+        return False
+    return info.provider_name.startswith(_IMBUE_CLOUD_PROVIDER_PREFIX)
+
+
 def _handle_workspace_settings(
     agent_id: str,
     request: Request,
@@ -2581,6 +2759,7 @@ def _handle_workspace_settings(
     session_store: MultiAccountSessionStore | None = request.app.state.session_store
     current_account = session_store.get_account_for_workspace(agent_id) if session_store else None
     accounts = session_store.list_accounts() if session_store else []
+    is_leased_imbue_cloud = _is_leased_imbue_cloud_workspace(backend_resolver, agent_id)
 
     ws_name = backend_resolver.get_workspace_name(AgentId(agent_id))
     if not ws_name:
@@ -2601,6 +2780,7 @@ def _handle_workspace_settings(
         accounts=accounts,
         servers=servers,
         telegram_state=telegram_state,
+        is_leased_imbue_cloud=is_leased_imbue_cloud,
     )
     return HTMLResponse(content=html)
 
@@ -2613,6 +2793,15 @@ async def _handle_workspace_associate(
     """Associate a workspace with an account."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
+    # Leased imbue_cloud hosts are permanently bound to their leasing account;
+    # re-associating one to a different account would cause confusing account
+    # mixing, so reject it here as a defense-in-depth backstop to the UI guard.
+    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    if _is_leased_imbue_cloud_workspace(backend_resolver, agent_id):
+        return Response(
+            status_code=403,
+            content="Cannot change the account association of a host leased from imbue_cloud",
+        )
     form = await request.form()
     user_id = str(form.get("user_id", ""))
     redirect_url = str(form.get("redirect", ""))
@@ -2624,7 +2813,6 @@ async def _handle_workspace_associate(
         # heartbeat. Without this, the user clicks Associate, the page
         # reloads via 303, but the chrome panel still shows the old
         # unassociated state for ~half a minute.
-        backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
         if isinstance(backend_resolver, MngrCliBackendResolver):
             backend_resolver.notify_change()
     location = redirect_url if redirect_url else f"/workspace/{agent_id}/settings"
@@ -2639,6 +2827,14 @@ async def _handle_workspace_disassociate(
     """Disassociate a workspace from its account and tear down its tunnel."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
+    # Leased imbue_cloud hosts must stay bound to their leasing account; block
+    # disassociation here as a defense-in-depth backstop to the disabled UI control.
+    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    if _is_leased_imbue_cloud_workspace(backend_resolver, agent_id):
+        return Response(
+            status_code=403,
+            content="Cannot disassociate a host leased from imbue_cloud",
+        )
     session_store: MultiAccountSessionStore | None = request.app.state.session_store
     cli: ImbueCloudCli | None = request.app.state.imbue_cloud_cli
     if session_store:
@@ -2661,7 +2857,6 @@ async def _handle_workspace_disassociate(
             # Mirror the associate handler: poke the chrome SSE so the
             # tile flips back to unassociated immediately instead of
             # waiting out the 30s heartbeat.
-            backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
             if isinstance(backend_resolver, MngrCliBackendResolver):
                 backend_resolver.notify_change()
     return Response(status_code=303, headers={"Location": f"/workspace/{agent_id}/settings"})
@@ -3318,6 +3513,9 @@ def create_desktop_client(
     app.state.notification_dispatcher = notification_dispatcher
     app.state.session_store = session_store
     app.state.minds_config = minds_config
+    # In-memory IP-geolocation cache, populated once at startup (see the lifespan),
+    # used to default the create form's region per provider.
+    app.state.geo_location_cache = GeoLocationCache()
     app.state.client_env_config = client_env_config
     app.state.request_inbox = request_inbox
     app.state.request_event_handlers = request_event_handlers
@@ -3388,6 +3586,7 @@ def create_desktop_client(
     app.get("/login")(_handle_login)
     app.get("/authenticate")(_handle_authenticate)
     app.get("/")(_handle_landing_page)
+    app.get("/post-login")(_handle_post_login_redirect)
 
     # Account management routes
     app.get("/accounts")(_handle_accounts_page)
