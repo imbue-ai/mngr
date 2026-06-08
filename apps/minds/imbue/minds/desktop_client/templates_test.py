@@ -14,7 +14,9 @@ from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_recovery_page
+from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
+from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
@@ -33,6 +35,42 @@ def test_render_landing_page_with_agents_lists_them_as_links() -> None:
     assert f"/goto/{_AGENT_B}/" in html
     assert str(_AGENT_A) in html
     assert str(_AGENT_B) in html
+
+
+def test_render_landing_page_settings_link_interpolates_agent_id() -> None:
+    # Regression: the settings gear is a <Button> (JinjaX component), so its
+    # onclick must use the `attr={{ expr }}` form -- a quoted `onclick="...{{ }}..."`
+    # is forwarded literally, which sent `/workspace/{{ agent_id }}/settings` to the
+    # server and 500'd the AgentId parse on destroy.
+    html = render_landing_page(accessible_agent_ids=(_AGENT_A,))
+    assert f"/workspace/{_AGENT_A}/settings" in html
+    assert "{{" not in html
+
+
+def test_render_workspace_settings_data_agent_id_interpolates() -> None:
+    html = render_workspace_settings(
+        agent_id=str(_AGENT_A),
+        ws_name="ws",
+        current_account=None,
+        accounts=(),
+        servers=(),
+    )
+    assert f'data-agent-id="{_AGENT_A}"' in html
+    assert "{{" not in html
+
+
+def test_render_sharing_editor_workspace_link_interpolates_agent_id() -> None:
+    # Regression: the workspace <Link href="...{{ }}..."> must interpolate
+    # (component quoted-attribute interpolation does not happen in JinjaX).
+    html = render_sharing_editor(
+        agent_id=str(_AGENT_A),
+        service_name="svc",
+        title="Share",
+        mngr_forward_origin="http://localhost:8421",
+        ws_name="ws",
+    )
+    assert f"/goto/{_AGENT_A}/" in html
+    assert "{{" not in html
 
 
 def test_render_landing_page_with_no_agents_shows_empty_state() -> None:
@@ -136,13 +174,14 @@ def test_render_create_form_shows_error_message_when_supplied() -> None:
     assert "Imbue cloud requires an account." in html
 
 
-def test_render_create_form_honors_workspace_env_vars_in_dev_tier(monkeypatch: pytest.MonkeyPatch) -> None:
-    """In a dev tier, the MINDS_WORKSPACE_* env vars pre-fill the create form.
+def test_render_create_form_honors_workspace_env_vars_when_opted_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the explicit opt-in, the MINDS_WORKSPACE_* env vars pre-fill the form.
 
-    Used by ``just minds-start`` to point the form at the operator's local
-    FCT worktree + current branch so the dev-iteration loop is one click.
+    Used by ``just minds-start`` (and the e2e runner) to point the form at the
+    operator's local FCT worktree + current branch so the dev-iteration loop is
+    one click.
     """
-    monkeypatch.setenv("MINDS_ROOT_NAME", "minds-dev-josh")
+    monkeypatch.setenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", "1")
     monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/fct/path")
     monkeypatch.setenv("MINDS_WORKSPACE_NAME", "mindtest")
     monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
@@ -152,16 +191,37 @@ def test_render_create_form_honors_workspace_env_vars_in_dev_tier(monkeypatch: p
     assert "mngr/some-feature" in html
 
 
-def test_render_create_form_ignores_workspace_env_vars_in_staging(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Staging must not honor MINDS_WORKSPACE_* env vars.
+def test_render_create_form_honors_workspace_env_vars_on_staging_when_opted_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The opt-in is tier-independent: it works even on a shared tier (staging).
 
-    Without the gate, a stray ``MINDS_WORKSPACE_BRANCH=mngr/some-branch`` in
-    the operator's shell (e.g. left over from a prior ``just minds-start``
-    invocation) would pre-fill the form's branch field and propagate to
-    the imbue_cloud lease request as ``-b repo_branch_or_tag=...``, which
-    would silently fail to match any pool host baked with the tier's
-    canonical branch.
+    Regression test: staging previously dropped MINDS_WORKSPACE_* unconditionally,
+    so ``just minds-start`` against staging silently fell back to the public
+    GitHub FCT on ``main`` -- meaning local FCT changes could never be tested
+    against staging.
     """
+    monkeypatch.setenv("MINDS_ROOT_NAME", "minds-staging")
+    monkeypatch.setenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", "1")
+    monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/fct/path")
+    monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
+    html = render_create_form()
+    assert "/local/fct/path" in html
+    assert "mngr/some-feature" in html
+
+
+def test_render_create_form_ignores_workspace_env_vars_without_opt_in_on_shared_tier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without the opt-in, a stray MINDS_WORKSPACE_* in the shell is ignored.
+
+    A stray ``MINDS_WORKSPACE_BRANCH=mngr/some-branch`` (e.g. left over from a
+    prior ``just minds-start``) must not pre-fill the form's branch field for an
+    end-user ``minds run``, where it would propagate to the imbue_cloud lease as
+    ``-b repo_branch_or_tag=...`` and fail to match any pool host baked with the
+    tier's canonical branch.
+    """
+    monkeypatch.delenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", raising=False)
     monkeypatch.setenv("MINDS_ROOT_NAME", "minds-staging")
     monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/fct/path")
     monkeypatch.setenv("MINDS_WORKSPACE_NAME", "mindtest")
@@ -175,21 +235,16 @@ def test_render_create_form_ignores_workspace_env_vars_in_staging(monkeypatch: p
     assert "assistant" in html
 
 
-def test_render_create_form_ignores_workspace_env_vars_in_production(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Production -- like staging -- must not honor the dev-iteration env vars."""
-    monkeypatch.setenv("MINDS_ROOT_NAME", "minds")
-    monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
-    html = render_create_form()
-    assert "mngr/some-feature" not in html
+def test_render_create_form_ignores_workspace_env_vars_without_opt_in_on_dev_tier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tier no longer matters: even a dev-tier root name ignores the vars without opt-in.
 
-
-def test_render_create_form_ignores_workspace_env_vars_when_unactivated(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No activated env (no MINDS_ROOT_NAME) -- treat as non-dev and ignore env vars.
-
-    Mirrors the conservative default: a bare ``minds run`` without any
-    activation context shouldn't accidentally pull from ad-hoc env vars.
+    This closes the old gap where dev tiers honored a stray MINDS_WORKSPACE_*
+    purely by tier, with no explicit operator intent.
     """
-    monkeypatch.delenv("MINDS_ROOT_NAME", raising=False)
+    monkeypatch.delenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", raising=False)
+    monkeypatch.setenv("MINDS_ROOT_NAME", "minds-dev-josh")
     monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
     html = render_create_form()
     assert "mngr/some-feature" not in html

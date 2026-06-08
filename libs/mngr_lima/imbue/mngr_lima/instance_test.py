@@ -12,7 +12,30 @@ from imbue.mngr_lima.errors import LimaHostRenameError
 from imbue.mngr_lima.host_store import HostRecord
 from imbue.mngr_lima.host_store import LimaHostConfig
 from imbue.mngr_lima.instance import LimaProviderInstance
+from imbue.mngr_lima.instance import _build_agent_container_extra_args
 from imbue.mngr_lima.instance import _parse_size_to_gb
+
+
+def test_build_agent_container_extra_args_default_is_empty() -> None:
+    # No runtime and no passthrough args -> no extra docker run args.
+    assert _build_agent_container_extra_args(None, ()) == []
+
+
+def test_build_agent_container_extra_args_runtime_only() -> None:
+    assert _build_agent_container_extra_args("runsc", ()) == ["--runtime", "runsc"]
+
+
+def test_build_agent_container_extra_args_passthrough_only() -> None:
+    # Passthrough run args apply even without a custom runtime.
+    assert _build_agent_container_extra_args(None, ("--workdir=/",)) == ["--workdir=/"]
+
+
+def test_build_agent_container_extra_args_runtime_and_passthrough_order() -> None:
+    # Runtime is prepended; passthrough args follow in order (the gVisor case).
+    assert _build_agent_container_extra_args(
+        "runsc",
+        ("--workdir=/", "--security-opt=no-new-privileges"),
+    ) == ["--runtime", "runsc", "--workdir=/", "--security-opt=no-new-privileges"]
 
 
 def test_provider_capabilities(lima_provider: LimaProviderInstance) -> None:
