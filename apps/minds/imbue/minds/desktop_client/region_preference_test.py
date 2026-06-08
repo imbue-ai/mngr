@@ -45,20 +45,23 @@ def test_known_regions_and_defaults() -> None:
 
 def test_resolve_default_region_prefers_configured_known_value() -> None:
     cache = GeoLocationCache()
-    cache.set_coordinates((37.77, -122.42))  # San Francisco -> would be US-WEST-OR by geo
+    # San Francisco would resolve to US-WEST-OR by geo.
+    cache.set_coordinates((37.77, -122.42))
     # A valid stored value wins over geolocation.
     assert resolve_default_region(IMBUE_CLOUD_PROVIDER_KEY, "US-EAST-VA", cache) == "US-EAST-VA"
 
 
 def test_resolve_default_region_falls_back_to_geo_when_unconfigured() -> None:
     cache = GeoLocationCache()
-    cache.set_coordinates((37.77, -122.42))  # San Francisco
+    # San Francisco.
+    cache.set_coordinates((37.77, -122.42))
     assert resolve_default_region(IMBUE_CLOUD_PROVIDER_KEY, None, cache) == "US-WEST-OR"
 
 
 def test_resolve_default_region_ignores_unknown_configured_value() -> None:
     cache = GeoLocationCache()
-    cache.set_coordinates((40.71, -74.01))  # NYC -> US-EAST-VA by geo
+    # NYC resolves to US-EAST-VA by geo.
+    cache.set_coordinates((40.71, -74.01))
     # An unknown stored region is ignored; geo wins.
     assert resolve_default_region(IMBUE_CLOUD_PROVIDER_KEY, "MARS-WEST-1", cache) == "US-EAST-VA"
 

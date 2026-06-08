@@ -939,6 +939,23 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
     )
 
 
+def _log_backup_attempt(agent_id: AgentId, retry_state: RetryCallState) -> None:
+    """Debug-log a backup-setup retry, called at the start of each retry attempt.
+
+    The first attempt has no prior outcome and is not logged; subsequent attempts
+    log the previous attempt's failure so retries are traceable without spamming.
+    """
+    outcome = retry_state.outcome
+    if outcome is None:
+        return
+    logger.debug(
+        "Backup setup attempt {} for agent {} (previous failed: {}); retrying",
+        retry_state.attempt_number,
+        agent_id,
+        outcome.exception(),
+    )
+
+
 class AgentCreator(MutableModel):
     """Creates mngr agents in the background from git repositories or local paths.
 
@@ -1618,25 +1635,15 @@ class AgentCreator(MutableModel):
         configure backups later -- and it never blocks the create call.
         """
 
-        def _log_retry(retry_state: RetryCallState) -> None:
-            outcome = retry_state.outcome
-            failure = outcome.exception() if outcome is not None else None
-            logger.debug(
-                "Backup setup attempt {} for agent {} failed ({}); retrying",
-                retry_state.attempt_number,
-                agent_id,
-                failure,
-            )
-
         try:
             for attempt in Retrying(
                 retry=retry_if_exception_type((BackupProvisioningError, ImbueCloudCliError)),
                 stop=stop_after_delay(self.backup_setup_retry_budget_seconds),
                 wait=wait_fixed(self.backup_setup_retry_wait_seconds),
-                before_sleep=_log_retry,
                 reraise=True,
             ):
                 with attempt:
+                    _log_backup_attempt(agent_id, attempt.retry_state)
                     configure_backups_for_host(
                         agent_id=agent_id,
                         host_id=host_id,

@@ -48,40 +48,45 @@ _IMBUE_CLOUD_REGION_COORDINATES: Final[dict[str, tuple[float, float]]] = {
     "US-WEST-OR": (45.54, -122.96),
 }
 
-# Vultr region codes and the approximate coordinates of each datacenter city.
-# Used only to pick a sensible default nearest the user; the user can override.
+# Vultr region codes mapped to the approximate (latitude, longitude) of each
+# region's datacenter city, used only to pick a sensible default nearest the user
+# (the user can override). The city for each code, in declaration order, is:
+# New Jersey, Chicago, Dallas, Seattle, Los Angeles, Atlanta, Miami, Silicon
+# Valley, Toronto, Mexico City, Sao Paulo, Santiago, London, Manchester,
+# Amsterdam, Frankfurt, Paris, Madrid, Stockholm, Warsaw, Tel Aviv, Johannesburg,
+# Delhi, Mumbai, Bangalore, Singapore, Tokyo, Osaka, Seoul, Sydney, Melbourne.
 _VULTR_REGION_COORDINATES: Final[dict[str, tuple[float, float]]] = {
-    "ewr": (40.74, -74.17),  # New Jersey
-    "ord": (41.88, -87.63),  # Chicago
-    "dfw": (32.78, -96.80),  # Dallas
-    "sea": (47.61, -122.33),  # Seattle
-    "lax": (34.05, -118.24),  # Los Angeles
-    "atl": (33.75, -84.39),  # Atlanta
-    "mia": (25.76, -80.19),  # Miami
-    "sjc": (37.34, -121.89),  # Silicon Valley
-    "yto": (43.65, -79.38),  # Toronto
-    "mex": (19.43, -99.13),  # Mexico City
-    "sao": (-23.55, -46.63),  # Sao Paulo
-    "scl": (-33.45, -70.67),  # Santiago
-    "lhr": (51.51, -0.13),  # London
-    "man": (53.48, -2.24),  # Manchester
-    "ams": (52.37, 4.90),  # Amsterdam
-    "fra": (50.11, 8.68),  # Frankfurt
-    "par": (48.86, 2.35),  # Paris
-    "mad": (40.42, -3.70),  # Madrid
-    "sto": (59.33, 18.07),  # Stockholm
-    "waw": (52.23, 21.01),  # Warsaw
-    "tlv": (32.07, 34.79),  # Tel Aviv
-    "jnb": (-26.20, 28.05),  # Johannesburg
-    "del": (28.61, 77.21),  # Delhi
-    "bom": (19.08, 72.88),  # Mumbai
-    "blr": (12.97, 77.59),  # Bangalore
-    "sgp": (1.35, 103.82),  # Singapore
-    "nrt": (35.68, 139.69),  # Tokyo
-    "itm": (34.69, 135.50),  # Osaka
-    "icn": (37.57, 126.98),  # Seoul
-    "syd": (-33.87, 151.21),  # Sydney
-    "mel": (-37.81, 144.96),  # Melbourne
+    "ewr": (40.74, -74.17),
+    "ord": (41.88, -87.63),
+    "dfw": (32.78, -96.80),
+    "sea": (47.61, -122.33),
+    "lax": (34.05, -118.24),
+    "atl": (33.75, -84.39),
+    "mia": (25.76, -80.19),
+    "sjc": (37.34, -121.89),
+    "yto": (43.65, -79.38),
+    "mex": (19.43, -99.13),
+    "sao": (-23.55, -46.63),
+    "scl": (-33.45, -70.67),
+    "lhr": (51.51, -0.13),
+    "man": (53.48, -2.24),
+    "ams": (52.37, 4.90),
+    "fra": (50.11, 8.68),
+    "par": (48.86, 2.35),
+    "mad": (40.42, -3.70),
+    "sto": (59.33, 18.07),
+    "waw": (52.23, 21.01),
+    "tlv": (32.07, 34.79),
+    "jnb": (-26.20, 28.05),
+    "del": (28.61, 77.21),
+    "bom": (19.08, 72.88),
+    "blr": (12.97, 77.59),
+    "sgp": (1.35, 103.82),
+    "nrt": (35.68, 139.69),
+    "itm": (34.69, 135.50),
+    "icn": (37.57, 126.98),
+    "syd": (-33.87, 151.21),
+    "mel": (-37.81, 144.96),
 }
 
 _REGION_COORDINATES_BY_PROVIDER: Final[dict[str, dict[str, tuple[float, float]]]] = {
@@ -217,25 +222,30 @@ class GeoLocationCache(MutableModel):
             return self._coordinates
 
 
+def _run_geo_detection(geo_cache: GeoLocationCache) -> None:
+    """Background body: fetch IP geolocation and store it, swallowing failures.
+
+    A failure is swallowed (logged at debug) so the create form simply falls back
+    to the hardcoded per-provider default.
+    """
+    coordinates = fetch_geo_coordinates(_IFCONFIG_TIMEOUT_SECONDS)
+    if coordinates is None:
+        return
+    geo_cache.set_coordinates(coordinates)
+    logger.debug("Resolved IP geolocation to lat/long {} for region defaults", coordinates)
+
+
 def start_geo_detection(concurrency_group: ConcurrencyGroup, geo_cache: GeoLocationCache) -> None:
     """Kick off the one-shot, non-blocking IP-geolocation lookup at startup.
 
     Returns immediately; on success the resolved coordinates are stored in
-    ``geo_cache`` and logged. A failure is swallowed (logged at debug) so the
-    create form simply falls back to the hardcoded per-provider default.
+    ``geo_cache`` and logged.
     """
-
-    def _run() -> None:
-        coordinates = fetch_geo_coordinates(_IFCONFIG_TIMEOUT_SECONDS)
-        if coordinates is None:
-            return
-        geo_cache.set_coordinates(coordinates)
-        logger.debug("Resolved IP geolocation to lat/long {} for region defaults", coordinates)
-
     concurrency_group.start_new_thread(
-        target=_run,
+        target=_run_geo_detection,
+        kwargs={"geo_cache": geo_cache},
         name="geo-location-detection",
-        # A failed/slow lookup must not poison the root group; _run swallows its own failures.
+        # A failed/slow lookup must not poison the root group; the target swallows its own failures.
         is_checked=False,
     )
 
