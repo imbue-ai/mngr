@@ -161,9 +161,7 @@ def test_create_codex_explicit_type(e2e: E2eSession) -> None:
     # Scope discovery to the local provider so the check stays fast and never
     # queries Modal (--provider restricts which providers are queried, unlike
     # the --local result filter which still fans out to remote providers).
-    list_result = e2e.run(
-        "mngr list --provider local --format json", comment="verify the codex agent was created"
-    )
+    list_result = e2e.run("mngr list --provider local --format json", comment="verify the codex agent was created")
     expect(list_result).to_succeed()
     agents = json.loads(list_result.stdout)["agents"]
     matching = [agent for agent in agents if agent["name"] == "my-task"]

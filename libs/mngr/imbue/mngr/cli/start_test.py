@@ -1,12 +1,11 @@
 """Unit tests for the start CLI command."""
 
 import json
+from pathlib import Path
 
 import pluggy
 import pytest
 from click.testing import CliRunner
-
-from pathlib import Path
 
 from imbue.mngr.cli.start import StartCliOptions
 from imbue.mngr.cli.start import _output_result

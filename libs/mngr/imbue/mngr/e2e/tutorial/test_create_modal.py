@@ -961,9 +961,9 @@ def test_create_modal_idle_timeout_60(e2e: E2eSession) -> None:
     agents = json.loads(list_result.stdout)["agents"]
     matching = [agent for agent in agents if agent["name"] == "my-task"]
     assert len(matching) == 1, f"Expected exactly one 'my-task' agent, got: {agents}"
-    assert (
-        matching[0]["idle_timeout_seconds"] == 60
-    ), f"Expected idle_timeout_seconds=60, got: {matching[0]['idle_timeout_seconds']}"
+    assert matching[0]["idle_timeout_seconds"] == 60, (
+        f"Expected idle_timeout_seconds=60, got: {matching[0]['idle_timeout_seconds']}"
+    )
 
 
 @pytest.mark.release

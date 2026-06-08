@@ -44,7 +44,9 @@ def test_full_lifecycle(e2e: E2eSession) -> None:
 
     # Verify start actually relaunched the agent's own command, not just that
     # exec works: the "sleep 100100" process must be running again after restart.
-    ps_after_restart = e2e.run("mngr exec my-task 'ps aux'", comment="Verify the agent command is running after restart")
+    ps_after_restart = e2e.run(
+        "mngr exec my-task 'ps aux'", comment="Verify the agent command is running after restart"
+    )
     expect(ps_after_restart).to_succeed()
     expect(ps_after_restart.stdout).to_contain("sleep 100100")
 

@@ -13,7 +13,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "imbue-mngr-modal==0.2.10",
+    "imbue-mngr-modal==0.2.11",
 ]
 
 [project.entry-points.mngr]
