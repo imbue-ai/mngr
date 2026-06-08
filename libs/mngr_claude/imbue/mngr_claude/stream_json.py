@@ -14,7 +14,12 @@ assistant summary. Two payoffs:
 
 - The emit side constructs the events via the SDK models and ``model_dump()``\\s them to the
   wire, so producers and the parser share one vocabulary instead of duplicating bare string
-  literals (``"content_block_delta"``, ``"text_delta"``, ...).
+  literals (``"content_block_delta"``, ``"text_delta"``, ...). Because the events are dumped from
+  anthropic's own models, the framing events and the assistant ``Message`` now carry the API's
+  optional, semantically-null metadata fields (e.g. ``citations``, the ``usage`` cache/detail
+  nulls) that the previous hand-rolled dicts omitted -- a deliberate widening to the API's native
+  shapes. Only ``content_block_delta`` (the CLI token stream), ``content_block_stop``, and
+  ``message_stop`` are byte-identical to the old dicts.
 - The consume side validates into the union and dispatches with an exhaustive ``assert_never``
   match. When a future ``anthropic`` release adds an event variant, ``ty`` fails the
   exhaustiveness check and names the unhandled member -- an early warning our hand-written
@@ -73,8 +78,10 @@ _MESSAGE_ADAPTER: Final[TypeAdapter[Message]] = TypeAdapter(Message)
 def text_delta_event(text: str, index: int = _DEFAULT_BLOCK_INDEX) -> dict[str, Any]:
     """Build a ``content_block_delta`` carrying a ``text_delta``.
 
-    This is the hot path (the only inner event the CLI token stream emits); its
-    ``model_dump()`` is byte-identical to the dict producers hand-rolled before.
+    This is the hot path (the only inner event the CLI token stream emits); its ``model_dump()``
+    is byte-identical to the dict producers hand-rolled before. (The framing builders below are
+    *not* byte-identical -- dumping anthropic's models adds the API's optional, semantically-null
+    metadata fields. See the module docstring.)
     """
     return RawContentBlockDeltaEvent(
         type="content_block_delta", index=index, delta=TextDelta(type="text_delta", text=text)
@@ -264,6 +271,13 @@ def validate_stream_event(payload: object) -> RawMessageStreamEvent | None:
     package degrades gracefully: an unmodeled event is skipped, not raised. (The new-variant
     *signal* is the static exhaustiveness check in :func:`classify_stream_event`, which trips when
     we bump the package -- not this runtime path.)
+
+    Unlike the ``assistant`` summary (see :func:`assistant_text`), there is no separate lenient
+    raw-dict fallback here: a ``message_start`` carries empty ``content``, so there are no evolving
+    content-block types to drift, and the only field we read from it (``message.id``) is non-load-
+    bearing -- if validation ever fails, the caller simply loses the deltas-vs-summary correlation
+    optimization while text still streams. The assistant summary, by contrast, carries populated,
+    evolving content blocks, so it keeps a fallback to avoid dropping real text.
     """
     try:
         return _STREAM_EVENT_ADAPTER.validate_python(payload)
