@@ -2101,6 +2101,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         env_vars["MNGR_AGENT_STATE_DIR"] = str(agent_state_dir)
         env_vars["MNGR_AGENT_WORK_DIR"] = str(agent.work_dir)
         env_vars["LLM_USER_PATH"] = str(agent_state_dir / "llm_data")
+        # The agent's primary tmux window name, exported so in-session helpers
+        # (e.g. the ttyd attach script) can target the window by name rather than
+        # the literal :0 index, keeping them independent of the user's base-index.
+        env_vars["MNGR_PRIMARY_WINDOW_NAME"] = self.mngr_ctx.config.tmux.primary_window_name
 
         # 2. Add programmatic defaults
         base_branch = (options.git.base_branch if options.git else None) or ""

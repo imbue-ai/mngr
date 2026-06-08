@@ -2851,6 +2851,37 @@ def test_host_collect_agent_env_vars_includes_mngr_variables(
     # alongside MNGR_GIT_BASE_BRANCH and must hold the same value.
     assert "CODE_GUARDIAN_STOP_HOOK__BASE_BRANCH" in env
     assert env["CODE_GUARDIAN_STOP_HOOK__BASE_BRANCH"] == env["MNGR_GIT_BASE_BRANCH"]
+    # The primary tmux window name is exported (default "agent") so in-session
+    # helpers like the ttyd attach script can target the window by name, not :0.
+    assert env["MNGR_PRIMARY_WINDOW_NAME"] == "agent"
+
+
+def test_host_collect_agent_env_vars_uses_configured_primary_window_name(
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+    temp_profile_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+    active_concurrency_group: ConcurrencyGroup,
+    mngr_test_prefix: str,
+) -> None:
+    """A custom tmux.primary_window_name flows into MNGR_PRIMARY_WINDOW_NAME."""
+    host = _make_local_host_with_tmux_config(
+        TmuxConfig(primary_window_name="primary"),
+        temp_host_dir,
+        temp_profile_dir,
+        plugin_manager,
+        active_concurrency_group,
+        mngr_test_prefix,
+    )
+    options = CreateAgentOptions(
+        name=AgentName("env-window-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+    agent = host.create_agent_state(temp_work_dir, options)
+
+    env = host._collect_agent_env_vars(agent, options)
+    assert env["MNGR_PRIMARY_WINDOW_NAME"] == "primary"
 
 
 def test_host_collect_agent_env_vars_with_env_file(
