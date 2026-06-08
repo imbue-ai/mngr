@@ -18,10 +18,17 @@ Every item below is now `investigated`.
 
 **Verification method:** verdicts are from direct code inspection of both implementations
 (the real-SDK internals were read out in full: arg builder, session listing/mutation, and the
-control-protocol query loop). Items #1, #6, #7, #8 were additionally confirmed empirically by
-runtime introspection (`uv run python` importing both modules). Behavioral items have not been
-exercised against the live API (the live suite makes paid calls); their verdicts rest on the
-matching source on both sides.
+control-protocol query loop). In addition, `imbue/mngr_robinhood/test_sdk_divergences.py` encodes
+several divergences as living tests: each asserts the real SDK's behavior and is
+`xfail(strict=True)` for the mngr target, so a normal run is green (real PASS, mngr XFAIL) and
+`pytest --runxfail` shows the "real passes / mngr fails" split. Items marked **Test:** below were
+run that way against the live API (or offline where no network is needed) and observed to fail for
+the mngr target:
+
+- #1, #6, #7, #8, #9 — offline (no API): real PASS, mngr FAIL/XFAIL.
+- #3, #18 — live (one cheap haiku call each): real PASS, mngr FAIL.
+
+The remaining items' verdicts rest on the matching source on both sides (not yet encoded as tests).
 
 Each item also carries a **Verdict**:
 
@@ -58,6 +65,8 @@ Evidence file references:
   types/functions, `delete_session`, `fork_session`, `list_subagents`, `get_subagent_messages`,
   and all `*_from_store` / `*_via_store` variants. The module docstring's "every type is
   re-exported verbatim" is inaccurate.
+- **Test:** `test_sdk_divergences.py::test_divergence_1_reexports_every_public_name` — real PASS,
+  mngr FAIL (86 names missing).
 - **Recommendation:** Replace the hand-maintained import list with a single
   `from claude_agent_sdk import *`-style re-export of everything in `claude_agent_sdk.__all__`
   except the names this module deliberately overrides (`query`, `ClaudeSDKClient`,
@@ -118,6 +127,9 @@ Evidence file references:
   it fires for *every* tool except those in `allowed_tools` (the only pre-approval honored,
   `_dispatch_permission`). Tools auto-allowed by `permission_mode` or `permissions.allow` settings
   still hit the callback here.
+- **Test:** `test_sdk_divergences.py::test_divergence_3_can_use_tool_not_invoked_when_auto_allowed`
+  (live) — with `permission_mode="bypassPermissions"`, real PASS (callback never invoked), mngr
+  FAIL (`recorded == ['Bash']`).
 - **Recommendation:** Hard to make exact over the mngr transport (no stdio control channel). Two
   options: (a) document the "fires for every non-`allowed_tools` tool" semantics as a known
   approximation; or (b) if feasible, use claude's stdio permission-prompt MCP tool against the
@@ -159,6 +171,8 @@ Evidence file references:
 - **Evidence:** Real client has `rewind_files`, `reconnect_mcp_server`, `toggle_mcp_server`,
   `stop_task`, `get_context_usage` (client.py:370-540); the mngr client has none — calling them
   raises `AttributeError`, not `AgentSdkNotImplementedError`.
+- **Test:** `test_sdk_divergences.py::test_divergence_6_client_exposes_documented_methods`
+  (parametrized over all 5 methods) — real PASS, mngr FAIL for each.
 - **Recommendation:** Add stub methods that raise `AgentSdkNotImplementedError` with a clear
   message (so they're discoverable and consistent with `fork_session`), or implement the few that
   are tractable (`get_context_usage` could run a `/context`-style probe; the MCP/task ones depend
@@ -170,6 +184,8 @@ Evidence file references:
 - **Verdict:** confirmed
 - **Evidence:** Real `__init__(self, options=None, transport=None)` (client.py:67). The mngr client
   is a pydantic `MutableModel` with only an `options` field.
+- **Test:** `test_sdk_divergences.py::test_divergence_7_client_accepts_transport_argument` — real
+  PASS, mngr FAIL.
 - **Recommendation:** Accept a `transport` keyword for signature compatibility; since the whole
   point is the mngr backend, raise `AgentSdkNotImplementedError` if a non-None transport is
   passed (custom transports are incompatible with the mngr driver).
@@ -180,6 +196,8 @@ Evidence file references:
 - **Verdict:** confirmed
 - **Evidence:** Real `query(*, prompt, options=None, transport=None)` (query.py:11). mngr's omits
   `transport`, so `query(prompt=..., transport=...)` raises `TypeError`.
+- **Test:** `test_sdk_divergences.py::test_divergence_8_query_accepts_transport_argument` — real
+  PASS, mngr FAIL.
 - **Recommendation:** Same as #7 — accept and reject non-None with `AgentSdkNotImplementedError`.
 
 ### 9. Wrong exception types on the "not connected" / error paths
@@ -190,6 +208,8 @@ Evidence file references:
   `interrupt` / `set_model` / `set_permission_mode` / `get_server_info`; upstream raises
   `CLIConnectionError("Not connected. Call connect() first.")` (client.py). A missing `claude` CLI
   surfaces as an mngr error rather than `CLINotFoundError`.
+- **Test:** `test_sdk_divergences.py::test_divergence_9_query_before_connect_raises_cli_connection_error`
+  — real PASS, mngr FAIL (raises `RobinhoodError`).
 - **Recommendation:** Raise the re-exported `CLIConnectionError` (with the same message) for the
   not-connected case, and map a missing-CLI failure to `CLINotFoundError`, so callers' `except`
   blocks behave identically.
@@ -296,6 +316,8 @@ Evidence file references:
   it from the CLI result.
 - **Recommendation:** Thread the last assistant `stop_reason` (already absorbed in
   `_absorb_event_metadata`) into the `ResultMessage`.
+- **Test:** `test_sdk_divergences.py::test_divergence_18_result_message_has_stop_reason` (live) —
+  real PASS (`stop_reason` populated, e.g. `"end_turn"`), mngr FAIL (`None`).
 
 ### 19. `ResultMessage.num_turns` semantics differ
 
