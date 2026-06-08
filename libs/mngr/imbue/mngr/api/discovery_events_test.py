@@ -606,6 +606,7 @@ def test_find_latest_full_snapshot_offset_finds_last_full_event(temp_config: Mng
 
     events_path = get_discovery_events_path(temp_config)
     offset = find_latest_full_snapshot_offset(events_path)
+    assert offset is not None
 
     # Read from the offset -- should get the second full event and the last agent event
     with open(events_path) as f:

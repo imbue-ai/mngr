@@ -60,7 +60,7 @@ def main() -> None:
             print(f"[{i:3d}] FDs: {current} (delta: {current - base:+d})")
 
         print("\n--- Test 2: discover both providers sequentially (no executor, no leak) ---")
-        providers = get_all_provider_instances(mngr_ctx, None)
+        providers = get_all_provider_instances(mngr_ctx, None).instances
         base = count_real_fds()
         for i in range(1, args.iterations + 1):
             for provider in providers:

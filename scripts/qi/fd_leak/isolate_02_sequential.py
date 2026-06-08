@@ -33,7 +33,7 @@ def main() -> None:
     with cg:
         pm = create_plugin_manager()
         mngr_ctx = load_config(pm, cg)
-        providers = get_all_provider_instances(mngr_ctx, None)
+        providers = get_all_provider_instances(mngr_ctx, None).instances
 
         gc.collect()
         base = count_real_fds()

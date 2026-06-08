@@ -10,7 +10,9 @@ Number of files transferred: 3
 Total file size: 5,678 B
 Total transferred file size: 1,234 B
 """
-    files, bytes_transferred = parse_rsync_output(output)
+    result = parse_rsync_output(output)
+    assert result is not None
+    files, bytes_transferred = result
     assert files == 3
     assert bytes_transferred == 1234
 
@@ -22,7 +24,9 @@ Number of files transferred: 0
 Total file size: 1,000 B
 Total transferred file size: 0 B
 """
-    files, bytes_transferred = parse_rsync_output(output)
+    result = parse_rsync_output(output)
+    assert result is not None
+    files, bytes_transferred = result
     assert files == 0
     assert bytes_transferred == 0
 
@@ -34,7 +38,9 @@ Number of files transferred: 3
 Total file size: 10,000 B
 Total transferred file size: 345 B
 """
-    files, bytes_transferred = parse_rsync_output(output)
+    result = parse_rsync_output(output)
+    assert result is not None
+    files, bytes_transferred = result
     assert files == 3
     assert bytes_transferred == 345
 
@@ -46,7 +52,9 @@ Number of files transferred: 1
 Total file size: 2,000,000,000 B
 Total transferred file size: 1,234,567,890 B
 """
-    files, bytes_transferred = parse_rsync_output(output)
+    result = parse_rsync_output(output)
+    assert result is not None
+    files, bytes_transferred = result
     assert files == 1
     assert bytes_transferred == 1234567890
 

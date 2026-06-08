@@ -54,7 +54,7 @@ def main() -> None:
     with cg:
         pm = create_plugin_manager()
         mngr_ctx = load_config(pm, cg)
-        providers = get_all_provider_instances(mngr_ctx, None)
+        providers = get_all_provider_instances(mngr_ctx, None).instances
         provider_map = {p.name: p for p in providers}
 
         gc.collect()
