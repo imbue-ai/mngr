@@ -774,11 +774,7 @@ def test_provision_per_agent_settings_ignores_user_base_when_sync_disabled(
 def test_provision_writes_onboarding_seed(
     antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path
 ) -> None:
-    """Provisioning writes the NUX seed to the path agy reads, so its first-run flow doesn't intercept the first message.
-
-    The seed's *contents* are owned by ``test_build_onboarding_seed_emits_the_three_nux_keys``;
-    here we only assert provisioning persists that seed at the expected path.
-    """
+    """Provisioning persists the NUX seed at the path agy reads (contents owned by the builder's own unit test)."""
     agent = antigravity_agent_auto_dismiss
     _provision(agent)
     onboarding_path = get_antigravity_onboarding_cache_path(agent._get_agy_home_dir())
