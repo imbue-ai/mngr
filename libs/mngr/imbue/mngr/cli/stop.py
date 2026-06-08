@@ -55,6 +55,7 @@ class StopCliOptions(CommonCliOptions):
     archive: bool
     sessions: tuple[str, ...]
     stop_host: bool
+    dry_run: bool
     # Planned features (not yet implemented)
     snapshot_mode: str | None
     graceful: bool
@@ -210,6 +211,11 @@ def _output_result(stopped_agents: Sequence[str], output_opts: OutputOptions) ->
     help="Stop the agent's entire host (all agents on it) instead of just the named agent",
 )
 @optgroup.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show what would be stopped without actually stopping anything",
+)
+@optgroup.option(
     "--snapshot-mode",
     type=click.Choice(["auto", "always", "never"], case_sensitive=False),
     default=None,
@@ -277,6 +283,11 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
     # --stop-host stops the agent's whole host directly, without the
     # agent-enumeration scan (see _stop_hosts_for_addresses).
     if opts.stop_host:
+        if opts.dry_run:
+            _output("Would stop the host(s) of:", output_opts)
+            for address in agent_addresses:
+                _output(f"  - {address.agent}", output_opts)
+            return
         stopped_host_agents = _stop_hosts_for_addresses(agent_addresses, mngr_ctx, output_opts)
         _output_result(stopped_host_agents, output_opts)
         return
@@ -291,6 +302,13 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
 
     if not agents_to_stop:
         _output("No running agents found to stop", output_opts)
+        return
+
+    # Dry-run: report what would be stopped without touching any agent.
+    if opts.dry_run:
+        _output("Would stop:", output_opts)
+        for match in agents_to_stop:
+            _output(f"  - {match.agent_name} (on host {match.host_id})", output_opts)
         return
 
     # Stop each agent
@@ -340,7 +358,7 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="stop",
     one_line_description="Stop running agent(s)",
-    synopsis="mngr [stop|s] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [--archive] [--stop-host] [--snapshot-mode <MODE>] [--graceful/--no-graceful]",
+    synopsis="mngr [stop|s] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [--archive] [--stop-host] [--dry-run] [--snapshot-mode <MODE>] [--graceful/--no-graceful]",
     description="""For remote hosts, this stops the agent's tmux session. The host remains
 running unless idle detection stops it automatically.
 
@@ -357,6 +375,9 @@ This marks the agent as archived without destroying it, allowing it to
 be filtered out of listings while preserving its state. The 'mngr archive'
 command is a shorthand for 'mngr stop --archive'.
 
+Use --dry-run to preview which agents (or hosts, with --stop-host) would be
+stopped without actually stopping anything.
+
 Use '-' in place of agent names to read them from stdin, one per line.
 
 Supports custom format templates via --format. Available fields: name.""",
@@ -367,6 +388,7 @@ Supports custom format templates via --format. Available fields: name.""",
         ("Stop all running agents", "mngr list --ids | mngr stop -"),
         ("Stop and archive an agent", "mngr stop my-agent --archive"),
         ("Stop the agent's whole host", "mngr stop my-agent --stop-host"),
+        ("Preview what would be stopped", "mngr list --ids | mngr stop - --dry-run"),
         ("Stop by tmux session name", "mngr stop --session mngr-my-agent"),
         ("Custom format template output", "mngr stop agent1 agent2 --format '{name}'"),
     ),
