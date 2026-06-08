@@ -63,7 +63,12 @@ def build_post_attach_resize_script(session_name: str) -> str:
 
 
 @pure
-def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path, attach_args: tuple[str, ...] = ()) -> str:
+def _build_ssh_activity_wrapper_script(
+    session_name: str,
+    host_dir: Path,
+    primary_window_name: str,
+    attach_args: tuple[str, ...] = (),
+) -> str:
     """Build a shell script that tracks SSH activity while running tmux.
 
     The script:
@@ -94,8 +99,11 @@ def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path, attach
     # configured dimensions survive an interactive attach. The check runs on the
     # remote host at attach time (window-size is a window option, read via -wv).
     # Redirect stdout too (not just stderr) so control mode (-CC) is not corrupted
-    # by stray tmux command output on the SSH stdout stream.
-    agent_window_target = TmuxWindowTarget(session_name=session_name, window=0).as_shell_arg()
+    # by stray tmux command output on the SSH stdout stream. Target the primary
+    # window by name (not the literal :0 index) so the manual-pin guard holds
+    # regardless of the user's tmux base-index, matching how the window is created
+    # and targeted everywhere else.
+    agent_window_target = TmuxWindowTarget(session_name=session_name, window=primary_window_name).as_shell_arg()
     resize_step = (
         f"(sleep 3; "
         f'if [ "$(tmux show-options -t {agent_window_target} -wv window-size 2>/dev/null)" != manual ]; then '
@@ -307,7 +315,10 @@ def connect_to_agent(
 
         # Build wrapper script that tracks SSH activity while running tmux
         wrapper_script = _build_ssh_activity_wrapper_script(
-            session_name, host.host_dir, mngr_ctx.config.tmux.attach_args
+            session_name,
+            host.host_dir,
+            mngr_ctx.config.tmux.primary_window_name,
+            mngr_ctx.config.tmux.attach_args,
         )
         # Pass the wrapper as a single remote command string so SSH doesn't
         # split it into separate words. SSH concatenates multiple remote command
