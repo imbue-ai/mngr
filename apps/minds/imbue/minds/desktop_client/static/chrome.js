@@ -54,13 +54,24 @@
     }
   }
 
-  // -- Titlebar per-project swatch ------------------------------------------
+  // -- Titlebar accent ------------------------------------------------------
+  //
+  // The titlebar background and contrasting foreground are driven by three
+  // CSS variables set on the document root:
+  //   --workspace-accent  the OKLCH color (also consumed by sidebar spines etc.)
+  //   --titlebar-bg       the same color, used by the titlebar background
+  //   --titlebar-fg       an RGB triple ("0 0 0" | "255 255 255") for the
+  //                       contrasting foreground; titlebar-* utility classes
+  //                       compose this with per-element alpha for hierarchy
+  // Cleared back to defaults (dark bar, white foreground) when there's no
+  // active workspace, so a sign-out / workspace-delete / freshly-launched
+  // app renders the default zinc-900 chrome.
   var currentTitleAgentId = null;
-  function applyTitleSwatch(agentId) {
-    var swatch = document.getElementById('title-swatch');
+  function applyTitleAccent(agentId) {
     if (!agentId) {
-      swatch.classList.add('hidden');
       document.documentElement.style.removeProperty('--workspace-accent');
+      document.documentElement.style.removeProperty('--titlebar-bg');
+      document.documentElement.style.removeProperty('--titlebar-fg');
       currentTitleAgentId = null;
       return;
     }
@@ -74,7 +85,11 @@
     getAccent(agentId, function (c) {
       if (currentTitleAgentId !== agentId) return;
       document.documentElement.style.setProperty('--workspace-accent', c);
-      swatch.classList.remove('hidden');
+      document.documentElement.style.setProperty('--titlebar-bg', c);
+    });
+    window.mindsAccent.getForeground(agentId, function (rgb) {
+      if (currentTitleAgentId !== agentId) return;
+      document.documentElement.style.setProperty('--titlebar-fg', rgb);
     });
     maybeRedirectToRecovery();
   }
@@ -161,7 +176,7 @@
     // that doesn't match /goto/<id>/, which would prevent the recovery-page
     // redirect from firing for the current agent.
     window.minds.onCurrentWorkspaceChanged(function (agentId) {
-      applyTitleSwatch(agentId || null);
+      applyTitleAccent(agentId || null);
     });
   } else {
     setInterval(function () {
@@ -170,7 +185,7 @@
         if (t) document.getElementById('page-title').textContent = t;
         var loc = document.getElementById('content-frame').contentWindow.location.pathname;
         var m = loc.match(/^\/goto\/([^/]+)/);
-        applyTitleSwatch(m ? m[1] : null);
+        applyTitleAccent(m ? m[1] : null);
       } catch (e) {}
     }, 500);
     document.getElementById('content-frame').addEventListener('load', refreshAuthStatus);

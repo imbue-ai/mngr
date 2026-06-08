@@ -8,24 +8,68 @@
 //
 // Usage:
 //   window.mindsAccent.get(agentId, function (color) { ... });
+//   window.mindsAccent.getForeground(agentId, function (rgb) { ... });
+//   window.mindsAccent.pickForeground(L) -> "0 0 0" | "255 255 255"
 //
 // In the common case the server attaches `accent` to each workspace dict
 // over SSE and this helper is only used when that field is missing.
 (function () {
-  var cache = {};
+  // Fixed lightness / chroma for the workspace accent. Mirrored in
+  // templates.py. 80% L / 0.1 C is calmer than the prior 65 / 0.15 so
+  // the full-width titlebar reads as a chrome surface rather than a
+  // saturated highlight.
+  var ACCENT_L = 80;
+  var ACCENT_C = 0.1;
+  // Threshold for choosing a contrasting foreground. Above this L the
+  // background is light enough that black ink reads better; below it,
+  // white. OKLCH lightness is perceptual so a fixed cutoff works
+  // across the hue wheel.
+  var FOREGROUND_L_THRESHOLD = 0.5;
 
-  async function compute(agentId) {
+  var colorCache = {};
+  var hueCache = {};
+
+  function hueFromAgentId(agentId) {
+    var cached = hueCache[agentId];
+    if (cached !== undefined) return Promise.resolve(cached);
     var enc = new TextEncoder().encode(agentId);
-    var digest = await crypto.subtle.digest('SHA-256', enc);
-    var view = new DataView(digest);
-    var hue = view.getUint32(0, false) % 360;
-    return 'oklch(65% 0.15 ' + hue + ')';
+    return crypto.subtle.digest('SHA-256', enc).then(function (digest) {
+      var view = new DataView(digest);
+      var hue = view.getUint32(0, false) % 360;
+      hueCache[agentId] = hue;
+      return hue;
+    });
+  }
+
+  // ``pickForeground`` -- pure function over the OKLCH lightness of the
+  // accent. Returns the foreground RGB triple as a space-separated string
+  // ("0 0 0" or "255 255 255") so consumers can drop it straight into
+  // ``rgb(var(--titlebar-fg) / <alpha>)``.
+  function pickForeground(oklchL) {
+    return oklchL >= FOREGROUND_L_THRESHOLD ? '0 0 0' : '255 255 255';
   }
 
   function get(agentId, cb) {
-    if (cache[agentId] !== undefined) { cb(cache[agentId]); return; }
-    compute(agentId).then(function (c) { cache[agentId] = c; cb(c); });
+    if (colorCache[agentId] !== undefined) { cb(colorCache[agentId]); return; }
+    hueFromAgentId(agentId).then(function (hue) {
+      var c = 'oklch(' + ACCENT_L + '% ' + ACCENT_C + ' ' + hue + ')';
+      colorCache[agentId] = c;
+      cb(c);
+    });
   }
 
-  window.mindsAccent = { get: get };
+  // Foreground for the hash-derived accent. All hash-derived accents
+  // share the same lightness (ACCENT_L), so the foreground is the same
+  // for every agent today; the per-agent signature is kept so future
+  // user-chosen accents with varying lightness slot in without changing
+  // the call sites.
+  function getForeground(_agentId, cb) {
+    cb(pickForeground(ACCENT_L / 100));
+  }
+
+  window.mindsAccent = {
+    get: get,
+    getForeground: getForeground,
+    pickForeground: pickForeground,
+  };
 })();

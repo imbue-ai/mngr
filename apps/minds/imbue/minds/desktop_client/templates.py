@@ -157,9 +157,12 @@ CATALOG: Final[Catalog] = _build_catalog()
 # hue. Mirrored on the JS side (static/chrome.js, static/sidebar.js).
 
 # Lightness percent and chroma for the OKLCH workspace accent. Fixed across
-# all workspaces so the only axis of variation is the hue.
-_WORKSPACE_L: Final[int] = 65
-_WORKSPACE_C: Final[float] = 0.15
+# all workspaces so the only axis of variation is the hue. 80 / 0.1 is
+# calmer than the prior 65 / 0.15 -- the accent now fills the full-width
+# titlebar (not just a small swatch) so the larger surface needs a
+# lighter, less-saturated tone to read as chrome rather than a highlight.
+_WORKSPACE_L: Final[int] = 80
+_WORKSPACE_C: Final[float] = 0.1
 
 
 @pure

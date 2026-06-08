@@ -627,13 +627,15 @@ def test_button_passes_through_arbitrary_attrs() -> None:
 
 def test_titlebar_button_default_is_nav_variant() -> None:
     html = CATALOG.render("TitlebarButton", _content="<svg/>")
-    # nav variant => w-8 h-7 rounded active:bg-white/10
+    # nav variant => w-8 h-7 rounded-md, default tone => the .titlebar-btn
+    # class (defined in tokens.css) carries the accent-aware color +
+    # hover + active rules.
     assert "w-8" in html
     assert "h-7" in html
-    assert "active:bg-white/10" in html
-    # default tone => hover lifts to white/5 + zinc-200 text
-    assert "hover:bg-white/5" in html
-    assert "hover:text-zinc-200" in html
+    assert "rounded-md" in html
+    assert "titlebar-btn" in html
+    # The danger tone modifier should NOT be present on the default tone.
+    assert "titlebar-btn-danger" not in html
     # Window-control geometry should NOT bleed into nav
     assert "w-9" not in html
     assert "h-[38px]" not in html
@@ -648,10 +650,10 @@ def test_titlebar_button_control_variant_renders_window_control_geometry() -> No
 
 def test_titlebar_button_danger_tone_applies_red_hover() -> None:
     html = CATALOG.render("TitlebarButton", variant="control", tone="danger", _content="<svg/>")
-    assert "hover:bg-red-600" in html
-    assert "hover:text-white" in html
-    # The default tone's hover should be replaced, not merged.
-    assert "hover:bg-white/5" not in html
+    # ``.titlebar-btn-danger`` (in tokens.css) supplies the red hover.
+    assert "titlebar-btn-danger" in html
+    # Base ``.titlebar-btn`` still applies (geometry + base colors).
+    assert "titlebar-btn " in html
 
 
 def test_notice_renders_each_variant() -> None:

@@ -38,20 +38,20 @@
       body_attrs={{ _body_attrs }}
       scripts={{ _scripts }}>
   <div id="minds-titlebar"
-       class="fixed top-0 left-0 right-0 h-[38px] bg-zinc-900 flex items-center select-none z-[100] border-b border-white/10 px-1 {% if is_mac %}pl-[72px]{% endif %}">
+       style="background-color: var(--titlebar-bg, #18181b);"
+       class="fixed top-0 left-0 right-0 h-[38px] flex items-center select-none z-[100] px-1 {% if is_mac %}pl-[72px]{% endif %}">
     <div class="flex gap-0.5">
       <TitlebarButton id="sidebar-toggle" title="Projects"><Icon24 name="sidebar" /></TitlebarButton>
       <TitlebarButton id="home-btn" title="Home"><Icon24 name="home" /></TitlebarButton>
       <TitlebarButton id="back-btn" title="Back"><Icon24 name="back" /></TitlebarButton>
       <TitlebarButton id="forward-btn" title="Forward"><Icon24 name="forward" /></TitlebarButton>
     </div>
-    <div class="flex-1 flex items-center justify-center gap-2 px-2 min-w-0">
-      <span id="title-swatch" class="accent-swatch hidden w-2.5 h-2.5 rounded-sm shrink-0"></span>
-      <span id="page-title" class="text-zinc-200 text-xs whitespace-nowrap overflow-hidden text-ellipsis">Minds</span>
+    <div class="flex-1 flex items-center justify-center px-2 min-w-0">
+      <span id="page-title" class="titlebar-title text-xs whitespace-nowrap overflow-hidden text-ellipsis">Minds</span>
     </div>
     <div class="relative minds-user-area shrink-0">
       <button id="user-btn"
-              class="!w-auto !h-auto !inline-block text-zinc-400 cursor-pointer px-2.5 py-1 rounded-md text-xs font-sans whitespace-nowrap hover:bg-white/5 hover:text-zinc-200"
+              class="titlebar-account !w-auto !h-auto !inline-block cursor-pointer px-2.5 py-1 rounded-md text-xs font-sans whitespace-nowrap"
               title="Account">Log in</button>
     </div>
     <TitlebarButton id="requests-toggle" title="Requests" extra="relative">
