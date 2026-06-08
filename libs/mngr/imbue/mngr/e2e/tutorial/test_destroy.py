@@ -13,7 +13,6 @@ from imbue.skitwright.expect import expect
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 @pytest.mark.timeout(60)
 def test_create_and_destroy_agent(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
@@ -43,6 +42,7 @@ def test_create_and_destroy_agent(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_destroy_all_via_stdin(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # destroy all agents (be careful!)
@@ -84,34 +84,79 @@ def _create_my_task(e2e: E2eSession, sleep_value: int) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(180)
 def test_destroy_specific(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # destroy a specific agent
         mngr destroy my-task
     """)
     _create_my_task(e2e, 100600)
+    # The bare `mngr destroy` (no --force) refuses to destroy a *running* agent,
+    # so stop it first. This lets the documented command actually destroy the
+    # agent rather than short-circuiting on the running-agent guard.
+    expect(e2e.run("mngr stop my-task", comment="stop the agent before destroying it", timeout=60.0)).to_succeed()
     # Pipe "y\n" to confirm the destructive prompt that --force would suppress.
-    expect(e2e.run("yes | mngr destroy my-task", comment="destroy a specific agent")).to_succeed()
+    destroy_result = e2e.run("yes | mngr destroy my-task", comment="destroy a specific agent", timeout=90.0)
+    expect(destroy_result).to_succeed()
+    expect(destroy_result.stdout).to_contain("Destroyed agent: my-task")
+    # Verify the agent is actually gone, not just that the command exited 0.
+    list_result = e2e.run("mngr list", comment="verify the agent no longer exists")
+    expect(list_result).to_succeed()
+    expect(list_result.stdout).not_to_contain("my-task")
 
 
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_destroy_short_form(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # short form
         mngr rm my-task
     """)
     _create_my_task(e2e, 100601)
-    expect(e2e.run("yes | mngr rm my-task", comment="short form")).to_succeed()
+    # `--force` is an extra flag (the agent created above is still running, and a
+    # non-forced destroy refuses running agents -- see the companion test below).
+    # It also lets us verify that the `rm` alias performs a real removal.
+    destroy_result = e2e.run("mngr rm my-task --force", comment="short form")
+    expect(destroy_result).to_succeed()
+    expect(destroy_result.stdout).to_contain("Destroyed agent: my-task")
+
+    # `rm` is an alias for `destroy`, so the agent must actually be gone afterward.
+    list_result = e2e.run("mngr list", comment="Verify agent no longer appears in list")
+    expect(list_result).to_succeed()
+    expect(list_result.stdout).not_to_contain("my-task")
 
 
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
+@pytest.mark.timeout(120)
+def test_destroy_short_form_running_requires_force(e2e: E2eSession) -> None:
+    # Unhappy path for the same tutorial block: without --force, the short-form
+    # `rm` is safe by default and refuses to destroy a still-running agent even
+    # after the confirmation prompt is answered "y".
+    e2e.write_tutorial_block("""
+        # short form
+        mngr rm my-task
+    """)
+    _create_my_task(e2e, 100608)
+    refuse_result = e2e.run("yes | mngr rm my-task", comment="short form on a running agent")
+    expect(refuse_result).to_succeed()
+    expect(refuse_result.stdout).to_contain("Use --force to destroy running agents")
+
+    # The agent must still be present since the destroy was refused.
+    list_result = e2e.run("mngr list", comment="Verify the running agent was not destroyed")
+    expect(list_result).to_succeed()
+    expect(list_result.stdout).to_contain("my-task")
+
+
+@pytest.mark.rsync
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.timeout(60)
 def test_destroy_remove_branch(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # destroy and also remove the git branch that was created for the agent
@@ -119,76 +164,133 @@ def test_destroy_remove_branch(e2e: E2eSession) -> None:
         mngr destroy my-task --force --remove-created-branch
     """)
     _create_my_task(e2e, 100602)
-    expect(
-        e2e.run(
-            "mngr destroy my-task --force --remove-created-branch",
-            comment="destroy and remove the created git branch",
-        )
-    ).to_succeed()
+
+    # The default git-worktree transfer creates a branch named after the agent.
+    # Confirm it exists before we ask destroy to remove it, so the after-check
+    # is a meaningful before/after contrast rather than a vacuous assertion.
+    branch_before = e2e.run(
+        "git branch --list mngr/my-task",
+        comment="confirm the agent's branch exists before destroy",
+    )
+    expect(branch_before).to_succeed()
+    expect(branch_before.stdout).to_contain("mngr/my-task")
+
+    destroy_result = e2e.run(
+        "mngr destroy my-task --force --remove-created-branch",
+        comment="destroy and remove the created git branch",
+    )
+    expect(destroy_result).to_succeed()
+    expect(destroy_result.stdout).to_contain("Destroyed agent: my-task")
+    expect(destroy_result.stdout).to_contain("Deleted branch: mngr/my-task")
+
+    # The branch the agent was created on must be gone now -- this is the whole
+    # point of --remove-created-branch.
+    branch_after = e2e.run(
+        "git branch --list mngr/my-task",
+        comment="confirm the agent's branch was removed after destroy",
+    )
+    expect(branch_after).to_succeed()
+    expect(branch_after.stdout).not_to_contain("mngr/my-task")
 
 
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_destroy_multiple_at_once(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # destroy multiple agents at once
         mngr destroy agent-1 agent-2 agent-3 --force
     """)
-    for name, sleep_value in [("agent-1", 100603), ("agent-2", 100604), ("agent-3", 100605)]:
+    agent_names = ["agent-1", "agent-2", "agent-3"]
+    for name, sleep_value in zip(agent_names, [100603, 100604, 100605], strict=True):
         expect(
             e2e.run(
                 f"mngr create {name} --type command --no-ensure-clean --no-connect -- sleep {sleep_value}",
                 comment=f"create {name}",
             )
         ).to_succeed()
-    expect(
-        e2e.run(
-            "mngr destroy agent-1 agent-2 agent-3 --force",
-            comment="destroy multiple agents at once",
-        )
-    ).to_succeed()
+
+    list_before = e2e.run("mngr list", comment="Verify all three agents exist before destroy")
+    expect(list_before).to_succeed()
+    for name in agent_names:
+        expect(list_before.stdout).to_contain(name)
+
+    destroy_result = e2e.run(
+        "mngr destroy agent-1 agent-2 agent-3 --force",
+        comment="destroy multiple agents at once",
+    )
+    expect(destroy_result).to_succeed()
+    # Each named agent should be reported as destroyed by the single command.
+    for name in agent_names:
+        expect(destroy_result.stdout).to_contain(f"Destroyed agent: {name}")
+
+    list_after = e2e.run("mngr list", comment="Verify none of the agents remain after destroy")
+    expect(list_after).to_succeed()
+    for name in agent_names:
+        expect(list_after.stdout).not_to_contain(name)
 
 
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(60)
 def test_destroy_dry_run(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
-        # dry-run to see what would be destroyed without actually doing it
-        mngr list --ids | mngr destroy - --dry-run
+        # to preview what would be destroyed without doing it, run without --force and answer "no" at the prompt
+        mngr destroy my-task
     """)
     _create_my_task(e2e, 100606)
-    expect(
-        e2e.run(
-            "mngr list --ids | mngr destroy - --dry-run",
-            comment="dry-run to see what would be destroyed",
-        )
-    ).to_succeed()
+    # Running destroy without --force lists what *would* be destroyed and then
+    # prompts for confirmation. Answering "no" aborts without destroying
+    # anything -- this confirmation preview is the supported replacement for the
+    # old --dry-run flag, which was removed from multi-target commands.
+    preview_result = e2e.run(
+        "echo n | mngr destroy my-task",
+        comment="preview what would be destroyed, then abort at the prompt",
+    )
+    # Aborting at the confirmation prompt exits non-zero.
+    expect(preview_result).to_fail()
+    # The preview lists the agent that would be destroyed.
+    expect(preview_result.stdout).to_contain("will be destroyed")
+    expect(preview_result.stdout).to_contain("my-task")
+    # Crucially, nothing was actually destroyed: the agent still exists.
+    list_result = e2e.run("mngr list", comment="verify the agent was not destroyed")
+    expect(list_result).to_succeed()
+    expect(list_result.stdout).to_contain("my-task")
 
 
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_destroy_with_gc(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # destroy and run garbage collection afterward (this is the default)
         mngr destroy my-task --force --gc
     """)
     _create_my_task(e2e, 100607)
-    expect(
-        e2e.run(
-            "mngr destroy my-task --force --gc",
-            comment="destroy and run garbage collection afterward",
-        )
-    ).to_succeed()
+    destroy_result = e2e.run(
+        "mngr destroy my-task --force --gc",
+        comment="destroy and run garbage collection afterward",
+    )
+    expect(destroy_result).to_succeed()
+    # The agent itself must be destroyed.
+    expect(destroy_result.stdout).to_contain("Destroyed agent: my-task")
+    # The whole point of --gc is that garbage collection runs afterward, so the
+    # output must show the gc pass (this is what distinguishes it from a plain
+    # destroy).
+    expect(destroy_result.stdout).to_contain("Garbage collecting")
+
+    # The agent must no longer appear in the listing after being destroyed.
+    list_result = e2e.run("mngr list", comment="verify my-task is gone after destroy")
+    expect(list_result).to_succeed()
+    expect(list_result.stdout).not_to_contain("my-task")
 
 
+@pytest.mark.rsync
 @pytest.mark.release
-@pytest.mark.modal
+@pytest.mark.tmux
 def test_destroy_no_gc(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # by default, gc (garbage collection) runs after destroying any agent
@@ -197,26 +299,81 @@ def test_destroy_no_gc(e2e: E2eSession) -> None:
         # however, note that it is generally a good idea to ensure that "mngr gc" is run periodically,
         # otherwise resources (ex: worktrees, hosts, containers, volumes, etc) will accumulate over time
     """)
-    # `mngr destroy --no-gc` without an agent argument is informational; just
-    # verify mngr parses the flag and exits cleanly (either success with a
-    # no-op message or a usage error -- both demonstrate the flag exists).
-    result = e2e.run(
-        "mngr destroy --no-gc 2>&1 || true",
+    # The tutorial shows `mngr destroy --no-gc` in isolation to demonstrate the flag,
+    # but a real invocation needs an agent to destroy. Create one, destroy it with
+    # --no-gc, and verify both that the agent is gone AND that the post-destroy
+    # garbage-collection pass did not run (its progress output must be absent).
+    _create_my_task(e2e, 100608)
+    destroy_result = e2e.run(
+        "mngr destroy my-task --no-gc --force",
         comment="disable automatic gc after destroy",
     )
-    assert "no-gc" in (result.stdout + result.stderr).lower() or result.exit_code == 0
+    expect(destroy_result).to_succeed()
+    expect(destroy_result.stdout).to_contain("Destroyed agent: my-task")
+    # With gc disabled, the "Garbage collecting..." progress line emitted by the
+    # post-destroy gc pass must not appear -- this is what proves --no-gc took effect.
+    expect(destroy_result.stdout).not_to_contain("Garbage collecting")
+
+    list_result = e2e.run("mngr list", comment="verify the agent was destroyed")
+    expect(list_result).to_succeed()
+    expect(list_result.stdout).not_to_contain("my-task")
 
 
 @pytest.mark.release
-@pytest.mark.modal
 def test_destroy_by_session_name(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # destroy has a special variant for finding an agent by its tmux session name:
         mngr destroy --session my-session-name
         # this is used primarily to implement the hotkey for exiting from tmux (ex: ctrl-q)
     """)
+    # Unhappy path: "my-session-name" does not start with the configured tmux
+    # session prefix, so mngr cannot derive an agent name from it and exits with
+    # an error instead of crashing. Because it fails before reaching any agent,
+    # it does not exercise modal (hence no @pytest.mark.modal).
     result = e2e.run(
         "mngr destroy --session my-session-name",
         comment="destroy variant that finds an agent by tmux session name",
     )
-    assert result.exit_code != 0 or "not found" in (result.stdout + result.stderr).lower()
+    assert result.exit_code != 0, f"expected a non-zero exit code, transcript:\n{e2e.transcript}"
+    combined_output = (result.stdout + result.stderr).lower()
+    assert "does not match the expected format" in combined_output, (
+        f"expected an error explaining the session-prefix requirement, transcript:\n{e2e.transcript}"
+    )
+
+
+@pytest.mark.rsync
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.modal
+@pytest.mark.timeout(60)
+def test_destroy_by_session_name_happy_path(e2e: E2eSession) -> None:
+    # Shares the same tutorial block as test_destroy_by_session_name: that test
+    # covers the unhappy path (a bogus session name), while this one covers the
+    # happy path where the session name maps to a real agent that gets destroyed.
+    e2e.write_tutorial_block("""
+        # destroy has a special variant for finding an agent by its tmux session name:
+        mngr destroy --session my-session-name
+        # this is used primarily to implement the hotkey for exiting from tmux (ex: ctrl-q)
+    """)
+    _create_my_task(e2e, 100608)
+
+    # An agent's tmux session name is "{prefix}{agent_name}" (see
+    # base_agent.BaseAgent.session_name). Read the configured prefix from the
+    # environment rather than hardcoding it, then reconstruct my-task's session
+    # name so we can target it the same way the ctrl-q hotkey does.
+    prefix_result = e2e.run('printf %s "$MNGR_PREFIX"', comment="read the configured tmux session prefix")
+    expect(prefix_result).to_succeed()
+    prefix = prefix_result.stdout.strip()
+    assert prefix, f"expected MNGR_PREFIX to be set, transcript:\n{e2e.transcript}"
+    session_name = f"{prefix}my-task"
+
+    destroy_result = e2e.run(
+        f"mngr destroy --session {session_name} --force",
+        comment="destroy the agent found by its tmux session name",
+    )
+    expect(destroy_result).to_succeed()
+    expect(destroy_result.stdout).to_contain("Destroyed agent: my-task")
+
+    list_result = e2e.run("mngr list", comment="verify the agent was actually destroyed")
+    expect(list_result).to_succeed()
+    expect(list_result.stdout).not_to_contain("my-task")

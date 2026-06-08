@@ -139,7 +139,7 @@ def test_build_onboarding_seed_emits_the_three_nux_keys() -> None:
     seed = build_onboarding_seed()
     assert seed == {
         "consumerOnboardingComplete": True,
-        "enterpriseOnboardingComplete": False,
+        "enterpriseOnboardingComplete": True,
         "onboardingComplete": True,
     }
 

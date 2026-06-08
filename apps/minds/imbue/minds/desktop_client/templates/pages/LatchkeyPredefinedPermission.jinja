@@ -1,30 +1,13 @@
-{#def agent_id, request_id, ws_name, rationale, display_name, scope, permission_schemas, description_by_permission_name, checked_permissions, accent, will_open_browser, mngr_forward_origin #}
+{#def agent_id, request_id, ws_name, rationale, display_name, scope, permission_schemas, description_by_permission_name, checked_permissions, will_open_browser, mngr_forward_origin #}
 {#
-  Latchkey predefined permission request dialog. Composes the
-  Permissions* components; provides the per-permission simple/editor
-  views and the auth-browser progress notice.
-
-  The simple (default) view is a read-only summary of the permissions
-  that will be granted on Approve. The editor view (hidden by default)
-  is a checkbox per detent permission schema. Both views share the same
-  underlying checkbox inputs (the editor div is merely hidden) so the
-  generic submit handler can read the checked set in either view.
+  Latchkey predefined permission request fragment. Rendered inside the
+  inbox modal's right pane. Provides the per-permission simple/editor
+  views and the auth-browser progress notice. Chrome (backdrop, close
+  button, escape/backdrop dismiss, form submission JS, Adjust toggle)
+  lives in the inbox shell and operates on these elements via the ids
+  below (#permissions-form, #permissions-simple-view, etc.).
 #}
-{% set _extra_scripts %}
-<script>
-  // Reveal the checkbox editor and hide the simple summary. The Approve
-  // button's enabled state is driven by the generic handler's
-  // updateApproveState (it watches the checkbox inputs), so no extra
-  // wiring is needed here.
-  window.showPermissionEditor = function () {
-    var simple = document.getElementById("permissions-simple-view");
-    var editor = document.getElementById("permissions-editor-view");
-    if (simple) simple.classList.add("hidden");
-    if (editor) editor.classList.remove("hidden");
-  };
-</script>
-{% endset %}
-<PermissionsDialog :display_name="display_name" :accent="accent" extra_scripts={{ _extra_scripts }}>
+<div class="permissions-detail">
   <PermissionsHeader :display_name="display_name" :ws_name="ws_name" :agent_id="agent_id" :rationale="rationale" />
 
   <PermissionsForm :request_id="request_id">
@@ -122,7 +105,7 @@
       {% if will_open_browser %}
         <span class="font-medium">Authenticating...</span>
         Latchkey is opening a browser window for you to sign in to {{ display_name }}.
-        This dialog will close automatically when the flow completes.
+        The request will resolve automatically when the flow completes.
       {% else %}
         <span class="font-medium">Granting permission...</span>
       {% endif %}
@@ -131,4 +114,4 @@
 
   <PermissionsManualCredentials />
   <PermissionsError />
-</PermissionsDialog>
+</div>

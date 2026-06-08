@@ -1,0 +1,1 @@
+Strengthened the e2e tutorial test for `mngr create --branch BASE:NEW`: the happy-path test now also verifies (via `git worktree list`) that the agent's worktree is actually checked out on the new branch at the base commit, and a new unhappy-path test confirms that creating an agent with a nonexistent base branch fails cleanly without leaving a dangling agent branch.

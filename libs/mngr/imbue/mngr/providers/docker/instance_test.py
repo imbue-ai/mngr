@@ -291,6 +291,39 @@ def test_build_docker_run_command_entrypoint_at_end(temp_mngr_ctx: MngrContext) 
     assert cmd[image_idx + 1] == "-c"
 
 
+def _make_docker_provider_with_runtime(mngr_ctx: MngrContext, docker_runtime: str | None) -> DockerProviderInstance:
+    config = DockerProviderConfig(isolate_host_volumes=False, docker_runtime=docker_runtime)
+    return DockerProviderInstance(
+        name=ProviderInstanceName("test-docker"),
+        host_dir=Path("/mngr"),
+        mngr_ctx=mngr_ctx,
+        config=config,
+    )
+
+
+def test_build_docker_run_command_includes_runtime_when_configured(temp_mngr_ctx: MngrContext) -> None:
+    provider = _make_docker_provider_with_runtime(temp_mngr_ctx, docker_runtime="runsc")
+    cmd = provider._build_docker_run_command(
+        image="debian:bookworm-slim",
+        container_name="test",
+        labels={},
+        start_args=(),
+    )
+    runtime_idx = cmd.index("--runtime")
+    assert cmd[runtime_idx + 1] == "runsc"
+
+
+def test_build_docker_run_command_omits_runtime_by_default(temp_mngr_ctx: MngrContext) -> None:
+    provider = _make_docker_provider_with_runtime(temp_mngr_ctx, docker_runtime=None)
+    cmd = provider._build_docker_run_command(
+        image="debian:bookworm-slim",
+        container_name="test",
+        labels={},
+        start_args=(),
+    )
+    assert "--runtime" not in cmd
+
+
 def test_build_docker_run_command_passes_through_volume_mount_args(temp_mngr_ctx: MngrContext) -> None:
     """`volume_mount_args` tokens are inserted verbatim into the docker run command."""
     provider = make_docker_provider(temp_mngr_ctx)

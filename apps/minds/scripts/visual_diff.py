@@ -72,10 +72,11 @@ from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_creating_page
 from imbue.minds.desktop_client.templates import render_destroying_page
 from imbue.minds.desktop_client.templates import render_dev_styleguide_page
+from imbue.minds.desktop_client.templates import render_inbox_page
+from imbue.minds.desktop_client.templates import render_inbox_unavailable_fragment
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
-from imbue.minds.desktop_client.templates import render_request_unavailable_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
@@ -366,7 +367,7 @@ def _build_scenarios() -> list[Scenario]:
         Scenario(name="chrome_non_mac_auth", builder=lambda: render_chrome_page(is_mac=False, is_authenticated=True)),
         # -- Sidebar -----------------------------------------------------
         Scenario(name="sidebar", builder=lambda: render_sidebar_page(mngr_forward_origin="http://localhost:8421")),
-        # -- Login / login_redirect / auth_error / request_unavailable ---
+        # -- Login / login_redirect / auth_error / inbox_unavailable / inbox_empty ---
         Scenario(name="login", builder=render_login_page),
         Scenario(
             name="login_redirect",
@@ -377,8 +378,12 @@ def _build_scenarios() -> list[Scenario]:
             builder=lambda: render_auth_error_page(message="This code has already been used."),
         ),
         Scenario(
-            name="request_unavailable",
-            builder=lambda: render_request_unavailable_page(message="This request was already granted."),
+            name="inbox_unavailable_fragment",
+            builder=lambda: render_inbox_unavailable_fragment(message="This request was already granted."),
+        ),
+        Scenario(
+            name="inbox_empty",
+            builder=lambda: render_inbox_page(cards=[], selected_id="", detail_html="", is_empty=True),
         ),
         # -- Dev styleguide ----------------------------------------------
         Scenario(name="dev_styleguide", builder=render_dev_styleguide_page),

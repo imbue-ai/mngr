@@ -17,6 +17,14 @@
   #minds-titlebar { -webkit-app-region: drag; box-shadow: var(--shadow-seam); }
   #minds-titlebar button { -webkit-app-region: no-drag; }
   .minds-user-area { -webkit-app-region: no-drag; }
+  /* When the inbox modal (or any modal hosted in the main process's
+     modalView) is open, drop the titlebar's app-region: drag. macOS
+     unions drag regions across all views in a window, so without this
+     the titlebar's drag swallows clicks intended for the modal's
+     interior in the y=0..TITLEBAR strip. The main process sends
+     `modal-state-changed` over IPC and chrome.js toggles the
+     ``modal-open`` body class accordingly. */
+  body.modal-open #minds-titlebar { -webkit-app-region: no-drag; }
 </style>
 {% endset %}
 {% set _body_attrs %}data-is-mac="{{ 'true' if is_mac else 'false' }}" data-is-authenticated="{{ 'true' if is_authenticated else 'false' }}" data-mngr-forward-origin="{{ mngr_forward_origin }}"{% endset %}

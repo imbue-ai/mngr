@@ -6,7 +6,7 @@ Audit date: 2026-04-23
 
 The minds desktop app uses a layered proxy architecture:
 
-1. **Electron shell** (`electron/main.js`): Creates `BaseWindow` with multiple `WebContentsView` instances (chromeView, contentView, sidebarView, requestsPanelView). Manages window lifecycle and IPC.
+1. **Electron shell** (`electron/main.js`): Creates `BaseWindow` with multiple `WebContentsView` instances (chromeView, contentView, sidebarView, modalView). Manages window lifecycle and IPC.
 
 2. **Desktop client** (FastAPI, `desktop_client/app.py`): Runs on `localhost:PORT`. Handles auth, agent discovery, and proxies `<agent-id>.localhost:PORT` subdomain requests to per-agent system interfaces.
 
@@ -30,7 +30,7 @@ Previously, the desktop client proxy (`_forward_workspace_http`) forwarded all r
 
 **NO.** localStorage is origin-scoped. `agent-A.localhost:PORT` and `agent-B.localhost:PORT` are different origins, so they have completely separate localStorage, sessionStorage, and IndexedDB storage.
 
-Note: Content views now use a separate Electron session partition (`persist:workspace-content`), while chrome, sidebar, and requests panel views use the default session. Even without this partition, web storage would still be scoped by origin per Chromium's standard behavior. The partition adds defense-in-depth by fully separating the content cookie jar from chrome-level cookies.
+Note: Content views now use a separate Electron session partition (`persist:workspace-content`), while chrome, sidebar, and modal overlay views use the default session. Even without this partition, web storage would still be scoped by origin per Chromium's standard behavior. The partition adds defense-in-depth by fully separating the content cookie jar from chrome-level cookies.
 
 ## Question 3: Can agents access cookies/localStorage used by the outer minds app?
 
@@ -50,7 +50,7 @@ The bare-origin `minds_session` cookie is never sent to `agent-X.localhost` subd
 
 **localStorage: NO.** The desktop client's chrome UI pages load from `localhost:PORT` (e.g., `/_chrome`, `/_chrome/sidebar`). Agent content loads from `agent-X.localhost:PORT`. Different origins = separate localStorage.
 
-**Electron IPC: NO.** The preload script (which exposes `window.minds` IPC bridge) is only loaded in chromeView, sidebarView, and requestsPanelView. The contentView (where agent pages render) is created without a preload script (`main.js:218-224`), so agent pages cannot access Electron IPC.
+**Electron IPC: NO.** The preload script (which exposes `window.minds` IPC bridge) is only loaded in chromeView, sidebarView, and modalView. The contentView (where agent pages render) is created without a preload script (`main.js:218-224`), so agent pages cannot access Electron IPC.
 
 ## Detailed isolation mechanisms
 
@@ -114,7 +114,7 @@ Cons:
 
 ### Option C (variant): Content session partitioning -- IMPLEMENTED
 
-Rather than per-agent partitions (which would require complex cookie re-synchronization), a single shared content partition (`persist:workspace-content`) is used for all content views. Chrome, sidebar, and requests panel views continue to use the default Electron session. A cookie sync mechanism copies `minds_session` cookies from the content partition to the default session so that chrome-level auth checks work.
+Rather than per-agent partitions (which would require complex cookie re-synchronization), a single shared content partition (`persist:workspace-content`) is used for all content views. Chrome, sidebar, and modal overlay views continue to use the default Electron session. A cookie sync mechanism copies `minds_session` cookies from the content partition to the default session so that chrome-level auth checks work.
 
 This separates the content cookie jar from the chrome cookie jar, adding defense-in-depth. Agents remain origin-isolated within the content partition via standard Chromium same-origin policy.
 

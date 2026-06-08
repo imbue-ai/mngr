@@ -430,7 +430,7 @@
                 <Icon24 name="restart" />
               </Button>
               <Button variant="ghost" size="icon"
-                      onclick="event.stopPropagation(); window.location='/workspace/{{ agent_id }}/settings'"
+                      onclick={{ "event.stopPropagation(); window.location='/workspace/" ~ agent_id ~ "/settings'" }}
                       title="Settings"
                       aria-label="Workspace settings">
                 <Icon24 name="settings" />

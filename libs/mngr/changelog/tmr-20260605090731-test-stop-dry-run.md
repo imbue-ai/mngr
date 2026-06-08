@@ -1,0 +1,1 @@
+- Add a `--dry-run` flag to `mngr stop`. It reports which agents (or, with `--stop-host`, which hosts) would be stopped without actually stopping anything, matching the `--dry-run` flag already offered by `mngr archive`, `mngr destroy`, and `mngr cleanup`. This makes the documented `mngr list --ids | mngr stop - --dry-run` tutorial example work.
