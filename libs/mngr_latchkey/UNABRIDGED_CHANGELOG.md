@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-08
+
+- Now auto-discovered as a publishable package by the release tooling (it is a standalone `mngr latchkey` plugin). It will be offered for first publication to PyPI on the next release. Its stale `imbue-common==0.1.17` and `concurrency-group==0.1.17` pins are realigned to the current `0.1.18`. No runtime change.
+
 ## 2026-06-06
 
 Added `libs/mngr_latchkey/imbue/mngr_latchkey/remote_gateway.py`, the first piece of "run the latchkey gateway on the VPS" support. It declares a pinned `LATCHKEY_VERSION` (2.15.1) and a small public surface for standing up a latchkey gateway on a remote VPS (the agent's outer host):

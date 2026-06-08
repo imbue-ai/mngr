@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Auto-discovered as a publishable package by the release tooling (the writer half of the usage split; pairs with `mngr_usage`); will be offered for first publication to PyPI on the next release.
+
 ## [v0.1.0] - 2026-06-05
 
 ### Changed
