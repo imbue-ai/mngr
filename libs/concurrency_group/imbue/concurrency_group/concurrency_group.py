@@ -38,6 +38,10 @@ T = TypeVar("T")
 DEFAULT_EXIT_TIMEOUT_SECONDS: Final[float] = 10.0
 DEFAULT_SHUTDOWN_TIMEOUT_SECONDS: Final[float] = 10.0
 
+# Grace period to wait for a timed-out process's run thread to exit after we signal shutdown,
+# before concluding that it could not be killed.
+PROCESS_FORCE_KILL_GRACE_SECONDS: Final[float] = 5.0
+
 # Increase this if cleanup becomes a performance bottleneck.
 CLEANUP_INTERVAL_TICKS: Final[int] = 1
 # For each kind of strand, we don't need to keep too many failed ones around after cleanup.
@@ -237,9 +241,22 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
                     command = error.cmd
                     stdout = process.read_stdout()[:1024]
                     stderr = process.read_stderr()[:1024]
+                    # Attempt to actually kill the process, giving it a real grace period to exit.
+                    # With force_kill_seconds=0.0 this would join with a zero timeout and almost
+                    # always raise TimeoutExpired right after a timeout, so the kill could not be
+                    # confirmed -- report whether we actually managed to terminate it.
+                    is_killed = True
+                    try:
+                        process.terminate(force_kill_seconds=PROCESS_FORCE_KILL_GRACE_SECONDS)
+                    except TimeoutExpired:
+                        is_killed = False
+                    if is_killed:
+                        outcome = "did not terminate in time and was killed."
+                    else:
+                        outcome = "did not terminate in time and could not be killed (it may still be running)."
                     message = "\n".join(
                         [
-                            f"Process {command} did not terminate in time and was killed.",
+                            f"Process {command} {outcome}",
                             f"Stdout: {stdout}",
                             f"Stderr: {stderr}",
                         ]
@@ -248,10 +265,6 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
                         raise StrandTimedOutError(message) from error
                     except StrandTimedOutError as e:
                         timeout_errors.append(e)
-                    try:
-                        process.terminate(force_kill_seconds=0.0)
-                    except TimeoutExpired:
-                        pass
         for tracked_thread in self._threads:
             remaining_timeout = self._get_remaining_timeout(start_time, timeout_seconds)
             # Thread.join(timeout=float("inf")) raises OverflowError, so convert to None (wait forever)
