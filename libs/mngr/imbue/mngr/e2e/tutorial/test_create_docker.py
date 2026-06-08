@@ -37,7 +37,7 @@ def test_create_docker_start_args(e2e: E2eSession) -> None:
         mngr create my-task --provider docker -s "--gpus all"
     """)
     result = e2e.run(
-        'mngr create my-task --provider docker --type command'
+        "mngr create my-task --provider docker --type command"
         ' -s "--hostname=mngr-start-arg-test" --no-connect --no-ensure-clean -- sleep 100605',
         comment="some providers (like docker), take start args as well as build args",
         timeout=_REMOTE_TIMEOUT,

@@ -118,7 +118,7 @@ def test_create_with_pass_host_env(e2e: E2eSession) -> None:
     # agent on the host, which is the whole point of --pass-host-env). We assert
     # the var is present without ever printing its (secret) value.
     host_env_check = e2e.run(
-        "mngr exec my-task 'test -n \"$MODAL_TOKEN_ID\" && test -n \"$MODAL_TOKEN_SECRET\" && echo HOST_ENV_PRESENT'",
+        'mngr exec my-task \'test -n "$MODAL_TOKEN_ID" && test -n "$MODAL_TOKEN_SECRET" && echo HOST_ENV_PRESENT\'',
         comment="confirm host-level env vars are visible to agents on the host",
         timeout=120.0,
     )
