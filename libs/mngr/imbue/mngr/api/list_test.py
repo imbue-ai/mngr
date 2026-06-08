@@ -36,7 +36,6 @@ from imbue.mngr.api.list import build_agent_cel_context
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
-from imbue.mngr.config.provider_config_registry import _provider_config_registry
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.hosts.host import Host
@@ -65,10 +64,10 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.providers.mock_provider_test import make_offline_host
-from imbue.mngr.providers.registry import _backend_registry
 from imbue.mngr.utils.cel_utils import TolerantMapType
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.testing import capture_loguru
+from imbue.mngr.utils.testing import register_test_backend
 
 # =============================================================================
 # Helpers
@@ -1642,9 +1641,7 @@ def test_list_agents_batch_continue_mode_handles_mismatched_provider_name(
     In CONTINUE mode this triggers a ProviderInstanceNotFoundError that should
     be recorded (not raised).
     """
-    _backend_registry[_MISMATCHED_BACKEND_NAME] = _MismatchedProviderBackend
-    _provider_config_registry[_MISMATCHED_BACKEND_NAME] = ProviderInstanceConfig
-    try:
+    with register_test_backend(_MISMATCHED_BACKEND_NAME, _MismatchedProviderBackend, ProviderInstanceConfig):
         captured_errors: list[ErrorInfo] = []
         result = list_agents(
             mngr_ctx=temp_mngr_ctx,
@@ -1658,9 +1655,6 @@ def test_list_agents_batch_continue_mode_handles_mismatched_provider_name(
         assert any("nonexistent-provider-xyz" in str(e.provider_name) for e in provider_errors)
         assert len(captured_errors) >= 1
         assert all(isinstance(e, ProviderErrorInfo) for e in captured_errors)
-    finally:
-        del _backend_registry[_MISMATCHED_BACKEND_NAME]
-        del _provider_config_registry[_MISMATCHED_BACKEND_NAME]
 
 
 def test_list_agents_batch_abort_mode_raises_for_mismatched_provider_name(
@@ -1672,9 +1666,7 @@ def test_list_agents_batch_abort_mode_raises_for_mismatched_provider_name(
     ProviderInstanceNotFoundError must propagate (wrapped by the
     ConcurrencyGroupExecutor) rather than be swallowed.
     """
-    _backend_registry[_MISMATCHED_BACKEND_NAME] = _MismatchedProviderBackend
-    _provider_config_registry[_MISMATCHED_BACKEND_NAME] = ProviderInstanceConfig
-    try:
+    with register_test_backend(_MISMATCHED_BACKEND_NAME, _MismatchedProviderBackend, ProviderInstanceConfig):
         with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
             list_agents(
                 mngr_ctx=temp_mngr_ctx,
@@ -1682,9 +1674,6 @@ def test_list_agents_batch_abort_mode_raises_for_mismatched_provider_name(
                 error_behavior=ErrorBehavior.ABORT,
             )
         assert exc_info.value.only_exception_is_instance_of(MngrError)
-    finally:
-        del _backend_registry[_MISMATCHED_BACKEND_NAME]
-        del _provider_config_registry[_MISMATCHED_BACKEND_NAME]
 
 
 # =============================================================================
@@ -1716,9 +1705,9 @@ def test_construct_discover_and_emit_for_provider_continue_mode_records_error(
     must be caught and stored as a ProviderErrorInfo on the result, and the
     on_error callback must be called.
     """
-    _backend_registry[_RAISING_DISCOVERY_BACKEND_NAME] = _RaisingDiscoveryProviderBackend
-    _provider_config_registry[_RAISING_DISCOVERY_BACKEND_NAME] = ProviderInstanceConfig
-    try:
+    with register_test_backend(
+        _RAISING_DISCOVERY_BACKEND_NAME, _RaisingDiscoveryProviderBackend, ProviderInstanceConfig
+    ):
         mngr_ctx = _make_raising_provider_ctx(temp_mngr_ctx)
         result = ListResult()
         lock = Lock()
@@ -1743,18 +1732,15 @@ def test_construct_discover_and_emit_for_provider_continue_mode_records_error(
         assert "simulated discovery failure from test" in result.errors[0].message
         assert len(captured_errors) == 1
         assert captured_errors[0] is result.errors[0]
-    finally:
-        del _backend_registry[_RAISING_DISCOVERY_BACKEND_NAME]
-        del _provider_config_registry[_RAISING_DISCOVERY_BACKEND_NAME]
 
 
 def test_construct_discover_and_emit_for_provider_abort_mode_propagates_error(
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """_construct_discover_and_emit_for_provider re-raises the MngrError in ABORT mode."""
-    _backend_registry[_RAISING_DISCOVERY_BACKEND_NAME] = _RaisingDiscoveryProviderBackend
-    _provider_config_registry[_RAISING_DISCOVERY_BACKEND_NAME] = ProviderInstanceConfig
-    try:
+    with register_test_backend(
+        _RAISING_DISCOVERY_BACKEND_NAME, _RaisingDiscoveryProviderBackend, ProviderInstanceConfig
+    ):
         mngr_ctx = _make_raising_provider_ctx(temp_mngr_ctx)
         result = ListResult()
         lock = Lock()
@@ -1771,9 +1757,6 @@ def test_construct_discover_and_emit_for_provider_abort_mode_propagates_error(
             )
 
         assert result.errors == []
-    finally:
-        del _backend_registry[_RAISING_DISCOVERY_BACKEND_NAME]
-        del _provider_config_registry[_RAISING_DISCOVERY_BACKEND_NAME]
 
 
 # NOTE: the success path of _construct_discover_and_emit_for_provider (construct,
@@ -1816,9 +1799,7 @@ def test_list_agents_streaming_abort_mode_silently_skips_empty_provider(
 
     Regression for: `mngr list` aborting when the Modal env didn't exist yet.
     """
-    _backend_registry[_EMPTY_BACKEND_NAME] = _EmptyProviderBackend
-    _provider_config_registry[_EMPTY_BACKEND_NAME] = ProviderInstanceConfig
-    try:
+    with register_test_backend(_EMPTY_BACKEND_NAME, _EmptyProviderBackend, ProviderInstanceConfig):
         mngr_ctx = _make_empty_provider_ctx(temp_mngr_ctx)
         result = list_agents(
             mngr_ctx=mngr_ctx,
@@ -1827,9 +1808,6 @@ def test_list_agents_streaming_abort_mode_silently_skips_empty_provider(
         )
 
         assert result.errors == []
-    finally:
-        del _backend_registry[_EMPTY_BACKEND_NAME]
-        del _provider_config_registry[_EMPTY_BACKEND_NAME]
 
 
 def test_list_agents_batch_abort_mode_silently_skips_empty_provider(
@@ -1839,9 +1817,7 @@ def test_list_agents_batch_abort_mode_silently_skips_empty_provider(
     an empty provider rather than wrapping the error into a ProviderDiscoveryError
     that would abort the whole listing.
     """
-    _backend_registry[_EMPTY_BACKEND_NAME] = _EmptyProviderBackend
-    _provider_config_registry[_EMPTY_BACKEND_NAME] = ProviderInstanceConfig
-    try:
+    with register_test_backend(_EMPTY_BACKEND_NAME, _EmptyProviderBackend, ProviderInstanceConfig):
         mngr_ctx = _make_empty_provider_ctx(temp_mngr_ctx)
         result = list_agents(
             mngr_ctx=mngr_ctx,
@@ -1850,9 +1826,6 @@ def test_list_agents_batch_abort_mode_silently_skips_empty_provider(
         )
 
         assert result.errors == []
-    finally:
-        del _backend_registry[_EMPTY_BACKEND_NAME]
-        del _provider_config_registry[_EMPTY_BACKEND_NAME]
 
 
 # =============================================================================

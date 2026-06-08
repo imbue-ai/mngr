@@ -26,7 +26,6 @@ from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
-from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -44,6 +43,7 @@ from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.providers.mock_provider_test import make_recording_destroy_provider
 from imbue.mngr.utils.plugin_testing import PLACEHOLDER_AGENT_TYPE
 from imbue.mngr.utils.testing import make_ctx_with_plugins
 
@@ -443,29 +443,12 @@ def test_write_host_env_vars_later_env_file_overrides_earlier(
 _RETAIN_FLAG = "MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE"
 
 
-class _RecordingDestroyProvider(LocalProviderInstance):
-    """LocalProviderInstance that records destroy_host calls instead of performing them."""
-
-    destroyed_host_ids: list[HostId] = Field(default_factory=list)
-
-    def destroy_host(self, host: HostInterface | HostId) -> None:
-        self.destroyed_host_ids.append(host if isinstance(host, HostId) else host.id)
-
-
-def _make_recording_provider(local_provider: LocalProviderInstance) -> _RecordingDestroyProvider:
-    return _RecordingDestroyProvider(
-        name=local_provider.name,
-        host_dir=local_provider.host_dir,
-        mngr_ctx=local_provider.mngr_ctx,
-    )
-
-
 def test_destroy_new_host_on_create_failure_destroys_failed_new_host(
     local_provider: LocalProviderInstance,
     local_host: Host,
 ) -> None:
     """A failure inside the guard tears down the newly-created host and re-raises."""
-    provider = _make_recording_provider(local_provider)
+    provider = make_recording_destroy_provider(local_provider)
     with pytest.raises(ValueError):
         with destroy_new_host_on_create_failure(local_host, provider):
             raise ValueError("provisioning blew up")
@@ -477,7 +460,7 @@ def test_destroy_new_host_on_create_failure_is_noop_on_success(
     local_host: Host,
 ) -> None:
     """A clean exit must not destroy the host."""
-    provider = _make_recording_provider(local_provider)
+    provider = make_recording_destroy_provider(local_provider)
     with destroy_new_host_on_create_failure(local_host, provider):
         pass
     assert provider.destroyed_host_ids == []
@@ -508,7 +491,7 @@ def test_destroy_new_host_on_create_failure_retains_host_when_debug_flag_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The debug retain flag suppresses the teardown so a failed host can be inspected."""
-    provider = _make_recording_provider(local_provider)
+    provider = make_recording_destroy_provider(local_provider)
     monkeypatch.setenv(_RETAIN_FLAG, "1")
     with pytest.raises(ValueError):
         with destroy_new_host_on_create_failure(local_host, provider):
@@ -573,7 +556,7 @@ def test_create_new_host_torn_down_when_failure_before_message_send(
 ) -> None:
     """A new-host create that fails after create_host but before the message send tears the host down."""
     test_ctx = make_ctx_with_plugins(temp_mngr_ctx, [_RaiseInOnHostCreated()])
-    provider = _make_recording_provider(local_provider)
+    provider = make_recording_destroy_provider(local_provider)
 
     source_location = HostLocation(host=local_provider.create_host(HostName(LOCAL_HOST_NAME)), path=temp_work_dir)
     target_host = NewHostOptions(provider=ProviderInstanceName(LOCAL_PROVIDER_NAME), name=HostName(LOCAL_HOST_NAME))
@@ -600,7 +583,7 @@ def test_create_new_host_retained_on_failure_when_debug_flag_set(
     """With the debug retain flag set, a failed new-host create keeps the host for inspection."""
     monkeypatch.setenv(_RETAIN_FLAG, "1")
     test_ctx = make_ctx_with_plugins(temp_mngr_ctx, [_RaiseInOnHostCreated()])
-    provider = _make_recording_provider(local_provider)
+    provider = make_recording_destroy_provider(local_provider)
 
     source_location = HostLocation(host=local_provider.create_host(HostName(LOCAL_HOST_NAME)), path=temp_work_dir)
     target_host = NewHostOptions(provider=ProviderInstanceName(LOCAL_PROVIDER_NAME), name=HostName(LOCAL_HOST_NAME))

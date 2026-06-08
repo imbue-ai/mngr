@@ -5,8 +5,6 @@ import os
 import re
 import shlex
 import subprocess
-from datetime import datetime
-from datetime import timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -18,7 +16,6 @@ from pyinfra.api import State as PyinfraState
 from pyinfra.api.inventory import Inventory
 
 from imbue.imbue_common.model_update import to_update
-from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.api.connect import SIGNAL_EXIT_CODE_DESTROY
 from imbue.mngr.api.connect import SIGNAL_EXIT_CODE_STOP
 from imbue.mngr.api.connect import _build_ssh_activity_wrapper_script
@@ -28,16 +25,14 @@ from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.connect import resolve_connect_command
 from imbue.mngr.api.connect import run_connect_command
 from imbue.mngr.api.data_types import ConnectionOptions
-from imbue.mngr.config.data_types import AgentTypeConfig
+from imbue.mngr.api.testing import FixedProcessNameAgent
+from imbue.mngr.api.testing import make_fixed_process_name_agent
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NestedTmuxError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.data_types import PyinfraConnector
-from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import AgentName
-from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LocalProviderInstance
@@ -232,37 +227,13 @@ def _make_ssh_host(
     )
 
 
-class _FixedProcessNameAgent(BaseAgent):
-    """Test agent that avoids SSH access for get_expected_process_name.
-
-    BaseAgent.get_expected_process_name reads data.json via the host connector,
-    which fails for SSH hosts in tests since no SSH server is running. This
-    subclass returns a fixed process name to avoid that code path.
-
-    Named without a ``Test`` prefix so pytest does not attempt to collect it.
-    """
-
-    def get_expected_process_name(self) -> str:
-        return "test-process"
-
-
 def _make_remote_agent(
     host: Host,
     temp_mngr_ctx: MngrContext,
     agent_name: str = "test-agent",
-) -> _FixedProcessNameAgent:
+) -> FixedProcessNameAgent:
     """Create a test agent on a remote host for testing connect_to_agent."""
-    return _FixedProcessNameAgent(
-        id=AgentId(f"agent-{uuid4().hex}"),
-        name=AgentName(agent_name),
-        agent_type=AgentTypeName("generic"),
-        work_dir=Path("/tmp/work"),
-        create_time=datetime.now(timezone.utc),
-        host_id=host.id,
-        mngr_ctx=temp_mngr_ctx,
-        agent_config=AgentTypeConfig(),
-        host=host,
-    )
+    return make_fixed_process_name_agent(host, temp_mngr_ctx, agent_name=agent_name)
 
 
 def test_build_ssh_args_with_known_hosts_file(
@@ -671,7 +642,7 @@ def _make_local_host_and_agent(
     local_provider: LocalProviderInstance,
     mngr_ctx: MngrContext,
     agent_name: str = "test-agent",
-) -> tuple[Host, _FixedProcessNameAgent]:
+) -> tuple[Host, FixedProcessNameAgent]:
     """Create a local host and agent for testing connect_to_agent."""
     host = Host(
         id=HostId(f"host-{uuid4().hex}"),
@@ -680,17 +651,7 @@ def _make_local_host_and_agent(
         provider_instance=local_provider,
         mngr_ctx=mngr_ctx,
     )
-    agent = _FixedProcessNameAgent(
-        id=AgentId(f"agent-{uuid4().hex}"),
-        name=AgentName(agent_name),
-        agent_type=AgentTypeName("generic"),
-        work_dir=Path("/tmp/work"),
-        create_time=datetime.now(timezone.utc),
-        host_id=host.id,
-        mngr_ctx=mngr_ctx,
-        agent_config=AgentTypeConfig(),
-        host=host,
-    )
+    agent = make_fixed_process_name_agent(host, mngr_ctx, agent_name=agent_name)
     return host, agent
 
 
