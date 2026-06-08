@@ -2599,34 +2599,29 @@ def _handle_running_local_minds_api(
 ) -> Response:
     """Return the local minds whose containers are currently running, for the quit prompt.
 
-    Forces a fresh liveness read (rather than trusting the last poll) so the
-    Electron quit dialog never lists a mind that is already stopped. Each entry
-    carries the agent id and human-readable workspace name.
+    Reads the in-memory liveness tracker (which the background poll keeps fresh,
+    and which Start/Stop actions update immediately) rather than shelling out to
+    ``mngr list`` -- so the quit dialog appears instantly instead of blocking on
+    a subprocess. The prompt's purpose is "free local resources you forgot
+    about", not exact accounting: a container stopped externally within the last
+    poll interval may still be listed, but re-stopping it is idempotent. Each
+    entry carries the agent id and human-readable workspace name.
     """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return _json_error("Not authenticated", status_code=403)
     liveness_tracker: LocalMindLivenessTracker | None = request.app.state.local_mind_liveness_tracker
-    concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
     backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
-    if liveness_tracker is None or concurrency_group is None:
+    if liveness_tracker is None:
         return Response(content=json.dumps({"running": []}), media_type="application/json")
-    state_by_agent_id = _read_local_mind_states(
-        backend_resolver=backend_resolver,
-        mngr_binary=request.app.state.mngr_binary,
-        mngr_host_dir=request.app.state.mngr_host_dir,
-        concurrency_group=concurrency_group,
-    )
-    liveness_tracker.apply_poll_results(state_by_agent_id)
     running = []
-    for aid_str, state in state_by_agent_id.items():
+    for aid, state in liveness_tracker.snapshot_all().items():
         if state != LocalMindState.RUNNING:
             continue
-        aid = AgentId(aid_str)
         name = backend_resolver.get_workspace_name(aid)
         if not name:
             info = backend_resolver.get_agent_display_info(aid)
-            name = info.agent_name if info is not None else aid_str
-        running.append({"id": aid_str, "name": name})
+            name = info.agent_name if info is not None else str(aid)
+        running.append({"id": str(aid), "name": name})
     return Response(content=json.dumps({"running": running}), media_type="application/json")
 
 

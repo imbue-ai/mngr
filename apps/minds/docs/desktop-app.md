@@ -41,7 +41,7 @@ Closing an individual window just tears down that window's views -- the backend 
 
 #### Local-mind shutdown prompt
 
-Agent containers run independently of the backend, so quitting the app would otherwise leave any **local** minds (those on `docker` / `lima` hosts) running and consuming machine resources. Before tearing the backend down, Electron asks the backend which local minds are still running (`GET /api/local-minds/running`, which forces a fresh liveness read). If any are:
+Agent containers run independently of the backend, so quitting the app would otherwise leave any **local** minds (those on `docker` / `lima` hosts) running and consuming machine resources. Before tearing the backend down, Electron asks the backend which local minds are still running (`GET /api/local-minds/running`, which reads the in-memory liveness tracker the background poll keeps fresh, so the dialog appears instantly). When the last window is closed via the macOS close button, the close is intercepted so this prompt appears *before* the window disappears. If any local minds are running:
 
 - A dialog lists how many and which minds are running, with three choices: **Cancel** (stay open), **Leave running** (quit now; containers keep running), or **Shut down**.
 - **Shut down** issues `mngr stop --stop-host` for each running local mind (via `POST /api/agents/{id}/stop-host`), shows a "Stopping minds…" progress window, and polls until they are all down before quitting. If some can't be stopped within the deadline, it offers Retry / Quit anyway / Cancel.

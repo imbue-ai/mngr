@@ -117,13 +117,37 @@ def test_running_local_minds_requires_authentication(tmp_path: Path) -> None:
     assert response.status_code == 403
 
 
-def test_running_local_minds_empty_without_concurrency_group(tmp_path: Path) -> None:
-    """The quit-prompt lookup degrades to an empty list when it can't read state."""
+def test_running_local_minds_empty_when_tracker_empty(tmp_path: Path) -> None:
+    """The quit-prompt lookup returns an empty list when nothing is tracked yet."""
     client, auth_store = _make_client(tmp_path, MngrCliBackendResolver(), LocalMindLivenessTracker())
     _authenticate(client, auth_store)
     response = client.get("/api/local-minds/running")
     assert response.status_code == 200
     assert response.json() == {"running": []}
+
+
+def test_running_local_minds_reads_tracker_without_subprocess(tmp_path: Path) -> None:
+    """The quit-prompt lookup returns running minds straight from the tracker.
+
+    No ``root_concurrency_group`` is wired here, so if the endpoint tried to shell
+    out to ``mngr list`` it would degrade to empty; returning the running mind
+    proves it reads the in-memory tracker (instant, no subprocess).
+    """
+    running_agent = AgentId.generate()
+    stopped_agent = AgentId.generate()
+    resolver = _resolver_with_local_agent(running_agent)
+    tracker = LocalMindLivenessTracker()
+    tracker.set_state(running_agent, LocalMindState.RUNNING)
+    tracker.set_state(stopped_agent, LocalMindState.STOPPED)
+    client, auth_store = _make_client(tmp_path, resolver, tracker)
+    _authenticate(client, auth_store)
+
+    response = client.get("/api/local-minds/running")
+
+    assert response.status_code == 200
+    running = response.json()["running"]
+    # Only the RUNNING mind is listed; the STOPPED one is excluded.
+    assert [entry["id"] for entry in running] == [str(running_agent)]
 
 
 # -- landing page integration --
