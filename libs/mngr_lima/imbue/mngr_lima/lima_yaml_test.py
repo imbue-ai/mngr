@@ -296,7 +296,11 @@ def test_generate_docker_mode_lima_yaml_has_container_port_forward_and_no_mounts
     # The provisioning script installs Docker + snapshot deps, authorizes the
     # outer client key for root, and does NOT symlink host_dir into the VM.
     script = config["provision"][0]["script"]
-    assert "docker.io" in script
+    # Docker is installed from Docker's official apt repo at the pinned version,
+    # not Debian's unpinned docker.io package.
+    assert "docker.io" not in script
+    assert "docker-ce=5:29.5.1-1~debian.12~bookworm" in script
+    assert "download.docker.com" in script
     assert "btrfs-progs" in script
     assert "inotify-tools" in script
     assert "ssh-ed25519 AAAAOUTER" in script
