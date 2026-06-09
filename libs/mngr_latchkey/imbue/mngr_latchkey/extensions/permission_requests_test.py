@@ -170,6 +170,14 @@ def node_extension(tmp_path: Path) -> Generator[tuple[str, Path, Path], None, No
             "LATCHKEY_DIRECTORY": str(latchkey_directory),
             "TEST_PERMISSIONS_CONFIG_PATH": str(permissions_config_path),
             "PATH": "/usr/bin:/bin",
+            # File-sharing path validation rejects paths outside the WebDAV
+            # mount roots, which the extension derives from the process's
+            # HOME / TMPDIR (Node's ``homedir()`` / ``tmpdir()``). Pin both
+            # to deterministic values so tests can use stable in-root paths
+            # (``/home/example/...`` and ``/tmp/...``) regardless of the
+            # runner's real HOME / TMPDIR.
+            "HOME": "/home/example",
+            "TMPDIR": "/tmp",
         },
         text=True,
     )
@@ -438,6 +446,41 @@ def test_post_rejects_traversal_in_file_sharing(node_extension: tuple[str, Path,
         assert status == 400, (traversal_path, body)
         message = json.loads(body)["error"].lower()
         assert "traversal" in message or "absolute" in message, (traversal_path, message)
+
+
+def test_post_rejects_path_outside_mount_roots(node_extension: tuple[str, Path, Path]) -> None:
+    """A path outside the home / temp WebDAV mounts is rejected at creation."""
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "wants a system file",
+            "type": "file-sharing",
+            "payload": {"path": "/etc/passwd", "access": "READ"},
+        },
+    )
+    assert status == 400, body
+    message = json.loads(body)["error"]
+    assert "shared root" in message
+    # The error names the roots so the agent can self-correct.
+    assert "/home/example" in message
+    assert "/tmp" in message
+
+
+def test_post_accepts_path_under_temp_root(node_extension: tuple[str, Path, Path]) -> None:
+    """A path under the system temp mount is accepted (the temp dir is a shared root)."""
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "share a scratch file",
+            "type": "file-sharing",
+            "payload": {"path": "/tmp/scratch/output.txt", "access": "WRITE"},
+        },
+    )
+    assert status == 201, body
 
 
 def test_post_rejects_extraneous_top_level_field(node_extension: tuple[str, Path, Path]) -> None:
@@ -819,6 +862,32 @@ def test_approve_rejects_traversal_in_path_override(
     )
     assert status == 400, body
     assert "traversal" in json.loads(body)["error"].lower()
+
+
+def test_approve_rejects_path_override_outside_mount_roots(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """An edited path outside the WebDAV mounts is rejected on approve, same as at creation."""
+    base_url, _latchkey_directory, permissions_config_path = node_extension
+    create_status, create_body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "x",
+            "type": "file-sharing",
+            "payload": {"path": "/home/example/ok.txt", "access": "READ"},
+        },
+    )
+    assert create_status == 201
+    request_id = json.loads(create_body)["request_id"]
+    status, body = _post_json(
+        f"{base_url}/permission-requests/approve/{request_id}",
+        {"path": "/etc/shadow"},
+    )
+    assert status == 400, body
+    assert "shared root" in json.loads(body)["error"]
+    # The grant was not applied (the request stays pending).
+    assert not permissions_config_path.exists()
 
 
 def test_approve_rejects_extraneous_field_in_override_body(

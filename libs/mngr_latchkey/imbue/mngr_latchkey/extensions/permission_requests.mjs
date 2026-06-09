@@ -85,7 +85,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -310,15 +310,58 @@ function ensureNoExtraneousFields(parent, allowed, parsed) {
 }
 
 /**
+ * The on-disk roots the Minds WebDAV server mounts: the current user's
+ * home directory and the system temp directory. Computed from Node's
+ * ``homedir()`` / ``tmpdir()`` which -- on the desktop host, where the
+ * gateway and the Minds WebDAV server run as the same user in the same
+ * environment -- match the ``Path.home()`` / ``tempfile.gettempdir()``
+ * roots that ``webdav.py`` actually serves.
+ *
+ * Trailing slashes are stripped so the prefix test in
+ * ``isPathWithinFileSharingRoot`` is uniform. A falsy root (which
+ * ``homedir()`` / ``tmpdir()`` should never return on a real host) is
+ * dropped rather than collapsed to ``/`` (which would match every
+ * path).
+ */
+function fileSharingMountRoots() {
+  const roots = [];
+  for (const root of [homedir(), tmpdir()]) {
+    if (typeof root !== 'string' || root.length === 0) {
+      continue;
+    }
+    const trimmed = root.replace(/\/+$/, '');
+    roots.push(trimmed.length > 0 ? trimmed : '/');
+  }
+  return roots;
+}
+
+/**
+ * Whether ``filePath`` is at or beneath ``root``. The comparison is
+ * case-insensitive to mirror WsgiDAV's share-prefix matching (it
+ * lowercases both the share keys and the request path), and purely
+ * lexical -- we do not resolve symlinks or require the path to exist,
+ * matching how the WebDAV server mounts by string prefix.
+ */
+function isPathWithinFileSharingRoot(filePath, root) {
+  const lowerPath = filePath.toLowerCase();
+  const lowerRoot = root.toLowerCase();
+  return lowerPath === lowerRoot || lowerPath.startsWith(`${lowerRoot}/`);
+}
+
+/**
  * Validate an absolute filesystem path for the ``file-sharing`` payload.
  *
- * The path must start with ``/`` and must not contain any ``..``
- * segments (under either POSIX or Windows separators). We deliberately
- * do not resolve symlinks or check that the file exists here; that is
- * a job for the Minds API endpoint that ends up serving the file when
- * the request is approved. The goal is just to reject obvious traversal
- * patterns up front so a request like ``/etc/passwd/../shadow`` is
- * refused at creation time.
+ * The path must start with ``/``, must not contain any ``..`` segments
+ * (under either POSIX or Windows separators), and must lie within one
+ * of the WebDAV mount roots (the user's home directory or the system
+ * temp directory). We deliberately do not resolve symlinks or check
+ * that the file exists here; that is a job for the Minds API endpoint
+ * that ends up serving the file when the request is approved. The goals
+ * are to reject obvious traversal patterns (e.g. ``/etc/passwd/../shadow``)
+ * and to reject paths the WebDAV server could never serve (anything
+ * outside the two mounts), so the agent gets a clear error at request
+ * time -- or at approve time, when this also guards a user-edited path
+ * override -- rather than an approve-then-404 dead end.
  */
 function validateAbsoluteFileSharingPath(rawPath) {
   if (typeof rawPath !== 'string' || rawPath.length === 0) {
@@ -347,6 +390,14 @@ function validateAbsoluteFileSharingPath(rawPath) {
   const normalized = posix.normalize(rawPath);
   if (!normalized.startsWith('/') || normalized.includes('/../') || normalized.endsWith('/..')) {
     throw new InvalidRequestBodyError(`payload.'path' normalizes to a traversed path: ${rawPath} -> ${normalized}.`);
+  }
+  // Reject anything the Minds WebDAV server could never serve: it mounts
+  // only the home and temp roots, so a grant elsewhere is inert (404).
+  const roots = fileSharingMountRoots();
+  if (!roots.some((root) => isPathWithinFileSharingRoot(normalized, root))) {
+    throw new InvalidRequestBodyError(
+      `payload.'path' must be within a shared root (${roots.join(', ')}); got ${rawPath}.`,
+    );
   }
 }
 
