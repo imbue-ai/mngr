@@ -11,4 +11,3 @@ Removed from `modal_proxy`:
 - The `_translate_modal_error` branch that mapped
   `modal.exception.PermissionDeniedError` to it (`imbue.modal_proxy.direct`);
   permission-denied errors once again fall through to the base `ModalProxyError`.
-</content>

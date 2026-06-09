@@ -13,4 +13,3 @@ Removed from `mngr_modal`:
   `ModalProxyNotFoundError`.
 - The `_invoke_modal_sdk_delete_with_retry` test-cleanup helper in `conftest.py`;
   `_classify_modal_sdk_delete` now invokes the SDK delete callable directly again.
-</content>
