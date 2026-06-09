@@ -9,7 +9,6 @@ tests exercise request-building and response-handling without real API calls.
 
 from datetime import datetime
 from datetime import timezone
-from typing import Any
 
 import pytest
 from google.api_core import exceptions as google_api_exceptions
@@ -49,12 +48,16 @@ class FakeInstancesClient:
         self.list_result: list[compute_v1.Instance] = []
         self.last_list_filter: str | None = None
         self.insert_error: Exception | None = None
+        self.delete_error: Exception | None = None
+        self.list_error: Exception | None = None
 
     def insert(self, *, project: str, zone: str, instance_resource: compute_v1.Instance) -> FakeOperation:
         self.inserted.append(instance_resource)
         return FakeOperation(error=self.insert_error)
 
     def delete(self, *, project: str, zone: str, instance: str) -> FakeOperation:
+        if self.delete_error is not None:
+            raise self.delete_error
         self.deleted.append(instance)
         return FakeOperation()
 
@@ -65,6 +68,8 @@ class FakeInstancesClient:
         return self.get_result
 
     def list(self, *, project: str, zone: str, filter: str | None = None) -> list[compute_v1.Instance]:
+        if self.list_error is not None:
+            raise self.list_error
         self.last_list_filter = filter
         return self.list_result
 
@@ -310,13 +315,8 @@ def test_destroy_instance() -> None:
 
 def test_destroy_instance_tolerates_already_gone() -> None:
     instances = FakeInstancesClient()
-    instances.get_error = None
+    instances.delete_error = google_api_exceptions.NotFound("instance gone")
     client = _make_client(instances)
-
-    def _raise_not_found(**_kwargs: Any) -> FakeOperation:
-        raise google_api_exceptions.NotFound("instance gone")
-
-    instances.delete = _raise_not_found  # type: ignore[method-assign]
     # 404 on delete is idempotent success, not an error.
     client.destroy_instance(VpsInstanceId("mngr-host-1"))
 
@@ -392,11 +392,7 @@ def test_list_instances_filters_and_normalizes() -> None:
 
 def test_list_instances_translates_api_error() -> None:
     instances = FakeInstancesClient()
-
-    def _raise(**_kwargs: Any) -> list[compute_v1.Instance]:
-        raise google_api_exceptions.Forbidden("not authorized")
-
-    instances.list = _raise  # type: ignore[method-assign]
+    instances.list_error = google_api_exceptions.Forbidden("not authorized")
     client = _make_client(instances)
     with pytest.raises(VpsApiError, match="not authorized"):
         client.list_instances(provider_tag="gcp")

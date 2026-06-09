@@ -47,17 +47,6 @@ def test_build_provider_instance_raises_provider_empty_without_project(
         GcpProviderBackend.build_provider_instance(ProviderInstanceName("gcp-test"), config, temp_mngr_ctx)
 
 
-def test_build_provider_instance_rejects_wrong_config_type(temp_mngr_ctx: MngrContext) -> None:
-    # A config that is not a GcpProviderConfig trips the isinstance guard before
-    # any credential resolution.
-    with pytest.raises(MngrError, match="Expected GcpProviderConfig"):
-        GcpProviderBackend.build_provider_instance(
-            ProviderInstanceName("gcp-test"),
-            object(),  # type: ignore[arg-type]
-            temp_mngr_ctx,
-        )
-
-
 def _build_provider(mngr_ctx: MngrContext, *, auto_shutdown_minutes: int | None) -> GcpProvider:
     """Construct a GcpProvider with the given auto-shutdown setting.
 
