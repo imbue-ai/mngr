@@ -411,6 +411,7 @@ function createBundle() {
     preErrorUrl: null,
     isErrorState: false,
     isLoadingState: true,
+    showInactiveOnFirstShow: false,
     _maximizedByUs: false,
     _boundsBeforeMaximize: null,
   };
