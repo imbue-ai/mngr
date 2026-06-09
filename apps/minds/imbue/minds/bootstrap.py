@@ -74,15 +74,11 @@ def resolve_minds_root_name() -> str:
             MINDS_ROOT_NAME_PATTERN,
             DEFAULT_MINDS_ROOT_NAME,
         )
-        # Intentional: a set-but-invalid value (including a typo'd dev/ci env
-        # name) falls back to production (~/.minds/) rather than raising. This
-        # keeps every caller pointed at *some* consistent host_dir, but it does
-        # mean a mistyped env name silently resolves to the production data dir.
-        # That blast radius is accepted because the warning above surfaces it and
-        # because callers for whom landing on production would be destructive
-        # (`minds env deploy/destroy`, `minds run`) gate on the stricter
-        # is_minds_root_name_set_to_active_env (which treats invalid as "not
-        # activated") instead of trusting this fallback.
+        # Intentional: a set-but-invalid value (e.g. a typo'd env name) falls
+        # back to production rather than raising, so every caller has *some*
+        # consistent host_dir. Callers for whom landing on production would be
+        # destructive (`minds env deploy/destroy`, `minds run`) instead gate on
+        # the stricter is_minds_root_name_set_to_active_env.
         return DEFAULT_MINDS_ROOT_NAME
     return value
 
@@ -182,11 +178,9 @@ def _ensure_mngr_settings(root_name: str) -> None:
     yet (no ``config.toml`` / no profile dir) -- there's nothing to
     write to.
     """
-    # Resolve through the same guarded helper the other readers use, rather
-    # than re-reading + re-parsing config.toml inline. ``read_active_profile_dir``
-    # (which this wraps) catches a corrupt/unreadable config.toml and degrades to
-    # None; the previous inline ``tomllib.loads`` here did not, so a corrupt
-    # config.toml raised a raw TOMLDecodeError out of the import-time bootstrap.
+    # Use the guarded helper rather than re-parsing config.toml inline, so a
+    # corrupt config.toml degrades to None instead of raising out of the
+    # import-time bootstrap.
     settings_path = _resolve_active_settings_path(root_name)
     if settings_path is None:
         return
@@ -373,12 +367,9 @@ def reconcile_imbue_cloud_providers_from_sessions(connector_url: str, *, root_na
         return
     entries = data.get("entries") if isinstance(data, dict) else None
     if not isinstance(entries, list):
-        # The plugin always writes ``{"entries": [...]}`` (see
-        # ``mngr_imbue_cloud.session_store.SessionStore._save_index``), so a
-        # decoded-but-wrong-shape index means schema drift, not "no accounts".
-        # Warn instead of returning silently: a silent skip here would
-        # reconcile nothing and leave the user unable to ``mngr create``,
-        # reproducing the exact drift this function exists to repair.
+        # The plugin always writes ``{"entries": [...]}``, so a wrong-shape index
+        # is schema drift, not "no accounts" -- warn rather than silently
+        # reconciling nothing (which would reproduce the drift this repairs).
         logger.warning(
             'imbue_cloud accounts index {} is not in the expected {{"entries": [...]}} '
             "shape; skipping provider reconciliation",
@@ -388,9 +379,7 @@ def reconcile_imbue_cloud_providers_from_sessions(connector_url: str, *, root_na
     for entry in entries:
         email = entry.get("email") if isinstance(entry, dict) else None
         if not isinstance(email, str) or not email:
-            # Same rationale: the plugin only ever writes entries with a
-            # non-empty ``email`` string, so a malformed entry is an anomaly
-            # worth surfacing rather than silently dropping.
+            # Same rationale: a malformed entry is an anomaly worth surfacing.
             logger.warning("Skipping malformed entry in imbue_cloud accounts index {}: {!r}", accounts_path, entry)
             continue
         try:
@@ -621,10 +610,8 @@ def is_imbue_cloud_provider_enabled_for_account(email: str, *, root_name: str | 
         provider_name = imbue_cloud_provider_name_for_account(email)
     except BootstrapError:
         return True
-    # Every other branch here biases toward "enabled" so the UI never wrongly
-    # shows "Signed out". A read/parse failure (e.g. a hand-corrupted
-    # settings.toml) is no different -- fall back to the same default rather
-    # than letting a raw OSError/TOMLDecodeError crash the chip-rendering path.
+    # Like every other branch here, a read/parse failure falls back to "enabled"
+    # rather than crashing the chip-rendering path on a corrupt settings.toml.
     try:
         raw_settings = settings_path.read_text()
     except OSError as e:
