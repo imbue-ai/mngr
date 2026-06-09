@@ -85,8 +85,6 @@ _CDP_READY_TIMEOUT_SECONDS: Final[int] = 120
 _BACKEND_READY_TIMEOUT_SECONDS: Final[int] = 120
 _CREATE_FORM_TIMEOUT_SECONDS: Final[int] = 600
 _SYSTEM_INTERFACE_TIMEOUT_SECONDS: Final[int] = 180
-# How often to re-check the two terminal create states (workspace-ready URL
-# vs. the failure sub-view) while waiting out the create-form budget above.
 _CREATE_OUTCOME_POLL_INTERVAL_MS: Final[int] = 500
 
 # The onboarding wizard's screen-advance is driven by creating.js, a deferred
