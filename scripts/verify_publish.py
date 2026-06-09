@@ -64,7 +64,7 @@ def main() -> None:
             sys.exit(1)
         print(f"\nmngr version matches expected: {mngr_version}")
 
-    # Verify the hard-coded package graph matches actual pyproject.toml declarations
+    # Verify the auto-discovered package graph matches actual pyproject.toml declarations
     print("\n=== Package graph validation ===")
     validate_package_graph()
     print("Package graph is consistent.")
