@@ -1,5 +1,4 @@
 import json
-import sys
 from enum import auto
 from pathlib import Path
 from typing import Final
@@ -21,29 +20,11 @@ DEFAULT_DESKTOP_CLIENT_HOST: Final[str] = "127.0.0.1"
 
 DEFAULT_DESKTOP_CLIENT_PORT: Final[int] = 8420
 
-
-def _resolve_mngr_binary() -> str:
-    """Resolve the mngr binary path, preferring the one next to the running
-    Python interpreter.
-
-    In a uv-managed venv (dev or packaged), `mngr` sits alongside `python`
-    at `<venv>/bin/mngr`. We prefer that absolute path because subprocesses
-    in the packaged app inherit a PATH that does not include the venv's bin
-    dir -- `os.environ['PATH']` is built by Electron and does not know about
-    the internal venv. Relying on bare "mngr" + PATH lookup therefore fails
-    with "No such file or directory: 'mngr'" under packaging.
-
-    Fall back to bare "mngr" (PATH lookup) only if the sibling binary is
-    absent, which preserves the dev-mode behavior where mngr may be
-    installed as a uv tool outside any specific venv.
-    """
-    sibling = Path(sys.executable).parent / "mngr"
-    if sibling.is_file():
-        return str(sibling)
-    return "mngr"
-
-
-MNGR_BINARY: Final[str] = _resolve_mngr_binary()
+# `uv run --active` (the spawn pattern in electron/backend.js) prepends
+# `<VIRTUAL_ENV>/bin` to PATH for the spawned Python, so a bare `mngr`
+# resolves to the venv-installed CLI via PATH lookup. Empirically verified
+# on host + clean Tahoe VM.
+MNGR_BINARY: Final[str] = "mngr"
 
 
 class WorkspacePaths(FrozenModel):
