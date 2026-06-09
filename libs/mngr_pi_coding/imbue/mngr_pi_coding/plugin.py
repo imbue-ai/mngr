@@ -667,11 +667,11 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig], HasCommonTranscrip
 
         pi keys trust on ``realpathSync(cwd)``; matching that requires resolving
         symlinks on the host the agent runs on (``/tmp`` -> ``/private/tmp`` on
-        macOS, etc.), so we ask the host rather than resolving locally.
+        macOS, etc.), so we ask the host rather than resolving locally. ``realpath``
+        is a single binary (not the shell builtin ``cd``), so it runs under the
+        test ``FakeHost`` too, and resolves symlinks the same way pi does.
         """
-        result = host.execute_idempotent_command(
-            f"cd {shlex.quote(str(self.work_dir))} && pwd -P", timeout_seconds=5.0
-        )
+        result = host.execute_idempotent_command(f"realpath {shlex.quote(str(self.work_dir))}", timeout_seconds=5.0)
         if result.success and result.stdout.strip():
             return result.stdout.strip()
         logger.warning("Could not resolve canonical work dir for {}; using the literal path", self.work_dir)
