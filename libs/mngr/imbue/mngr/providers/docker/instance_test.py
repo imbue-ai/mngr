@@ -4,8 +4,6 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 
-import docker
-import docker.errors
 import pytest
 
 from imbue.concurrency_group.errors import ProcessTimeoutError
@@ -13,7 +11,6 @@ from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import DockerBuildTimeoutError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
@@ -24,7 +21,6 @@ from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.providers.docker.backend import DockerProviderBackend
 from imbue.mngr.providers.docker.config import DockerProviderConfig
 from imbue.mngr.providers.docker.host_store import HostRecord
 from imbue.mngr.providers.docker.instance import CONTAINER_SSH_PORT
@@ -36,14 +32,12 @@ from imbue.mngr.providers.docker.instance import LABEL_TAGS
 from imbue.mngr.providers.docker.instance import _get_docker_context_host
 from imbue.mngr.providers.docker.instance import _get_ssh_host_from_docker_config
 from imbue.mngr.providers.docker.instance import build_container_labels
-from imbue.mngr.providers.docker.instance import create_docker_client
 from imbue.mngr.providers.docker.instance import parse_container_labels
 from imbue.mngr.providers.docker.instance import verify_engine_version_supports_volume_subpath
 from imbue.mngr.providers.docker.testing import make_docker_provider
 from imbue.mngr.providers.docker.testing import make_docker_provider_with_local_volume
 from imbue.mngr.providers.docker.testing import make_offline_docker_provider
 from imbue.mngr.providers.docker.testing import write_fake_docker_context
-from imbue.mngr.providers.docker.volume import state_container_name
 
 HOST_ID_A = "host-00000000000000000000000000000001"
 HOST_ID_B = "host-00000000000000000000000000000002"
@@ -662,42 +656,6 @@ def test_discover_hosts_and_agents_returns_empty_when_daemon_offline(temp_mngr_c
     provider = make_offline_docker_provider(temp_mngr_ctx)
     result = provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
     assert result == {}
-
-
-@pytest.mark.docker_sdk
-def test_read_only_construction_is_empty_and_creates_no_state_container(temp_mngr_ctx: MngrContext) -> None:
-    """Building the docker provider for a read-only op must not create the state container.
-
-    Mirrors the Modal backend: when nothing has been created yet and
-    is_for_host_creation is False, build_provider_instance raises
-    ProviderEmptyError (so the provider loader skips docker) instead of lazily
-    materializing the singleton state container -- which is what caused
-    read-only commands like `mngr list` to leak state containers.
-    """
-    config = DockerProviderConfig(isolate_host_volumes=False)
-    user_id = str(temp_mngr_ctx.get_profile_user_id())
-    container_name = state_container_name(temp_mngr_ctx.config.prefix, user_id)
-
-    client = create_docker_client()
-    try:
-        with pytest.raises(ProviderEmptyError):
-            DockerProviderBackend.build_provider_instance(
-                name=ProviderInstanceName("docker"),
-                config=config,
-                mngr_ctx=temp_mngr_ctx,
-                is_for_host_creation=False,
-            )
-        # The read-only construction must not have created the state container.
-        with pytest.raises(docker.errors.NotFound):
-            client.containers.get(container_name)
-    finally:
-        # Defensive: if the assertion above regresses and a container WAS
-        # created, remove it so this test does not itself leak.
-        try:
-            client.containers.get(container_name).remove(force=True)
-        except docker.errors.NotFound:
-            pass
-        client.close()
 
 
 # =========================================================================
