@@ -282,17 +282,18 @@ function updateBundleBounds(bundle) {
   if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
     // The chromeView covers the entire window. Its body background is
     // ``var(--titlebar-bg)``, so wherever the contentView doesn't paint
-    // (the 6px frame around three sides and the rounded-corner cutouts
-    // at all four corners of the contentView), the chromeView fills in
-    // with the current workspace's accent color. This mirrors browser
-    // mode where the iframe sits inside a 6px body inset that paints
-    // the same accent color.
+    // (the ``CONTENT_INSET``-wide frame around three sides and the
+    // rounded-corner cutouts at all four corners of the contentView),
+    // the chromeView fills in with the current workspace's accent
+    // color. This mirrors browser mode where the iframe sits inside a
+    // matching body inset that paints the same accent color.
     bundle.chromeView.setBounds({ x: 0, y: 0, width, height });
   }
   if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-    // Inset the contentView by 6px on left, right, and bottom (top is
-    // flush with the titlebar's bottom edge). The 6px gap + the
-    // contentView's ``setBorderRadius(16)`` together create the "tucks
+    // Inset the contentView by ``CONTENT_INSET`` on left, right, and
+    // bottom (top is flush with the titlebar's bottom edge). That gap
+    // plus ``setBorderRadius(CONTENT_CORNER_RADIUS)`` (applied in
+    // ``createBundleWebContentsViews``) together create the "tucks
     // under a rounded inset frame" look without needing per-corner
     // control: all four corners of the contentView are visibly rounded
     // and the cutouts reveal accent color (the chromeView below),
