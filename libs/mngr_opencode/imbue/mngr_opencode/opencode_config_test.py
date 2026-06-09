@@ -26,7 +26,6 @@ from imbue.mngr_opencode.opencode_config import ROOT_SESSION_FILENAME
 from imbue.mngr_opencode.opencode_config import SERVER_PORT_FILENAME
 from imbue.mngr_opencode.opencode_config import SERVER_ROLE
 from imbue.mngr_opencode.opencode_config import build_opencode_config
-from imbue.mngr_opencode.opencode_config import compute_server_port
 from imbue.mngr_opencode.opencode_config import get_opencode_app_data_dir
 from imbue.mngr_opencode.opencode_config import get_opencode_auth_path_for_data_home
 from imbue.mngr_opencode.opencode_config import get_opencode_config_dir
@@ -122,16 +121,6 @@ def test_path_helpers_layout(tmp_path: Path) -> None:
 
 def test_shared_auth_path_under_xdg_default(tmp_path: Path) -> None:
     assert get_shared_opencode_auth_path(tmp_path) == tmp_path / ".local" / "share" / "opencode" / "auth.json"
-
-
-def test_compute_server_port_is_deterministic_in_range_and_distinct() -> None:
-    port_a = compute_server_port("agent-aaaa")
-    port_b = compute_server_port("agent-bbbb")
-    # Stable across calls so resume reuses the same port; distinct per agent.
-    assert port_a == compute_server_port("agent-aaaa")
-    assert port_a != port_b
-    for port in (port_a, port_b):
-        assert 49200 <= port < 49200 + 15000
 
 
 def test_plugin_resource_literals_stay_in_sync_with_constants() -> None:

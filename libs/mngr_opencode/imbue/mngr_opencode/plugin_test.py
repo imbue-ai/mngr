@@ -20,7 +20,6 @@ from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
-from imbue.mngr_opencode.opencode_config import compute_server_port
 from imbue.mngr_opencode.opencode_config import get_opencode_auth_path_for_data_home
 from imbue.mngr_opencode.opencode_config import get_opencode_config_file_path
 from imbue.mngr_opencode.opencode_config import get_opencode_plugin_path
@@ -136,11 +135,11 @@ def test_assemble_command_runs_launch_script_with_isolation_and_server_env(openc
     command = str(opencode_agent.assemble_command(opencode_agent.host, (), command_override=None))
     config_dir = str(opencode_agent._get_opencode_config_dir())
     data_home = str(opencode_agent._get_opencode_data_home())
-    port = compute_server_port(str(opencode_agent.id))
     assert f"OPENCODE_CONFIG_DIR={config_dir}" in command
     assert f"XDG_DATA_HOME={data_home}" in command
     assert "MNGR_OPENCODE_BIN=opencode" in command
-    assert f"MNGR_OPENCODE_PORT={port}" in command
+    # Port 0 -> the server binds an OS-assigned free port (the script records it).
+    assert "MNGR_OPENCODE_PORT=0" in command
     assert f"MNGR_OPENCODE_WORKDIR={opencode_agent.work_dir}" in command
     assert "bash $MNGR_AGENT_STATE_DIR/commands/opencode_launch.sh" in command
 

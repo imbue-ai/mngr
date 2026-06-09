@@ -28,7 +28,6 @@ truth those resources are kept in sync with.
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Mapping
 from pathlib import Path
@@ -87,16 +86,12 @@ LAUNCH_SCRIPT_NAME: str = "opencode_launch.sh"
 ROLE_ENV_VAR: str = "MNGR_OPENCODE_ROLE"
 SERVER_ROLE: str = "server"
 
-# Env vars the launch script reads (set by ``assemble_command``).
+# Env vars the launch script reads (set by ``assemble_command``). The port is
+# passed as ``0`` so ``opencode serve`` binds an OS-assigned free port; the launch
+# script records the actual bound port (co-resident agents never collide).
 OPENCODE_BIN_ENV_VAR: str = "MNGR_OPENCODE_BIN"
 OPENCODE_PORT_ENV_VAR: str = "MNGR_OPENCODE_PORT"
 OPENCODE_WORKDIR_ENV_VAR: str = "MNGR_OPENCODE_WORKDIR"
-
-# Per-agent server port is derived deterministically from the agent id so it is
-# stable across restarts (resume reuses the same port) and distinct per agent.
-# A high, uncommon range avoids the OpenCode default (4096) and well-known ports.
-_SERVER_PORT_RANGE_START: int = 49200
-_SERVER_PORT_RANGE_SIZE: int = 15000
 
 # Raw transcript path (relative to ``$MNGR_AGENT_STATE_DIR``). The plugin appends
 # each ``message.updated`` / ``message.part.updated`` event here verbatim; the
@@ -120,13 +115,6 @@ def get_opencode_root_session_file_path(agent_state_dir: Path) -> Path:
 def get_opencode_server_port_file_path(agent_state_dir: Path) -> Path:
     """Return the file recording the port the agent's OpenCode server bound."""
     return agent_state_dir / SERVER_PORT_FILENAME
-
-
-@pure
-def compute_server_port(agent_id: str) -> int:
-    """Derive a stable, per-agent server port from the agent id (deterministic across restarts)."""
-    digest = hashlib.sha256(agent_id.encode()).digest()
-    return _SERVER_PORT_RANGE_START + int.from_bytes(digest[:4], "big") % _SERVER_PORT_RANGE_SIZE
 
 
 def get_opencode_config_dir(agent_state_dir: Path) -> Path:

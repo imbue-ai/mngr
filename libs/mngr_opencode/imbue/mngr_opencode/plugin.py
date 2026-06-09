@@ -82,7 +82,6 @@ from imbue.mngr_opencode.opencode_config import OPENCODE_PORT_ENV_VAR
 from imbue.mngr_opencode.opencode_config import OPENCODE_WORKDIR_ENV_VAR
 from imbue.mngr_opencode.opencode_config import PLUGIN_FILENAME
 from imbue.mngr_opencode.opencode_config import build_opencode_config
-from imbue.mngr_opencode.opencode_config import compute_server_port
 from imbue.mngr_opencode.opencode_config import get_opencode_auth_path_for_data_home
 from imbue.mngr_opencode.opencode_config import get_opencode_config_dir
 from imbue.mngr_opencode.opencode_config import get_opencode_config_file_path
@@ -108,6 +107,11 @@ _USER_CONFIG_RELATIVE_PATH: Final[tuple[str, ...]] = (".config", "opencode", "op
 # OpenCode env vars that isolate config and data per agent.
 _OPENCODE_CONFIG_DIR_ENV_VAR: Final[str] = "OPENCODE_CONFIG_DIR"
 _XDG_DATA_HOME_ENV_VAR: Final[str] = "XDG_DATA_HOME"
+
+# Ask ``opencode serve`` for an OS-assigned free port (verified: concurrent
+# ``--port 0`` servers get distinct ports). The launch script records the actual
+# bound port, so co-resident agents never collide and there is no port to pick.
+_EPHEMERAL_PORT: Final[str] = "0"
 
 # Stable footer-hint substring OpenCode renders only once the input prompt is
 # drawn and ready. Deliberately not the ASCII-art splash banner (renders before
@@ -430,11 +434,13 @@ class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin):
            common-transcript converter supervisor (only when ``emit_common_transcript``).
         2. ``env <isolation + MNGR_OPENCODE_*> bash opencode_launch.sh <user-args>``
            -- the launch orchestrator (see the resource): it starts ``opencode
-           serve`` on the per-agent port, pre-creates/reuses the session, and
-           attaches the TUI client in the foreground. The env carries the config /
-           data isolation (inherited by both serve and attach) plus the bin, port,
-           and work dir the script needs. User ``cli_args`` / ``agent_args`` are
-           forwarded (shell-quoted) to the attach client.
+           serve`` (asking for an ephemeral port via ``--port 0`` and recording
+           the actual bound port, so co-resident agents never collide),
+           pre-creates/reuses the session, and attaches the TUI client in the
+           foreground. The env carries the config / data isolation (inherited by
+           both serve and attach) plus the bin and work dir the script needs. User
+           ``cli_args`` / ``agent_args`` are forwarded (shell-quoted) to the attach
+           client.
 
         Session resume across stop/start is handled inside the script (it reuses
         the recorded root session id), so there is no resume flag here.
@@ -444,14 +450,13 @@ class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin):
 
         config_dir = self._get_opencode_config_dir()
         data_home = self._get_opencode_data_home()
-        port = compute_server_port(str(self.id))
         launch_script = "$MNGR_AGENT_STATE_DIR/commands/" + LAUNCH_SCRIPT_NAME
 
         env_prefix = (
             f"env {_OPENCODE_CONFIG_DIR_ENV_VAR}={shlex.quote(str(config_dir))}"
             f" {_XDG_DATA_HOME_ENV_VAR}={shlex.quote(str(data_home))}"
             f" {OPENCODE_BIN_ENV_VAR}={shlex.quote(opencode_bin)}"
-            f" {OPENCODE_PORT_ENV_VAR}={port}"
+            f" {OPENCODE_PORT_ENV_VAR}={_EPHEMERAL_PORT}"
             f" {OPENCODE_WORKDIR_ENV_VAR}={shlex.quote(str(self.work_dir))}"
         )
         launch_command = f"{env_prefix} bash {launch_script}"

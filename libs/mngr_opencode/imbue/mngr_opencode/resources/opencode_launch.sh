@@ -76,6 +76,18 @@ if [ -z "$SESSION_ID" ]; then
     printf '%s' "$SESSION_ID" > "$ROOT_SESSION_FILE"
 fi
 
+# Liveness watcher: the attach client does NOT exit when the server dies, so
+# without this a dead server would leave a live `opencode attach` in the pane and
+# lifecycle detection would keep reporting RUNNING/WAITING against a broken agent.
+# When the server exits, tear the whole pane process group down (this script is
+# non-interactive, so the backgrounded watcher shares the group) so the pane goes
+# DONE and lifecycle honestly reflects that the agent is gone.
+( while kill -0 "$SERVER_PID" 2>/dev/null; do sleep 2; done; kill 0 2>/dev/null ) &
+WATCHER_PID=$!
+
 # Attach the TUI client to that session in the foreground. This is the pane the
 # user interacts with via `mngr connect`; messages POSTed to the server render here.
 "$BIN" attach "$BASE_URL" --session "$SESSION_ID" "$@"
+
+# Normal client quit: stop the watcher (the EXIT trap stops the server).
+kill "$WATCHER_PID" 2>/dev/null || true

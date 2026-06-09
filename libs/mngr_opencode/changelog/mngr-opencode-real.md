@@ -1,12 +1,13 @@
 # Real OpenCode agent support
 
-The `opencode` agent type graduated from a bare `BaseAgent` shell (which ran the
+The `opencode` agent type graduated from a bare config shell (which ran the
 binary but reported WAITING forever, with no transcript, resume, or isolation)
-to a first-class `InteractiveTuiAgent`, bringing it to roughly the
-`mngr_antigravity` level of parity. OpenCode is architecturally unlike Claude
-Code / Antigravity -- a client-server app with SQLite-backed sessions and no
-POSIX-sh hook mechanism -- so the implementation leans on OpenCode's own
-in-process TypeScript plugin extension point and its config-dir env vars.
+to a full agent at roughly the `mngr_antigravity` level of parity. OpenCode is
+architecturally unlike Claude Code / Antigravity -- a client-server app with
+SQLite-backed sessions and no POSIX-sh hook mechanism -- so the implementation
+runs each agent as a headless `opencode serve` plus an `opencode attach` TUI
+client, maintains lifecycle/transcript via an in-process TypeScript plugin loaded
+into the server, and sends messages over the server's HTTP API (see below).
 
 User-visible changes:
 
@@ -17,8 +18,9 @@ User-visible changes:
   (child sessions) keeps the agent RUNNING until the whole turn finishes, because
   the marker clear is gated on the root session.
 - **Conversation resume across stop/start.** `mngr stop` then `mngr start`
-  resumes the prior conversation (via `opencode --continue`, which resumes the
-  most recent root session from the per-agent SQLite store) instead of starting
+  resumes the prior conversation: the launch script records the root session id
+  on first launch and re-attaches to it (`opencode attach --session <id>`) on
+  restart, reading it back from the per-agent SQLite store, instead of starting
   fresh.
 - **Transcripts.** `mngr transcript` now works for opencode agents. The raw
   transcript is captured in-process by the plugin; a background converter turns
