@@ -131,41 +131,11 @@ def test_marker_set_on_agent_start_and_cleared_on_agent_end(tmp_path: Path) -> N
         ],
     )
     assert not (state / "active").exists()
-    assert (state / "pi_root_session").read_text().strip() == "root"
 
 
 def test_marker_present_after_agent_start(tmp_path: Path) -> None:
     state = _run_extension(tmp_path, [{"event": "agent_start", "sessionId": "root"}])
     assert (state / "active").exists()
-
-
-def test_nested_session_does_not_clear_root_marker(tmp_path: Path) -> None:
-    """A nested pi's agent_end (different session id) must leave the root marker."""
-    state = _run_extension(
-        tmp_path,
-        [
-            {"event": "agent_start", "sessionId": "root"},
-            # A nested pi starts mid-turn then finishes; its session id differs from the root.
-            {"event": "agent_start", "sessionId": "child"},
-            {"event": "agent_end", "sessionId": "child"},
-        ],
-    )
-    assert (state / "active").exists()
-    # The root id, not the child's, is recorded.
-    assert (state / "pi_root_session").read_text().strip() == "root"
-
-
-def test_liveness_fallback_clears_when_no_root_recorded(tmp_path: Path) -> None:
-    """An agent_end with no recorded root (e.g. id unavailable) still clears the marker."""
-    state = _run_extension(
-        tmp_path,
-        [
-            # No sessionId, so no root is recorded; agent_end must still clear via the fallback.
-            {"event": "agent_start"},
-            {"event": "agent_end"},
-        ],
-    )
-    assert not (state / "active").exists()
 
 
 def test_session_shutdown_clears_marker(tmp_path: Path) -> None:

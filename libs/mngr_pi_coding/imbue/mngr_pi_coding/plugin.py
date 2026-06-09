@@ -268,8 +268,8 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin):
     pi's only lifecycle-event surface is its TypeScript extension API (no
     shell hooks). mngr therefore provisions a single extension
     (``mngr_pi_lifecycle.ts``) and loads it with ``pi -e``; that extension
-    maintains the ``active`` RUNNING/WAITING marker (subagent-aware via a
-    root-session id), writes the readiness sentinel this class waits on, emits
+    maintains the ``active`` RUNNING/WAITING marker, writes the readiness
+    sentinel this class waits on, emits
     both the raw and common transcripts, and injects input that mngr appends to
     the agent's inbox. Because emission happens inside the extension, the
     transcript-mixin script hooks return nothing.

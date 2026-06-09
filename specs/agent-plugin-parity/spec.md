@@ -141,7 +141,7 @@ Y = implemented, partial = present but incomplete, - = absent.
 | Custom agent class | Y | Y | Y | - (BaseAgent) | - (BaseAgent) |
 | Launch command isolation | Y | Y | Y | - | - |
 | Lifecycle marker (RUNNING/WAITING) | Y | Y | Y (extension marker) | - | - |
-| Subagent-aware idle gating | Y (`SESSION_GUARD`) | Y (root_conversation + fullyIdle) | Y (root-session id) | - | - |
+| Subagent-aware idle gating | Y (`SESSION_GUARD`) | Y (root_conversation + fullyIdle) | n/a (no in-process subagents) | - | - |
 | Readiness detection | Y (sentinel hook) | Y (TUI banner) | Y (`session_start` sentinel) | - | - |
 | Input delivery & submission | Y (tmux paste+Enter) | Y (tmux paste+Enter) | Y (extension injection) | partial (inherited) | partial (inherited) |
 | Auth / credential sharing | Y (keychain + file) | Y (token symlink) | Y (`sync_auth`) | - | - |
@@ -162,10 +162,10 @@ Y = implemented, partial = present but incomplete, - = absent.
 | Extra agent subtypes | Y (guardian/fairy/headless) | - | - | - | - |
 
 Notable observations:
-- **`pi-coding` is now a near-`antigravity`-parity port**, not a stub: lifecycle marker
-  (subagent-aware via a root-session id), readiness sentinel, raw + common transcripts,
-  conversation resume, and trust handling, on top of the auth/HOME/install baseline it
-  already had. It carries the same deferred tail as antigravity (session preservation,
+- **`pi-coding` is now a near-`antigravity`-parity port**, not a stub: lifecycle marker,
+  readiness sentinel, raw + common transcripts, conversation resume, and trust handling, on
+  top of the auth/HOME/install baseline it already had. (It needs no subagent-aware idle
+  gating: pi has no in-process subagent tool, so only one agent loop runs per process.) It carries the same deferred tail as antigravity (session preservation,
   streaming snapshot, deploy contributions, field generators) plus per-agent permissions.
   Two things make it the structural outlier: its entire dynamic surface is **one
   in-process TypeScript extension** (pi has no shell hooks), and it **delivers input by

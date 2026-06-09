@@ -15,17 +15,12 @@
 //   2. The RUNNING/WAITING marker. mngr's BaseAgent reports RUNNING iff
 //      `$MNGR_AGENT_STATE_DIR/active` exists while the pi process is alive (see
 //      determine_lifecycle_state). pi maintains no such file, so this extension
-//      touches it on `agent_start` and removes it on `agent_end`. Only the
-//      mngr-launched pi runs this extension (it is loaded via the explicit `-e`
-//      flag, not auto-discovery), so a nested pi the agent spawns with the bash
-//      tool -- bare `pi`, no `-e` -- never executes these handlers and never
-//      touches the marker. The root-vs-child gating below (record the turn's
-//      root session id, clear only for it) is therefore defensive: it keeps the
-//      marker correct in the exotic case where a *second* process running this
-//      same extension shares the state dir (e.g. the agent explicitly invokes
-//      `pi -e <this file>`). It mirrors the discriminator mngr_antigravity uses
-//      for agy's in-process subagents. (pi has no in-process subagent/Task
-//      tool, so a separate process is the only child case at all.)
+//      touches it on `agent_start` and removes it on `agent_end`. No child/root
+//      gating is needed: pi has no in-process subagent/Task tool, so only one
+//      agent loop ever runs per process, and only the mngr-launched pi runs this
+//      extension (loaded via the explicit `-e` flag, not auto-discovery) -- a
+//      nested pi the agent spawns with the bash tool (bare `pi`, no `-e`) never
+//      executes these handlers and never touches the marker.
 //
 //   3. Transcript emission. On `message_end` it appends the raw pi message to
 //      `$MNGR_AGENT_STATE_DIR/logs/<type>_transcript/events.jsonl` and, when
@@ -103,7 +98,6 @@ interface MessageEndEvent {
 }
 
 interface SessionManager {
-  getSessionId?: () => string | undefined;
   getSessionFile?: () => string | undefined;
 }
 interface ExtensionContext {
@@ -122,7 +116,6 @@ interface PiApi {
 
 const ACTIVE_MARKER_NAME = "active";
 const SESSION_STARTED_SENTINEL_NAME = "pi_session_started";
-const ROOT_SESSION_NAME = "pi_root_session";
 const SESSION_FILE_NAME = "pi_session_file";
 // mngr appends one JSON-encoded message string per line here; we inject each new
 // line into the live session via pi.sendUserMessage (no tmux keystrokes). Kept
@@ -231,7 +224,6 @@ export default function mngrPiLifecycle(pi: PiApi): void {
 
   const markerPath = join(stateDir, ACTIVE_MARKER_NAME);
   const sentinelPath = join(stateDir, SESSION_STARTED_SENTINEL_NAME);
-  const rootSessionPath = join(stateDir, ROOT_SESSION_NAME);
   const sessionFilePath = join(stateDir, SESSION_FILE_NAME);
   const rawPath = join(stateDir, "logs", `${agentType}_transcript`, "events.jsonl");
   const commonPath = join(stateDir, "events", agentType, "common_transcript", "events.jsonl");
@@ -243,22 +235,6 @@ export default function mngrPiLifecycle(pi: PiApi): void {
   // session id but only fires message_end for *new* messages, so a per-session
   // reset would collide with ids written before the restart).
   let commonSeq = emitCommon ? countLines(commonPath) : 0;
-
-  const readRootSession = (): string => {
-    try {
-      return existsSync(rootSessionPath) ? readFileSync(rootSessionPath, "utf-8").trim() : "";
-    } catch {
-      return "";
-    }
-  };
-
-  const currentSessionId = (ctx: ExtensionContext): string => {
-    try {
-      return ctx.sessionManager?.getSessionId?.() ?? "";
-    } catch {
-      return "";
-    }
-  };
 
   // Record this (main) agent's session file so the plugin can resume it
   // explicitly with `pi --session <file>` -- more robust than `--continue`,
@@ -347,31 +323,15 @@ export default function mngrPiLifecycle(pi: PiApi): void {
     });
   });
 
-  pi.on("agent_start", (_event, ctx) => {
+  pi.on("agent_start", (_event, _ctx) => {
     safe("agent_start", () => {
-      // Record the root only at a turn boundary (marker absent), so a second
-      // process running this extension that starts mid-turn does not overwrite
-      // the true root with its own id (see the header note on why this is
-      // defensive -- ordinary nested pis don't load this extension).
-      if (!existsSync(markerPath)) {
-        const sessionId = currentSessionId(ctx);
-        if (sessionId) {
-          writeFileSync(rootSessionPath, sessionId);
-        }
-      }
       writeFileSync(markerPath, "1");
     });
   });
 
-  pi.on("agent_end", (_event, ctx) => {
+  pi.on("agent_end", (_event, _ctx) => {
     safe("agent_end", () => {
-      const root = readRootSession();
-      const sessionId = currentSessionId(ctx);
-      // Clear for the root turn, or -- liveness fallback -- when no root was
-      // ever recorded, so a failure to capture the id can't strand RUNNING.
-      if (root === "" || root === sessionId) {
-        rmSync(markerPath, { force: true });
-      }
+      rmSync(markerPath, { force: true });
     });
   });
 
