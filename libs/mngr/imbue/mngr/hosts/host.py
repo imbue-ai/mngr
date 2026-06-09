@@ -284,9 +284,8 @@ _TMUX_STATUS_LEFT_LENGTH: Final[int] = 20
 # stop_agents forever (observed hanging an entire offload batch). These steps
 # are idempotent and best-effort: a timeout simply yields no PIDs for that
 # step, and the remaining steps (kill-session, env-scan fallback) still run, so
-# cleanup keeps making forward progress instead of stalling. Matches the 5.0s
-# bound already used by get_lifecycle_state for its tmux/ps calls.
-_STOP_AGENT_COMMAND_TIMEOUT_SECONDS: Final[float] = 5.0
+# cleanup keeps making forward progress instead of stalling.
+_STOP_AGENT_COMMAND_TIMEOUT_SECONDS: Final[float] = 10.0
 
 
 class Host(OuterHost, BaseHost, OnlineHostInterface):
