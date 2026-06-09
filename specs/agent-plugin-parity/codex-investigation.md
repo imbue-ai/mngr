@@ -156,6 +156,13 @@ deploy/scheduling contributions, field generators (`waiting_reason` -- codex *do
 `Notification` event and a `PermissionRequest` hook, so a permission-WAITING reason is
 *feasible* later, unlike agy), the streaming snapshot, and installation management.
 
+Also carried forward (an accepted tradeoff inherited from the agy pattern): durable trust
+entries written to the user's global `~/.codex/config.toml` `[projects."<repo>"]` are not
+garbage-collected when an agent or host is destroyed, so the global trust list accumulates
+one entry per trusted repo. This is intentional for milestone 1-4 (re-trust shouldn't
+re-prompt across worktrees of the same repo), and cleanup would belong with the
+session-preservation-on-destroy work.
+
 **Future `headless_codex` (noted in PR):** the `codex app-server` JSON-RPC protocol (or `codex
 exec --json`) gives clean synchronous lifecycle + stream events (`initialize`/`thread.started`
 readiness, `turn.started`/`turn.completed`, `item.*` output). That is the natural basis for a
