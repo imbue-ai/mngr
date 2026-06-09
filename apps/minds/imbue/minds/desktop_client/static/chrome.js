@@ -213,10 +213,25 @@
         // also persists this id so it survives a restart; we don't need to
         // push it back over IPC here.
         applyTitleAccent(agentId);
+        return;
       }
-      // Non-workspace URL (Home, etc.): leave the bar tinted with whatever
-      // the last-opened workspace was. Main owns clearing the accent
-      // (workspace deleted, user signed out) via ``onLastWorkspaceAgentIdChanged``.
+      // Non-workspace URL (Home, sign-in, accounts, ...): the bar should
+      // track the persisted last-opened workspace, which main may have
+      // *already cleared* by the time we get here (sign-out, deletion of
+      // the displayed workspace). Re-query rather than relying on the
+      // ``onLastWorkspaceAgentIdChanged`` broadcast: that broadcast's
+      // gate (``if (currentTitleAgentId) return;``) blocks the clear in
+      // any flow where the broadcast arrives BEFORE this null
+      // ``current-workspace-changed``, which is the case on sign-out (the
+      // two events come from different async streams and aren't ordered).
+      // The deletion path explicitly orders the IPC, but pulling the
+      // stored value here covers both paths uniformly.
+      window.minds.getLastWorkspaceAgentId().then(function (storedId) {
+        // A subsequent workspace open may have set ``currentTitleAgentId``
+        // while this IPC was in flight; let that win.
+        if (currentTitleAgentId) return;
+        applyTitleAccent(storedId || null);
+      });
     });
     // Bootstrap: paint the accent on chrome page load using the persisted
     // last-opened workspace, before any other IPC fires.
@@ -236,15 +251,11 @@
     // Home / sign-in / some non-workspace URL): the active-workspace-driven
     // path (``onCurrentWorkspaceChanged``) is the source of truth for
     // windows that have their own displayed workspace, so leave them
-    // alone. Windows that *were* displaying the now-deleted workspace
-    // get a ``current-workspace-changed: null`` IPC from main BEFORE the
-    // last-workspace broadcast (main calls
-    // ``sendCurrentWorkspaceToBundleViews`` after clearing
-    // ``currentWorkspaceId`` in the deletion cleanup, since the
-    // did-navigate handler's diff-guard wouldn't fire one). Electron
-    // delivers IPC in order, so by the time this handler runs
-    // ``currentTitleAgentId`` is already null and the gate falls through,
-    // clearing the accent.
+    // alone. The ``current-workspace-changed: null`` branch above re-queries
+    // ``getLastWorkspaceAgentId`` once the window leaves its workspace, so
+    // we don't rely on cross-stream IPC ordering to deliver clears that
+    // arrived (over the chrome SSE event handler) before this window's
+    // own ``current-workspace-changed: null`` lands.
     window.minds.onLastWorkspaceAgentIdChanged(function (agentId) {
       if (currentTitleAgentId) return;
       applyTitleAccent(agentId || null);
