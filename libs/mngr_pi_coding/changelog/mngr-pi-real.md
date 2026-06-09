@@ -12,6 +12,8 @@ with `pi -e`) that drives everything pi has no shell hooks for:
   New config: `resume_session` (default on).
 - Agent creation now waits on a real readiness signal (a sentinel the extension
   writes when pi's session loads) rather than only scraping the startup banner.
+- Auto-install now uses the current npm package `@earendil-works/pi-coding-agent`
+  (the old `@mariozechner/pi-coding-agent` scope is deprecated and frozen).
 
 Known gaps carried for follow-up (matching the other ports): session preservation
 on destroy, scheduled-deploy file/env contributions, a `waiting_reason` listing

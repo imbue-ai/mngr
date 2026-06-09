@@ -118,10 +118,17 @@ def _check_pi_installed(host: OnlineHostInterface) -> bool:
     return result.success
 
 
+# The npm package pi ships under. It migrated from @mariozechner/pi-coding-agent
+# (now deprecated and frozen) to the @earendil-works scope, which carries the
+# current releases; the binary, config dir (.pi), and PI_CODING_AGENT_DIR env var
+# are unchanged across the move.
+_PI_NPM_PACKAGE: str = "@earendil-works/pi-coding-agent"
+
+
 def _install_pi(host: OnlineHostInterface) -> None:
     """Install pi on the host via npm."""
     result = host.execute_idempotent_command(
-        "npm install -g @mariozechner/pi-coding-agent",
+        f"npm install -g {_PI_NPM_PACKAGE}",
         timeout_seconds=300.0,
     )
     if not result.success:
@@ -449,7 +456,7 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig], HasCommonTranscrip
             if is_installed:
                 logger.debug("pi is already installed on the host")
             else:
-                install_hint = "npm install -g @mariozechner/pi-coding-agent"
+                install_hint = f"npm install -g {_PI_NPM_PACKAGE}"
                 if host.is_local and not mngr_ctx.is_auto_approve:
                     raise PluginMngrError(f"pi is not installed. Please install it with:\n  {install_hint}")
                 elif not host.is_local and not mngr_ctx.config.is_remote_agent_installation_allowed:

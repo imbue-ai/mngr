@@ -2,7 +2,7 @@
 
 Plugin that registers the `pi-coding` agent type for mngr.
 
-[Pi](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent) is a minimal terminal coding harness. This plugin runs it as a fully-featured mngr agent: lifecycle-aware (RUNNING vs WAITING), transcript-capturing, and resumable across restarts.
+[Pi](https://github.com/earendil-works/pi/tree/main/packages/coding-agent) is a minimal terminal coding harness (published on npm as `@earendil-works/pi-coding-agent`). This plugin runs it as a fully-featured mngr agent: lifecycle-aware (RUNNING vs WAITING), transcript-capturing, and resumable across restarts.
 
 ## Usage
 
