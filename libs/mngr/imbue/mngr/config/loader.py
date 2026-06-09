@@ -489,8 +489,7 @@ def _normalize_field_keys(raw: dict[str, Any], context: str) -> dict[str, Any]:
       raise so the caller picks one canonical spelling.
 
     Always returns a fresh dict, so callers can freely mutate the result
-    (e.g. via ``del`` in ``_check_unknown_fields`` or ``pop`` in
-    ``parse_config``) without affecting the caller's input.
+    (e.g. via ``pop`` in ``parse_config``) without affecting the caller's input.
     """
     result: dict[str, Any] = {}
     seen_normalized: dict[str, str] = {}
@@ -524,7 +523,7 @@ def _normalize_field_keys(raw: dict[str, Any], context: str) -> dict[str, Any]:
     return result
 
 
-def _check_unknown_fields(
+def _drop_unknown_fields(
     raw_config: dict[str, Any],
     model_class: type[BaseModel],
     context: str,
@@ -532,31 +531,34 @@ def _check_unknown_fields(
     strict: bool = True,
     silent: bool = False,
     extra_hint: str | None = None,
-) -> None:
-    """Check for unknown fields in raw_config and either raise or warn.
+) -> dict[str, Any]:
+    """Return ``raw_config`` keeping only fields declared on ``model_class``.
 
-    When strict=True, raises ConfigParseError (used by config set to catch typos).
-    When strict=False, logs a warning and removes the unknown fields so that config files
-    written for newer versions of mngr don't break older versions.
-    When silent=True (and strict=False), suppress the warning entirely. Used by
-    ``mngr plugin add``, where the config is expected to reference plugins that
-    are not yet installed; the warnings are noise that resolve themselves once
-    the install completes.
+    When strict=True (used by ``config set`` to catch typos), raises
+    ConfigParseError on any unknown field. When strict=False, logs a warning and
+    returns a copy with the unknown fields removed, so config files written for
+    newer versions of mngr don't break older versions. When silent=True (and
+    strict=False), suppresses the warning entirely -- used by ``mngr plugin add``,
+    where the config is expected to reference plugins that are not yet installed;
+    the warnings are noise that resolve themselves once the install completes.
+
+    The input dict is left untouched; the returned dict is the one to use (it is
+    the same object when there are no unknown fields).
 
     `extra_hint` is appended to the error/warning message after the field listing
     when there are unknown fields. Used to suggest causes (e.g. a missing plugin).
     """
     known_fields = set(model_class.model_fields.keys())
     unknown = set(raw_config.keys()) - known_fields
-    if unknown:
-        base_msg = f"Unknown fields in {context}: {sorted(unknown)}. Valid fields: {sorted(known_fields)}"
-        full_msg = f"{base_msg}\n{extra_hint}" if extra_hint else base_msg
-        if strict:
-            raise ConfigParseError(full_msg)
-        if not silent:
-            logger.warning(full_msg)
-        for key in unknown:
-            del raw_config[key]
+    if not unknown:
+        return raw_config
+    base_msg = f"Unknown fields in {context}: {sorted(unknown)}. Valid fields: {sorted(known_fields)}"
+    full_msg = f"{base_msg}\n{extra_hint}" if extra_hint else base_msg
+    if strict:
+        raise ConfigParseError(full_msg)
+    if not silent:
+        logger.warning(full_msg)
+    return {k: v for k, v in raw_config.items() if k not in unknown}
 
 
 def _parse_providers(
@@ -568,15 +570,11 @@ def _parse_providers(
 ) -> dict[ProviderInstanceName, ProviderInstanceConfig]:
     """Parse provider configs using the registry.
 
-    Uses ``model_validate`` (not ``model_construct``) so raw TOML scalars are
-    coerced to their declared field types -- e.g. ``builder = "DEPOT"`` becomes
-    ``DockerBuilder.DEPOT`` and ``allowed_ssh_cidrs = [...]`` becomes a tuple.
-    ``model_construct`` left them as raw str/list, which both tripped pydantic
-    serializer warnings on the ``model_dump`` inside ``merge_with`` and broke
-    identity checks like ``builder is DockerBuilder.DEPOT`` for an un-merged
-    (single config layer) provider block. ``model_validate`` still records only
-    the keys actually present in ``model_fields_set``, so per-field config-layer
-    merging is unaffected.
+    Validates each block with ``model_validate`` so raw TOML scalars are coerced
+    to their declared field types (e.g. ``builder = "DEPOT"`` to
+    ``DockerBuilder.DEPOT``, ``allowed_ssh_cidrs = [...]`` to a tuple). Only the
+    keys actually present in the block are recorded in ``model_fields_set``, so
+    per-field config-layer merging works.
     Provider blocks whose plugin is disabled are silently skipped.
     Provider blocks with is_enabled=false whose backend plugin is not installed
     are also skipped, since there is no config class to resolve for a disabled
@@ -621,10 +619,10 @@ def _parse_providers(
             if not silent:
                 logger.warning(msg)
             continue
-        # _check_unknown_fields has already raised (strict) or stripped the unknown
-        # keys from raw_config (non-strict), so what remains is only known fields;
-        # model_validate then coerces them to their declared types.
-        _check_unknown_fields(raw_config, config_class, f"providers.{name}", strict=strict, silent=silent)
+        # _drop_unknown_fields raises (strict) or returns raw_config with unknown
+        # keys removed (non-strict), leaving only known fields for model_validate
+        # to coerce to their declared types.
+        raw_config = _drop_unknown_fields(raw_config, config_class, f"providers.{name}", strict=strict, silent=silent)
         providers[ProviderInstanceName(name)] = config_class.model_validate(raw_config)
 
     return providers
@@ -758,7 +756,7 @@ def _parse_agent_types(
                 "installed. Otherwise the agent type name or one of the field names may be "
                 "misspelled."
             )
-        _check_unknown_fields(
+        raw_config = _drop_unknown_fields(
             raw_config,
             config_class,
             f"agent_types.{name}",
@@ -787,7 +785,7 @@ def _parse_plugins(
     for name, raw_config in raw_plugins.items():
         raw_config = _normalize_field_keys(raw_config, f"plugins.{name}")
         config_class = get_plugin_config_class(name)
-        _check_unknown_fields(raw_config, config_class, f"plugins.{name}", strict=strict, silent=silent)
+        raw_config = _drop_unknown_fields(raw_config, config_class, f"plugins.{name}", strict=strict, silent=silent)
         plugins[PluginName(name)] = config_class.model_construct(**raw_config)
 
     return plugins
@@ -865,7 +863,7 @@ def _parse_retry_config(raw_retry: dict[str, Any], *, strict: bool = True, silen
     Uses model_construct to bypass validation and explicitly set None for unset fields.
     """
     raw_retry = _normalize_field_keys(raw_retry, "retry")
-    _check_unknown_fields(raw_retry, RetryConfig, "retry", strict=strict, silent=silent)
+    raw_retry = _drop_unknown_fields(raw_retry, RetryConfig, "retry", strict=strict, silent=silent)
     return RetryConfig.model_construct(**raw_retry)
 
 
@@ -875,7 +873,7 @@ def _parse_logging_config(raw_logging: dict[str, Any], *, strict: bool = True, s
     Uses model_construct to bypass validation and explicitly set None for unset fields.
     """
     raw_logging = _normalize_field_keys(raw_logging, "logging")
-    _check_unknown_fields(raw_logging, LoggingConfig, "logging", strict=strict, silent=silent)
+    raw_logging = _drop_unknown_fields(raw_logging, LoggingConfig, "logging", strict=strict, silent=silent)
     return LoggingConfig.model_construct(**raw_logging)
 
 
