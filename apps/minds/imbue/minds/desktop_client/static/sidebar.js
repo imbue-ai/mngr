@@ -18,29 +18,21 @@
   // `accent` field from the server.
   function getAccent(agentId, cb) { window.mindsAccent.get(agentId, cb); }
 
+  // The floating sidebar auto-closes after the user makes a selection
+  // (workspace row, settings gear, "New workspace", "Manage account(s)" /
+  // "Log in", and "Open in new window"). The close happens entirely on the
+  // main process side: `navigate-content` and `open-workspace-in-new-window`
+  // in apps/minds/electron/main.js both call closeSidebar(bundle) before
+  // returning, so the renderer must NOT also send a `toggle-sidebar` IPC
+  // here. IPCs from a single renderer are processed FIFO; a follow-up
+  // toggle would see the already-closed sidebar and re-open it.
   function navigate(url) {
     if (isElectron) window.minds.navigateContent(url);
     else window.location = url;
   }
 
-  // Close the floating sidebar after the user makes a selection (workspace,
-  // settings, new workspace, account). The sidebar is a separate
-  // WebContentsView in Electron; toggling it from inside the running view
-  // always closes it (the view is by definition visible since this code is
-  // executing). Mirrors chrome.js's `closeSidebar()` behavior for the
-  // browser-mode inline panel so both modes auto-close consistently.
-  // Not called from the open-in-new-window path: the
-  // `open-workspace-in-new-window` IPC handler in apps/minds/electron/main.js
-  // already closes the sidebar on the main process side, so calling it here
-  // would send a second `toggle-sidebar` IPC that re-opens the (now-closed)
-  // sidebar.
-  function closeSidebarIfElectron() {
-    if (isElectron && window.minds.toggleSidebar) window.minds.toggleSidebar();
-  }
-
   function selectWorkspace(agentId) {
     navigate(mngrForwardOrigin + '/goto/' + agentId + '/');
-    closeSidebarIfElectron();
   }
 
   function openInNewWindow(agentId) {
@@ -51,7 +43,6 @@
 
   function openWorkspaceSettings(agentId) {
     navigate('/workspace/' + agentId + '/settings');
-    closeSidebarIfElectron();
   }
 
   // -- Per-row icon buttons -------------------------------------------------
@@ -154,12 +145,10 @@
   document.addEventListener('click', function (e) {
     if (e.target.closest('#sidebar-new-workspace')) {
       navigate('/create');
-      closeSidebarIfElectron();
       return;
     }
     if (e.target.closest('#sidebar-account')) {
       navigate(signedIn ? '/accounts' : '/auth/login');
-      closeSidebarIfElectron();
       return;
     }
     handleRowClick(e.target);
