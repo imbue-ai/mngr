@@ -80,6 +80,7 @@ from imbue.mngr_claude.plugin import _read_macos_keychain_credential
 from imbue.mngr_claude.plugin import _rewrite_installed_plugins_paths
 from imbue.mngr_claude.plugin import _rewrite_known_marketplaces_paths
 from imbue.mngr_claude.plugin import _should_preserve_sessions
+from imbue.mngr_claude.plugin import _sync_user_resources
 from imbue.mngr_claude.plugin import _write_generated_files
 from imbue.mngr_claude.plugin import agent_field_generators
 from imbue.mngr_claude.plugin import approve_api_key_for_claude
@@ -4323,6 +4324,48 @@ def test_write_generated_files_breaks_symlink_before_writing(tmp_path: Path, tem
     assert symlink.read_text() == rewritten_content
     # The original source file must NOT be modified
     assert json.loads(source_file.read_text()) == {"original": True}
+
+
+def test_sync_user_resources_is_idempotent_without_self_referential_symlinks(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """Re-running _sync_user_resources must not create self-referential symlink loops in the shared source.
+
+    Regression test: plain `ln -sf` (no -n) dereferences an existing dest symlink-to-directory on
+    the second run and nests a new link inside the shared source (e.g. ~/.claude/agents/agents ->
+    ~/.claude/agents, or ~/.claude/skills/<skill>/<skill>). `ln -sfn` replaces the dest symlink
+    instead. Covers both the dir-level branch (agents/commands) and the child-level branch
+    (skills/plugins).
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+
+    home_claude = tmp_path / "home_claude"
+    # dir-level branch source (agents)
+    (home_claude / "agents").mkdir(parents=True)
+    (home_claude / "agents" / "my-agent.md").write_text("agent")
+    # child-level branch source (skills)
+    (home_claude / "skills" / "user-skill").mkdir(parents=True)
+    (home_claude / "skills" / "user-skill" / "SKILL.md").write_text("skill")
+
+    config_dir = tmp_path / "agent_config"
+    config_dir.mkdir()
+
+    with patch(f"{_CLAUDE_AGENT_MODULE}.get_user_claude_config_dir", return_value=home_claude):
+        _sync_user_resources(host, config_dir, symlink=True)
+        _sync_user_resources(host, config_dir, symlink=True)
+
+    # No self-referential loop nested inside the shared source dirs.
+    assert not (home_claude / "agents" / "agents").exists()
+    assert not (home_claude / "skills" / "skills").exists()
+    assert not (home_claude / "skills" / "user-skill" / "user-skill").exists()
+
+    # dir-level: config_dir/agents is a symlink to the shared source dir.
+    assert (config_dir / "agents").is_symlink()
+    assert (config_dir / "agents").resolve() == (home_claude / "agents").resolve()
+
+    # child-level: config_dir/skills/user-skill is a symlink to the shared source skill.
+    assert (config_dir / "skills" / "user-skill").is_symlink()
+    assert (config_dir / "skills" / "user-skill").resolve() == (home_claude / "skills" / "user-skill").resolve()
 
 
 # =============================================================================

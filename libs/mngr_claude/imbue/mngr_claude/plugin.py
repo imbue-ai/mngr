@@ -104,6 +104,12 @@ _READY_SIGNAL_TIMEOUT_SECONDS: Final[float] = 10.0
 # Used by both get_files_for_deploy() and provision() to ensure consistency.
 _CLAUDE_HOME_SYNC_DIRS: Final[tuple[str, ...]] = ("skills", "agents", "commands", "plugins")
 
+# Subset of _CLAUDE_HOME_SYNC_DIRS synced via child-level symlinks (one symlink per
+# child) instead of a single dir-level symlink, so the per-agent config dir can hold
+# its own real files alongside the shared source: plugins/ for generated config files,
+# skills/ for a skill-provisioned agent's own primary skill.
+_CLAUDE_HOME_CHILD_SYMLINK_DIRS: Final[tuple[str, ...]] = ("skills", "plugins")
+
 # Individual files from ~/.claude/ to sync (not generated/transformed).
 # settings.json is handled separately by _build_settings_json.
 _CLAUDE_HOME_SYNC_FILES: Final[tuple[str, ...]] = ("keybindings.json",)
@@ -833,7 +839,7 @@ def _provision_local_credentials(host: OnlineHostInterface, config_dir: Path, *,
     if credentials_source.exists():
         if symlink:
             host.execute_idempotent_command(
-                f"ln -sf {shlex.quote(str(credentials_source))} {shlex.quote(str(credentials_dest))}",
+                f"ln -sfn {shlex.quote(str(credentials_source))} {shlex.quote(str(credentials_dest))}",
                 timeout_seconds=5.0,
             )
         else:
@@ -918,10 +924,14 @@ def _sync_user_resources(host: OnlineHostInterface, config_dir: Path, *, symlink
 
     Syncs directories (skills/, agents/, commands/, plugins/) and individual
     files (keybindings.json) depending on the ``symlink`` flag. In symlink mode,
-    plugins/ uses child-level symlinks (not a dir-level symlink) so that
-    per-agent generated files (installed_plugins.json, known_marketplaces.json)
-    can be written as real files without modifying the shared source.
-    settings.json is handled separately by _build_settings_json.
+    plugins/ and skills/ use child-level symlinks (not a dir-level symlink) so
+    that per-agent real files can coexist with the shared source: plugins/ holds
+    generated files (installed_plugins.json, known_marketplaces.json) and skills/
+    holds a skill-provisioned agent's own primary skill, neither of which should
+    leak back into the shared ~/.claude/. settings.json is handled separately by
+    _build_settings_json. All symlinks use ``ln -sfn`` so that re-provisioning
+    replaces an existing dest symlink instead of dereferencing it and nesting a
+    new self-referential link inside the shared source.
     """
     home_claude = get_user_claude_config_dir()
     for dir_name in _CLAUDE_HOME_SYNC_DIRS:
@@ -933,23 +943,27 @@ def _sync_user_resources(host: OnlineHostInterface, config_dir: Path, *, symlink
             host.execute_idempotent_command(
                 f"cp -r {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0
             )
-        elif dir_name == "plugins":
-            # Child-level symlinks so per-agent generated files can coexist with
-            # shared directory contents (cache/, marketplaces/, etc.). Skip the
-            # files that will be overwritten by _write_generated_files; symlinking
-            # them would cause writes to corrupt the shared source.
+        elif dir_name in _CLAUDE_HOME_CHILD_SYMLINK_DIRS:
+            # Child-level symlinks so per-agent real files can coexist with shared
+            # directory contents (cache/, marketplaces/, other skills, etc.). For
+            # plugins/, skip the files that _write_generated_files overwrites;
+            # symlinking them would cause writes to corrupt the shared source.
             host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(dest))}", timeout_seconds=5.0)
-            skip_names = {_INSTALLED_PLUGINS_RELATIVE_PATH.name, _KNOWN_MARKETPLACES_RELATIVE_PATH.name}
+            skip_names = (
+                {_INSTALLED_PLUGINS_RELATIVE_PATH.name, _KNOWN_MARKETPLACES_RELATIVE_PATH.name}
+                if dir_name == "plugins"
+                else set()
+            )
             for child in source.iterdir():
                 if child.name in skip_names:
                     continue
                 host.execute_idempotent_command(
-                    f"ln -sf {shlex.quote(str(child))} {shlex.quote(str(dest / child.name))}",
+                    f"ln -sfn {shlex.quote(str(child))} {shlex.quote(str(dest / child.name))}",
                     timeout_seconds=5.0,
                 )
         else:
             host.execute_idempotent_command(
-                f"ln -sf {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0
+                f"ln -sfn {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0
             )
     # Sync individual files (e.g. keybindings.json)
     for file_name in _CLAUDE_HOME_SYNC_FILES:
@@ -959,7 +973,7 @@ def _sync_user_resources(host: OnlineHostInterface, config_dir: Path, *, symlink
         dest = config_dir / file_name
         if symlink:
             host.execute_idempotent_command(
-                f"ln -sf {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0
+                f"ln -sfn {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0
             )
         else:
             host.execute_idempotent_command(

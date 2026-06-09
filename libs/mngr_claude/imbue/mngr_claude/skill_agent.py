@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import ClassVar
 
-import click
 from loguru import logger
 from pydantic import Field
 
@@ -14,7 +13,6 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.utils.file_utils import atomic_write
-from imbue.mngr_claude.claude_config import get_user_claude_config_dir
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 
@@ -27,27 +25,16 @@ class SkillProvisionedAgentConfig(ClaudeAgentConfig):
     """
 
 
-def _prompt_user_for_skill_install(skill_name: str, skill_path: Path) -> bool:
-    """Prompt the user to install or update a skill."""
-    if skill_path.exists():
-        logger.info(
-            "\nThe {} skill at {} will be updated.\n",
-            skill_name,
-            skill_path,
-        )
-        return click.confirm(f"Update the {skill_name} skill?", default=True)
-    else:
-        logger.info(
-            "\nThe {} skill will be installed to {}.\n",
-            skill_name,
-            skill_path,
-        )
-        return click.confirm(f"Install the {skill_name} skill?", default=True)
+def _install_skill_locally(skill_name: str, skill_content: str, config_dir: Path) -> None:
+    """Install a skill into this agent's own per-agent Claude config skills/ directory.
 
-
-def _install_skill_locally(skill_name: str, skill_content: str, mngr_ctx: MngrContext) -> None:
-    """Install a skill to the local user's Claude config skills/ directory."""
-    skill_path = get_user_claude_config_dir() / "skills" / skill_name / "SKILL.md"
+    Writing into the agent's per-agent config dir (rather than the shared
+    ~/.claude/skills/) keeps the skill scoped to this agent so it does not leak
+    into every other local agent via _sync_user_resources. This mirrors the
+    agent-scoped remote install in _install_skill_remotely.
+    """
+    skill_dir = config_dir / "skills" / skill_name
+    skill_path = skill_dir / "SKILL.md"
 
     with log_span("Installing {} skill to {}", skill_name, skill_path):
         # Skip if the skill is already installed with the same content
@@ -55,10 +42,12 @@ def _install_skill_locally(skill_name: str, skill_content: str, mngr_ctx: MngrCo
             logger.debug("{} skill is already up to date at {}", skill_name, skill_path)
             return
 
-        if mngr_ctx.is_interactive and not mngr_ctx.is_auto_approve:
-            if not _prompt_user_for_skill_install(skill_name, skill_path):
-                logger.info("Skipped {} skill installation", skill_name)
-                return
+        # _sync_user_resources child-symlinks skills/, so skill_dir may be a symlink
+        # into the shared ~/.claude/skills/ (when the user has a same-named skill).
+        # atomic_write follows symlinks, so break it first to keep the write in the
+        # per-agent dir instead of corrupting the shared source.
+        if skill_dir.is_symlink():
+            skill_dir.unlink()
 
         atomic_write(skill_path, skill_content)
         logger.debug("Installed {} skill to {}", skill_name, skill_path)
@@ -99,6 +88,6 @@ class SkillProvisionedAgent(ClaudeAgent):
         super().provision(host, options, mngr_ctx)
 
         if host.is_local:
-            _install_skill_locally(self._skill_name, self._skill_content, mngr_ctx)
+            _install_skill_locally(self._skill_name, self._skill_content, self.get_claude_config_dir())
         else:
             _install_skill_remotely(self._skill_name, self._skill_content, host)
