@@ -1,0 +1,1 @@
+Fixed a bug in the e2e tutorial test fixture (`conftest.py`) that wrote a duplicate `type = "claude"` key under `[commands.create]` in the generated `settings.local.toml`. The config parser rejected the duplicate key ("Cannot overwrite a value"), causing every e2e tutorial test's `mngr create` step to fail. Removed the duplicate key.

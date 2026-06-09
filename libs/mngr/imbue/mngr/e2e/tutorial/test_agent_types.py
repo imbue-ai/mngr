@@ -10,6 +10,12 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 @pytest.mark.tmux
+# Creating a command agent and the subsequent `mngr list`/`mngr exec` calls
+# enumerate every configured provider; that discovery (plus agent startup) can
+# exceed the default 10s per-test timeout when a remote provider (e.g. Docker)
+# is unreachable and the client waits on a connection. Allow extra headroom so
+# the verification below is robust across environments.
+@pytest.mark.timeout(120)
 def test_create_command_python_http(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # mngr supports multiple agent types out of the box (claude, codex, etc.)
@@ -80,6 +86,15 @@ def test_create_command_custom_script(e2e: E2eSession) -> None:
     assert "sleep 100951" in agent["command"], f"Custom command not forwarded; got: {agent['command']}"
     assert agent["state"] in ("RUNNING", "WAITING"), f"Expected a running agent, got state: {agent['state']}"
 
+    # Confirm the forwarded command is not merely recorded in metadata but is
+    # actually running as a process inside the agent.
+    ps_result = e2e.run(
+        "mngr exec my-task 'ps aux | grep sleep'",
+        comment="verify the custom command is running inside the agent",
+    )
+    expect(ps_result).to_succeed()
+    expect(ps_result.stdout).to_contain("sleep 100951")
+
 
 @pytest.mark.release
 def test_plugin_list_active_to_see_types(e2e: E2eSession) -> None:
@@ -96,9 +111,32 @@ def test_plugin_list_active_to_see_types(e2e: E2eSession) -> None:
     for agent_type in ("claude", "codex", "command"):
         expect(result.stdout).to_contain(agent_type)
 
+    # Substring matches on the human table are weak: "claude" also occurs inside
+    # "claude_usage"/"headless_claude" and "command" inside "headless_command",
+    # so the loop above would pass even if the bare agent-type plugins were
+    # absent. Re-run with JSON output and assert each agent type is present as
+    # its own plugin entry, and that --active reports it enabled.
+    json_result = e2e.run(
+        "mngr plugin list --active --format json",
+        comment="verify exact agent-type plugin entries are enabled",
+    )
+    expect(json_result).to_succeed()
+    plugins_by_name = {p["name"]: p for p in json.loads(json_result.stdout)["plugins"]}
+    for agent_type in ("claude", "codex", "command"):
+        assert agent_type in plugins_by_name, f"expected a plugin named {agent_type!r}, got {sorted(plugins_by_name)}"
+        assert plugins_by_name[agent_type]["enabled"] == "true", (
+            f"expected {agent_type} to be enabled under --active, got {plugins_by_name[agent_type]}"
+        )
+
 
 @pytest.mark.release
 @pytest.mark.tmux
+# The agent is created locally, so verification scopes `mngr list` to the local
+# provider (`--provider local`). This keeps discovery fast and avoids querying
+# Modal -- an unscoped `mngr list` fans out to every provider, which can exceed
+# the default 10s per-test timeout when a remote provider is slow or unreachable.
+# The extended timeout adds further headroom for the rsync-backed agent setup.
+@pytest.mark.timeout(120)
 def test_create_codex_positional(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # you can specify the agent type as the second positional argument to create:
@@ -118,12 +156,17 @@ def test_create_codex_positional(e2e: E2eSession) -> None:
     ).to_succeed()
     # Verify the positional argument was interpreted as the agent type: the
     # created agent must actually be of type codex, not merely exit 0.
-    list_result = e2e.run("mngr list --format json", comment="verify the agent was created with the codex type")
+    list_result = e2e.run(
+        "mngr list --provider local --format json", comment="verify the agent was created with the codex type"
+    )
     expect(list_result).to_succeed()
     agents = json.loads(list_result.stdout)["agents"]
     matching = [agent for agent in agents if agent["name"] == "my-task"]
     assert len(matching) == 1, f"expected exactly one 'my-task' agent, got: {agents}"
     assert matching[0]["type"] == "codex", f"expected agent type 'codex', got: {matching[0]}"
+    # The positional type really resolved into a running agent, not just an
+    # entry with the right type label.
+    assert matching[0]["state"] in ("RUNNING", "WAITING"), f"unexpected agent state: {matching[0]['state']}"
 
 
 @pytest.mark.release
@@ -167,6 +210,12 @@ def test_create_codex_explicit_type(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
+# Agent creation (provisioning, ttyd install attempt, etc.) can exceed the
+# default 10s per-test timeout, so allow extra headroom. This test stays on the
+# local provider throughout (the create defaults to local and the verification
+# below scopes `mngr list` to --provider local), so it is intentionally not
+# marked @pytest.mark.modal.
+@pytest.mark.timeout(120)
 def test_create_custom_yolo_agent_type(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # you can also create your own custom agent types by defining them in a config:
@@ -187,7 +236,15 @@ def test_create_custom_yolo_agent_type(e2e: E2eSession) -> None:
         )
     ).to_succeed()
     # Define the yolo agent type via config set so the create command resolves.
-    # Use the built-in `command` parent so the test doesn't need claude installed.
+    # The tutorial uses parent_type = "claude"; we use the built-in `command`
+    # parent instead so the test doesn't need claude installed, and give it a
+    # `command` to run (mirroring the tutorial's cli_args override on the parent).
+    expect(
+        e2e.run(
+            "mngr config set agent_types.yolo.parent_type command",
+            comment="point the custom yolo type at the built-in command parent",
+        )
+    ).to_succeed()
     expect(
         e2e.run(
             "mngr config set agent_types.yolo.command 'sleep 100954'",
@@ -201,7 +258,25 @@ def test_create_custom_yolo_agent_type(e2e: E2eSession) -> None:
         )
     ).to_succeed()
     # The custom type really resolved and produced a running agent (an unknown
-    # type would have failed the create above): confirm it shows up running.
-    list_result = e2e.run("mngr list", comment="confirm the yolo agent is running")
+    # type would have failed the create above). Verify the concrete effect, not
+    # just that create exited 0: the agent must be recorded with the *custom*
+    # `yolo` type (not a fallback), and be running. Scope discovery to the local
+    # provider so the check stays fast and never queries remote providers (the
+    # agent was created on the local provider).
+    list_result = e2e.run("mngr list --provider local --format json", comment="confirm the yolo agent is running")
     expect(list_result).to_succeed()
-    expect(list_result.stdout).to_match(r"my-task\s+(RUNNING|WAITING)")
+    agents = json.loads(list_result.stdout)["agents"]
+    matching = [agent for agent in agents if agent["name"] == "my-task"]
+    assert len(matching) == 1, f"expected exactly one 'my-task' agent, got {agents}"
+    assert matching[0]["type"] == "yolo", f"expected custom type 'yolo', got {matching[0]['type']}"
+    assert matching[0]["state"] in ("RUNNING", "WAITING"), f"unexpected agent state: {matching[0]['state']}"
+
+    # The yolo type inherits the built-in `command` parent, so creating it should
+    # have launched the configured command inside the agent. Confirm that process
+    # is actually running (the whole point of a command-parented custom type).
+    ps_result = e2e.run(
+        "mngr exec my-task 'ps aux | grep sleep'",
+        comment="verify the custom type's command is running",
+    )
+    expect(ps_result).to_succeed()
+    expect(ps_result.stdout).to_contain("sleep 100954")
