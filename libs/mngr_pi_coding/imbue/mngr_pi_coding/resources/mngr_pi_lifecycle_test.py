@@ -303,3 +303,64 @@ def test_no_common_transcript_when_disabled(tmp_path: Path) -> None:
     assert not (state / _COMMON_TRANSCRIPT).exists()
     # Raw is still captured (it is not gated).
     assert (state / _RAW_TRANSCRIPT).exists()
+
+
+def test_unknown_content_and_roles_degrade_gracefully(tmp_path: Path) -> None:
+    """Unknown content blocks/roles and malformed messages must not crash the extension.
+
+    The common (lossy) envelope surfaces only what it models; the raw stream
+    preserves everything verbatim, so unknown shapes are never lost.
+    """
+    state = _run_extension(
+        tmp_path,
+        [
+            {
+                "event": "message_end",
+                "payload": {
+                    "message": {
+                        "role": "assistant",
+                        "model": "m",
+                        "stopReason": "toolUse",
+                        "timestamp": 1,
+                        "content": [
+                            {"type": "thinking", "thinking": "secret reasoning"},
+                            {"type": "text", "text": "hello"},
+                            {"type": "image", "data": "BASE64", "mimeType": "image/png"},
+                            {"type": "futureBlockType", "blob": {"nested": True}},
+                            {"type": "toolCall", "id": "c1", "name": "bash", "arguments": {"command": "ls"}},
+                        ],
+                    }
+                },
+            },
+            # Roles the common schema does not model -> skipped from common (kept in raw).
+            {
+                "event": "message_end",
+                "payload": {"message": {"role": "branchSummary", "summary": "x", "timestamp": 2}},
+            },
+            {
+                "event": "message_end",
+                "payload": {"message": {"role": "someFutureRole", "whatever": 1, "timestamp": 3}},
+            },
+            # content that is neither a string nor an array -> coerced to "" (no crash).
+            {"event": "message_end", "payload": {"message": {"role": "user", "content": 12345, "timestamp": 4}}},
+            # Malformed messages -> skipped entirely.
+            {"event": "message_end", "payload": {"message": {"timestamp": 5}}},
+            {"event": "message_end", "payload": {"message": None}},
+        ],
+    )
+
+    common = _read_jsonl(state / _COMMON_TRANSCRIPT)
+    assert [r["type"] for r in common] == ["assistant_message", "user_message"]
+    assistant = next(r for r in common if r["type"] == "assistant_message")
+    assert assistant["text"] == "hello"  # unknown content blocks (thinking/image/future) dropped
+    assert [c["tool_name"] for c in assistant["tool_calls"]] == ["bash"]
+    assert "secret reasoning" not in json.dumps(common)  # thinking not surfaced in the lossy envelope
+    user = next(r for r in common if r["type"] == "user_message")
+    assert user["content"] == ""  # non-string/array content coerced, not crashed
+
+    # Raw preserves every well-formed message verbatim -- unknown roles AND unknown blocks.
+    raw = _read_jsonl(state / _RAW_TRANSCRIPT)
+    assert [r["message"]["role"] for r in raw] == ["assistant", "branchSummary", "someFutureRole", "user"]
+    raw_text = json.dumps(raw)
+    assert "futureBlockType" in raw_text
+    assert "BASE64" in raw_text
