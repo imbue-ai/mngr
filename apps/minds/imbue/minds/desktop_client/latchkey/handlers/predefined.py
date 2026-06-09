@@ -118,7 +118,7 @@ def _format_auth_failed_message(service_display_name: str, detail: str) -> str:
     suffix = f" Reason: {detail}" if detail else ""
     return (
         f"Sign-in to {service_display_name} did not complete, so the permission could not be "
-        f"granted.{suffix} The request is still pending -- you can click Approve again to retry."
+        f"granted at the moment.{suffix}"
     )
 
 
