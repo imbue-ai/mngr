@@ -335,8 +335,10 @@ class DockerProviderInstance(BaseProviderInstance):
 
         Used by the backend to decide whether read-only construction should
         treat this provider as empty (mirrors the Modal backend's environment
-        existence check). Raises ProviderUnavailableError (via _docker_client)
-        if the Docker daemon is unreachable.
+        existence check). Raises ProviderUnavailableError if the Docker daemon is
+        unreachable -- both when the client cannot be created (via _docker_client)
+        and when the existence lookup itself fails -- so the provider loader skips
+        the provider instead of crashing the command with a raw DockerException.
         """
         user_id = str(self.mngr_ctx.get_profile_user_id())
         prefix = self.mngr_ctx.config.prefix
@@ -344,6 +346,8 @@ class DockerProviderInstance(BaseProviderInstance):
             self._docker_client.containers.get(state_container_name(prefix, user_id))
         except docker.errors.NotFound:
             return False
+        except docker.errors.DockerException as e:
+            raise ProviderUnavailableError(self.name, str(e)) from e
         return True
 
     @cached_property
