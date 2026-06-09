@@ -17,6 +17,11 @@ with `pi -e`) that drives everything pi has no shell hooks for:
 - Also sync the `agents/` resource dir from `~/.pi/agent/` into each agent's
   config dir (alongside skills/prompts/extensions/themes), so an installed
   subagent extension finds its agent definitions (pi has no built-in subagents).
+  The `npm` dir is deliberately *not* synced: pi auto-installs the `packages`
+  listed in the synced `settings.json` into each agent's `$PI_CODING_AGENT_DIR/npm`
+  on startup, so npm-package extensions (e.g. `npm:pi-subagents`) are available
+  without copying `node_modules`, at the cost of a ~1s per-agent install that
+  needs network on first launch.
 - Deliver messages by injecting them into the live session via the lifecycle
   extension (`pi.sendUserMessage`) rather than simulating tmux keystrokes: mngr
   appends each message to a per-agent inbox file and the extension's watcher
