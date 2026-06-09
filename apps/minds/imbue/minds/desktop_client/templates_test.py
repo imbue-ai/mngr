@@ -17,6 +17,7 @@ from imbue.minds.desktop_client.templates import render_recovery_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
+from imbue.minds.desktop_client.templates import workspace_accent
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
@@ -262,6 +263,63 @@ def test_render_chrome_page_contains_titlebar() -> None:
     assert "home-btn" in html
     assert "back-btn" in html
     assert "content-frame" in html
+
+
+def test_render_chrome_page_drops_title_swatch_and_seam_border() -> None:
+    # The full-width accent bar replaces the small swatch and the
+    # ``border-b border-white/10`` seam: the rounded content corner
+    # already provides separation below.
+    html = render_chrome_page()
+    assert 'id="title-swatch"' not in html
+    # The seam class shouldn't appear on the titlebar element. Other
+    # uses of border-white/10 elsewhere on the page are fine; assert
+    # on the specific titlebar markup.
+    titlebar_open = html.index('id="minds-titlebar"')
+    titlebar_close = html.index(">", titlebar_open)
+    titlebar_tag = html[titlebar_open:titlebar_close]
+    assert "border-b" not in titlebar_tag
+    assert "border-white" not in titlebar_tag
+
+
+def test_render_chrome_page_titlebar_background_follows_titlebar_bg_var() -> None:
+    # The titlebar paints via the ``--titlebar-bg`` CSS variable (set by
+    # chrome.js when a workspace is active) with a zinc-900 fallback, so
+    # the dark default chrome transitions cleanly to the active
+    # workspace's accent color.
+    html = render_chrome_page()
+    assert "var(--titlebar-bg" in html
+
+
+def test_render_chrome_page_page_title_uses_titlebar_title_class() -> None:
+    # ``.titlebar-title`` reads ``--titlebar-fg`` so the page-title text
+    # flips between dark and light depending on the accent's lightness.
+    html = render_chrome_page()
+    assert 'id="page-title" class="titlebar-title' in html
+
+
+def test_render_chrome_page_account_button_uses_titlebar_account_class() -> None:
+    html = render_chrome_page()
+    assert 'id="user-btn"' in html
+    # ``.titlebar-account`` carries the accent-aware foreground; the old
+    # hard-coded ``text-zinc-400`` / ``hover:bg-white/5`` recipe is gone.
+    btn_open = html.index('id="user-btn"')
+    btn_close = html.index(">", btn_open)
+    btn_tag = html[btn_open:btn_close]
+    assert "titlebar-account" in btn_tag
+    assert "text-zinc-400" not in btn_tag
+    assert "hover:bg-white/5" not in btn_tag
+
+
+def test_render_chrome_page_content_iframe_uses_12px_rounded_corners() -> None:
+    # 12px radius (``rounded-xl``) matches Electron-side
+    # ``contentView.setBorderRadius(12)`` (= ``CONTENT_CORNER_RADIUS`` in
+    # electron/main.js) so both modes render the same tucked-under shape
+    # against the OS's outer window rounding.
+    html = render_chrome_page()
+    iframe_open = html.index('id="content-frame"')
+    iframe_close = html.index(">", iframe_open)
+    iframe_tag = html[iframe_open:iframe_close]
+    assert "rounded-xl" in iframe_tag
 
 
 def test_render_chrome_page_hides_window_controls_on_mac() -> None:
@@ -627,13 +685,15 @@ def test_button_passes_through_arbitrary_attrs() -> None:
 
 def test_titlebar_button_default_is_nav_variant() -> None:
     html = CATALOG.render("TitlebarButton", _content="<svg/>")
-    # nav variant => w-8 h-7 rounded active:bg-white/10
+    # nav variant => w-8 h-7 rounded-md, default tone => the .titlebar-btn
+    # class (defined in tokens.css) carries the accent-aware color +
+    # hover + active rules.
     assert "w-8" in html
     assert "h-7" in html
-    assert "active:bg-white/10" in html
-    # default tone => hover lifts to white/5 + zinc-200 text
-    assert "hover:bg-white/5" in html
-    assert "hover:text-zinc-200" in html
+    assert "rounded-md" in html
+    assert "titlebar-btn" in html
+    # The danger tone modifier should NOT be present on the default tone.
+    assert "titlebar-btn-danger" not in html
     # Window-control geometry should NOT bleed into nav
     assert "w-9" not in html
     assert "h-[38px]" not in html
@@ -648,10 +708,76 @@ def test_titlebar_button_control_variant_renders_window_control_geometry() -> No
 
 def test_titlebar_button_danger_tone_applies_red_hover() -> None:
     html = CATALOG.render("TitlebarButton", variant="control", tone="danger", _content="<svg/>")
-    assert "hover:bg-red-600" in html
-    assert "hover:text-white" in html
-    # The default tone's hover should be replaced, not merged.
-    assert "hover:bg-white/5" not in html
+    # ``.titlebar-btn-danger`` (in tokens.css) supplies the red hover.
+    assert "titlebar-btn-danger" in html
+    # Base ``.titlebar-btn`` still applies (geometry + base colors).
+    assert "titlebar-btn " in html
+
+
+# -- Workspace accent + titlebar tokens ----------------------------------
+#
+# The accent is set per-workspace via a CSS variable on document.documentElement
+# (chrome.js) so the value is computed; the *shape* of the computation lives
+# in workspace_accent() (mirrored in static/workspace_accent.js). These tests
+# pin the OKLCH lightness / chroma at 85% / 0.08 -- a calm tone that reads as
+# chrome across the full-width titlebar -- and pin the deterministic
+# agent-id -> hue mapping that powers identity color across the app.
+
+
+def test_workspace_accent_uses_85_lightness_and_0_08_chroma() -> None:
+    accent = workspace_accent(str(_AGENT_A))
+    # Match the full-width-titlebar tuning. If you bump these, also update
+    # ``ACCENT_L`` / ``ACCENT_C`` in static/workspace_accent.js so the two
+    # stay in lockstep.
+    assert accent.startswith("oklch(85% 0.08 ")
+    assert accent.endswith(")")
+
+
+def test_workspace_accent_is_deterministic_for_a_given_agent_id() -> None:
+    # The deterministic mapping is the whole point: an agent's identity
+    # color must not flicker across renders.
+    assert workspace_accent(str(_AGENT_A)) == workspace_accent(str(_AGENT_A))
+
+
+def test_workspace_accent_differs_across_distinct_agent_ids() -> None:
+    # Distinct agent ids should hash to distinct hues; with a 360-degree
+    # space and SHA-256 hashes, a collision between two specific ids is
+    # effectively impossible.
+    assert workspace_accent(str(_AGENT_A)) != workspace_accent(str(_AGENT_B))
+
+
+def test_tokens_css_defines_titlebar_utility_classes() -> None:
+    """Drift guard: the chrome HTML emits these class names; tokens.css must
+    define them, otherwise the bar paints with no foreground hierarchy."""
+    css = _TOKENS_CSS_PATH.read_text()
+    assert ".titlebar-title" in css
+    assert ".titlebar-btn" in css
+    assert ".titlebar-btn-danger" in css
+    assert ".titlebar-account" in css
+    # All of them read --titlebar-fg with an alpha for hierarchy.
+    assert "var(--titlebar-fg" in css
+
+
+def test_tokens_css_drops_page_workspace_top_stripe() -> None:
+    """The 3px ``.page-workspace::before`` stripe is now redundant with
+    the colored chrome bar above; tokens.css must not redeclare it."""
+    css = _TOKENS_CSS_PATH.read_text()
+    assert ".page-workspace::before" not in css
+
+
+def test_tokens_css_accent_fallbacks_use_the_pinned_lightness_chroma() -> None:
+    """``--workspace-accent`` may not be set (e.g. the dev styleguide or
+    a sidebar item rendered before chrome.js applies the accent), in
+    which case consumers fall back to a fixed default. Pin that default
+    to the 85 / 0.08 tuning so the fallback doesn't pop visually against
+    the rest of the accent system."""
+    css = _TOKENS_CSS_PATH.read_text()
+    # Pre-titlebar-accent values must not linger in fallbacks.
+    assert "oklch(65% 0.15" not in css
+    assert "oklch(80% 0.1" not in css
+    assert "oklch(85% 0.12" not in css
+    # All fallbacks should use the current tuning.
+    assert "oklch(85% 0.08 230)" in css
 
 
 def test_notice_renders_each_variant() -> None:
