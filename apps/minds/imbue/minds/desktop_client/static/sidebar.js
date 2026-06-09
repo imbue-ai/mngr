@@ -29,9 +29,11 @@
   // always closes it (the view is by definition visible since this code is
   // executing). Mirrors chrome.js's `closeSidebar()` behavior for the
   // browser-mode inline panel so both modes auto-close consistently.
-  // Intentionally does NOT close on "open in new window" -- the user is
-  // keeping their current workspace context to compare against the new
-  // window, so collapsing the sidebar at the same time would feel jarring.
+  // Not called from the open-in-new-window path: the
+  // `open-workspace-in-new-window` IPC handler in apps/minds/electron/main.js
+  // already closes the sidebar on the main process side, so calling it here
+  // would send a second `toggle-sidebar` IPC that re-opens the (now-closed)
+  // sidebar.
   function closeSidebarIfElectron() {
     if (isElectron && window.minds.toggleSidebar) window.minds.toggleSidebar();
   }
