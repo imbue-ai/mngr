@@ -8,10 +8,8 @@ from pathlib import Path
 from typing import Any
 from typing import cast
 
-import pluggy
 import pytest
 
-from imbue.imbue_common.model_update import to_update
 from imbue.mngr import hookimpl
 from imbue.mngr.api.create import create
 from imbue.mngr.api.providers import get_provider_instance
@@ -21,7 +19,6 @@ from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
-from imbue.mngr.plugins import hookspecs
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
@@ -29,7 +26,6 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
-from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.utils.testing import make_ctx_with_plugins
 from imbue.mngr.utils.testing import tmux_session_cleanup
 
@@ -278,15 +274,11 @@ def _make_named_tracker_ctx(
 ) -> MngrContext:
     """Build a ctx whose plugin manager has ``tracker`` registered under ``name``.
 
-    Unlike ``make_ctx_with_plugins`` (which lets pluggy assign an id-based name),
-    this registers under a stable, config-addressable name so a work_dir's
-    ``[plugins.<name>] enabled = false`` can target it.
+    Registers under a stable, config-addressable name (rather than pluggy's
+    default id-based name) so a work_dir's ``[plugins.<name>] enabled = false``
+    can target it.
     """
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    load_local_backend_only(pm)
-    pm.register(tracker, name=name)
-    return base_ctx.model_copy_update(to_update(base_ctx.field_ref().pm, pm))
+    return make_ctx_with_plugins(base_ctx, [tracker], load_backends=True, names=[name])
 
 
 def test_subagent_proxy_disabled_in_tests(temp_mngr_ctx: MngrContext) -> None:

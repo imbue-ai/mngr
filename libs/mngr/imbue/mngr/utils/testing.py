@@ -893,6 +893,7 @@ def make_ctx_with_plugins(
     plugins: Sequence[object],
     *,
     load_backends: bool = False,
+    names: Sequence[str | None] | None = None,
 ) -> MngrContext:
     """Create a MngrContext with a fresh plugin manager and the given plugins registered.
 
@@ -901,13 +902,21 @@ def make_ctx_with_plugins(
     plugin_manager fixture.
 
     If load_backends is True, also loads the local provider backend into the PM.
+
+    ``names`` optionally supplies an explicit pluggy registration name per plugin
+    (must be the same length as ``plugins``); a None entry lets pluggy assign its
+    default id-based name. Pass a stable name when a config layer must be able to
+    address the plugin (e.g. a work_dir's ``[plugins.<name>] enabled = false``).
     """
+    if names is not None and len(names) != len(plugins):
+        raise ValueError(f"names has length {len(names)} but plugins has length {len(plugins)}")
     pm = pluggy.PluginManager("mngr")
     pm.add_hookspecs(hookspecs)
     if load_backends:
         load_local_backend_only(pm)
-    for plugin in plugins:
-        pm.register(plugin)
+    for index, plugin in enumerate(plugins):
+        name = names[index] if names is not None else None
+        pm.register(plugin, name=name)
     return mngr_ctx.model_copy_update(to_update(mngr_ctx.field_ref().pm, pm))
 
 
