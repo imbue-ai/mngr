@@ -31,4 +31,5 @@
 - `AwsVpsClient` no longer carries an `ec2_client` field for test injection; the test-only `_StubbedAwsVpsClient` subclass in `mngr_aws.testing` does that.
 - AWS security-group config moved to a tagged union (`security_group: ExistingSecurityGroup | AutoCreateSecurityGroup` keyed on `kind`), replacing the parallel `security_group_id` / `security_group_name` fields.
 - `mngr_aws/test_release_aws.py` ships a `test_default_amis_describe_successfully` release test that calls `DescribeImages` on every entry in `DEFAULT_AMI_BY_REGION` so stale AMI IDs surface in CI rather than silently failing host creates.
-- After merging `main`, `test_ratchets.py` gains `test_prevent_bare_tmux_targets` (the new package was created before `main` added that repo-wide ratchet check). Test-only.
+- After merging `main`, `test_ratchets.py` gains `test_prevent_bare_tmux_targets` and `test_prevent_per_file_host_upload` (the new package was created before `main` added those repo-wide ratchet checks). Test-only.
+- `mngr_aws` internal dep pins bumped to match current workspace versions (`imbue-mngr==0.2.12`, `imbue-mngr-vps-docker==0.1.5`). Build metadata only.
