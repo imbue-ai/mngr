@@ -28,10 +28,7 @@ class SkillProvisionedAgentConfig(ClaudeAgentConfig):
 def _install_skill_locally(skill_name: str, skill_content: str, config_dir: Path) -> None:
     """Install a skill into this agent's own per-agent Claude config skills/ directory.
 
-    Writing into the agent's per-agent config dir (rather than the shared
-    ~/.claude/skills/) keeps the skill scoped to this agent so it does not leak
-    into every other local agent via _sync_user_resources. This mirrors the
-    agent-scoped remote install in _install_skill_remotely.
+    This mirrors the agent-scoped remote install in _install_skill_remotely.
     """
     skill_dir = config_dir / "skills" / skill_name
     skill_path = skill_dir / "SKILL.md"
