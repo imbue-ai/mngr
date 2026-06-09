@@ -290,7 +290,7 @@ _TMUX_STATUS_LEFT_LENGTH: Final[int] = 20
 # degrading: continuing past a wedged command has no real teardown value. These
 # commands normally return near-instantly; the bound is generous headroom
 # (including for slower remote hosts) before declaring a command wedged.
-_STOP_AGENT_COMMAND_TIMEOUT_SECONDS: Final[float] = 10.0
+_STOP_AGENT_COMMAND_TIMEOUT_SECONDS: Final[float] = 30.0
 
 # Default tmux window dimensions used when the agent does not specify its own.
 # These match the historical hard-coded ``-x 200 -y 50`` (see the new-session
