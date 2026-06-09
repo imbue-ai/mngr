@@ -56,8 +56,15 @@ from imbue.minds.config.loader import load_deploy_config
 from imbue.minds.envs.primitives import VaultReadError
 from imbue.minds.envs.vault_reader import VaultPath
 from imbue.minds.envs.vault_reader import read_vault_kv
+from imbue.minds.utils.secret_redaction import redact_secret_flag_values
 
 _POOL_COMMAND_TIMEOUT_SECONDS: Final[int] = 7200
+
+# Flags whose values are secrets and must be masked when the admin command is
+# rendered into the "Running: ..." log line. ``--database-url`` carries the
+# Neon pool DSN (username + password); leaking it into logs/terminals is the
+# exact issue this redaction closes.
+_SECRET_BEARING_FLAGS: Final[tuple[str, ...]] = ("--database-url",)
 
 # OVH provider-config env vars consumed by ``OvhProviderConfig`` (in
 # ``libs/mngr_ovh``). The three AK/AS/CK keys are required; the
@@ -89,6 +96,7 @@ def build_create_admin_args(
     management_public_key_file: str,
     database_url: str | None,
     mngr_source: str | None,
+    is_recycle_enabled: bool,
 ) -> list[str]:
     """Compose the ``mngr imbue_cloud admin pool create`` argv from minds-side inputs.
 
@@ -99,6 +107,9 @@ def build_create_admin_args(
     ``--database-url`` is forwarded only when explicitly supplied. When
     omitted, the admin CLI auto-resolves the DSN from the activated
     minds env's ``secrets.toml`` (which the deploy wrote).
+
+    When ``is_recycle_enabled`` is False, forwards ``--no-recycle`` so the
+    OVH provider orders a fresh VPS instead of reclaiming a cancelled one.
     """
     args = [
         "create",
@@ -119,6 +130,8 @@ def build_create_admin_args(
         args.extend(["--database-url", database_url])
     if mngr_source is not None:
         args.extend(["--mngr-source", mngr_source])
+    if not is_recycle_enabled:
+        args.append("--no-recycle")
     return args
 
 
@@ -347,7 +360,8 @@ def _run_admin_command(args: list[str], *, extra_env: Mapping[str, str] | None =
     to mutate the parent process's environment.
     """
     full_command = ["mngr", "imbue_cloud", "admin", "pool"] + args
-    logger.info("Running: {}", " ".join(shlex.quote(part) for part in full_command))
+    loggable_command = redact_secret_flag_values(full_command, secret_bearing_flags=_SECRET_BEARING_FLAGS)
+    logger.info("Running: {}", " ".join(shlex.quote(part) for part in loggable_command))
     subprocess_env: dict[str, str] | None = None
     if extra_env:
         subprocess_env = merge_ovh_env_into_subprocess_env(shell_env=os.environ, ovh_env=extra_env)
@@ -425,6 +439,16 @@ def pool() -> None:
     default=None,
     help="Path to the mngr monorepo root. If provided, rsyncs into the template's vendor/mngr/ before creating hosts.",
 )
+@click.option(
+    "--no-recycle",
+    "is_recycle_enabled",
+    flag_value=False,
+    default=True,
+    help=(
+        "Force a fresh OVH VPS order instead of reclaiming a cancelled (still-billable) VPS. "
+        "Useful for testing the fresh-provision path. Forwarded to the admin command as --no-recycle."
+    ),
+)
 def pool_create(
     count: int,
     region: str,
@@ -433,6 +457,7 @@ def pool_create(
     management_public_key_file: str | None,
     database_url: str | None,
     mngr_source: str | None,
+    is_recycle_enabled: bool,
 ) -> None:
     """Create pool hosts for the activated minds env (OVH-backed via admin).
 
@@ -464,6 +489,7 @@ def pool_create(
                 management_public_key_file=effective_mgmt_pub_path,
                 database_url=database_url,
                 mngr_source=mngr_source,
+                is_recycle_enabled=is_recycle_enabled,
             )
             _raise_on_failure("create", _run_admin_command(args, extra_env=ovh_env))
     except VaultReadError as exc:

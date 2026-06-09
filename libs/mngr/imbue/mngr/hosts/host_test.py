@@ -46,6 +46,7 @@ from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import AgentProvisioningOptions
+from imbue.mngr.interfaces.host import AgentTmuxOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -57,6 +58,9 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import TmuxHeight
+from imbue.mngr.primitives import TmuxWidth
+from imbue.mngr.primitives import TmuxWindowSize
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.testing import get_short_random_string
@@ -660,6 +664,7 @@ def _build_command_with_defaults(
     additional_commands: list[NamedCommand] | None = None,
     unset_vars: list[str] | None = None,
     onboarding_text: str | None = None,
+    tmux_options: AgentTmuxOptions | None = None,
 ) -> str:
     """Call _build_start_agent_shell_command with standard test defaults."""
     return _build_start_agent_shell_command(
@@ -671,6 +676,7 @@ def _build_command_with_defaults(
         tmux_config_path=Path("/tmp/tmux.conf"),
         unset_vars=unset_vars if unset_vars is not None else [],
         host_dir=host_dir,
+        tmux_options=tmux_options if tmux_options is not None else AgentTmuxOptions(),
         onboarding_text=onboarding_text,
     )
 
@@ -700,6 +706,45 @@ def test_build_start_agent_shell_command_produces_single_command(
     # Should contain the process monitor
     assert "nohup" in result
     assert "pane_pid" in result
+
+
+def test_build_start_agent_shell_command_uses_default_dimensions_when_unset(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """With default (all-None) tmux options, the historical 200x50 size is used and no resize policy is set."""
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    result = _build_command_with_defaults(agent, temp_host_dir, tmux_options=AgentTmuxOptions())
+
+    assert "-x 200 -y 50" in result
+    assert "window-size" not in result
+
+
+def test_build_start_agent_shell_command_uses_custom_dimensions(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """Custom width/height are passed to new-session's -x/-y."""
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    options = AgentTmuxOptions(width=TmuxWidth(2048), height=TmuxHeight(256))
+    result = _build_command_with_defaults(agent, temp_host_dir, tmux_options=options)
+
+    assert "-x 2048 -y 256" in result
+
+
+def test_build_start_agent_shell_command_sets_manual_window_size_on_agent_window(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """A manual window-size emits a set-option targeting the agent window (:0)."""
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    options = AgentTmuxOptions(window_size=TmuxWindowSize.MANUAL)
+    result = _build_command_with_defaults(agent, temp_host_dir, tmux_options=options)
+
+    assert f"set-option -t =mngr-{agent.name}:0 window-size manual" in result
 
 
 def test_build_start_agent_shell_command_includes_unset_vars(
@@ -770,6 +815,7 @@ def test_build_start_agent_shell_command_send_keys_uses_end_of_options_separator
         tmux_config_path=Path("/tmp/tmux.conf"),
         unset_vars=[],
         host_dir=temp_host_dir,
+        tmux_options=AgentTmuxOptions(),
     )
 
     send_keys_l_lines = [line for line in result.split(" && ") if "send-keys" in line and " -l " in line]

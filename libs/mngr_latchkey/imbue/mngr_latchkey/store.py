@@ -236,6 +236,11 @@ class LatchkeyPermissionsConfig(FrozenModel):
     )
 
 
+def hosts_dir(data_dir: Path) -> Path:
+    """Return the directory under ``data_dir`` that holds every per-host subdirectory."""
+    return data_dir / _HOSTS_DIR_NAME
+
+
 def permissions_path_for_host(data_dir: Path, host_id: HostId) -> Path:
     """Return the path to the per-host permissions file.
 

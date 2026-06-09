@@ -4,6 +4,43 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-08
+
+Refined the cron automation recipes doc (`docs/cron_recipes.md`):
+
+- The agent-spawning recipes (`warm-window.sh`, `dispatch-task.sh`) now `cd
+  "$PROJECT_DIR"` before creating an agent, using a placeholder project path.
+  cron starts in `$HOME` (usually not a git repo), and mngr resolves
+  project-scoped config from the cwd's git worktree root -- so running inside
+  the project is what gives the new agent a git root to branch from and applies
+  the project's settings (`create_templates`, labels, etc.). Dropped the now
+  redundant `--from ":$PROJECT_DIR"` from `dispatch-task.sh` (cd makes the
+  create source default to the project's git root). Clarified that the
+  `warm-window.sh` warmer does no real work, so its `PROJECT_DIR` can be any git
+  repo already trusted in Claude Code -- the project context is irrelevant, and
+  `--no-connect` can't answer the trust prompt on first use.
+- Reworked the Scheduling section: the `PATH` note now covers both the Linux
+  (`/usr/bin` via apt) and macOS (`/opt/homebrew/bin` via Homebrew) dependency
+  locations around a single cron example.
+- Added a macOS LaunchAgent section as the recommended alternative to `cron` on
+  macOS. cron jobs run outside the GUI (Aqua) login session and so can't reach
+  the login Keychain, where Claude Code stores its credentials -- cron-launched
+  agents come up "Not logged in". A user LaunchAgent loaded into the Aqua
+  session has Keychain access and authenticates normally. Includes a plist
+  skeleton (`StartInterval`, `EnvironmentVariables` PATH, log paths),
+  `launchctl bootstrap`/`bootout` load/unload commands, and the
+  runs-only-while-logged-in tradeoff.
+
+- Now auto-discovered as a publishable package by the release tooling (it is a standalone `mngr usage` plugin with its own help-topic docs). It will be offered for first publication to PyPI on the next release. Its stale `imbue-mngr==0.2.6` pin is realigned to the current `0.2.10`. No runtime change.
+
+## 2026-06-05
+
+- Added to the release tooling's publish graph (`scripts/utils.py`). It will be offered for first publication to PyPI on the next release. Its stale `imbue-mngr==0.2.6` pin is realigned to the current `0.2.10`. No runtime change.
+
+## 2026-06-04
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.
+
 ## 2026-06-02
 
 Internal refactor with no user-visible behavior change. Updated the JSON output call sites to use the renamed `write_json_line` helper from `imbue.mngr.cli.output_helpers` (formerly `emit_final_json`, now removed).

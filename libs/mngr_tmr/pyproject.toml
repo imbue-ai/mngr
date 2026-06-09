@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "boto3>=1.40,<2",
-    "imbue-mngr==0.1.6",
+    "imbue-mngr==0.2.12",
     "imbue-mngr-mapreduce==0.1.0",
     "jinja2>=3.1",
     "markdown-it-py>=3.0.0",

@@ -14,7 +14,9 @@ from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_recovery_page
+from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
+from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
@@ -33,6 +35,42 @@ def test_render_landing_page_with_agents_lists_them_as_links() -> None:
     assert f"/goto/{_AGENT_B}/" in html
     assert str(_AGENT_A) in html
     assert str(_AGENT_B) in html
+
+
+def test_render_landing_page_settings_link_interpolates_agent_id() -> None:
+    # Regression: the settings gear is a <Button> (JinjaX component), so its
+    # onclick must use the `attr={{ expr }}` form -- a quoted `onclick="...{{ }}..."`
+    # is forwarded literally, which sent `/workspace/{{ agent_id }}/settings` to the
+    # server and 500'd the AgentId parse on destroy.
+    html = render_landing_page(accessible_agent_ids=(_AGENT_A,))
+    assert f"/workspace/{_AGENT_A}/settings" in html
+    assert "{{" not in html
+
+
+def test_render_workspace_settings_data_agent_id_interpolates() -> None:
+    html = render_workspace_settings(
+        agent_id=str(_AGENT_A),
+        ws_name="ws",
+        current_account=None,
+        accounts=(),
+        servers=(),
+    )
+    assert f'data-agent-id="{_AGENT_A}"' in html
+    assert "{{" not in html
+
+
+def test_render_sharing_editor_workspace_link_interpolates_agent_id() -> None:
+    # Regression: the workspace <Link href="...{{ }}..."> must interpolate
+    # (component quoted-attribute interpolation does not happen in JinjaX).
+    html = render_sharing_editor(
+        agent_id=str(_AGENT_A),
+        service_name="svc",
+        title="Share",
+        mngr_forward_origin="http://localhost:8421",
+        ws_name="ws",
+    )
+    assert f"/goto/{_AGENT_A}/" in html
+    assert "{{" not in html
 
 
 def test_render_landing_page_with_no_agents_shows_empty_state() -> None:
@@ -136,13 +174,14 @@ def test_render_create_form_shows_error_message_when_supplied() -> None:
     assert "Imbue cloud requires an account." in html
 
 
-def test_render_create_form_honors_workspace_env_vars_in_dev_tier(monkeypatch: pytest.MonkeyPatch) -> None:
-    """In a dev tier, the MINDS_WORKSPACE_* env vars pre-fill the create form.
+def test_render_create_form_honors_workspace_env_vars_when_opted_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the explicit opt-in, the MINDS_WORKSPACE_* env vars pre-fill the form.
 
-    Used by ``just minds-start`` to point the form at the operator's local
-    FCT worktree + current branch so the dev-iteration loop is one click.
+    Used by ``just minds-start`` (and the e2e runner) to point the form at the
+    operator's local FCT worktree + current branch so the dev-iteration loop is
+    one click.
     """
-    monkeypatch.setenv("MINDS_ROOT_NAME", "minds-dev-josh")
+    monkeypatch.setenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", "1")
     monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/fct/path")
     monkeypatch.setenv("MINDS_WORKSPACE_NAME", "mindtest")
     monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
@@ -152,16 +191,37 @@ def test_render_create_form_honors_workspace_env_vars_in_dev_tier(monkeypatch: p
     assert "mngr/some-feature" in html
 
 
-def test_render_create_form_ignores_workspace_env_vars_in_staging(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Staging must not honor MINDS_WORKSPACE_* env vars.
+def test_render_create_form_honors_workspace_env_vars_on_staging_when_opted_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The opt-in is tier-independent: it works even on a shared tier (staging).
 
-    Without the gate, a stray ``MINDS_WORKSPACE_BRANCH=mngr/some-branch`` in
-    the operator's shell (e.g. left over from a prior ``just minds-start``
-    invocation) would pre-fill the form's branch field and propagate to
-    the imbue_cloud lease request as ``-b repo_branch_or_tag=...``, which
-    would silently fail to match any pool host baked with the tier's
-    canonical branch.
+    Regression test: staging previously dropped MINDS_WORKSPACE_* unconditionally,
+    so ``just minds-start`` against staging silently fell back to the public
+    GitHub FCT on ``main`` -- meaning local FCT changes could never be tested
+    against staging.
     """
+    monkeypatch.setenv("MINDS_ROOT_NAME", "minds-staging")
+    monkeypatch.setenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", "1")
+    monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/fct/path")
+    monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
+    html = render_create_form()
+    assert "/local/fct/path" in html
+    assert "mngr/some-feature" in html
+
+
+def test_render_create_form_ignores_workspace_env_vars_without_opt_in_on_shared_tier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without the opt-in, a stray MINDS_WORKSPACE_* in the shell is ignored.
+
+    A stray ``MINDS_WORKSPACE_BRANCH=mngr/some-branch`` (e.g. left over from a
+    prior ``just minds-start``) must not pre-fill the form's branch field for an
+    end-user ``minds run``, where it would propagate to the imbue_cloud lease as
+    ``-b repo_branch_or_tag=...`` and fail to match any pool host baked with the
+    tier's canonical branch.
+    """
+    monkeypatch.delenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", raising=False)
     monkeypatch.setenv("MINDS_ROOT_NAME", "minds-staging")
     monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/fct/path")
     monkeypatch.setenv("MINDS_WORKSPACE_NAME", "mindtest")
@@ -175,21 +235,16 @@ def test_render_create_form_ignores_workspace_env_vars_in_staging(monkeypatch: p
     assert "assistant" in html
 
 
-def test_render_create_form_ignores_workspace_env_vars_in_production(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Production -- like staging -- must not honor the dev-iteration env vars."""
-    monkeypatch.setenv("MINDS_ROOT_NAME", "minds")
-    monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
-    html = render_create_form()
-    assert "mngr/some-feature" not in html
+def test_render_create_form_ignores_workspace_env_vars_without_opt_in_on_dev_tier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tier no longer matters: even a dev-tier root name ignores the vars without opt-in.
 
-
-def test_render_create_form_ignores_workspace_env_vars_when_unactivated(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No activated env (no MINDS_ROOT_NAME) -- treat as non-dev and ignore env vars.
-
-    Mirrors the conservative default: a bare ``minds run`` without any
-    activation context shouldn't accidentally pull from ad-hoc env vars.
+    This closes the old gap where dev tiers honored a stray MINDS_WORKSPACE_*
+    purely by tier, with no explicit operator intent.
     """
-    monkeypatch.delenv("MINDS_ROOT_NAME", raising=False)
+    monkeypatch.delenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", raising=False)
+    monkeypatch.setenv("MINDS_ROOT_NAME", "minds-dev-josh")
     monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
     html = render_create_form()
     assert "mngr/some-feature" not in html
@@ -496,7 +551,10 @@ def test_dev_styleguide_token_swatches_enumerate_root_declarations() -> None:
 
 def test_button_link_renders_anchor_with_href() -> None:
     html = CATALOG.render("ButtonLink", href="/create", _content="Create")
-    assert '<a href="/create"' in html
+    # attrs.render() sorts attributes alphabetically, so href ends up after
+    # class. Assert presence rather than ordering.
+    assert html.startswith("<a ")
+    assert 'href="/create"' in html
     assert ">Create</a>" in html
 
 
@@ -520,6 +578,82 @@ def test_button_submit_has_form_attribute_when_passed() -> None:
     assert 'form="my-form"' in html
 
 
+def test_button_default_size_uses_md_geometry() -> None:
+    html = CATALOG.render("Button", variant="primary", _content="X")
+    # md size = px-3.5 py-2 rounded-md font-medium text-sm
+    assert "px-3.5" in html
+    assert "py-2" in html
+    assert "rounded-md" in html
+    assert "font-medium" in html
+    assert "text-sm" in html
+    # Should not pick up lg-specific classes
+    assert "py-3" not in html
+    assert "rounded-lg" not in html
+    assert "font-semibold" not in html
+
+
+def test_button_size_lg_uses_block_cta_geometry() -> None:
+    html = CATALOG.render("Button", variant="primary", size="lg", block=True, _content="Sign in")
+    assert "py-3" in html
+    assert "rounded-lg" in html
+    assert "font-semibold" in html
+    assert "text-base" in html
+    assert "w-full" in html
+
+
+def test_button_size_icon_uses_square_padding() -> None:
+    html = CATALOG.render("Button", variant="ghost", size="icon", _content="<svg/>")
+    assert "p-1.5" in html
+    # No horizontal/vertical padding mismatch (only one padding utility)
+    assert "px-3.5" not in html
+    assert "py-2 " not in html and not html.rstrip().endswith("py-2")
+
+
+def test_button_passes_through_arbitrary_attrs() -> None:
+    # JinjaX attrs.render() flows through undeclared HTML attributes like
+    # title, aria-label, and data-*, so callers don't have to enumerate
+    # them as props on the component.
+    html = CATALOG.render(
+        "Button",
+        variant="ghost",
+        size="icon",
+        _content="<svg/>",
+        _attrs={"title": "Restart", "aria-label": "Restart workspace", "data-x": "y"},
+    )
+    assert 'title="Restart"' in html
+    assert 'aria-label="Restart workspace"' in html
+    assert 'data-x="y"' in html
+
+
+def test_titlebar_button_default_is_nav_variant() -> None:
+    html = CATALOG.render("TitlebarButton", _content="<svg/>")
+    # nav variant => w-8 h-7 rounded active:bg-white/10
+    assert "w-8" in html
+    assert "h-7" in html
+    assert "active:bg-white/10" in html
+    # default tone => hover lifts to white/5 + zinc-200 text
+    assert "hover:bg-white/5" in html
+    assert "hover:text-zinc-200" in html
+    # Window-control geometry should NOT bleed into nav
+    assert "w-9" not in html
+    assert "h-[38px]" not in html
+
+
+def test_titlebar_button_control_variant_renders_window_control_geometry() -> None:
+    html = CATALOG.render("TitlebarButton", variant="control", _content="<svg/>")
+    assert "w-9" in html
+    assert "h-[38px]" in html
+    assert "rounded-none" in html
+
+
+def test_titlebar_button_danger_tone_applies_red_hover() -> None:
+    html = CATALOG.render("TitlebarButton", variant="control", tone="danger", _content="<svg/>")
+    assert "hover:bg-red-600" in html
+    assert "hover:text-white" in html
+    # The default tone's hover should be replaced, not merged.
+    assert "hover:bg-white/5" not in html
+
+
 def test_notice_renders_each_variant() -> None:
     variants_to_class = {
         "info": "bg-blue-50",
@@ -536,7 +670,145 @@ def test_notice_renders_each_variant() -> None:
 def test_card_renders_default_slot() -> None:
     html = CATALOG.render("Card", _content="<p>body</p>")
     assert "<p>body</p>" in html
-    assert "border-zinc-200" in html
+    # The visual shell (bg/border/rounded; no baseline shadow) is in the
+    # ``.minds-card`` CSS class in tokens.css; the rendered HTML carries
+    # the class name rather than the underlying Tailwind utilities.
+    assert "minds-card" in html
+    # Default padding is "default" -> p-4.
+    assert "p-4" in html
+
+
+def test_card_row_spread_layout_adds_justify_between() -> None:
+    html = CATALOG.render("Card", layout="row-spread", _content="x")
+    assert "justify-between" in html
+    assert "items-center" in html
+
+
+def test_card_row_layout_omits_justify_between() -> None:
+    html = CATALOG.render("Card", layout="row", _content="x")
+    assert "items-center" in html
+    assert "justify-between" not in html
+
+
+def test_card_tight_padding_uses_px4_py25() -> None:
+    html = CATALOG.render("Card", padding="tight", _content="x")
+    assert "px-4" in html
+    assert "py-2.5" in html
+    assert "p-4 " not in html and not html.rstrip().endswith("p-4")
+
+
+def test_card_tag_anchor_renders_anchor_with_href() -> None:
+    html = CATALOG.render("Card", tag="a", href="/x", _content="body")
+    assert "<a " in html
+    assert 'href="/x"' in html
+    # Anchors auto-disable underline + inherit text color so a Card anchor
+    # doesn't read like a regular hyperlink.
+    assert "no-underline" in html
+    assert "text-inherit" in html
+
+
+def test_card_interactive_adds_hover_classes() -> None:
+    plain = CATALOG.render("Card", _content="x")
+    interactive = CATALOG.render("Card", interactive=True, _content="x")
+    assert "hover:border-zinc-300" not in plain
+    assert "hover:border-zinc-300" in interactive
+    assert "cursor-pointer" in interactive
+
+
+def test_form_label_default_is_block_with_mb_1_5() -> None:
+    # The prop is ``target`` rather than ``for`` because JinjaX parses
+    # the prop declaration block as a Python function signature, and
+    # ``for`` is a reserved keyword. The rendered HTML still uses the
+    # standard HTML ``for`` attribute.
+    html = CATALOG.render("FormLabel", target="email", _content="Email")
+    assert 'for="email"' in html
+    assert "block" in html
+    assert "mb-1.5" in html
+    assert "text-sm" in html
+    assert "font-medium" in html
+    assert "text-zinc-900" in html
+
+
+def test_form_label_inline_drops_block_and_mb() -> None:
+    html = CATALOG.render("FormLabel", target="x", inline=True, _content="Provider")
+    # Inline layout: no block / mb classes (the parent flex row handles
+    # spacing), but the shared color and weight tokens remain.
+    assert "block" not in html
+    assert "mb-1.5" not in html
+    assert "text-sm" in html
+    assert "font-medium" in html
+
+
+def test_oauth_button_renders_google_label_and_brand_icon_with_hook_class() -> None:
+    html = CATALOG.render("auth.OauthButton", provider="google")
+    # The .oauth-btn hook is load-bearing -- static/auth.js queries for
+    # it to enable/disable all OAuth buttons as a group.
+    assert "oauth-btn" in html
+    # Label text + data-oauth provider attr.
+    assert "Continue with Google" in html
+    assert 'data-oauth="google"' in html
+    # Brand glyph from auth.OauthIcon is composed inline. The path
+    # fragment is one of the four <path d="..."> values unique to
+    # Google's blue triangle.
+    assert "M22.56 12.25" in html
+
+
+def test_oauth_button_github_uses_github_label_and_glyph() -> None:
+    html = CATALOG.render("auth.OauthButton", provider="github")
+    assert "Continue with GitHub" in html
+    assert 'data-oauth="github"' in html
+    # Path fragment that opens GitHub's mark glyph.
+    assert "M12 0C5.37 0 0 5.37" in html
+
+
+def test_card_page_default_padding_and_max_width() -> None:
+    html = CATALOG.render("CardPage", title="x", _content="<p>body</p>")
+    # Card surface: bg/border/rounded/shadow + p-10 + max-w-[420px] + w-full.
+    assert "bg-white" in html
+    assert "rounded-xl" in html
+    assert "shadow-sm" in html
+    assert "p-10" in html
+    assert "max-w-[420px]" in html
+    assert "<p>body</p>" in html
+    # The body is flex-centered around the card.
+    assert "flex items-center justify-center min-h-screen" in html
+
+
+def test_card_page_form_padding_uses_p6() -> None:
+    html = CATALOG.render("CardPage", title="x", padding="form", max_width="max-w-[520px]", _content="x")
+    assert "p-6" in html
+    assert "p-10" not in html
+    assert "max-w-[520px]" in html
+
+
+def test_icon24_renders_with_stroke_shell_and_default_size() -> None:
+    # ``home`` is one of the icons in the ICONS_24 catalog global.
+    html = CATALOG.render("Icon24", name="home")
+    # Stroke-based shell attrs applied uniformly.
+    assert 'viewBox="0 0 24 24"' in html
+    assert 'fill="none"' in html
+    assert 'stroke="currentColor"' in html
+    assert 'stroke-width="2"' in html
+    assert 'aria-hidden="true"' in html
+    # Default size = md = w-4 h-4.
+    assert "w-4 h-4" in html
+    # Path data from the catalog flows through unescaped.
+    assert '<path d="M3 12L12 3l9 9"/>' in html
+
+
+def test_icon24_size_axis() -> None:
+    for size, css_class in (("sm", "w-3.5 h-3.5"), ("md", "w-4 h-4"), ("lg", "w-5 h-5")):
+        html = CATALOG.render("Icon24", name="home", size=size)
+        assert css_class in html
+
+
+def test_icon12_renders_with_w3_h3_size_and_12_viewbox() -> None:
+    html = CATALOG.render("Icon12", name="close")
+    assert 'viewBox="0 0 12 12"' in html
+    assert "w-3 h-3" in html
+    # Two lines forming the X.
+    assert '<line x1="2" y1="2" x2="10" y2="10"/>' in html
+    assert '<line x1="10" y1="2" x2="2" y2="10"/>' in html
 
 
 def test_spinner_renders_for_each_size() -> None:
@@ -544,6 +816,16 @@ def test_spinner_renders_for_each_size() -> None:
         html = CATALOG.render("Spinner", size=size)
         assert 'class="spinner' in html
         assert css_class in html
+
+
+def test_spinner_default_tone_omits_accent_class() -> None:
+    html = CATALOG.render("Spinner", size="sm")
+    assert "spinner-accent" not in html
+
+
+def test_spinner_accent_tone_adds_accent_class() -> None:
+    html = CATALOG.render("Spinner", size="sm", tone="accent")
+    assert "spinner-accent" in html
 
 
 def test_oauth_icon_google_includes_google_svg_path() -> None:
@@ -595,6 +877,83 @@ def test_text_input_omits_autocomplete_and_minlength_when_unset() -> None:
     html = CATALOG.render("TextInput", name="email")
     assert "autocomplete=" not in html
     assert "minlength=" not in html
+
+
+def test_text_input_passes_through_arbitrary_attrs() -> None:
+    # attrs.render() flows undeclared HTML attributes (readonly, onkeydown,
+    # data-*) so callers don't enumerate each as a prop.
+    html = CATALOG.render(
+        "TextInput",
+        name="email",
+        _attrs={"id": "new-email", "onkeydown": "addEmail()", "data-x": "y"},
+    )
+    assert 'id="new-email"' in html
+    assert 'onkeydown="addEmail()"' in html
+    assert 'data-x="y"' in html
+
+
+def test_select_renders_with_option_children_and_focus_ring() -> None:
+    html = CATALOG.render(
+        "Select",
+        name="launch_mode",
+        _content='<option value="LIMA">lima</option>',
+    )
+    assert "<select" in html
+    assert 'name="launch_mode"' in html
+    assert '<option value="LIMA">lima</option>' in html
+    # Inherits the shared INPUT_BASE focus ring.
+    assert "focus:border-blue-600" in html
+    assert "focus:ring-2" in html
+    # Default width is w-full.
+    assert "w-full" in html
+
+
+def test_select_honors_width_prop() -> None:
+    html = CATALOG.render("Select", name="x", width="w-48", _content="")
+    assert "w-48" in html
+    # Default w-full should be replaced, not added alongside.
+    assert " w-full " not in html
+
+
+def test_link_regular_uses_blue_underline_recipe() -> None:
+    html = CATALOG.render("Link", href="/x", _content="back").strip()
+    assert "<a " in html
+    assert 'href="/x"' in html
+    assert "text-blue-600" in html
+    assert "hover:underline" in html
+    assert "font-medium" not in html
+
+
+def test_link_medium_weight_adds_font_medium() -> None:
+    html = CATALOG.render("Link", href="/x", weight="medium", _content="Sign in")
+    assert "font-medium" in html
+
+
+def test_link_passes_through_arbitrary_attrs() -> None:
+    html = CATALOG.render(
+        "Link",
+        href="https://example.com",
+        _content="docs",
+        _attrs={"target": "_blank", "rel": "noopener"},
+    )
+    assert 'target="_blank"' in html
+    assert 'rel="noopener"' in html
+
+
+def test_textarea_renders_value_in_content_with_shared_shell() -> None:
+    html = CATALOG.render(
+        "Textarea",
+        name="env",
+        value="line1\nline2",
+        rows=6,
+        extra="font-mono",
+    )
+    assert "<textarea" in html
+    assert 'name="env"' in html
+    assert 'rows="6"' in html
+    assert "line1\nline2" in html
+    assert "font-mono" in html
+    assert "focus:border-blue-600" in html
 
 
 def test_section_header_plain_has_no_divider_classes() -> None:

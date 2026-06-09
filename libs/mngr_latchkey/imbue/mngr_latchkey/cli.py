@@ -278,6 +278,7 @@ in tunneled mode and emits its result as a single JSON object on stdout:
 {
   "env": {
     "LATCHKEY_GATEWAY": "...",
+    "LATCHKEY_GATEWAY_SECONDARY": "...",
     "LATCHKEY_GATEWAY_PASSWORD": "...",
     "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE": "...",
     "LATCHKEY_DISABLE_COUNTING": "1"
@@ -540,6 +541,7 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
         latchkey=latchkey,
         tunnel_manager=tunnel_manager,
         concurrency_group=mngr_ctx.concurrency_group,
+        mngr_ctx=mngr_ctx,
     )
     destruction_handler = LatchkeyDestructionHandler(tunnel_manager=tunnel_manager)
 
@@ -557,6 +559,13 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
     shutdown_event = threading.Event()
     bounce_event = threading.Event()
     _install_signal_handlers(shutdown_event, bounce_event)
+
+    # Keep every remote host's VPS credentials/permissions in sync in the
+    # background for the lifetime of this supervisor. Passed the shutdown event
+    # so the watcher stops cleanly on shutdown -- and, if the watcher itself
+    # dies unexpectedly, signals a loud teardown rather than running on with a
+    # silently-dead watcher.
+    discovery_handler.start_remote_state_sync(mngr_ctx.concurrency_group, shutdown_event)
 
     consumer.start()
     # Dispatch SIGHUP-driven observe bounces off the signal-handler thread so

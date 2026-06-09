@@ -28,7 +28,7 @@ from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
-from imbue.mngr.interfaces.data_types import VolumeFileType
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -82,9 +82,11 @@ from imbue.mngr_modal.volume import _proxy_file_entry_type_to_volume_file_type
 from imbue.modal_proxy.data_types import FileEntry
 from imbue.modal_proxy.data_types import FileEntryType as ProxyFileEntryType
 from imbue.modal_proxy.errors import ModalProxyError
+from imbue.modal_proxy.errors import ModalProxyInvalidError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.errors import ModalProxyRateLimitError
 from imbue.modal_proxy.interface import AppInterface
+from imbue.modal_proxy.interface import SandboxInterface
 from imbue.modal_proxy.interface import VolumeInterface
 from imbue.modal_proxy.testing import FakeModalInterface
 
@@ -1371,6 +1373,44 @@ def test_create_host_raises_on_ssh_setup_failure(
         testing_provider.create_host(HostName("will-fail"))
 
 
+class _ImageRejectingFakeModalInterface(FakeModalInterface):
+    """A FakeModalInterface that rejects sandbox creation the way real Modal does
+    for a non-existent ``--snapshot`` image id.
+
+    Modal validates the snapshot/image lazily -- ``image_from_id`` succeeds and
+    the bad id is only rejected when the sandbox is actually created -- so this
+    override raises ``ModalProxyInvalidError`` from ``sandbox_create``.
+    """
+
+    def sandbox_create(self, *args: object, **kwargs: object) -> SandboxInterface:
+        raise ModalProxyInvalidError("'snap-123abc' is not a valid Image ID.")
+
+
+def test_create_host_wraps_invalid_argument_error_as_clean_mngr_error(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
+) -> None:
+    """An invalid Modal argument (e.g. a non-existent --snapshot image id) is
+    surfaced as a clean MngrError, not a raw ModalProxyInvalidError.
+
+    ``create_host`` must translate the ModalProxyInvalidError into a user-facing
+    MngrError (which the CLI renders as a single-line message) rather than
+    letting it escape as a raw Python traceback.
+    """
+    root = tmp_path / "modal_testing"
+    root.mkdir(parents=True, exist_ok=True)
+    rejecting_modal = _ImageRejectingFakeModalInterface(root_dir=root, concurrency_group=cg)
+    provider = make_testing_provider(temp_mngr_ctx, rejecting_modal)
+    try:
+        with pytest.raises(MngrError) as exc_info:
+            provider.create_host(HostName("bad-snapshot"), snapshot=SnapshotName("snap-123abc"))
+        # The original modal error message is preserved for the user.
+        assert "snap-123abc" in str(exc_info.value)
+    finally:
+        rejecting_modal.cleanup()
+
+
 # ---------------------------------------------------------------------------
 # Properties and Config Tests
 # ---------------------------------------------------------------------------
@@ -1982,12 +2022,12 @@ def test_provider_instance_close(
 
 def test_proxy_file_entry_type_file_maps_to_volume_file() -> None:
     result = _proxy_file_entry_type_to_volume_file_type(ProxyFileEntryType.FILE)
-    assert result == VolumeFileType.FILE
+    assert result == FileType.FILE
 
 
 def test_proxy_file_entry_type_directory_maps_to_volume_directory() -> None:
     result = _proxy_file_entry_type_to_volume_file_type(ProxyFileEntryType.DIRECTORY)
-    assert result == VolumeFileType.DIRECTORY
+    assert result == FileType.DIRECTORY
 
 
 # ---------------------------------------------------------------------------

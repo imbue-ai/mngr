@@ -26,10 +26,10 @@ and how the agent receives the answer.
    idle.
 4. **Desktop notifies the user.** The desktop client tails the agent's
    request events file via `mngr events --follow`, adds a card to the
-   right-side requests inbox panel, and surfaces a notification.
+   inbox drawer, and surfaces a notification.
 5. **User opens the dialog.** Clicking the card opens
-   `/requests/<event_id>` in a **modal overlay** over the current window
-   (a transparent full-content-area `WebContentsView` stacked above the
+   `/inbox?selected=<event_id>` in a **modal overlay** over the current
+   window (a transparent full-window `WebContentsView` stacked above the
    workspace, with a dim backdrop). The user's workspace view is never
    navigated away, so dismissing the dialog -- via Approve/Deny, the close
    button, a backdrop click, or Escape -- returns them to their work with
@@ -75,7 +75,13 @@ and how the agent receives the answer.
    2. If credentials are not `valid` and the service advertises a
       `browser` auth option (or latchkey reports no `authOptions` at all,
       treated as the legacy fallback), runs `latchkey auth browser <service>`
-      synchronously; cancellation/failure produces an `AUTH_FAILED` outcome.
+      synchronously (transparently running the one-off `latchkey auth
+      browser-prepare <service>` step first when latchkey asks for it).
+      Cancellation or failure of either step produces a `FAILED` outcome:
+      the grant is **not** applied and the request stays pending (no
+      response event is written), so the dialog surfaces the reason and the
+      user can click Approve again to retry. A failed approval is never
+      recorded as a denial.
    3. If credentials are not `valid` and the service does not advertise a
       `browser` auth option (e.g. Coolify, where `authOptions = ["set"]`),
       the grant is **refused** and the request stays pending. The dialog
@@ -85,10 +91,13 @@ and how the agent receives the answer.
       proceeds normally once credentials are valid.
    4. Atomically rewrites the agent's `latchkey_permissions.json` so the gateway
       enforces the chosen schemas on the next request.
-   5. Appends a `GRANTED` (or `AUTH_FAILED`) response event to
-      `~/.minds/events/requests/events.jsonl`.
-   6. Sends the agent a plain-English `mngr message` describing the
-      decision; the agent wakes up and decides whether to retry.
+   5. On success, appends a `GRANTED` response event to
+      `~/.minds/events/requests/events.jsonl`. (A `FAILED` approval writes
+      no response event and leaves the request pending; see step 6.2.)
+   6. On a `GRANTED` outcome, sends the agent a plain-English `mngr message`
+      describing the decision; the agent wakes up and decides whether to
+      retry. A `FAILED` or manual-credentials outcome leaves the request
+      pending and notifies only the user (in the dialog), not the agent.
 7. **User denies.** The desktop client appends a `DENIED` response event
    and sends the agent a plain-English denial message. `latchkey_permissions.json`
    is not touched.

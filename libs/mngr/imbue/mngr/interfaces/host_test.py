@@ -4,8 +4,39 @@ from pathlib import Path
 
 import pytest
 
+from imbue.mngr.interfaces.host import AgentTmuxOptions
 from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr.interfaces.host import UploadFileSpec
+from imbue.mngr.primitives import TmuxHeight
+from imbue.mngr.primitives import TmuxWidth
+from imbue.mngr.primitives import TmuxWindowSize
+
+
+def test_agent_tmux_options_round_trips_through_data_dict() -> None:
+    options = AgentTmuxOptions(
+        width=TmuxWidth(2048),
+        height=TmuxHeight(256),
+        window_size=TmuxWindowSize.MANUAL,
+    )
+    assert AgentTmuxOptions.from_data_dict(options.to_data_dict()) == options
+
+
+def test_agent_tmux_options_to_data_dict_is_json_native() -> None:
+    options = AgentTmuxOptions(
+        width=TmuxWidth(120),
+        height=TmuxHeight(40),
+        window_size=TmuxWindowSize.LATEST,
+    )
+    assert options.to_data_dict() == {"width": 120, "height": 40, "window_size": "LATEST"}
+
+
+def test_agent_tmux_options_from_data_dict_defaults_to_all_none() -> None:
+    # An agent created before this field existed has no "tmux" block in data.json.
+    options = AgentTmuxOptions.from_data_dict(None)
+    assert options.width is None
+    assert options.height is None
+    assert options.window_size is None
+
 
 # === UploadFileSpec Tests ===
 

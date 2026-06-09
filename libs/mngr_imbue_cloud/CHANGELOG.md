@@ -6,6 +6,25 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.1] - 2026-06-08
+
+### Added
+
+- Added: `--no-recycle` flag on `mngr imbue_cloud admin pool create` that forces a fresh OVH VPS order (sets `MNGR__PROVIDERS__OVH__ENABLE_RECYCLE_CANCELLED=false` on the inner `mngr create`) instead of reclaiming a cancelled (still-billable) VPS, for exercising the fresh-provision path.
+- Added: Region-aware leasing — `mngr create` against imbue_cloud accepts a hard `-b region=<datacenter>` build arg (lease fails if no host is available in that datacenter), validated against the known OVH-US datacenters (`US-EAST-VA`, `US-WEST-OR`). The region is sent to the connector's lease endpoint as a separate field (not folded into the JSONB attribute filter), applied on both fast (adopt) and slow (rebuild) paths, and preserved through the slow path's attribute relaxation. `mngr imbue_cloud admin pool create` now records the bake `--region` into the new `pool_hosts.region` column so the connector can filter on it.
+- Added: Auto-discovered as a publishable package by the release tooling; will be offered for first publication to PyPI on the next release.
+
+### Changed
+
+- Changed: `ImbueCloudProviderConfig` now extends `VpsDockerProviderConfig`, so it carries `docker_runtime` / `install_gvisor_runtime` / `default_start_args`; the delegated vps_docker provider forwards them, so the rebuilt container runs under `--runtime runsc` with the `--workdir=/` and `--security-opt=no-new-privileges` hardening args (values are written into the per-account `[providers.imbue_cloud_<slug>]` block by minds bootstrap).
+- Changed: The imbue_cloud slow (rebuild) path now re-applies the full idempotent host setup (pinned Docker version, gVisor `runsc` install/registration, sshd tuning, base packages) on the leased VPS before rebuilding the container, so a workspace created via the slow path — even on a host baked before runsc existed — comes up consistent and runs its agent container under gVisor. A failure is fatal.
+
+### Removed
+
+- Removed: The soft `-b preferred_region=<dc>` lease build arg. A lease is now constrained only by the hard `-b region=<dc>` arg; when unset, the lease is region-agnostic.
+
+## [v0.1.0] - 2026-06-05
+
 ### Added
 
 - Added: New `mngr imbue_cloud bucket` command group (`create` / `list` / `info` / `destroy`) for managing per-host R2 buckets (paid accounts only), plus `bucket keys create/list/destroy` for minting and revoking bucket-scoped S3 keys (read-only or read-write). `bucket create` returns S3-compatible credentials as JSON; the secret is shown only once and never stored. `bucket destroy` refuses a non-empty bucket and otherwise cascades to revoke its keys.
@@ -25,6 +44,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: The bake's services agent now uses the constant name `system-services` (was per-bake `pool-<hex>` UUID); the bake also destroys the FCT-bootstrap-created chat agent and `rm -f`'s `/code/runtime/initial_chat_created` so the user's first start re-fires the bootstrap cleanly.
 - Changed: `_get_agent_info` now takes `host_name` as a keyword arg and filters by both `name` and `host.name`, so the operator's local mngr state accumulating one `system-services` agent per bake no longer routes subsequent calls to the wrong VPS.
 - Changed: Provider's `get_host_and_agent_details` override (and its lease-only `_build_offline_details_from_lease` fallback) now accepts and forwards the new `offline_field_generators` parameter, so offline plugin fields are populated for leased hosts that fall back to offline/lease-only data.
+- Changed: Added to the release tooling's publish graph (`scripts/utils.py`); will be offered for first publication to PyPI on the next release. Previously-unpinned internal deps (`imbue-mngr-vps-docker`, `imbue-common`) are now pinned with `==` to their current workspace versions, as a published wheel requires. No runtime change.
 
 ### Removed
 

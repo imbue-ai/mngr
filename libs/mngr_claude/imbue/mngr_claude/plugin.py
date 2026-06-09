@@ -31,44 +31,44 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
+from imbue.mngr.agents.base_agent import quote_agent_args
 from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
-from imbue.mngr.api.providers import get_local_host
-from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.api.preservation import PreservedItem
+from imbue.mngr.api.preservation import get_local_preserved_agent_dir
+from imbue.mngr.api.preservation import preserve_agent_data
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentStartError
-from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import is_macos
 from imbue.mngr.hosts.file_upload import upload_files_in_bulk
+from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.data_types import FileTransferSpec
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import RelativePath
-from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import HostFileReadInterface
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
-from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.plugins.hookspecs import OptionStackItem
-from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
-from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import TransferMode
-from imbue.mngr.utils.git_utils import find_git_common_dir
+from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_claude import hookimpl
 from imbue.mngr_claude import resources as _claude_resources
@@ -266,8 +266,9 @@ class ClaudeAgentConfig(AgentTypeConfig):
         default=True,
         description="Preserve Claude session files locally before the agent's state directory is deleted on destroy. "
         "When enabled, session JSONL files, transcripts (raw and common), and the session ID history "
-        "are copied to <local_host_dir>/plugin/mngr_claude/preserved_sessions/<agent-name>--<agent-id>/. "
-        "For remote agents, files are pulled to the local machine so they survive host destruction. "
+        "are copied to <local_host_dir>/preserved/<agent-name>--<agent-id>/, mirroring the agent's "
+        "state-directory layout. For remote agents, files are pulled to the local machine so they "
+        "survive host destruction. "
         "Set to False to discard session data on destroy.",
     )
     use_env_config_dir: bool = Field(
@@ -277,6 +278,14 @@ class ClaudeAgentConfig(AgentTypeConfig):
         "When set, mngr never writes to the user's Claude config; the user is responsible for "
         "interactive `claude` setup (trust dialogs, onboarding, credentials) ahead of time. "
         "Other sync/override/auto-dismiss fields on this config are silently ignored in this mode.",
+    )
+    streaming_snapshot_interval_seconds: float = Field(
+        default=0.0,
+        description="Poll interval (in seconds) for the tmux-based response-streaming watcher. When > 0, a "
+        "background watcher periodically captures the agent's tmux pane, reverse-maps the rendered "
+        "assistant text back into markdown, and writes it to "
+        "$MNGR_AGENT_STATE_DIR/plugin/claude/stream_buffer. When <= 0 (the default), the watcher is "
+        "not provisioned or run.",
     )
 
 
@@ -1059,6 +1068,12 @@ _CLAUDE_ALWAYS_PROVISIONED_SCRIPT_NAMES: Final[tuple[str, ...]] = (
     "sync_keychain_credentials.py",
 )
 
+# The tmux-based response-streaming watcher. Provisioned only when
+# streaming_snapshot_interval_seconds > 0; claude_background_tasks.sh launches it
+# when it finds the script on disk (the presence check is the single gate, just
+# like common_transcript.sh).
+_CLAUDE_STREAM_SNAPSHOT_SCRIPT_NAME: Final[str] = "stream_snapshot.py"
+
 
 def _provision_claude_always_on_scripts(
     host: OnlineHostInterface,
@@ -1077,6 +1092,42 @@ def _provision_claude_always_on_scripts(
     """
     scripts = {name: _load_claude_resource_script(name) for name in _CLAUDE_ALWAYS_PROVISIONED_SCRIPT_NAMES}
     provision_scripts_to_commands_dir(host, agent_state_dir, scripts, concurrency_group)
+
+
+def _check_python3_available(host: OnlineHostInterface) -> None:
+    """Raise PluginMngrError if python3 is not available on the host.
+
+    The response-streaming watcher is a python script, so the host must have a
+    python3 interpreter when streaming is enabled.
+    """
+    result = host.execute_idempotent_command("command -v python3", timeout_seconds=10.0)
+    if not result.success:
+        raise PluginMngrError(
+            "streaming_snapshot_interval_seconds > 0 requires python3 on the agent host, "
+            "but no python3 interpreter was found. Install python3 on the host or set "
+            "streaming_snapshot_interval_seconds = 0 to disable response streaming."
+        )
+
+
+def _provision_stream_snapshot_script(
+    host: OnlineHostInterface,
+    agent_state_dir: Path,
+    interval_seconds: float,
+    concurrency_group: ConcurrencyGroup,
+) -> None:
+    """Provision the response-streaming watcher script and its poll-interval file.
+
+    The interval is written to a file (rather than passed via an env var) because
+    env-var propagation into the background-tasks subshell that launches the
+    watcher is unreliable; the watcher reads the interval from this file at
+    runtime via $MNGR_AGENT_STATE_DIR, which it always has.
+    """
+    script = _load_claude_resource_script(_CLAUDE_STREAM_SNAPSHOT_SCRIPT_NAME)
+    provision_scripts_to_commands_dir(
+        host, agent_state_dir, {_CLAUDE_STREAM_SNAPSHOT_SCRIPT_NAME: script}, concurrency_group
+    )
+    interval_path = agent_state_dir / "plugin" / "claude" / "stream_interval"
+    host.write_file(interval_path, f"{interval_seconds}\n".encode(), "0644")
 
 
 def _has_api_credentials_available(
@@ -1398,6 +1449,16 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
             return resolve_shared_claude_config_dir()
         return self._get_agent_dir() / "plugin" / "claude" / "anthropic"
 
+    def get_stream_buffer_path(self) -> Path:
+        """Return the path to this agent's response-streaming buffer file.
+
+        Written by the stream_snapshot.py watcher when
+        streaming_snapshot_interval_seconds > 0. The first line is the uuid of
+        the last complete assistant message; the remaining lines are the
+        in-progress assistant text reverse-mapped to markdown.
+        """
+        return self._get_agent_dir() / "plugin" / "claude" / "stream_buffer"
+
     def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
         """Add CLAUDE_CONFIG_DIR and ORIGINAL_CLAUDE_CONFIG_DIR.
 
@@ -1540,13 +1601,9 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         agent_uuid = str(self.id.get_uuid())
 
         # Build the additional arguments (cli_args from config + agent_args from CLI).
-        # cli_args reach here already shell-safe (string-form configs are split with non-POSIX
-        # shlex that preserves quotes). agent_args, by contrast, are raw argv strings passed
-        # through Click as click.UNPROCESSED -- the OS shell stripped quote chars when it built
-        # argv at invocation time, so we must re-quote each element before splicing it into a
-        # shell command string.
-        quoted_agent_args = tuple(shlex.quote(arg) for arg in agent_args)
-        all_extra_args = self.agent_config.cli_args + quoted_agent_args
+        # cli_args arrive already shell-safe; agent_args are raw argv and must be quoted
+        # before being spliced into this shell-evaluated command (see ``quote_agent_args``).
+        all_extra_args = self.agent_config.cli_args + quote_agent_args(agent_args)
         args_str = " ".join(all_extra_args) if all_extra_args else ""
 
         # Read the latest session ID from the tracking file written by the SessionStart hook.
@@ -1800,12 +1857,11 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         """Find the source repo path for the agent's work_dir, if it's a git worktree or mirror.
 
         Returns the parent of the git common dir (the source repo root),
-        or None if work_dir is not inside a git repo.
+        or None if work_dir is not inside a git repo. Delegates to the shared
+        core helper ``imbue.mngr.utils.git_utils.find_git_source_path`` (also
+        used by ``mngr_antigravity``).
         """
-        git_common_dir = find_git_common_dir(self.work_dir, concurrency_group)
-        if git_common_dir is None:
-            return None
-        return git_common_dir.parent
+        return find_git_source_path(self.work_dir, concurrency_group)
 
     def _setup_per_agent_config_dir(
         self,
@@ -1971,6 +2027,18 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
             )
             provision_raw_transcript_scripts(self, host, self._get_agent_dir(), concurrency_group)
             maybe_provision_common_transcript_scripts(self, host, self._get_agent_dir(), concurrency_group)
+
+            # Provision the response-streaming watcher only when enabled. Its
+            # presence on disk is what makes claude_background_tasks.sh launch
+            # it, so a disabled interval simply means the script is absent.
+            if config.streaming_snapshot_interval_seconds > 0:
+                _check_python3_available(host)
+                _provision_stream_snapshot_script(
+                    host,
+                    self._get_agent_dir(),
+                    config.streaming_snapshot_interval_seconds,
+                    concurrency_group,
+                )
 
             if host.is_local and not config.use_env_config_dir:
                 # Determine the source path for trust extension
@@ -2288,10 +2356,13 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         """
         # Preserve session files before the state dir is deleted
         if self.agent_config.preserve_sessions_on_destroy:
-            try:
-                _preserve_session_files(self, host)
-            except (MngrError, OSError) as e:
-                logger.warning("Failed to preserve session files for agent {}: {}", self.name, e)
+            preserve_agent_data(
+                _claude_preserved_items(self.agent_config.use_env_config_dir),
+                host,
+                self._get_agent_dir(),
+                get_local_preserved_agent_dir(self.mngr_ctx, self.name, self.id),
+                self.mngr_ctx,
+            )
 
         if self.agent_config.use_env_config_dir:
             # Shared-config mode: mngr never wrote per-agent keychain entries or
@@ -2322,148 +2393,28 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
             pass
 
 
-def _get_preserved_sessions_dir(agent: ClaudeAgent) -> Path:
-    """Return the local directory path for an agent's preserved session files.
+def _claude_preserved_items(is_shared_config: bool) -> list[PreservedItem]:
+    """Return the files to preserve from a Claude agent's state directory.
 
-    Always resolves to a path under the local mngr data directory, regardless
-    of whether the agent ran locally or remotely.
+    Paths are relative to the agent state directory and are identical for the
+    online and offline preservation paths:
+
+    - ``plugin/claude/anthropic/projects`` -- the per-agent Claude config dir's
+      session JSONLs. Skipped in ``use_env_config_dir`` mode, where projects
+      live in the user's persistent ``$CLAUDE_CONFIG_DIR`` (not under the agent
+      state dir, and shared across all of the user's projects); they survive
+      destruction already and must not be duplicated per-agent.
+    - ``logs/claude_transcript`` -- the raw, agent-native transcript.
+    - ``events/claude/common_transcript`` -- the common (agent-agnostic) transcript.
+    - ``claude_session_id_history`` -- the session-id history file.
     """
-    return _get_preserved_sessions_dir_for(agent.name, agent.id, agent.mngr_ctx)
-
-
-def _preserve_session_files(agent: ClaudeAgent, host: OnlineHostInterface) -> None:
-    """Copy session files to the local mngr data directory before the agent state dir is deleted.
-
-    Preserves four categories of data:
-    - Session JSONL files from the per-agent Claude config dir (projects/)
-    - The raw transcript (logs/claude_transcript/events.jsonl)
-    - The common (agent-agnostic) transcript (events/claude/common_transcript/events.jsonl)
-    - The session ID history file (claude_session_id_history)
-
-    For local agents, this is a same-host copy. For remote agents, files are
-    pulled to the local machine via copy_directory (rsync over SSH).
-    Failures are logged as warnings but do not prevent agent destruction.
-
-    In ``use_env_config_dir`` mode the ``projects/`` copy is skipped: session
-    JSONLs already live in the user's persistent ``$CLAUDE_CONFIG_DIR`` (which
-    is not deleted with the agent state), and ``$CLAUDE_CONFIG_DIR/projects/``
-    contains the user's entire cross-project session history -- copying it
-    per-agent would duplicate gigabytes of unrelated sessions into mngr's
-    preserved-sessions store. Transcripts and the session-id history still
-    live under the agent state dir and are preserved as usual.
-    """
-    agent_dir = agent._get_agent_dir()
-    is_shared_config = agent.agent_config.use_env_config_dir
-
-    # Source paths for session data (on the agent's host). In shared-config
-    # mode the projects dir is the user's persistent dir, so don't probe or
-    # copy it; sessions there survive the agent's state-dir deletion already.
-    config_dir = agent.get_claude_config_dir()
-    projects_dir = config_dir / "projects"
-    raw_transcript_path = agent_dir / "logs" / "claude_transcript"
-    common_transcript_path = agent_dir / "events" / "claude" / "common_transcript"
-    history_path = agent_dir / "claude_session_id_history"
-
-    # Check which source directories/files exist on the agent's host (single roundtrip).
-    # The projects probe is omitted in shared-config mode -- we never copy it there.
-    projects_probe = "" if is_shared_config else f"[ -d {shlex.quote(str(projects_dir))} ] && echo projects;"
-    check_script = (
-        f"{projects_probe}"
-        f" [ -d {shlex.quote(str(raw_transcript_path))} ] && echo raw_transcript;"
-        f" [ -d {shlex.quote(str(common_transcript_path))} ] && echo common_transcript;"
-        f" [ -f {shlex.quote(str(history_path))} ] && echo history;"
-        f" true"
-    )
-    check_result = host.execute_idempotent_command(check_script, timeout_seconds=5.0)
-    available = set(check_result.stdout.strip().split()) if check_result.stdout.strip() else set()
-
-    if not available:
-        logger.debug("No session data to preserve for agent {}", agent.name)
-        return
-
-    dest_dir = _get_preserved_sessions_dir(agent)
-
-    # Get a local host reference for copy_directory (needed for remote agents)
-    local_host = get_local_host(agent.mngr_ctx)
-
-    with log_span("Preserving session files for agent {}", agent.name):
-        # Copy each available data category using copy_directory.
-        # In shared-config mode, "projects" is never present in `available`
-        # because we omitted its probe -- so this branch naturally skips.
-        if "projects" in available:
-            _copy_to_local(local_host, host, projects_dir, dest_dir / "projects", "session projects", agent.name)
-
-        if "raw_transcript" in available:
-            _copy_to_local(
-                local_host, host, raw_transcript_path, dest_dir / "raw_transcript", "raw transcript", agent.name
-            )
-
-        if "common_transcript" in available:
-            _copy_to_local(
-                local_host,
-                host,
-                common_transcript_path,
-                dest_dir / "common_transcript",
-                "common transcript",
-                agent.name,
-            )
-
-        if "history" in available:
-            # Session history is a single file -- read its content and write it locally
-            _copy_single_file_to_local(host, history_path, dest_dir / "claude_session_id_history", agent.name)
-
-
-def _copy_to_local(
-    local_host: OnlineHostInterface,
-    source_host: OnlineHostInterface,
-    source_path: Path,
-    dest_path: Path,
-    label: str,
-    agent_name: str,
-) -> None:
-    """Copy a directory from the source host to the local host via copy_directory."""
-    try:
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
-        local_host.copy_directory(source_host, source_path, dest_path)
-        logger.debug("Preserved {} for agent {}", label, agent_name)
-    except (MngrError, OSError) as e:
-        logger.warning("Failed to preserve {} for agent {}: {}", label, agent_name, e)
-
-
-def _copy_single_file_to_local(
-    source_host: OnlineHostInterface,
-    source_path: Path,
-    dest_path: Path,
-    agent_name: str,
-) -> None:
-    """Copy a single file from the source host to a local path."""
-    try:
-        content = source_host.read_text_file(source_path)
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
-        dest_path.write_text(content)
-        logger.debug("Preserved session history for agent {}", agent_name)
-    except (MngrError, OSError) as e:
-        logger.warning("Failed to preserve session history for agent {}: {}", agent_name, e)
-
-
-def get_preserved_sessions_dir_for_host(host_dir: Path, agent_name: AgentName, agent_id: AgentId) -> Path:
-    """Return the preserved-sessions directory for an agent under the given host dir.
-
-    This is the single source of truth for the on-disk layout of preserved
-    Claude session data, so other plugins that need to read those files can
-    call this helper instead of duplicating the path structure.
-    """
-    return host_dir / "plugin" / "mngr_claude" / "preserved_sessions" / f"{agent_name}--{agent_id}"
-
-
-def _get_preserved_sessions_dir_for(agent_name: AgentName, agent_id: AgentId, mngr_ctx: MngrContext) -> Path:
-    """Return the local directory path for an agent's preserved session files.
-
-    Takes primitives instead of a ClaudeAgent so it can be used from both
-    the online (agent-based) and offline (volume-based) preservation paths.
-    """
-    local_host_dir = Path(mngr_ctx.config.default_host_dir).expanduser()
-    return get_preserved_sessions_dir_for_host(local_host_dir, agent_name, agent_id)
+    items: list[PreservedItem] = []
+    if not is_shared_config:
+        items.append(PreservedItem(rel_path="plugin/claude/anthropic/projects", kind=FileType.DIRECTORY))
+    items.append(PreservedItem(rel_path="logs/claude_transcript", kind=FileType.DIRECTORY))
+    items.append(PreservedItem(rel_path="events/claude/common_transcript", kind=FileType.DIRECTORY))
+    items.append(PreservedItem(rel_path="claude_session_id_history", kind=FileType.FILE))
+    return items
 
 
 def _should_preserve_sessions(ref: DiscoveredAgent) -> bool:
@@ -2474,137 +2425,6 @@ def _should_preserve_sessions(ref: DiscoveredAgent) -> bool:
     """
     agent_config = ref.certified_data.get("agent_config", {})
     return bool(agent_config.get("preserve_sessions_on_destroy"))
-
-
-def _recursive_list_volume_files(volume: Volume, path: str) -> list[str]:
-    """Recursively list all file paths under a volume directory.
-
-    Returns full paths relative to the volume root (e.g. "projects/foo/bar.jsonl").
-    """
-    result: list[str] = []
-    try:
-        entries = volume.listdir(path)
-    except (MngrError, OSError) as e:
-        logger.trace("Failed to list volume directory '{}': {}", path, e)
-        return result
-
-    for entry in entries:
-        match entry.file_type:
-            case VolumeFileType.FILE:
-                result.append(entry.path)
-            case VolumeFileType.DIRECTORY:
-                result.extend(_recursive_list_volume_files(volume, entry.path))
-
-    return result
-
-
-def _copy_volume_file_to_local(volume: Volume, volume_path: str, dest_path: Path, agent_name: str) -> bool:
-    """Read a single file from a volume and write it locally.
-
-    Returns True on success, False on failure (logged as warning).
-    """
-    try:
-        data = volume.read_file(volume_path)
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
-        dest_path.write_bytes(data)
-        return True
-    except (MngrError, OSError) as e:
-        logger.warning("Failed to read volume file '{}' for agent {}: {}", volume_path, agent_name, e)
-        return False
-
-
-def _copy_volume_tree_to_local(volume: Volume, volume_path: str, dest_dir: Path, label: str, agent_name: str) -> bool:
-    """Recursively read files from a volume path and write them locally.
-
-    Returns True if at least one file was copied.
-    """
-    files = _recursive_list_volume_files(volume, volume_path)
-    if not files:
-        return False
-
-    copied_any = False
-    # Normalize once before the loop (strip trailing slash for prefix matching)
-    volume_path_normalized = volume_path.rstrip("/")
-    for file_path in files:
-        # file_path is relative to volume root (e.g. "plugin/claude/.../foo.jsonl")
-        # We want to preserve structure under volume_path, so strip the volume_path prefix
-        if file_path.startswith(volume_path_normalized + "/"):
-            relative = file_path[len(volume_path_normalized) + 1 :]
-        else:
-            relative = file_path
-        dest_file = dest_dir / relative
-        if _copy_volume_file_to_local(volume, file_path, dest_file, agent_name):
-            copied_any = True
-
-    if copied_any:
-        logger.debug("Preserved {} from volume for agent {}", label, agent_name)
-    return copied_any
-
-
-def _preserve_session_files_from_volume(
-    agent_volume: Volume,
-    agent_name: AgentName,
-    agent_id: AgentId,
-    mngr_ctx: MngrContext,
-) -> None:
-    """Read session files from an agent's volume and write them locally.
-
-    This is the offline counterpart to _preserve_session_files. Instead of
-    using SSH/rsync on an online host, it reads directly from the host volume
-    via the Volume API. Used by on_before_host_destroy when the host is offline.
-
-    Session file paths on the agent volume (relative to agent state dir):
-    - plugin/claude/anthropic/projects/**/*.jsonl
-    - logs/claude_transcript/events.jsonl
-    - events/claude/common_transcript/events.jsonl
-    - claude_session_id_history
-    """
-    dest_dir = _get_preserved_sessions_dir_for(agent_name, agent_id, mngr_ctx)
-
-    with log_span("Preserving session files from volume for agent {}", agent_name):
-        # Session JSONL files from the per-agent Claude config dir
-        _copy_volume_tree_to_local(
-            agent_volume,
-            "plugin/claude/anthropic/projects",
-            dest_dir / "projects",
-            "session projects",
-            str(agent_name),
-        )
-
-        # Raw transcript
-        _copy_volume_tree_to_local(
-            agent_volume,
-            "logs/claude_transcript",
-            dest_dir / "raw_transcript",
-            "raw transcript",
-            str(agent_name),
-        )
-
-        # Common transcript
-        _copy_volume_tree_to_local(
-            agent_volume,
-            "events/claude/common_transcript",
-            dest_dir / "common_transcript",
-            "common transcript",
-            str(agent_name),
-        )
-
-        # Session history (single file) -- check existence via listdir before
-        # attempting read, to avoid warning-level logs for the expected case
-        # where the file doesn't exist yet
-        try:
-            root_entries = agent_volume.listdir(".")
-            has_history = any(e.path == "claude_session_id_history" for e in root_entries)
-        except (MngrError, OSError) as e:
-            logger.trace("Failed to list volume root for session history check: {}", e)
-            has_history = False
-        if has_history:
-            _copy_volume_file_to_local(
-                agent_volume,
-                "claude_session_id_history",
-                dest_dir / "claude_session_id_history",
-                str(agent_name),
-            )
 
 
 def _generate_claude_home_settings() -> dict[str, Any]:
@@ -2696,30 +2516,31 @@ def agent_field_generators() -> tuple[str, dict[str, Callable[[AgentInterface, O
 
 @hookimpl
 def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
-    """Preserve Claude session files from the host volume before it is destroyed.
+    """Preserve Claude session files from the host's volume before it is destroyed.
 
     When a host goes offline and is destroyed without calling agent.on_destroy(),
-    session data still lives on the host volume. This hook reads session files
-    via the Volume API and writes them locally before the volume is deleted.
+    session data still lives on the host's persisted volume. If the provider
+    surfaces that volume, ``to_offline_host`` returns an ``OfflineHostWithVolume``
+    (a :class:`HostFileReadInterface`), so the same :func:`preserve_agent_data`
+    used on the online path reads the files straight off the volume. If the host
+    is not readable (no volume), there is nothing we can preserve.
     """
-    agent_refs = host.discover_agents()
-    agents_to_preserve = [ref for ref in agent_refs if _should_preserve_sessions(ref)]
-    if not agents_to_preserve:
+    if not isinstance(host, HostFileReadInterface):
+        logger.debug("Host {} is not readable (no volume); skipping session preservation", host.id)
         return
 
-    # Get the host volume from the provider
-    provider = get_provider_instance(agents_to_preserve[0].provider_name, mngr_ctx)
-    host_volume = provider.get_volume_for_host(host)
-    if host_volume is None:
-        logger.debug("No host volume available for host {}, skipping session preservation", host.id)
-        return
-
-    for ref in agents_to_preserve:
-        try:
-            agent_volume = host_volume.get_agent_volume(ref.agent_id)
-            _preserve_session_files_from_volume(agent_volume, ref.agent_name, ref.agent_id, mngr_ctx)
-        except (MngrError, OSError) as e:
-            logger.warning("Failed to preserve session files from volume for agent {}: {}", ref.agent_name, e)
+    for ref in host.discover_agents():
+        if not _should_preserve_sessions(ref):
+            continue
+        agent_config = ref.certified_data.get("agent_config", {})
+        is_shared_config = bool(agent_config.get("use_env_config_dir"))
+        preserve_agent_data(
+            _claude_preserved_items(is_shared_config),
+            host,
+            get_agent_state_dir_path(host.host_dir, ref.agent_id),
+            get_local_preserved_agent_dir(mngr_ctx, ref.agent_name, ref.agent_id),
+            mngr_ctx,
+        )
 
 
 @hookimpl

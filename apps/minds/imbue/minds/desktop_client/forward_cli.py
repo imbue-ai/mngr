@@ -52,16 +52,19 @@ from imbue.minds.desktop_client.backend_resolver import parse_service_log_record
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
+from imbue.minds.utils.secret_redaction import redact_secret_flag_values
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
+from imbue.mngr.api.discovery_events import HostDiscoveryEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.api.discovery_events import partition_removed_agents_by_provider_error
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import HostState
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
@@ -112,6 +115,7 @@ class EnvelopeStreamConsumer(MutableModel):
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _agent_host_map: dict[str, str] = PrivateAttr(default_factory=dict)
     _ssh_by_host_id: dict[str, RemoteSSHInfo] = PrivateAttr(default_factory=dict)
+    _host_state_by_host_id: dict[str, HostState] = PrivateAttr(default_factory=dict)
     _discovered_agents: dict[str, DiscoveredAgent] = PrivateAttr(default_factory=dict)
     _services_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
     _on_agent_discovered_callbacks: list[OnAgentDiscoveredCallback] = PrivateAttr(default_factory=list)
@@ -337,15 +341,21 @@ class EnvelopeStreamConsumer(MutableModel):
         self.resolver.record_discovery_event_received(datetime.now(timezone.utc))
         if isinstance(event, HostSSHInfoEvent):
             self._handle_host_ssh_info(event)
+        elif isinstance(event, HostDiscoveryEvent):
+            self._handle_host_discovered(event)
         elif isinstance(event, AgentDiscoveryEvent):
             self._handle_agent_discovered(event)
         elif isinstance(event, AgentDestroyedEvent):
             self._handle_agent_destroyed(event.agent_id)
         elif isinstance(event, HostDestroyedEvent):
+            # Record the terminal state first so any snapshot that re-lists this
+            # host during the destroyed-host persistence window is recognized as
+            # destroyed, then tear down the agents that were on it.
+            with self._lock:
+                self._host_state_by_host_id[str(event.host_id)] = HostState.DESTROYED
+                self._ssh_by_host_id.pop(str(event.host_id), None)
             for aid in event.agent_ids:
                 self._handle_agent_destroyed(aid)
-            with self._lock:
-                self._ssh_by_host_id.pop(str(event.host_id), None)
         elif isinstance(event, DiscoveryErrorEvent):
             logger.warning(
                 "Discovery error from {}: {} ({})", event.source_name, event.error_message, event.error_type
@@ -389,6 +399,20 @@ class EnvelopeStreamConsumer(MutableModel):
             ssh_info_by_agent = {
                 aid: self._ssh_by_host_id[hid] for aid, hid in merged_host_map.items() if hid in self._ssh_by_host_id
             }
+            # Rebuild host state from this snapshot's hosts (a destroyed host
+            # lingers here with host_state=DESTROYED for its persistence window).
+            # Retained agents' hosts are absent from an errored provider's
+            # snapshot, so carry their last-known state forward.
+            prior_host_state = dict(self._host_state_by_host_id)
+            merged_host_state: dict[str, HostState] = {
+                str(host.host_id): host.host_state for host in event.hosts if host.host_state is not None
+            }
+            for aid_str in partition.retained:
+                retained_host_id = merged_host_map[aid_str]
+                if retained_host_id not in merged_host_state and retained_host_id in prior_host_state:
+                    merged_host_state[retained_host_id] = prior_host_state[retained_host_id]
+            self._host_state_by_host_id = merged_host_state
+            host_state_snapshot = dict(merged_host_state)
         # Push the merged set (fresh + retained) so retained agents stay listed
         # in the workspace UI; their provider_name lets the workspace list mark
         # them stale by cross-referencing the errored providers below.
@@ -397,6 +421,7 @@ class EnvelopeStreamConsumer(MutableModel):
                 agent_ids=tuple(agent.agent_id for agent in merged_agents.values()),
                 discovered_agents=tuple(merged_agents.values()),
                 ssh_info_by_agent_id=ssh_info_by_agent,
+                host_state_by_host_id=host_state_snapshot,
             )
         )
         # Push provider state + freshness timestamp through the resolver so the
@@ -422,6 +447,28 @@ class EnvelopeStreamConsumer(MutableModel):
             ssh_info = ssh_info_by_agent.get(str(agent.agent_id))
             self._fire_discovered(agent.agent_id, ssh_info, str(agent.provider_name))
 
+    def _build_agents_result_locked(self) -> ParsedAgentsResult:
+        """Snapshot the current agent/ssh/host-state maps into a ParsedAgentsResult.
+
+        Must be called while ``self._lock`` is held: it reads the shared mutable
+        maps. Callers push the result to the resolver *after* releasing the lock.
+        Centralizing this keeps the per-event handlers from each re-deriving (and
+        having to re-thread every new resolver-snapshot field through) the same
+        merged view.
+        """
+        agent_ids = tuple(AgentId(aid) for aid in self._agent_host_map)
+        ssh_info_by_agent = {
+            aid: self._ssh_by_host_id[hid] for aid, hid in self._agent_host_map.items() if hid in self._ssh_by_host_id
+        }
+        discovered = tuple(self._discovered_agents.values())
+        host_state_snapshot = dict(self._host_state_by_host_id)
+        return ParsedAgentsResult(
+            agent_ids=agent_ids,
+            discovered_agents=discovered,
+            ssh_info_by_agent_id=ssh_info_by_agent,
+            host_state_by_host_id=host_state_snapshot,
+        )
+
     def _handle_host_ssh_info(self, event: HostSSHInfoEvent) -> None:
         ssh_info = RemoteSSHInfo(
             user=event.ssh.user, host=event.ssh.host, port=event.ssh.port, key_path=event.ssh.key_path
@@ -430,20 +477,18 @@ class EnvelopeStreamConsumer(MutableModel):
         with self._lock:
             self._ssh_by_host_id[host_id_str] = ssh_info
             agents_on_host = [AgentId(aid) for aid, hid in self._agent_host_map.items() if hid == host_id_str]
-            agent_ids = tuple(AgentId(aid) for aid in self._agent_host_map)
-            ssh_info_by_agent = {
-                aid: self._ssh_by_host_id[hid]
-                for aid, hid in self._agent_host_map.items()
-                if hid in self._ssh_by_host_id
-            }
-            discovered = tuple(self._discovered_agents.values())
-        self.resolver.update_agents(
-            ParsedAgentsResult(
-                agent_ids=agent_ids, discovered_agents=discovered, ssh_info_by_agent_id=ssh_info_by_agent
-            )
-        )
+            agents_result = self._build_agents_result_locked()
+        self.resolver.update_agents(agents_result)
         for agent_id in agents_on_host:
             self._fire_discovered(agent_id, ssh_info, self._provider_name_for_agent(agent_id))
+
+    def _handle_host_discovered(self, event: HostDiscoveryEvent) -> None:
+        if event.host.host_state is None:
+            return
+        with self._lock:
+            self._host_state_by_host_id[str(event.host.host_id)] = event.host.host_state
+            agents_result = self._build_agents_result_locked()
+        self.resolver.update_agents(agents_result)
 
     def _handle_agent_discovered(self, event: AgentDiscoveryEvent) -> None:
         agent = event.agent
@@ -451,19 +496,9 @@ class EnvelopeStreamConsumer(MutableModel):
         with self._lock:
             self._agent_host_map[aid_str] = str(agent.host_id)
             self._discovered_agents[aid_str] = agent
-            agent_ids = tuple(AgentId(aid) for aid in self._agent_host_map)
-            ssh_info_by_agent = {
-                aid: self._ssh_by_host_id[hid]
-                for aid, hid in self._agent_host_map.items()
-                if hid in self._ssh_by_host_id
-            }
-            discovered = tuple(self._discovered_agents.values())
             ssh_info = self._ssh_by_host_id.get(str(agent.host_id))
-        self.resolver.update_agents(
-            ParsedAgentsResult(
-                agent_ids=agent_ids, discovered_agents=discovered, ssh_info_by_agent_id=ssh_info_by_agent
-            )
-        )
+            agents_result = self._build_agents_result_locked()
+        self.resolver.update_agents(agents_result)
         self._fire_discovered(agent.agent_id, ssh_info, str(agent.provider_name))
 
     def _handle_agent_destroyed(self, agent_id: AgentId) -> None:
@@ -472,18 +507,8 @@ class EnvelopeStreamConsumer(MutableModel):
             self._discovered_agents.pop(aid_str, None)
             self._agent_host_map.pop(aid_str, None)
             self._services_by_agent.pop(aid_str, None)
-            agent_ids = tuple(AgentId(aid) for aid in self._agent_host_map)
-            ssh_info_by_agent = {
-                aid: self._ssh_by_host_id[hid]
-                for aid, hid in self._agent_host_map.items()
-                if hid in self._ssh_by_host_id
-            }
-            discovered = tuple(self._discovered_agents.values())
-        self.resolver.update_agents(
-            ParsedAgentsResult(
-                agent_ids=agent_ids, discovered_agents=discovered, ssh_info_by_agent_id=ssh_info_by_agent
-            )
-        )
+            agents_result = self._build_agents_result_locked()
+        self.resolver.update_agents(agents_result)
         self.resolver.update_services(agent_id, {})
         self._fire_destroyed(agent_id)
 
@@ -708,23 +733,15 @@ def _resolve_mngr_binary(candidate: str) -> str:
 
 
 def _redact_secrets(command: list[str]) -> list[str]:
-    """Return a copy of ``command`` with secret-bearing argument values masked.
+    """Return a copy of ``command`` with secret-bearing argument values masked for logging.
 
-    Used only for logging. The actual ``Popen`` call uses the unredacted
-    list so the plugin still receives the real values. Today we redact the
-    ``--preauth-cookie`` value (a freshly-minted shared secret between
-    minds, the plugin, and the Electron shell); future secret-bearing
-    flags can be added to ``_SECRET_BEARING_FLAGS``.
+    The actual ``Popen`` call uses the unredacted list so the plugin still
+    receives the real values. Today we redact the ``--preauth-cookie`` value
+    (a freshly-minted shared secret between minds, the plugin, and the
+    Electron shell); future secret-bearing flags can be added to
+    ``_SECRET_BEARING_FLAGS``.
     """
-    redacted = list(command)
-    for flag in _SECRET_BEARING_FLAGS:
-        try:
-            idx = redacted.index(flag)
-        except ValueError:
-            continue
-        if idx + 1 < len(redacted):
-            redacted[idx + 1] = "***"
-    return redacted
+    return redact_secret_flag_values(command, secret_bearing_flags=_SECRET_BEARING_FLAGS)
 
 
 _SECRET_BEARING_FLAGS: Final[tuple[str, ...]] = ("--preauth-cookie",)

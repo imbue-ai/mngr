@@ -90,6 +90,11 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         ...
 
     @abstractmethod
+    def set_command(self, command: CommandString) -> None:
+        """Replace the command used to start this agent (applied on the next start/restart)."""
+        ...
+
+    @abstractmethod
     def get_expected_process_name(self) -> str:
         """Get the expected process name for lifecycle state detection.
 

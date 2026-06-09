@@ -42,6 +42,7 @@ def test_stop_cli_options_fields() -> None:
         archive=False,
         sessions=(),
         stop_host=False,
+        dry_run=False,
         snapshot_mode=None,
         graceful=True,
         graceful_timeout=None,
@@ -311,6 +312,7 @@ def test_stop_cli_options_accepts_all_optional_fields() -> None:
         archive=True,
         sessions=("mngr-session-1", "mngr-session-2"),
         stop_host=True,
+        dry_run=False,
         snapshot_mode="auto",
         graceful=False,
         graceful_timeout="30s",
@@ -413,6 +415,39 @@ def test_stop_host_routes_to_provider_stop_host(
 
     assert result.exit_code != 0
     assert "Cannot stop the local host" in result.output
+
+
+@pytest.mark.tmux
+def test_stop_dry_run_does_not_stop_agent(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    create_test_agent: Callable[..., str],
+    temp_host_dir: Path,
+) -> None:
+    """``stop --dry-run`` reports the agent that would be stopped but leaves it running."""
+    create_test_agent("dry-run-agent", "sleep 300019")
+
+    dry_result = cli_runner.invoke(
+        stop,
+        ["dry-run-agent", "--dry-run"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert dry_result.exit_code == 0
+    assert "Would stop:" in dry_result.output
+    assert "dry-run-agent" in dry_result.output
+    # The dry run must not actually stop anything.
+    assert "Stopped agent" not in dry_result.output
+
+    # Proof the agent was left running: a real stop now finds and stops it.
+    real_result = cli_runner.invoke(
+        stop,
+        ["dry-run-agent"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert real_result.exit_code == 0
+    assert "Stopped agent: dry-run-agent" in real_result.output
 
 
 @pytest.mark.tmux

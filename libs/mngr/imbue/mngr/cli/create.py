@@ -29,6 +29,7 @@ from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.connect import resolve_connect_command
 from imbue.mngr.api.connect import run_connect_command
 from imbue.mngr.api.create import create as api_create
+from imbue.mngr.api.create import destroy_new_host_on_create_failure
 from imbue.mngr.api.data_types import ConnectionOptions
 from imbue.mngr.api.data_types import CreateAgentResult
 from imbue.mngr.api.discover import discover_hosts_and_agents
@@ -69,6 +70,7 @@ from imbue.mngr.interfaces.host import AgentGitOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import AgentLifecycleOptions
 from imbue.mngr.interfaces.host import AgentProvisioningOptions
+from imbue.mngr.interfaces.host import AgentTmuxOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HOST_PROVISIONING_FIELD_MAP
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
@@ -79,6 +81,7 @@ from imbue.mngr.interfaces.host import NewHostBuildOptions
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.host import PROVISIONING_FIELD_MAP
+from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -96,6 +99,9 @@ from imbue.mngr.primitives import NewAgentLocation
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
+from imbue.mngr.primitives import TmuxHeight
+from imbue.mngr.primitives import TmuxWidth
+from imbue.mngr.primitives import TmuxWindowSize
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.utils.duration import parse_duration_to_seconds
@@ -361,6 +367,24 @@ class _CreateCommand(click.Command):
     "--project",
     default=".",
     help="Project name for the agent (sets the 'project' label; '.' inherits from source agent's project label when --from references an agent, else uses the source's git remote origin, else the source's folder name) [default: .]",
+)
+@optgroup.option(
+    "--tmux-width",
+    type=int,
+    default=None,
+    help="Width (columns) of the agent's tmux window [default: 200]",
+)
+@optgroup.option(
+    "--tmux-height",
+    type=int,
+    default=None,
+    help="Height (rows) of the agent's tmux window [default: 50]",
+)
+@optgroup.option(
+    "--tmux-window-size",
+    type=click.Choice(["manual", "latest", "largest", "smallest"]),
+    default=None,
+    help="tmux window resize policy; 'manual' pins the window to its width/height and never resizes on attach [default: latest]",
 )
 @optgroup.group("Host Options")
 @optgroup.option(
@@ -938,6 +962,18 @@ def _create_agent(
         ),
     )
 
+    # Resolve the provider that owns a freshly-created host so the post-api_create
+    # edit-message send (which happens outside api_create's own teardown guard)
+    # can still tear the new host down on failure. None when we adopted an
+    # existing host -- in that case the guard below is a no-op and never destroys.
+    # Pass is_for_host_creation=True (matching api_create's own resolution) so a
+    # backend with one-time per-user bootstrap (Modal's environment) does not
+    # raise ProviderEmptyError here on the very first create: this is the create
+    # path, and the environment is about to be bootstrapped, not listed.
+    new_host_provider: ProviderInstanceInterface | None = None
+    if _is_creating_new_host(address, opts.new_host) and isinstance(resolved_target_host, NewHostOptions):
+        new_host_provider = get_provider_instance(resolved_target_host.provider, mngr_ctx, is_for_host_creation=True)
+
     # Call the API create function
     with _editor_cleanup_scope(setup.editor_session):
         create_result = api_create(
@@ -949,13 +985,18 @@ def _create_agent(
 
         # If --edit-message was used, wait for editor and send the message.
         # Re-acquire the host lock to prevent idle shutdown while the user edits
-        # (api_create releases its lock before returning).
+        # (api_create releases its lock before returning). This send happens
+        # after api_create returns -- outside its teardown guard -- so wrap it in
+        # the same guard here: if the initial-message send fails for a host we
+        # just created, tear that host down (respecting the debug retain flag)
+        # rather than leaking it.
         if setup.editor_session is not None:
-            with create_result.host.lock_cooperatively():
-                _handle_editor_message(
-                    editor_session=setup.editor_session,
-                    agent=create_result.agent,
-                )
+            with destroy_new_host_on_create_failure(create_result.host, new_host_provider):
+                with create_result.host.lock_cooperatively():
+                    _handle_editor_message(
+                        editor_session=setup.editor_session,
+                        agent=create_result.agent,
+                    )
 
     return create_result, connection_opts
 
@@ -1544,6 +1585,12 @@ def _parse_agent_opts(
     # Parse worktree base folder
     parsed_worktree_base_folder = Path(opts.worktree_base_folder).expanduser() if opts.worktree_base_folder else None
 
+    tmux_options = AgentTmuxOptions(
+        width=TmuxWidth(opts.tmux_width) if opts.tmux_width is not None else None,
+        height=TmuxHeight(opts.tmux_height) if opts.tmux_height is not None else None,
+        window_size=TmuxWindowSize(opts.tmux_window_size.upper()) if opts.tmux_window_size is not None else None,
+    )
+
     agent_opts = CreateAgentOptions(
         agent_id=AgentId(opts.id) if opts.id else None,
         agent_type=AgentTypeName(resolved_agent_type),
@@ -1560,6 +1607,7 @@ def _parse_agent_opts(
         lifecycle=lifecycle,
         label_options=label_options,
         provisioning=provisioning,
+        tmux=tmux_options,
         source_agent_state_location=source_agent_state_location,
     )
     return agent_opts, has_explicit_base

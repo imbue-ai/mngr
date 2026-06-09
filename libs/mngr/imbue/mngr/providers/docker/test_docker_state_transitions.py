@@ -96,7 +96,7 @@ def test_discover_host_state_failed_for_bad_build(
 
 
 # =========================================================================
-# Release tests -- run on release branch only
+# Release tests -- marked @pytest.mark.release, run via the Release Tests workflow and TMR
 # =========================================================================
 
 
