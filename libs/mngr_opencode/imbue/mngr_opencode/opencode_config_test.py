@@ -13,6 +13,7 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_opencode import resources as _opencode_resources
 from imbue.mngr_opencode.opencode_config import ACTIVE_MARKER_FILENAME
+from imbue.mngr_opencode.opencode_config import COMMON_TRANSCRIPT_RELATIVE_PATH
 from imbue.mngr_opencode.opencode_config import PLUGIN_FILENAME
 from imbue.mngr_opencode.opencode_config import RAW_TRANSCRIPT_RELATIVE_PATH
 from imbue.mngr_opencode.opencode_config import ROOT_SESSION_FILENAME
@@ -121,3 +122,12 @@ def test_plugin_resource_literals_stay_in_sync_with_constants() -> None:
     assert f'"{ACTIVE_MARKER_FILENAME}"' in plugin_source
     assert f'"{ROOT_SESSION_FILENAME}"' in plugin_source
     assert f'"{RAW_TRANSCRIPT_RELATIVE_PATH}"' in plugin_source
+
+
+def test_converter_resource_paths_stay_in_sync_with_constants() -> None:
+    """The converter .sh hardcodes the raw input and common output paths; guard against drift."""
+    converter_source = (
+        importlib.resources.files(_opencode_resources).joinpath("opencode_common_transcript.sh").read_text()
+    )
+    assert RAW_TRANSCRIPT_RELATIVE_PATH in converter_source
+    assert COMMON_TRANSCRIPT_RELATIVE_PATH in converter_source

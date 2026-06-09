@@ -22,9 +22,10 @@
 //
 //   2. Root session id for resume. The root session is the one with no
 //      `parentID`. Its id is written to $MNGR_AGENT_STATE_DIR/<root-session-file>
-//      so assemble_command can resume it via `opencode --session <id>` across
-//      stop/start. Subagents are child sessions and never overwrite it; starting
-//      a fresh session (/new) updates it to the newest root.
+//      so assemble_command can detect that a session exists and resume via
+//      `opencode --continue` across stop/start (the recorded id itself is
+//      informational). Subagents are child sessions and never overwrite it;
+//      starting a fresh session (/new) updates it to the newest root.
 //
 //   3. Raw transcript. Each message.updated / message.part.updated event is
 //      appended verbatim (as {type, properties}) to

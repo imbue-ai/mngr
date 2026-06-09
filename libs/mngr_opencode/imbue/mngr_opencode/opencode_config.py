@@ -64,10 +64,14 @@ PLUGIN_FILENAME: str = "mngr_opencode_plugin.ts"
 ACTIVE_MARKER_FILENAME: str = "active"
 
 # Per-agent file (in ``$MNGR_AGENT_STATE_DIR``) recording the *root* OpenCode
-# session id for the current turn -- the session with no ``parentID``. The plugin
-# writes it at each turn boundary; ``assemble_command`` reads it to resume via
-# ``opencode --session <id>``. Subagents run as child sessions (with a
-# ``parentID``) and never overwrite it. The plugin hardcodes this same literal.
+# session id -- the session with no ``parentID``. The plugin writes it once a
+# root session exists; ``assemble_command`` checks its *presence* to decide
+# whether to resume (via ``opencode --continue``, which resumes the most recent
+# root session). ``--continue`` is used rather than ``--session <id>`` because
+# OpenCode errors on a missing session id; the recorded id itself is therefore
+# informational (and ready for a future ``--session`` pin). Subagents run as
+# child sessions (with a ``parentID``) and never overwrite it. The plugin
+# hardcodes this same literal.
 ROOT_SESSION_FILENAME: str = "opencode_root_session"
 
 # Raw transcript path (relative to ``$MNGR_AGENT_STATE_DIR``). The plugin appends
