@@ -293,7 +293,8 @@ idle early; parent never goes idle)?
 **Related failure mode -- background / detached work.** The `active` marker tracks the
 agent's *conversational turn* (the model loop), not arbitrary processes that turn spawned. A
 *foreground* tool call keeps the marker present until it returns -- including an awaited
-subagent tool (e.g. pi's subagent extension blocks the turn while its child agents run). The
+subagent tool (pi has no built-in subagents, but an optional third-party subagent extension,
+if installed, runs each child as a *nested process* that blocks the turn while it runs). The
 marker only flips to WAITING with work still in flight when that work is *detached* from the
 turn: the agent runs `cmd &` / `nohup` / starts a daemon, **or** the CLI offers a structured
 "run in background" tool that returns a handle *before* the task finishes (Claude Code's
@@ -324,9 +325,10 @@ Be careful to separate two things, because the CLIs' idle signals *do* correctly
 `false` through a turn's interim Stops and the root-vs-subagent id match ignores a subagent's
 own idle ([dimension D](#d-subagent-aware-idle-gating-the-crux)), so the marker clears only on
 the root's final, everything-done Stop -- not mid-turn, and not when a subagent it launched
-finishes. pi reaches the same outcome differently: its foreground tools (including the
-subagent tool) block the turn, so `agent_end` fires only once the turn -- subagents included
--- is fully complete. What *none* of the three reflects is a process the agent **detaches
+finishes. pi reaches the same outcome differently: its foreground tools block the turn (and
+an optional subagent extension, if installed, runs its children as nested processes that
+likewise block), so `agent_end` fires only once the turn is fully complete. What *none* of
+the three reflects is a process the agent **detaches
 from its loop entirely** (`cmd &` / `nohup` / a CLI `run_in_background` tool that returns
 before its task finishes): that is loop/turn-scoped for claude, agy, and pi alike. So the
 honest fallback, absent a per-task tag to wait on, is to scope the marker to the agent's

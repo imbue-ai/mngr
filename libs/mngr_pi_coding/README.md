@@ -21,6 +21,10 @@ environment and pass it through, e.g. `mngr create my-agent pi-coding --pass-env
 or run `pi` once and use `/login` to populate `~/.pi/agent/auth.json` (which the
 plugin shares into each agent).
 
+> **Tool permissions.** pi runs tools -- including shell commands -- without a confirmation
+> gate: it has no built-in approval prompts, and mngr adds none. To restrict an agent, use
+> pi's own `--tools <allowlist>` via `cli_args`, or run untrusted work in a sandbox.
+
 ## What you get
 
 - **Per-agent isolation.** Each agent gets its own pi config dir via
