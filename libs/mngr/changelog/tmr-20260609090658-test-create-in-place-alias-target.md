@@ -1,0 +1,1 @@
+Fixed the e2e tutorial test fixture (`conftest.py`) that wrote a duplicate `type = "claude"` key into `settings.local.toml` under `[commands.create]`, producing invalid TOML and causing `mngr create` to fail with "Cannot overwrite a value" during e2e tutorial tests.

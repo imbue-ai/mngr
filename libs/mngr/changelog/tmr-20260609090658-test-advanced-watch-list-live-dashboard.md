@@ -1,0 +1,1 @@
+Fixed a duplicate `type = "claude"` key in the e2e test fixture's generated `settings.local.toml`, which produced invalid TOML ("Cannot overwrite a value") and broke every e2e tutorial test's environment setup.
