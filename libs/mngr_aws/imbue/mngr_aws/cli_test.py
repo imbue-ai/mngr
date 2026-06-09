@@ -2,13 +2,15 @@
 
 Splits the test surface into two layers:
 
-- The privileged ``prepare`` path: exercised through ``_build_prepare_client``
-  + a real ``_StubbedAwsVpsClient`` rather than mocking the click runtime.
-  This keeps the EC2 API contract in the test (botocore Stubber) without
-  pulling in ``unittest.mock``.
-- Click-level smoke tests: invoke the click commands directly to verify
-  exit codes and user-facing error messages on the paths that don't need
-  a real EC2 call (the ``ami`` ``[future]`` stub; the no-credentials path).
+- The SG-management logic that the ``prepare`` callback invokes:
+  exercised against ``_StubbedAwsVpsClient`` with a botocore ``Stubber``
+  queuing the expected EC2 API calls. Bypasses the click runtime so the
+  wire contract (Describe -> Create -> Authorize x2) can be asserted on
+  directly, without ``unittest.mock``.
+- Click-level smoke tests: invoke the click commands through
+  ``CliRunner`` to verify exit codes and user-facing error messages on
+  the paths that don't need a real EC2 call (the ``ami`` ``[future]``
+  stub; the no-credentials path; ``prepare --help``).
 """
 
 import boto3
