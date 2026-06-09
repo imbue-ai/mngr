@@ -485,7 +485,11 @@ def _get_stale_docker_test_containers(max_age_seconds: int = 3600) -> list[tuple
     """
     try:
         client = create_docker_client()
-    except docker.errors.DockerException:
+    except docker.errors.DockerException as e:
+        # Called unconditionally at session end, including in sessions with no
+        # Docker daemon (e.g. offload sandboxes), so a connection failure here
+        # is expected -- log at debug only.
+        logger.debug("Skipped stale docker container sweep (Docker unavailable): {}", e)
         return []
 
     try:
@@ -496,7 +500,8 @@ def _get_stale_docker_test_containers(max_age_seconds: int = 3600) -> list[tuple
                 "label": [LABEL_PROVIDER],
             },
         )
-    except docker.errors.DockerException:
+    except docker.errors.DockerException as e:
+        logger.warning("Failed to list Docker containers during stale-container sweep: {}", e)
         client.close()
         return []
 
@@ -553,7 +558,12 @@ def _get_leaked_state_containers_for_prefixes(prefixes: list[str]) -> list[tuple
         return []
     try:
         client = create_docker_client()
-    except docker.errors.DockerException:
+    except docker.errors.DockerException as e:
+        # We only reach here when this worker's docker fixtures ran (non-empty
+        # prefixes), so the daemon was reachable during the tests. Failing to
+        # connect now means we cannot verify our own cleanup -- this is
+        # unexpected, so surface it loudly rather than silently skipping.
+        logger.opt(exception=e).error("Failed to connect to Docker to check for leaked state containers")
         return []
 
     try:
@@ -561,7 +571,8 @@ def _get_leaked_state_containers_for_prefixes(prefixes: list[str]) -> list[tuple
             all=True,
             filters={"label": [f"{STATE_CONTAINER_TYPE_LABEL}={STATE_CONTAINER_TYPE_VALUE}"]},
         )
-    except docker.errors.DockerException:
+    except docker.errors.DockerException as e:
+        logger.opt(exception=e).error("Failed to list Docker containers while checking for leaked state containers")
         return []
     finally:
         client.close()
