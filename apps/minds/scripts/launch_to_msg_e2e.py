@@ -76,6 +76,7 @@ import sys
 import threading
 import time
 import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -113,7 +114,8 @@ EVENTS_LOG = MINDS_HOME / "logs" / "minds-events.jsonl"
 ONE_TIME_CODES = MINDS_HOME / "auth" / "one_time_codes.json"
 SCREENSHOT_DIR = Path(os.environ.get("LAUNCH_TO_MSG_SHOTS_DIR", "/tmp/launch-to-msg-screenshots"))
 SLACK_MOCK_STATE = Path("/tmp/slack-mock")
-SLACK_MOCK_PORT = 8443  # plain HTTP; socat terminates TLS on :443
+# Plain HTTP; socat terminates TLS on :443.
+SLACK_MOCK_PORT = 8443
 LATCHKEY_DIR = MINDS_HOME / "latchkey"
 # The latchkey-gateway extension writes pending permission request files
 # here. Iter 10 reads this directory directly to verify that Claude
@@ -350,7 +352,7 @@ def start_mock() -> _ThreadedHTTP:
             return server
         except OSError:
             time.sleep(0.2)
-    raise RuntimeError(f"slack mock failed to bind {SLACK_MOCK_PORT}")
+    raise E2EFailure(f"slack mock failed to bind {SLACK_MOCK_PORT}")
 
 
 # --- cert + /etc/hosts + socat + latchkey wiring ---
@@ -419,7 +421,7 @@ def ensure_brew_curl() -> Path:
     logger.info("brew curl missing -> brew install curl")
     brew = next((b for b in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew") if Path(b).exists()), None)
     if brew is None:
-        raise RuntimeError("neither brew curl nor brew found; install brew + curl")
+        raise E2EFailure("neither brew curl nor brew found; install brew + curl")
     subprocess.run([brew, "install", "curl"], check=True)
     return ensure_brew_curl()
 
@@ -477,7 +479,7 @@ def latchkey_env() -> dict[str, str]:
     """Env the bundled latchkey shim needs: encryption key + Electron exec path."""
     key_file = LATCHKEY_DIR / "encryption_key"
     if not key_file.exists():
-        raise RuntimeError(f"latchkey encryption_key missing at {key_file}")
+        raise E2EFailure(f"latchkey encryption_key missing at {key_file}")
     return {
         **os.environ,
         "LATCHKEY_DIRECTORY": str(LATCHKEY_DIR),
@@ -538,7 +540,7 @@ def wait_backend_url(since_offset: int = 0) -> str:
                     base = url.split("/login")[0]
                     return base
         time.sleep(2)
-    raise RuntimeError(f"no backend login URL after {LAUNCH_BACKEND_TIMEOUT}s (since_offset={since_offset})")
+    raise E2EFailure(f"no backend login URL after {LAUNCH_BACKEND_TIMEOUT}s (since_offset={since_offset})")
 
 
 def mint_one_time_code() -> str:
@@ -562,8 +564,6 @@ def _free_port() -> int:
 
 async def _wait_cdp(port: int, timeout: float = 60.0) -> str:
     """Wait until http://127.0.0.1:<port>/json/version is reachable."""
-    import urllib.request
-
     deadline = time.time() + timeout
     last_err: Exception | None = None
     while time.time() < deadline:
@@ -574,7 +574,7 @@ async def _wait_cdp(port: int, timeout: float = 60.0) -> str:
         except Exception as e:
             last_err = e
         await asyncio.sleep(0.5)
-    raise RuntimeError(f"CDP not reachable on :{port} after {timeout}s: {last_err}")
+    raise E2EFailure(f"CDP not reachable on :{port} after {timeout}s: {last_err}")
 
 
 def all_pages(ctx: BrowserContext) -> list[Page]:
@@ -684,7 +684,7 @@ async def _create_workspace_and_first_message(
     await snap_page(win, snaps.submitted)
     m = re.search(r"/creating/([a-z0-9-]+)", win.url)
     if not m:
-        raise RuntimeError(f"[{label}] expected /creating/<id> after submit, got url={win.url}")
+        raise E2EFailure(f"[{label}] expected /creating/<id> after submit, got url={win.url}")
     creation_id = m.group(1)
     logger.info("[{}] creation_id={}", label, creation_id)
 
@@ -727,7 +727,7 @@ async def _create_workspace_and_first_message(
             done = True
             break
         if state == "FAILED":
-            raise RuntimeError(f"[{label}] creation FAILED: {payload.get('error', stat['body'])}")
+            raise E2EFailure(f"[{label}] creation FAILED: {payload.get('error', stat['body'])}")
         if (
             state == "CREATING_WORKSPACE"
             and not any(SCREENSHOT_DIR.glob(f"{snaps.creating_mid}.*"))
@@ -741,7 +741,7 @@ async def _create_workspace_and_first_message(
         if EVENTS_LOG.exists():
             tail = EVENTS_LOG.read_text(errors="ignore").splitlines()[-60:]
             logger.error("[{}] minds-events.jsonl tail:\n{}", label, "\n".join(tail))
-        raise RuntimeError(f"[{label}] creation didn't reach DONE in {CREATE_TIMEOUT}s (last={last_status})")
+        raise E2EFailure(f"[{label}] creation didn't reach DONE in {CREATE_TIMEOUT}s (last={last_status})")
     if not done_redirect_url:
         raise E2EFailure(
             f"[{label}] creation DONE without redirect_url; check the /api/create-agent/<id>/status contract"
@@ -953,7 +953,7 @@ async def amain() -> int:
                 break
             await asyncio.sleep(0.5)
         if not ctx.pages:
-            raise RuntimeError("no Electron windows after 30s")
+            raise E2EFailure("no Electron windows after 30s")
         win = ctx.pages[0]
         await snap_page(win, "00-app-launched")
 
@@ -982,10 +982,10 @@ async def amain() -> int:
         # See _create_workspace_and_first_message for the exact step list.
         ai_provider = os.environ.get("MINDS_AI_PROVIDER", "API_KEY").upper()
         if ai_provider not in ("API_KEY", "SUBSCRIPTION"):
-            raise RuntimeError(f"MINDS_AI_PROVIDER={ai_provider!r} -- must be API_KEY or SUBSCRIPTION")
+            raise E2EFailure(f"MINDS_AI_PROVIDER={ai_provider!r} -- must be API_KEY or SUBSCRIPTION")
         anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
         if ai_provider == "API_KEY" and not anthropic_key:
-            raise RuntimeError(
+            raise E2EFailure(
                 "MINDS_AI_PROVIDER=API_KEY but ANTHROPIC_API_KEY not set; "
                 "either set ANTHROPIC_API_KEY or pass MINDS_AI_PROVIDER=SUBSCRIPTION."
             )
@@ -1033,8 +1033,10 @@ async def amain() -> int:
             logger.info("=== slack flow ===")
             mock = start_mock()
             patch_etc_hosts()
-            start_socat(cert)  # killed in finally via stop_socat()
-            time.sleep(2)  # let socat bind
+            # Killed in finally via stop_socat().
+            start_socat(cert)
+            # Let socat bind.
+            time.sleep(2)
             try:
                 latchkey_set_slack()
                 # 8. Send slack prompt
@@ -1144,7 +1146,8 @@ async def amain() -> int:
                 deadline = time.time() + DRIVE_SLACK_TIMEOUT
                 clicked_at = {}
                 approved_request_urls: set[str] = set()
-                last_kick_at = 0.0  # monotonic timestamp of last kick
+                # Monotonic timestamp of the last kick.
+                last_kick_at = 0.0
                 first_approve_at = 0.0
                 approve_snaps = (
                     "07g-approve-stage0",
@@ -1228,7 +1231,7 @@ async def amain() -> int:
                         with contextlib.suppress(Exception):
                             preview = (await p.evaluate("document.body.innerText"))[:200].replace("\n", " ")
                             logger.error("  page url={} body=...{!r}", p.url, preview)
-                    raise RuntimeError(
+                    raise E2EFailure(
                         f"canned body not in chat after {DRIVE_SLACK_TIMEOUT}s (approval_stage={approval_stage})"
                     )
             finally:
@@ -1679,7 +1682,7 @@ async def _advance_approval(
     ctx: BrowserContext,
     win: Page,
     stage: int,
-    state: dict,
+    state: dict[str, int],
     *,
     decision: str = "approve",
     snap_prefix_pair: tuple[str, str, str, str] = (
@@ -1717,16 +1720,18 @@ async def _advance_approval(
         # because Claude rephrases the message each run (eg "Waiting"
         # vs "awaiting" vs "wait for").
         body = (await win.evaluate("document.body.innerText")).lower()
+        # "approval" catches "Waiting for your approval", "awaiting", etc.
         if not any(
             s in body
             for s in (
                 "permission request",
                 "requested read",
-                "approval",  # catches "Waiting for your approval", "awaiting", etc.
+                "approval",
                 "approve",
             )
         ):
-            return  # not ready yet
+            # Not ready yet.
+            return
         # Find the Requests button on any window.
         for w in all_pages(ctx):
             try:
@@ -1799,7 +1804,7 @@ async def _advance_approval(
                         with contextlib.suppress(Exception):
                             body_text = await w.evaluate("document.body.innerText")
                             if "Authorization failed" in body_text or "No browser configured" in body_text:
-                                raise RuntimeError(
+                                raise E2EFailure(
                                     f"{snap_stage2_post} shows authorization failure: "
                                     + body_text.replace("\n", " | ")[:400]
                                 )
@@ -1818,7 +1823,7 @@ def main() -> int:
     except KeyboardInterrupt:
         return 130
     except Exception:
-        logger.exception("FATAL")
+        logger.opt(exception=True).error("FATAL")
         return 1
 
 
