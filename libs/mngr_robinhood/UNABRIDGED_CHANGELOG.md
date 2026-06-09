@@ -4,6 +4,147 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-08
+
+- Now auto-discovered as a publishable package by the release tooling (it is a standalone `mngr robinhood` CLI -- a drop-in `claude -p` replacement -- documented with `uv tool install imbue-mngr-robinhood`). It will be offered for first publication to PyPI on the next release, so those documented install instructions stop 404-ing. Its stale `imbue-mngr==0.2.8` / `imbue-mngr-claude==0.2.8` pins are realigned to the current `0.2.10`. No runtime change.
+
+Add some docs about the SDK divergences for the Agent SDK
+Update install instructions
+Update robinhood README
+
+## 2026-06-07
+
+# mngr-backed Claude Agent SDK (`imbue.mngr_robinhood.agent_sdk`)
+
+Added an alternative, mngr-backed implementation of the Claude Agent SDK Python interface,
+importable as a drop-in replacement for `claude_agent_sdk`:
+
+```python
+from imbue.mngr_robinhood.agent_sdk import query, ClaudeAgentOptions, ClaudeSDKClient
+```
+
+The new `imbue.mngr_robinhood.agent_sdk` module re-exports every SDK *type* verbatim from
+`claude_agent_sdk` (so `isinstance` checks and field shapes are identical) and re-implements the
+behavioral entry points on top of mngr: each session is a `robinhood-`-prefixed mngr claude agent,
+driven through the in-process mngr API and read back from its native transcript. This works with
+any agent mngr can run; v1 targets the claude agent type.
+
+Implemented and verified live against the real API:
+
+- `query()` (string and streaming-input prompts) and the full `ClaudeSDKClient` lifecycle
+  (async context manager, `connect`/`disconnect`, `query`, `receive_response`/`receive_messages`,
+  multi-turn on one connection with a stable `session_id`).
+- The observable `ClaudeAgentOptions` subset: `model`, `system_prompt` (string + preset/append),
+  `allowed_tools`/`disallowed_tools`, `permission_mode` (default/acceptEdits/plan/bypass),
+  `cwd`, `add_dirs`, `env`, `settings`, `max_turns`.
+- Built-in tool use end-to-end (Bash/Read/Write/Edit/Glob/Grep), with correlated
+  `ToolUseBlock`/`ToolResultBlock`.
+- Message/content-block/result type shapes, including a synthesized `system`/`init` message and a
+  terminal `ResultMessage` (with `usage`, `model_usage`, durations, `session_id`, `uuid`).
+- The session functions keyed by `directory`: `list_sessions` (newest-first, `limit`/`offset`),
+  `get_session_info`, `get_session_messages`, `rename_session`, `tag_session`, with the documented
+  `None`/`[]`/`FileNotFoundError` contracts. `session_id` is read from the transcript (never
+  assumed equal to the mngr agent id, since claude rotates session ids).
+- `resume` / `continue_conversation` by reusing and restarting the agent that owns the session.
+
+Known limitations on the mngr transport (the tests skip the mngr target for these and still run
+them against the real SDK): in-process `can_use_tool` / `hooks` callbacks, `interrupt`,
+partial-message `StreamEvent` streaming, live `get_server_info`, `fork_session`, and
+`total_cost_usd` (absent from claude's native session JSONL). `set_model` / `set_permission_mode`
+are accepted but do not retroactively re-configure the already-running agent.
+
+Test suite: the existing `test_sdk_*.py` live suite is parameterized over an `sdk` fixture so each
+test runs against both the real `claude_agent_sdk` and the mngr implementation.
+
+Also extracted shared agent-runtime helpers out of `orchestrator.py` into `agent_runtime.py`
+(used by both the robinhood CLI and the SDK), and hardened env forwarding to drop shell-unsafe
+values that could corrupt the agent's env file.
+
+Added an opt-in, live integration test suite (`imbue/mngr_robinhood/test_sdk_*.py`) that
+performs clean-room verification of the documented `query()` and `ClaudeSDKClient` interfaces
+of the Claude Agent SDK (`claude_agent_sdk`) end-to-end against the real API. The suite covers
+`query()` (string and streaming-input prompts), `ClaudeSDKClient` lifecycle and control
+(`connect`/`disconnect`, multi-turn, `receive_messages`/`receive_response`, `set_model`,
+`set_permission_mode`, `interrupt`), `can_use_tool` allow/deny and a `PreToolUse` hook,
+message/content-block type shapes, the session functions (`list_sessions`,
+`get_session_info`, `get_session_messages`, `rename_session`, `tag_session`), and documented
+`FileNotFoundError` error paths.
+
+The suite was then expanded with ~100 additional tests covering: field-level message contracts
+(`SystemMessage` init data, `ResultMessage` usage/cost/duration/model-usage, `AssistantMessage`
+metadata, `StreamEvent`); built-in tool use end-to-end (Bash/Read/Write/Edit/Glob/Grep, tool
+use/result id correlation, failing-command `is_error`); more `ClaudeAgentOptions` behavior
+(`env`, `allowed_tools`/`disallowed_tools`, `permission_mode` bypass/accept/plan, pinned
+`model`, `system_prompt` string and preset, `add_dirs`, `cwd`); `ClaudeSDKClient` introspection
+(`get_server_info`, `get_mcp_status`) and streaming input / partial messages; advanced
+permission and hook behavior (`can_use_tool` input rewriting and deny semantics, `PreToolUse`/
+`PostToolUse`/`UserPromptSubmit` hooks and matchers); and session continuation (`resume`,
+`fork_session`, `continue_conversation`) plus `SDKSessionInfo`/`SessionMessage` field contracts
+and `list_sessions` paging.
+
+A dedicated `test_sdk_session_functions.py` adds thorough coverage of the five session
+functions (`list_sessions`, `get_session_messages`, `get_session_info`, `rename_session`,
+`tag_session`): `limit`/`offset` paging on real sessions, `list_sessions` newest-first
+ordering, `SDKSessionInfo` field-value contracts (summary/tag/custom_title/file_size/created_at),
+directory isolation, and rename/tag overwrite-and-clear semantics.
+
+These tests make real, paid API calls and are excluded from all CI runs via the new `sdk_live`
+marker; they only run when `RUN_SDK_LIVE_TESTS=1` and `ANTHROPIC_API_KEY` are both set (run them
+with `just test-sdk-live`). Added `claude-agent-sdk` as a dependency and `pytest-asyncio` as a
+dev dependency (`asyncio_mode = "strict"`). See the README's "Running the live SDK tests"
+section for details.
+
+# Finish the mngr-backed Agent SDK
+
+Bug fix: `mngr robinhood` (and the Agent SDK) no longer forward the caller's tmux/terminal session
+variables (`TMUX`, `TMUX_PANE`, `KITTY_*`) into the spawned agent's environment. When `mngr robinhood`
+is run from inside a tmux/mngr session, forwarding `TMUX` pointed the new headless agent's tmux
+machinery (readiness detection, transcript capture) at the *parent's* pane, so the agent never
+signalled readiness and the command hung. (This was latent on `main` too, masked by `KITTY_PUBLIC_KEY`'s
+unquoted-backtick value accidentally truncating the env file before those vars; this branch's env-file
+hardening removed that accident and exposed the bug, now fixed properly in `build_pass_env_vars`.)
+
+Completed the previously-stubbed control surfaces of the mngr-backed Agent SDK
+(`imbue.mngr_robinhood.agent_sdk`) so it is a faithful drop-in for `claude_agent_sdk`:
+
+- `can_use_tool` and `hooks` callbacks now fire in-process, served by a local HTTP bridge that
+  the mngr claude agent calls via `--settings` hook commands (PreToolUse/PostToolUse/
+  UserPromptSubmit). Permission allow/deny/`updated_input` all work, and denials are surfaced in
+  `ResultMessage.permission_denials`.
+- `ClaudeSDKClient.interrupt()` now ends an in-flight turn (the response stream is streamed
+  incrementally and terminates at a `ResultMessage`); the next `query()` continues the conversation.
+- `set_model` / `set_permission_mode` now take effect by rewriting the agent's stored launch
+  command with the new configuration (via the agent's `set_command` API) and restarting it on the
+  resumed session (previously a no-op); this can switch to a genuinely different model mid-session.
+- `get_server_info()` returns real commands / output style from a one-shot `claude` stream-json probe.
+- `ResultMessage.total_cost_usd` is computed from per-turn token usage and a per-model price table.
+- `include_partial_messages` now yields `StreamEvent`s on the mngr target: the agent's tmux pane is
+  watched (via mngr_claude's streaming `stream_buffer`) and the reconstructed assistant text is
+  wrapped in the claude-native partial-event sequence (`message_start` -> `content_block_delta` ->
+  `message_stop`). The event shapes conform to the real SDK; the text is approximate (reconstructed
+  from the rendered pane, not claude's token-level deltas) and `usage`/`total_cost_usd` stay on the
+  authoritative transcript-derived `ResultMessage`. Off by default; the caller's model is honored
+  (the SDK does not force sonnet). The `stream_buffer` parse/diff logic is shared with the robinhood
+  CLI streaming path via a new `stream_buffer.py` module.
+
+The corresponding live tests are now unskipped for the mngr target (they previously ran only
+against the real SDK). The README documents the dual-target live suite and the supported control
+surfaces.
+
+`fork_session` remains real-SDK-only: claude's `--fork-session` does not assign a new session id
+when driven interactively over an adopted, resumed session, so the mngr-backed SDK raises
+`AgentSdkNotImplementedError` rather than returning a wrong/duplicate id.
+
+Fixed duplicated paragraphs in `mngr robinhood`'s live streaming output (`--stream-plain-text` and `--include-partial-messages`).
+
+- When Claude's TUI reflowed already-rendered text as later text streamed in -- most visibly collapsing a blank line around a markdown horizontal rule (`---`) as the following paragraph arrived -- the stream-buffer body was no longer a clean prefix-extension of what had already been emitted. The delta computation then re-emitted everything past the (character-level) divergence point, and because plain-text output cannot be unprinted, the already-printed region appeared a second time.
+- `compute_stream_delta`'s divergence branch now recognizes already-emitted content across whitespace reflow (treating whitespace runs as equivalent and absorbing collapsed/added blank lines), so only genuinely new content is emitted. At worst a little already-printed whitespace is left stale; no visible content is duplicated.
+
+Added tmux window-sizing flags to `mngr robinhood`: `--tmux-width`, `--tmux-height`, and `--tmux-window-size` (`manual|latest|largest|smallest`).
+
+- The spawned agent's tmux window now defaults to a large, pinned size (`2048` columns x `256` rows, `manual`) so the live-streamed response -- reverse-mapped from the rendered tmux pane -- is no longer chopped into hard line wraps at a narrow pane width.
+- All three flags are consumed by the wrapper (not forwarded to claude); invalid values exit with code 2.
+
 ## 2026-06-06
 
 `mngr robinhood` can now surface an approximate, live view of the response as it is produced, sourced from the spawned agent's tmux-based `stream_buffer` (see `imbue-mngr-claude`).

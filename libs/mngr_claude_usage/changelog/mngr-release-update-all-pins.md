@@ -1,1 +1,0 @@
-- Now auto-discovered as a publishable package by the release tooling (the writer half of the usage split; pairs with `mngr_usage`). It will be offered for first publication to PyPI on the next release. Its stale `imbue-mngr==0.2.6` / `imbue-mngr-claude==0.2.6` pins are realigned to the current `0.2.10`. No runtime change.

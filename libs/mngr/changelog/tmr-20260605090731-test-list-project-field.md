@@ -1,1 +1,0 @@
-- `mngr list --fields` now accepts `project` as a short alias for the `labels.project` field (mirroring the existing `--project` filter flag and the `host.provider` field alias). Previously `mngr list --fields "name,project,state"` rendered an empty `PROJECT` column because `project` resolved to a nonexistent top-level attribute; it now shows each agent's project label.

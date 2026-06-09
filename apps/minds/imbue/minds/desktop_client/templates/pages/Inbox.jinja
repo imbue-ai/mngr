@@ -349,6 +349,20 @@
           updateApproveState();
           return;
         }
+        // FAILED: the approval did not complete (e.g. the browser sign-in
+        // flow failed). The request stays pending server-side (it is not
+        // resolved, so we do not advance the inbox); show the reason and
+        // re-enable Approve so the user can retry -- this is a failure, not
+        // a denial.
+        if (data.outcome === "FAILED") {
+          if (errorMsg) errorMsg.textContent = data.message || "Approval failed; please try again.";
+          if (errorBox) {
+            errorBox.classList.remove("hidden");
+            scrollDetailIntoView(errorBox);
+          }
+          if (approveBtn) approveBtn.disabled = false;
+          return;
+        }
         if (errorMsg) errorMsg.textContent = data.message || "Authorization failed.";
         if (errorBox) {
           errorBox.classList.remove("hidden");

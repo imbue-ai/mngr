@@ -1,0 +1,1 @@
+Fixed the e2e test fixture (`conftest.py`) that wrote an invalid `settings.local.toml`: the `[commands.create]` table contained a duplicate `type = "claude"` key, which TOML rejects ("Cannot overwrite a value"). This broke `mngr create` in every e2e test. Also removed a duplicate `_parse_jsonl_events` helper definition in `test_event.py`.
