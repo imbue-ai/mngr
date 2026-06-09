@@ -110,9 +110,12 @@ interface ExtensionContext {
   sessionManager?: SessionManager;
 }
 
-// pi's ExtensionAPI -- only the `on` method is used here.
+// pi's ExtensionAPI -- `on` plus `sendUserMessage` (used to inject input without
+// tmux keystrokes). `sendUserMessage` is optional so a stub/fake `pi` (the test
+// harness) still type-checks; the inbox watcher guards on its presence.
 interface PiApi {
   on: (event: string, handler: (event: any, ctx: ExtensionContext) => void | Promise<void>) => void;
+  sendUserMessage?: (content: string, options?: { deliverAs?: "steer" | "followUp" }) => void | Promise<void>;
 }
 
 // --- Constants kept in sync with plugin.py / base_agent.py. -----------------
@@ -121,6 +124,11 @@ const ACTIVE_MARKER_NAME = "active";
 const SESSION_STARTED_SENTINEL_NAME = "pi_session_started";
 const ROOT_SESSION_NAME = "pi_root_session";
 const SESSION_FILE_NAME = "pi_session_file";
+// mngr appends one JSON-encoded message string per line here; we inject each new
+// line into the live session via pi.sendUserMessage (no tmux keystrokes). Kept
+// in sync with _INBOX_FILE_NAME in plugin.py.
+const INBOX_NAME = "pi_inbox";
+const INBOX_POLL_MS = 200;
 
 const INPUT_PREVIEW_LIMIT = 200;
 const TOOL_OUTPUT_LIMIT = 2000;
@@ -267,6 +275,49 @@ export default function mngrPiLifecycle(pi: PiApi): void {
     }
   };
 
+  // Input injection. mngr delivers messages by appending one JSON-encoded string
+  // per line to <state>/pi_inbox; we inject each new line via pi.sendUserMessage
+  // so the agent receives input without tmux keystroke simulation, while the TUI
+  // stays viewable. The offset is seeded from the current line count *now* (at
+  // load, before session_start writes the readiness sentinel mngr waits on), so
+  // a resumed restart never re-injects the prior session's already-delivered
+  // messages, and -- because mngr only writes after seeing the sentinel -- no
+  // message sent right after readiness is skipped.
+  const inboxPath = join(stateDir, INBOX_NAME);
+  let processedInbox = countLines(inboxPath);
+  const drainInbox = (): void => {
+    safe("inbox", () => {
+      if (typeof pi.sendUserMessage !== "function" || !existsSync(inboxPath)) {
+        return;
+      }
+      const lines = readFileSync(inboxPath, "utf-8").split("\n");
+      const total = lines[lines.length - 1] === "" ? lines.length - 1 : lines.length;
+      while (processedInbox < total) {
+        const raw = lines[processedInbox];
+        if (raw !== "") {
+          let content: unknown;
+          try {
+            content = JSON.parse(raw);
+          } catch {
+            // Skip a malformed line rather than inject garbage or stall.
+            processedInbox++;
+            continue;
+          }
+          if (typeof content === "string") {
+            // Advance only after a successful inject, so a transient failure
+            // retries on the next tick rather than dropping the message.
+            void pi.sendUserMessage(content, { deliverAs: "followUp" });
+          }
+        }
+        processedInbox++;
+      }
+    });
+  };
+  const inboxTimer = setInterval(drainInbox, INBOX_POLL_MS);
+  if (typeof inboxTimer.unref === "function") {
+    inboxTimer.unref();
+  }
+
   pi.on("session_start", (_event, ctx) => {
     safe("session_start", () => {
       mkdirSync(dirname(sentinelPath), { recursive: true });
@@ -311,6 +362,7 @@ export default function mngrPiLifecycle(pi: PiApi): void {
 
   pi.on("session_shutdown", (_event, _ctx) => {
     safe("session_shutdown", () => {
+      clearInterval(inboxTimer);
       // The process is exiting; mngr will report STOPPED regardless, but clear
       // the marker so a quick relaunch never sees a stale RUNNING.
       rmSync(markerPath, { force: true });

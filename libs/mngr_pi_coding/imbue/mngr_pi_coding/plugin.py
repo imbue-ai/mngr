@@ -13,15 +13,13 @@ from pydantic import Field
 
 from imbue.imbue_common.logging import log_span
 from imbue.mngr import hookimpl
-from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
-from imbue.mngr.agents.tui_utils import send_enter_keystroke
+from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
-from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.data_types import FileTransferSpec
@@ -81,13 +79,16 @@ _SESSION_FILE_NAME: str = "pi_session_file"
 # must render the TUI before the session loads.
 _READY_TIMEOUT_SECONDS: float = 30.0
 
-# Message submission: send Enter, then wait this long for the ``active`` marker
-# (the turn starting) before re-sending. pi occasionally swallows the first
-# Enter after a paste; retrying makes submission reliable. The marker appears
-# within a beat of a real submit, so a swallowed Enter is the only thing that
-# burns an attempt.
-_SUBMIT_MAX_ATTEMPTS: int = 4
-_SUBMIT_PER_ATTEMPT_TIMEOUT_SECONDS: float = 4.0
+# Input delivery: mngr appends one JSON-encoded message per line to this file in
+# the agent state dir; the lifecycle extension's watcher injects each new line
+# into the live session via pi.sendUserMessage (no tmux keystrokes, TUI stays
+# viewable). Kept in sync with INBOX_NAME in mngr_pi_lifecycle.ts.
+_INBOX_FILE_NAME: str = "pi_inbox"
+
+# After inboxing a message, wait up to this long for the turn to start (the
+# ``active`` marker to appear) as delivery confirmation. Covers the extension's
+# poll interval plus pi accepting the injected message.
+_TURN_CONFIRM_TIMEOUT_SECONDS: float = 16.0
 
 
 def _load_resource(filename: str) -> str:
@@ -133,6 +134,16 @@ def _read_pi_trust(content: str | None, path: Path) -> dict[str, bool]:
 def _serialize_pi_trust(trust: Mapping[str, bool]) -> str:
     """Serialize a trust map in pi's format (sorted keys, 2-space indent, trailing newline)."""
     return json.dumps({key: trust[key] for key in sorted(trust)}, indent=2) + "\n"
+
+
+def _inbox_append_command(inbox_path: Path, message: str) -> str:
+    """Shell command that appends one JSON-encoded message line to the inbox.
+
+    JSON encoding keeps the message on a single line (newlines escaped), so a
+    single ``>>`` append is exactly one inbox entry. ``printf '%s\\n'`` writes the
+    shell-quoted argument literally followed by a newline.
+    """
+    return f"printf '%s\\n' {shlex.quote(json.dumps(message))} >> {shlex.quote(str(inbox_path))}"
 
 
 def _get_pi_home_dir(home_dir: Path | None = None) -> Path:
@@ -251,23 +262,24 @@ def _has_api_credentials_available(
     return False
 
 
-class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig], HasCommonTranscriptMixin):
-    """Agent implementation for the pi coding agent with TUI handling.
+class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin):
+    """Agent implementation for the pi coding agent.
 
     pi's only lifecycle-event surface is its TypeScript extension API (no
     shell hooks). mngr therefore provisions a single extension
     (``mngr_pi_lifecycle.ts``) and loads it with ``pi -e``; that extension
     maintains the ``active`` RUNNING/WAITING marker (subagent-aware via a
-    root-session id), writes the readiness sentinel this class waits on, and
-    emits both the raw and common transcripts. Because emission happens inside
-    the extension, the transcript-mixin script hooks return nothing.
-    """
+    root-session id), writes the readiness sentinel this class waits on, emits
+    both the raw and common transcripts, and injects input that mngr appends to
+    the agent's inbox. Because emission happens inside the extension, the
+    transcript-mixin script hooks return nothing.
 
-    # Required by InteractiveTuiAgent, but pi readiness is gated on the
-    # extension's session_start sentinel instead (see wait_for_ready_signal) --
-    # the "pi v" banner prints before the session is ready for input. Retained
-    # only to satisfy the base-class contract / for diagnostics.
-    TUI_READY_INDICATOR = "pi v"
+    pi runs as an interactive TUI in the agent's tmux session (attach with
+    ``mngr connect``), but mngr delivers messages via the extension's
+    ``pi.sendUserMessage`` injection rather than tmux keystrokes (see
+    ``send_message``), so this subclasses ``BaseAgent`` directly rather than
+    ``InteractiveTuiAgent`` -- it uses none of the latter's paste/Enter pipeline.
+    """
 
     @property
     def is_common_transcript_enabled(self) -> bool:
@@ -286,36 +298,56 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig], HasCommonTranscrip
         """No ``commands/`` scripts: the lifecycle extension emits the common transcript."""
         return {}
 
-    def _send_enter_and_validate(self, tmux_target: TmuxWindowTarget) -> None:
-        """Submit the pasted message, confirming via the turn actually starting.
+    def send_message(self, message: str) -> None:
+        """Deliver a message by appending it to the inbox the lifecycle extension injects.
 
-        pi exposes no submission hook and no reliable input-cleared placeholder,
-        and a single Enter sent right after a paste is sometimes swallowed by the
-        TUI -- most often on the first message of a fresh session, before the
-        editor has fully absorbed the paste. The dependable signal that the
-        message submitted is the lifecycle extension's ``active`` marker: pi fires
-        ``agent_start`` (and the extension writes the marker) only once it begins
-        processing the turn. So send Enter and poll for the marker, re-sending
-        Enter if the turn has not started yet.
+        pi has no IPC for input, but its extension API injects a user message
+        (``pi.sendUserMessage``) into the live session. mngr appends one
+        JSON-encoded message per line to ``<agent_dir>/pi_inbox``; the extension's
+        watcher injects each new line. This replaces typing into the TUI via tmux
+        ``send-keys`` -- which pi intermittently swallowed (the first Enter after a
+        paste), forcing retries -- keeps the TUI viewable, and behaves identically
+        on local and remote hosts.
 
-        If the marker is already present (a steering message to an agent that is
-        already mid-turn), the first poll returns immediately -- we cannot use the
-        marker to confirm that case, so the single Enter is best-effort, matching
-        the prior behavior.
+        Delivery is confirmed by the turn starting (the ``active`` marker
+        appearing), the same signal lifecycle detection uses. If the marker is
+        already present (a steering message to an already-running agent), the
+        injected message is queued (``deliverAs: followUp``) and we return without
+        a marker-based confirmation. The message lock serializes concurrent sends
+        so their inbox appends don't interleave.
         """
+        with self._message_lock(), log_span("Sending message to agent {} (length={})", self.name, len(message)):
+            self._append_to_inbox(message)
+            self._confirm_turn_started()
+
+    def _append_to_inbox(self, message: str) -> None:
+        """Append one JSON-encoded message line to the agent's inbox on the host.
+
+        The append is stateful (it must run exactly once, never be retried/deduped
+        like an idempotent command) and uses ``>>`` so concurrent sends can't lose
+        a line.
+        """
+        inbox_path = self._get_agent_dir() / _INBOX_FILE_NAME
+        result = self.host.execute_stateful_command(_inbox_append_command(inbox_path, message))
+        if not result.success:
+            raise SendMessageError(str(self.name), f"failed to write to pi inbox: {result.stderr or result.stdout}")
+
+    def _confirm_turn_started(self, timeout: float = _TURN_CONFIRM_TIMEOUT_SECONDS) -> None:
+        """Wait for the injected message to start a turn (the ``active`` marker appearing)."""
         marker_path = self._get_agent_dir() / "active"
-        for _attempt in range(_SUBMIT_MAX_ATTEMPTS):
-            send_enter_keystroke(self, tmux_target)
-            if poll_until(
-                lambda: self._check_file_exists(marker_path),
-                timeout=_SUBMIT_PER_ATTEMPT_TIMEOUT_SECONDS,
-                poll_interval=0.3,
-            ):
-                return
+        if self._check_file_exists(marker_path):
+            # Already running: the followUp message is queued; no marker-based confirmation.
+            return
+        if poll_until(
+            lambda: self._check_file_exists(marker_path),
+            timeout=timeout,
+            poll_interval=0.3,
+        ):
+            return
         raise SendMessageError(
             str(self.name),
-            f"pi did not start a turn after {_SUBMIT_MAX_ATTEMPTS} Enter attempts "
-            f"({_SUBMIT_MAX_ATTEMPTS * _SUBMIT_PER_ATTEMPT_TIMEOUT_SECONDS:.0f}s); the message may not have submitted",
+            f"pi did not start a turn within {timeout:.0f}s of inboxing the message "
+            "(is the lifecycle extension running?)",
         )
 
     def get_pi_config_dir(self) -> Path:

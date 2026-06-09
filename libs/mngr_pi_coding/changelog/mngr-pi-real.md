@@ -17,6 +17,12 @@ with `pi -e`) that drives everything pi has no shell hooks for:
 - Also sync the `agents/` resource dir from `~/.pi/agent/` into each agent's
   config dir (alongside skills/prompts/extensions/themes), so an installed
   subagent extension finds its agent definitions (pi has no built-in subagents).
+- Deliver messages by injecting them into the live session via the lifecycle
+  extension (`pi.sendUserMessage`) rather than simulating tmux keystrokes: mngr
+  appends each message to a per-agent inbox file and the extension's watcher
+  injects it. The TUI stays viewable (attach with `mngr connect`), and delivery
+  is more reliable than the old paste+Enter path (pi intermittently swallowed the
+  first Enter) and behaves identically on local and remote hosts.
 - Handle pi 0.79+'s "Trust project folder?" dialog: mngr pre-trusts the agent's
   workspace (seeding pi's `trust.json`) so the agent never stalls at the dialog,
   gated like the claude/antigravity agent types -- silent under `mngr create --yes`

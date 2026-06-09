@@ -368,3 +368,50 @@ def test_unknown_content_and_roles_degrade_gracefully(tmp_path: Path) -> None:
     raw_text = json.dumps(raw)
     assert "futureBlockType" in raw_text
     assert "BASE64" in raw_text
+
+
+# Drives the inbox watcher: a fake pi captures sendUserMessage calls; the inbox is
+# pre-seeded with one already-delivered line BEFORE load (so the offset is seeded
+# past it), then new/malformed lines are appended and we wait for the poll.
+_INBOX_DRIVER_MJS = """
+import { appendFileSync, writeFileSync } from "node:fs";
+const STATE = process.env.MNGR_AGENT_STATE_DIR;
+const inbox = STATE + "/pi_inbox";
+const injected = [];
+const pi = { on: () => {}, sendUserMessage: (c) => injected.push(c) };
+writeFileSync(inbox, JSON.stringify("OLD: already delivered") + "\\n");
+const mod = await import("./mngr_pi_lifecycle.ts");
+mod.default(pi);
+appendFileSync(inbox, JSON.stringify("first\\nmultiline") + "\\n");
+appendFileSync(inbox, "{not json}\\n");
+appendFileSync(inbox, JSON.stringify("second") + "\\n");
+await new Promise((r) => setTimeout(r, 600));
+writeFileSync(STATE + "/injected.json", JSON.stringify(injected));
+"""
+
+
+def test_inbox_watcher_injects_only_new_lines(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not available")
+    work_dir = tmp_path / "work"
+    work_dir.mkdir(exist_ok=True)
+    if not _node_supports_typescript(node, work_dir):
+        pytest.skip("node does not support importing TypeScript modules")
+    (work_dir / _LIFECYCLE_EXTENSION_NAME).write_text(_load_resource(_LIFECYCLE_EXTENSION_NAME))
+    driver = work_dir / "inbox_driver.mjs"
+    driver.write_text(_INBOX_DRIVER_MJS)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(exist_ok=True)
+    result = subprocess.run(
+        [node, str(driver)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={"PATH": os.environ.get("PATH", ""), "MNGR_AGENT_STATE_DIR": str(state_dir)},
+    )
+    assert result.returncode == 0, f"inbox driver failed:\n{result.stdout}\n{result.stderr}"
+    injected = json.loads((state_dir / "injected.json").read_text())
+    # Pre-existing line not re-injected (offset seeded at load); new lines injected
+    # in order with the embedded newline preserved; the malformed line is skipped.
+    assert injected == ["first\nmultiline", "second"]

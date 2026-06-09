@@ -1,5 +1,6 @@
 """Unit tests for the pi-coding plugin."""
 
+import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import PluginMngrError
+from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
@@ -23,6 +25,7 @@ from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr_pi_coding.plugin import PiCodingAgent
 from imbue.mngr_pi_coding.plugin import PiCodingAgentConfig
 from imbue.mngr_pi_coding.plugin import _LIFECYCLE_EXTENSION_NAME
+from imbue.mngr_pi_coding.plugin import _inbox_append_command
 from imbue.mngr_pi_coding.plugin import _load_resource
 from imbue.mngr_pi_coding.plugin import _read_pi_trust
 from imbue.mngr_pi_coding.plugin import _serialize_pi_trust
@@ -148,15 +151,6 @@ def test_pi_coding_agent_config_merge_with_override() -> None:
 # =============================================================================
 # PiCodingAgent method tests
 # =============================================================================
-
-
-def test_tui_ready_indicator_is_pi_v() -> None:
-    assert PiCodingAgent.TUI_READY_INDICATOR == "pi v"
-
-
-def test_pi_agent_implements_send_enter_and_validate() -> None:
-    """PiCodingAgent provides a concrete _send_enter_and_validate, satisfying the abstract method."""
-    assert "_send_enter_and_validate" not in PiCodingAgent.__abstractmethods__
 
 
 def test_get_expected_process_name_returns_pi(pi_agent: PiCodingAgent) -> None:
@@ -653,3 +647,57 @@ def test_seed_per_agent_workspace_trust_writes_per_agent_file(pi_agent: PiCoding
     data = _read_pi_trust(trust_path.read_text(), trust_path)
     assert len(data) == 1
     assert all(value is True for value in data.values())
+
+
+# =============================================================================
+# Message delivery via the inbox (pi.sendUserMessage injection)
+# =============================================================================
+
+
+def test_inbox_append_command_json_encodes_and_appends() -> None:
+    cmd = _inbox_append_command(Path("/state/pi_inbox"), "hi\nthere")
+    assert cmd.startswith("printf '%s\\n' ")
+    assert ">> " in cmd
+    assert "/state/pi_inbox" in cmd
+    # The message is JSON-encoded so embedded newlines stay on one inbox line.
+    assert json.dumps("hi\nthere") in cmd
+
+
+def test_confirm_turn_started_returns_when_marker_present(pi_agent: PiCodingAgent) -> None:
+    marker = pi_agent._get_agent_dir() / "active"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("1")
+    # Already running -> returns immediately without waiting for a new turn.
+    pi_agent._confirm_turn_started(timeout=0.5)
+
+
+def test_confirm_turn_started_raises_when_no_turn(pi_agent: PiCodingAgent) -> None:
+    with pytest.raises(SendMessageError, match="did not start a turn"):
+        pi_agent._confirm_turn_started(timeout=0.5)
+
+
+def test_send_message_appends_inbox_then_confirms(tmp_path: Path, pi_agent: PiCodingAgent) -> None:
+    # Stub the inbox append so it succeeds without a shell; pre-create the marker
+    # so confirmation returns immediately (no real pi turn).
+    host = _stub_host(
+        tmp_path,
+        is_local=True,
+        command_results={"printf": CommandResult(stdout="", stderr="", success=True)},
+    )
+    object.__setattr__(pi_agent, "host", host)
+    marker = pi_agent._get_agent_dir() / "active"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("1")
+    # Should append to the inbox and return (no exception) once the marker confirms.
+    pi_agent.send_message("hello from mngr")
+
+
+def test_send_message_raises_when_inbox_write_fails(tmp_path: Path, pi_agent: PiCodingAgent) -> None:
+    host = _stub_host(
+        tmp_path,
+        is_local=True,
+        command_results={"printf": CommandResult(stdout="", stderr="disk full", success=False)},
+    )
+    object.__setattr__(pi_agent, "host", host)
+    with pytest.raises(SendMessageError, match="failed to write to pi inbox"):
+        pi_agent.send_message("hello")

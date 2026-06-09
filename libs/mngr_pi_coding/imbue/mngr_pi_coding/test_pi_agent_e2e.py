@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import uuid
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -234,12 +235,34 @@ def test_pi_agent_full_lifecycle(tmp_path: Path, subprocess_env: dict[str, str])
             error_message="active marker never cleared (WAITING) after the turn finished",
         )
 
-        # 5. The transcript captured the turn (user prompt, assistant reply, the bash tool result).
+        # 5. The transcript captured the turn with the right record SHAPES -- the same
+        #    contract the synthetic node-harness asserts, here validated against REAL pi
+        #    events (so the harness's assumed event shapes can't silently drift).
         records = [json.loads(line) for line in _common_transcript_path(env).read_text().splitlines() if line.strip()]
-        record_types = [r["type"] for r in records]
-        assert "user_message" in record_types, record_types
-        assert "assistant_message" in record_types, record_types
-        assert "tool_result" in record_types, record_types
+        by_type: dict[str, list[dict[str, Any]]] = {}
+        for record in records:
+            by_type.setdefault(str(record["type"]), []).append(record)
+        for record in records:
+            assert {"timestamp", "type", "event_id", "source"} <= set(record), record
+            assert record["source"] == "pi-coding/common_transcript", record
+        assert len({str(r["event_id"]) for r in records}) == len(records), "event_ids must be unique"
+        assert "user_message" in by_type and "assistant_message" in by_type and "tool_result" in by_type, list(by_type)
+        # The user prompt carried the secret.
+        assert any(r["role"] == "user" and secret in str(r["content"]) for r in by_type["user_message"])
+        # An assistant message has a bash tool call, a populated model, and a usage block.
+        bash_calls = [c for r in by_type["assistant_message"] for c in r["tool_calls"] if c["tool_name"] == "bash"]
+        assert bash_calls, by_type["assistant_message"]
+        assert all(c.get("tool_call_id") and "input_preview" in c for c in bash_calls)
+        assert all(r["model"] for r in by_type["assistant_message"])
+        usage_keys = {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"}
+        assert all(usage_keys <= set(r["usage"]) for r in by_type["assistant_message"])
+        # The bash tool_result holds the echo output, is not an error, and pairs to a real call id.
+        call_ids = {c["tool_call_id"] for c in bash_calls}
+        assert any(
+            t["tool_name"] == "bash" and "SEEDED" in str(t["output"]) and t["is_error"] is False
+            for t in by_type["tool_result"]
+        ), by_type["tool_result"]
+        assert any(t["tool_call_id"] in call_ids for t in by_type["tool_result"])
         # And `mngr transcript` renders it (the secret was in the user prompt).
         transcript_out = _run(["uv", "run", "mngr", "transcript", agent_name], env=env, timeout=60.0).stdout
         assert secret in transcript_out, f"secret not found in mngr transcript output:\n{transcript_out[-2000:]}"
