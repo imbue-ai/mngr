@@ -1,2 +1,0 @@
-- Remove the superfluous `@pytest.mark.modal` mark from the `test_create_with_agent_args` e2e tutorial test. The test creates a purely local agent and runs `mngr list`, which only makes Modal gRPC calls when a Modal environment already exists; for a local-only test no Modal call is ever made, so the resource guard correctly flagged the mark as never-invoked.
-- Add a complementary unhappy-path e2e test verifying that agent-targeted flags (e.g. `--model opus`) must be separated with `--`, and that omitting the separator makes `mngr create` reject the flag as an unknown option.

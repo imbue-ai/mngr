@@ -1,3 +1,0 @@
-Fixed the `test_stop_archive` e2e lifecycle test: added a `@pytest.mark.timeout(120)` mark (the test was hitting the global 10s pytest timeout during the create + stop flow) and removed the superfluous `@pytest.mark.modal` mark, since the test only exercises a local command agent and never invokes Modal. Also strengthened the test to verify that `mngr stop my-task --archive` actually stops and archives the agent (the agent now appears under `mngr list --archived` and is excluded from `mngr list --active`).
-
-Corrected the tutorial comment for `mngr stop --archive`: it previously claimed the command "creates a snapshot before stopping", but `--archive` only marks the agent archived (sets the `archived_at` label) while preserving its state -- no snapshot is created.

@@ -6,6 +6,23 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Opt-in `is_host_in_docker` mode on the Lima provider (`providers.lima.is_host_in_docker`, default `false`). When enabled, the agent runs inside a Docker container *in* the Lima VM (built from the project's Dockerfile, exactly like the docker/vps_docker providers) instead of directly in the VM; mngr treats the container as the host (ssh and all agent work happen inside it, Lima forwards the container's sshd out to the host's localhost). Forces `is_host_data_volume_exposed=false`; a per-host btrfs subvolume on the additional disk backs the container's `host_dir`, and the `mngr_vps_docker` snapshot helper is installed in the VM so the in-container agent can trigger consistent `btrfs subvolume snapshot` backups. `mngr stop` powers off the whole VM; `start` boots it and relaunches the container; `destroy` removes the VM and disk. Default (`is_host_in_docker=false`) behavior is unchanged.
+- Added: `docker_runtime` and `install_gvisor_runtime` options on the Lima provider config (used in `is_host_in_docker` mode). `docker_runtime` (default unset) passes `--runtime=<value>` to the agent container's `docker run` inside the VM; `install_gvisor_runtime` (default `false`) installs and registers gVisor `runsc` with the in-VM Docker daemon via gVisor's official APT repository (idempotent). Installing is independent of enabling — set `docker_runtime = "runsc"` to run the agent container under gVisor.
+- Added: `providers.lima.default_container_run_args` (default empty), extra arguments appended to the `docker run` that starts the agent container in `is_host_in_docker` mode — the only config path for injecting inner-container `docker run` flags on Lima. Pairs with `docker_runtime="runsc"` (e.g. `["--workdir=/", "--security-opt=no-new-privileges"]`).
+- Added: `discover_hosts` now warns about orphaned Lima VMs — prefix-matched instances that no host record claims (leftovers from an interrupted create) are logged with the manual `limactl delete --force <name>` cleanup command, since mngr can neither manage nor garbage-collect a VM that has no record.
+
+### Changed
+
+- Changed: The Lima VM now installs a pinned Docker Engine version from Docker's official apt repo (the same version remote VPS providers use) instead of Debian's unpinned `docker.io` package, so workspace hosts run an identical, reproducible Docker regardless of provider.
+- Changed: Default Lima VM image switched from Ubuntu 24.04 to a pinned Debian 12 "bookworm" genericcloud image (both `aarch64` and `x86_64`). Now that the agent typically runs inside a Docker container in the VM (`is_host_in_docker`), the VM only needs Docker + btrfs + sshd, and this mirrors the OVH provider's Debian 12 base. Override per-arch via `providers.lima.default_image_url_*`.
+- Changed: Provisioning now formats and mounts the per-host btrfs data disk in-guest (installing `btrfs-progs`, formatting if not already btrfs — idempotent; existing snapshot data survives — and mounting at the canonical path), instead of relying on Lima's guestagent to auto-format it at boot. Minimal cloud images (the new Debian default) ship no `mkfs.btrfs`, which had left the disk unformatted and broke per-host subvolume creation. On later boots Lima's guestagent handles the mount.
+
+### Fixed
+
+- Fixed: Lima host creation now tears down half-built VMs on any failure. Both `create_host` and the docker-mode `_create_docker_host` use a success-flag + `finally` so the VM and its btrfs additional disk are always cleaned up (and a failed-host record written) when creation does not complete — including failures that are not `MngrError`/`OSError` (e.g. concurrency-group errors, timeouts, or interrupts) which previously escaped the `except` clause and left an orphaned, untracked VM behind. The docker-mode path also drops the container's forwarded-port `known_hosts` entry on cleanup.
+
 ## [v0.1.4] - 2026-06-05
 
 ## [v0.1.3] - 2026-06-01

@@ -4,6 +4,21 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-08
+
+Standardized mngr_modal's project conftest on `register_plugin_test_fixtures(globals())`
+for HOME isolation, the same single mechanism used by every mngr plugin. The
+Modal-specific fixtures (including the credential-loading `setup_test_mngr_env`
+override) are unchanged. Internal test-infrastructure change only; no user-facing
+behavior change.
+
+Creating a Modal host with an invalid argument (e.g. a non-existent
+`--snapshot` image id) now fails with a clean single-line error
+(`Error: Failed to create Modal host: '<id>' is not a valid Image ID.`) instead
+of dumping a raw Python traceback. `create_host` now wraps
+`ModalProxyInvalidError` in a user-facing `MngrError`, mirroring how
+`ModalProxyRemoteError` was already handled.
+
 ## 2026-06-04
 
 Added an acceptance test (`test_upload_deploy_files_handles_large_set_on_modal`) that uploads a large (600-file) deploy set to a real Modal host and verifies every file lands. This is the regression guard for github issue 1825, where `mngr create` on Modal failed during provisioning (`Error reading SSH protocol banner`) because deploy files were uploaded one SFTP channel at a time; the fix transfers them with a single rsync.
