@@ -373,9 +373,8 @@ def _get_selected_providers(
                 providers.append(get_provider_instance(name, mngr_ctx))
             except ProviderEmptyError as e:
                 logger.debug("Skipping provider {} (empty -- nothing to gc): {}", name, e)
-                skipped_errors.append(f"provider {name} is empty: {e}")
             except ProviderUnavailableError as e:
-                logger.debug("Skipping provider {} (unavailable): {}", name, e)
+                logger.error("Skipping provider {} (unavailable): {}", name, e)
                 skipped_errors.append(f"provider {name} is unavailable: {e}")
         return providers, skipped_errors
 
