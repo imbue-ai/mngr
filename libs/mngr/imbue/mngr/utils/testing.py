@@ -40,6 +40,7 @@ from imbue.mngr.cli.create import create as create_command
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.loader import get_or_create_profile_dir
 from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
@@ -441,6 +442,12 @@ def get_subprocess_test_env(
     This is important for isolating the user_id file between tests.
 
     Returns a copy of os.environ with the specified environment variables set.
+
+    Also disables the ``claude_subagent_proxy`` plugin in the subprocess's user
+    profile (see ``_disable_subagent_proxy_in_test_profile``), so subprocess
+    tests don't spin up the real proxy machinery (spawning mngr subagents,
+    writing Claude hooks into the work_dir). The proxy's own real-subagent test
+    builds its env directly rather than through this helper, so it is unaffected.
     """
     env = os.environ.copy()
     env["MNGR_ROOT_NAME"] = root_name
@@ -448,7 +455,37 @@ def get_subprocess_test_env(
         env["MNGR_PREFIX"] = prefix
     if host_dir is not None:
         env["MNGR_HOST_DIR"] = str(host_dir)
+    mngr_host_dir = env.get("MNGR_HOST_DIR")
+    if mngr_host_dir is not None:
+        _disable_subagent_proxy_in_test_profile(Path(mngr_host_dir))
     return env
+
+
+def _disable_subagent_proxy_in_test_profile(base_dir: Path) -> None:
+    """Disable the subagent proxy in ``base_dir``'s user profile for subprocess tests.
+
+    Writes ``[plugins.claude_subagent_proxy] enabled = false`` into the profile
+    settings.toml so a subprocess ``mngr`` blocks the proxy at startup (the
+    startup pre-reader only sees config *files*, not ``MNGR__*`` env overrides,
+    and disabling at startup is what prevents the proxy's agent type from
+    registering -- not just its hooks). Mirrors the in-test default applied to
+    the in-process plugin manager. Includes ``is_allowed_in_pytest`` so the
+    subprocess's pytest config guard accepts the file. Idempotent: a no-op once
+    the proxy section is present.
+    """
+    profile_dir = get_or_create_profile_dir(base_dir)
+    settings_path = profile_dir / "settings.toml"
+    existing = settings_path.read_text() if settings_path.exists() else ""
+    if "[plugins.claude_subagent_proxy]" in existing:
+        return
+    proxy_section = "[plugins.claude_subagent_proxy]\nenabled = false\n"
+    if existing:
+        # is_allowed_in_pytest is already present (any existing test profile sets
+        # it); a top-level key cannot follow a table, so only append the section.
+        separator = "" if existing.endswith("\n") else "\n"
+        settings_path.write_text(f"{existing}{separator}\n{proxy_section}")
+    else:
+        settings_path.write_text(f"is_allowed_in_pytest = true\n\n{proxy_section}")
 
 
 def _get_test_verbose_level() -> int:
