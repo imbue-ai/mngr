@@ -12,6 +12,7 @@ command that produces a Debian + Docker + deps-baked AMI to skip the
 """
 
 import click
+from botocore.exceptions import BotoCoreError
 from loguru import logger
 
 from imbue.mngr.cli.output_helpers import write_human_line
@@ -106,7 +107,12 @@ def prepare(
     effective_cidrs = allowed_ssh_cidrs or base_defaults.allowed_ssh_cidrs
     try:
         client = _build_prepare_client(region, sg_name, vpc_id, effective_cidrs)
-    except ValueError as e:
+    except (ValueError, BotoCoreError) as e:
+        # ``ValueError`` covers the no-credentials case raised by
+        # ``AwsProviderConfig.get_session``; ``BotoCoreError`` covers
+        # boto3-rejected environment shapes (e.g. ``ProfileNotFound`` from a
+        # bad ``AWS_PROFILE``). Mirrors the pair caught by
+        # ``AwsProviderBackend.build_provider_instance``.
         raise click.ClickException(str(e)) from e
     sg_id = client.ensure_security_group()
     logger.info("Prepared AWS security group {} in region {}", sg_id, client.region)
