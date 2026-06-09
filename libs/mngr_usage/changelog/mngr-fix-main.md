@@ -1,0 +1,1 @@
+Fixed a type error introduced when an older branch merged into main: `mngr_usage`'s usage-preservation code referenced `VolumeFileType`, which had been renamed to `FileType` in `imbue.mngr.interfaces.data_types`. Updated the import and references to use `FileType`.
