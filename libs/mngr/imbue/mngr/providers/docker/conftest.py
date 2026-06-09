@@ -12,6 +12,7 @@ from imbue.mngr.providers.docker.testing import remove_all_containers_by_prefix
 from imbue.mngr.utils.testing import generate_test_environment_name
 from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import run_mngr_subprocess
+from imbue.mngr.utils.testing import worker_docker_state_prefixes
 
 
 @pytest.fixture
@@ -36,6 +37,10 @@ def docker_subprocess_env(tmp_path: Path) -> Generator[dict[str, str], None, Non
         prefix=prefix,
         host_dir=host_dir,
     )
+    # Register the prefix so the session-end safety net can attribute any
+    # leaked state container (named "<prefix>docker-state-<user_id>") to this
+    # worker and fail the suite if the teardown below fails to remove it.
+    worker_docker_state_prefixes.append(prefix)
     yield env
 
     # Destroy all agents created during the test.

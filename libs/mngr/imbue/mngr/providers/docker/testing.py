@@ -17,6 +17,7 @@ from imbue.mngr.providers.docker.volume import LABEL_PROVIDER
 from imbue.mngr.providers.docker.volume import state_volume_name
 from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr.utils.testing import get_short_random_string
+from imbue.mngr.utils.testing import worker_docker_state_prefixes
 
 
 def write_fake_docker_context(config_dir: Path, context_name: str, host_url: str) -> None:
@@ -157,6 +158,10 @@ def make_docker_provider_with_cleanup(
         mngr_ctx=mngr_ctx,
         config=config,
     )
+    # Register the prefix so the session-end safety net can attribute any
+    # leaked state container (named "<prefix>docker-state-<user_id>") to this
+    # worker and fail the suite if our cleanup below fails to remove it.
+    worker_docker_state_prefixes.append(mngr_ctx.config.prefix)
     yield provider
 
     try:

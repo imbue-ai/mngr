@@ -75,6 +75,7 @@ from imbue.mngr.providers.docker.volume import LABEL_PREFIX
 from imbue.mngr.providers.docker.volume import LABEL_PROVIDER
 from imbue.mngr.providers.docker.volume import STATE_VOLUME_MOUNT_PATH
 from imbue.mngr.providers.docker.volume import ensure_state_container
+from imbue.mngr.providers.docker.volume import state_container_name
 from imbue.mngr.providers.docker.volume import state_volume_name
 from imbue.mngr.providers.ssh_host_setup import REQUIRED_HOST_PACKAGES
 from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
@@ -328,6 +329,22 @@ class DockerProviderInstance(BaseProviderInstance):
         user_id = str(self.mngr_ctx.get_profile_user_id())
         prefix = self.mngr_ctx.config.prefix
         return state_volume_name(prefix, user_id)
+
+    def has_state_container(self) -> bool:
+        """Whether the singleton state container already exists, without creating it.
+
+        Used by the backend to decide whether read-only construction should
+        treat this provider as empty (mirrors the Modal backend's environment
+        existence check). Raises ProviderUnavailableError (via _docker_client)
+        if the Docker daemon is unreachable.
+        """
+        user_id = str(self.mngr_ctx.get_profile_user_id())
+        prefix = self.mngr_ctx.config.prefix
+        try:
+            self._docker_client.containers.get(state_container_name(prefix, user_id))
+        except docker.errors.NotFound:
+            return False
+        return True
 
     @cached_property
     def _host_store(self) -> DockerHostStore:
