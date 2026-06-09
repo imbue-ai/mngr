@@ -131,7 +131,7 @@ def _build_prompt_post_command(port: str, session_id: str, message: str) -> str:
     """
     url = _PROMPT_ENDPOINT_TEMPLATE.format(port=port, session_id=session_id)
     payload = serialize_opencode_config({"parts": [{"type": "text", "text": message}]})
-    return f"curl -sf -X POST {shlex.quote(url)} -H 'content-type: application/json' -d {shlex.quote(payload)}"
+    return f"curl -fsS -X POST {shlex.quote(url)} -H 'content-type: application/json' -d {shlex.quote(payload)}"
 
 
 def _load_opencode_resource(filename: str) -> str:

@@ -280,7 +280,7 @@ def test_provision_skips_auth_copy_when_no_shared_auth(local_provider: LocalProv
 
 def test_build_prompt_post_command_targets_prompt_async_with_json_part() -> None:
     command = _build_prompt_post_command("50123", "ses_abc123", "count to twenty please")
-    assert command.startswith("curl -sf -X POST ")
+    assert command.startswith("curl -fsS -X POST ")
     assert "http://127.0.0.1:50123/session/ses_abc123/prompt_async" in command
     # Delivered as a JSON text part so the body is structured, not screen-typed.
     assert '"count to twenty please"' in command
@@ -379,6 +379,6 @@ def test_send_message_raises_when_launch_files_missing(local_provider: LocalProv
 def test_post_prompt_raises_when_server_unreachable(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     """A real curl to a closed port fails, and _post_prompt surfaces it as SendMessageError."""
     agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
-    # Port 1 is not listening; curl -sf returns non-zero.
+    # Port 1 is not listening; curl -fsS returns non-zero.
     with pytest.raises(SendMessageError):
         agent._post_prompt("1", "ses_nope", "hello")
