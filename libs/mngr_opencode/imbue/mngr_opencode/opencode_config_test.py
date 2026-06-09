@@ -14,6 +14,7 @@ from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_opencode import resources as _opencode_resources
 from imbue.mngr_opencode.opencode_config import ACTIVE_MARKER_FILENAME
 from imbue.mngr_opencode.opencode_config import COMMON_TRANSCRIPT_RELATIVE_PATH
+from imbue.mngr_opencode.opencode_config import COMMON_TRANSCRIPT_SOURCE
 from imbue.mngr_opencode.opencode_config import PLUGIN_FILENAME
 from imbue.mngr_opencode.opencode_config import RAW_TRANSCRIPT_RELATIVE_PATH
 from imbue.mngr_opencode.opencode_config import ROOT_SESSION_FILENAME
@@ -131,3 +132,6 @@ def test_converter_resource_paths_stay_in_sync_with_constants() -> None:
     )
     assert RAW_TRANSCRIPT_RELATIVE_PATH in converter_source
     assert COMMON_TRANSCRIPT_RELATIVE_PATH in converter_source
+    # The converter stamps this `source` on every emitted event; it hardcodes the
+    # literal (it runs as standalone embedded Python), so guard it against drift.
+    assert f'_SOURCE = "{COMMON_TRANSCRIPT_SOURCE}"' in converter_source
