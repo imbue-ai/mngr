@@ -2040,6 +2040,35 @@ ipcMain.on('close-modal', (event) => {
   closeModal(getBundleFromEvent(event));
 });
 
+// Native file/directory picker for the file-sharing permission dialog.
+// The inbox modal calls this (via the preload bridge) so the user can
+// pick the path to share. ``options.mode`` is 'file' or 'directory':
+// the dialog exposes separate "Choose file" / "Choose folder" buttons
+// rather than a single combined picker because a dialog can't be both a
+// file and a directory selector on Linux/Windows (Electron would fall
+// back to a directory selector, so picking a file there returns its
+// parent directory). Returns the chosen absolute path, or null when the
+// user cancelled.
+ipcMain.handle('show-file-picker', async (event, options) => {
+  const bundle = getBundleFromEvent(event);
+  const opts = options || {};
+  const property = opts.mode === 'directory' ? 'openDirectory' : 'openFile';
+  const dialogOptions = { properties: [property] };
+  if (typeof opts.defaultPath === 'string' && opts.defaultPath.length > 0) {
+    dialogOptions.defaultPath = opts.defaultPath;
+  }
+  // Anchor the dialog to the requesting window when we can resolve it so
+  // it behaves as a sheet/modal; fall back to an unparented dialog
+  // otherwise.
+  const result = bundle && bundle.window && !bundle.window.isDestroyed()
+    ? await dialog.showOpenDialog(bundle.window, dialogOptions)
+    : await dialog.showOpenDialog(dialogOptions);
+  if (result.canceled || !Array.isArray(result.filePaths) || result.filePaths.length === 0) {
+    return null;
+  }
+  return result.filePaths[0];
+});
+
 ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
   const bundle = getBundleFromEvent(event);
   if (!bundle || !agentId) return;
