@@ -38,8 +38,8 @@ from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.preservation import preserve_agent_data
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import HostDetails
-from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.host import HostFileReadInterface
 from imbue.mngr.interfaces.provider_instance import build_agent_details_from_offline_ref
 from imbue.mngr.primitives import AgentId
@@ -93,12 +93,12 @@ def _discover_usage_items(source: HostFileReadInterface, agent_state_dir: Path) 
     events_dir = agent_state_dir / EVENTS_DIR_NAME
     items: list[PreservedItem] = []
     for entry in source.list_directory(events_dir):
-        if entry.file_type != VolumeFileType.DIRECTORY:
+        if entry.file_type != FileType.DIRECTORY:
             continue
         source_name = Path(entry.path).name
         usage_rel = f"{EVENTS_DIR_NAME}/{source_name}/{USAGE_DIR_NAME}"
         if source.path_exists(agent_state_dir / usage_rel):
-            items.append(PreservedItem(rel_path=usage_rel, kind=VolumeFileType.DIRECTORY))
+            items.append(PreservedItem(rel_path=usage_rel, kind=FileType.DIRECTORY))
     return items
 
 
@@ -123,7 +123,7 @@ def preserve_agent_usage(
     items = _discover_usage_items(source, agent_state_dir)
     if not items:
         return
-    items.append(PreservedItem(rel_path=_DATA_JSON_FILENAME, kind=VolumeFileType.FILE))
+    items.append(PreservedItem(rel_path=_DATA_JSON_FILENAME, kind=FileType.FILE))
 
     dest_root = get_local_preserved_agent_dir(mngr_ctx, agent_name, agent_id)
     with log_span("Preserving usage data for agent {}", agent_name):
