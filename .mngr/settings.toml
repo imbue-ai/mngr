@@ -27,7 +27,10 @@ provider = "modal"
 build_arg = ["file=libs/mngr/imbue/mngr/resources/Dockerfile", "context-dir=.mngr/dev/build/", "volume=code-review-json:/code_reviews"]
 extra_window = ["github_setup='ssh-keyscan github.com >> ~/.ssh/known_hosts && git remote set-url origin https://github.com/imbue-ai/mngr.git && gh auth setup-git'"]
 agent_args = ["--dangerously-skip-permissions"]
-pass_env = ["GH_TOKEN"]
+# __extend (not plain assign) so GH_TOKEN is ADDED to any inherited pass_env (e.g. a
+# user profile's pass_env = ["ANTHROPIC_API_KEY"]) instead of clobbering it -- a plain
+# `pass_env = [...]` trips the settings-narrowing guard and drops the inherited entries.
+pass_env__extend = ["GH_TOKEN"]
 pass_host_env = ["EDITOR"]
 target_path = "/code/mngr"
 
