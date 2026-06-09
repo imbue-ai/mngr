@@ -51,6 +51,12 @@ let workspaceList = []; // [{id, name, account}]
 // window alone -- the recovery flow kicks in via the system_interface_status
 // event). Never cleared once added; a destroyed workspace's id is dead forever.
 const everSeenDestroying = new Set();
+// Latest per-agent system-interface health (``healthy`` / ``stuck`` /
+// ``restarting`` / ``restart_failed``) as pushed by the chrome SSE's
+// ``system_interface_status`` events. Read by the landing-page Stop handler so
+// it can leave a window that is mid-restart alone (the user is intentionally
+// restarting it there) rather than yanking it out from under them.
+const systemInterfaceStatusByAgent = new Map();
 let isShuttingDown = false;
 let initialBundle = null; // the first window created at startup
 let hasCompletedInitialStart = false;
@@ -225,6 +231,35 @@ function updateOsTitle(bundle) {
 
 function updateAllOsTitles() {
   for (const b of bundles) updateOsTitle(b);
+}
+
+// Tear down every live window currently open to ``agentId``. If those windows
+// are the only ones left, navigate them to the home page instead of closing
+// them, so we never close the last window (which would commit an app
+// shutdown). Shared by the workspace-destroyed handler and the landing-page
+// Stop handler. (At most one window exists per workspace, so this affects at
+// most one window in practice.)
+function detachWindowsForWorkspace(agentId) {
+  if (!agentId) return;
+  const affected = [];
+  for (const b of bundles) {
+    if (!b.window.isDestroyed() && b.currentWorkspaceId === agentId) {
+      affected.push(b);
+    }
+  }
+  if (affected.length === 0) return;
+  const liveBundleCount = [...bundles].filter((b) => !b.window.isDestroyed()).length;
+  for (const b of affected) {
+    if (liveBundleCount - affected.length >= 1) {
+      b.window.close();
+    } else {
+      b.currentWorkspaceId = null;
+      if (b.contentView && !b.contentView.webContents.isDestroyed() && backendBaseUrl) {
+        b.contentView.webContents.loadURL(backendBaseUrl + '/');
+      }
+      updateOsTitle(b);
+    }
+  }
 }
 
 // -- Layout --
@@ -1191,27 +1226,16 @@ function handleChromeSSEEvent(evt) {
     for (const oldId of oldIds) {
       if (newIds.has(oldId)) continue;
       if (!everSeenDestroying.has(oldId)) continue;
-      const affected = [];
-      for (const b of bundles) {
-        if (!b.window.isDestroyed() && b.currentWorkspaceId === oldId) {
-          affected.push(b);
-        }
-      }
-      const liveBundleCount = [...bundles].filter((b) => !b.window.isDestroyed()).length;
-      for (const b of affected) {
-        if (liveBundleCount - affected.length >= 1) {
-          b.window.close();
-        } else {
-          b.currentWorkspaceId = null;
-          if (b.contentView && !b.contentView.webContents.isDestroyed() && backendBaseUrl) {
-            b.contentView.webContents.loadURL(backendBaseUrl + '/');
-          }
-          updateOsTitle(b);
-        }
-      }
+      detachWindowsForWorkspace(oldId);
     }
 
     updateAllOsTitles();
+  } else if (evt.type === 'system_interface_status') {
+    // Remember each mind's latest health so the Stop handler can leave a
+    // window that is actively restarting alone (see confirm-stop-mind).
+    if (evt.agent_id) {
+      systemInterfaceStatusByAgent.set(String(evt.agent_id), evt.status ? String(evt.status) : '');
+    }
   } else if (evt.type === 'auth_status') {
     latestChromeState.authStatus = evt;
   } else if (evt.type === 'requests') {
@@ -2548,7 +2572,17 @@ ipcMain.on('confirm-stop-mind', async (event, agentId, name) => {
     : await dialog.showMessageBox(options);
   if (response !== 1) return;
   const ok = await postMindStop(agentId);
-  if (!ok) console.warn(`[mind-shutdown] single-row stop for ${agentId} did not succeed`);
+  if (!ok) {
+    console.warn(`[mind-shutdown] single-row stop for ${agentId} did not succeed`);
+    return;
+  }
+  // The stop succeeded, so the mind's container is down. Any other window still
+  // open to this mind would observe the now-unreachable system interface, get
+  // redirected to the recovery page, and auto-restart the host -- silently
+  // undoing the stop. Close that window now. Skip it if the mind is mid-restart
+  // (the user is intentionally restarting it in that window).
+  if (systemInterfaceStatusByAgent.get(agentId) === 'restarting') return;
+  detachWindowsForWorkspace(agentId);
 });
 
 ipcMain.on('window-minimize', (event) => {
