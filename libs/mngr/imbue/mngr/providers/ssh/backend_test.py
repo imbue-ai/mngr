@@ -178,6 +178,7 @@ def test_build_provider_instance_preserves_known_hosts_file_with_key_file(temp_m
         config=config,
         mngr_ctx=temp_mngr_ctx,
     )
+    assert isinstance(instance, SSHProviderInstance)
     host_config = instance.hosts["server1"]
     # known_hosts_file must be preserved exactly (strict host-key checking stays on).
     assert host_config.known_hosts_file == known_hosts_path
