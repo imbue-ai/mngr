@@ -97,17 +97,40 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | `iam_instance_profile` | `None` | IAM instance profile name. |
 | `auto_shutdown_minutes` | `None` | When set, cloud-init schedules `shutdown -P +N` so the OS halts itself after N minutes. Combined with `InstanceInitiatedShutdownBehavior=terminate` (always on), this auto-terminates the EC2 instance. Leave `None` for normal long-lived behavior; useful for ephemeral test / scratch hosts. |
 
+## One-time setup: `mngr aws prepare`
+
+Run this once, with credentials that can create security groups, before any developer attempts `mngr create --provider aws`:
+
+```bash
+uv run mngr aws prepare --region us-east-1
+# Or with explicit ingress restriction:
+uv run mngr aws prepare --region us-east-1 --allowed-ssh-cidr 203.0.113.4/32
+```
+
+`prepare` creates (or reuses) the `mngr-aws` security group in the given region and authorizes the configured CIDRs on tcp/22 and the container SSH port. It needs:
+
+- `ec2:DescribeSecurityGroups`
+- `ec2:CreateSecurityGroup`
+- `ec2:AuthorizeSecurityGroupIngress`
+
+After `prepare` succeeds, the per-host `mngr create` path only needs the regular RunInstances-style permissions (see the next section); no SG-mutating permissions. This split lets you give devs restricted creds while keeping the privileged setup behind an admin one-shot.
+
 ## Required IAM permissions
 
-The minimal policy actions needed:
+For `mngr create --provider aws` (per-host path):
 
 ```
 ec2:RunInstances, ec2:TerminateInstances, ec2:DescribeInstances,
 ec2:DescribeKeyPairs, ec2:ImportKeyPair, ec2:DeleteKeyPair,
-ec2:DescribeSecurityGroups, ec2:CreateSecurityGroup,
-ec2:AuthorizeSecurityGroupIngress,
+ec2:DescribeSecurityGroups,
 ec2:DescribeSnapshots, ec2:CreateSnapshot, ec2:DeleteSnapshot,
 ec2:DescribeImages
+```
+
+For `mngr aws prepare` (one-time admin setup; in addition to the above for convenience):
+
+```
+ec2:CreateSecurityGroup, ec2:AuthorizeSecurityGroupIngress
 ```
 
 Tags are set in the `RunInstances` call via `TagSpecifications`, not via a separate `CreateTags` call. EBS volumes are tagged the same way (no extra permission needed). Stop/start operate on the container inside the instance (Docker over SSH), not on the EC2 instance itself, so `ec2:StopInstances` / `ec2:StartInstances` are not needed. `DescribeImages` is needed by the AMI-staleness release test (`test_default_amis_describe_successfully`).
@@ -119,7 +142,7 @@ Tags are set in the `RunInstances` call via `TagSpecifications`, not via a separ
 - SSH key auth: each host gets a per-host EC2 KeyPair via `ImportKeyPair`, deleted on `destroy_host`.
 - Discovery: `DescribeInstances` filtered by `tag:mngr-provider`, then SSH to each VPS to read host records from the state volume.
 - Instance shutdown behavior is set to `terminate` so a self-halted instance is garbage-collected automatically.
-- The security group (`mngr-aws` by default) is auto-created on first `create_host` and reused across hosts; it is not deleted on `destroy_host` — clean up manually when retiring a provider.
+- The security group (`mngr-aws` by default) is provisioned out-of-band via `mngr aws prepare` (one-time admin setup) and reused across hosts. `create_host` looks it up read-only and raises a clear "run `mngr aws prepare`" error if missing. It is not deleted on `destroy_host` — clean up manually when retiring a provider.
 - **No automatic snapshot-on-create**: unlike `mngr_modal`, where every sandbox is snapshotted at create time so a hard-killed host can be rehydrated, this provider does not snapshot EC2 instances automatically. `AwsVpsClient.create_snapshot` / `list_snapshots` / `delete_snapshot` are implemented; you can call them manually via `mngr snapshot`, or write a plugin that hooks `on_host_created` to do it for you.
 
 ## Release tests and cost

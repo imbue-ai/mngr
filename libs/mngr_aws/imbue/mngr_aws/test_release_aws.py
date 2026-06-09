@@ -63,8 +63,34 @@ pytestmark = [
 ]
 
 
+@pytest.fixture(scope="session")
+def _aws_release_test_security_group_prepared() -> None:
+    """Run ``mngr aws prepare`` once per test session before any lifecycle test.
+
+    ``create_instance`` no longer auto-creates the security group on the hot
+    path (so users with restricted IAM can run mngr create); the privileged
+    SG-creation step lives in ``mngr aws prepare``. The release tests need
+    to run prepare once so subsequent creates can attach the SG.
+    """
+    cmd = [
+        "uv",
+        "run",
+        "mngr",
+        "aws",
+        "prepare",
+        "--region",
+        AWS_DEFAULT_REGION,
+        "--allowed-ssh-cidr",
+        "0.0.0.0/0",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, (
+        f"`mngr aws prepare` failed (exit {result.returncode}):\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+
 @pytest.fixture()
-def aws_test_settings_dir(tmp_path: Path) -> Iterator[Path]:
+def aws_test_settings_dir(tmp_path: Path, _aws_release_test_security_group_prepared: None) -> Iterator[Path]:
     """Write a project settings.toml that sets the AWS auto-shutdown TTL.
 
     The release tests must set ``auto_shutdown_minutes`` on the AWS

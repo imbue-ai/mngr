@@ -18,6 +18,7 @@ from botocore.stub import ANY
 from botocore.stub import Stubber
 from loguru import logger
 
+from imbue.mngr.errors import MngrError
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import ExistingSecurityGroup
@@ -582,3 +583,64 @@ def test_ensure_security_group_duplicate_on_one_port_does_not_drop_the_other(
         expected_params={"GroupId": "sg-existing", "IpPermissions": ANY},
     )
     assert client.ensure_security_group() == "sg-existing"
+
+
+# =============================================================================
+# resolve_security_group_id (lookup-only; used by create_instance hot path)
+# =============================================================================
+
+
+def test_resolve_security_group_id_returns_preset_id_when_provided(
+    stubbed_client: tuple[AwsVpsClient, Stubber],
+) -> None:
+    client, _stubber = stubbed_client
+    assert client.resolve_security_group_id() == "sg-test"
+
+
+def test_resolve_security_group_id_returns_existing_sg_id_without_authorizing(
+    auto_sg_client: tuple[AwsVpsClient, Stubber],
+) -> None:
+    """Lookup-only path: must NOT call authorize_security_group_ingress."""
+    client, stubber = auto_sg_client
+    stubber.add_response(
+        "describe_security_groups",
+        {"SecurityGroups": [{"GroupId": "sg-existing", "GroupName": "mngr-aws-test"}]},
+        expected_params={"Filters": [{"Name": "group-name", "Values": ["mngr-aws-test"]}]},
+    )
+    # If resolve_security_group_id accidentally calls authorize, the stubber
+    # would fail on an unexpected API call -- so the absence of an
+    # authorize_security_group_ingress stub here is part of the assertion.
+    assert client.resolve_security_group_id() == "sg-existing"
+
+
+def test_resolve_security_group_id_raises_with_prepare_hint_when_missing(
+    auto_sg_client: tuple[AwsVpsClient, Stubber],
+) -> None:
+    """Missing SG must surface as a clear "run `mngr aws prepare`" error, not a CreateSecurityGroup attempt."""
+    client, stubber = auto_sg_client
+    stubber.add_response(
+        "describe_security_groups",
+        {"SecurityGroups": []},
+        expected_params={"Filters": [{"Name": "group-name", "Values": ["mngr-aws-test"]}]},
+    )
+    with pytest.raises(MngrError, match="mngr aws prepare"):
+        client.resolve_security_group_id()
+
+
+def test_resolve_security_group_id_raises_on_multi_vpc_name_collision(
+    auto_sg_client: tuple[AwsVpsClient, Stubber],
+) -> None:
+    """When the same name exists in multiple VPCs, refuse to guess."""
+    client, stubber = auto_sg_client
+    stubber.add_response(
+        "describe_security_groups",
+        {
+            "SecurityGroups": [
+                {"GroupId": "sg-vpc-a", "GroupName": "mngr-aws-test", "VpcId": "vpc-a"},
+                {"GroupId": "sg-vpc-b", "GroupName": "mngr-aws-test", "VpcId": "vpc-b"},
+            ]
+        },
+        expected_params={"Filters": [{"Name": "group-name", "Values": ["mngr-aws-test"]}]},
+    )
+    with pytest.raises(MngrError, match="Found 2 security groups"):
+        client.resolve_security_group_id()

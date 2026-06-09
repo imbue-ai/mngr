@@ -1,7 +1,9 @@
 import os
+from collections.abc import Sequence
 from typing import Any
 from typing import Final
 
+import click
 from botocore.exceptions import BotoCoreError
 from pydantic import ConfigDict
 from pydantic import Field
@@ -15,6 +17,7 @@ from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_aws import hookimpl
+from imbue.mngr_aws.cli import aws_cli_group
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
@@ -171,3 +174,9 @@ class AwsProviderBackend(ProviderBackendInterface):
 def register_provider_backend() -> tuple[type[ProviderBackendInterface], type[ProviderInstanceConfig]]:
     """Register the AWS provider backend."""
     return (AwsProviderBackend, AwsProviderConfig)
+
+
+@hookimpl
+def register_cli_commands() -> Sequence[click.Command]:
+    """Register the ``mngr aws ...`` operator command group."""
+    return [aws_cli_group]

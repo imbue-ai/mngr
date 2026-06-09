@@ -125,6 +125,10 @@ class AwsVpsClient(VpsClientInterface):
         SSH is what protects the host, not network ACLs. The default ingress
         of ``0.0.0.0/0`` is logged as a warning too, prompting production
         users to tighten it.
+
+        Used by ``mngr aws prepare`` (one-time admin setup). The hot path
+        in ``create_instance`` uses ``resolve_security_group_id`` instead,
+        which is lookup-only and requires only RunInstances-style permissions.
         """
         match self.security_group:
             case ExistingSecurityGroup(id=sg_id):
@@ -134,7 +138,54 @@ class AwsVpsClient(VpsClientInterface):
             case _ as unreachable:
                 assert_never(unreachable)
 
-    def _ensure_auto_created_security_group(self, sg_name: str) -> str:
+    def resolve_security_group_id(self) -> str:
+        """Look up the SG id without creating or modifying anything.
+
+        Mirrors ``ensure_security_group`` but with no write API calls --
+        callers only need ``ec2:DescribeSecurityGroups``. When the auto-create
+        SG is missing, raises a ``MngrError`` pointing at ``mngr aws prepare``
+        so a user with restricted IAM (RunInstances-only) gets a clear next
+        step rather than an opaque AWS permission denial.
+        """
+        match self.security_group:
+            case ExistingSecurityGroup(id=sg_id):
+                return sg_id
+            case AutoCreateSecurityGroup(name=sg_name):
+                return self._lookup_security_group_id_or_raise(sg_name)
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def _lookup_security_group_id_or_raise(self, sg_name: str) -> str:
+        filters: list[dict[str, Any]] = [{"Name": "group-name", "Values": [sg_name]}]
+        if self.vpc_id is not None:
+            filters.append({"Name": "vpc-id", "Values": [self.vpc_id]})
+        with self._translate_aws_errors():
+            existing = self._ec2().describe_security_groups(Filters=filters).get("SecurityGroups", [])
+        if not existing:
+            raise MngrError(
+                f"AWS security group named {sg_name!r} does not exist in region {self.region!r}. "
+                f"Run `uv run mngr aws prepare --region {self.region}` once to create it "
+                "(needs ec2:CreateSecurityGroup + ec2:AuthorizeSecurityGroupIngress), then "
+                "retry the create with your usual RunInstances-only credentials. Alternatively, "
+                "set security_group = {kind = 'existing', id = 'sg-...'} on the provider config "
+                "to attach an SG you manage outside mngr."
+            )
+        if len(existing) > 1:
+            sg_descriptions = ", ".join(f"{g['GroupId']} (vpc={g.get('VpcId', '?')})" for g in existing)
+            raise MngrError(
+                f"Found {len(existing)} security groups named {sg_name!r}: {sg_descriptions}. "
+                "Set vpc_id on the AWS provider config to scope the lookup, or pass an explicit "
+                "security_group=ExistingSecurityGroup(id='sg-...')."
+            )
+        return existing[0]["GroupId"]
+
+    def _warn_about_cidrs_if_needed(self, sg_name: str) -> None:
+        """Emit a one-line warning when the effective CIDR set is empty or 0.0.0.0/0.
+
+        The two cases need different wording: empty means "no usable ingress"
+        (instance unreachable), whereas 0.0.0.0/0 means "open to the internet"
+        (default but worth flagging). Anything else is silent.
+        """
         if not self.allowed_ssh_cidrs:
             logger.warning(
                 "AWS allowed_ssh_cidrs is empty; auto-created security group {!r} will have no "
@@ -142,13 +193,17 @@ class AwsVpsClient(VpsClientInterface):
                 "allowed_ssh_cidrs on the provider config (e.g. ('203.0.113.4/32',)) to fix.",
                 sg_name,
             )
-        elif "0.0.0.0/0" in self.allowed_ssh_cidrs:
+            return
+        if "0.0.0.0/0" in self.allowed_ssh_cidrs:
             logger.warning(
                 "AWS allowed_ssh_cidrs includes 0.0.0.0/0; auto-created security group {!r} will "
                 "permit SSH from the public internet. Acceptable for ephemeral dev hosts (key-only "
                 "auth); tighten to a single IP / CIDR (e.g. ('203.0.113.4/32',)) for production.",
                 sg_name,
             )
+
+    def _ensure_auto_created_security_group(self, sg_name: str) -> str:
+        self._warn_about_cidrs_if_needed(sg_name)
 
         filters: list[dict[str, Any]] = [{"Name": "group-name", "Values": [sg_name]}]
         if self.vpc_id is not None:
@@ -241,7 +296,7 @@ class AwsVpsClient(VpsClientInterface):
                 f"got region={region!r}. Instantiate a region-specific client.",
             )
 
-        sg_id = self.ensure_security_group()
+        sg_id = self.resolve_security_group_id()
 
         tag_specs: list[dict[str, str]] = [{"Key": k, "Value": v} for k, v in tags.items()]
         tag_specs.append({"Key": "Name", "Value": label})
