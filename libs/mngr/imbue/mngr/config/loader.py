@@ -619,11 +619,13 @@ def _parse_providers(
             if not silent:
                 logger.warning(msg)
             continue
-        # _drop_unknown_fields raises (strict) or returns raw_config with unknown
+        # _drop_unknown_fields raises (strict) or returns the config with unknown
         # keys removed (non-strict), leaving only known fields for model_validate
         # to coerce to their declared types.
-        raw_config = _drop_unknown_fields(raw_config, config_class, f"providers.{name}", strict=strict, silent=silent)
-        providers[ProviderInstanceName(name)] = config_class.model_validate(raw_config)
+        cleaned_config = _drop_unknown_fields(
+            raw_config, config_class, f"providers.{name}", strict=strict, silent=silent
+        )
+        providers[ProviderInstanceName(name)] = config_class.model_validate(cleaned_config)
 
     return providers
 
@@ -756,7 +758,7 @@ def _parse_agent_types(
                 "installed. Otherwise the agent type name or one of the field names may be "
                 "misspelled."
             )
-        raw_config = _drop_unknown_fields(
+        cleaned_config = _drop_unknown_fields(
             raw_config,
             config_class,
             f"agent_types.{name}",
@@ -764,7 +766,7 @@ def _parse_agent_types(
             silent=silent,
             extra_hint=extra_hint,
         )
-        normalized_config = _normalize_tuple_fields_for_construct(raw_config)
+        normalized_config = _normalize_tuple_fields_for_construct(cleaned_config)
         agent_types[AgentTypeName(name)] = config_class.model_construct(**normalized_config)
 
     return agent_types
@@ -785,8 +787,10 @@ def _parse_plugins(
     for name, raw_config in raw_plugins.items():
         raw_config = _normalize_field_keys(raw_config, f"plugins.{name}")
         config_class = get_plugin_config_class(name)
-        raw_config = _drop_unknown_fields(raw_config, config_class, f"plugins.{name}", strict=strict, silent=silent)
-        plugins[PluginName(name)] = config_class.model_construct(**raw_config)
+        cleaned_config = _drop_unknown_fields(
+            raw_config, config_class, f"plugins.{name}", strict=strict, silent=silent
+        )
+        plugins[PluginName(name)] = config_class.model_construct(**cleaned_config)
 
     return plugins
 
@@ -863,8 +867,8 @@ def _parse_retry_config(raw_retry: dict[str, Any], *, strict: bool = True, silen
     Uses model_construct to bypass validation and explicitly set None for unset fields.
     """
     raw_retry = _normalize_field_keys(raw_retry, "retry")
-    raw_retry = _drop_unknown_fields(raw_retry, RetryConfig, "retry", strict=strict, silent=silent)
-    return RetryConfig.model_construct(**raw_retry)
+    cleaned_retry = _drop_unknown_fields(raw_retry, RetryConfig, "retry", strict=strict, silent=silent)
+    return RetryConfig.model_construct(**cleaned_retry)
 
 
 def _parse_logging_config(raw_logging: dict[str, Any], *, strict: bool = True, silent: bool = False) -> LoggingConfig:
@@ -873,8 +877,8 @@ def _parse_logging_config(raw_logging: dict[str, Any], *, strict: bool = True, s
     Uses model_construct to bypass validation and explicitly set None for unset fields.
     """
     raw_logging = _normalize_field_keys(raw_logging, "logging")
-    raw_logging = _drop_unknown_fields(raw_logging, LoggingConfig, "logging", strict=strict, silent=silent)
-    return LoggingConfig.model_construct(**raw_logging)
+    cleaned_logging = _drop_unknown_fields(raw_logging, LoggingConfig, "logging", strict=strict, silent=silent)
+    return LoggingConfig.model_construct(**cleaned_logging)
 
 
 def _parse_commands(raw_commands: dict[str, dict[str, Any]]) -> dict[str, CommandDefaults]:
