@@ -309,8 +309,9 @@
   // so we also keep the "Manage account(s)" / "Log in" label up-to-date here
   // by toggling the same DOM the Electron sidebar.js uses. In Electron mode
   // the sidebar lives in its own WebContentsView with its own copy of this
-  // logic; the DOM lookup below no-ops (the inline #sidebar-account is
-  // hidden) and the main process drives the separate view.
+  // logic; the writes below land on the inline #sidebar-account, which
+  // lives inside the display:none #sidebar-panel and so isn't user-visible.
+  // The main process drives the separate view.
   var signedIn = false;
   function updateAuthUI(data) {
     signedIn = !!(data && data.signedIn);
