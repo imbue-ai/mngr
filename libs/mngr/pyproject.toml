@@ -35,10 +35,7 @@ dependencies = [
     "setproctitle>=1.3",
     "python-dotenv>=1.0",
     "pyinfra>=3.0",
-    # paramiko 4.0.0 SIGILLs on import inside python:3.12.13-slim ARM64 docker
-    # containers on Apple Silicon (verified in launch-to-msg run 27238034922).
-    # Pin to 3.x until paramiko 4.x ships a fixed aarch64 wheel.
-    "paramiko>=3.0,<4.0",
+    "paramiko>=3.0",
     "pluggy>=1.5.0",
     "pygtail>=0.14.0",
     "markdown-it-py>=2.2.0",
