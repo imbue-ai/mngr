@@ -121,7 +121,7 @@ Y = implemented, partial = present but incomplete, - = absent.
 | Raw transcript | Y | Y | - | - | - |
 | Common transcript | Y | Y | - | - | - |
 | Conversation resume (stop/start) | Y | Y | - | - | - |
-| Session preserve on destroy | Y (online + offline) | - | - | - | - |
+| Session preserve on destroy | Y (online + offline) | WIP | - | - | - |
 | Streaming snapshot (live view) | Y | - | - | - | - |
 | Deploy file/env contributions | Y | - | - | - | - |
 | Field generators (waiting_reason) | Y (online) | - | - | - | - |
@@ -132,9 +132,9 @@ Notable observations:
 - **`pi-coding` is the most advanced stub**: real TUI class, auth sync, HOME isolation,
   install management -- but no lifecycle marker, transcripts, resume, permissions, or
   trust handling.
-- **`antigravity` is missing session-preservation-on-destroy, the streaming snapshot,
-  deploy contributions, and field generators** relative to claude. These are the claude
-  features no port has yet matched.
+- **`antigravity` still lags claude on session-preservation-on-destroy (WIP), the
+  streaming snapshot, deploy contributions, and field generators.** These are the claude
+  features no port has fully matched yet.
 - **`codex`/`opencode` are pure `BaseAgent` shells**: they only get the free baseline.
   They will *appear* to work (`mngr create` succeeds, you can send messages) but will
   report WAITING forever, have no transcript, no resume, and no credential sharing.
@@ -204,36 +204,52 @@ file). Hook scripts must be POSIX `sh` and must not assume `jq` is present on re
 
 ### D. Subagent-aware idle gating (the crux)
 
-When the agent spawns its own subagents/sub-tasks, those subprocesses fire the *same*
-lifecycle hooks. A naive implementation lets a subagent's "I'm done" event clear the
-parent's `active` marker, so the parent flips to WAITING while still working. Both
-reference plugins solve this, by different means dictated by their CLIs:
+Naively, the failure mode is: when the agent spawns a subagent (or a nested invocation of
+itself), the marker-touching events fire for that child too, and the child's "I'm done"
+event clears the parent's `active` marker, so the parent flips to WAITING while still
+working. **But whether this actually happens is entirely CLI-specific** -- it depends on
+*which* of the CLI's lifecycle events fire for children vs only the root, and the two
+reference plugins face genuinely different situations:
 
-- **claude -- env-var session guard**: every readiness hook command is prefixed with
-  `SESSION_GUARD = '[ -z "$MAIN_CLAUDE_SESSION_ID" ] && exit 0; '` (`claude_config.py:512`).
-  `MAIN_CLAUDE_SESSION_ID` is exported only on the main session's launch line
-  (`plugin.py:1613`). A subagent subprocess lacks it, so its hook firings short-circuit
-  and never touch the marker. The `Stop` hook (`wait_for_stop_hook.sh`) additionally
-  *drains* sibling stop hooks (waits up to 120s for other Stop hooks / bash-tool tasks to
-  finish, distinguished via `/proc/<pid>/environ`) before marking idle.
-- **antigravity -- root-conversation matching**: `agy` sets no per-session env var, so the
-  discriminator is the conversation id. `PreInvocation` records the turn's *root*
-  conversation in `root_conversation` (only when the marker was absent -- i.e. a new
-  turn). `Stop` clears `active` **only** when the payload reports both `"fullyIdle":true`
-  **and** a conversation id matching the recorded root. Subagent Stops carry a non-root id;
-  interim Stops carry `fullyIdle:false`; either keeps the marker. Re-recording the root at
-  each turn boundary keeps `/clear`, `/fork`, `/switch`, and resume correct
-  (README "Hooks" section; `resources/set_active_marker.sh`,
-  `resources/clear_active_marker_when_idle.sh`).
+- **claude -- separate subagent event + a guard against nested processes.** Claude Code
+  Task-tool subagents do **not** fire the `Stop` event; they fire a *distinct*
+  `SubagentStop` event, which `mngr_claude` does **not** hook at all (it configures only
+  `SessionStart`, `UserPromptSubmit`, `PermissionRequest`, `PostToolUse`, `Notification`,
+  `Stop` -- `claude_config.py:555-665`). So Task subagents never touch the markers by
+  construction. The `SESSION_GUARD = '[ -z "$MAIN_CLAUDE_SESSION_ID" ] && exit 0; '`
+  prefix (`claude_config.py:512`) addresses a *different* case: a nested/recursive `claude`
+  **process** that resumed a session (e.g. a code-guardian reviewer spawned as a
+  subprocess) would fire the full `SessionStart`/`Stop`/... hook set against the same
+  `$MNGR_AGENT_STATE_DIR`. The guard makes those firings exit early unless this is the
+  main session (`MAIN_CLAUDE_SESSION_ID` is exported on mngr's launch line, `plugin.py:1615`).
+  Separately, the `Stop` hook (`wait_for_stop_hook.sh`) *drains* concurrent sibling stop
+  hooks (waits up to 120s, distinguishing process types via `/proc/<pid>/environ`:
+  `CLAUDE_PROJECT_DIR` without `CLAUDECODE=1` = a stop hook; `CLAUDECODE=1` = a bash-tool
+  task) before marking idle, so a still-running reviewer keeps the agent RUNNING.
+- **antigravity -- root-conversation matching.** `agy` has **no** separate subagent-stop
+  event: it runs the *same* `Stop` hook for the root conversation and every subagent
+  conversation, and each subagent fires its own `"fullyIdle":true` Stop. So here the naive
+  failure mode is real. The discriminator is the conversation id: `PreInvocation` records
+  the turn's *root* conversation in `root_conversation` (only when the marker was absent --
+  a new turn). `Stop` clears `active` **only** when the payload reports both
+  `"fullyIdle":true` **and** a conversation id matching the recorded root. Subagent Stops
+  carry a non-root id; interim Stops carry `fullyIdle:false`; either keeps the marker
+  (`resources/set_active_marker.sh`, `resources/clear_active_marker_when_idle.sh`). A
+  liveness fallback clears on `fullyIdle:true` if no root was ever recorded, so a failure
+  to record the root can't strand the agent in RUNNING forever.
 
-**This is the single most important and easiest-to-miss dimension.** A liveness fallback
-matters too: antigravity clears on `fullyIdle:true` if no root was ever recorded, so a
-failure to record the root can't strand the agent in RUNNING forever.
+So the two plugins illustrate the spectrum: Claude's harness already isolates subagents
+into a separate event class (mngr just declines to hook it) and only needs a guard for
+recursive whole-process invocations; agy collapses everything onto one `Stop` event and
+needs explicit root-vs-child id matching. **This is the single most important and
+easiest-to-miss dimension** -- and you cannot assume either shape; you must check your CLI.
 
-**Questions**: Does the CLI fire stop/idle events for subagents separately from the root?
-Is there a stable discriminator (an env var on the main process, a "fully idle" flag, a
-root-vs-child conversation id)? How do you avoid both failure modes (parent goes idle
-early; parent never goes idle)?
+**Questions**: Which of the CLI's lifecycle events fire for Task-style subagents -- a
+distinct event (like Claude's `SubagentStop`) or the same one as the root (like agy's
+`Stop`)? What about a nested/recursive invocation of the CLI as a subprocess? Is there a
+stable discriminator (a distinct event, an env var on the main process, a "fully idle"
+flag, a root-vs-child conversation id)? How do you avoid both failure modes (parent goes
+idle early; parent never goes idle)?
 
 ### E. Readiness detection
 
@@ -274,8 +290,13 @@ per-agent isolated config dirs.
 
 **Gotchas**: whether the CLI writes its token **in place** vs atomic-rename decides whether
 a symlink-to-shared works (in-place: yes; rename: the symlink gets replaced by a regular
-file and sharing breaks). macOS keychain storage usually can't be shared across relocated
-homes -- prefer a file token.
+file and sharing breaks). The macOS-keychain headache is specifically a consequence of
+**relocating `$HOME`** (see [config isolation](#g-config-dir--home-isolation)): a macOS
+keychain can't be reliably read from a relocated home, so antigravity has to lean on a
+shared *file* token instead. A CLI isolated via a config-dir env var (claude, pi) keeps the
+user's real `$HOME` and can still reach the system keychain (claude just has to mirror
+entries to per-config-dir labels, since it hashes the config-dir path into the label) --
+this is one more reason to prefer config-dir isolation over HOME relocation.
 
 **Questions**: Where does the CLI store credentials (file? keychain? both)? Does it write
 in place or atomically? Does it hash the config-dir path into the credential location
@@ -285,24 +306,36 @@ steps remain?
 ### G. Config dir / HOME isolation
 
 Each agent needs its own settings/permissions/transcripts, not the user's global state.
+**Strongly prefer a config-dir override env var; relocating `$HOME` is a last resort.**
+Pointing the CLI at a per-agent config dir (claude, pi) is surgical -- it isolates exactly
+the agent's config and nothing else. Relocating `$HOME` (antigravity) is a blunt
+instrument that drags *everything* an unscoped tool reads from `$HOME` into the per-agent
+sandbox: credentials/keychains, caches, unrelated dotfiles. It exists only because `agy`
+gives no finer-grained lever. Do it only if your CLI has no config-dir override.
 
-- **claude** (`plugin.py:1436`): sets `CLAUDE_CONFIG_DIR` to
+- **claude** (`plugin.py:1436`) -- *preferred shape*: sets `CLAUDE_CONFIG_DIR` to
   `$MNGR_AGENT_STATE_DIR/plugin/claude/anthropic/` and `ORIGINAL_CLAUDE_CONFIG_DIR` to the
   user's real dir. Populates it by symlinking-or-copying `skills/agents/commands/plugins/`
   and rewriting plugin/marketplace install paths. A `use_env_config_dir` escape hatch
   shares the user's `$CLAUDE_CONFIG_DIR` (local-only, mngr writes nothing).
-- **antigravity** (`plugin.py:513`): `agy` has **no** config-dir env var, so it relocates
-  `$HOME` to `<agent_state_dir>/plugin/antigravity/home/` (injected only on the agy process
-  via `env HOME=...`). Per-agent `$HOME/.gemini` then holds settings/auth/hooks/sessions.
-  Heavy caches (`ms-playwright-go`) are symlinked back to the user's real host cache so they
-  download once.
+- **pi-coding** -- also preferred shape: sets `PI_CODING_AGENT_DIR` to a per-agent dir.
+- **antigravity** (`plugin.py:513`) -- *the fallback*: `agy` has **no** config-dir env var
+  and ignores per-workspace settings, so relocating `$HOME` to
+  `<agent_state_dir>/plugin/antigravity/home/` (injected only on the agy process via
+  `env HOME=...`) is the *only* lever for a per-agent `settings.json`. Per-agent
+  `$HOME/.gemini` then holds settings/auth/hooks/sessions, and the fallout (no shared
+  keychain, heavy caches re-downloaded) has to be patched back up by hand: the
+  `ms-playwright-go` cache is symlinked to the user's real host cache, and auth falls back
+  to a shared file token (see [Auth](#f-auth--credential-sharing)). This collateral cleanup
+  is exactly the cost of HOME relocation and the reason to avoid it.
 
 Both resolve the real host `$HOME`/OS over the host shell (not `Path.home()`/
 `platform.system()`) so it works on remote hosts.
 
-**Questions**: Does the CLI have a config-dir override env var? If not, can you relocate
-`$HOME`? Where does it store global vs per-project settings (you usually want to seed from
-the *global* scope only)? Any heavy caches to share?
+**Questions**: Does the CLI have a config-dir override env var? (Hope so -- use it.) If
+*not*, can you relocate `$HOME`, and what collateral state (keychain, caches, dotfiles)
+does that drag in that you'll have to re-share or re-seed? Where does it store global vs
+per-project settings (you usually want to seed from the *global* scope only)?
 
 ### H. Permissions
 
@@ -393,7 +426,8 @@ forward. For antigravity this is because agy's conversation store is global, not
 ### L. Session preservation on destroy
 
 When an agent (or its host) is destroyed, its session/transcript files should be preserved
-so they're not lost. **Only `mngr_claude` implements this; no port has matched it.**
+so they're not lost. **`mngr_claude` implements this fully; `mngr_antigravity` has it as
+WIP; the other stubs lack it.**
 
 - **claude** (`plugin.py:2333`, `2402`, `2612`, `2765`): `on_destroy` copies session JSONLs,
   raw + common transcripts, and session-id history to
@@ -520,9 +554,9 @@ on the last; replicating it for a new CLI is a sane default.
 6. **Correctness fixes** (#1927 shell-quoting, #2022 enterprise onboarding). Point fixes
    layered on top.
 
-Then the claude-only features not yet ported anywhere: **session preservation on destroy**,
-**deploy/scheduling contributions**, **field generators (waiting_reason)**, and the
-**streaming snapshot** -- in roughly that priority order.
+Then the claude features no port has fully matched: **session preservation on destroy**
+(WIP for antigravity), **deploy/scheduling contributions**, **field generators
+(waiting_reason)**, and the **streaming snapshot** -- in roughly that priority order.
 
 ### Known open gaps (carried by antigravity, and by definition by every newer port)
 
