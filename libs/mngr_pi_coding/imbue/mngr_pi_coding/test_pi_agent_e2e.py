@@ -12,15 +12,9 @@ exercising the four capabilities this plugin adds over the bare stub:
   ``mngr transcript`` renders it.
 * **Resume across stop/start** -- after a stop/start the agent recalls a secret
   planted before the stop, proving the prior conversation was restored.
-* **Workspace trust** -- the source has a CLAUDE.md, so the worktree would hit
-  pi's "Trust project folder?" dialog; the plugin pre-seeds trust, so the run
-  (and its first message) succeeds rather than stalling at the dialog.
-
-Release tests do not run in CI; run this manually with a real key::
-
-    PYTEST_MAX_DURATION_SECONDS=900 ANTHROPIC_API_KEY=sk-ant-... \\
-        uv run pytest --no-cov --cov-fail-under=0 -n 0 -m release \\
-        libs/mngr_pi_coding/imbue/mngr_pi_coding/test_pi_agent_e2e.py
+* **Workspace trust** -- the source has a ``.agents/skills`` dir, so the worktree
+  would hit pi's "Trust project folder?" dialog; the plugin pre-seeds trust, so the
+  run (and its first message) succeeds rather than stalling at the dialog.
 """
 
 import json
