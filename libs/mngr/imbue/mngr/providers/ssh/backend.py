@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final
 
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr import hookimpl
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
@@ -84,11 +85,11 @@ Example configuration in mngr.toml:
         expanded_hosts: dict[str, SSHHostConfig] = {}
         for host_name, host_config in hosts.items():
             if host_config.key_file is not None:
-                expanded_hosts[host_name] = SSHHostConfig(
-                    address=host_config.address,
-                    port=host_config.port,
-                    user=host_config.user,
-                    key_file=Path(host_config.key_file).expanduser(),
+                # Update only key_file so every other field (notably
+                # known_hosts_file) is preserved. Listing fields by hand silently
+                # drops anything not re-listed.
+                expanded_hosts[host_name] = host_config.model_copy_update(
+                    to_update(host_config.field_ref().key_file, Path(host_config.key_file).expanduser()),
                 )
             else:
                 expanded_hosts[host_name] = host_config
