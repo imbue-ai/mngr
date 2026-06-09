@@ -508,18 +508,21 @@ jobs:
           # session for depth rather than spinning a separate workflow per
           # scenario.
           WORKSPACE_COUNT:    "2"
-          # Pin the FCT ref the binary creates against to the SHA the
-          # workflow resolved from `template_ref`. Without this, minds
-          # falls back to `FALLBACK_BRANCH = "v0.2.35"` (templates.py)
-          # regardless of what the workflow_dispatch input says, so a
-          # `template_ref=main` run silently exercises v0.2.35 instead.
-          # The full SHA (not the branch name) keeps the run reproducible
-          # if `template_ref` was a moving ref like `main`.
+          # Pin the FCT ref the binary creates against to the `template_ref`
+          # dispatch input. Without this, minds falls back to
+          # `FALLBACK_BRANCH = "v0.2.35"` (templates.py) regardless of what the
+          # workflow_dispatch input says, so a `template_ref=main` run silently
+          # exercises v0.2.35 instead.
           # MINDS_WORKSPACE_BRANCH is gated by MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1
           # in templates._operator_workspace_default (an end-user `minds run` ignores
           # a stray MINDS_WORKSPACE_* in the shell unless explicitly opted in).
+          # We pass the branch / tag name (not the resolved SHA) because the
+          # binary's `git clone --branch <ref>` only accepts branch names and
+          # tags. The resolved SHA is still recorded in the GHA step summary
+          # for audit. Moving refs (e.g. `main`) thus float between runs --
+          # the trade-off is "must clone-able" vs "must be byte-identical".
           MINDS_USE_LOCAL_WORKSPACE_DEFAULTS: "1"
-          MINDS_WORKSPACE_BRANCH: ${{ steps.fct_sha.outputs.sha }}
+          MINDS_WORKSPACE_BRANCH: ${{ inputs.template_ref }}
         run: |
           # pipefail is REQUIRED: without it, the pipeline below exits
           # with tee's status (always 0), so an e2e failure (exit 1) is
