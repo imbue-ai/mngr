@@ -181,10 +181,14 @@ one entry per trusted repo. This is intentional for milestone 1-4 (re-trust shou
 re-prompt across worktrees of the same repo), and cleanup would belong with the
 session-preservation-on-destroy work.
 
-**Future `headless_codex` (noted in PR):** the `codex app-server` JSON-RPC protocol (or `codex
-exec --json`) gives clean synchronous lifecycle + stream events (`initialize`/`thread.started`
-readiness, `turn.started`/`turn.completed`, `item.*` output). That is the natural basis for a
-headless codex subtype -- a `BaseHeadlessAgent`/`StreamingHeadlessAgentMixin` driving
-app-server over JSON-RPC -- directly parallel to `mngr_claude`'s `headless_claude` (`claude
---print`, streaming from `stdout.jsonl`). Out of scope here; called out as the recommended
-follow-up for a headless variant.
+**Future app-server-backed agent variant:** the `codex app-server` JSON-RPC protocol gives
+clean synchronous lifecycle + stream events (`initialize`/`thread.started` readiness,
+`turn.started`/`turn.completed`, `item.*` output) and -- via `codex --remote unix://<sock>` --
+lets a TUI *view* a programmatically-driven session (so mngr can message over the socket
+instead of `tmux send-keys`, while the user still watches in the TUI). The detailed design,
+the verified mechanics (raw `app-server --listen` works with brew; the `remote-control` daemon
+needs the standalone installer), and -- importantly -- the **OpenAI-ToS caveat** (drive with an
+honest `clientInfo.name`; do NOT spoof `codex-tui` to defeat the `*-codex` model gate; use an
+API key for those models in app-server mode) are documented in the plugin itself:
+`libs/mngr_codex/README.md` ("Future direction: an app-server-backed agent variant"). Out of
+scope here; the recommended follow-up.

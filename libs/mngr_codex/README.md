@@ -63,13 +63,75 @@ Set fields under an `[agent_types.codex]` table in your mngr config, or pass ove
 
 Codex picks the account's default model, and a **ChatGPT-account login rejects some
 `*-codex` model slugs** (e.g. `gpt-5.2-codex`) with a 400 "model is not supported when using
-Codex with a ChatGPT account". If your agent errors on the first message with that, set
-`model` to a model your account supports (e.g. `"gpt-5.5"`).
+Codex with a ChatGPT account". Two distinct things cause this:
+
+- **Deprecation:** `gpt-5.2` / `gpt-5.2-codex` / `gpt-5.3-codex` have been sunset for ChatGPT
+  subscriptions (OpenAI's announcement points those users to the API). These fail on a ChatGPT
+  plan in *every* mode, including the TUI.
+- **Run-mode entitlement:** the backend gates some `*-codex` models by the `originator` HTTP
+  header (i.e. the client identity). The interactive TUI presents as `codex-tui` and is
+  allowed; `codex exec` presents as `codex_exec` and is denied. (See the app-server note below
+  for why this matters and why we do *not* spoof the TUI identity.)
+
+If your agent errors on the first message with the "not supported" 400, set `model` to a model
+your account supports (e.g. `"gpt-5.5"`), or authenticate with an API key (which carries the
+full model entitlement).
 
 ## Not yet implemented
 
 Relative to `mngr_claude`, these are not yet ported (tracked for follow-up): session
 preservation on destroy, deploy/scheduling contributions, field generators (`waiting_reason`),
-the streaming snapshot, and installation/version management. A future `headless_codex` subtype
-could drive `codex app-server` (JSON-RPC) for clean synchronous lifecycle/stream events,
-directly paralleling `mngr_claude`'s `headless_claude`.
+the streaming snapshot, and installation/version management.
+
+## Future direction: an app-server-backed agent variant
+
+This agent drives the codex **TUI** by `tmux send-keys` (paste + Enter), with banner-poll
+readiness. That works, but it's fragile (screen-scraping) and codex's `SessionStart` fires
+lazily, so there's no clean pre-input readiness signal. Codex offers a much cleaner surface we
+should adopt in a **follow-up** as a *second* agent type (mirroring `mngr_claude`'s
+`claude` + `headless_claude`): the **app-server**.
+
+### What it would give us
+- **Programmatic messaging instead of tmux paste.** `codex app-server` speaks a JSON-RPC
+  protocol over a socket; you send a turn with `initialize` -> `thread/start` -> `turn/start`.
+  No `send-keys`, no paste-visibility polling.
+- **You can still view it in the TUI.** Launch the TUI as a *viewer* with
+  `codex --remote unix://<sock>` (accepts `ws://`, `wss://`, `unix://` too) connected to the
+  app-server -- so it runs in tmux and you watch it live, but mngr drives it over the socket.
+- **Clean synchronous readiness.** The `initialize` response / `thread.started` event is an
+  unambiguous "ready for input" signal -- it eliminates the lazy-`SessionStart` banner-poll
+  workaround entirely.
+- **Cleaner lifecycle/transcript.** `turn.started` / `turn.completed` / `item.*` events could
+  drive the RUNNING/WAITING marker and the transcript directly, instead of (or alongside) the
+  hook scripts. The hooks, subagents, sandbox, and approval policy are all **engine-level**
+  (`codex-core`), so they fire identically whether codex is driven via the TUI or the
+  app-server -- the existing marker hooks would keep working.
+
+### How (verified against codex 0.138.0)
+- `codex app-server --listen unix://<sock>` runs the server and **works with the brew/npm
+  install**. (The convenience wrapper `codex remote-control start` / `codex app-server daemon`
+  requires codex's *standalone* installer at a fixed path -- avoid it; use raw `app-server
+  --listen`.) `codex app-server proxy --sock <sock>` proxies stdio to a running server's
+  control socket.
+- mngr would override `send_message` to speak JSON-RPC to the socket, and `assemble_command`
+  would launch `app-server` + a `--remote` TUI viewer instead of the bare TUI.
+
+### Important: client identity and OpenAI's ToS (do NOT spoof the TUI)
+The app-server sets its `originator` from the `initialize` request's `clientInfo.name`. It is
+**tempting but against the spirit (and likely the letter) of OpenAI's terms** to set
+`clientInfo.name = "codex-tui"` so the backend grants the `*-codex` model entitlement it
+otherwise denies non-TUI clients. That presents a programmatic client as the first-party TUI
+specifically to bypass an *intentional* server-side model gate -- which falls under OpenAI's
+"circumvent any restrictions / bypass any protective measures" clause (codex's own code treats
+these names as a trust boundary; the override env var is literally `CODEX_INTERNAL_ORIGINATOR_OVERRIDE`).
+
+So the app-server variant must **identify honestly** (mngr's own client name) and use whatever
+models that identity is legitimately entitled to. For the gated `*-codex` models in app-server
+mode, authenticate with an **API key** (OpenAI's documented path for programmatic workflows) --
+do not spoof the TUI. The genuine `codex` TUI agent in this plugin remains the legitimate way
+to use `*-codex` models on a ChatGPT-subscription login (it really *is* the TUI).
+
+(Driving codex programmatically via the app-server on a single user's own ChatGPT login is
+itself fine -- it's a first-party feature and OpenAI staff have called such use "permissive";
+the line we don't cross is identity-spoofing to defeat the model gate, plus the usual no
+credential-sharing / no multi-tenant-proxying / no rate-limit-bypass.)
