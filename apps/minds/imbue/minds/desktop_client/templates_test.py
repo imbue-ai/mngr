@@ -345,6 +345,21 @@ def test_render_sidebar_page_contains_workspace_list() -> None:
     # The interactivity (including the SSE EventSource fallback) now lives
     # in the external /_static/sidebar.js file; the template should pull it in.
     assert "/_static/sidebar.js" in html
+    # The floating-menu wrapper id sidebar.js's ResizeObserver targets to
+    # push the measured menu height to the Electron main process over the
+    # ``set-sidebar-height`` IPC. A transparent sidebar WebContentsView sized
+    # past the menu would silently absorb clicks intended for the workspace
+    # content underneath; the height report is what keeps clicks falling
+    # through.
+    assert 'id="sidebar-menu"' in html
+    # SidebarBottom.jinja is rendered inside the floating menu in both
+    # Chrome.jinja (browser mode) and Sidebar.jinja (Electron sidebar
+    # WebContentsView). It carries the "New workspace" CTA and the
+    # "Manage account(s)" / "Log in" entry; the label is updated
+    # dynamically by sidebar.js from /auth/api/status.
+    assert 'id="sidebar-new-workspace"' in html
+    assert 'id="sidebar-account"' in html
+    assert 'id="sidebar-account-label"' in html
 
 
 def test_render_recovery_page_includes_agent_id_and_return_to() -> None:
