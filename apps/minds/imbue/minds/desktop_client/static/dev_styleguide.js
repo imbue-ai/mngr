@@ -9,7 +9,7 @@
   var value = document.getElementById('styleguide-accent-value');
   if (!hue || !value) return;
   function apply() {
-    var color = 'oklch(65% 0.15 ' + hue.value + ')';
+    var color = 'oklch(85% 0.08 ' + hue.value + ')';
     document.documentElement.style.setProperty('--workspace-accent', color);
     value.textContent = color;
   }
