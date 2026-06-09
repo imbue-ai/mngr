@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shlex
 
 import pytest
@@ -141,10 +142,13 @@ def test_create_short_forms(e2e: E2eSession) -> None:
     mngr create my-task claude
     mngr c my-task
     """)
-    # Test "mngr create <name>" form. --type command -- sleep <N> stands in
-    # for the real claude agent so the test doesn't need claude installed.
+    # Test the "mngr create <name> <type>" form, where the agent type is given as
+    # a positional argument (the tutorial's `mngr create my-task claude`). We pass
+    # `command` positionally -- exactly where the tutorial puts `claude` -- so the
+    # test exercises the positional-type code path without needing claude
+    # installed. `-- sleep <N>` supplies the command for the `command` agent type.
     result_full = e2e.run(
-        "mngr create my-task --type command --no-ensure-clean -- sleep 100072",
+        "mngr create my-task command --no-ensure-clean -- sleep 100072",
         comment="you can name the agent type explicitly as a positional argument, or use the short form",
     )
     expect(result_full).to_succeed()
@@ -157,19 +161,41 @@ def test_create_short_forms(e2e: E2eSession) -> None:
     )
     expect(result_short).to_succeed()
 
-    # Verify both agents were created and are running
+    # Verify both agents were created and are running. Also confirm the positional
+    # `command` type actually resolved (both agents have type "command" and are
+    # running the stand-in sleep command), proving the positional-type argument was
+    # honored rather than silently falling back to a default.
     list_result = e2e.run("mngr list --format json", comment="Verify both agents are running")
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     agents_by_name = {a["name"]: a for a in parsed["agents"]}
     assert "my-task" in agents_by_name, f"my-task not found in agents: {list(agents_by_name)}"
     assert "my-other-task" in agents_by_name, f"my-other-task not found in agents: {list(agents_by_name)}"
+    my_task = agents_by_name["my-task"]
+    my_other_task = agents_by_name["my-other-task"]
+    assert my_task["type"] == "command", f"Expected positional type 'command' to resolve, got: {my_task['type']}"
+    assert my_task["command"] == "sleep 100072", f"Unexpected command for my-task: {my_task['command']}"
+    assert my_other_task["type"] == "command", f"Expected 'mngr c' agent type 'command', got: {my_other_task['type']}"
+    assert my_task["state"] in ("RUNNING", "WAITING"), f"my-task not running: {my_task['state']}"
+    assert my_other_task["state"] in ("RUNNING", "WAITING"), f"my-other-task not running: {my_other_task['state']}"
 
 
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+# This test runs three sequential mngr operations (config set, create, list),
+# each of which performs full provider discovery, so it needs more than the
+# default 10s.
+#
+# No @pytest.mark.modal here: this test only creates a local codex agent
+# (configured to `sleep 99999`) and runs `mngr list`. `mngr list` reaches Modal
+# solely through the in-process gRPC SDK inside the spawned `mngr` subprocess,
+# which the resource guard cannot track (the SDK monkeypatch lives in the pytest
+# process, and the `modal` CLI binary -- the only cross-process-tracked path --
+# is never invoked for local agents). With the mark, the guard's NEVER_INVOKED
+# check fails the test; without it there is no tracked Modal usage, so no BLOCKED
+# violation.
+@pytest.mark.timeout(120)
 def test_create_codex_agent(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can also specify a different agent (ex: codex)
@@ -211,6 +237,9 @@ def test_create_codex_agent(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+# This test runs two sequential mngr operations (create, list), each performing
+# full provider discovery, so the default 10s pytest-timeout is too tight.
+@pytest.mark.timeout(120)
 def test_create_with_agent_args(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can specify the arguments to the *agent* (ie, send args to the agent rather than mngr)
@@ -265,6 +294,12 @@ def test_create_agent_args_require_dash_separator(e2e: E2eSession) -> None:
     expect(result).to_fail()
     combined_output = result.stdout + result.stderr
     assert "--model" in combined_output, f"Expected the error to mention the rejected flag, got:\n{combined_output}"
+    # Pin down the *reason* for failure: mngr's option parser must reject
+    # `--model` as an unrecognized option, not fail for some unrelated reason
+    # (e.g. a bad config) that merely happens to echo the flag back.
+    assert "No such option" in combined_output, (
+        f"Expected an unrecognized-option parse error, got:\n{combined_output}"
+    )
 
     # The failed create must not have left an agent behind.
     list_result = e2e.run("mngr list --format json", comment="Verify the rejected create produced no agent")
@@ -315,6 +350,61 @@ def test_create_named_agent(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
+def test_create_unnamed_agent_gets_random_name(e2e: E2eSession) -> None:
+    """Alternative path for the same tutorial block: the block documents that "If
+    you don't specify a name, mngr will generate a random one for you." This test
+    omits the name argument entirely and verifies a non-empty random name is
+    generated and actually addresses the running agent."""
+    e2e.write_tutorial_block("""
+    # when creating agents to accomplish tasks, it's recommended that you give them a name to make it easier to manage them:
+    mngr create my-task
+    # that command gives the agent a name of "my-task". If you don't specify a name, mngr will generate a random one for you.
+    """)
+    # Omit the name argument so mngr falls back to its random name generator
+    # (default style "coolname", a hyphen-separated multi-word slug).
+    expect(
+        e2e.run(
+            "mngr create --type command --no-ensure-clean -- sleep 100124",
+            comment="if you don't specify a name, mngr will generate a random one for you",
+        )
+    ).to_succeed()
+
+    list_result = e2e.run("mngr list --format json", comment="Verify the auto-generated name")
+    expect(list_result).to_succeed()
+    agents = json.loads(list_result.stdout)["agents"]
+    # The isolated fixture starts with no agents, so this create yields exactly one.
+    assert len(agents) == 1, f"Expected exactly 1 auto-named agent, got: {agents}"
+    generated_name = agents[0]["name"]
+    # A generated name must be non-empty, must not be the literal default the
+    # tutorial uses for explicit naming, and must look like a coolname slug
+    # (lowercase tokens joined by hyphens, i.e. more than one word).
+    assert generated_name, f"Expected a non-empty generated name, got: {generated_name!r}"
+    assert generated_name != "my-task", "Unnamed create must not reuse the tutorial's explicit name"
+    assert re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)+", generated_name), (
+        f"Expected a hyphenated random slug, got: {generated_name!r}"
+    )
+    assert agents[0]["state"] in ("RUNNING", "WAITING")
+
+    # The generated name must actually address the agent: exec on it by name and
+    # confirm it runs inside its own worktree (named after the generated name).
+    work_dir = agents[0]["work_dir"]
+    assert os.path.basename(work_dir).startswith(generated_name), (
+        f"Expected the worktree to be named after the generated name {generated_name!r}, got: {work_dir!r}"
+    )
+    exec_result = e2e.run(
+        f"mngr exec {generated_name} pwd",
+        comment="Verify the generated name addresses the running agent",
+    )
+    expect(exec_result).to_succeed()
+    assert os.path.basename(work_dir) in exec_result.stdout, (
+        f"Expected `pwd` output to reference the agent worktree {work_dir!r}, got: {exec_result.stdout!r}"
+    )
+
+
+@pytest.mark.rsync
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.timeout(120)
 def test_create_with_json_output(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can control output format for scripting:
@@ -327,17 +417,34 @@ def test_create_with_json_output(e2e: E2eSession) -> None:
     )
     expect(create_result).to_succeed()
 
-    # The create command with --format json should produce valid JSON with agent_id and host_id
+    # The create command with --format json should produce valid JSON with agent_id and host_id.
+    # Parsing stdout directly (no stripping/regex) is itself part of the contract: --format json
+    # must emit only the JSON object on stdout, with all status/log lines routed to stderr.
     create_json = json.loads(create_result.stdout)
     assert "agent_id" in create_json
     assert "host_id" in create_json
+    created_agent_id = create_json["agent_id"]
+    created_host_id = create_json["host_id"]
 
     list_result = e2e.run("mngr list --format json", comment="Verify agent appears in JSON list")
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     agents = parsed["agents"]
     assert len(agents) == 1
-    assert agents[0]["name"] == "my-task"
+    agent = agents[0]
+    assert agent["name"] == "my-task"
+    # The identifiers returned by `create --format json` must be real and usable for
+    # scripting: the same agent_id/host_id must identify the agent that `mngr list`
+    # reports (not merely be well-formed strings). This is the whole point of the
+    # machine-readable output the tutorial block demonstrates.
+    assert agent["id"] == created_agent_id, (
+        f"create reported agent_id {created_agent_id!r} but list shows {agent['id']!r}"
+    )
+    assert agent["host"]["id"] == created_host_id, (
+        f"create reported host_id {created_host_id!r} but list shows {agent['host']['id']!r}"
+    )
+    # The agent must actually be up, confirming create did more than print JSON.
+    assert agent["state"] in ("RUNNING", "WAITING"), f"Expected agent to be running, got state: {agent['state']}"
 
 
 @pytest.mark.rsync
@@ -363,6 +470,10 @@ def test_create_with_quiet_output(e2e: E2eSession) -> None:
     # _output_result() returns early and the console log level is NONE, so
     # neither the result line nor the status lines are emitted.
     assert create_result.stdout.strip() == "", f"Expected no stdout under --quiet, got: {create_result.stdout!r}"
+    # The tutorial states --quiet "suppresses all output", so the diagnostic
+    # provider-discovery warnings that a plain `mngr list` prints (Docker
+    # unavailable, Vultr unconfigured, etc.) must be silenced on stderr too.
+    assert create_result.stderr.strip() == "", f"Expected no stderr under --quiet, got: {create_result.stderr!r}"
 
     # The agent must still have been created despite the silenced output.
     list_result = e2e.run("mngr list --format json", comment="Verify the agent was created despite --quiet")
@@ -376,7 +487,12 @@ def test_create_with_quiet_output(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+# No @pytest.mark.modal: this test only creates a local (`--type command`) agent
+# with a git-mirror transfer (a local git operation) and runs `mngr list`. As
+# documented on test_create_short_forms, `mngr list` reaches Modal only via the
+# in-process gRPC SDK inside the spawned `mngr` subprocess, which the resource
+# guard cannot track. With the mark, the guard's NEVER_INVOKED check fails the
+# test; without it there is no tracked Modal usage, so no violation.
 @pytest.mark.timeout(60)
 def test_create_copy(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
@@ -410,6 +526,17 @@ def test_create_copy(e2e: E2eSession) -> None:
     expect(git_kind_result).to_succeed()
     expect(git_kind_result.stdout).to_contain("DIRECTORY")
 
+    # A git mirror is more than a directory containing a `.git` folder: it is a
+    # functional repository that carries over the source's commit history. Run
+    # `git log` inside the copy and confirm the source's foundational commit is
+    # present, proving the history was actually transferred via git.
+    git_log_result = e2e.run(
+        "mngr exec my-task 'git log --oneline'",
+        comment="A git mirror carries over the source repository's commit history",
+    )
+    expect(git_log_result).to_succeed()
+    expect(git_log_result.stdout).to_contain("Initial commit")
+
     # The copy lives in its own directory, separate from the source repo.
     pwd_result = e2e.run("pwd", comment="Get the source directory for comparison")
     expect(pwd_result).to_succeed()
@@ -418,10 +545,21 @@ def test_create_copy(e2e: E2eSession) -> None:
     )
 
 
+# NOTE: intentionally not marked @pytest.mark.modal. The tutorial command
+# (`mngr create --transfer=git-mirror`) creates a *local* agent, and the only
+# modal contact is the incidental discovery `mngr list` performs (it finds no
+# modal-hosted agents here). That discovery happens via the modal Python SDK
+# inside the `mngr` subprocess, which the resource guard's in-process SDK
+# monkeypatch cannot observe -- so a @pytest.mark.modal here would always fail
+# the guard's "marked modal but never invoked modal" NEVER_INVOKED check.
+#
+# This test also runs four sequential operations (pwd, create, list, and a
+# .git check), each performing full provider discovery, so it needs more than
+# the default 10s timeout.
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_create_clone(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # you can create a full git "clone" instead of a worktree or copy: this transfers the repo via git, giving the agent its own independent copy with a separate working directory and git history (this is also the default when the source and target are on different hosts):
@@ -458,6 +596,38 @@ def test_create_clone(e2e: E2eSession) -> None:
         comment="Verify the clone has its own .git directory (not a worktree's .git file)",
     )
     expect(git_dir_check).to_succeed()
+
+    # The tutorial's core promise is that the clone gets the repo's *git history*
+    # (not just its files). git-mirror pushes all branches/tags, then creates the
+    # agent's new branch from the source's HEAD -- so the clone's HEAD commit must
+    # be byte-identical to the source's. Comparing the resolved SHAs proves the
+    # history was transferred intact, not merely that some .git directory exists.
+    source_head = e2e.run(
+        f"git -C {shlex.quote(source_dir)} rev-parse HEAD",
+        comment="Resolve the source repo's HEAD commit",
+    )
+    expect(source_head).to_succeed()
+    clone_head = e2e.run(
+        f"git -C {shlex.quote(work_dir)} rev-parse HEAD",
+        comment="Verify the clone carries the source's git history (same HEAD commit)",
+    )
+    expect(clone_head).to_succeed()
+    assert clone_head.stdout.strip() == source_head.stdout.strip(), (
+        f"Clone HEAD should match the source's transferred history.\n"
+        f"  source HEAD: {source_head.stdout.strip()}\n"
+        f"  clone HEAD:  {clone_head.stdout.strip()}"
+    )
+
+    # git-mirror also creates a fresh per-agent branch (mngr/<name>) in the clone,
+    # confirming it is an independent checkout rather than a detached snapshot.
+    clone_branch = e2e.run(
+        f"git -C {shlex.quote(work_dir)} branch --show-current",
+        comment="Verify the clone is checked out on its own per-agent branch",
+    )
+    expect(clone_branch).to_succeed()
+    assert clone_branch.stdout.strip() == "mngr/my-task", (
+        f"Expected the clone on the per-agent branch 'mngr/my-task', got: {clone_branch.stdout.strip()!r}"
+    )
 
 
 @pytest.mark.release
@@ -498,6 +668,9 @@ def test_create_with_snapshot_fictional(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+# This test runs three sequential mngr operations (create, list, exec), each of
+# which performs full provider discovery, so it needs more than the default 10s.
+@pytest.mark.timeout(120)
 def test_create_headless(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # mngr is very much meant to be used for scripting and automation, so nothing requires interactivity.
@@ -519,3 +692,10 @@ def test_create_headless(e2e: E2eSession) -> None:
     # headless agent is actually running by exec-ing a command on its host.
     exec_result = e2e.run("mngr exec my-task pwd", comment="Verify headless agent is actually running")
     expect(exec_result).to_succeed()
+    # The agent must really be running inside its own dedicated worktree, not
+    # merely show up in `mngr list`: its cwd is the generated "my-task-<hash>"
+    # worktree directory. Asserting on the actual `pwd` output (rather than just
+    # exit 0) confirms the headless agent was provisioned and launched correctly.
+    assert "my-task" in exec_result.stdout and "worktrees" in exec_result.stdout, (
+        f"Expected `pwd` to report the agent's worktree directory, got: {exec_result.stdout!r}"
+    )

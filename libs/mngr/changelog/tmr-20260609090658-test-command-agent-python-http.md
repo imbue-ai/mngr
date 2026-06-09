@@ -1,0 +1,1 @@
+Fixed the e2e tutorial test fixture: removed a duplicate `type = "claude"` key in the generated `settings.local.toml` that produced an invalid TOML file ("Cannot overwrite a value"), which caused `mngr create` to fail in command-agent tutorial tests.
