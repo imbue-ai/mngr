@@ -12,13 +12,17 @@ container repo to already contain the base objects -- a shallow clone fails with
 "pack has N unresolved deltas / index-pack abnormal exit".
 
 The shared `[providers.aws]` config (region `us-west-2`, plan `t3.large`,
-`auto_shutdown_minutes = 120`) is committed in `.mngr/settings.toml`; only the
-operator-specific `allowed_ssh_cidrs` lives in the gitignored `.mngr/settings.local.toml`.
-The two blocks merge per-field (ProviderInstanceConfig.merge_with honors `model_fields_set`).
-The image is built with the default local `docker build` on the VPS (like the `docker`
-template, and like modal it does not use depot); a cold full build of the dev image fits
-within the backend's 600s build cap on a `t3.large`. Only `GH_TOKEN` need be exported when
-running `mngr create -t aws`. The template uses `pass_env__extend` (not plain `pass_env`)
-so it adds `GH_TOKEN` without clobbering any inherited `pass_env` (e.g. a user profile's
-`ANTHROPIC_API_KEY`); the existing `modal` template's `pass_env` was switched to
-`pass_env__extend` for the same reason.
+`auto_shutdown_minutes = 120`, `builder = "DEPOT"`) is committed in `.mngr/settings.toml`;
+only the operator-specific `allowed_ssh_cidrs` lives in the gitignored
+`.mngr/settings.local.toml`. The two blocks merge per-field (ProviderInstanceConfig.merge_with
+honors `model_fields_set`). `builder = "DEPOT"` builds the image on depot's cached remote
+builders; `DEPOT_TOKEN` and `GH_TOKEN` must be exported when running `mngr create -t aws`
+(`depot.json` in the repo supplies the project id). The template uses `pass_env__extend`
+(not plain `pass_env`) so it adds `GH_TOKEN` without clobbering any inherited `pass_env`
+(e.g. a user profile's `ANTHROPIC_API_KEY`); the existing `modal` template's `pass_env`
+was switched to `pass_env__extend` for the same reason.
+
+This also fixes a bug in `mngr_vps_docker` that broke `builder = "DEPOT"` for all VPS
+backends: the depot CLI installs to `/root/.depot/bin` (not on the non-interactive shell's
+PATH), but the build invoked it by bare name, failing with "depot: command not found". It
+is now invoked by absolute path. See the `mngr_vps_docker` changelog entry.

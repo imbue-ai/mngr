@@ -80,10 +80,14 @@ OUTER_HELPER_SERVICE_PATH: Final[Path] = Path("/etc/systemd/system/snapshot_help
 OUTER_HELPER_ENV_PATH: Final[Path] = Path("/etc/mngr-snapshot-helper.env")
 OUTER_HELPER_SERVICE_NAME: Final[str] = "snapshot_helper.service"
 
-# Idempotent install: skip if depot already on PATH, otherwise download to
-# /usr/local/bin via depot.dev's official installer. Run once per build (cheap
-# no-op when already present); avoids needing a separate provisioning step.
-_DEPOT_INSTALL_CMD: Final[str] = "command -v depot >/dev/null 2>&1 || curl -fsSL https://depot.dev/install-cli.sh | sh"
+# depot.dev's official installer drops the CLI at $HOME/.depot/bin (i.e.
+# /root/.depot/bin for the root user these VPS builds run as), which is NOT on
+# the non-interactive shell's PATH. So we invoke depot by absolute path
+# (_DEPOT_BIN) rather than by bare name, and the idempotent install check tests
+# for that exact binary (a cheap no-op once present); avoids a separate
+# provisioning step.
+_DEPOT_BIN: Final[str] = "/root/.depot/bin/depot"
+_DEPOT_INSTALL_CMD: Final[str] = f"test -x {_DEPOT_BIN} || curl -fsSL https://depot.dev/install-cli.sh | sh"
 
 # Env-var assignments whose values are secrets and must be redacted before any
 # remote command string ends up in logs or exception messages.
@@ -1026,7 +1030,7 @@ def build_image_on_outer(
         env: dict[str, str] = {"DEPOT_TOKEN": depot_token}
         if depot_project_id:
             env["DEPOT_PROJECT_ID"] = depot_project_id
-        remote_cmd = f"{_DEPOT_INSTALL_CMD} && depot {quoted}"
+        remote_cmd = f"{_DEPOT_INSTALL_CMD} && {_DEPOT_BIN} {quoted}"
         run_env: Mapping[str, str] | None = env
     else:
         args = ["build", "-t", tag] + list(docker_build_args) + [build_context_path]

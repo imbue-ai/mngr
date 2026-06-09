@@ -410,8 +410,13 @@ def test_build_image_on_outer_with_depot_uses_depot_build(monkeypatch: pytest.Mo
     )
     assert tag == "depot-image"
     cmd = _stub(outer).recorded[0].command
-    # Depot install + depot build, with --load (so the image lands on the daemon)
-    assert "depot build --load -t depot-image" in cmd
+    # depot build, with --load (so the image lands on the daemon), invoked by
+    # ABSOLUTE path: the installer drops the CLI at /root/.depot/bin, which is not
+    # on the non-interactive shell's PATH, so a bare `depot` would not be found.
+    assert "/root/.depot/bin/depot build --load -t depot-image" in cmd
+    # The idempotent install check must also reference the same absolute path
+    # rather than a bare `command -v depot` (which never sees the off-PATH binary).
+    assert "test -x /root/.depot/bin/depot" in cmd
     # Secret must NOT be inlined into the command string -- it goes via env.
     assert "my-secret-token" not in cmd
 
