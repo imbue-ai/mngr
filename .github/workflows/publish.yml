@@ -37,10 +37,6 @@ jobs:
 
       - name: Verify versions and pin consistency
         run: |
-          # `--all-packages` is required: scripts/verify_publish.py imports
-          # UNPUBLISHED_PACKAGES from imbue.mngr, which is a workspace member but
-          # not a dependency of the root project, so a bare `uv run` would not
-          # install it and the import would fail.
           # Determine expected mngr version from tag or workflow_dispatch input
           EXPECTED=""
           if [ "${{ github.ref_type }}" = "tag" ]; then

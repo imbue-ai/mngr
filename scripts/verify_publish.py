@@ -3,17 +3,21 @@
 Called from the publish workflow. In its default mode, verifies:
 1. Displays all package versions
 2. If --expected-mngr-version is given, checks mngr version matches (for tag/dispatch checks)
-3. The hard-coded package graph matches actual pyproject.toml declarations
+3. The auto-discovered package graph matches actual pyproject.toml declarations
 4. All internal dependency pins are consistent
 
 With --list-package-dirs, instead prints `libs/<dir_name>` for each publishable
 package (one per line) and exits without running any verification. This is used
 by the publish workflow to drive the per-package build loop.
 
+Run with `--all-packages` so the whole workspace is synced: this script imports
+`UNPUBLISHED_PACKAGES` from `imbue.mngr`, which is a workspace member rather than
+a root dependency, so a bare `uv run` would fail to import it in a clean venv.
+
 Usage:
-    uv run scripts/verify_publish.py
-    uv run scripts/verify_publish.py --expected-mngr-version 0.1.5
-    uv run scripts/verify_publish.py --list-package-dirs
+    uv run --all-packages scripts/verify_publish.py
+    uv run --all-packages scripts/verify_publish.py --expected-mngr-version 0.1.5
+    uv run --all-packages scripts/verify_publish.py --list-package-dirs
 """
 
 import argparse
