@@ -1,0 +1,1 @@
+Fixed the e2e test fixture's generated `settings.local.toml` which had a duplicate `type = "claude"` key under `[commands.create]`, causing all e2e tutorial tests using the fixture to fail at config-parse time with "Cannot overwrite a value".

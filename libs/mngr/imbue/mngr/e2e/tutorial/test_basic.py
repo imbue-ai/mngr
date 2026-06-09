@@ -45,8 +45,14 @@ def test_unknown_command_fails(e2e: E2eSession) -> None:
         "mngr definitely-not-a-real-command",
         comment="an unknown command fails and points the user to --help",
     )
-    expect(result).to_fail()
-    expect(result.stderr).to_contain("No such command")
+    # Click/Typer use exit code 2 for usage errors; the unknown command is
+    # rejected at argument-parsing time, mirroring test_create_rejects_unknown_option.
+    expect(result).to_have_exit_code(2)
+    # The error and usage hint go to stderr, leaving stdout clean for scripting.
+    expect(result.stdout).to_be_empty()
+    # The error must name the offending command (not just a generic failure) and
+    # point the user back to `mngr --help`, as the shared tutorial block teaches.
+    expect(result.stderr).to_contain("No such command 'definitely-not-a-real-command'")
     expect(result.stderr).to_contain("mngr --help")
 
 
@@ -61,8 +67,17 @@ def test_create_help_succeeds(e2e: E2eSession) -> None:
         comment="tons more arguments for anything you could want! As always, you can learn more via --help",
     )
     expect(result).to_succeed()
+    # This is genuinely the `create` command's help, not some other command's:
+    # the NAME line carries create's summary and the synopsis names the command.
+    expect(result.stdout).to_contain("mngr create - Create and run an agent")
+    expect(result.stdout).to_contain("SYNOPSIS")
+    # The tutorial promises "tons more arguments", so the help must actually
+    # document them. Assert on a representative spread of the advertised flags.
     expect(result.stdout).to_contain("--no-connect")
     expect(result.stdout).to_contain("--type")
+    # The man-page-style help renders concrete usage examples, not just an
+    # option list -- this section is what makes the command discoverable.
+    expect(result.stdout).to_contain("EXAMPLES")
 
 
 @pytest.mark.release
@@ -128,6 +143,47 @@ def test_create_with_json_output(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
+def test_create_quiet_suppresses_output(e2e: E2eSession) -> None:
+    """Covers the second half of the same tutorial block: the `--quiet` comment.
+
+    `--quiet` promises to suppress *all* console output, so a successful create
+    must leave both stdout and stderr empty while still actually creating the
+    agent. This is the counterpart to test_create_with_json_output, which
+    exercises the `--format json` half of the block.
+    """
+    e2e.write_tutorial_block("""
+    # you can control output format for scripting:
+    mngr create my-task --no-connect --format json
+    # (--quiet suppresses all output)
+    """)
+    create_result = e2e.run(
+        "mngr create my-task --no-connect --type command --no-ensure-clean --quiet -- sleep 100066",
+        comment="--quiet suppresses all output",
+    )
+    expect(create_result).to_succeed()
+    # The whole point of --quiet is that a successful create prints nothing at
+    # all -- not the JSON result on stdout, nor the progress/warning lines that
+    # otherwise go to stderr.
+    expect(create_result.stdout).to_be_empty()
+    expect(create_result.stderr).to_be_empty()
+
+    # Suppressing output must not suppress the work: the agent must still exist.
+    # `mngr list` output is unaffected by the create command's --quiet flag.
+    list_result = e2e.run("mngr list --format json", comment="Verify the quiet-created agent still exists")
+    expect(list_result).to_succeed()
+    parsed = json.loads(list_result.stdout)
+    assert parsed["errors"] == []
+    assert len(parsed["agents"]) == 1
+    agent = parsed["agents"][0]
+    assert agent["name"] == "my-task"
+    assert agent["type"] == "command"
+    assert agent["command"] == "sleep 100066"
+
+
+@pytest.mark.rsync
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.timeout(120)
 def test_create_headless(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # mngr is very much meant to be used for scripting and automation, so nothing requires interactivity.
@@ -187,3 +243,33 @@ def test_create_with_label(e2e: E2eSession) -> None:
     assert len(matching_agents) == 1
     assert matching_agents[0]["labels"]["team"] == "backend"
     assert matching_agents[0]["host"]["tags"]["env"] == "staging"
+
+
+@pytest.mark.release
+# No host work happens (create fails at label parsing, and `mngr list` creates
+# nothing), so no tmux/rsync markers -- but `mngr list`'s remote discovery still
+# routinely exceeds the global 10s pytest timeout, so raise it like the other
+# create tests above.
+@pytest.mark.timeout(120)
+def test_create_rejects_malformed_label(e2e: E2eSession) -> None:
+    """Unhappy path for the same `mngr create --label` block: a label missing the
+    `=` separator is not in KEY=VALUE format, so create must fail with a clear
+    error before any agent is created.
+    """
+    e2e.write_tutorial_block("""
+    # you can add labels to organize your agents and tags for host metadata:
+    mngr create my-task --label team=backend --host-label env=staging
+    """)
+    result = e2e.run(
+        "mngr create my-task --type command --no-ensure-clean --label team -- sleep 100069",
+        comment="a label that is not in KEY=VALUE format is rejected",
+    )
+    expect(result).to_fail()
+    expect(result.stderr).to_contain("KEY=VALUE")
+
+    # The malformed input must be rejected before any agent is created -- nothing
+    # should be left behind in the listing.
+    list_result = e2e.run("mngr list --format json", comment="Verify no agent was created")
+    expect(list_result).to_succeed()
+    parsed = json.loads(list_result.stdout)
+    assert [a for a in parsed["agents"] if a["name"] == "my-task"] == []
