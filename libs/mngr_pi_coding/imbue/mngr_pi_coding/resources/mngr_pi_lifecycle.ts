@@ -15,14 +15,17 @@
 //   2. The RUNNING/WAITING marker. mngr's BaseAgent reports RUNNING iff
 //      `$MNGR_AGENT_STATE_DIR/active` exists while the pi process is alive (see
 //      determine_lifecycle_state). pi maintains no such file, so this extension
-//      touches it on `agent_start` and removes it on `agent_end`. To stay
-//      correct when a *nested* pi (spawned by the bash tool, inheriting
-//      `MNGR_AGENT_STATE_DIR` and `PI_CODING_AGENT_DIR`) runs its own
-//      agent_start/agent_end against the same marker, we record the root turn's
-//      session id and only clear for that root -- the same root-vs-child
-//      discriminator mngr_antigravity uses for agy subagents. (pi has no
-//      in-process subagent/Task tool, so a nested process is the only child
-//      case.)
+//      touches it on `agent_start` and removes it on `agent_end`. Only the
+//      mngr-launched pi runs this extension (it is loaded via the explicit `-e`
+//      flag, not auto-discovery), so a nested pi the agent spawns with the bash
+//      tool -- bare `pi`, no `-e` -- never executes these handlers and never
+//      touches the marker. The root-vs-child gating below (record the turn's
+//      root session id, clear only for it) is therefore defensive: it keeps the
+//      marker correct in the exotic case where a *second* process running this
+//      same extension shares the state dir (e.g. the agent explicitly invokes
+//      `pi -e <this file>`). It mirrors the discriminator mngr_antigravity uses
+//      for agy's in-process subagents. (pi has no in-process subagent/Task
+//      tool, so a separate process is the only child case at all.)
 //
 //   3. Transcript emission. On `message_end` it appends the raw pi message to
 //      `$MNGR_AGENT_STATE_DIR/logs/<type>_transcript/events.jsonl` and, when
@@ -280,8 +283,10 @@ export default function mngrPiLifecycle(pi: PiApi): void {
 
   pi.on("agent_start", (_event, ctx) => {
     safe("agent_start", () => {
-      // Record the root only at a turn boundary (marker absent), so a nested pi
-      // that starts mid-turn does not overwrite the true root with its own id.
+      // Record the root only at a turn boundary (marker absent), so a second
+      // process running this extension that starts mid-turn does not overwrite
+      // the true root with its own id (see the header note on why this is
+      // defensive -- ordinary nested pis don't load this extension).
       if (!existsSync(markerPath)) {
         const sessionId = currentSessionId(ctx);
         if (sessionId) {
