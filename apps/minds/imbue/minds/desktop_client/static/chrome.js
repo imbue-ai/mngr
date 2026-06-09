@@ -76,10 +76,11 @@
   // must never write to ``currentTitleAgentId`` or trigger recovery, or a
   // stuck agent in another window will hijack this window's content view.
   var currentTitleAgentId = null;
-  // Tracks the in-flight accent target so async ``getAccent`` / ``getForeground``
-  // callbacks can guard against landing after a newer accent application has
-  // already been kicked off. Independent of ``currentTitleAgentId`` so the
-  // accent-only call paths (bootstrap + ``onLastWorkspaceAgentIdChanged``)
+  // Tracks the in-flight accent target so the async ``getAccent`` callback
+  // can guard against landing after a newer accent application has already
+  // been kicked off. (``pickForeground`` is synchronous and applied inline,
+  // so it doesn't need a token.) Independent of ``currentTitleAgentId`` so
+  // the accent-only call paths (bootstrap + ``onLastWorkspaceAgentIdChanged``)
   // can apply colors without claiming to represent the displayed workspace.
   var pendingAccentAgentId = null;
   function applyTitleAccent(agentId) {
