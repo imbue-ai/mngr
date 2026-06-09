@@ -571,6 +571,15 @@ function wireContentViewEvents(bundle, contentView) {
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
       bundle.chromeView.webContents.send('content-url-changed', url);
     }
+    // The sidebar webview refreshes its 'Manage account(s)' / 'Log in'
+    // label whenever the content URL changes (sign-in / sign-out happens
+    // inside the content view). The sidebar's preload exposes
+    // onContentURLChange off the same IPC channel chromeView listens on,
+    // but the channel only fires for the WebContents the message is
+    // explicitly addressed to, so we have to dispatch to both views.
+    if (bundle.sidebarView && !bundle.sidebarView.webContents.isDestroyed()) {
+      bundle.sidebarView.webContents.send('content-url-changed', url);
+    }
   };
 
   contentView.webContents.on('did-navigate', (_e, url) => onContentNavigate(url));
