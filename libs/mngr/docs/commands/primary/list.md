@@ -120,7 +120,6 @@ These field names are shared across the three places they can appear:
 Each field below is annotated with the contexts in which it is available.
 
 **Agent fields:**
-- `resource_type` (filter, sort, template)
 - `id` (filter, sort, template) - Agent ID
 - `name` (filter, sort, template) - Agent name
 - `type` (filter, sort, template) - Agent type (claude, codex, etc.)

@@ -35,6 +35,15 @@ def test_catalog_is_derived_from_the_live_model_shape() -> None:
     assert {"host.name", "host.provider_name", "host.resource.cpu.count", "host.ssh.host"} <= keys
 
 
+def test_catalog_omits_the_model_discriminator_tag() -> None:
+    """The ``resource_type`` discriminator (Literal['agent']) is not a referenceable field.
+
+    It is a constant model serialization tag, so it must not appear in the
+    user-facing field catalog (and therefore not in the schema view or docs).
+    """
+    assert "resource_type" not in _catalog_keys()
+
+
 def test_computed_keys_match_what_cel_context_actually_emits() -> None:
     """``_CEL_COMPUTED_KEYS`` must equal the keys agent_details_to_cel_context synthesizes.
 
