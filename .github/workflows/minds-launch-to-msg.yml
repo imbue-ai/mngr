@@ -340,6 +340,31 @@ jobs:
       - name: reset to clean state and install fresh app
         run: bash apps/minds/scripts/mac-runner-reset.sh "${{ steps.url.outputs.url }}"
 
+      - name: seed lima image-cache sha256.digest marker
+        # Without this marker file, lima 2.0.3 falls back to HEAD-validating
+        # the source URL on every boot. When cloud.debian.org is unreachable
+        # from the runner (as observed in runs 27226429762, 27229065721),
+        # lima logs "Using cache" but silently skips materializing
+        # ~/.lima/<vm>/basedisk, then fatals. With the marker in place lima
+        # trusts the cached data and proceeds straight to basedisk creation
+        # (verified in run 27231554631: lima READY at 12:54 with the seeded
+        # marker, vs fatal at 12:36 without).
+        run: |
+          set +e
+          CACHE_ROOT="$HOME/Library/Caches/lima/download/by-url-sha256"
+          for CACHE_DIR in "$CACHE_ROOT"/*/; do
+            [ -d "$CACHE_DIR" ] || continue
+            DATA="$CACHE_DIR/data"
+            DIGEST_FILE="$CACHE_DIR/sha256.digest"
+            [ -f "$DATA" ] || continue
+            [ -f "$DIGEST_FILE" ] && continue  # already present
+            HASH=$(shasum -a 256 "$DATA" | awk '{print $1}')
+            [ -n "$HASH" ] || continue
+            echo "sha256:$HASH" > "$DIGEST_FILE"
+            echo "seeded $DIGEST_FILE -> sha256:$HASH"
+          done
+          true
+
       - name: probe debian-image reachability + lima cache state
         # Two consecutive runs (27226429762, 27229065721) failed with
         # TLS-handshake-timeout to cloud.debian.org from this runner,
@@ -483,6 +508,14 @@ jobs:
           # session for depth rather than spinning a separate workflow per
           # scenario.
           WORKSPACE_COUNT:    "2"
+          # Pin the FCT ref the binary creates against to the SHA the
+          # workflow resolved from `template_ref`. Without this, minds
+          # falls back to `FALLBACK_BRANCH = "v0.2.35"` (templates.py)
+          # regardless of what the workflow_dispatch input says, so a
+          # `template_ref=main` run silently exercises v0.2.35 instead.
+          # The full SHA (not the branch name) keeps the run reproducible
+          # if `template_ref` was a moving ref like `main`.
+          MINDS_WORKSPACE_BRANCH: ${{ steps.fct_sha.outputs.full_sha }}
         run: |
           # pipefail is REQUIRED: without it, the pipeline below exits
           # with tee's status (always 0), so an e2e failure (exit 1) is
