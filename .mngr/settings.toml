@@ -38,13 +38,6 @@ target_path = "/code/mngr"
 # shape: context `.` (the worktree) is cloned + overlaid with uncommitted changes by
 # the mngr_vps_docker build flow, and the Dockerfile's `COPY . /code/mngr/` consumes it.
 #
-# The clone is intentionally FULL history (no --git-depth): after the image build,
-# mngr seeds the work dir by pushing the local repo's refs into the container's
-# /code/mngr/.git as a thin pack. A shallow (--git-depth=1) container repo lacks the
-# base objects those deltas resolve against, so the push fails with "pack has N
-# unresolved deltas / index-pack abnormal exit". (This matches modal/docker, whose
-# keyframe make_tar_of_repo.sh also does a full clone.)
-#
 # The shared [providers.aws] block (region/plan/builder/auto_shutdown) is committed below
 # in the providers section; only the per-developer allowed_ssh_cidrs lives in the
 # gitignored .mngr/settings.local.toml.

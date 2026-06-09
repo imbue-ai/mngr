@@ -80,13 +80,14 @@ OUTER_HELPER_SERVICE_PATH: Final[Path] = Path("/etc/systemd/system/snapshot_help
 OUTER_HELPER_ENV_PATH: Final[Path] = Path("/etc/mngr-snapshot-helper.env")
 OUTER_HELPER_SERVICE_NAME: Final[str] = "snapshot_helper.service"
 
-# depot.dev's official installer drops the CLI at $HOME/.depot/bin (i.e.
-# /root/.depot/bin for the root user these VPS builds run as), which is NOT on
-# the non-interactive shell's PATH. So we invoke depot by absolute path
+# depot.dev's official installer drops the CLI at $HOME/.depot/bin, which is NOT
+# on the non-interactive shell's PATH. So we invoke depot by absolute path
 # (_DEPOT_BIN) rather than by bare name, and the idempotent install check tests
 # for that exact binary (a cheap no-op once present); avoids a separate
-# provisioning step.
-_DEPOT_BIN: Final[str] = "/root/.depot/bin/depot"
+# provisioning step. _DEPOT_BIN is double-quoted so the remote shell expands
+# $HOME (set by sshd to the connecting user's home, e.g. /root) at run time
+# rather than hardcoding a specific user's home directory.
+_DEPOT_BIN: Final[str] = '"$HOME/.depot/bin/depot"'
 _DEPOT_INSTALL_CMD: Final[str] = f"test -x {_DEPOT_BIN} || curl -fsSL https://depot.dev/install-cli.sh | sh"
 
 # Env-var assignments whose values are secrets and must be redacted before any

@@ -568,7 +568,15 @@ def _parse_providers(
 ) -> dict[ProviderInstanceName, ProviderInstanceConfig]:
     """Parse provider configs using the registry.
 
-    Uses model_construct to bypass validation and explicitly set None for unset fields.
+    Uses ``model_validate`` (not ``model_construct``) so raw TOML scalars are
+    coerced to their declared field types -- e.g. ``builder = "DEPOT"`` becomes
+    ``DockerBuilder.DEPOT`` and ``allowed_ssh_cidrs = [...]`` becomes a tuple.
+    ``model_construct`` left them as raw str/list, which both tripped pydantic
+    serializer warnings on the ``model_dump`` inside ``merge_with`` and broke
+    identity checks like ``builder is DockerBuilder.DEPOT`` for an un-merged
+    (single config layer) provider block. ``model_validate`` still records only
+    the keys actually present in ``model_fields_set``, so per-field config-layer
+    merging is unaffected.
     Provider blocks whose plugin is disabled are silently skipped.
     Provider blocks with is_enabled=false whose backend plugin is not installed
     are also skipped, since there is no config class to resolve for a disabled
@@ -614,7 +622,13 @@ def _parse_providers(
                 logger.warning(msg)
             continue
         _check_unknown_fields(raw_config, config_class, f"providers.{name}", strict=strict, silent=silent)
-        providers[ProviderInstanceName(name)] = config_class.model_construct(**raw_config)
+        # Drop unknown keys before validating: in non-strict mode
+        # _check_unknown_fields only warns and leaves them in raw_config, but the
+        # config models are ``extra="forbid"`` so model_validate would otherwise
+        # raise on them (in strict mode _check_unknown_fields already raised, so
+        # this is a no-op there).
+        known_config = {k: v for k, v in raw_config.items() if k in config_class.model_fields}
+        providers[ProviderInstanceName(name)] = config_class.model_validate(known_config)
 
     return providers
 
