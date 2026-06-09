@@ -1092,7 +1092,7 @@ class VpsDockerProvider(BaseProviderInstance):
         host.execute_idempotent_command(f"chmod +x {commands_dir / 'shutdown.sh'}")
 
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
-        """Parse build args, separating provisioning args from Docker build args.
+        """Abstract: subclasses must override to bind their provider prefix.
 
         Each VpsDockerProvider subclass must override this method to supply
         the provider-specific ``provider_prefix`` and ``plan_arg_name`` to the
