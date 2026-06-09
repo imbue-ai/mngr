@@ -426,7 +426,7 @@ function createBundle() {
   chromeView.webContents.on('did-finish-load', () => {
     updateOsTitle(bundle);
     sendCurrentWorkspaceToBundleViews(bundle);
-    primeViewWithCachedChromeState(chromeView.webContents);
+    primeViewWithCachedChromeState(bundle, chromeView.webContents);
   });
 
   wireContentViewEvents(bundle, contentView);
@@ -622,7 +622,7 @@ function openSidebar(bundle) {
     registerShortcutsFor(bundle, sidebarView.webContents);
     sidebarView.webContents.on('did-finish-load', () => {
       sendCurrentWorkspaceToBundleViews(bundle);
-      primeViewWithCachedChromeState(sidebarView.webContents);
+      primeViewWithCachedChromeState(bundle, sidebarView.webContents);
     });
     if (backendBaseUrl) {
       sidebarView.webContents.loadURL(backendBaseUrl + '/_chrome/sidebar');
@@ -1156,7 +1156,7 @@ function broadcastChromeEvent(evt) {
   }
 }
 
-function primeViewWithCachedChromeState(wc) {
+function primeViewWithCachedChromeState(bundle, wc) {
   if (!wc || wc.isDestroyed()) return;
   if (latestChromeState.workspaces !== null) {
     wc.send('chrome-event', { type: 'workspaces', workspaces: latestChromeState.workspaces });
@@ -1169,6 +1169,16 @@ function primeViewWithCachedChromeState(wc) {
     count: latestChromeState.requestCount,
     request_ids: latestChromeState.requestIds,
   });
+  // Re-send modal state to the chrome titlebar in case the modal opened
+  // before chrome.js registered its onModalStateChanged listener (e.g. the
+  // requests panel auto-opens at startup faster than chrome.js loads).
+  // Electron IPC drops events with no listener, so without this replay the
+  // initial open is missed and the titlebar drag region wins over the
+  // modal's no-drag in the y=0..TITLEBAR strip. The sidebar view doesn't
+  // listen for this event so we scope the send to the chrome view.
+  if (bundle && bundle.chromeView && wc === bundle.chromeView.webContents) {
+    wc.send('modal-state-changed', { open: !!bundle.modalVisible });
+  }
 }
 
 function kickChromeSSEReconnect() {
