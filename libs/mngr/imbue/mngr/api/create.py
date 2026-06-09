@@ -1,7 +1,9 @@
 import os
+import tomllib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 from typing import Final
 from typing import cast
 
@@ -15,6 +17,8 @@ from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.loader import block_disabled_plugins
+from imbue.mngr.config.pre_readers import disabled_plugins_from_raw_layers
 from imbue.mngr.errors import DuplicateAgentNameError
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
@@ -164,6 +168,47 @@ def _cleanup_failed_worktree_create(
         logger.warning("Failed to remove worktree {} during create cleanup: {}", work_dir_path, e)
     if created_branch_name is not None:
         delete_git_branch(created_branch_name, source_repo_path, cg)
+
+
+def _read_work_dir_disabled_plugins(host: OnlineHostInterface, work_dir: Path) -> frozenset[str]:
+    """Return the plugins disabled by the agent's own work_dir project config.
+
+    The agent resolves which plugins are enabled from its work_dir at runtime,
+    but ``mngr create`` builds the plugin manager's blocked-set once, from the
+    *invocation* cwd. When the two diverge -- creating from a temp dir, an
+    ``MNGR_PROJECT_CONFIG_DIR`` override, ``--from`` another repo, or an in-place
+    create like ``mngr robinhood`` -- a plugin the work_dir disables can still be
+    enabled at provisioning time and install runtime artifacts the agent can't
+    use (e.g. subagent-proxy hooks that then fail because the work_dir config
+    blocks the plugin). Reading the work_dir's project/local layers here lets the
+    caller additionally block whatever the work_dir disables before firing
+    provisioning hooks.
+
+    Reads through the ``host`` interface so it works for local and remote
+    work_dirs alike. Best-effort: a missing or unparseable layer is skipped (the
+    agent's own runtime config load remains the authoritative validator), and a
+    work_dir outside any git repo yields an empty set.
+    """
+    root_name = os.environ.get("MNGR_ROOT_NAME", "mngr")
+    git_root_result = host.execute_idempotent_command(
+        "git rev-parse --show-toplevel", cwd=work_dir, timeout_seconds=10.0
+    )
+    if not git_root_result.success or not git_root_result.stdout.strip():
+        return frozenset()
+    config_dir = Path(git_root_result.stdout.strip()) / f".{root_name}"
+    # project then local, so the higher-precedence local layer overrides project.
+    raw_layers: list[dict[str, Any]] = []
+    for filename in ("settings.toml", "settings.local.toml"):
+        config_path = config_dir / filename
+        if not host.path_exists(config_path):
+            continue
+        try:
+            raw_layers.append(tomllib.loads(host.read_text_file(config_path)))
+        except tomllib.TOMLDecodeError as e:
+            logger.warning(
+                "Skipping unparseable work_dir config {} when resolving plugin enablement: {}", config_path, e
+            )
+    return disabled_plugins_from_raw_layers(raw_layers)
 
 
 @log_call
@@ -318,6 +363,19 @@ def create(
                     agent = host.create_agent_state(
                         work_dir_path, agent_options, created_branch_name=created_branch_name
                     )
+
+                # Only fire provisioning hooks for plugins enabled in the config
+                # that will actually govern this agent at runtime -- its work_dir's
+                # project config -- not merely the config of the cwd `mngr create`
+                # ran from. Plugin enablement is enforced by blocking disabled
+                # plugins on the plugin manager, but that blocked-set is built once
+                # from the invocation cwd; without this, an agent whose work_dir
+                # disables a plugin can still get that plugin's provisioning side
+                # effects installed and then break at runtime (the work_dir config
+                # blocks the plugin). block_disabled_plugins only *adds* blocks, so
+                # this suppresses a plugin the work_dir disables but cannot re-enable
+                # one already disabled at startup (the rarer converse case).
+                block_disabled_plugins(mngr_ctx.pm, _read_work_dir_disabled_plugins(host, work_dir_path))
 
                 # Run provisioning for the agent (hooks, dependency installation, etc.)
                 with log_span("Calling on_before_provisioning hooks"):

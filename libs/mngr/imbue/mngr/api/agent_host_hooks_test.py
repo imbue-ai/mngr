@@ -3,12 +3,15 @@
 Tests verify that hooks fire in the correct order during create and destroy flows.
 """
 
+import os
 from pathlib import Path
 from typing import Any
 from typing import cast
 
+import pluggy
 import pytest
 
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr import hookimpl
 from imbue.mngr.api.create import create
 from imbue.mngr.api.providers import get_provider_instance
@@ -18,6 +21,7 @@ from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.plugins import hookspecs
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
@@ -25,6 +29,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
+from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.utils.testing import make_ctx_with_plugins
 from imbue.mngr.utils.testing import tmux_session_cleanup
 
@@ -264,6 +269,87 @@ def test_create_without_work_dir_skips_file_copy_hooks(
     assert "on_before_provisioning" in tracker.hook_log
     assert "on_after_provisioning" in tracker.hook_log
     assert "on_agent_created" in tracker.hook_log
+
+
+def _make_named_tracker_ctx(
+    base_ctx: MngrContext,
+    tracker: _AgentHostHookTracker,
+    name: str,
+) -> MngrContext:
+    """Build a ctx whose plugin manager has ``tracker`` registered under ``name``.
+
+    Unlike ``make_ctx_with_plugins`` (which lets pluggy assign an id-based name),
+    this registers under a stable, config-addressable name so a work_dir's
+    ``[plugins.<name>] enabled = false`` can target it.
+    """
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    load_local_backend_only(pm)
+    pm.register(tracker, name=name)
+    return base_ctx.model_copy_update(to_update(base_ctx.field_ref().pm, pm))
+
+
+def test_subagent_proxy_disabled_in_tests(temp_mngr_ctx: MngrContext) -> None:
+    """The shared test plugin manager blocks the subagent proxy by default.
+
+    Guards the behavior added in plugin_testing.plugin_manager: the proxy's
+    provisioning hooks spawn real subagents / write Claude hooks, so they must
+    not fire for agents provisioned in tests.
+    """
+    assert temp_mngr_ctx.pm.is_blocked("claude_subagent_proxy")
+
+
+@pytest.mark.tmux
+def test_provisioning_hooks_skipped_for_workdir_disabled_plugin(
+    temp_mngr_ctx: MngrContext,
+    temp_git_repo: Path,
+) -> None:
+    """A plugin disabled by the agent's work_dir config does not get provisioning hooks.
+
+    Models the in-place create (e.g. ``mngr robinhood``): the agent is
+    provisioned onto a work_dir whose own project config disables a plugin, even
+    though that plugin is enabled in the (invocation-context) plugin manager.
+    create() must block it before firing provisioning hooks, so its
+    on_before_provisioning / on_after_provisioning / on_agent_created never run --
+    while hooks that fire before the block (e.g. on_agent_state_dir_created) still
+    do, and the agent is still created.
+    """
+    plugin_name = "workdir_disabled_tracker"
+    # Write the disable into the work_dir's own project config dir. The agent (and
+    # _read_work_dir_disabled_plugins) resolve the config dir as `.{root_name}` at
+    # the work_dir's git root; in tests MNGR_ROOT_NAME is the per-test root name.
+    root_name = os.environ["MNGR_ROOT_NAME"]
+    config_dir = temp_git_repo / f".{root_name}"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "settings.toml").write_text(f"[plugins.{plugin_name}]\nenabled = false\n")
+
+    tracker = _AgentHostHookTracker()
+    ctx = _make_named_tracker_ctx(temp_mngr_ctx, tracker, plugin_name)
+    host = _get_local_host(ctx)
+    agent_name = AgentName("test-workdir-disabled-plugin")
+    session_name = f"{ctx.config.prefix}{agent_name}"
+
+    with tmux_session_cleanup(session_name):
+        result = create(
+            source_location=HostLocation(host=host, path=temp_git_repo),
+            target_host=host,
+            agent_options=CreateAgentOptions(
+                agent_type=AgentTypeName("generic"),
+                name=agent_name,
+                command=CommandString("sleep 648205"),
+            ),
+            mngr_ctx=ctx,
+            create_work_dir=False,
+        )
+        assert result.agent is not None
+
+    # The plugin is disabled by the work_dir config, so its provisioning hooks
+    # (and the later on_agent_created) must not have fired.
+    assert "on_before_provisioning" not in tracker.hook_log
+    assert "on_after_provisioning" not in tracker.hook_log
+    assert "on_agent_created" not in tracker.hook_log
+    # A hook that runs before the work_dir block still fires.
+    assert "on_agent_state_dir_created" in tracker.hook_log
 
 
 # --- Destroy flow tests ---

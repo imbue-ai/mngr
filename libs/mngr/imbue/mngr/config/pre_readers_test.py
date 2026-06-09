@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.config.pre_readers import disabled_plugins_from_raw_layers
 from imbue.mngr.config.pre_readers import get_local_config_name
 from imbue.mngr.config.pre_readers import get_project_config_name
 from imbue.mngr.config.pre_readers import get_user_config_path
@@ -192,6 +193,37 @@ def test_read_disabled_plugins_multiple_plugins(
     assert "modal" in result
     assert "docker" in result
     assert "local" not in result
+
+
+# =============================================================================
+# Tests for disabled_plugins_from_raw_layers
+# =============================================================================
+
+
+def test_disabled_plugins_from_raw_layers_empty() -> None:
+    """No layers (or layers without a plugins table) yield no disabled plugins."""
+    assert disabled_plugins_from_raw_layers([]) == frozenset()
+    assert disabled_plugins_from_raw_layers([{"prefix": "x-"}]) == frozenset()
+
+
+def test_disabled_plugins_from_raw_layers_collects_disabled() -> None:
+    """A plugin with enabled = false in a layer is reported as disabled; enabled ones are not."""
+    layers = [{"plugins": {"modal": {"enabled": False}, "local": {"enabled": True}}}]
+    result = disabled_plugins_from_raw_layers(layers)
+    assert "modal" in result
+    assert "local" not in result
+
+
+def test_disabled_plugins_from_raw_layers_later_layer_overrides() -> None:
+    """A higher-precedence (later) layer overrides an earlier layer's enabled flag both ways."""
+    # later layer re-enables what the earlier disabled
+    assert "modal" not in disabled_plugins_from_raw_layers(
+        [{"plugins": {"modal": {"enabled": False}}}, {"plugins": {"modal": {"enabled": True}}}]
+    )
+    # later layer disables what the earlier enabled
+    assert "modal" in disabled_plugins_from_raw_layers(
+        [{"plugins": {"modal": {"enabled": True}}}, {"plugins": {"modal": {"enabled": False}}}]
+    )
 
 
 # =============================================================================

@@ -1,5 +1,7 @@
 import os
 import tomllib
+from collections.abc import Mapping
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -252,17 +254,21 @@ def read_default_command(command_name: str) -> str | None:
 # --- Disabled plugins pre-reader ---
 
 
-def read_disabled_plugins() -> frozenset[str]:
-    """Return the set of plugin names disabled across all config layers.
+def disabled_plugins_from_raw_layers(raw_layers: Sequence[Mapping[str, Any]]) -> frozenset[str]:
+    """Compute the set of disabled plugin names from raw config layers.
 
-    Reads user, project, and local config files for [plugins.<name>]
-    sections with enabled = false.  Later layers override earlier ones.
+    ``raw_layers`` are parsed TOML dicts in precedence order (lowest to
+    highest); later layers override earlier ones for the same plugin. A plugin
+    is disabled iff the highest-precedence layer that mentions its
+    ``[plugins.<name>] enabled`` sets it to false.
 
-    The project root is resolved from MNGR_PROJECT_CONFIG_DIR or the cwd's git
-    worktree root.
+    Shared by ``read_disabled_plugins`` (cwd-rooted layers) and callers that
+    resolve layers for some other project dir (e.g. an agent's work_dir), so the
+    enable/disable semantics stay identical regardless of which directory the
+    layers came from.
     """
     merged: dict[str, bool] = {}
-    for raw in _resolve_config_files():
+    for raw in raw_layers:
         raw_plugins = raw.get("plugins")
         if not isinstance(raw_plugins, dict):
             continue
@@ -273,3 +279,15 @@ def read_disabled_plugins() -> frozenset[str]:
             if enabled_value is not None:
                 merged[plugin_name] = bool(enabled_value)
     return frozenset(name for name, is_enabled in merged.items() if not is_enabled)
+
+
+def read_disabled_plugins() -> frozenset[str]:
+    """Return the set of plugin names disabled across all config layers.
+
+    Reads user, project, and local config files for [plugins.<name>]
+    sections with enabled = false.  Later layers override earlier ones.
+
+    The project root is resolved from MNGR_PROJECT_CONFIG_DIR or the cwd's git
+    worktree root.
+    """
+    return disabled_plugins_from_raw_layers(_resolve_config_files())

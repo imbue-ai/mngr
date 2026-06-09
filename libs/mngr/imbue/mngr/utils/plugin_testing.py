@@ -31,6 +31,7 @@ from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.loader import block_disabled_plugins
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.main import load_plugin_hookspecs
 from imbue.mngr.plugins import hookspecs
@@ -96,6 +97,19 @@ def plugin_manager() -> Generator[pluggy.PluginManager, None, None]:
     pm = pluggy.PluginManager("mngr")
     pm.add_hookspecs(hookspecs)
     pm.load_setuptools_entrypoints("mngr")
+    # Disable the subagent proxy in tests by default. Its on_after_provisioning
+    # spawns real mngr-managed subagents and writes Claude hooks into the agent's
+    # work_dir; letting it fire for every claude agent a test provisions is both
+    # noise and a footgun (the installed hooks reroute Task calls through
+    # `mngr create --type mngr-proxy-child`). Block it right after entrypoint
+    # load -- before load_agents_from_plugins -- so its agent-type registration
+    # is skipped too, mirroring production where a project config disables it. The
+    # plugin's own tests invoke its hookimpls directly rather than through this
+    # manager, and its release tests run the real proxy via a subprocess with its
+    # own config, so neither is affected. The name is the plugin's config-registry
+    # key (CLAUDE_SUBAGENT_PROXY_PLUGIN_NAME); kept as a literal so core test infra
+    # takes no import dependency on the plugin package.
+    block_disabled_plugins(pm, frozenset({"claude_subagent_proxy"}))
     load_plugin_hookspecs(pm)
     load_local_backend_only(pm)
     load_agents_from_plugins(pm)
