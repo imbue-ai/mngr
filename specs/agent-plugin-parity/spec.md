@@ -527,11 +527,16 @@ SKILL.md / different launch mode: `code-guardian`, `fixme-fairy` (both
 
 A new plugin needs a project-level `conftest.py` calling `suppress_warnings()`,
 `register_conftest_hooks(globals())`, and `register_plugin_test_fixtures(globals())` (the
-last pulls in the autouse `setup_test_mngr_env` that redirects `$HOME` to a temp dir so
-tests can't touch real `~/.mngr`/`~/.claude.json`/`~/.gemini`). If the plugin shares a
-credential, add a package-level fixture that seeds it into the isolated `$HOME` (see
-antigravity's `isolated_home`). Hook/converter shell scripts get their own `*_test.py`.
-pyproject sets `--cov`, `fail_under = 95`, pyright `strict`.
+last pulls in the autouse `setup_test_mngr_env` that redirects `$HOME` to a temp dir for
+*every* test, so tests can't touch the real `~/.mngr`/`~/.claude.json`/`~/.gemini`). This
+`$HOME` redirect is the universal test-harness sandbox -- not to be confused with
+antigravity's per-agent HOME *relocation*; it applies to config-dir-isolated plugins too.
+If the plugin shares a credential, add a package-level fixture that seeds it where the
+plugin reads the **shared** (user-side) credential from -- i.e. into that test-redirected
+`$HOME` (e.g. `~/.gemini/.../oauth-token`, `~/.claude/.credentials.json`), so the plugin's
+sharing logic finds it. antigravity's `isolated_home` is one example. Hook/converter shell
+scripts get their own `*_test.py`. pyproject sets `--cov`, `fail_under = 95`, pyright
+`strict`.
 
 ---
 
