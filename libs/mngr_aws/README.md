@@ -142,9 +142,13 @@ Production code enforces this: `AwsProvider._validate_provider_args_for_create` 
 
 ## Future improvements
 
-- `--vps-ami=<ami-id>` build-arg for per-host AMI override.
-- Spot instances via `InstanceMarketOptions`.
-- GPU instances with pre-baked CUDA AMIs.
-- Auto SSM Parameter Store lookup for current Debian AMIs per region.
-- Optional EIP allocation for stable public addressing across stops/starts.
-- Multi-container per EC2 instance packing.
+Tagged `[future]` items are deferred but tracked so the user-facing surface in this README is honest about what does not yet exist:
+
+- `[future]` `mngr aws ami` subcommand that builds and registers a Debian + Docker + deps-baked AMI. Bypasses the ~60-90s cloud-init bootstrap on every create.
+- `[future]` mngr-published public AMIs (so users skip the build step entirely). Requires us to commit to a publishing cadence.
+- `[future]` Spot instances via `InstanceMarketOptions={"MarketType": "spot"}`. Useful for cheap stateless workloads; complicated by AWS's 2-minute interruption notice not fitting long-lived mngr hosts.
+- `[future]` GPU AMI automation: the Debian 12 AMIs in `DEFAULT_AMI_BY_REGION` have no CUDA / NVIDIA drivers / nvidia-container-toolkit. Pairs naturally with `mngr aws ami` above.
+- `[future]` Optional EIP allocation for stable public addressing across stops/starts. ~$3.60/month per idle EIP.
+- `[future]` Auto SSM Parameter Store lookup for current Debian AMIs per region (so the pinned map in `config.py` doesn't drift).
+- `[future]` Multi-container per EC2 instance packing.
+- `[future]` Auto-cleanup of the `mngr-aws` security group on the final `destroy` of a region.
