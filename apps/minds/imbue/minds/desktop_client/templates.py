@@ -423,7 +423,6 @@ def render_creating_page(
         "pages.Creating",
         agent_id=creation_id,
         status_text=status_text,
-        accent=workspace_accent(str(creation_id)),
         # Drives the client-side time-based progress bar on the loading
         # screen (eases toward ~80% over this duration).
         expected_duration_seconds=expected_creation_duration_seconds(info.launch_mode),
@@ -1055,7 +1054,6 @@ def render_destroying_page(
         agent_name=agent_name,
         pid=pid,
         status=status,
-        accent=workspace_accent(str(agent_id)),
     )
 
 
@@ -1139,7 +1137,6 @@ def render_sharing_editor(
         redirect_url=redirect_url,
         ws_name=ws_name,
         account_email=account_email,
-        accent=workspace_accent(agent_id),
     )
 
 
@@ -1177,7 +1174,6 @@ def render_workspace_settings(
         servers=servers,
         telegram_state=telegram_state,
         is_leased_imbue_cloud=is_leased_imbue_cloud,
-        accent=workspace_accent(agent_id),
     )
 
 
