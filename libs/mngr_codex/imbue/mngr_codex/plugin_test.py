@@ -246,7 +246,7 @@ def _provision(agent: CodexAgent) -> None:
     )
 
 
-def test_provision_builds_the_codex_home_tree(codex_agent: CodexAgent) -> None:
+def test_provision_builds_the_codex_home_tree(codex_agent: CodexAgent, isolated_codex_home: Path) -> None:
     """provision writes config.toml (pin + trust), hooks.json, the auth symlink, and the NUX marker."""
     _provision(codex_agent)
     codex_home = codex_agent._get_codex_home()
@@ -266,9 +266,14 @@ def test_provision_builds_the_codex_home_tree(codex_agent: CodexAgent) -> None:
     assert SET_ACTIVE_MARKER_SCRIPT_NAME in hooks_text
     assert CLEAR_ACTIVE_MARKER_SCRIPT_NAME in hooks_text
 
-    # auth.json is a symlink to the shared user auth.json (dangling is fine).
+    # auth.json is a symlink to the shared user auth.json. With the shared auth
+    # seeded (isolated_codex_home), the symlink resolves to that real file rather
+    # than dangling.
     auth_path = get_codex_auth_path(codex_home)
     assert auth_path.is_symlink()
+    shared_auth = get_codex_auth_path(isolated_codex_home / ".codex")
+    assert auth_path.resolve() == shared_auth.resolve()
+    assert auth_path.read_text() == shared_auth.read_text()
 
     # The personality-migration NUX-skip marker exists.
     assert get_codex_personality_migration_path(codex_home).exists()
