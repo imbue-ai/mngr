@@ -10,10 +10,6 @@ With --list-package-dirs, instead prints `libs/<dir_name>` for each publishable
 package (one per line) and exits without running any verification. This is used
 by the publish workflow to drive the per-package build loop.
 
-Run with `--all-packages` so the whole workspace is synced: this script imports
-`UNPUBLISHED_PACKAGES` from `imbue.mngr`, which is a workspace member rather than
-a root dependency, so a bare `uv run` would fail to import it in a clean venv.
-
 Usage:
     uv run --all-packages scripts/verify_publish.py
     uv run --all-packages scripts/verify_publish.py --expected-mngr-version 0.1.5
