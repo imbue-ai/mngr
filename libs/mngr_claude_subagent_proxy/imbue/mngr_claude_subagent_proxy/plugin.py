@@ -445,10 +445,11 @@ def _check_subagent_hooks_compat(host: OnlineHostInterface, agent: AgentInterfac
     """Refuse to provision a subagent-proxy child whose inherited Stop/SubagentStop hooks
     need custom translation between top-level and subagent semantics.
 
-    We recognize the baseline mngr_claude readiness hook and let it through;
-    anything else is a user-configured hook whose intended scope we don't
-    know (should it run once per subagent turn? once per outer turn? not at
-    all?). Fail loudly rather than silently strip or silently duplicate.
+    mngr's own hooks load via ``claude --settings`` and are not in this file,
+    so any Stop/SubagentStop hook here is user-configured (legacy mngr-marked
+    leftovers are still recognized and allowed). A user hook's intended scope
+    is ambiguous -- should it run once per subagent turn? once per outer turn?
+    not at all? -- so we fail loudly rather than silently strip or duplicate.
     """
     settings_path = agent.work_dir / ".claude" / "settings.local.json"
     try:
@@ -624,10 +625,9 @@ def _strip_user_hooks_from_subagent(host: OnlineHostInterface, work_dir: Path) -
     hooks the user has configured on the parent (PreToolUse filters,
     PostToolUse notifications, etc.). Their top-level-vs-subagent
     semantics are ambiguous, so drop everything that isn't recognized
-    as mngr-managed. The Stop/SubagentStop compat check already
-    rejected unsafe ones before we got here, so anything still present
-    in those events must be mngr baseline; the loop below simply
-    filters again for uniformity.
+    as mngr-managed. mngr's own hooks load via ``claude --settings``,
+    not from here, so in practice this removes the inherited user hooks
+    (the compat check has already rejected ambiguous user Stop/SubagentStop hooks).
     """
     settings_path = work_dir / ".claude" / "settings.local.json"
     try:
