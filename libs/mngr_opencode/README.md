@@ -103,14 +103,10 @@ options with `opencode models`). Three ways, highest precedence first:
 
 Notes:
 
-- The model's provider must be authenticated, or **OpenCode silently falls back
-  to a free model** -- so if you set, say, `anthropic/claude-sonnet-4-5` but the
-  agent shows a free "OpenCode Zen" model instead, the config did apply; OpenCode
-  just couldn't use the model because the provider has no credential. Authenticate
-  once with `opencode auth login` (it writes to `~/.local/share/opencode/auth.json`,
-  which every agent's `auth.json` symlinks to, so one login covers all agents),
-  then create/restart the agent. Check with `opencode auth list`. (The free
-  OpenCode-Zen models need no auth.)
+- If the model's provider isn't authenticated, **OpenCode silently falls back to
+  a free model** -- so if you set, say, `anthropic/claude-sonnet-4-5` but the
+  agent shows a free "OpenCode Zen" model, run `opencode auth login` and
+  create/restart the agent. (The free OpenCode-Zen models need no auth.)
 - Passing the model after `--` (`mngr create ... opencode -- --model X`) does
   **not** work: `--` args go to the `opencode attach` client, which has no
   `--model` flag; the model is used by the `serve` process, from `opencode.json`.
