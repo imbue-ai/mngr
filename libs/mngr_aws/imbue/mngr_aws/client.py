@@ -249,7 +249,22 @@ class AwsVpsClient(VpsClientInterface):
         port. AWS rejects ``AuthorizeSecurityGroupIngress`` calls with
         ``InvalidPermission.Duplicate`` atomically — none of the permissions in
         the batch are added if any one is a duplicate.
+
+        When ``allowed_ssh_cidrs`` is empty, skip the authorize calls entirely:
+        AWS rejects an ``IpPermission`` with no source set (no IpRanges /
+        Ipv6Ranges / UserIdGroupPairs / PrefixListIds) with
+        ``InvalidParameterValue``, so issuing the call with empty ``IpRanges``
+        is a real API error, not a no-op. The "no usable ingress" shape is the
+        SG sitting with the AWS default of zero ingress rules, which is exactly
+        what the caller gets by not issuing the call.
         """
+        if not self.allowed_ssh_cidrs:
+            logger.debug(
+                "Skipping authorize_security_group_ingress on {}: allowed_ssh_cidrs is empty "
+                "(the security group keeps its default of zero ingress rules)",
+                sg_id,
+            )
+            return
         ip_ranges = [{"CidrIp": cidr} for cidr in self.allowed_ssh_cidrs]
         ip_permissions = [
             {

@@ -440,6 +440,12 @@ def test_ensure_security_group_auto_create_warns_when_no_cidrs() -> None:
 
     Mirrors how Vultr/OVH provisioning behaves in this monorepo (no provider-managed firewall);
     the empty case is a "I'll wire my own ingress later" signal, not a fail-closed gate.
+
+    No ``authorize_security_group_ingress`` calls are issued: real AWS rejects an
+    IpPermission with no source set, so the SG keeps its default of zero ingress rules
+    (which is exactly the documented "wire it yourself" shape). The absence of
+    authorize stubs below is part of the assertion -- the Stubber would raise on any
+    unexpected API call.
     """
     session = boto3.Session(
         aws_access_key_id="AKIATEST",
@@ -461,11 +467,6 @@ def test_ensure_security_group_auto_create_warns_when_no_cidrs() -> None:
         {"SecurityGroups": [{"GroupId": "sg-empty", "GroupName": "mngr-aws-empty"}]},
         expected_params={"Filters": [{"Name": "group-name", "Values": ["mngr-aws-empty"]}]},
     )
-    # Even with no CIDRs we still call authorize_security_group_ingress (twice, once
-    # per port), with an empty IpRanges list. AWS treats that as a no-op — the SG
-    # ends up with no usable ingress, which is the intended "wire it yourself" shape.
-    stubber.add_response("authorize_security_group_ingress", {})
-    stubber.add_response("authorize_security_group_ingress", {})
     stubber.activate()
     try:
         with _captured_loguru_warnings() as warnings:
