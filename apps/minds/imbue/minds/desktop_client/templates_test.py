@@ -719,17 +719,17 @@ def test_titlebar_button_danger_tone_applies_red_hover() -> None:
 # The accent is set per-workspace via a CSS variable on document.documentElement
 # (chrome.js) so the value is computed; the *shape* of the computation lives
 # in workspace_accent() (mirrored in static/workspace_accent.js). These tests
-# pin the OKLCH lightness / chroma at 80% / 0.1 -- a calm tone that reads as
+# pin the OKLCH lightness / chroma at 85% / 0.12 -- a calm tone that reads as
 # chrome across the full-width titlebar -- and pin the deterministic
 # agent-id -> hue mapping that powers identity color across the app.
 
 
-def test_workspace_accent_uses_80_lightness_and_0_1_chroma() -> None:
+def test_workspace_accent_uses_85_lightness_and_0_12_chroma() -> None:
     accent = workspace_accent(str(_AGENT_A))
-    # Match the new full-width-titlebar tuning. If you bump these, also
-    # update ``ACCENT_L`` / ``ACCENT_C`` in static/workspace_accent.js so
-    # the two stay in lockstep.
-    assert accent.startswith("oklch(80% 0.1 ")
+    # Match the full-width-titlebar tuning. If you bump these, also update
+    # ``ACCENT_L`` / ``ACCENT_C`` in static/workspace_accent.js so the two
+    # stay in lockstep.
+    assert accent.startswith("oklch(85% 0.12 ")
     assert accent.endswith(")")
 
 
@@ -765,17 +765,18 @@ def test_tokens_css_drops_page_workspace_top_stripe() -> None:
     assert ".page-workspace::before" not in css
 
 
-def test_tokens_css_accent_fallbacks_use_the_new_lightness_chroma() -> None:
+def test_tokens_css_accent_fallbacks_use_the_pinned_lightness_chroma() -> None:
     """``--workspace-accent`` may not be set (e.g. the dev styleguide or
     a sidebar item rendered before chrome.js applies the accent), in
     which case consumers fall back to a fixed default. Pin that default
-    to the new 80 / 0.1 tuning so the fallback doesn't pop visually
-    against the rest of the accent system."""
+    to the 85 / 0.12 tuning so the fallback doesn't pop visually against
+    the rest of the accent system."""
     css = _TOKENS_CSS_PATH.read_text()
-    # The old 65% / 0.15 fallbacks should all be gone.
+    # Pre-titlebar-accent values must not linger in fallbacks.
     assert "oklch(65% 0.15" not in css
-    # The new fallbacks should all use 80% / 0.1.
-    assert "oklch(80% 0.1 230)" in css
+    assert "oklch(80% 0.1" not in css
+    # All fallbacks should use the current tuning.
+    assert "oklch(85% 0.12 230)" in css
 
 
 def test_notice_renders_each_variant() -> None:

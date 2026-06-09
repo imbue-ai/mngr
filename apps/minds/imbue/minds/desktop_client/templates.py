@@ -162,8 +162,8 @@ CATALOG: Final[Catalog] = _build_catalog()
 # the full-width titlebar (not just a small swatch), so a light /
 # low-saturation tone is needed to read as chrome rather than a saturated
 # highlight.
-_WORKSPACE_L: Final[int] = 80
-_WORKSPACE_C: Final[float] = 0.1
+_WORKSPACE_L: Final[int] = 85
+_WORKSPACE_C: Final[float] = 0.12
 
 
 @pure

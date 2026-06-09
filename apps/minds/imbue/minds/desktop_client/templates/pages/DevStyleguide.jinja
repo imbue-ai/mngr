@@ -190,14 +190,14 @@
       </p>
 
       {# Titlebar buttons. Demo container paints the full-width accent
-         bar (oklch(80% 0.1 230)) and sets --titlebar-fg to the contrast
+         bar (oklch(85% 0.12 230)) and sets --titlebar-fg to the contrast
          pick the workspace_accent helper would make for that lightness
-         ("0 0 0", since L=0.8 >= 0.5), so the page title + nav-button
+         ("0 0 0", since L=0.85 >= 0.5), so the page title + nav-button
          glyphs render against the bar exactly as they do in Chrome.jinja. #}
       <div class="mb-6">
         <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Titlebar buttons</div>
         <div class="rounded-lg overflow-hidden border border-zinc-200"
-             style="--titlebar-bg: oklch(80% 0.1 230); --titlebar-fg: 0 0 0;">
+             style="--titlebar-bg: oklch(85% 0.12 230); --titlebar-fg: 0 0 0;">
           <div class="h-[38px] flex items-center select-none px-1"
                style="background-color: var(--titlebar-bg);">
             <div class="flex gap-0.5">

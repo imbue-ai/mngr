@@ -37,7 +37,7 @@ html {
   top: 0;
   bottom: 0;
   width: 3px;
-  background: var(--workspace-accent, oklch(80% 0.1 230));
+  background: var(--workspace-accent, oklch(85% 0.12 230));
 }
 
 .sidebar-item {
@@ -51,7 +51,7 @@ html {
   bottom: 8px;
   width: 3px;
   border-radius: 2px;
-  background: var(--workspace-accent, oklch(80% 0.1 230));
+  background: var(--workspace-accent, oklch(85% 0.12 230));
   opacity: 0.55;
   transition: opacity 100ms;
 }
@@ -61,7 +61,7 @@ html {
 }
 
 .accent-swatch {
-  background: var(--workspace-accent, oklch(80% 0.1 230));
+  background: var(--workspace-accent, oklch(85% 0.12 230));
 }
 
 /*
