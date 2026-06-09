@@ -23,8 +23,22 @@
     else window.location = url;
   }
 
+  // Close the floating sidebar after the user makes a selection (workspace,
+  // settings, new workspace, account). The sidebar is a separate
+  // WebContentsView in Electron; toggling it from inside the running view
+  // always closes it (the view is by definition visible since this code is
+  // executing). Mirrors chrome.js's `closeSidebar()` behavior for the
+  // browser-mode inline panel so both modes auto-close consistently.
+  // Intentionally does NOT close on "open in new window" -- the user is
+  // keeping their current workspace context to compare against the new
+  // window, so collapsing the sidebar at the same time would feel jarring.
+  function closeSidebarIfElectron() {
+    if (isElectron && window.minds.toggleSidebar) window.minds.toggleSidebar();
+  }
+
   function selectWorkspace(agentId) {
     navigate(mngrForwardOrigin + '/goto/' + agentId + '/');
+    closeSidebarIfElectron();
   }
 
   function openInNewWindow(agentId) {
@@ -35,6 +49,7 @@
 
   function openWorkspaceSettings(agentId) {
     navigate('/workspace/' + agentId + '/settings');
+    closeSidebarIfElectron();
   }
 
   // -- Per-row icon buttons -------------------------------------------------
@@ -137,10 +152,12 @@
   document.addEventListener('click', function (e) {
     if (e.target.closest('#sidebar-new-workspace')) {
       navigate('/create');
+      closeSidebarIfElectron();
       return;
     }
     if (e.target.closest('#sidebar-account')) {
       navigate(signedIn ? '/accounts' : '/auth/login');
+      closeSidebarIfElectron();
       return;
     }
     handleRowClick(e.target);
