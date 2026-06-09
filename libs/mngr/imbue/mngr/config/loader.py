@@ -6,11 +6,14 @@ from pathlib import Path
 from typing import Any
 from typing import Final
 from typing import Sequence
+from typing import get_args
 from uuid import uuid4
 
 import pluggy
 from loguru import logger
 from pydantic import BaseModel
+from pydantic import TypeAdapter
+from pydantic import ValidationError
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -559,6 +562,48 @@ def _check_unknown_fields(
             del raw_config[key]
 
 
+def _annotation_references_model(annotation: Any) -> bool:
+    """Whether a field annotation is a pydantic model or contains one as a type
+    argument (e.g. ``SSHHostConfig``, ``dict[str, SSHHostConfig]``,
+    ``list[SSHHostConfig]``, ``SSHHostConfig | None``).
+    """
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return True
+    return any(_annotation_references_model(arg) for arg in get_args(annotation))
+
+
+def _coerce_nested_model_fields(
+    raw_config: dict[str, Any],
+    config_class: type[BaseModel],
+    context: str,
+) -> dict[str, Any]:
+    """Validate fields whose declared type involves a nested pydantic model.
+
+    Provider configs are built with ``model_construct`` (see ``_parse_providers``)
+    so that unset top-level fields stay ``None`` for config-layer merging. But
+    ``model_construct`` does not coerce values, so a nested-model field such as
+    ``SSHProviderConfig.hosts`` (``dict[str, SSHHostConfig]``) would keep its raw
+    TOML dicts and blow up the moment the backend accessed an attribute on them
+    (``AttributeError: 'dict' object has no attribute 'key_file'``).
+
+    Only fields actually present in ``raw_config`` are touched, and only those
+    whose annotation references a pydantic model, so scalar fields and the
+    None-for-unset merge semantics for unset fields are both unaffected. Nested
+    entries are atomic (validated as a unit), which is why coercing them does not
+    interfere with the layer merge. Returns a new dict; the input is not mutated.
+    """
+    result = dict(raw_config)
+    for field_name, value in raw_config.items():
+        field_info = config_class.model_fields.get(field_name)
+        if field_info is None or not _annotation_references_model(field_info.annotation):
+            continue
+        try:
+            result[field_name] = TypeAdapter(field_info.annotation).validate_python(value)
+        except ValidationError as e:
+            raise ConfigParseError(f"Invalid value for '{context}.{field_name}': {e}") from e
+    return result
+
+
 def _parse_providers(
     raw_providers: dict[str, dict[str, Any]],
     disabled_plugins: frozenset[str],
@@ -614,6 +659,7 @@ def _parse_providers(
                 logger.warning(msg)
             continue
         _check_unknown_fields(raw_config, config_class, f"providers.{name}", strict=strict, silent=silent)
+        raw_config = _coerce_nested_model_fields(raw_config, config_class, f"providers.{name}")
         providers[ProviderInstanceName(name)] = config_class.model_construct(**raw_config)
 
     return providers
