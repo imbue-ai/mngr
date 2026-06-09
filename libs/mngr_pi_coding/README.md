@@ -26,9 +26,11 @@ plugin shares into each agent).
 - **Per-agent isolation.** Each agent gets its own pi config dir via
   `PI_CODING_AGENT_DIR` (`$MNGR_AGENT_STATE_DIR/plugin/pi_coding/`), so settings,
   sessions, and state never collide. Your `~/.pi/agent/` `auth.json`, `settings.json`,
-  and resource dirs (`skills`, `prompts`, `extensions`, `themes`) are shared in
-  (symlinked locally, copied to remote hosts). `auth.json` is symlinked, so a
-  `/login` or token refresh in any agent propagates to the rest.
+  and resource dirs (`skills`, `prompts`, `extensions`, `themes`, `agents`) are
+  shared in (symlinked locally, copied to remote hosts). `auth.json` is symlinked,
+  so a `/login` or token refresh in any agent propagates to the rest. (`agents`
+  carries subagent definitions, so an installed subagent extension works under
+  mngr -- pi ships no built-in subagents.)
 - **RUNNING vs WAITING.** `mngr list` shows whether the agent is mid-turn or idle,
   and stays correct when the agent runs a nested `pi` via its bash tool.
 - **Transcripts.** `mngr transcript my-agent` renders the conversation. A raw pi

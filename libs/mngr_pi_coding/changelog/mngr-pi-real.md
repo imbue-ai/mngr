@@ -14,6 +14,9 @@ with `pi -e`) that drives everything pi has no shell hooks for:
   writes when pi's session loads) rather than only scraping the startup banner.
 - Auto-install now uses the current npm package `@earendil-works/pi-coding-agent`
   (the old `@mariozechner/pi-coding-agent` scope is deprecated and frozen).
+- Also sync the `agents/` resource dir from `~/.pi/agent/` into each agent's
+  config dir (alongside skills/prompts/extensions/themes), so an installed
+  subagent extension finds its agent definitions (pi has no built-in subagents).
 - Handle pi 0.79+'s "Trust project folder?" dialog: mngr pre-trusts the agent's
   workspace (seeding pi's `trust.json`) so the agent never stalls at the dialog,
   gated like the claude/antigravity agent types -- silent under `mngr create --yes`

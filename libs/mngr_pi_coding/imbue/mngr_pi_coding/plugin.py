@@ -35,6 +35,13 @@ from imbue.mngr_pi_coding import resources as _pi_resources
 _PI_HOME_DIR_NAME: str = ".pi"
 _PI_AGENT_SUBDIR: str = "agent"
 
+# Resource directories under ~/.pi/agent/ shared into each agent's isolated
+# config dir when ``sync_home_settings`` is on. ``agents`` holds subagent
+# definitions (``*.md``) that subagent extensions (pi's in-tree example, or
+# community packages like ``pi-subagents``) read from the config dir; without it
+# a synced subagent extension would load but find no agents to delegate to.
+_SYNCED_RESOURCE_DIRS: tuple[str, ...] = ("skills", "prompts", "extensions", "themes", "agents")
+
 # The pi agent-type name, used for the per-agent transcript directories
 # (``events/<type>/common_transcript`` and ``logs/<type>_transcript``) and
 # passed to the lifecycle extension via ``MNGR_PI_AGENT_TYPE``. Kept in sync
@@ -480,7 +487,7 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig], HasCommonTranscrip
                 if not result.success:
                     logger.warning("Failed to symlink settings.json: {}", result.stderr)
 
-            for dir_name in ("skills", "prompts", "extensions", "themes"):
+            for dir_name in _SYNCED_RESOURCE_DIRS:
                 source = home_pi / dir_name
                 if source.exists():
                     result = host.execute_idempotent_command(
@@ -517,7 +524,7 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig], HasCommonTranscrip
             # per file (a full round-trip over the SSH tunnel) and does not
             # scale to large resource sets -- see github issue 1825.
             include_args: list[str] = []
-            for dir_name in ("skills", "prompts", "extensions", "themes"):
+            for dir_name in _SYNCED_RESOURCE_DIRS:
                 if (home_pi / dir_name).is_dir():
                     include_args.extend([f"--include={dir_name}/", f"--include={dir_name}/**"])
             if include_args:

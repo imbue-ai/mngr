@@ -275,6 +275,8 @@ def test_setup_local_config_dir_symlinks_resource_dirs(tmp_path: Path, pi_agent:
     home = _setup_home_pi(tmp_path)
     (home / ".pi" / "agent" / "skills").mkdir()
     (home / ".pi" / "agent" / "prompts").mkdir()
+    # `agents` holds subagent definitions read by subagent extensions.
+    (home / ".pi" / "agent" / "agents").mkdir()
 
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True)
@@ -286,6 +288,7 @@ def test_setup_local_config_dir_symlinks_resource_dirs(tmp_path: Path, pi_agent:
 
     assert (config_dir / "skills").is_symlink()
     assert (config_dir / "prompts").is_symlink()
+    assert (config_dir / "agents").is_symlink()
 
 
 def test_setup_remote_config_dir_copies_settings(tmp_path: Path, pi_agent: PiCodingAgent) -> None:
