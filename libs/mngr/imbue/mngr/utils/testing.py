@@ -908,8 +908,9 @@ def make_ctx_with_plugins(
     default id-based name. Pass a stable name when a config layer must be able to
     address the plugin (e.g. a work_dir's ``[plugins.<name>] enabled = false``).
     """
-    if names is not None and len(names) != len(plugins):
-        raise ValueError(f"names has length {len(names)} but plugins has length {len(plugins)}")
+    assert names is None or len(names) == len(plugins), (
+        f"names has length {len(names)} but plugins has length {len(plugins)}"
+    )
     pm = pluggy.PluginManager("mngr")
     pm.add_hookspecs(hookspecs)
     if load_backends:
