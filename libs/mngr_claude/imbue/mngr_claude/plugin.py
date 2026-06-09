@@ -344,6 +344,13 @@ Finding this segment in an installPath means the plugin was installed inside
 an mngr agent rather than in the user's persistent ~/.claude/ directory.
 """
 
+# The ``--settings`` flag passed to claude at launch (see ``assemble_command``),
+# pointing at the per-agent managed settings file via the runtime
+# $MNGR_AGENT_STATE_DIR. Loading mngr's hooks this way keeps them out of the
+# project's settings.local.json. See ``get_managed_settings_path``.
+_MANAGED_SETTINGS_SHELL_PATH: Final[str] = f"$MNGR_AGENT_STATE_DIR/{'/'.join(MANAGED_SETTINGS_RELATIVE_PATH)}"
+MANAGED_SETTINGS_LAUNCH_ARG: Final[str] = f'--settings "{_MANAGED_SETTINGS_SHELL_PATH}"'
+
 _PLUGINS_DIR_MARKER: Final[str] = "/plugins/"
 """Generic marker for extracting relative plugin paths.
 
@@ -1576,16 +1583,6 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
             f' export MAIN_CLAUDE_SESSION_ID="${{_MNGR_READ_SID:-{agent_uuid}}}"'
         )
 
-        # Load mngr's hooks via --settings from the managed file. The
-        # `if [ -f ]; then ... fi` form always exits 0 (even when the file is
-        # absent, e.g. an agent created by an older mngr), so it neither breaks
-        # the `&&` chain below nor passes --settings pointing at a missing path.
-        managed_settings_shell_path = f"$MNGR_AGENT_STATE_DIR/{'/'.join(MANAGED_SETTINGS_RELATIVE_PATH)}"
-        settings_arg_setup = (
-            f'_MNGR_SETTINGS_ARG=""; if [ -f "{managed_settings_shell_path}" ]; then'
-            f' _MNGR_SETTINGS_ARG="--settings {managed_settings_shell_path}"; fi'
-        )
-
         # Build both command variants using the dynamic session ID.
         # Use $CLAUDE_CONFIG_DIR (set in the agent's env file) to find session files
         # in the per-agent config dir rather than ~/.claude/. Session files on disk
@@ -1594,8 +1591,8 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         # the end of assemble_command would spawn a fresh `claude --session-id
         # <agent_uuid>` without surfacing any error -- so an adopted session
         # would appear to do nothing.
-        resume_cmd = f'( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && {base} $_MNGR_SETTINGS_ARG --resume "$MAIN_CLAUDE_SESSION_ID"'
-        create_cmd = f"{base} $_MNGR_SETTINGS_ARG --session-id {agent_uuid}"
+        resume_cmd = f'( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && {base} {MANAGED_SETTINGS_LAUNCH_ARG} --resume "$MAIN_CLAUDE_SESSION_ID"'
+        create_cmd = f"{base} {MANAGED_SETTINGS_LAUNCH_ARG} --session-id {agent_uuid}"
 
         # Append additional args to both commands if present
         if args_str:
@@ -1605,9 +1602,6 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         # Build the environment exports
         # IS_SANDBOX is only set for remote hosts (not local)
         env_exports = f"export IS_SANDBOX=1 && {sid_export}" if not host.is_local else sid_export
-        # Resolve the --settings flag (kept after the env exports so it runs in
-        # the same shell as the resume/create commands that consume the var).
-        env_exports = f"{env_exports} && {settings_arg_setup}"
 
         # Build the background tasks command (activity tracking + transcript export)
         session_name = f"{self.mngr_ctx.config.prefix}{self.name}"
@@ -1731,25 +1725,24 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         sync_credentials_on_login is set, and the permission auto-allow hook
         when auto_allow_permissions is set.
         """
-        # mngr owns this file outright, so the build is the whole content (no
-        # read-merge). merge_hooks_config only composes the optional configs onto
-        # the readiness base.
-        merged = build_readiness_hooks_config()
-
-        # Conditionally add credential sync hooks (macOS only)
+        # The always-on readiness hooks, plus the optional credential-sync
+        # (macOS) and permission auto-allow hooks.
+        hook_configs = [build_readiness_hooks_config()]
         if self.agent_config.sync_credentials_on_login and is_macos():
-            merged = merge_hooks_config(merged, build_credential_sync_hooks_config()) or merged
-
-        # Merge permission auto-allow hooks if configured
+            hook_configs.append(build_credential_sync_hooks_config())
         if self.agent_config.auto_allow_permissions:
-            merged = merge_hooks_config(merged, build_permission_auto_allow_hooks_config()) or merged
+            hook_configs.append(build_permission_auto_allow_hooks_config())
+
+        settings: dict[str, Any] = {}
+        for hook_config in hook_configs:
+            settings = merge_hooks_config(settings, hook_config) or settings
 
         settings_path = get_managed_settings_path(self._get_agent_dir())
         # The plugin/claude/ parent may not exist yet (e.g. in use_env_config_dir
         # mode, where the per-agent config dir is not provisioned), so create it.
         host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(settings_path.parent))}", timeout_seconds=5.0)
         with log_span("Configuring agent hooks in {}", settings_path):
-            host.write_text_file(settings_path, json.dumps(merged, indent=2) + "\n")
+            host.write_text_file(settings_path, json.dumps(settings, indent=2) + "\n")
 
     def interactively_dismiss_claude_dialogs(self, source_path: Path | None, mngr_ctx: MngrContext) -> None:
         """Ensure all known Claude startup dialogs are dismissed in the global config.

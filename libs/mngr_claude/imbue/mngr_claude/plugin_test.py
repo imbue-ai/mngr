@@ -60,6 +60,7 @@ from imbue.mngr_claude.claude_config import get_managed_settings_path
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_claude.plugin import CostThresholdDialogIndicator
+from imbue.mngr_claude.plugin import MANAGED_SETTINGS_LAUNCH_ARG
 from imbue.mngr_claude.plugin import ProvisioningContext
 from imbue.mngr_claude.plugin import WaitingReason
 from imbue.mngr_claude.plugin import _build_install_command_hint
@@ -133,15 +134,6 @@ def _sid_export_for(uuid: UUID) -> str:
         f'_MNGR_READ_SID=$(cat "$MNGR_AGENT_STATE_DIR/claude_session_id" 2>/dev/null || true);'
         f' export MAIN_CLAUDE_SESSION_ID="${{_MNGR_READ_SID:-{uuid}}}"'
     )
-
-
-# Expected shell that resolves the --settings flag (only when the managed file
-# exists). $_MNGR_SETTINGS_ARG is spliced into the resume/create commands.
-_MANAGED_SETTINGS_SHELL_PATH = "$MNGR_AGENT_STATE_DIR/plugin/claude/mngr_managed_settings.json"
-_SETTINGS_ARG_SETUP = (
-    f'_MNGR_SETTINGS_ARG=""; if [ -f "{_MANAGED_SETTINGS_SHELL_PATH}" ]; then'
-    f' _MNGR_SETTINGS_ARG="--settings {_MANAGED_SETTINGS_SHELL_PATH}"; fi'
-)
 
 
 def _init_git_with_gitignore(work_dir: Path) -> None:
@@ -349,7 +341,7 @@ def test_claude_agent_assemble_command_with_no_args(
     sid_export = _sid_export_for(uuid)
     # Local hosts should NOT have IS_SANDBOX set
     assert command == CommandString(
-        f'{background_cmd} {sid_export} && {_SETTINGS_ARG_SETUP} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude $_MNGR_SETTINGS_ARG --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude $_MNGR_SETTINGS_ARG --session-id {uuid}'
+        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude {MANAGED_SETTINGS_LAUNCH_ARG} --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude {MANAGED_SETTINGS_LAUNCH_ARG} --session-id {uuid}'
     )
 
 
@@ -367,7 +359,7 @@ def test_claude_agent_assemble_command_with_agent_args(
     background_cmd = agent._build_background_tasks_command(session_name)
     sid_export = _sid_export_for(uuid)
     assert command == CommandString(
-        f'{background_cmd} {sid_export} && {_SETTINGS_ARG_SETUP} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude $_MNGR_SETTINGS_ARG --resume "$MAIN_CLAUDE_SESSION_ID" --model opus ) || claude $_MNGR_SETTINGS_ARG --session-id {uuid} --model opus'
+        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude {MANAGED_SETTINGS_LAUNCH_ARG} --resume "$MAIN_CLAUDE_SESSION_ID" --model opus ) || claude {MANAGED_SETTINGS_LAUNCH_ARG} --session-id {uuid} --model opus'
     )
 
 
@@ -390,7 +382,7 @@ def test_claude_agent_assemble_command_with_cli_args_and_agent_args(
     background_cmd = agent._build_background_tasks_command(session_name)
     sid_export = _sid_export_for(uuid)
     assert command == CommandString(
-        f'{background_cmd} {sid_export} && {_SETTINGS_ARG_SETUP} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude $_MNGR_SETTINGS_ARG --resume "$MAIN_CLAUDE_SESSION_ID" --verbose --model opus ) || claude $_MNGR_SETTINGS_ARG --session-id {uuid} --verbose --model opus'
+        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude {MANAGED_SETTINGS_LAUNCH_ARG} --resume "$MAIN_CLAUDE_SESSION_ID" --verbose --model opus ) || claude {MANAGED_SETTINGS_LAUNCH_ARG} --session-id {uuid} --verbose --model opus'
     )
 
 
@@ -412,7 +404,7 @@ def test_claude_agent_assemble_command_with_command_override(
     background_cmd = agent._build_background_tasks_command(session_name)
     sid_export = _sid_export_for(uuid)
     assert command == CommandString(
-        f'{background_cmd} {sid_export} && {_SETTINGS_ARG_SETUP} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && custom-claude $_MNGR_SETTINGS_ARG --resume "$MAIN_CLAUDE_SESSION_ID" --model opus ) || custom-claude $_MNGR_SETTINGS_ARG --session-id {uuid} --model opus'
+        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && custom-claude {MANAGED_SETTINGS_LAUNCH_ARG} --resume "$MAIN_CLAUDE_SESSION_ID" --model opus ) || custom-claude {MANAGED_SETTINGS_LAUNCH_ARG} --session-id {uuid} --model opus'
     )
 
 
@@ -452,7 +444,7 @@ def test_claude_agent_assemble_command_sets_is_sandbox_for_remote_host(
     sid_export = _sid_export_for(uuid)
     # Remote hosts SHOULD have IS_SANDBOX set
     assert command == CommandString(
-        f'{background_cmd} export IS_SANDBOX=1 && {sid_export} && {_SETTINGS_ARG_SETUP} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude $_MNGR_SETTINGS_ARG --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude $_MNGR_SETTINGS_ARG --session-id {uuid}'
+        f'{background_cmd} export IS_SANDBOX=1 && {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude {MANAGED_SETTINGS_LAUNCH_ARG} --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude {MANAGED_SETTINGS_LAUNCH_ARG} --session-id {uuid}'
     )
 
 
@@ -1008,11 +1000,7 @@ def test_configure_agent_hooks_writes_managed_file_not_settings_local(
 def test_configure_agent_hooks_works_without_a_git_repo(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """_configure_agent_hooks works in a plain (non-git) work_dir.
-
-    There is no longer any gitignore check to skip -- mngr writes only to the
-    agent state dir, which is independent of the work_dir's git state.
-    """
+    """_configure_agent_hooks works in a plain (non-git) work_dir."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
