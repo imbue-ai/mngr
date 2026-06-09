@@ -340,38 +340,63 @@ jobs:
       - name: reset to clean state and install fresh app
         run: bash apps/minds/scripts/mac-runner-reset.sh "${{ steps.url.outputs.url }}"
 
-      - name: probe lima image cache + cloud.debian.org reachability
-        # Runs 27226429762 and 27229065721 both failed identically:
-        # lima HEAD to cloud.debian.org times out (TLS handshake),
-        # lima falls back to a cached image entry, but then fatals
-        # opening ~/.lima/<vm>/basedisk. Dump cache state + network
-        # probe so we can tell whether (a) the cache entry is real
-        # but lima's fallback path is buggy, (b) the cache entry is
-        # empty / partial from a previous failed download, or (c)
-        # the runner truly cannot reach cloud.debian.org.
+      - name: probe debian-image reachability + lima cache state
+        # Two consecutive runs (27226429762, 27229065721) failed with
+        # TLS-handshake-timeout to cloud.debian.org from this runner,
+        # followed by lima logging "Using cache" and then fataling on
+        # "basedisk: no such file or directory". Cache file itself is
+        # intact (verified run 27229383007). Now probe multiple endpoints
+        # with longer timeouts + real GETs to see whether ANY Debian
+        # cloud-image source is reachable from the runner, so we know
+        # if the right fix is (a) a different mirror URL, (b) /etc/hosts
+        # override, or (c) lima cache-fallback workaround.
         run: |
           set +e
-          DEBIAN_URL="https://cloud.debian.org/images/cloud/bookworm/20260601-2496/debian-12-genericcloud-arm64-20260601-2496.qcow2"
-          CACHE_KEY="8774030760d00b6458319cdbb37dce5d0a878cde994448674bd9f3e6eca6e761"
-          CACHE_DIR="$HOME/Library/Caches/lima/download/by-url-sha256/$CACHE_KEY"
-          echo "=== lima cache dir for the Debian image:"
-          ls -la "$CACHE_DIR" 2>&1 || echo "(cache dir absent)"
-          if [[ -f "$CACHE_DIR/data" ]]; then
-            echo "=== data file size + sha256:"
-            stat -f '%z %N' "$CACHE_DIR/data"
-            shasum -a 256 "$CACHE_DIR/data" | head -1
-            echo "=== qemu-img info (if available):"
-            qemu-img info "$CACHE_DIR/data" 2>&1 | head -10 || true
-            file "$CACHE_DIR/data" 2>&1 | head -1
+          IMG="debian-12-genericcloud-arm64-20260601-2496.qcow2"
+          echo "=== DNS resolution:"
+          for HOST in cloud.debian.org cdimage.debian.org saimei.ftp.acc.umu.se mirrors.kernel.org cdn-fastly.deb.debian.org; do
+            printf "  %-40s -> " "$HOST"
+            dig +short +tries=1 +time=3 "$HOST" 2>&1 | head -1 || echo "(dig fail)"
+          done
+          echo
+          echo "=== HEAD + first-byte GET attempts (30s timeout each):"
+          for URL in \
+            "https://cloud.debian.org/images/cloud/bookworm/20260601-2496/$IMG" \
+            "https://cdimage.debian.org/cdimage/cloud/bookworm/20260601-2496/$IMG" \
+            "https://saimei.ftp.acc.umu.se/cloud-images/cloud/bookworm/20260601-2496/$IMG" \
+            "https://mirrors.kernel.org/debian-cloud-images/bookworm/20260601-2496/$IMG" \
+            "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"; do
+            echo "--- $URL"
+            HEAD_OUT=$(/opt/homebrew/opt/curl/bin/curl --max-time 30 -sSI "$URL" 2>&1)
+            HEAD_RC=$?
+            echo "    HEAD rc=$HEAD_RC: $(echo "$HEAD_OUT" | head -1)"
+            if [[ "$HEAD_RC" -eq 0 ]]; then
+              # Try to fetch the first 100KB to verify the data path actually works.
+              GET_OUT=$(/opt/homebrew/opt/curl/bin/curl --max-time 30 -sS -o /tmp/probe-body -w "%{http_code} %{size_download}b in %{time_total}s\n" -H "Range: bytes=0-102399" "$URL" 2>&1)
+              echo "    GET rc=$? : $GET_OUT"
+              rm -f /tmp/probe-body
+            fi
+          done
+          echo
+          echo "=== plain TCP connectivity (nc -z, 5s timeout):"
+          for HP in cloud.debian.org:443 cdimage.debian.org:443 mirrors.kernel.org:443 github.com:443; do
+            HOST="${HP%%:*}"; PORT="${HP##*:}"
+            printf "  %-40s : " "$HP"
+            nc -z -G 5 -w 5 "$HOST" "$PORT" 2>&1 && echo "open" || echo "closed/timeout"
+          done
+          echo
+          echo "=== lima cache state for the Debian URL:"
+          CACHE_DIR="$HOME/Library/Caches/lima/download/by-url-sha256/8774030760d00b6458319cdbb37dce5d0a878cde994448674bd9f3e6eca6e761"
+          if [[ -d "$CACHE_DIR" ]]; then
+            ls -la "$CACHE_DIR"
+            if [[ -f "$CACHE_DIR/data" ]]; then
+              file "$CACHE_DIR/data" | head -1
+              stat -f 'size=%z' "$CACHE_DIR/data"
+            fi
+          else
+            echo "(cache dir absent)"
           fi
-          echo "=== curl HEAD to $DEBIAN_URL (10s timeout):"
-          /opt/homebrew/opt/curl/bin/curl --max-time 10 -sI "$DEBIAN_URL" 2>&1 | head -5
-          echo "=== curl HEAD via system curl:"
-          /usr/bin/curl --max-time 10 -sI "$DEBIAN_URL" 2>&1 | head -5
-          echo "=== openssl s_client to cloud.debian.org:443 (10s timeout):"
-          timeout 10 openssl s_client -connect cloud.debian.org:443 -servername cloud.debian.org < /dev/null 2>&1 | head -10
-          echo "=== dig cloud.debian.org:"
-          dig +short +tries=1 +time=3 cloud.debian.org 2>&1 | head -5
+          echo
           echo "=== installed lima version (bundled):"
           /Applications/Minds.app/Contents/Resources/lima/bin/limactl --version 2>&1 || true
           true  # never fail the step itself
