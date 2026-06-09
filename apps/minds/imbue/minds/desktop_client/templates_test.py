@@ -752,7 +752,6 @@ def test_tokens_css_defines_titlebar_utility_classes() -> None:
     assert ".titlebar-title" in css
     assert ".titlebar-btn" in css
     assert ".titlebar-btn-danger" in css
-    assert ".titlebar-account" in css
     # All of them read --titlebar-fg with an alpha for hierarchy.
     assert "var(--titlebar-fg" in css
 

@@ -105,14 +105,6 @@ html {
   color: #ffffff;
   background-color: #dc2626; /* red-600 */
 }
-.titlebar-account {
-  color: rgb(var(--titlebar-fg, 255 255 255) / 0.7);
-  transition: color 100ms, background-color 100ms;
-}
-.titlebar-account:hover {
-  color: rgb(var(--titlebar-fg, 255 255 255) / 0.95);
-  background-color: rgb(var(--titlebar-fg, 255 255 255) / 0.06);
-}
 
 /*
  * Shared card surface (bg, border, rounded corners). No baseline shadow
