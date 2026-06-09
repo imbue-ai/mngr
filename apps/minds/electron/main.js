@@ -1704,9 +1704,12 @@ async function onReady() {
   initialBundle = createBundle();
   // Apply saved bounds before the loading screen renders so the window doesn't
   // jump from default-centered to its restored position once content loads.
+  // ``loadSessionState`` returns ``{ windows: [...] }`` (see comment above
+  // the function) -- entry 0 is the MRU window, which is the bundle the
+  // loading screen will surface as.
   const initialSavedState = loadSessionState();
-  if (initialSavedState.length > 0) {
-    restoreWindowBounds(initialBundle, initialSavedState[0]);
+  if (initialSavedState.windows.length > 0) {
+    restoreWindowBounds(initialBundle, initialSavedState.windows[0]);
   }
   await runStartupSequence(initialBundle);
 }
