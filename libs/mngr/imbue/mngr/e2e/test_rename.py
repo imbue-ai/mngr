@@ -15,7 +15,6 @@ from imbue.skitwright.expect import expect
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 def test_create_and_rename_agent(e2e: E2eSession) -> None:
     expect(
         e2e.run(
@@ -46,3 +45,31 @@ def test_create_and_rename_agent(e2e: E2eSession) -> None:
     )
     expect(exec_result).to_succeed()
     expect(exec_result.stdout).to_contain("sleep 100104")
+
+
+@pytest.mark.rsync
+@pytest.mark.release
+@pytest.mark.tmux
+def test_rename_dry_run_does_not_rename(e2e: E2eSession) -> None:
+    """``mngr rename --dry-run`` previews the rename without applying it."""
+    expect(
+        e2e.run(
+            "mngr create my-task --type command --no-ensure-clean -- sleep 100104",
+            comment="Create agent for dry-run rename",
+        )
+    ).to_succeed()
+
+    dry_run_result = e2e.run(
+        "mngr rename my-task renamed-task --dry-run",
+        comment="Preview the rename without applying it",
+    )
+    expect(dry_run_result).to_succeed()
+    expect(dry_run_result.stdout).to_contain("Would rename agent: my-task -> renamed-task")
+
+    list_result = e2e.run(
+        "mngr list --format json",
+        comment="Verify the agent still has its original name (dry-run did not mutate)",
+    )
+    expect(list_result).to_succeed()
+    agent_names = [a["name"] for a in json.loads(list_result.stdout)["agents"]]
+    assert agent_names == ["my-task"], f"Expected dry-run to leave 'my-task' unchanged, got {agent_names}"

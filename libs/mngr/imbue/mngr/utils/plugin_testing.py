@@ -5,6 +5,8 @@ Call register_plugin_test_fixtures(globals()) from a plugin's conftest.py
 to register the standard set of fixtures.
 """
 
+import importlib.resources
+import textwrap
 from pathlib import Path
 from typing import Any
 from typing import Generator
@@ -16,9 +18,11 @@ from click.testing import CliRunner
 
 import imbue.mngr.main
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr import resources as mngr_resources
 from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.agents.agent_registry import reset_agent_registry
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.api.providers import reset_provider_instances
 from imbue.mngr.config.agent_class_registry import is_agent_class_registered
 from imbue.mngr.config.agent_class_registry import register_agent_class
 from imbue.mngr.config.agent_config_registry import is_agent_config_registered
@@ -27,9 +31,12 @@ from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.hosts.host import Host
 from imbue.mngr.main import load_plugin_hookspecs
 from imbue.mngr.plugins import hookspecs
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.providers.registry import reset_backend_registry
@@ -207,6 +214,9 @@ def temp_mngr_ctx(
     """Create a MngrContext with a temporary host directory."""
     with ConcurrencyGroup(name="test") as test_cg:
         yield make_mngr_ctx(temp_config, plugin_manager, temp_profile_dir, concurrency_group=test_cg)
+    # Clear the provider instance cache so cached instances don't outlive the
+    # ConcurrencyGroup that was just torn down.
+    reset_provider_instances()
 
 
 @pytest.fixture
@@ -219,25 +229,112 @@ def local_provider(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> LocalProv
     )
 
 
+@pytest.fixture
+def per_host_dir(temp_host_dir: Path) -> Path:
+    """Get the host directory for the local provider.
+
+    This is the directory where host-scoped data lives: agents/, data.json,
+    activity/, etc. This is the same as temp_host_dir (e.g. ~/.mngr/).
+    """
+    return temp_host_dir
+
+
+@pytest.fixture
+def local_host(local_provider: LocalProviderInstance) -> Host:
+    """Create a local Host via the local provider.
+
+    This fixture eliminates the repeated pattern of:
+        host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+
+    Use this when tests need a Host instance for creating agents,
+    executing commands, etc. The local provider always returns a Host
+    (the concrete OnlineHostInterface implementation).
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    return host
+
+
+@pytest.fixture
+def temp_work_dir(tmp_path: Path) -> Path:
+    """Create a temporary work_dir directory for agents."""
+    work_dir = tmp_path / "work_dir"
+    work_dir.mkdir()
+    return work_dir
+
+
+@pytest.fixture
+def project_config_dir(temp_git_repo: Path, mngr_test_root_name: str) -> Path:
+    """Return the project config directory inside the test git repo, creating it.
+
+    The directory is named `.{mngr_test_root_name}` (e.g., `.mngr-test-abc123`).
+    Tests can write `settings.toml` or `settings.local.toml` into this directory
+    to configure project-level settings for a test.
+    """
+    config_dir = temp_git_repo / f".{mngr_test_root_name}"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    return config_dir
+
+
+@pytest.fixture
+def stub_mngr_log_sh() -> str:
+    """A no-op mngr_log.sh stub for testing shell scripts that source it.
+
+    Background scripts in mngr_claude/resources and mngr_antigravity/resources
+    source $MNGR_AGENT_STATE_DIR/commands/mngr_log.sh for logging helpers.
+    In production the file is provisioned by Host.provision_agent(); tests
+    write this stub to the same path so the script under test can source it
+    without doing real I/O.
+    """
+    return textwrap.dedent("""\
+        #!/bin/bash
+        mngr_timestamp() { date -u +"%Y-%m-%dT%H:%M:%S.000000000Z"; }
+        log_info() { :; }
+        log_debug() { :; }
+        log_warn() { :; }
+        log_error() { :; }
+    """)
+
+
+@pytest.fixture
+def mngr_transcript_lib_sh() -> str:
+    """Real mngr_transcript_lib.sh contents for shell tests that source it.
+
+    Returns the actual library body (not a stub) because the streamer
+    scripts exercise the shared primitives end-to-end. Tests write this to
+    ``$MNGR_AGENT_STATE_DIR/commands/mngr_transcript_lib.sh`` to mirror the
+    production layout established by ``Host._ensure_shared_shell_libs``.
+    """
+    return importlib.resources.files(mngr_resources).joinpath("mngr_transcript_lib.sh").read_text()
+
+
 def register_plugin_test_fixtures(namespace: dict[str, Any]) -> None:
     """Register common plugin test fixtures into the given namespace.
 
     Call this from a plugin's conftest.py to get the standard set of fixtures
-    needed for testing mngr plugins.
+    needed for testing mngr plugins. This is the single sanctioned way for an
+    mngr plugin to inherit the shared test infrastructure -- in particular the
+    autouse ``setup_test_mngr_env`` fixture, which redirects HOME to a temp dir
+    so plugin tests cannot read or write the real ~/.mngr or ~/.claude.json.
     """
     namespace["cg"] = cg
     namespace["cli_runner"] = cli_runner
+    namespace["local_host"] = local_host
     namespace["local_provider"] = local_provider
     namespace["mngr_test_id"] = mngr_test_id
     namespace["mngr_test_prefix"] = mngr_test_prefix
     namespace["mngr_test_root_name"] = mngr_test_root_name
+    namespace["mngr_transcript_lib_sh"] = mngr_transcript_lib_sh
+    namespace["per_host_dir"] = per_host_dir
     namespace["plugin_manager"] = plugin_manager
+    namespace["project_config_dir"] = project_config_dir
     namespace["setup_git_config"] = setup_git_config
     namespace["setup_test_mngr_env"] = setup_test_mngr_env
+    namespace["stub_mngr_log_sh"] = stub_mngr_log_sh
     namespace["temp_config"] = temp_config
     namespace["temp_git_repo"] = temp_git_repo
     namespace["temp_host_dir"] = temp_host_dir
     namespace["temp_mngr_ctx"] = temp_mngr_ctx
     namespace["temp_profile_dir"] = temp_profile_dir
+    namespace["temp_work_dir"] = temp_work_dir
     namespace["tmp_home_dir"] = tmp_home_dir
     namespace["_isolate_tmux_server"] = _isolate_tmux_server

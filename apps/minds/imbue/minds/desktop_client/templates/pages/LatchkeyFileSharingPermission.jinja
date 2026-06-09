@@ -1,11 +1,12 @@
-{#def agent_id, request_id, ws_name, rationale, file_path, access, access_human_label, display_name, accent, mngr_forward_origin #}
+{#def agent_id, request_id, ws_name, rationale, file_path, access, access_human_label, display_name, mngr_forward_origin #}
 {#
-  Latchkey file-sharing permission request dialog. Composes the
-  Permissions* components; provides a single hidden checked
+  Latchkey file-sharing permission request fragment. Rendered inside the
+  inbox modal's right pane. Provides a single hidden checked
   ``name="permissions"`` input so the Approve button enables on first
-  paint (file sharing has no per-permission choice).
+  paint (file sharing has no per-permission choice). Chrome and form
+  submission JS live in the inbox shell.
 #}
-<PermissionsDialog :display_name="display_name" :accent="accent">
+<div class="permissions-detail">
   <PermissionsHeader :display_name="display_name" :ws_name="ws_name" :agent_id="agent_id" :rationale="rationale" />
 
   <PermissionsForm :request_id="request_id">
@@ -22,7 +23,7 @@
         <strong>read-only</strong> access to the following file:
       {% endif %}
     </p>
-    <div class="bg-white border border-zinc-200 rounded-xl p-4 flex items-center gap-3">
+    <Card layout="row">
       <code class="text-sm font-mono text-zinc-900 break-all flex-1 min-w-0">{{ file_path }}</code>
       {# Access mode badge -- emerald tint for read-only, amber for
          read+write so the broader grant stands out visually. #}
@@ -35,7 +36,7 @@
           {{ access_human_label }}
         </span>
       {% endif %}
-    </div>
+    </Card>
     {# Hidden checked input named ``permissions`` so the base dialog's
        updateApproveState enables the Approve button on first paint:
        there is no per-permission choice in this flow, the request itself
@@ -51,4 +52,4 @@
 
   <PermissionsManualCredentials />
   <PermissionsError />
-</PermissionsDialog>
+</div>

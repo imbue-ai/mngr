@@ -65,6 +65,18 @@ def test_build_ssh_activity_wrapper_script_attaches_to_tmux_session() -> None:
     assert "tmux attach -t =mngr-my-agent" in script
 
 
+def test_build_ssh_activity_wrapper_script_guards_resize_on_manual_window_size() -> None:
+    # The post-attach resize must be skipped for a pinned ("manual") window so the
+    # configured dimensions survive an interactive attach. The check is done on the
+    # remote host at attach time via tmux show-options (-wv, a window option).
+    script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"))
+
+    assert "show-options -t =mngr-my-agent:0 -wv window-size" in script
+    assert "!= manual" in script
+    # The resize itself is still present (run only when not manual).
+    assert "resize-window" in script
+
+
 def test_build_ssh_activity_wrapper_script_kills_activity_tracker_on_exit() -> None:
     """Test that the wrapper script kills the activity tracker when tmux exits."""
     script = _build_ssh_activity_wrapper_script("mngr-test", Path("/tmp/.mngr"))

@@ -4,8 +4,10 @@
 # Runs continuously while the agent's tmux session is alive, supervising:
 #   1. Raw transcript streaming: stream_transcript.sh tails agy's per-
 #      conversation JSONL transcripts (filtered to conversation IDs that
-#      this agent created, discovered by grep'ing agy's own --log-file)
-#      into $MNGR_AGENT_STATE_DIR/logs/antigravity_transcript/events.jsonl.
+#      this agent worked on, discovered from the per-agent conversation-ids
+#      file the PreInvocation capture hook maintains -- see
+#      capture_conversation_id.sh) into
+#      $MNGR_AGENT_STATE_DIR/logs/antigravity_transcript/events.jsonl.
 #   2. Common transcript conversion (optional): common_transcript.sh
 #      converts the raw stream into the agent-agnostic common format at
 #      $MNGR_AGENT_STATE_DIR/events/antigravity/common_transcript/events.jsonl.

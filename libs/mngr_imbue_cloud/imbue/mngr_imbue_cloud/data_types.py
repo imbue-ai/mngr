@@ -11,6 +11,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr_imbue_cloud.primitives import DEFAULT_FAST_MODE
 from imbue.mngr_imbue_cloud.primitives import FastMode
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
+from imbue.mngr_imbue_cloud.primitives import KNOWN_OVH_US_REGIONS
 from imbue.mngr_imbue_cloud.primitives import LeaseDbId
 from imbue.mngr_imbue_cloud.primitives import R2AccessKeyId
 from imbue.mngr_imbue_cloud.primitives import R2BucketAccess
@@ -78,6 +79,13 @@ class ParsedImbueCloudBuildArgs(FrozenModel):
     attributes: "LeaseAttributes" = Field(description="Lease-attribute filter for the connector")
     account_override: str | None = Field(default=None, description="``-b account=<email>`` override, if any")
     fast_mode: FastMode = Field(description="Whether the fast/adopt path is required or prevented")
+    region: str | None = Field(
+        default=None,
+        description=(
+            "``-b region=<dc>`` hard region requirement: only lease a host in this OVH datacenter, "
+            "or fail with a clear no-capacity error."
+        ),
+    )
     passthrough_build_args: tuple[str, ...] = Field(
         default=(),
         description="Unrecognized -b entries forwarded verbatim to the delegated vps_docker build",
@@ -95,18 +103,22 @@ def parse_imbue_cloud_build_args(build_args: Sequence[str] | None) -> ParsedImbu
     ``cpus``, ``memory_gb``, ``gpu_count``) populate the ``LeaseAttributes``
     filter. ``account`` selects the Imbue Cloud session. ``fast_mode`` selects
     the create path (``require`` / ``prevent``; defaults to
-    :data:`DEFAULT_FAST_MODE`). Every other entry -- including bare positionals
-    like ``.`` and docker flags like ``--file=Dockerfile`` -- is preserved
-    verbatim as a pass-through build arg for the delegated vps_docker build.
+    :data:`DEFAULT_FAST_MODE`). ``region`` is a hard datacenter requirement
+    (validated against
+    :data:`~imbue.mngr_imbue_cloud.primitives.KNOWN_OVH_US_REGIONS`). Every other
+    entry -- including bare positionals like ``.`` and docker flags like
+    ``--file=Dockerfile`` -- is preserved verbatim as a pass-through build arg for
+    the delegated vps_docker build.
 
     Raises ``ValueError`` on a malformed recognized key (e.g. a non-integer
-    ``cpus`` or an unknown ``fast_mode`` value).
+    ``cpus``, an unknown ``fast_mode``, or an unknown ``region`` value).
     """
     if not build_args:
         return ParsedImbueCloudBuildArgs(attributes=LeaseAttributes(), fast_mode=DEFAULT_FAST_MODE)
     parsed_attributes: dict[str, Any] = {}
     account_override: str | None = None
     fast_mode = DEFAULT_FAST_MODE
+    region: str | None = None
     passthrough: list[str] = []
     for entry in build_args:
         key, separator, value = entry.partition("=")
@@ -116,6 +128,16 @@ def parse_imbue_cloud_build_args(build_args: Sequence[str] | None) -> ParsedImbu
             if not value:
                 raise ValueError("build_arg account=<email> requires a non-empty value")
             account_override = value
+        elif separator and key == "region":
+            # Validate the region against the known OVH-US datacenters so a typo
+            # fails fast at create time instead of silently leasing a non-matching
+            # (or no) host. An empty value is also rejected here (it's not in the
+            # set). ValueError matches the rest of this parser's contract -- the
+            # caller (instance.create_host) catches ValueError and wraps it.
+            if value not in KNOWN_OVH_US_REGIONS:
+                allowed = sorted(KNOWN_OVH_US_REGIONS)
+                raise ValueError(f"build_arg region={value!r} must be one of {allowed}")
+            region = value
         elif separator and key == "fast_mode":
             try:
                 fast_mode = FastMode(value.upper())
@@ -137,6 +159,7 @@ def parse_imbue_cloud_build_args(build_args: Sequence[str] | None) -> ParsedImbu
         attributes=LeaseAttributes(**parsed_attributes),
         account_override=account_override,
         fast_mode=fast_mode,
+        region=region,
         passthrough_build_args=tuple(passthrough),
     )
 

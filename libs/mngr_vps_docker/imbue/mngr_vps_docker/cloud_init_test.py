@@ -2,6 +2,8 @@
 
 from imbue.mngr_vps_docker.cloud_init import _indent
 from imbue.mngr_vps_docker.cloud_init import generate_cloud_init_user_data
+from imbue.mngr_vps_docker.host_setup import PINNED_DOCKER_APT_VERSION
+from imbue.mngr_vps_docker.host_setup import PINNED_GVISOR_RELEASE
 
 
 def test_indent_single_line() -> None:
@@ -29,6 +31,7 @@ def test_generate_cloud_init_starts_with_cloud_config() -> None:
     result = generate_cloud_init_user_data(
         host_private_key="-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----",
         host_public_key="ssh-ed25519 AAAA testkey",
+        install_gvisor_runtime=False,
     )
     assert result.startswith("#cloud-config\n")
 
@@ -40,6 +43,7 @@ def test_generate_cloud_init_contains_host_key() -> None:
     result = generate_cloud_init_user_data(
         host_private_key=private_key,
         host_public_key=public_key,
+        install_gvisor_runtime=False,
     )
 
     assert "test-key-content" in result
@@ -50,22 +54,21 @@ def test_generate_cloud_init_disables_password_auth() -> None:
     result = generate_cloud_init_user_data(
         host_private_key="fake-key",
         host_public_key="ssh-ed25519 AAAA fake",
+        install_gvisor_runtime=False,
     )
     assert "ssh_pwauth: false" in result
 
 
-def test_generate_cloud_init_installs_docker() -> None:
-    """Docker comes from the Debian ``docker.io`` package, installed inline by
-    cloud-init's package handler. The ``curl get.docker.com | sh`` installer
-    script (used in an earlier revision) made provisioning take 60-120s on a
-    ``t3.small``; the packaged install takes 5-15s by piggybacking on the
-    same apt run as ca-certificates/curl/rsync.
-    """
+def test_generate_cloud_init_installs_pinned_docker() -> None:
     result = generate_cloud_init_user_data(
         host_private_key="fake-key",
         host_public_key="ssh-ed25519 AAAA fake",
+        install_gvisor_runtime=False,
     )
-    assert "- docker.io" in result
+    # Pinned install via the official Docker apt repo (not the unpinned get.docker.com script).
+    assert "download.docker.com/linux/debian" in result
+    assert f"docker-ce={PINNED_DOCKER_APT_VERSION}" in result
+    assert "--allow-downgrades" in result
     assert "systemctl enable docker" in result
     assert "systemctl start docker" in result
     # The slow installer-script approach must NOT come back -- it was the
@@ -89,6 +92,7 @@ def test_generate_cloud_init_forwards_ssh_key_to_root() -> None:
     result = generate_cloud_init_user_data(
         host_private_key="fake-key",
         host_public_key="ssh-ed25519 AAAA fake",
+        install_gvisor_runtime=False,
     )
     assert "/root/.ssh/authorized_keys" in result
     assert "admin" in result
@@ -108,29 +112,16 @@ def test_generate_cloud_init_disables_root_lockout() -> None:
     result = generate_cloud_init_user_data(
         host_private_key="fake-key",
         host_public_key="ssh-ed25519 AAAA fake",
+        install_gvisor_runtime=False,
     )
     assert "disable_root: false" in result
-
-
-def test_generate_cloud_init_installs_curl() -> None:
-    """``curl`` must stay in the cloud-init package list because
-    ``_DEPOT_INSTALL_CMD`` in ``instance.py`` shells out to
-    ``curl -fsSL https://depot.dev/install-cli.sh | sh`` on the
-    cloud-init-provisioned VPS whenever ``builder=DEPOT``. Debian cloud
-    images ship ``wget`` but not ``curl`` by default, so dropping it
-    here silently regresses the depot build path.
-    """
-    result = generate_cloud_init_user_data(
-        host_private_key="fake-key",
-        host_public_key="ssh-ed25519 AAAA fake",
-    )
-    assert "- curl" in result
 
 
 def test_generate_cloud_init_creates_ready_marker() -> None:
     result = generate_cloud_init_user_data(
         host_private_key="fake-key",
         host_public_key="ssh-ed25519 AAAA fake",
+        install_gvisor_runtime=False,
     )
     assert "touch /var/run/mngr-ready" in result
 
@@ -139,6 +130,7 @@ def test_generate_cloud_init_deletes_existing_keys() -> None:
     result = generate_cloud_init_user_data(
         host_private_key="fake-key",
         host_public_key="ssh-ed25519 AAAA fake",
+        install_gvisor_runtime=False,
     )
     assert "ssh_deletekeys: true" in result
 
@@ -147,6 +139,7 @@ def test_generate_cloud_init_no_shutdown_by_default() -> None:
     result = generate_cloud_init_user_data(
         host_private_key="fake-key",
         host_public_key="ssh-ed25519 AAAA fake",
+        install_gvisor_runtime=False,
     )
     assert "shutdown -P" not in result
 
@@ -155,6 +148,7 @@ def test_generate_cloud_init_with_auto_shutdown_adds_shutdown_command() -> None:
     result = generate_cloud_init_user_data(
         host_private_key="fake-key",
         host_public_key="ssh-ed25519 AAAA fake",
+        install_gvisor_runtime=False,
         auto_shutdown_minutes=42,
     )
     assert "shutdown -P +42" in result
@@ -165,6 +159,7 @@ def test_generate_cloud_init_with_auto_shutdown_appears_in_runcmd() -> None:
     result = generate_cloud_init_user_data(
         host_private_key="fake-key",
         host_public_key="ssh-ed25519 AAAA fake",
+        install_gvisor_runtime=False,
         auto_shutdown_minutes=15,
     )
     runcmd_index = result.index("runcmd:")
@@ -175,29 +170,26 @@ def test_generate_cloud_init_with_auto_shutdown_appears_in_runcmd() -> None:
     assert line.lstrip().startswith("- shutdown -P")
 
 
-def test_generate_cloud_init_uses_sshd_config_dropin_not_restart() -> None:
-    """sshd customization must use a config drop-in + reload (SIGHUP), not restart.
-
-    Regression: ``systemctl restart ssh`` during cloud-init kills any
-    in-flight SSH connection, and pyinfra's ``read_output_buffers``
-    blocks for its full 10s timeout when the channel dies mid-read. That
-    timeout used to escape ``_run_shell_command_with_transient_retry``
-    and crash host creation on plain-Debian AMIs (the Docker install
-    runs long enough that the provisioning poll loop overlaps with the
-    sshd restart). The fix writes the MaxSessions/MaxStartups bump as a
-    drop-in under ``/etc/ssh/sshd_config.d/`` so sshd starts with the
-    right config, plus ``systemctl reload ssh`` (SIGHUP, no connection
-    drop) as belt-and-suspenders. ``systemctl restart`` must NOT appear.
-    """
+def test_generate_cloud_init_omits_gvisor_install_by_default() -> None:
     result = generate_cloud_init_user_data(
         host_private_key="fake-key",
         host_public_key="ssh-ed25519 AAAA fake",
+        install_gvisor_runtime=False,
     )
-    assert "/etc/ssh/sshd_config.d/99-mngr.conf" in result
-    assert "MaxSessions 100" in result
-    assert "MaxStartups 100:30:200" in result
-    assert "systemctl reload ssh" in result
-    assert "systemctl restart ssh" not in result, (
-        "systemctl restart ssh tears down in-flight connections and races the "
-        "provisioning poll loop; use systemctl reload (SIGHUP) instead."
+    assert "runsc" not in result
+    assert "gvisor" not in result
+
+
+def test_generate_cloud_init_includes_gvisor_install_when_requested() -> None:
+    result = generate_cloud_init_user_data(
+        host_private_key="fake-key",
+        host_public_key="ssh-ed25519 AAAA fake",
+        install_gvisor_runtime=True,
     )
+    # Downloads the pinned dated gVisor release and registers it with the daemon.
+    assert f"gvisor/releases/release/{PINNED_GVISOR_RELEASE}" in result
+    assert "runsc install" in result
+    # Guarded so it is a no-op when runsc is already registered.
+    assert "docker info" in result
+    # gnupg is installed with the base packages (needed for the Docker apt key).
+    assert "gnupg" in result

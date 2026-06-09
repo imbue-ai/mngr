@@ -141,6 +141,7 @@ class DestroyCliOptions(CommonCliOptions):
     remove_created_branch: bool
     allow_worktree_removal: bool
     sessions: tuple[str, ...]
+    dry_run: bool
 
 
 @click.command(name="destroy")
@@ -182,6 +183,11 @@ class DestroyCliOptions(CommonCliOptions):
     "--allow-worktree-removal/--no-allow-worktree-removal",
     default=True,
     help="Allow GC to remove the git worktree directory (default: enabled)",
+)
+@optgroup.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show what would be destroyed without actually destroying anything",
 )
 @add_common_options
 @click.pass_context
@@ -233,6 +239,11 @@ def destroy(ctx: click.Context, **kwargs) -> None:
 
     if not targets.online_agents and not targets.offline_hosts:
         _output("No agents found to destroy", output_opts)
+        return
+
+    # Dry-run: report what would be destroyed without touching anything.
+    if opts.dry_run:
+        _emit_dry_run_output(targets, output_opts)
         return
 
     # Confirm destruction if not forced
@@ -562,6 +573,48 @@ def _check_all_agents_targeted_on_offline_host(
             )
 
 
+def _emit_dry_run_output(targets: _DestroyTargets, output_opts: OutputOptions) -> None:
+    """Report what would be destroyed without destroying anything.
+
+    Collects the targeted agents (online and offline) into a flat list of
+    entries and emits them via :func:`_emit_dry_run_entries`.
+    """
+    agent_entries: list[dict[str, str]] = []
+    for agent, host in targets.online_agents:
+        agent_entries.append({"name": str(agent.name), "host": host.get_name(), "offline": "false"})
+    for offline in targets.offline_hosts:
+        host_name = offline.host.get_name()
+        for name in offline.agent_names:
+            agent_entries.append({"name": str(name), "host": host_name, "offline": "true"})
+    _emit_dry_run_entries(agent_entries, output_opts)
+
+
+def _emit_dry_run_entries(agent_entries: Sequence[dict[str, str]], output_opts: OutputOptions) -> None:
+    """Emit dry-run agent entries, honoring the active output format.
+
+    Honors the same output formats as the real destroy result: format
+    templates, JSON, JSONL, and human-readable. Offline-host agents are
+    annotated as such in human output.
+    """
+    if output_opts.format_template is not None:
+        emit_format_template_lines(output_opts.format_template, agent_entries)
+        return
+
+    result_data = {"dry_run": True, "agents": list(agent_entries), "count": len(agent_entries)}
+    match output_opts.output_format:
+        case OutputFormat.JSON:
+            write_json_line(result_data)
+        case OutputFormat.JSONL:
+            emit_event("dry_run", result_data, OutputFormat.JSONL)
+        case OutputFormat.HUMAN:
+            write_human_line("\nWould destroy {} agent(s):", len(agent_entries))
+            for entry in agent_entries:
+                suffix = " (offline)" if entry["offline"] == "true" else ""
+                write_human_line("  - {}@{}{}", entry["name"], entry["host"], suffix)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _confirm_destruction(targets: _DestroyTargets) -> None:
     """Prompt user to confirm destruction of agents."""
     write_human_line("\nThe following agents will be destroyed:")
@@ -727,7 +780,7 @@ def _run_post_destroy_gc(
 CommandHelpMetadata(
     key="destroy",
     one_line_description="Destroy agent(s) and clean up resources",
-    synopsis="mngr [destroy|rm] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [-f|--force] [-b|--remove-created-branch] [--[no-]gc] [--[no-]allow-worktree-removal]",
+    synopsis="mngr [destroy|rm] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [-f|--force] [-b|--remove-created-branch] [--[no-]gc] [--[no-]allow-worktree-removal] [--dry-run]",
     description="""When the last agent on a host is destroyed, the host itself is also destroyed
 (including containers, volumes, snapshots, and any remote infrastructure).
 
@@ -748,6 +801,7 @@ Supports custom format templates via --format. Available fields: name.""",
         ("Destroy using --agent flag (repeatable)", "mngr destroy --agent my-agent --agent another-agent"),
         ("Destroy by tmux session name", "mngr destroy --session mngr-my-agent"),
         ("Pipe agent names from list", "mngr list --ids | mngr destroy - --force"),
+        ("Preview what would be destroyed", "mngr list --ids | mngr destroy - --dry-run"),
         ("Custom format template output", "mngr destroy my-agent --force --format '{name}'"),
     ),
     see_also=(

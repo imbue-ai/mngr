@@ -237,15 +237,29 @@ def test_cli_docs_are_up_to_date() -> None:
 def test_prevent_bash_without_strict_mode() -> None:
     """Ensure all bash scripts in the repo use 'set -euo pipefail' for strict error handling.
 
-    Snapshot accommodates the committed secret-file templates at
-    ``.minds/template/*.sh``. Those files are shell-sourceable env
-    declarations (consumed by ``scripts/push_vault_from_file.py`` when
-    seeding HCP Vault), not executable scripts -- adding
-    ``set -euo pipefail`` to them would leak strict mode into whatever
-    shell sources them.
+    Snapshot accommodates two kinds of committed exception:
+
+    - The secret-file templates at ``.minds/template/*.sh``. Those files are
+      shell-sourceable env declarations (consumed by
+      ``scripts/push_vault_from_file.py`` when seeding HCP Vault), not
+      executable scripts -- adding ``set -euo pipefail`` to them would leak
+      strict mode into whatever shell sources them.
+    - The minds verify scripts ``apps/minds/scripts/first-message-verify.sh``
+      and ``apps/minds/scripts/launch-and-verify.sh``, which use
+      ``set -uo pipefail`` (omitting ``-e``) on purpose: they handle errors
+      explicitly (a ``fail`` helper, ``PIPESTATUS``, polling loops that depend
+      on commands exiting non-zero while they retry, and diagnostic blocks on
+      failure). ``-e`` would abort that handling instead of running it. The
+      sibling non-verify scripts in the same directory do use ``set -euo
+      pipefail``, so this omission is a deliberate, matched choice rather than
+      an oversight.
+
+    The count is enumerated against the full local checkout. In offload
+    sandboxes the count is lower because ``.dockerignore`` omits some of these
+    tracked paths from the build context, so they are absent on disk there.
     """
     violations = find_bash_scripts_without_strict_mode(_REPO_ROOT)
-    assert len(violations) <= snapshot(10), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
+    assert len(violations) <= snapshot(12), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
         f"  - {v}" for v in violations
     )
 
@@ -311,6 +325,79 @@ def test_every_project_has_pypi_readme() -> None:
         errors.append("readme file does not exist: " + ", ".join(missing_file))
 
     assert len(errors) == 0, "Projects with PyPI readme issues:\n" + "\n".join(f"  - {e}" for e in errors)
+
+
+def _is_mngr_plugin(project_dir: Path) -> bool:
+    """Return True if the project registers itself as an mngr plugin.
+
+    An mngr plugin is any project whose ``pyproject.toml`` declares a
+    ``[project.entry-points.mngr]`` table -- that entry point group is how mngr's
+    pluggy-based plugin manager discovers and loads a package's hooks at runtime.
+    Support libraries that merely have an ``mngr_`` name prefix but register no
+    such entry point (e.g. ``mngr_mapreduce``, ``mngr_vps_docker``) are *not*
+    plugins and are intentionally excluded.
+    """
+    pyproject = tomlkit.parse((project_dir / "pyproject.toml").read_text())
+    entry_points = pyproject.get("project", {}).get("entry-points", {})
+    return "mngr" in entry_points
+
+
+def _conftest_registers_plugin_test_fixtures(conftest_path: Path) -> bool:
+    """Return True if the conftest calls ``register_plugin_test_fixtures(...)``.
+
+    Parses the AST (rather than substring-matching) so that comments or
+    docstrings mentioning the helper do not count -- only an actual call does.
+    """
+    tree = ast.parse(conftest_path.read_text())
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
+        if name == "register_plugin_test_fixtures":
+            return True
+    return False
+
+
+def test_every_mngr_plugin_isolates_home_in_tests() -> None:
+    """Ensure each mngr plugin pulls in mngr's shared test fixtures.
+
+    Every mngr plugin (a project with a ``[project.entry-points.mngr]`` table)
+    must have a ``conftest.py`` that calls
+    ``register_plugin_test_fixtures(globals())`` from
+    ``imbue.mngr.utils.plugin_testing``. That helper injects the shared fixture
+    set -- crucially the autouse ``setup_test_mngr_env`` fixture, which redirects
+    ``HOME`` to a temp dir so the plugin's tests cannot read or write the real
+    ``~/.mngr`` / ``~/.claude.json``.
+
+    Without it, a plugin run on its own (``pytest libs/<plugin>``) does *not*
+    inherit that autouse fixture -- mngr's root conftest is not an ancestor of
+    the plugin's test files -- and the tests execute against the developer's real
+    home directory. This is the meta-level analogue of
+    ``test_every_project_has_pypi_readme``: a symmetric requirement that every
+    plugin opt into the shared HOME-isolation infrastructure the same way.
+
+    The single sanctioned mechanism is ``register_plugin_test_fixtures``; the
+    older ``pytest_plugins = ["imbue.mngr.conftest"]`` form is intentionally not
+    accepted here so the codebase keeps exactly one way to do this.
+    """
+    missing: list[str] = []
+    for project_dir in _get_all_project_dirs():
+        if not _is_mngr_plugin(project_dir):
+            continue
+        conftests = list(project_dir.rglob("conftest.py"))
+        if not any(_conftest_registers_plugin_test_fixtures(c) for c in conftests):
+            missing.append(project_dir.name)
+
+    assert len(missing) == 0, (
+        "Every mngr plugin must isolate HOME in its tests by calling "
+        "register_plugin_test_fixtures(globals()) (from imbue.mngr.utils.plugin_testing) "
+        "in a conftest.py. Add it to the plugin's project-level conftest.py, e.g.:\n\n"
+        "    from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures\n\n"
+        "    register_plugin_test_fixtures(globals())\n\n"
+        "Plugins missing it (tests would run against the real ~/.mngr / ~/.claude.json):\n"
+        + "\n".join(f"  - {m}" for m in missing)
+    )
 
 
 _REQUIRED_WHEEL_EXCLUDE_PATTERNS: tuple[str, ...] = (
@@ -564,7 +651,7 @@ def test_pr_has_changelog_entry() -> None:
     """
     branch = detect_branch()
 
-    if not branch or branch in ("main", "release"):
+    if not branch or branch == "main":
         pytest.skip("Not a PR branch")
 
     for prefix in _CHANGELOG_EXEMPT_BRANCH_PREFIXES:
