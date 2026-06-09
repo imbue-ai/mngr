@@ -182,9 +182,7 @@ def test_running_local_minds_reads_discovery_without_subprocess(tmp_path: Path) 
     """
     running_agent = AgentId.generate()
     stopped_agent = AgentId.generate()
-    resolver = _resolver_with_local_agents(
-        {running_agent: HostState.RUNNING, stopped_agent: HostState.STOPPED}
-    )
+    resolver = _resolver_with_local_agents({running_agent: HostState.RUNNING, stopped_agent: HostState.STOPPED})
     client, auth_store = _make_client(tmp_path, resolver, LocalMindStateProvider())
     _authenticate(client, auth_store)
 
