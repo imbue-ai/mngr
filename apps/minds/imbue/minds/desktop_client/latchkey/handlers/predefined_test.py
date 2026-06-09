@@ -735,8 +735,8 @@ def test_apply_deny_request_succeeds_for_unknown_scope(tmp_path: Path) -> None:
     """Deny must work even when the request's scope is not in the gateway catalog.
 
     An agent can file a permission request under an unknown scope
-    (typo, stale catalog, etc.); the rendered dialog
-    (:func:`_render_unknown_scope_page`) offers Deny as the only
+    (typo, stale catalog, etc.); the rendered detail fragment
+    (:func:`_render_unknown_scope_fragment`) offers Deny as the only
     action. The deny HTTP path must therefore still tear down the
     pending request, append a DENIED response event, and notify the
     agent -- using the raw scope string in place of a catalog

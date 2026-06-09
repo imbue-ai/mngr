@@ -122,6 +122,12 @@ the moment the last one elapses, it fires a one-off prompt to open the next.
 set -euo pipefail
 
 WARMER="window-warmer"
+PROJECT_DIR="$HOME/code/my-project"   # any git repo already trusted in Claude Code
+
+# The warmer does no real work, so its repo is irrelevant -- any trusted one
+# works. cron starts in $HOME (not a repo), so cd in to give `mngr create` a git
+# root.
+cd "$PROJECT_DIR"
 
 snapshot="$(mngr usage --format json)"
 
@@ -137,21 +143,16 @@ elapsed="$(jq -r '
 
 [[ "$elapsed" == "yes" ]] || exit 0
 
-# Make sure the warmer is up: create it the first time, else (re)start the one we
-# stopped last boundary (`|| true` tolerates it already running from an
-# interrupted run).
-if mngr list --include "name == \"$WARMER\"" --ids | grep -q .; then
-  mngr start "$WARMER" 2>/dev/null || true
-else
-  mngr create "$WARMER" claude --no-connect -- --model haiku
-fi
+# Clean up any warmer left over from an interrupted run, then spin up a fresh one.
+mngr destroy "$WARMER" --force 2>/dev/null || true
+mngr create "$WARMER" claude --no-connect -- --model haiku
 
-# One cheap prompt opens the new 5h window. Wait for the turn to finish, then STOP
-# (don't destroy): a stopped agent keeps its events, so the snapshot reflects the
-# new window and the check above won't re-fire until the next window rolls.
+# One cheap prompt opens the new 5h window. Wait for the turn to finish, then
+# destroy the warmer -- it's a throwaway, and its usage events are preserved on
+# destroy (the `preserve_on_destroy` usage-plugin option, on by default).
 mngr message "$WARMER" --message 'just say hi'
 mngr wait "$WARMER" WAITING --timeout 5m
-mngr stop "$WARMER"
+mngr destroy "$WARMER" --force
 ```
 
 ## Dispatch tasks from a queue directory
@@ -168,6 +169,11 @@ TODO_DIR="$HOME/agent-tasks/todo"
 DOING_DIR="$HOME/agent-tasks/in-progress"
 PROJECT_DIR="$HOME/code/my-project"   # all tasks target this repo
 MAX_PARALLEL=2
+
+# cron starts in $HOME; cd into the project so agents are created from its git
+# root and mngr loads the project's config (create_templates, labels, etc.).
+# (Absolute paths below -- $0, TODO_DIR, DOING_DIR -- are unaffected by the cd.)
+cd "$PROJECT_DIR"
 
 # Retire finished agents first: pool members (queue=live) that have gone WAITING,
 # i.e. done with their turn. Stop each and move it to queue=in-review -- that frees
@@ -201,10 +207,10 @@ mv "$task_file" "$claimed" || exit 0
 name="$(basename "$claimed" .md | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')"
 [[ -n "$name" ]] || name="task-$(date +%s)"
 
-# Create (auto-starts) from the project repo, tag it into the live pool, and hand
-# it the task file as its first message. --no-connect keeps it non-interactive
-# (cron has no TTY to attach a tmux session to).
-mngr create "$name" claude --from ":$PROJECT_DIR" --label queue=live \
+# Create the agent in the project repo we cd'd into, tag it into the live pool,
+# and hand it the task file as its first message. --no-connect keeps it
+# non-interactive (cron has no TTY to attach a tmux session to).
+mngr create "$name" claude --label queue=live \
   --message-file "$claimed" --no-connect
 ```
 
@@ -213,10 +219,58 @@ Finished agents are stopped and moved to `queue=in-review`; to see them, run
 
 ## Scheduling
 
-`cron` runs with a bare `PATH`, so set one that finds `mngr`, `jq`, and `claude`:
+`cron` runs with a bare `PATH`, so set one that finds `mngr`, `jq`, `git`,
+`tmux`, and `claude`. `mngr`, `claude`, and `uv` install under `~/.local/bin`;
+`jq`, `git`, and `tmux` come from your system package manager (`/usr/bin` via
+`apt` on Linux, `/opt/homebrew/bin` via Homebrew on Apple Silicon macOS).
 
 ```cron
-PATH=/usr/local/bin:/usr/bin:/bin:/home/you/.local/bin
+PATH=/usr/bin:/bin:/home/you/.local/bin
 
 */5 * * * * /path/to/your/script.sh
 ```
+
+### macOS: run via a LaunchAgent (Keychain-aware)
+
+On macOS, `cron` runs outside your GUI (Aqua) login session, so it can't reach
+the login Keychain where Claude Code stores its credentials -- cron-launched
+agents come up "Not logged in" and do nothing. A user **LaunchAgent** runs
+inside that session, so its agents authenticate with your normal Claude login.
+
+Put a plist in `~/Library/LaunchAgents/`; it runs your `.sh` directly (the
+script needs a shebang and `chmod +x`):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>                <string>com.you.mngr-dispatch</string>
+  <key>ProgramArguments</key>     <array><string>/path/to/your/script.sh</string></array>
+  <key>EnvironmentVariables</key> <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/you/.local/bin</string></dict>
+  <key>StartInterval</key>        <integer>300</integer>
+  <key>RunAtLoad</key>            <true/>
+  <key>StandardOutPath</key>      <string>/Users/you/Library/Logs/mngr-dispatch.log</string>
+  <key>StandardErrorPath</key>    <string>/Users/you/Library/Logs/mngr-dispatch.log</string>
+</dict>
+</plist>
+```
+
+- `StartInterval` (seconds) sets the run cadence -- `300` is cron's `*/5`.
+- `EnvironmentVariables` -> `PATH` needs the same entries as cron above: the
+  Homebrew prefix (`/opt/homebrew/bin`) and `~/.local/bin`.
+- `StandardOutPath` / `StandardErrorPath` capture output to a log file.
+
+Load it into your session (and start it running):
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.you.mngr-dispatch.plist
+```
+
+Unload it (by label):
+
+```bash
+launchctl bootout gui/$(id -u)/com.you.mngr-dispatch
+```
+
+Unlike cron, a LaunchAgent only runs while you're logged in.

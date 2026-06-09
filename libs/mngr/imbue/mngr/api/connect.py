@@ -25,6 +25,12 @@ from imbue.mngr.utils.polling import poll_until
 SIGNAL_EXIT_CODE_DESTROY: Final[int] = 10
 SIGNAL_EXIT_CODE_STOP: Final[int] = 11
 
+# Set in the environment of a custom connect command so that any nested mngr
+# invocation it makes (e.g. a script that calls `mngr connect` to do the real
+# attach) falls back to the builtin connect instead of re-running the custom
+# command, which would recurse indefinitely.
+CONNECT_COMMAND_ACTIVE_ENV_VAR: Final[str] = "MNGR_CONNECT_COMMAND_ACTIVE"
+
 
 @pure
 def build_post_attach_resize_script(session_name: str) -> str:
@@ -195,7 +201,14 @@ def resolve_connect_command(
     cli_connect_command: str | None,
     mngr_ctx: MngrContext,
 ) -> str | None:
-    """Resolve the connect command from a CLI option or global config."""
+    """Resolve the connect command from a CLI option or global config.
+
+    Returns None (i.e. use the builtin connect) when already running inside a
+    custom connect command, so a connect command that itself invokes mngr does
+    not recurse indefinitely.
+    """
+    if os.environ.get(CONNECT_COMMAND_ACTIVE_ENV_VAR):
+        return None
     if cli_connect_command is not None:
         return cli_connect_command
     return mngr_ctx.config.connect_command
@@ -216,6 +229,8 @@ def run_connect_command(
     env["MNGR_AGENT_NAME"] = agent_name
     env["MNGR_SESSION_NAME"] = session_name
     env["MNGR_HOST_IS_LOCAL"] = "true" if is_local else "false"
+    # Guard against infinite recursion if the connect command invokes mngr again.
+    env[CONNECT_COMMAND_ACTIVE_ENV_VAR] = "1"
     logger.debug("Running custom connect command: {}", connect_command)
     os.execvpe("sh", ["sh", "-c", connect_command], env)
 

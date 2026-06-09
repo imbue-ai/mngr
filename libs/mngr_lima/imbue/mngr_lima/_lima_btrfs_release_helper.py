@@ -59,7 +59,7 @@ def _build_provider(profile_dir: Path) -> tuple[LimaProviderInstance, Concurrenc
         host_data_disk_size="2GiB",
         default_idle_timeout=3600,
         # Modal sandboxes have no /dev/kvm so qemu runs in TCG (software
-        # emulation). Cold boot of an Ubuntu cloud image under TCG is
+        # emulation). Cold boot of a Debian cloud image under TCG is
         # ~10-15 min; the default 600s is for KVM-accelerated boots.
         vm_start_timeout_seconds=1500.0,
     )

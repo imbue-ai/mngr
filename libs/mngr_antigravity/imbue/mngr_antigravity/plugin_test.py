@@ -24,6 +24,7 @@ from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import SET_ACTIVE_MARKER_SCRIPT_NAME
+from imbue.mngr_antigravity.antigravity_config import build_onboarding_seed
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_hooks_config_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_oauth_token_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_onboarding_cache_path
@@ -291,6 +292,30 @@ def test_assemble_command_appends_user_agent_args(antigravity_agent: Antigravity
     # The user *may* pass their own --add-dir; it lands right after agy. (mngr no
     # longer injects one of its own for hooks.)
     assert "agy --add-dir /tmp --log-file" in command
+
+
+def test_assemble_command_shell_quotes_agent_args_with_spaces_and_parens(
+    antigravity_agent: AntigravityAgent,
+) -> None:
+    """A model name with spaces/parens is shell-quoted, not spliced in raw.
+
+    Regression test for the reported failure: passing
+    ``--model "Gemini 3.5 Flash (Medium)"`` produced
+    ``agy --model Gemini 3.5 Flash (Medium) ...`` inside the shell-evaluated
+    launch command, so bash word-split the value and parsed ``(Medium)`` as a
+    subshell ("syntax error near unexpected token `('"). The value must appear
+    as a single quoted token.
+    """
+    command = str(
+        antigravity_agent.assemble_command(
+            antigravity_agent.host,
+            ("--model", "Gemini 3.5 Flash (Medium)"),
+            command_override=None,
+        )
+    )
+    assert "agy --model 'Gemini 3.5 Flash (Medium)' --log-file" in command
+    # The raw, unquoted value (which triggered the bash syntax error) must not appear.
+    assert "--model Gemini 3.5 Flash (Medium)" not in command
 
 
 def test_assemble_command_omits_dangerously_skip_permissions_when_auto_allow_disabled(
@@ -773,17 +798,13 @@ def test_provision_per_agent_settings_ignores_user_base_when_sync_disabled(
 def test_provision_writes_onboarding_seed(
     antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path
 ) -> None:
-    """The NUX seed is written so agy's first-run flow doesn't intercept the first message."""
+    """Provisioning persists the NUX seed at the path agy reads (contents owned by the builder's own unit test)."""
     agent = antigravity_agent_auto_dismiss
     _provision(agent)
     onboarding_path = get_antigravity_onboarding_cache_path(agent._get_agy_home_dir())
     assert onboarding_path.exists()
     seed = json.loads(onboarding_path.read_text())
-    assert seed == {
-        "consumerOnboardingComplete": True,
-        "enterpriseOnboardingComplete": False,
-        "onboardingComplete": True,
-    }
+    assert seed == build_onboarding_seed()
 
 
 def test_provision_symlinks_oauth_token_into_per_agent_home(
