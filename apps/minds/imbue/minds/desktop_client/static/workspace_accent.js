@@ -8,8 +8,7 @@
 //
 // Usage:
 //   window.mindsAccent.get(agentId, function (color) { ... });
-//   window.mindsAccent.getForeground(agentId, function (rgb) { ... });
-//   window.mindsAccent.pickForeground(L) -> "0 0 0" | "255 255 255"
+//   window.mindsAccent.pickForeground() -> "0 0 0" | "255 255 255"
 //
 // In the common case the server attaches `accent` to each workspace dict
 // over SSE and this helper is only used when that field is missing.
@@ -40,12 +39,15 @@
     });
   }
 
-  // ``pickForeground`` -- pure function over the OKLCH lightness of the
-  // accent. Returns the foreground RGB triple as a space-separated string
-  // ("0 0 0" or "255 255 255") so consumers can drop it straight into
-  // ``rgb(var(--titlebar-fg) / <alpha>)``.
-  function pickForeground(oklchL) {
-    return oklchL >= FOREGROUND_L_THRESHOLD ? '0 0 0' : '255 255 255';
+  // ``pickForeground`` -- pure function. All hash-derived accents share the
+  // fixed ``ACCENT_L`` lightness today, so the foreground is the same for
+  // every agent: black on a light bar. Returns the foreground RGB triple as
+  // a space-separated string ("0 0 0" or "255 255 255") so consumers can
+  // drop it straight into ``rgb(var(--titlebar-fg) / <alpha>)``. When
+  // user-chosen accents with varying L land, this will need to take a
+  // lightness argument; for now it's argument-less and synchronous.
+  function pickForeground() {
+    return ACCENT_L / 100 >= FOREGROUND_L_THRESHOLD ? '0 0 0' : '255 255 255';
   }
 
   function get(agentId, cb) {
@@ -57,18 +59,8 @@
     });
   }
 
-  // Foreground for the hash-derived accent. All hash-derived accents
-  // share the same lightness (ACCENT_L), so the foreground is the same
-  // for every agent today; the per-agent signature is kept so future
-  // user-chosen accents with varying lightness slot in without changing
-  // the call sites.
-  function getForeground(_agentId, cb) {
-    cb(pickForeground(ACCENT_L / 100));
-  }
-
   window.mindsAccent = {
     get: get,
-    getForeground: getForeground,
     pickForeground: pickForeground,
   };
 })();

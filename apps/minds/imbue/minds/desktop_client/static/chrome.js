@@ -91,14 +91,20 @@
       return;
     }
     pendingAccentAgentId = agentId;
+    // ``pickForeground`` is synchronous (the threshold depends only on the
+    // accent's lightness, which is constant for today's hash-derived
+    // accents), so we apply ``--titlebar-fg`` immediately. The background
+    // color resolves asynchronously via SHA-256; the in-flight token
+    // (``pendingAccentAgentId``) guards against a stale callback landing
+    // after a newer ``applyTitleAccent`` has been kicked off.
+    document.documentElement.style.setProperty(
+      '--titlebar-fg',
+      window.mindsAccent.pickForeground(),
+    );
     getAccent(agentId, function (c) {
       if (pendingAccentAgentId !== agentId) return;
       document.documentElement.style.setProperty('--workspace-accent', c);
       document.documentElement.style.setProperty('--titlebar-bg', c);
-    });
-    window.mindsAccent.getForeground(agentId, function (rgb) {
-      if (pendingAccentAgentId !== agentId) return;
-      document.documentElement.style.setProperty('--titlebar-fg', rgb);
     });
   }
   // Update the "displayed workspace" tracker and trigger the recovery

@@ -299,6 +299,17 @@ function buildBundleWindowOptions() {
     title: 'Minds',
     show: false,
     autoHideMenuBar: true,
+    // ``setBorderRadius`` on the contentView rounds all four corners with
+    // the same radius, but we want top-only rounding (the workspace
+    // content tucks under the colored titlebar; the bottom should look
+    // flat, or follow the OS's outer-window rounding on macOS). Setting
+    // the BaseWindow background to the workspace content's zinc-50 makes
+    // the bottom-corner cutouts paint the same color as the surrounding
+    // workspace, so the bottom rounding visually disappears regardless
+    // of platform. macOS still clips the outer window corners at the OS
+    // level; Linux/Windows users see a square outer window with the
+    // cutout pixels blending into the content.
+    backgroundColor: '#fafafa',
   };
   if (isMac) {
     windowOptions.titleBarStyle = 'hiddenInset';
@@ -435,6 +446,15 @@ function createBundle() {
     inboxListReloadTimer: null,
     currentContentUrl: null,
     currentWorkspaceId: null,
+    // ``lastWorkspaceAgentId`` is the agent id whose accent should color
+    // THIS window's titlebar even after the user navigates away from the
+    // workspace (e.g. to Home). Distinct from ``currentWorkspaceId``
+    // because that clears on every navigate-to-non-workspace; this only
+    // changes when the user opens a *different* workspace in this window,
+    // or when the workspace is deleted / the user signs out. Persisted in
+    // each window-state.json entry so windows restore with their own
+    // accent rather than a single global one stepping on every window.
+    lastWorkspaceAgentId: null,
     preErrorUrl: null,
     isErrorState: false,
     isLoadingState: true,
@@ -829,12 +849,14 @@ function sendCurrentWorkspaceToBundleViews(bundle) {
   if (bundle.sidebarView && !bundle.sidebarView.webContents.isDestroyed()) {
     bundle.sidebarView.webContents.send('current-workspace-changed', bundle.currentWorkspaceId);
   }
-  // Persist as the "last opened workspace" so a subsequent navigation to
-  // Home (or any non-workspace URL) keeps the bar tinted in this workspace's
-  // color, and so cold-start restores the same color before the first
-  // ``current-workspace-changed`` event lands.
+  // Persist this window's "last opened workspace" so a subsequent
+  // navigation to Home (or any non-workspace URL) keeps the bar tinted in
+  // this workspace's color, and so cold-start restores the same color
+  // before the first ``current-workspace-changed`` event lands. Each
+  // window remembers independently -- opening a workspace in window B
+  // does not repaint window A.
   if (bundle.currentWorkspaceId) {
-    setLastWorkspaceAgentId(bundle.currentWorkspaceId);
+    updateBundleLastWorkspaceAgentId(bundle, bundle.currentWorkspaceId);
   }
 }
 
@@ -986,43 +1008,38 @@ function readLastLogLines(lineCount) {
 
 // -- Session state --
 //
-// On-disk shape is ``{ windows: [...], lastWorkspaceAgentId: string | null }``
-// in ``window-state.json``. The pre-titlebar-accent version of the file was a
-// bare array of window entries; ``loadSessionState`` accepts either shape so
-// existing installs migrate transparently on first read. ``lastWorkspaceAgentId``
-// is the agent id whose accent should color the titlebar even after the user
-// navigates away from the workspace (e.g. to Home); cleared on workspace
-// deletion or account sign-out.
-
-// In-memory mirror of ``lastWorkspaceAgentId`` so the IPC ``get`` handler is
-// synchronous (no disk reads on every chrome page load) and ``set`` can keep
-// the next ``saveSessionState`` flush in sync without re-reading the file.
-let lastWorkspaceAgentId = null;
+// On-disk shape is ``{ windows: [{ url, x, y, width, height, displayId,
+// lastWorkspaceAgentId }, ...] }`` in ``window-state.json``. The
+// pre-titlebar-accent version of the file was a bare array of window
+// entries (no ``lastWorkspaceAgentId`` field); ``loadSessionState``
+// accepts either shape so existing installs migrate transparently on
+// first read. ``lastWorkspaceAgentId`` is per-window: the agent id whose
+// accent colors that window's titlebar across navigation to Home. Each
+// window remembers its own, so opening workspace B in window 2 does not
+// repaint window 1's titlebar. Cleared on workspace deletion (for
+// matching windows) or account sign-out (all windows).
 
 function loadSessionState() {
   try {
     const p = getSessionStatePath();
-    if (!fs.existsSync(p)) return { windows: [], lastWorkspaceAgentId: null };
+    if (!fs.existsSync(p)) return { windows: [] };
     const raw = fs.readFileSync(p, 'utf-8');
     const parsed = JSON.parse(raw);
     // Legacy shape: a bare array of window entries (pre-titlebar-accent).
     if (Array.isArray(parsed)) {
       return {
         windows: parsed.filter((e) => typeof e === 'object' && typeof e.url === 'string'),
-        lastWorkspaceAgentId: null,
       };
     }
     if (parsed && typeof parsed === 'object') {
       const windows = Array.isArray(parsed.windows)
         ? parsed.windows.filter((e) => typeof e === 'object' && typeof e.url === 'string')
         : [];
-      const lastAgentId =
-        typeof parsed.lastWorkspaceAgentId === 'string' ? parsed.lastWorkspaceAgentId : null;
-      return { windows, lastWorkspaceAgentId: lastAgentId };
+      return { windows };
     }
-    return { windows: [], lastWorkspaceAgentId: null };
+    return { windows: [] };
   } catch {
-    return { windows: [], lastWorkspaceAgentId: null };
+    return { windows: [] };
   }
 }
 
@@ -1054,44 +1071,33 @@ function saveSessionState() {
         width: bounds.width,
         height: bounds.height,
         displayId: display ? display.id : null,
+        lastWorkspaceAgentId: b.lastWorkspaceAgentId || null,
       });
     }
     const p = getSessionStatePath();
     fs.mkdirSync(path.dirname(p), { recursive: true });
-    fs.writeFileSync(p, JSON.stringify({ windows, lastWorkspaceAgentId }, null, 2));
+    fs.writeFileSync(p, JSON.stringify({ windows }, null, 2));
   } catch (err) {
     console.log('[session] Failed to save state:', err.message);
   }
 }
 
-function getLastWorkspaceAgentId() {
-  return lastWorkspaceAgentId;
-}
-
-// Update the in-memory ``lastWorkspaceAgentId`` and flush to disk. No-op when
-// the value isn't actually changing so a stream of duplicate
-// ``current-workspace-changed`` IPC events (Electron emits one per content
-// navigation) doesn't thrash the file. Pass ``null`` to clear (workspace
-// deleted, user signed out, no active workspace).
-function setLastWorkspaceAgentId(agentId) {
+// Update a single bundle's ``lastWorkspaceAgentId`` and notify only that
+// bundle's chrome view. Persists to disk via ``saveSessionState`` (skipped
+// during teardown so a late SSE-driven call doesn't overwrite the legitimate
+// pre-teardown snapshot with a partial windows array). No-op when the value
+// isn't actually changing so a stream of duplicate ``current-workspace-changed``
+// transitions (Electron emits one per content navigation) doesn't thrash the
+// file or the IPC. Pass ``null`` to clear (workspace deleted, user signed
+// out, no active workspace).
+function updateBundleLastWorkspaceAgentId(bundle, agentId) {
+  if (!bundle || bundle.window.isDestroyed()) return;
   const normalized = typeof agentId === 'string' && agentId ? agentId : null;
-  if (normalized === lastWorkspaceAgentId) return;
-  lastWorkspaceAgentId = normalized;
-  // Skip the on-disk flush during teardown: ``saveSessionState`` walks the
-  // live ``bundles`` Set, and that Set shrinks as each window's ``closed``
-  // handler runs during shutdown. The close handler and ``before-quit`` save
-  // already gate on ``isShuttingDown`` / ``bundles.size`` for the same
-  // reason -- a late SSE-driven call here must not clobber the legitimate
-  // pre-teardown snapshot with a partial windows array.
+  if (normalized === bundle.lastWorkspaceAgentId) return;
+  bundle.lastWorkspaceAgentId = normalized;
   if (!isShuttingDown) saveSessionState();
-  // Push the (possibly null) value to every chrome view so renderers that
-  // weren't the source of the change still update. The chrome.js handler
-  // is idempotent on no-op.
-  for (const b of bundles) {
-    if (b.window.isDestroyed()) continue;
-    if (b.chromeView && !b.chromeView.webContents.isDestroyed()) {
-      b.chromeView.webContents.send('last-workspace-agent-id-changed', lastWorkspaceAgentId);
-    }
+  if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+    bundle.chromeView.webContents.send('last-workspace-agent-id-changed', normalized);
   }
 }
 
@@ -1205,31 +1211,38 @@ function handleChromeSSEEvent(evt) {
           sendCurrentWorkspaceToBundleViews(b);
         }
       }
-      // If the destroyed workspace is the one currently coloring the
-      // titlebar, clear the stored accent so the next render falls back
-      // to the dark default chrome rather than pointing at a workspace
-      // that no longer exists.
-      if (oldId === lastWorkspaceAgentId) {
-        setLastWorkspaceAgentId(null);
+      // Clear the stored accent in any window whose remembered "last
+      // opened" was the destroyed workspace, so the next render of those
+      // titlebars falls back to the dark default chrome rather than
+      // pointing at a workspace that no longer exists.
+      for (const b of bundles) {
+        if (b.window.isDestroyed()) continue;
+        if (b.lastWorkspaceAgentId === oldId) {
+          updateBundleLastWorkspaceAgentId(b, null);
+        }
       }
     }
 
     updateAllOsTitles();
   } else if (evt.type === 'auth_required') {
-    // Clear the stored accent on the authenticated -> unauthenticated
-    // boundary (account sign-out or session expiration). Without this
-    // the bar would stay tinted with the last-opened workspace's color
-    // on the sign-in page. The SSE endpoint emits ``auth_required`` and
-    // closes whenever the request is unauthenticated, so a mid-session
-    // sign-out manifests here as: stream that was delivering
-    // ``workspaces`` -> stream closes -> reconnect after 1.5s ->
-    // ``auth_required`` payload. ``latestChromeState.workspaces`` is only
-    // ever set from the ``workspaces`` branch above, so its non-null
-    // state is a stable "we have been authenticated this session" flag --
-    // and gating on it leaves a freshly-hydrated ``lastWorkspaceAgentId``
+    // Clear every window's stored accent on the authenticated ->
+    // unauthenticated boundary (account sign-out or session expiration).
+    // Without this each window's bar would stay tinted with its
+    // last-opened workspace's color on the sign-in page. The SSE endpoint
+    // emits ``auth_required`` and closes whenever the request is
+    // unauthenticated, so a mid-session sign-out manifests here as:
+    // stream that was delivering ``workspaces`` -> stream closes ->
+    // reconnect after 1.5s -> ``auth_required`` payload.
+    // ``latestChromeState.workspaces`` is only ever set from the
+    // ``workspaces`` branch above, so its non-null state is a stable
+    // "we have been authenticated this session" flag -- gating on it
+    // leaves freshly-hydrated ``bundle.lastWorkspaceAgentId`` values
     // alone during the cold-start unauthenticated path.
     if (latestChromeState.workspaces !== null) {
-      setLastWorkspaceAgentId(null);
+      for (const b of bundles) {
+        if (b.window.isDestroyed()) continue;
+        updateBundleLastWorkspaceAgentId(b, null);
+      }
     }
   } else if (evt.type === 'auth_status') {
     latestChromeState.authStatus = evt;
@@ -1836,10 +1849,6 @@ async function startBackendWithRetry() {
 
     if (isFirstStart && initialBundle && !initialBundle.window.isDestroyed()) {
       const savedState = loadSessionState();
-      // Hydrate the in-memory ``lastWorkspaceAgentId`` from disk so the
-      // titlebar accent picks up the most-recently-opened workspace as
-      // soon as the chrome page calls ``getLastWorkspaceAgentId`` over IPC.
-      lastWorkspaceAgentId = savedState.lastWorkspaceAgentId;
 
       // Consume the one-time login code via net.request BEFORE checking
       // chrome state. This hits /authenticate which sets the minds_session
@@ -1898,16 +1907,18 @@ async function startBackendWithRetry() {
       const restorable = authenticated
         ? filterRestorableUrls(savedState.windows, knownAgentIdsSet)
         : [];
-      // Drop the stored lastWorkspaceAgentId if its workspace no longer
-      // exists -- otherwise the titlebar would paint with the color of a
-      // workspace the user already destroyed.
-      if (
-        authenticated &&
-        knownAgentIdsSet &&
-        lastWorkspaceAgentId &&
-        !knownAgentIdsSet.has(lastWorkspaceAgentId)
-      ) {
-        setLastWorkspaceAgentId(null);
+      // Drop any stored per-window ``lastWorkspaceAgentId`` whose workspace
+      // no longer exists -- otherwise the restored titlebar would paint
+      // with the color of a workspace the user already destroyed.
+      if (knownAgentIdsSet) {
+        for (const entry of restorable) {
+          if (
+            typeof entry.lastWorkspaceAgentId === 'string' &&
+            !knownAgentIdsSet.has(entry.lastWorkspaceAgentId)
+          ) {
+            entry.lastWorkspaceAgentId = null;
+          }
+        }
       }
 
       initialBundle.isLoadingState = false;
@@ -1934,13 +1945,25 @@ async function startBackendWithRetry() {
           initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/');
         }
       } else {
-        // Restore saved windows with their positions and sizes
+        // Restore saved windows with their positions, sizes, and -- so
+        // each window's titlebar repaints in its own accent on launch --
+        // their ``lastWorkspaceAgentId`` from the persisted entry. The
+        // explicit ``updateBundleLastWorkspaceAgentId`` call (rather than
+        // a direct assignment to ``bundle.lastWorkspaceAgentId``) sends
+        // the matching IPC to the chrome view so the accent is applied
+        // before any ``current-workspace-changed`` event arrives.
         const [first, ...rest] = restorable;
         restoreWindowBounds(initialBundle, first);
+        if (first.lastWorkspaceAgentId) {
+          updateBundleLastWorkspaceAgentId(initialBundle, first.lastWorkspaceAgentId);
+        }
         loadUrlIntoBundleContentView(initialBundle, toAbsoluteUrl(first.url));
         for (const entry of rest) {
           const bundle = openNewWindow(toAbsoluteUrl(entry.url));
           restoreWindowBounds(bundle, entry);
+          if (entry.lastWorkspaceAgentId) {
+            updateBundleLastWorkspaceAgentId(bundle, entry.lastWorkspaceAgentId);
+          }
         }
       }
     } else {
@@ -2263,12 +2286,14 @@ ipcMain.on('window-close', (event) => {
 
 // Renderer (chrome.js) asks for the persisted last-opened workspace agent id
 // on DOMContentLoaded so the titlebar accent can paint before any
-// ``current-workspace-changed`` event arrives. Synchronous-feeling via the
-// in-memory mirror -- no disk read per call. Writes are driven exclusively
-// from main (``sendCurrentWorkspaceToBundleViews`` + SSE-driven cleanup);
-// there is no renderer-side setter.
-ipcMain.handle('get-last-workspace-agent-id', () => {
-  return getLastWorkspaceAgentId();
+// ``current-workspace-changed`` event arrives. Per-window: scoped to the
+// caller's bundle, so each window's chrome page sees its own value rather
+// than a single shared one. Writes are driven exclusively from main
+// (``sendCurrentWorkspaceToBundleViews`` + SSE-driven cleanup); there is
+// no renderer-side setter.
+ipcMain.handle('get-last-workspace-agent-id', (event) => {
+  const bundle = getBundleFromEvent(event);
+  return bundle ? bundle.lastWorkspaceAgentId : null;
 });
 
 // -- App lifecycle --
