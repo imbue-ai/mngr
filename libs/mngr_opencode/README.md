@@ -76,16 +76,40 @@ mngr create my-agent my_opencode
 
 | Option | Default | Meaning |
 |---|---|---|
-| `cli_args` | `()` | Extra arguments appended to the `opencode` command. |
+| `cli_args` | `()` | Extra arguments forwarded to the `opencode attach` (TUI) client. |
 | `config_overrides` | `{}` | Key/value blob merged last into the per-agent `opencode.json` (e.g. `model`, the `permission` policy block). |
 | `sync_global_config` | `true` | Base the per-agent `opencode.json` on a copy of the user's `~/.config/opencode/opencode.json`. |
 | `symlink_auth` | `true` | Symlink the per-agent `auth.json` to the shared one (one login authenticates all agents). Set `false` for full isolation. |
 | `auto_allow_permissions` | `false` | Inject a wildcard allow into the per-agent permission policy (auto-approve everything not explicitly denied). |
 | `emit_common_transcript` | `true` | Emit the common transcript that `mngr transcript` reads. |
 
-A model must be resolvable for the agent to run unattended -- set it via
-`config_overrides.model`, your global `~/.config/opencode/opencode.json`, or an
-authenticated provider's default.
+## Choosing the model
+
+The model is read by the agent's OpenCode server from its per-agent
+`opencode.json`, so it is set through config (format: `provider/model`; list
+options with `opencode models`). Three ways, highest precedence first:
+
+1. **Per agent-type** -- `config_overrides.model` on an `opencode` variant (the
+   TOML example above). Applies to every agent of that type.
+2. **On the `mngr create` command line** -- mngr's generic per-invocation
+   override reaches right into `config_overrides`:
+
+   ```bash
+   mngr create my-agent opencode -S agent_types.opencode.config_overrides.model=anthropic/claude-sonnet-4-5
+   ```
+
+3. **Globally** -- the `"model"` in your `~/.config/opencode/opencode.json`,
+   inherited when `sync_global_config` is `true` (the default).
+
+Notes:
+
+- The provider must be authenticated (`opencode auth login`, shared across
+  agents via the symlinked `auth.json`) or the model unauthenticated (e.g. the
+  free OpenCode-Zen models). A model must be resolvable for the agent to run
+  unattended.
+- Passing the model after `--` (`mngr create ... opencode -- --model X`) does
+  **not** work: `--` args go to the `opencode attach` client, which has no
+  `--model` flag; the model is used by the `serve` process, from `opencode.json`.
 
 ## Not yet implemented
 
