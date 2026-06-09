@@ -6,6 +6,7 @@ from datetime import timezone
 from pathlib import Path
 
 import pluggy
+import pytest
 from click.testing import CliRunner
 
 from imbue.mngr.cli.gc import GcCliOptions
@@ -185,15 +186,16 @@ def _make_gc_opts(provider: tuple[str, ...]) -> GcCliOptions:
     )
 
 
-def test_get_selected_providers_records_skipped_empty_and_unavailable_providers(
+@pytest.mark.allow_warnings(match=r"^Skipping provider fake-unavailable-backend \(unavailable\)")
+def test_get_selected_providers_skips_empty_silently_and_records_unavailable(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """An explicit --provider that is empty or unavailable is skipped and reported.
+    """An explicit --provider that is empty is silently skipped; unavailable is reported.
 
-    gc still runs against any providers that did resolve (so the user's
-    explicit call does most of the work), but the skipped providers come back
-    as error strings so the caller can exit non-zero -- the user asked us to
-    gc those providers specifically and we did not.
+    Empty providers are known to have nothing to gc, so skipping is safe and
+    not a user-visible failure. Unavailable providers, by contrast, have
+    unknown state -- the user asked us to gc them specifically and we could
+    not reach them, so they come back as an error string and gc exits non-zero.
     """
     backends = (_FakeEmptyBackend, _FakeUnavailableBackend)
     for backend in backends:
@@ -210,34 +212,38 @@ def test_get_selected_providers_records_skipped_empty_and_unavailable_providers(
             del _provider_config_registry[backend.get_name()]
 
     assert selected == []
-    assert len(skipped_errors) == 2
-    assert any("fake-empty-backend" in err and "empty" in err for err in skipped_errors)
-    assert any("fake-unavailable-backend" in err and "unavailable" in err for err in skipped_errors)
+    assert len(skipped_errors) == 1
+    assert "fake-unavailable-backend" in skipped_errors[0]
+    assert "unavailable" in skipped_errors[0]
 
 
-def test_gc_exits_non_zero_when_explicit_provider_is_empty(
+@pytest.mark.allow_warnings(match=r"^Skipping provider fake-unavailable-backend \(unavailable\)")
+def test_gc_exits_non_zero_when_explicit_provider_is_unavailable(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """`mngr gc --provider X` with X empty/unavailable still exits non-zero.
+    """`mngr gc --provider X` with X unavailable exits non-zero.
 
     The skipped provider's error message is surfaced in the summary so the user
     can see what was not gc'd. gc still runs against any other providers, but
     the overall command fails so the explicit request is not silently dropped.
+    Empty providers (whose state is known to be empty) take the symmetric
+    silent-success path and are exercised by
+    test_get_selected_providers_skips_empty_silently_and_records_unavailable.
     """
-    _backend_registry[_FakeEmptyBackend.get_name()] = _FakeEmptyBackend
-    register_provider_config(str(_FakeEmptyBackend.get_name()), ProviderInstanceConfig)
+    _backend_registry[_FakeUnavailableBackend.get_name()] = _FakeUnavailableBackend
+    register_provider_config(str(_FakeUnavailableBackend.get_name()), ProviderInstanceConfig)
     try:
         result = cli_runner.invoke(
             gc,
-            ["--provider", "fake-empty-backend"],
+            ["--provider", "fake-unavailable-backend"],
             obj=plugin_manager,
             catch_exceptions=False,
         )
     finally:
-        del _backend_registry[_FakeEmptyBackend.get_name()]
-        del _provider_config_registry[_FakeEmptyBackend.get_name()]
+        del _backend_registry[_FakeUnavailableBackend.get_name()]
+        del _provider_config_registry[_FakeUnavailableBackend.get_name()]
 
     assert result.exit_code == 1, result.output
-    assert "fake-empty-backend" in result.output
-    assert "empty" in result.output
+    assert "fake-unavailable-backend" in result.output
+    assert "unavailable" in result.output

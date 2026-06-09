@@ -1,6 +1,6 @@
 Addressed Josh's review feedback on PR #1937:
 
-- `mngr gc --provider <name>` now exits non-zero when an explicitly-named provider was skipped because it was empty (e.g. a fresh Modal per-user environment) or unavailable. The other selected providers still run to completion; the skipped providers are reported in the summary so the user can see what was not gc'd. The automatic post-destroy gc path (which always passes `--all-providers` internally and tolerates skips) is unaffected.
+- `mngr gc --provider <name>` now exits non-zero when an explicitly-named provider is unavailable. The other selected providers still run to completion; the unavailable provider is reported as an error in the summary so the user can see what was not gc'd. Empty providers (e.g. a fresh Modal per-user environment with nothing to collect) remain silently skipped, since their state is known to be empty and there is nothing to do. The automatic post-destroy gc path (which always passes `--all-providers` internally and tolerates skips) is unaffected.
 
 - Removed the `-a` / `--all` / `--all-agents` flag from `mngr message` (alias `mngr msg`). The tutorial and CLI examples now use the explicit `mngr list --ids | mngr msg -` pattern. Users who relied on `-a` should switch to piping ids from `mngr list` (optionally with `--include` / `--exclude` to scope the broadcast).
 
