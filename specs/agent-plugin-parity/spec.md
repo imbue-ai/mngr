@@ -251,6 +251,42 @@ stable discriminator (a distinct event, an env var on the main process, a "fully
 flag, a root-vs-child conversation id)? How do you avoid both failure modes (parent goes
 idle early; parent never goes idle)?
 
+**Related failure mode -- background / detached work.** The `active` marker tracks the
+agent's *conversational turn* (the model loop), not arbitrary processes that turn spawned. A
+*foreground* tool call keeps the marker present until it returns -- including an awaited
+subagent tool (e.g. pi's subagent extension blocks the turn while its child agents run). The
+marker only flips to WAITING with work still in flight when that work is *detached* from the
+turn: the agent runs `cmd &` / `nohup` / starts a daemon, **or** the CLI offers a structured
+"run in background" tool that returns a handle *before* the task finishes (Claude Code's
+`Bash` `run_in_background` is the canonical example; pi has none -- its bash tool is
+synchronous, and pi's `usage.md` lists "background bash" among features it deliberately
+omits). For the manual-`&` case, WAITING is *correct* (the agent genuinely is idle, awaiting
+input); but a first-class background-task tool can make the agent report WAITING while a task
+it launched is still running.
+
+Note that even claude does **not** currently solve this for backgrounded bash. Its `Stop`
+hook (`wait_for_stop_hook.sh`) waits before going idle, but only for sibling *stop-hook*
+processes (the recursive-reviewer case of dimension D), which it distinguishes from
+bash-tool tasks via `/proc/<pid>/environ`: a stop hook has `CLAUDE_PROJECT_DIR` *without*
+`CLAUDECODE=1`, whereas a `CLAUDECODE=1` process is a bash-tool task and is **excluded** from
+the wait. So a still-running reviewer keeps the agent RUNNING, but a detached
+`run_in_background` bash does not -- claude's marker stays turn-scoped here too.
+
+This is the right hook to extend if you *did* want background work to count: the
+`CLAUDECODE=1` tag already present on bash-tool tasks is exactly the per-task discriminator
+that makes a descendant-liveness wait *safe* -- it distinguishes "a background task the agent
+started" from incidental children (the agent's shell, language servers, watchers). A CLI that
+exposes backgrounded work but provides **no** such discriminator cannot do a generic
+descendant-liveness check without false-RUNNING (the agent would never go idle once it
+started any long-lived child), so the honest fallback is to scope the marker to the turn and
+*document* that detached/background work is not reflected -- the agy/pi position (agy has no
+background-task tool; pi's port keeps the marker turn-scoped).
+
+**Questions**: Does the CLI have a `run_in_background`-style tool (one that returns before
+its work finishes)? If so, what identifies those tasks (a process tag like `CLAUDECODE=1`, a
+task registry, a completion event) so the marker can wait for them -- and is waiting even
+desired, or is turn-scoped WAITING the right semantics for your supervisor?
+
 ### E. Readiness detection
 
 How `mngr create`/start knows the agent is ready to receive the first message.
@@ -609,6 +645,7 @@ implementation choice above):
 - [ ] Is there a discriminator (env var on main process, fully-idle flag, root vs child id)?
 - [ ] Is there an "input ready" sentinel event, or only a TUI banner?
 - [ ] Which hooks file does it actually *execute* vs merely display? (agy had two paths.)
+- [ ] Does it have a `run_in_background`-style tool (returns before the task finishes)? If so, how are those tasks identified so the marker isn't cleared while one runs (see dimension D)?
 
 **Permissions & trust**
 - [ ] Does a PreToolUse allow-decision suppress dialogs, or is a skip-all flag required?
