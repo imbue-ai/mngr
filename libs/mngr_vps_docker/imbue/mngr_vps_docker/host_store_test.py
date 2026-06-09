@@ -19,6 +19,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import PyinfraConnector
+from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -266,6 +267,9 @@ class _LocalFakeOuter(OuterHostInterface):
 
     def get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
         return None
+
+    def list_directory(self, path: Path, *, recursive: bool = False) -> list[VolumeFile]:
+        raise NotImplementedError("_LocalFakeOuter.list_directory not used by VpsDockerHostStore")
 
     # path_exists is inherited from OuterHostInterface, which already routes to
     # Path.exists() when is_local is True.
