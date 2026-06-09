@@ -895,15 +895,16 @@ def test_tui_ready_indicator_is_claude_code(
 def test_build_accept_marker_command_extracts_latest_enqueue_timestamp(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """The acceptance-marker probe returns the newest enqueue event's timestamp.
+    """The acceptance-marker probe returns the most recent enqueue event's timestamp.
 
     This is the agent-specific behavior that ``tui_utils`` deliberately does not
     hold: read the transcript event log at ``$MNGR_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl``,
-    select ``enqueue`` events, and print the latest one's timestamp -- the
-    monotonic token ``send_enter_via_tmux_wait_for_hook`` watches. We run the
-    actual probe against a fixture transcript that interleaves non-enqueue
-    events and an out-of-order earlier enqueue, and assert it isolates the
-    newest enqueue timestamp.
+    select ``enqueue`` events, and print the last (most recently appended) one's
+    timestamp -- the monotonic token ``send_enter_via_tmux_wait_for_hook``
+    watches. We run the actual probe against a fixture transcript that
+    interleaves multiple enqueue events with non-enqueue events, and assert it
+    skips the non-enqueue events and the earlier enqueue, printing the timestamp
+    of the last enqueue line.
     """
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
     state_dir = tmp_path / "agent-state"
