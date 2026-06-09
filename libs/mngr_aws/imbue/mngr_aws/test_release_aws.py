@@ -164,6 +164,7 @@ def _run_mngr(
 # =============================================================================
 
 
+@pytest.mark.rsync
 def test_provider_lifecycle_create_exec_and_destroy(
     aws_test_settings_dir: Path,
     temp_git_repo: Path,
@@ -215,6 +216,7 @@ def test_provider_lifecycle_create_exec_and_destroy(
         time.sleep(20)
 
 
+@pytest.mark.rsync
 def test_provider_lifecycle_create_stop_start_destroy(
     aws_test_settings_dir: Path,
     temp_git_repo: Path,
