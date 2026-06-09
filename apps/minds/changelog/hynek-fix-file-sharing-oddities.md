@@ -17,6 +17,13 @@ field; you can paste a different absolute path or pick one with new
 both on Linux/Windows). Approving with an
 edited path retargets the grant to your chosen path -- the access mode the agent
 asked for (read-only vs. read & write) is preserved, and the edited path is
-re-validated for traversal before any grant is written. Approve stays disabled
-while the path field is empty. The Browse button appears only in the desktop app
-(it uses a native picker); in a plain browser you can still paste a path.
+re-validated for traversal before any grant is written. The buttons appear only
+in the desktop app (they use a native picker); in a plain browser you can still
+paste a path.
+
+The edited path is also validated against the WebDAV mount roots (your home
+directory and the system temp directory) directly in Minds, so a path outside
+those is rejected immediately with a clear message instead of being forwarded to
+the gateway. The dialog gives instant feedback too: Approve stays disabled (and a
+hint appears) while the path field is empty or points outside a shared folder, as
+you type or pick.

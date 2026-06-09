@@ -149,6 +149,30 @@
     // Approve becomes available as soon as any name="permissions" input
     // is checked. Re-run after every right-pane swap and on checkbox
     // change (via the delegated handler below).
+    // Parse the WebDAV mount roots the file-sharing dialog embeds on its
+    // path input (a JSON array of absolute paths). Returns [] when absent
+    // or malformed.
+    function sharePathRoots(input) {
+      try {
+        var parsed = JSON.parse(input.getAttribute("data-allowed-roots") || "[]");
+        return Array.isArray(parsed) ? parsed : [];
+      } catch (e) {
+        return [];
+      }
+    }
+
+    // Whether ``value`` is at or beneath one of ``roots``. Case-insensitive
+    // and purely lexical, mirroring the server-side check (and WsgiDAV's
+    // share-prefix matching).
+    function isSharePathWithinRoots(value, roots) {
+      if (!value) return false;
+      var lower = value.toLowerCase();
+      return roots.some(function (root) {
+        var r = String(root).replace(/\/+$/, "").toLowerCase() || "/";
+        return lower === r || lower.indexOf(r + "/") === 0;
+      });
+    }
+
     function updateApproveState() {
       var form = document.getElementById("permissions-form");
       if (!form) return;
@@ -157,10 +181,20 @@
       var anyChecked = form.querySelector('input[name="permissions"]:checked') !== null;
       // The file-sharing dialog adds an editable path field. Its hidden
       // "permissions" checkbox is always checked, so gate Approve on the
-      // path being non-empty too -- otherwise the user could approve a
-      // blank path.
+      // path being both non-empty AND inside a shared root -- otherwise
+      // the user could approve a blank or unshareable path. A hint is
+      // shown next to the field for a non-empty out-of-root path so the
+      // feedback is instant (matching the server-side rejection) instead
+      // of only surfacing after submit.
       var pathInput = document.getElementById("file-sharing-path-input");
-      var pathOk = !pathInput || pathInput.value.trim().length > 0;
+      var pathOk = true;
+      if (pathInput) {
+        var value = pathInput.value.trim();
+        var withinRoots = isSharePathWithinRoots(value, sharePathRoots(pathInput));
+        pathOk = value.length > 0 && withinRoots;
+        var hint = document.getElementById("file-sharing-path-hint");
+        if (hint) hint.classList.toggle("hidden", !(value.length > 0 && !withinRoots));
+      }
       approveBtn.disabled = !(anyChecked && pathOk);
     }
     window.updateApproveState = updateApproveState;

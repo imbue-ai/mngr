@@ -1,4 +1,4 @@
-{#def agent_id, request_id, ws_name, rationale, file_path, access, access_human_label, display_name, mngr_forward_origin #}
+{#def agent_id, request_id, ws_name, rationale, file_path, access, access_human_label, display_name, allowed_roots_json="[]", mngr_forward_origin #}
 {#
   Latchkey file-sharing permission request fragment. Rendered inside the
   inbox modal's right pane. Provides a single hidden checked
@@ -46,11 +46,22 @@
         </span>
       {% endif %}
     </div>
+    {# ``data-allowed-roots`` carries the WebDAV mount roots so the inbox
+       shell can flag (and block Approve on) a path outside them as the
+       user types or picks one -- the same roots the server validates
+       against. #}
     <TextInput id="file-sharing-path-input"
                name="file_path"
                :value="file_path"
+               :data-allowed-roots="allowed_roots_json"
                extra="font-mono text-sm"
                oninput="window.updateApproveState && window.updateApproveState()" />
+    {# Shown by the inbox shell only when the field holds a non-empty path
+       that is outside the shared roots. #}
+    <p id="file-sharing-path-hint" class="hidden mt-1.5 text-xs text-amber-700">
+      This path isn't inside a folder Minds can share (your home folder or the system
+      temporary folder), so it can't be shared. Pick a path under one of those instead.
+    </p>
     {# Two single-purpose pickers (file vs. folder) rather than one
        combined "Browse" button: a dialog can't be both a file and a
        directory selector on Linux/Windows, so a combined picker there

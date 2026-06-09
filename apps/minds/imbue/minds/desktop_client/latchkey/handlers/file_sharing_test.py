@@ -76,9 +76,16 @@ def _build_gateway_client(handler: _HttpxHandler) -> LatchkeyGatewayClient:
     )
 
 
+# Broad share roots so the existing tests' representative paths
+# (``/home/...``, ``/Users/...``, ``/tmp/...``) all validate as in-root.
+# Tests that exercise the out-of-root rejection inject a narrower set.
+_DEFAULT_TEST_SHARE_ROOTS: Final = (Path("/home"), Path("/Users"), Path("/tmp"))
+
+
 def _make_file_sharing_handler(
     tmp_path: Path,
     gateway_handler: _HttpxHandler,
+    share_roots: tuple[Path, ...] = _DEFAULT_TEST_SHARE_ROOTS,
 ) -> tuple[FileSharingGrantHandler, _RecordingMessageSender]:
     sender = _RecordingMessageSender(sent_messages=[])
     return (
@@ -86,6 +93,7 @@ def _make_file_sharing_handler(
             data_dir=tmp_path,
             gateway_client=_build_gateway_client(gateway_handler),
             mngr_message_sender=sender,
+            share_roots=share_roots,
         ),
         sender,
     )
@@ -404,6 +412,84 @@ def test_grant_rejects_traversal_in_edited_path(tmp_path: Path) -> None:
     assert response.status_code == 400
     assert ".." in response.json()["error"]
     assert gateway_called is False
+
+
+def test_grant_rejects_edited_path_outside_share_roots(tmp_path: Path) -> None:
+    """A path outside the WebDAV mount roots is rejected with a clean 400, not forwarded to the gateway."""
+    gateway_called = False
+
+    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal gateway_called
+        gateway_called = True
+        del request
+        return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
+
+    in_root = str(tmp_path / "ok.txt")
+    handler, sender = _make_file_sharing_handler(tmp_path, _gateway_handler, share_roots=(tmp_path,))
+    event = create_latchkey_file_sharing_permission_request_event(
+        agent_id=str(AgentId()),
+        path=in_root,
+        access="READ",
+        rationale="need data",
+    )
+    inbox = RequestInbox().add_request(event)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    response = client.post(f"/requests/{event.event_id}/grant", data={"file_path": "/etc/passwd"})
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert "shared folder" in error
+    # The error names the allowed root(s) so the user can self-correct.
+    assert str(tmp_path) in error
+    # We did not fall back to the gateway, and the request stays pending.
+    assert gateway_called is False
+    assert load_response_events(tmp_path) == []
+    assert sender.sent_messages == []
+
+
+def test_grant_accepts_edited_path_within_share_roots(tmp_path: Path) -> None:
+    """A path nested under an allowed root is accepted."""
+
+    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
+
+    handler, _sender = _make_file_sharing_handler(tmp_path, _gateway_handler, share_roots=(tmp_path,))
+    event = create_latchkey_file_sharing_permission_request_event(
+        agent_id=str(AgentId()),
+        path=str(tmp_path / "orig.txt"),
+        access="READ",
+        rationale="need data",
+    )
+    inbox = RequestInbox().add_request(event)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    edited = str(tmp_path / "nested" / "file.txt")
+    response = client.post(f"/requests/{event.event_id}/grant", data={"file_path": edited})
+    assert response.status_code == 200
+    assert response.json()["outcome"] == "GRANTED"
+
+
+def test_render_request_detail_fragment_embeds_allowed_roots(tmp_path: Path) -> None:
+    """The dialog embeds the share roots so the inbox shell can validate client-side."""
+    handler, _sender = _make_file_sharing_handler(
+        tmp_path, lambda r: httpx.Response(200), share_roots=(Path("/home/glenn"), Path("/tmp"))
+    )
+    event = create_latchkey_file_sharing_permission_request_event(
+        agent_id=str(AgentId()),
+        path="/home/glenn/notes.txt",
+        access="READ",
+        rationale="r",
+    )
+    body = str(
+        handler.render_request_detail_fragment(
+            req_event=event,
+            backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+            mngr_forward_origin="",
+        )
+    )
+    attrs = _parse_input_attrs(body, element_id="file-sharing-path-input")
+    assert json.loads(attrs["data-allowed-roots"]) == ["/home/glenn", "/tmp"]
 
 
 def test_grant_returns_502_when_gateway_rejects(tmp_path: Path) -> None:

@@ -31,6 +31,7 @@ the gateway forgets the pending entry.
 
 import asyncio
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
@@ -55,6 +56,7 @@ from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import append_response_event
 from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
+from imbue.minds.desktop_client.webdav import get_file_sharing_roots
 from imbue.mngr.primitives import AgentId
 
 # Label shown on the inbox list card (lower-case, short).
@@ -70,16 +72,33 @@ class InvalidSharePathError(Exception):
     """Raised when a user-edited share path is not an acceptable absolute path."""
 
 
-def _normalize_share_path(raw_path: str) -> str:
+def _is_path_within_roots(path: str, allowed_roots: Sequence[Path]) -> bool:
+    """Whether ``path`` is at or beneath one of ``allowed_roots``.
+
+    Case-insensitive and purely lexical, mirroring how the WebDAV server
+    matches its mount prefixes (WsgiDAV lowercases both the share keys
+    and the request path) so we never reject a path the server would
+    actually serve.
+    """
+    lower_path = path.lower()
+    for root in allowed_roots:
+        lower_root = str(root).rstrip("/").lower() or "/"
+        if lower_path == lower_root or lower_path.startswith(f"{lower_root}/"):
+            return True
+    return False
+
+
+def _normalize_share_path(raw_path: str, allowed_roots: Sequence[Path]) -> str:
     """Validate and normalize a user-edited absolute share path.
 
     Mirrors the gateway's ``validateAbsoluteFileSharingPath`` so the user
-    gets a clear, immediate error instead of a generic gateway 400. The
+    gets a clear, immediate error instead of a generic gateway 4xx. The
     gateway re-validates on approve regardless -- this is a friendlier
     first line of defence, not the security boundary.
 
-    Rejects empty, relative, and ``..``-containing paths. Returns the
-    stripped path on success.
+    Rejects empty, relative, and ``..``-containing paths, and paths that
+    fall outside ``allowed_roots`` (the WebDAV mount roots: home + temp).
+    Returns the stripped path on success.
     """
     path = raw_path.strip()
     if not path:
@@ -90,6 +109,9 @@ def _normalize_share_path(raw_path: str) -> str:
     # gateway's traversal check.
     if any(segment == ".." for segment in path.replace("\\", "/").split("/")):
         raise InvalidSharePathError(f"The path to share must not contain a '..' segment: {path}")
+    if not _is_path_within_roots(path, allowed_roots):
+        roots_str = ", ".join(str(root) for root in allowed_roots)
+        raise InvalidSharePathError(f"The path to share must be within a shared folder ({roots_str}): {path}")
     return path
 
 
@@ -162,6 +184,15 @@ class FileSharingGrantHandler(RequestEventHandler):
     mngr_message_sender: MngrMessageSender = Field(
         description="Sends ``mngr message`` nudges to the waiting agent on resolution.",
     )
+    share_roots: tuple[Path, ...] = Field(
+        default_factory=get_file_sharing_roots,
+        frozen=True,
+        description=(
+            "On-disk roots the WebDAV file server mounts (home + temp). A requested or "
+            "user-edited path outside these is rejected up front with a clear error rather "
+            "than being forwarded to the gateway. Defaults to the live WebDAV mount roots."
+        ),
+    )
 
     # -- RequestEventHandler interface ---------------------------------------
 
@@ -194,6 +225,7 @@ class FileSharingGrantHandler(RequestEventHandler):
             file_path=req_event.path,
             access=req_event.access,
             access_human_label=_access_human_label(req_event.access),
+            allowed_roots_json=json.dumps([str(root) for root in self.share_roots]),
             mngr_forward_origin=mngr_forward_origin,
         )
 
@@ -215,7 +247,11 @@ class FileSharingGrantHandler(RequestEventHandler):
         form = await request.form()
         raw_override = form.get(_FILE_PATH_FIELD)
         try:
-            effective_path = _normalize_share_path(str(raw_override)) if raw_override is not None else req_event.path
+            effective_path = (
+                _normalize_share_path(str(raw_override), self.share_roots)
+                if raw_override is not None
+                else req_event.path
+            )
         except InvalidSharePathError as e:
             return _json_error(str(e), status_code=400)
 
