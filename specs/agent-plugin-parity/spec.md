@@ -121,7 +121,7 @@ Y = implemented, partial = present but incomplete, - = absent.
 | Raw transcript | Y | Y | - | - | - |
 | Common transcript | Y | Y | - | - | - |
 | Conversation resume (stop/start) | Y | Y | - | - | - |
-| Session preserve on destroy | Y (online + offline) | WIP | - | - | - |
+| Session preserve on destroy | Y (online + offline) | - | - | - | - |
 | Streaming snapshot (live view) | Y | - | - | - | - |
 | Deploy file/env contributions | Y | - | - | - | - |
 | Field generators (waiting_reason) | Y (online) | - | - | - | - |
@@ -132,9 +132,9 @@ Notable observations:
 - **`pi-coding` is the most advanced stub**: real TUI class, auth sync, HOME isolation,
   install management -- but no lifecycle marker, transcripts, resume, permissions, or
   trust handling.
-- **`antigravity` still lags claude on session-preservation-on-destroy (WIP), the
-  streaming snapshot, deploy contributions, and field generators.** These are the claude
-  features no port has fully matched yet.
+- **`antigravity` is missing session-preservation-on-destroy, the streaming snapshot,
+  deploy contributions, and field generators** relative to claude. These are the claude
+  features no port has yet matched.
 - **`codex`/`opencode` are pure `BaseAgent` shells**: they only get the free baseline.
   They will *appear* to work (`mngr create` succeeds, you can send messages) but will
   report WAITING forever, have no transcript, no resume, and no credential sharing.
@@ -421,13 +421,17 @@ an incremental on-disk store; verify your CLI does too). Resume must be shell-ev
 `assemble_command` since the command is replayed.
 
 **Known gap (both)**: *cloning* an agent does not yet carry the source's conversation
-forward. For antigravity this is because agy's conversation store is global, not per-agent.
+forward -- the clone path doesn't copy the source's session/conversation store into the new
+agent or set its resume id. (The antigravity changelog attributes this to a "global"
+conversation store, but that phrasing predates the per-agent `$HOME` work in the same PR
+series: with HOME relocation, `ANTIGRAVITY_APP_DATA_DIR` -- where agy writes
+`brain/<conv_id>/...` -- points into each agent's own home, so conversations are now
+per-agent, not global. The real blocker is just that clone doesn't copy them across homes.)
 
 ### L. Session preservation on destroy
 
 When an agent (or its host) is destroyed, its session/transcript files should be preserved
-so they're not lost. **`mngr_claude` implements this fully; `mngr_antigravity` has it as
-WIP; the other stubs lack it.**
+so they're not lost. **Only `mngr_claude` implements this; no port has matched it.**
 
 - **claude** (`plugin.py:2333`, `2402`, `2612`, `2765`): `on_destroy` copies session JSONLs,
   raw + common transcripts, and session-id history to
@@ -554,9 +558,9 @@ on the last; replicating it for a new CLI is a sane default.
 6. **Correctness fixes** (#1927 shell-quoting, #2022 enterprise onboarding). Point fixes
    layered on top.
 
-Then the claude features no port has fully matched: **session preservation on destroy**
-(WIP for antigravity), **deploy/scheduling contributions**, **field generators
-(waiting_reason)**, and the **streaming snapshot** -- in roughly that priority order.
+Then the claude-only features not yet ported anywhere: **session preservation on destroy**,
+**deploy/scheduling contributions**, **field generators (waiting_reason)**, and the
+**streaming snapshot** -- in roughly that priority order.
 
 ### Known open gaps (carried by antigravity, and by definition by every newer port)
 
