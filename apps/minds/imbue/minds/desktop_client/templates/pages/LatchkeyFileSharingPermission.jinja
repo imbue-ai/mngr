@@ -11,9 +11,9 @@
 
   <PermissionsForm :request_id="request_id">
     {# Single summary sentence (mirroring the predefined dialog's simple view)
-       naming the requesting workspace, the access level, and that the grant
-       is host-wide, followed by a white card showing the absolute file
-       path and an access badge. #}
+       naming the requesting workspace and the access level, followed by an
+       editable path field (with an access badge beside its label) and a
+       Browse button that opens the OS file picker. #}
     <p class="text-sm text-zinc-700 mb-3">
       {% if access == 'WRITE' %}
         Approving will grant {{ ws_name or agent_id }} and its sibling agents
@@ -30,10 +30,12 @@
        opens the OS file dialog and writes the chosen path back here, and
        its ``updateApproveState`` keeps Approve disabled while the field
        is empty. #}
-    <div class="flex items-center justify-between gap-3 mb-1.5">
-      <FormLabel target="file-sharing-path-input">Path to share</FormLabel>
-      {# Access mode badge -- emerald tint for read-only, amber for
-         read+write so the broader grant stands out visually. #}
+    {# Field label + access badge on one line, left-aligned, so the badge
+       reads as labelling the field rather than floating above the Browse
+       control on the right edge. Emerald tint for read-only, amber for
+       read+write so the broader grant stands out visually. #}
+    <div class="flex items-center gap-2 mb-1.5">
+      <FormLabel inline target="file-sharing-path-input">Path to share</FormLabel>
       {% if access == 'WRITE' %}
         <span class="shrink-0 text-xs font-semibold uppercase tracking-wide px-2 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-200">
           {{ access_human_label }}
@@ -44,18 +46,21 @@
         </span>
       {% endif %}
     </div>
-    <div class="flex items-stretch gap-2">
-      <TextInput id="file-sharing-path-input"
-                 name="file_path"
-                 :value="file_path"
-                 extra="font-mono text-sm flex-1 min-w-0"
-                 oninput="window.updateApproveState && window.updateApproveState()" />
-      {# Hidden unless the Electron native-picker bridge is present (the
-         inbox shell reveals it on detail render). In a plain browser the
-         user can still paste a path into the input above. #}
+    <TextInput id="file-sharing-path-input"
+               name="file_path"
+               :value="file_path"
+               extra="font-mono text-sm"
+               oninput="window.updateApproveState && window.updateApproveState()" />
+    {# Browse opens the OS file picker and writes the chosen path back into
+       the field above. Placed below the input and left-aligned (rather
+       than to its right) so it does not stack in the same column as the
+       right-aligned Deny / Approve buttons. Hidden unless the Electron
+       native-picker bridge is present; in a plain browser the user pastes
+       a path into the field above. #}
+    <div class="mt-2">
       <Button id="file-sharing-browse-btn"
               variant="secondary"
-              extra="shrink-0 hidden"
+              extra="hidden"
               onclick="window.browseForSharePath && window.browseForSharePath()">Browse…</Button>
     </div>
     {# Hidden checked input named ``permissions`` so the base dialog's
