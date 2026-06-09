@@ -436,15 +436,4 @@ jobs:
         # `--timeout` per-test default match the test's own
         # `@pytest.mark.timeout(900)`, so the suite budget cannot kill
         # the pytest run before the per-test marker fires.
-        #
-        # `MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME=runc` forces the stock
-        # Docker runtime for the local-docker workspace the test creates.
-        # The e2e runner clones forever-claude-template `main` at runtime
-        # and `mngr create` honors FCT's `[providers.docker] docker_runtime
-        # = "runsc"` (gVisor) hardening. This `ubuntu-latest` runner has no
-        # `runsc` registered with its Docker daemon, so without this override
-        # `docker run --runtime runsc` fails with "unknown or invalid runtime
-        # name: runsc" (exit 125), the agent page never loads, and the test
-        # times out. The config docstring calls out this env var as the
-        # intended escape hatch for environments where gVisor is unavailable.
-        run: xvfb-run -a env PYTEST_MAX_DURATION_SECONDS=900 MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME=runc uv run pytest -n 0 --timeout 900 --no-cov --cov-fail-under=0 -v --tb=short -m 'minds_electron and not release'
+        run: xvfb-run -a env PYTEST_MAX_DURATION_SECONDS=900 uv run pytest -n 0 --timeout 900 --no-cov --cov-fail-under=0 -v --tb=short -m 'minds_electron and not release'

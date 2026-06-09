@@ -25,11 +25,13 @@ from pydantic import PrivateAttr
 from pyinfra.api import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.errors import ProcessTimeoutError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import DockerBuildTimeoutError
+from imbue.mngr.errors import DockerRuntimeNotRegisteredError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
@@ -129,6 +131,11 @@ HOST_VOLUME_MOUNT_PATH: Final[str] = STATE_VOLUME_MOUNT_PATH
 # SSH constants
 CONTAINER_SSH_PORT: Final[int] = 22
 SSH_CONNECT_TIMEOUT: Final[float] = 60
+
+# Substring of Docker's native error when `docker run --runtime <name>` names a
+# runtime the daemon has not registered (e.g. `runsc`/gVisor not installed).
+# Stable across Docker versions: "unknown or invalid runtime name: <name>".
+_UNKNOWN_RUNTIME_ERROR_MARKER: Final[str] = "unknown or invalid runtime name"
 
 
 # Minimum Docker Engine version that supports `--mount ... volume-subpath=...`.
@@ -852,10 +859,34 @@ kill -TERM 1
             start_args=start_args,
             volume_mount_args=volume_mount_args,
         )
-        result = self._run_docker_creation_command(cmd)
+        try:
+            result = self._run_docker_creation_command(cmd)
+        except ProcessError as e:
+            # When a non-default runtime is configured but not registered with the
+            # daemon, `docker run --runtime <name>` fails with Docker's native
+            # "unknown or invalid runtime name" error. Re-raise it as a typed,
+            # actionable error so callers (e.g. minds' create UI) surface a clean
+            # message instead of the raw `docker run` command dump.
+            runtime_error = self._runtime_not_registered_error_or_none(e)
+            if runtime_error is not None:
+                raise runtime_error from e
+            raise
 
         container_id = result.stdout.strip()
         return self._docker_client.containers.get(container_id)
+
+    def _runtime_not_registered_error_or_none(self, error: ProcessError) -> DockerRuntimeNotRegisteredError | None:
+        """Map a `docker run` `ProcessError` to a typed runtime error, when applicable.
+
+        Returns a :class:`DockerRuntimeNotRegisteredError` when a non-default
+        `docker_runtime` is configured and the failure output carries Docker's
+        "unknown or invalid runtime name" marker; otherwise ``None`` so the
+        caller re-raises the original `ProcessError` unchanged.
+        """
+        runtime = self.config.docker_runtime
+        if runtime is not None and _UNKNOWN_RUNTIME_ERROR_MARKER in (error.stdout + error.stderr):
+            return DockerRuntimeNotRegisteredError(self.name, runtime)
+        return None
 
     # =========================================================================
     # Container Discovery Helpers
