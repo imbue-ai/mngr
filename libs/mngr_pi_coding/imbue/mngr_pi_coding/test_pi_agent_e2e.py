@@ -211,11 +211,14 @@ def test_pi_agent_full_lifecycle(tmp_path: Path, subprocess_env: dict[str, str])
             error_message="active marker never appeared (RUNNING) after sending a message",
         )
 
-        # 4. Wait for the reply, then the marker must clear (WAITING).
-        _wait_for_text_in_pane(session_name, "ACK", env=env, timeout=float(_RESPONSE_TIMEOUT_SECONDS))
+        # 4. The turn completing is signalled by the marker clearing (WAITING) --
+        #    a real turn-completion gate, unlike matching a pane string (the
+        #    prompt is echoed into the pane, so any reply token we asked for would
+        #    match immediately). The assistant's actual reply is asserted via the
+        #    transcript below and the secret recall in step 8.
         wait_for(
             lambda: not _marker_path(env).exists(),
-            timeout=60.0,
+            timeout=float(_RESPONSE_TIMEOUT_SECONDS),
             poll_interval=0.5,
             error_message="active marker never cleared (WAITING) after the turn finished",
         )

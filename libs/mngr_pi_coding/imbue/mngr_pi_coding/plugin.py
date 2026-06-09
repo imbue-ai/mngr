@@ -13,11 +13,12 @@ from pydantic import Field
 from imbue.imbue_common.logging import log_span
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
-from imbue.mngr.agents.tui_utils import send_enter_best_effort
+from imbue.mngr.agents.tui_utils import send_enter_keystroke
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import PluginMngrError
+from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
@@ -58,6 +59,14 @@ _SESSION_FILE_NAME: str = "pi_session_file"
 # TUI-ready budget in ``tui_utils`` -- startup can be slow on remote hosts that
 # must render the TUI before the session loads.
 _READY_TIMEOUT_SECONDS: float = 30.0
+
+# Message submission: send Enter, then wait this long for the ``active`` marker
+# (the turn starting) before re-sending. pi occasionally swallows the first
+# Enter after a paste; retrying makes submission reliable. The marker appears
+# within a beat of a real submit, so a swallowed Enter is the only thing that
+# burns an attempt.
+_SUBMIT_MAX_ATTEMPTS: int = 4
+_SUBMIT_PER_ATTEMPT_TIMEOUT_SECONDS: float = 4.0
 
 
 def _load_resource(filename: str) -> str:
@@ -208,11 +217,36 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig], HasCommonTranscrip
         return {}
 
     def _send_enter_and_validate(self, tmux_target: TmuxWindowTarget) -> None:
-        # Pi has no UserPromptSubmit hook and no input-row placeholder that
-        # disappears during typing, so submission can't be confirmed
-        # post-Enter. The earlier paste-visibility check is what gives us
-        # confidence the message landed.
-        send_enter_best_effort(self, tmux_target)
+        """Submit the pasted message, confirming via the turn actually starting.
+
+        pi exposes no submission hook and no reliable input-cleared placeholder,
+        and a single Enter sent right after a paste is sometimes swallowed by the
+        TUI -- most often on the first message of a fresh session, before the
+        editor has fully absorbed the paste. The dependable signal that the
+        message submitted is the lifecycle extension's ``active`` marker: pi fires
+        ``agent_start`` (and the extension writes the marker) only once it begins
+        processing the turn. So send Enter and poll for the marker, re-sending
+        Enter if the turn has not started yet.
+
+        If the marker is already present (a steering message to an agent that is
+        already mid-turn), the first poll returns immediately -- we cannot use the
+        marker to confirm that case, so the single Enter is best-effort, matching
+        the prior behavior.
+        """
+        marker_path = self._get_agent_dir() / "active"
+        for _attempt in range(_SUBMIT_MAX_ATTEMPTS):
+            send_enter_keystroke(self, tmux_target)
+            if poll_until(
+                lambda: self._check_file_exists(marker_path),
+                timeout=_SUBMIT_PER_ATTEMPT_TIMEOUT_SECONDS,
+                poll_interval=0.3,
+            ):
+                return
+        raise SendMessageError(
+            str(self.name),
+            f"pi did not start a turn after {_SUBMIT_MAX_ATTEMPTS} Enter attempts "
+            f"({_SUBMIT_MAX_ATTEMPTS * _SUBMIT_PER_ATTEMPT_TIMEOUT_SECONDS:.0f}s); the message may not have submitted",
+        )
 
     def get_pi_config_dir(self) -> Path:
         """Return the per-agent pi config directory path.
