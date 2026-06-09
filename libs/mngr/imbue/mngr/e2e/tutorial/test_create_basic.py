@@ -169,7 +169,6 @@ def test_create_short_forms(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 def test_create_codex_agent(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can also specify a different agent (ex: codex)

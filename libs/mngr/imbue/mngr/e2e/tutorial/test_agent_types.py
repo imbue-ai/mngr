@@ -102,7 +102,6 @@ def test_plugin_list_active_to_see_types(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 def test_create_codex_positional(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # you can specify the agent type as the second positional argument to create:
