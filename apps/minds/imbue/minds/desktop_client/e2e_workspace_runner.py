@@ -661,8 +661,9 @@ def create_workspace_via_electron(
                 # screen; confirm each advance (retrying the click) to absorb
                 # the creating.js handler-attach race. The final (q3) Next runs
                 # finishQuestions(), which shows the loading screen or redirects
-                # straight to the workspace -- the wait_for_url below covers that
-                # transition, and by q3 creating.js has long since loaded.
+                # straight to the workspace -- the workspace-ready-or-failure wait
+                # below covers that transition (and the failure case), and by q3
+                # creating.js has long since loaded.
                 _advance_onboarding_screen(page, "q1")
                 _advance_onboarding_screen(page, "q2")
                 q3_next_button = '[data-screen="q3"] .js-next'
