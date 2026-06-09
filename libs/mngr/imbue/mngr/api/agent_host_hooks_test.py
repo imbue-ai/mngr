@@ -350,6 +350,11 @@ def test_provisioning_hooks_skipped_for_workdir_disabled_plugin(
     assert "on_agent_created" not in tracker.hook_log
     # A hook that runs before the work_dir block still fires.
     assert "on_agent_state_dir_created" in tracker.hook_log
+    # The work_dir block is scoped to the create and restored afterward, so it
+    # does not leak onto a later create in the same process: the plugin is no
+    # longer blocked and the original plugin object is re-registered.
+    assert not ctx.pm.is_blocked(plugin_name)
+    assert ctx.pm.get_plugin(plugin_name) is tracker
 
 
 # --- Destroy flow tests ---

@@ -7,6 +7,7 @@ from typing import Any
 from typing import Final
 from typing import cast
 
+import pluggy
 from loguru import logger
 
 from imbue.concurrency_group.errors import ProcessError
@@ -17,8 +18,9 @@ from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.config.loader import block_disabled_plugins
 from imbue.mngr.config.pre_readers import disabled_plugins_from_raw_layers
+from imbue.mngr.config.pre_readers import get_local_config_path
+from imbue.mngr.config.pre_readers import get_project_config_path
 from imbue.mngr.errors import DuplicateAgentNameError
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
@@ -185,9 +187,18 @@ def _read_work_dir_disabled_plugins(host: OnlineHostInterface, work_dir: Path) -
     provisioning hooks.
 
     Reads through the ``host`` interface so it works for local and remote
-    work_dirs alike. Best-effort: a missing or unparseable layer is skipped (the
-    agent's own runtime config load remains the authoritative validator), and a
-    work_dir outside any git repo yields an empty set.
+    work_dirs alike. We resolve the project config dir as ``<git-root>/.<root_name>``
+    -- the agent's own committed config -- and deliberately do NOT consult
+    ``MNGR_PROJECT_CONFIG_DIR``: that env var is an *invocation-context* override
+    (the very thing this is correcting for), whereas we want the work_dir's own
+    config. This also intentionally bypasses ``read_config_layers`` (and its
+    ``enforce_pytest_config_opt_in`` guard): that guard exists to stop tests from
+    *driving real operations* off a real config, but here we only extract the
+    disabled-plugin set to make provisioning more conservative, and -- unlike the
+    local-only ``read_config_layers`` -- this must read remote work_dirs through
+    the host. Best-effort: a missing or unparseable layer is skipped (the agent's
+    own runtime config load remains the authoritative validator), and a work_dir
+    outside any git repo yields an empty set.
     """
     root_name = os.environ.get("MNGR_ROOT_NAME", "mngr")
     git_root_result = host.execute_idempotent_command(
@@ -198,8 +209,7 @@ def _read_work_dir_disabled_plugins(host: OnlineHostInterface, work_dir: Path) -
     config_dir = Path(git_root_result.stdout.strip()) / f".{root_name}"
     # project then local, so the higher-precedence local layer overrides project.
     raw_layers: list[dict[str, Any]] = []
-    for filename in ("settings.toml", "settings.local.toml"):
-        config_path = config_dir / filename
+    for config_path in (get_project_config_path(config_dir), get_local_config_path(config_dir)):
         if not host.path_exists(config_path):
             continue
         try:
@@ -209,6 +219,37 @@ def _read_work_dir_disabled_plugins(host: OnlineHostInterface, work_dir: Path) -
                 "Skipping unparseable work_dir config {} when resolving plugin enablement: {}", config_path, e
             )
     return disabled_plugins_from_raw_layers(raw_layers)
+
+
+@contextmanager
+def _work_dir_disabled_plugins_blocked(pm: pluggy.PluginManager, work_dir_disabled: frozenset[str]) -> Iterator[None]:
+    """Block the agent's work_dir-disabled plugins for the provisioning window, then restore.
+
+    Provisioning lifecycle hooks fire through the plugin manager, which gates them
+    on its blocked-set; we block the plugins the agent's work_dir disables so their
+    hooks don't fire (and their runtime artifacts don't get installed). But the
+    plugin manager is a process-global singleton and ``create()`` may run many
+    times per process (e.g. mngr_mapreduce, the robinhood Agent SDK), so a
+    permanent block would leak one agent's work_dir config onto the next agent's
+    create. We therefore restore the manager afterward -- re-registering any plugin
+    we unregistered -- using only pluggy's public block/unblock API. Plugins
+    already blocked (e.g. disabled at startup) are left untouched; we only add
+    blocks for the duration here, so a plugin the work_dir *enables* but the
+    startup context disabled is not re-enabled (the rarer converse case).
+    """
+    restored: list[tuple[str, object | None]] = []
+    for name in work_dir_disabled:
+        if pm.is_blocked(name):
+            continue
+        restored.append((name, pm.get_plugin(name)))
+        pm.set_blocked(name)
+    try:
+        yield
+    finally:
+        for name, plugin in restored:
+            pm.unblock(name)
+            if plugin is not None:
+                pm.register(plugin, name=name)
 
 
 @log_call
@@ -364,71 +405,70 @@ def create(
                         work_dir_path, agent_options, created_branch_name=created_branch_name
                     )
 
-                # Only fire provisioning hooks for plugins enabled in the config
-                # that will actually govern this agent at runtime -- its work_dir's
-                # project config -- not merely the config of the cwd `mngr create`
-                # ran from. Plugin enablement is enforced by blocking disabled
-                # plugins on the plugin manager, but that blocked-set is built once
-                # from the invocation cwd; without this, an agent whose work_dir
-                # disables a plugin can still get that plugin's provisioning side
-                # effects installed and then break at runtime (the work_dir config
-                # blocks the plugin). block_disabled_plugins only *adds* blocks, so
-                # this suppresses a plugin the work_dir disables but cannot re-enable
-                # one already disabled at startup (the rarer converse case).
-                block_disabled_plugins(mngr_ctx.pm, _read_work_dir_disabled_plugins(host, work_dir_path))
+                # Only fire provisioning/lifecycle hooks for plugins enabled in the
+                # config that will actually govern this agent at runtime -- its
+                # work_dir's project config -- not merely the config of the cwd
+                # `mngr create` ran from. Hook firing is gated by the plugin
+                # manager's blocked-set, which is built once from the invocation
+                # cwd; without this, an agent whose work_dir disables a plugin can
+                # still get that plugin's provisioning side effects installed and
+                # then break at runtime (the work_dir config blocks the plugin). The
+                # block is scoped to this create and restored afterward so it cannot
+                # leak onto a later create in the same process.
+                work_dir_disabled = _read_work_dir_disabled_plugins(host, work_dir_path)
+                with _work_dir_disabled_plugins_blocked(mngr_ctx.pm, work_dir_disabled):
+                    # Run provisioning for the agent (hooks, dependency installation, etc.)
+                    with log_span("Calling on_before_provisioning hooks"):
+                        mngr_ctx.pm.hook.on_before_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)
+                    with log_span("Provisioning agent {}", agent.name):
+                        host.provision_agent(agent, agent_options, mngr_ctx)
+                    with log_span("Calling on_after_provisioning hooks"):
+                        mngr_ctx.pm.hook.on_after_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)
 
-                # Run provisioning for the agent (hooks, dependency installation, etc.)
-                with log_span("Calling on_before_provisioning hooks"):
-                    mngr_ctx.pm.hook.on_before_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)
-                with log_span("Provisioning agent {}", agent.name):
-                    host.provision_agent(agent, agent_options, mngr_ctx)
-                with log_span("Calling on_after_provisioning hooks"):
-                    mngr_ctx.pm.hook.on_after_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)
+                    # Deliver the initial message (if any) and start the agent.
+                    #
+                    # Interactive agents do the ready-signal dance and send the message
+                    # via the tmux pane after the agent is up. Headless agents cannot
+                    # receive messages that way: they communicate via stdout/stdin
+                    # pipes, so wait_for_ready_signal / send_message both raise. For
+                    # those we stage the message on disk first (the agent's command
+                    # cats the file at startup) and then just start the process.
+                    initial_message = agent.get_initial_message()
+                    if isinstance(agent, StreamingHeadlessAgentMixin):
+                        if initial_message is not None:
+                            agent.stage_initial_message(initial_message)
+                        logger.info("Starting agent {} ...", agent.name)
+                        host.start_agents([agent.id])
+                    elif initial_message is not None:
+                        # Start agent with signal-based readiness detection
+                        # Raises AgentStartError if the agent doesn't signal readiness in time
+                        logger.info("Starting agent {} ...", agent.name)
+                        timeout = (
+                            agent_options.ready_timeout_seconds
+                            if agent_options.ready_timeout_seconds is not None
+                            else mngr_ctx.config.agent_ready_timeout
+                        )
+                        agent.wait_for_ready_signal(
+                            is_creating=True,
+                            start_action=lambda: host.start_agents([agent.id]),
+                            timeout=timeout,
+                        )
+                        logger.info("Sending initial message...")
+                        agent.send_message(initial_message)
+                    else:
+                        # No initial message - just start the agent
+                        logger.info("Starting agent {} ...", agent.name)
+                        host.start_agents([agent.id])
 
-                # Deliver the initial message (if any) and start the agent.
-                #
-                # Interactive agents do the ready-signal dance and send the message
-                # via the tmux pane after the agent is up. Headless agents cannot
-                # receive messages that way: they communicate via stdout/stdin
-                # pipes, so wait_for_ready_signal / send_message both raise. For
-                # those we stage the message on disk first (the agent's command
-                # cats the file at startup) and then just start the process.
-                initial_message = agent.get_initial_message()
-                if isinstance(agent, StreamingHeadlessAgentMixin):
-                    if initial_message is not None:
-                        agent.stage_initial_message(initial_message)
-                    logger.info("Starting agent {} ...", agent.name)
-                    host.start_agents([agent.id])
-                elif initial_message is not None:
-                    # Start agent with signal-based readiness detection
-                    # Raises AgentStartError if the agent doesn't signal readiness in time
-                    logger.info("Starting agent {} ...", agent.name)
-                    timeout = (
-                        agent_options.ready_timeout_seconds
-                        if agent_options.ready_timeout_seconds is not None
-                        else mngr_ctx.config.agent_ready_timeout
-                    )
-                    agent.wait_for_ready_signal(
-                        is_creating=True,
-                        start_action=lambda: host.start_agents([agent.id]),
-                        timeout=timeout,
-                    )
-                    logger.info("Sending initial message...")
-                    agent.send_message(initial_message)
-                else:
-                    # No initial message - just start the agent
-                    logger.info("Starting agent {} ...", agent.name)
-                    host.start_agents([agent.id])
+                    # Build and return the result
+                    result = CreateAgentResult(agent=agent, host=host)
 
-                # Build and return the result
-                result = CreateAgentResult(agent=agent, host=host)
+                    # Call on_agent_created hooks to notify plugins about the new agent
+                    with log_span("Calling on_agent_created hooks"):
+                        mngr_ctx.pm.hook.on_agent_created(agent=result.agent, host=result.host)
 
-                # Call on_agent_created hooks to notify plugins about the new agent
-                with log_span("Calling on_agent_created hooks"):
-                    mngr_ctx.pm.hook.on_agent_created(agent=result.agent, host=result.host)
-
-                # Emit discovery events for the host and newly created agent
-                emit_discovery_events_for_host(mngr_ctx.config, host)
+                    # Emit discovery events for the host and newly created agent
+                    emit_discovery_events_for_host(mngr_ctx.config, host)
                 is_success = True
             finally:
                 if not is_success and create_work_dir:

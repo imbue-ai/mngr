@@ -58,6 +58,19 @@ def fake_host(host_dir: Path) -> FakeHost:
     return FakeHost(host_dir)
 
 
+def test_plugin_name_is_stable_for_test_infra_literals() -> None:
+    """Guard the config-registry key against silent desync with core test infra.
+
+    mngr's core test infrastructure disables this plugin during tests by the
+    literal string ``"claude_subagent_proxy"`` (the in-process ``plugin_manager``
+    fixture and ``get_subprocess_test_env`` in ``libs/mngr``), deliberately NOT
+    importing this package to avoid inverting the layering. If this key is ever
+    renamed, those literals must be updated in lockstep; this assertion fails to
+    force that.
+    """
+    assert CLAUDE_SUBAGENT_PROXY_PLUGIN_NAME == "claude_subagent_proxy"
+
+
 def test_plugin_hooks_register_on_claude_agent(work_dir: Path, fake_host: FakeHost) -> None:
     """The plugin's provisioning hook wires up hooks and the proxy agent.
 
