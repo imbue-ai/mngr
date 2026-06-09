@@ -168,9 +168,12 @@ def test_config_set_unknown_key_fails(e2e: E2eSession) -> None:
     result = e2e.run("mngr config set totally_unknown_key value", comment="setting an unknown key is rejected")
     expect(result).to_fail()
     expect(result.stderr).to_contain("Unknown configuration fields")
-    # The rejected write must not be persisted: no settings file should exist.
+    # The rejected write must not be persisted. The e2e fixture pre-seeds the
+    # project settings file with the pytest opt-in key, so the file exists; assert
+    # the rejected key was never written into it rather than that the file is absent.
     settings = e2e.run("cat .$MNGR_ROOT_NAME/settings.toml", comment="verify the invalid value was not written")
-    expect(settings).to_fail()
+    expect(settings).to_succeed()
+    expect(settings.stdout).not_to_contain("totally_unknown_key")
 
 
 # Runs several mngr subprocesses (set plus read-backs), so it needs more than the
