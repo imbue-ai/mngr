@@ -2033,3 +2033,49 @@ class VpsDockerProvider(BaseProviderInstance):
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
             host_store = open_host_store(outer, host_record.config.volume_name)
             host_store.remove_persisted_agent_data(agent_id)
+
+
+class MinimalVpsDockerProvider(VpsDockerProvider):
+    """``VpsDockerProvider`` for use cases where VPS provisioning is externally managed.
+
+    Pairs with a ``vps_client`` whose provisioning calls raise (e.g.
+    ``ExternallyManagedVpsClient``): some other system (an imbue_cloud pool
+    lease, a hand-rolled provisioner, etc.) already created the VPS. This
+    provider only ever runs the post-provisioning host-setup machinery --
+    ``teardown_container_on_existing_vps`` and ``create_host_on_existing_vps``
+    -- which take a caller-supplied ``outer`` and make no cloud-API calls.
+
+    Build args here are just the docker-side knobs that flow through to
+    ``docker build`` on the leased VPS: there is no cloud provider to
+    select a region / plan / image for. The parser extracts ``--git-depth=N``
+    (still relevant -- it controls the *local* mngr build context, not the
+    VPS) and forwards everything else verbatim. The legacy shared
+    ``--vps-*`` prefix is rejected with a migration error so a caller that
+    still passes the old shape gets a clear pointer rather than having the
+    arg silently land in docker.
+    """
+
+    def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
+        git_depth: int | None = None
+        docker_build_args: list[str] = []
+        if build_args:
+            for arg in build_args:
+                if arg.startswith("--git-depth="):
+                    git_depth = int(arg.split("=", 1)[1])
+                elif arg.startswith("--vps-"):
+                    raise MngrError(
+                        f"{arg.split('=', 1)[0]} is no longer supported. Build args are now "
+                        "per-provider (--aws-*, --vultr-*, --ovh-*); for the externally-managed "
+                        "VPS path only docker build args and --git-depth= are accepted."
+                    )
+                else:
+                    docker_build_args.append(arg)
+        # ``region`` / ``plan`` are unused on the externally-managed path
+        # (callers pass them as explicit kwargs to ``create_host_on_existing_vps``),
+        # so the sentinels are harmless.
+        return ParsedVpsBuildOptions(
+            region="",
+            plan="",
+            git_depth=git_depth,
+            docker_build_args=tuple(docker_build_args),
+        )

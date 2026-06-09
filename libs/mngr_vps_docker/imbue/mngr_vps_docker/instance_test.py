@@ -20,6 +20,7 @@ from imbue.mngr_vps_docker.container_setup import is_retryable_rsync_error
 from imbue.mngr_vps_docker.container_setup import redact_secret_env
 from imbue.mngr_vps_docker.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps_docker.container_setup import resolve_dockerfile_paths
+from imbue.mngr_vps_docker.instance import MinimalVpsDockerProvider
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import _wait_for_cloud_init_marker
 from imbue.mngr_vps_docker.instance import build_vps_tags
@@ -154,6 +155,42 @@ def test_parse_build_args_aws_rejects_aws_plan() -> None:
             default_plan="t3.small",
             plan_arg_name="instance-type",
         )
+
+
+# =============================================================================
+# MinimalVpsDockerProvider._parse_build_args (no-provisioning, no-prefix shape)
+# =============================================================================
+
+
+def test_minimal_vps_docker_provider_parse_build_args_empty() -> None:
+    """No build args -> no git_depth, no docker args; region/plan defaults are unused sentinels."""
+    minimal = MinimalVpsDockerProvider.model_construct()
+    parsed = minimal._parse_build_args(None)
+    assert parsed.git_depth is None
+    assert parsed.docker_build_args == ()
+
+
+def test_minimal_vps_docker_provider_parse_build_args_extracts_git_depth() -> None:
+    """--git-depth=N is consumed and surfaced separately; not forwarded to docker."""
+    minimal = MinimalVpsDockerProvider.model_construct()
+    parsed = minimal._parse_build_args(["--git-depth=1", "--file=Dockerfile", "."])
+    assert parsed.git_depth == 1
+    assert parsed.docker_build_args == ("--file=Dockerfile", ".")
+
+
+def test_minimal_vps_docker_provider_parse_build_args_passes_through_unknown() -> None:
+    """Docker flags and positional args pass through verbatim."""
+    minimal = MinimalVpsDockerProvider.model_construct()
+    parsed = minimal._parse_build_args(["--build-arg=FOO=bar", "--no-cache", "."])
+    assert parsed.git_depth is None
+    assert parsed.docker_build_args == ("--build-arg=FOO=bar", "--no-cache", ".")
+
+
+def test_minimal_vps_docker_provider_parse_build_args_rejects_dropped_vps_prefix() -> None:
+    """A caller still using --vps-* gets a clear migration error rather than silently forwarding to docker."""
+    minimal = MinimalVpsDockerProvider.model_construct()
+    with pytest.raises(MngrError, match="no longer supported"):
+        minimal._parse_build_args(["--vps-region=ewr"])
 
 
 def test_remove_host_from_known_hosts_port_22(tmp_path: Path) -> None:

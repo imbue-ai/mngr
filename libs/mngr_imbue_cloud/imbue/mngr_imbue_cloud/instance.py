@@ -115,7 +115,7 @@ from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.session_store import ImbueCloudSessionStore
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 from imbue.mngr_vps_docker.host_setup import apply_host_setup_on_outer
-from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
+from imbue.mngr_vps_docker.instance import MinimalVpsDockerProvider
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.vps_client import ExternallyManagedVpsClient
@@ -398,43 +398,6 @@ def _build_delegated_vps_config(config: ImbueCloudProviderConfig) -> VpsDockerPr
         install_gvisor_runtime=config.install_gvisor_runtime,
         default_start_args=config.default_start_args,
     )
-
-
-class _DelegatedVpsDockerProvider(VpsDockerProvider):
-    """Delegated vps_docker provider for the imbue_cloud slow-path container rebuild.
-
-    The slow path leases a pool VPS that's already provisioned by imbue_cloud,
-    tears down its baked container, and rebuilds the container via the shared
-    ``create_host_on_existing_vps`` setup path. The lease handles VPS-level
-    provisioning (region, plan, image), so the delegated provider only ever
-    receives ``passthrough_build_args`` from ``parse_imbue_cloud_build_args``:
-    docker build args and an optional ``--git-depth=N`` knob.
-
-    The base ``VpsDockerProvider._parse_build_args`` raises by design (each
-    concrete provider must bind its own ``--<provider>-*`` prefix). This
-    subclass supplies the no-provider-prefix override: extract
-    ``--git-depth=N``, forward everything else verbatim to docker. ``region``
-    and ``plan`` in the returned options are unused on this code path --
-    ``create_host_on_existing_vps`` reads them from its explicit ``region`` /
-    ``plan`` parameters (which the slow path sets to the
-    ``"imbue-cloud-pool"`` sentinel).
-    """
-
-    def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
-        git_depth: int | None = None
-        docker_build_args: list[str] = []
-        if build_args:
-            for arg in build_args:
-                if arg.startswith("--git-depth="):
-                    git_depth = int(arg.split("=", 1)[1])
-                else:
-                    docker_build_args.append(arg)
-        return ParsedVpsBuildOptions(
-            region="",
-            plan="",
-            git_depth=git_depth,
-            docker_build_args=tuple(docker_build_args),
-        )
 
 
 class ImbueCloudProvider(BaseProviderInstance):
@@ -1463,7 +1426,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         block.
         """
         vps_config = _build_delegated_vps_config(self.config)
-        return _DelegatedVpsDockerProvider(
+        return MinimalVpsDockerProvider(
             name=self.name,
             host_dir=self.config.host_dir,
             mngr_ctx=self.mngr_ctx,
