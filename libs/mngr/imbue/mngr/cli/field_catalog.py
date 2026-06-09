@@ -165,8 +165,8 @@ def _is_discriminator_annotation(annotation: Any) -> bool:
     A one-value ``Literal`` (e.g. ``Literal["agent"]``) can only ever hold that
     one constant, so it is a model serialization discriminator rather than a
     user-referenceable field -- filtering, sorting, or formatting on it is
-    meaningless. Multi-arm Literals (``Literal["a", "b"]``) are genuine
-    enumerations of user-facing values and are *not* treated as discriminators.
+    meaningless. Literals with more than one arm are genuine enumerations of
+    user-facing values and are *not* treated as discriminators.
     """
     return typing.get_origin(annotation) is typing.Literal and len(typing.get_args(annotation)) == 1
 
