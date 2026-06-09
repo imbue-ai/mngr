@@ -888,6 +888,26 @@ def test_tui_ready_indicator_is_claude_code(
     assert agent.get_tui_ready_indicator() == "Claude Code"
 
 
+def test_build_accept_marker_command_reads_enqueue_timestamp_from_transcript_log(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """The acceptance-marker probe encodes Claude's enqueue-event transcript schema.
+
+    This is the agent-specific knowledge that ``tui_utils`` deliberately does not
+    hold: a probe that reads the transcript event log, selects the latest
+    ``enqueue`` event, and prints its timestamp. ``send_enter_via_tmux_wait_for_hook``
+    treats the returned string as an opaque monotonic token.
+    """
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    command = agent._build_accept_marker_command()
+    # Reads the transcript event log...
+    assert "logs/claude_transcript/events.jsonl" in command
+    # ...selects the enqueue events...
+    assert '"operation":"enqueue"' in command.replace("\\", "")
+    # ...and extracts the (monotonic) ISO-8601 timestamp.
+    assert "jq -r .timestamp" in command
+
+
 def test_preflight_check_raises_when_not_gitignored(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:

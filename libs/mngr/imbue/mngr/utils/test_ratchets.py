@@ -264,7 +264,7 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 #
 # Baseline 2 accounts for two `tmux send-keys -t "$N"` occurrences in
 # agents/tui_utils.py -- one in the signal-only submission command and one in
-# the signal-or-enqueue command. In both, the positional ($1 / $2) is bound
+# the signal-or-marker command. In both, the positional ($1 / $2) is bound
 # from `tmux_target.as_shell_arg()` at the shell-arg boundary -- variable
 # indirection the regex can't see through; safe in practice because the value
 # already includes the exact-match `=` prefix.
