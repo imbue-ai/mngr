@@ -542,30 +542,39 @@ scripts get their own `*_test.py`. pyproject sets `--cov`, `fail_under = 95`, py
 
 ## Recommended bring-up sequence
 
-This is the order `mngr_antigravity` was built in (PR numbers in parens). Each stage built
-on the last; replicating it for a new CLI is a sane default.
+A suggested order, by what each milestone depends on. The ordering is driven by
+dependencies, not preference: you can't gate the lifecycle marker correctly until the agent
+runs, can't do subagent-aware gating until both the marker and conversation tracking exist,
+and so on.
 
-1. **Agent type + launch + readiness + transcript + trust/workspace** (#1719). The
-   baseline: register the type, get `assemble_command` right (HOME/workspace handling),
-   pick the TUI ready indicator, stream the raw + common transcript, dismiss the trust
-   dialog. At this stage the agent works but has no `active` marker (always WAITING).
-2. **Lifecycle marker** (#1815). Wire pre-invocation/stop hooks to maintain `active` so the
-   agent reports RUNNING/WAITING. Verify the CLI's hooks actually *execute* (antigravity
-   discovered an earlier "hooks don't run" belief was obsolete).
-3. **Conversation resume** (#1854). Capture conversation ids from hooks; append a resume
-   flag in `assemble_command`.
-4. **Per-agent isolation** (#1889). The biggest step: relocate config-dir/`$HOME`, shared
-   but overridable auth, per-agent permissions + model, trust split into durable-global vs
-   transient-per-agent. Resolve host paths over the host shell for remote correctness.
-5. **Subagent-aware idle gating** (#1931). Track the root conversation; clear `active` only
-   on the root's fully-idle stop. This closes the "parent goes idle while subagent works"
-   gap.
-6. **Correctness fixes** (#1927 shell-quoting, #2022 enterprise onboarding). Point fixes
-   layered on top.
+1. **Baseline: it runs and you can read it.** Register the agent type and config; get
+   `assemble_command` right (workspace handling, backgrounded helpers); pick the readiness
+   signal (sentinel if the CLI has one, else a TUI banner string); stream the raw + common
+   transcript; handle the trust/onboarding gate so the first message isn't intercepted. At
+   this point the agent works end-to-end but has no `active` marker, so it always reports
+   WAITING.
+2. **Lifecycle marker.** Wire the CLI's pre-invocation/stop (or equivalent) events to
+   maintain `active`, so the agent reports RUNNING vs WAITING. First confirm the CLI's hooks
+   actually *execute* (not just load).
+3. **Conversation resume.** Capture the conversation/session id and append a resume flag in
+   `assemble_command` so stop/start keeps context.
+4. **Per-agent isolation.** Usually the biggest step: a per-agent config dir (or, only if
+   the CLI forces it, a relocated `$HOME`), shared-but-overridable auth, per-agent
+   permissions + model, and trust split into durable-global vs transient-per-agent. Resolve
+   host paths over the host shell so it works remotely.
+5. **Subagent-aware idle gating.** Once both the marker (step 2) and conversation tracking
+   (step 3) exist, make the marker robust to subagents/nested invocations -- whatever shape
+   that takes for your CLI (see [dimension D](#d-subagent-aware-idle-gating-the-crux)). This
+   closes the "parent goes idle while a child still works" failure mode.
 
-Then the claude-only features not yet ported anywhere: **session preservation on destroy**,
-**deploy/scheduling contributions**, **field generators (waiting_reason)**, and the
-**streaming snapshot** -- in roughly that priority order.
+Then the claude features no port has matched yet, in roughly descending value: **session
+preservation on destroy**, **deploy/scheduling contributions**, **field generators
+(waiting_reason)**, and the **streaming snapshot**.
+
+Correctness hardening (shell-quoting of args, onboarding edge cases, etc.) is continuous,
+not a milestone -- expect it throughout. For a concrete worked example of this whole
+sequence, `mngr_antigravity` went through it stage by stage; its `UNABRIDGED_CHANGELOG.md`
+walks each step in order.
 
 ### Known open gaps (carried by antigravity, and by definition by every newer port)
 
