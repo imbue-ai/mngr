@@ -333,7 +333,6 @@ def clone_git_repo(
     *,
     branch: GitBranch | None = None,
     parent_cg: ConcurrencyGroup | None = None,
-    reference_repo: Path | None = None,
 ) -> None:
     """Clone a git repository into the specified directory.
 
@@ -347,10 +346,6 @@ def clone_git_repo(
     bare repo, and git rejects pushes from a shallow source with "shallow update
     not allowed" (the pushed tip's parent is missing from the pack).
 
-    When ``reference_repo`` points at a local pre-fetched clone of the same repo
-    (e.g. the first-launch FCT prefetch), ``--reference-if-able`` reuses its
-    objects so the network fetch shrinks to the delta from the prefetch point.
-
     Raises GitCloneError if the clone fails (including when ``branch`` does not
     exist on the remote).
     """
@@ -358,8 +353,6 @@ def clone_git_repo(
     command = ["git", "clone"]
     if branch is not None:
         command.extend(["--single-branch", "--branch", str(branch)])
-    if reference_repo is not None and (reference_repo / ".git").is_dir():
-        command.extend(["--reference-if-able", str(reference_repo)])
     command.extend([str(git_url), str(clone_dir)])
 
     # Wrap the caller's on_output so git's per-line stdout/stderr is scrubbed
@@ -1318,18 +1311,12 @@ class AgentCreator(MutableModel):
                     # checkout below is then a no-op for this path, but still
                     # does the work when the source is a pre-existing local
                     # directory.
-                    # When the first-launch prefetch left a warm copy of FCT
-                    # under ``data_dir/template-cache/forever-claude-template``,
-                    # pass it as ``--reference-if-able`` so we reuse those
-                    # objects and the network fetch shrinks to the delta.
-                    ref_repo = self.paths.data_dir / "template-cache" / "forever-claude-template"
                     clone_git_repo(
                         GitUrl(repo_source),
                         clone_target,
                         on_output=emit_log,
                         branch=GitBranch(branch) if branch else None,
                         parent_cg=self.root_concurrency_group,
-                        reference_repo=ref_repo,
                     )
                     workspace_dir = clone_target
 

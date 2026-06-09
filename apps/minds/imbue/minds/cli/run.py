@@ -356,14 +356,6 @@ def run(
     # allowed-agent list.
     LatchkeyAutoRegister(backend_resolver=backend_resolver, latchkey=latchkey).start()
 
-    # Kick off slow first-create asset prefetch (Ubuntu cloudimg,
-    # FCT clone) in the background. Idempotent: existing-and-valid
-    # caches are skipped. Failures are logged and never block startup;
-    # the lazy fallback at create-agent time keeps working.
-    from imbue.minds.desktop_client.first_launch_prefetch import start_first_launch_prefetch
-
-    start_first_launch_prefetch(paths.data_dir, root_concurrency_group)
-
     # Emit the started event so Electron can pre-set the cookie before the
     # first navigation. ``minds run`` itself does not open the browser at
     # the agent subdomain — it opens the minds bare-origin URL.
