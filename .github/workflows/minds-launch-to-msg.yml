@@ -112,29 +112,35 @@ jobs:
         env:
           TARGET_SHA: ${{ steps.sha.outputs.full_sha }}
         run: |
+          set -o pipefail
           # ToDesktop returns versionControlInfo.commitId on each build via
-          # `todesktop builds --format json`. If a clean ready build exists
-          # for this SHA we can skip the 15+ min build by reusing its
-          # arm64 .zip URL.
+          # `todesktop builds --format json`. If a clean succeeded build
+          # exists for this SHA we skip the 15+ min pnpm dist by reusing
+          # its arm64 .zip URL.
           mkdir -p resources  # todesktop config validation requires extraResources dir
-          pnpm exec todesktop builds --format json --count 30 --exit > /tmp/td-builds.json 2>&1 || true
-          URL=$(python3 -c '
+          # The CLI emits ANSI cursor-control escapes (`\x1b[2K\x1b[1A...`)
+          # to stdout *before* the JSON payload, so a naive redirect
+          # corrupts the file and the Python matcher used to silently
+          # fall through to "no match" -- causing every retry to redo
+          # the 15+ min build. Strip ANSI before writing. Stderr (CLI
+          # version-out-of-date banner) is routed to a separate file.
+          pnpm exec todesktop builds --format json --count 30 --exit 2>/tmp/td-builds.err \
+            | perl -pe 's/\x1b\[[0-9;]*[a-zA-Z]//g' > /tmp/td-builds.json
+          # Python emits the diagnostics + the chosen <url>\t<build_id> pair
+          # to stdout in a single deterministic format the shell parses below.
+          MATCH=$(python3 -c '
           import json, os, sys
-          try:
-              builds = json.load(open("/tmp/td-builds.json"))
-          except Exception:
-              sys.exit(0)
+          builds = json.load(open("/tmp/td-builds.json"))
           if not isinstance(builds, list):
-              sys.exit(0)
+              print(f"FATAL: unexpected response shape: {type(builds).__name__}", file=sys.stderr)
+              sys.exit(1)
           target = os.environ["TARGET_SHA"]
-          for b in builds:
+          sha_hits = [b for b in builds if (b.get("versionControlInfo") or {}).get("commitId") == target]
+          print(f"scanned {len(builds)} builds; {len(sha_hits)} match {target[:10]}", file=sys.stderr)
+          for b in sha_hits:
               vci = b.get("versionControlInfo") or {}
-              if vci.get("commitId") != target:                continue
-              if vci.get("hasUncommittedChanges"):              continue
-              # ToDesktop CLI v1.x reports completed Mac builds as
-              # status="succeeded". Older docs / some CLI versions used
-              # "ready"; accept both for forward compatibility.
-              if b.get("status") not in ("succeeded", "ready"):  continue
+              status = b.get("status")
+              dirty = vci.get("hasUncommittedChanges")
               # The arm64 .zip URL lives under mac.artifactDownloads.zip.arm64.url
               # in current ToDesktop responses. (Earlier CLI versions exposed
               # mac.zip.arm64.url directly; check both layouts.)
@@ -142,23 +148,26 @@ jobs:
               zip_node = (mac.get("artifactDownloads") or {}).get("zip") or mac.get("zip") or {}
               arm = zip_node.get("arm64") if isinstance(zip_node, dict) else None
               url = arm.get("url") if isinstance(arm, dict) else None
-              if url:
-                  # Prefer the build id from standardUniversalDownloadUrl
-                  # ("https://.../builds/<id>") -- it is the human-readable id
-                  # the dashboard shows; the bare "id" field is a UUID.
-                  bid = (b.get("standardUniversalDownloadUrl") or "").rstrip("/").split("/")[-1] or b.get("id", "")
-                  print(url)
-                  print(bid, file=sys.stderr)
-                  sys.exit(0)
-          ' 2> /tmp/td-existing-build-id.txt || true)
-          if [[ -n "$URL" ]]; then
-            BID=$(cat /tmp/td-existing-build-id.txt | tr -d '[:space:]')
+              # Prefer the build id from standardUniversalDownloadUrl
+              # ("https://.../builds/<id>") -- it is the human-readable id
+              # the dashboard shows; the bare "id" field is a UUID.
+              bid = (b.get("standardUniversalDownloadUrl") or "").rstrip("/").split("/")[-1] or b.get("id", "")
+              print(f"  candidate {bid}: status={status} dirty={dirty} arm64.url={bool(url)}", file=sys.stderr)
+              if status not in ("succeeded", "ready"): continue
+              if dirty:                                 continue
+              if not url:                               continue
+              print(f"{url}\t{bid}")
+              sys.exit(0)
+          ')
+          if [[ -n "$MATCH" ]]; then
+            URL="${MATCH%%$'\t'*}"
+            BID="${MATCH##*$'\t'}"
             echo "url=$URL"      >> "$GITHUB_OUTPUT"
             echo "build_id=$BID" >> "$GITHUB_OUTPUT"
             echo "Reusing existing build $BID for commit $TARGET_SHA"
             echo "  -> $URL"
           else
-            echo "No existing build matches $TARGET_SHA; will build fresh."
+            echo "No reusable build matches $TARGET_SHA; will build fresh."
           fi
       - name: pnpm dist (build + upload to ToDesktop)
         id: dist
