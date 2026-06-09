@@ -54,9 +54,9 @@ _SESSION_STARTED_SENTINEL_NAME: str = "pi_session_started"
 # in sync with ``SESSION_FILE_NAME`` in mngr_pi_lifecycle.ts.
 _SESSION_FILE_NAME: str = "pi_session_file"
 
-# How long to wait for the readiness sentinel (or the TUI banner fallback) at
-# create time. Matches the TUI-ready budget in ``tui_utils`` -- startup can be
-# slow on remote hosts that must render the TUI before the session loads.
+# How long to wait for the readiness sentinel at create time. Matches the
+# TUI-ready budget in ``tui_utils`` -- startup can be slow on remote hosts that
+# must render the TUI before the session loads.
 _READY_TIMEOUT_SECONDS: float = 30.0
 
 
