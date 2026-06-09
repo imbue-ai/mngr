@@ -90,11 +90,6 @@
       document.documentElement.style.setProperty('--workspace-accent', c);
       swatch.classList.remove('hidden');
     });
-    // The Electron sidebar's renderWorkspaces decides per-row "is-current"
-    // styling and the bonus settings icon from this same agent id, but
-    // browser-mode does its own render here; rerender to pick up the
-    // selected-row affordances when the user navigates inside the frame.
-    if (!isElectron) renderWorkspaces(lastWorkspaces);
     maybeRedirectToRecovery();
   }
 
@@ -194,8 +189,15 @@
         var loc = document.getElementById('content-frame').contentWindow.location.pathname;
         var m = loc.match(/^\/goto\/([^/]+)/);
         var aid = m ? m[1] : null;
+        // Re-render the inline workspace list only when the active
+        // workspace actually changes; otherwise the 500ms tick would
+        // tear down and rebuild every row twice per second forever.
+        // SSE-driven workspace add/remove/rename still flows through
+        // handleChromeEvent -> renderWorkspaces.
+        var workspaceChanged = currentWorkspaceId !== aid;
         currentWorkspaceId = aid;
         applyTitleSwatch(aid);
+        if (workspaceChanged) renderWorkspaces(lastWorkspaces);
       } catch (e) {}
     }, 500);
     document.getElementById('content-frame').addEventListener('load', refreshAuthStatus);
