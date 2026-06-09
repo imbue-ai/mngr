@@ -184,10 +184,10 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig], HasCommonTranscrip
     the extension, the transcript-mixin script hooks return nothing.
     """
 
-    # The readiness signal is the sentinel the lifecycle extension writes on
-    # session_start (see wait_for_ready_signal); this banner string is only a
-    # fallback for the rare case the extension fails to load. "pi v" precedes
-    # the version in pi's startup banner.
+    # Required by InteractiveTuiAgent, but pi readiness is gated on the
+    # extension's session_start sentinel instead (see wait_for_ready_signal) --
+    # the "pi v" banner prints before the session is ready for input. Retained
+    # only to satisfy the base-class contract / for diagnostics.
     TUI_READY_INDICATOR = "pi v"
 
     @property
@@ -282,20 +282,21 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig], HasCommonTranscrip
         """Start the agent and, on creation, wait for the lifecycle extension's sentinel.
 
         The extension writes ``pi_session_started`` from pi's ``session_start``
-        event, which fires once the TUI has loaded the session and can accept
-        input -- a real readiness signal, unlike a banner string that may scroll
-        out of the captured pane. The ``TUI_READY_INDICATOR`` banner is kept as a
-        fallback for the rare case the extension does not load. Raises
-        ``AgentStartError`` if neither appears in time.
+        event, which fires once pi has loaded the session and can accept input.
+        We wait specifically for that file -- NOT the ``"pi v"`` startup banner,
+        which pi prints earlier, before the session has loaded (and before
+        first-run setup like downloading ``fd``/``rg`` finishes). Gating on the
+        banner would let ``create`` return too early, so the first message sent
+        right afterwards lands before pi can process it and is lost. Raises
+        ``AgentStartError`` if the sentinel does not appear in time.
         """
         start_action()
         if not is_creating:
             return
         effective_timeout = timeout if timeout is not None else _READY_TIMEOUT_SECONDS
         sentinel_path = self._get_agent_dir() / _SESSION_STARTED_SENTINEL_NAME
-        indicator = self.get_tui_ready_indicator()
         if poll_until(
-            lambda: self._is_ready_signal_present(sentinel_path, indicator),
+            lambda: self._check_file_exists(sentinel_path),
             timeout=effective_timeout,
             poll_interval=0.25,
         ):
@@ -303,15 +304,10 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig], HasCommonTranscrip
         pane_content = self._capture_pane_content(self.tmux_target)
         raise AgentStartError(
             str(self.name),
-            f"pi did not signal readiness within {effective_timeout:.1f}s"
+            f"pi did not write its readiness sentinel within {effective_timeout:.1f}s "
+            "(is the mngr lifecycle extension loading?)"
             + (f"\nPane content:\n{pane_content}" if pane_content else ""),
         )
-
-    def _is_ready_signal_present(self, sentinel_path: Path, indicator: str) -> bool:
-        """True once the extension's readiness sentinel exists, or the TUI banner shows."""
-        if self._check_file_exists(sentinel_path):
-            return True
-        return self._check_pane_contains(self.tmux_target, indicator)
 
     def get_expected_process_name(self) -> str:
         """Return 'pi' as the expected process name.

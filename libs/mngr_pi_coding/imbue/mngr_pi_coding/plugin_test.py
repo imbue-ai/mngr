@@ -487,13 +487,6 @@ def test_provision_lifecycle_extension_writes_resource(pi_agent: PiCodingAgent, 
     assert extension_path.read_text() == _load_resource(_LIFECYCLE_EXTENSION_NAME)
 
 
-def test_is_ready_signal_present_true_when_sentinel_exists(pi_agent: PiCodingAgent) -> None:
-    sentinel = pi_agent._get_agent_dir() / "pi_session_started"
-    sentinel.parent.mkdir(parents=True, exist_ok=True)
-    sentinel.write_text("1")
-    assert pi_agent._is_ready_signal_present(sentinel, "pi v") is True
-
-
 def test_wait_for_ready_signal_non_creating_just_runs_start_action(pi_agent: PiCodingAgent) -> None:
     calls: list[int] = []
     pi_agent.wait_for_ready_signal(is_creating=False, start_action=lambda: calls.append(1))
