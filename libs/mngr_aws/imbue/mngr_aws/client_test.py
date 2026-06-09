@@ -16,6 +16,7 @@ from botocore.stub import ANY
 from botocore.stub import Stubber
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import ExistingSecurityGroup
@@ -428,14 +429,22 @@ def test_ensure_security_group_auto_create_fails_closed_when_no_cidrs() -> None:
     ec2 = session.client("ec2", region_name="us-east-1")
     client = _StubbedAwsVpsClient(
         session=session,
+        provider_name=ProviderInstanceName("aws-west"),
         region="us-east-1",
         ami_id="ami-test",
         # Explicit default mirroring config.py
         security_group=AutoCreateSecurityGroup(),
         stubbed_ec2_client=ec2,
     )
-    with pytest.raises(MngrError, match="allowed_ssh_cidrs is empty"):
+    with pytest.raises(MngrError) as exc_info:
         client.ensure_security_group()
+    message = str(exc_info.value)
+    assert "allowed_ssh_cidrs is empty" in message
+    # The error must be actionable: a runnable `mngr config set` command, keyed on
+    # this provider's name, at user scope, that grabs the operator's public IP.
+    assert "mngr config set providers.aws-west.allowed_ssh_cidrs" in message
+    assert "--scope user" in message
+    assert "curl -fsS https://checkip.amazonaws.com" in message
 
 
 def test_ensure_security_group_reuses_existing_sg_when_found(

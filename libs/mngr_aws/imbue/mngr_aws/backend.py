@@ -143,6 +143,7 @@ class AwsProviderBackend(ProviderBackendInterface):
 
         aws_client = AwsVpsClient(
             session=session,
+            provider_name=name,
             region=config.default_region,
             ami_id=ami_id,
             security_group=config.security_group,

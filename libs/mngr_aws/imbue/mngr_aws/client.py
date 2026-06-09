@@ -17,6 +17,7 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.config import SecurityGroupSpec
@@ -56,6 +57,10 @@ class AwsVpsClient(VpsClientInterface):
     slow_provisioning_warning_threshold_seconds: float = Field(default=90.0)
 
     session: boto3.Session = Field(frozen=True, description="boto3 Session with resolved credentials")
+    provider_name: ProviderInstanceName = Field(
+        default=ProviderInstanceName("aws"),
+        description="The provider instance name, used to build the config-key hint in user-facing errors.",
+    )
     region: str = Field(frozen=True, description="AWS region this client targets")
     ami_id: str = Field(frozen=True, description="Default AMI ID for instances created via this client")
     security_group: SecurityGroupSpec = Field(
@@ -137,9 +142,11 @@ class AwsVpsClient(VpsClientInterface):
         if not self.allowed_ssh_cidrs:
             raise MngrError(
                 "Cannot auto-create an AWS security group: allowed_ssh_cidrs is empty. "
-                "Either set allowed_ssh_cidrs to a tuple of CIDR blocks (e.g. ('203.0.113.4/32',) "
-                "for your own IP), or pre-create the SG and pass it as "
-                "security_group=ExistingSecurityGroup(id='sg-...')."
+                "Set the CIDR(s) allowed to SSH in -- to allow just your current public IP:\n"
+                f"  mngr config set providers.{self.provider_name}.allowed_ssh_cidrs "
+                '"[\\"$(curl -fsS https://checkip.amazonaws.com)/32\\"]" --scope user\n'
+                'Use ["0.0.0.0/0"] to allow any IP (not recommended), or pre-create a security '
+                'group and reference it with security_group = { kind = "existing", id = "sg-..." }.'
             )
 
         filters: list[dict[str, Any]] = [{"Name": "group-name", "Values": [sg_name]}]
