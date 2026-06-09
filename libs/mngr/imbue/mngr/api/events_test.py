@@ -1,6 +1,8 @@
 import json
 import queue as queue_mod
 import threading
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
 import pytest
@@ -11,20 +13,18 @@ from imbue.mngr.api.events import EventSourceInfo
 from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.api.events import _AllEventsStreamState
 from imbue.mngr.api.events import _build_event_sources_from_grouped_files
+from imbue.mngr.api.events import _build_event_sources_from_listing
 from imbue.mngr.api.events import _check_for_new_archived_events
 from imbue.mngr.api.events import _create_source_mismatch_warning
-from imbue.mngr.api.events import _discover_event_sources_via_volume
 from imbue.mngr.api.events import _emit_historical_events
-from imbue.mngr.api.events import _extract_filename
-from imbue.mngr.api.events import _group_volume_files_into_sources
 from imbue.mngr.api.events import _handle_online_offline_transition
 from imbue.mngr.api.events import _maybe_emit_source_mismatch_warning
-from imbue.mngr.api.events import _parse_discovered_files
 from imbue.mngr.api.events import _pygtail_offset_file_path
 from imbue.mngr.api.events import _record_from_event_data
 from imbue.mngr.api.events import _sort_rotated_files_oldest_first
 from imbue.mngr.api.events import _start_tail_thread
 from imbue.mngr.api.events import _tail_source_thread_local
+from imbue.mngr.api.events import discover_event_sources
 from imbue.mngr.api.events import filter_sources_by_name
 from imbue.mngr.api.events import parse_event_line
 from imbue.mngr.api.events import read_all_historical_events
@@ -37,6 +37,13 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MalformedJsonlLineError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
+from imbue.mngr.hosts.offline_host import make_readable_offline_host
+from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import FileType
+from imbue.mngr.interfaces.data_types import VolumeFile
+from imbue.mngr.interfaces.host import HostFileReadInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
@@ -44,36 +51,38 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
-from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.testing import capture_loguru
 
 
-@pytest.fixture
-def events_volume_target(tmp_path: Path) -> tuple[EventsTarget, Path]:
-    """Create an EventsTarget backed by a temp directory.
+def _make_local_host_target(
+    local_provider,
+    events_dir: Path,
+    *,
+    display_name: str = "test",
+) -> EventsTarget:
+    """Build an EventsTarget backed by the local online host reading ``events_dir``.
 
-    Returns (target, events_dir) so tests can write files into the volume.
+    The local online host's ``read_file``/``list_directory`` operate on any
+    absolute path, so pointing ``events_path`` at an arbitrary temp directory
+    exercises the real ``HostFileReadInterface`` read/discovery code paths.
+    """
+    host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, OnlineHostInterface)
+    return EventsTarget(host=host, events_path=events_dir, display_name=display_name)
+
+
+@pytest.fixture
+def events_volume_target(tmp_path: Path, local_provider) -> tuple[EventsTarget, Path]:
+    """Create an EventsTarget backed by a readable host reading a temp directory.
+
+    Returns (target, events_dir) so tests can write event files into the dir.
     """
     events_dir = tmp_path / "events"
     events_dir.mkdir()
-    volume = LocalVolume(root_path=events_dir)
-    target = EventsTarget(volume=volume, display_name="test")
+    target = _make_local_host_target(local_provider, events_dir)
     return target, events_dir
-
-
-# =============================================================================
-# _extract_filename tests
-# =============================================================================
-
-
-def test_extract_filename_from_simple_path() -> None:
-    assert _extract_filename("output.log") == "output.log"
-
-
-def test_extract_filename_from_nested_path() -> None:
-    assert _extract_filename("some/dir/output.log") == "output.log"
 
 
 # =============================================================================
@@ -88,6 +97,62 @@ def test_read_event_content_returns_file_contents(events_volume_target: tuple[Ev
     content = read_event_content(target, "test.log")
 
     assert content == snapshot("hello world\nsecond line\n")
+
+
+def _make_offline_volume_backed_host(local_provider, temp_mngr_ctx: MngrContext) -> OfflineHostWithVolume:
+    """Build an OfflineHostWithVolume over the local provider's volume (a stopped, readable host)."""
+    offline = OfflineHost(
+        id=local_provider.host_id,
+        provider_instance=local_provider,
+        mngr_ctx=temp_mngr_ctx,
+        certified_host_data=CertifiedHostData(
+            host_id=str(local_provider.host_id),
+            host_name="local",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        ),
+    )
+    readable = make_readable_offline_host(offline)
+    assert isinstance(readable, OfflineHostWithVolume), "local provider should expose a readable volume"
+    return readable
+
+
+def test_discover_and_read_events_through_offline_volume_backed_host(
+    local_provider,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Source discovery and content reads work end-to-end through the events API on a
+    volume-backed *offline* host -- not just an online one.
+
+    The online path is covered by ``events_volume_target`` elsewhere; this closes
+    the gap the dual-path collapse opened by routing the same ``discover_event_sources``
+    / ``read_event_content`` code through an ``OfflineHostWithVolume`` whose reads come
+    off the persisted volume rather than a live host.
+    """
+    host = _make_offline_volume_backed_host(local_provider, temp_mngr_ctx)
+    # A volume-backed offline host is a reader but explicitly NOT an online host.
+    assert isinstance(host, HostFileReadInterface)
+    assert not isinstance(host, OnlineHostInterface)
+
+    events_dir = host.host_dir / "events"
+    (events_dir / "messages").mkdir(parents=True)
+    (events_dir / "messages" / "events.jsonl").write_text(
+        '{"timestamp": "2026-01-01T00:00:00.000000000Z", "event_id": "e1", "source": "messages", "type": "msg"}\n'
+    )
+    # A root-level (empty source path) event file too.
+    (events_dir / "events.jsonl").write_text(
+        '{"timestamp": "2026-01-01T00:00:01.000000000Z", "event_id": "e2", "source": "", "type": "root"}\n'
+    )
+
+    target = EventsTarget(host=host, events_path=events_dir, display_name="offline host 'local'")
+
+    sources = discover_event_sources(target)
+    source_paths = {s.source_path for s in sources}
+    assert "messages" in source_paths
+    assert "" in source_paths
+
+    content = read_event_content(target, "messages/events.jsonl")
+    assert "e1" in content
 
 
 # =============================================================================
@@ -191,19 +256,12 @@ def events_host_target(
     """
     events_dir = tmp_path / "host_events"
     events_dir.mkdir()
-    host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
-    assert isinstance(host, OnlineHostInterface)
-    target = EventsTarget(
-        volume=None,
-        online_host=host,
-        events_path=events_dir,
-        display_name="test-host",
-    )
+    target = _make_local_host_target(local_provider, events_dir, display_name="test-host")
     return target, events_dir
 
 
 def test_read_event_content_via_host(events_host_target: tuple[EventsTarget, Path]) -> None:
-    """Verify read_event_content works via host execute_command when volume is None."""
+    """Verify read_event_content works via the readable host's read_file."""
     target, events_dir = events_host_target
     (events_dir / "test.log").write_text("hello from host\nsecond line\n")
 
@@ -228,11 +286,7 @@ def test_read_event_content_via_host_preserves_no_trailing_newline(
 def test_read_event_content_via_host_handles_empty_file(
     events_host_target: tuple[EventsTarget, Path],
 ) -> None:
-    """An empty file must round-trip as the empty string, not the sentinel.
-
-    Regression guard: the sentinel-strip step must run for every read,
-    including ones where ``cat`` produced zero bytes.
-    """
+    """An empty file must round-trip as the empty string."""
     target, events_dir = events_host_target
     (events_dir / "empty.log").write_bytes(b"")
 
@@ -246,9 +300,10 @@ def test_read_event_content_via_host_handles_only_newline(
 ) -> None:
     """A file that is just ``\n`` must round-trip as ``\n``, not as ``""``.
 
-    Regression guard for the old bug: pyinfra's stdout would have
-    stripped the trailing ``\n`` and returned ``""``, indistinguishable
-    from an empty file.
+    Regression guard for the trailing-newline fidelity that the old
+    sentinel-cat workaround existed to provide: the byte-exact
+    ``HostFileReadInterface.read_file`` path must preserve a lone trailing
+    newline rather than collapsing it to an empty string.
     """
     target, events_dir = events_host_target
     (events_dir / "just_newline.log").write_bytes(b"\n")
@@ -266,11 +321,11 @@ def test_read_event_content_via_host_raises_for_missing_file(events_host_target:
         read_event_content(target, "nonexistent-file-58291.log")
 
 
-def test_read_event_content_raises_when_no_volume_or_host() -> None:
-    """Verify read_event_content raises MngrError when neither volume nor host is available."""
+def test_read_event_content_raises_when_no_host() -> None:
+    """Verify read_event_content raises MngrError when no readable host is available."""
     target = EventsTarget(display_name="test-empty")
 
-    with pytest.raises(MngrError, match="no volume or online host"):
+    with pytest.raises(MngrError, match="no readable host"):
         read_event_content(target, "test.log")
 
 
@@ -283,7 +338,7 @@ def test_resolve_events_target_populates_online_host_for_agent(
     temp_mngr_ctx: MngrContext,
     local_provider,
 ) -> None:
-    """Verify resolve_events_target sets online_host and events_path when host is online."""
+    """Verify resolve_events_target sets a readable online host and absolute events_path."""
     per_host_dir = local_provider.host_dir
     agent_id = _create_agent_data_json(per_host_dir, "test-online-agent-82719", "sleep 82719")
 
@@ -294,9 +349,8 @@ def test_resolve_events_target_populates_online_host_for_agent(
 
     target = resolve_events_target(AgentAddress(agent=AgentName("test-online-agent-82719")), temp_mngr_ctx)
 
-    # Both volume and online_host should be populated for local provider
-    assert target.volume is not None
-    assert target.online_host is not None
+    # A live local host resolves to an OnlineHostInterface with an absolute events path.
+    assert isinstance(target.host, OnlineHostInterface)
     assert target.events_path is not None
     assert str(target.events_path).endswith(f"agents/{agent_id}/events")
 
@@ -413,17 +467,30 @@ def test_sort_rotated_files_ignores_non_matching() -> None:
 
 
 # =============================================================================
-# _parse_discovered_files tests
+# _build_event_sources_from_listing tests
 # =============================================================================
 
 
-def test_parse_discovered_files_groups_by_directory() -> None:
-    find_output = (
-        "/tmp/events/messages/events.jsonl\n"
-        "/tmp/events/messages/events.jsonl.20260415110000000000\n"
-        "/tmp/events/logs/mngr/events.jsonl\n"
-    )
-    sources = _parse_discovered_files(find_output, "/tmp/events")
+def _file_entry(path: str) -> VolumeFile:
+    """Build a FILE VolumeFile for an absolute path (mtime/size irrelevant here)."""
+    return VolumeFile(path=path, file_type=FileType.FILE, mtime=0, size=0)
+
+
+def _dir_entry(path: str) -> VolumeFile:
+    """Build a DIRECTORY VolumeFile for an absolute path."""
+    return VolumeFile(path=path, file_type=FileType.DIRECTORY, mtime=0, size=0)
+
+
+def test_build_event_sources_from_listing_groups_by_directory() -> None:
+    entries = [
+        _dir_entry("/tmp/events/messages"),
+        _file_entry("/tmp/events/messages/events.jsonl"),
+        _file_entry("/tmp/events/messages/events.jsonl.20260415110000000000"),
+        _dir_entry("/tmp/events/logs"),
+        _dir_entry("/tmp/events/logs/mngr"),
+        _file_entry("/tmp/events/logs/mngr/events.jsonl"),
+    ]
+    sources = _build_event_sources_from_listing(entries, Path("/tmp/events"))
     assert len(sources) == 2
     # Sources are sorted by path
     assert sources[0].source_path == "logs/mngr"
@@ -434,26 +501,47 @@ def test_parse_discovered_files_groups_by_directory() -> None:
     assert sources[1].rotated_files == ("events.jsonl.20260415110000000000",)
 
 
-def test_parse_discovered_files_handles_empty_output() -> None:
-    sources = _parse_discovered_files("", "/tmp/events")
-    assert sources == []
+def test_build_event_sources_from_listing_handles_empty_listing() -> None:
+    assert _build_event_sources_from_listing([], Path("/tmp/events")) == []
 
 
-def test_parse_discovered_files_only_rotated_file() -> None:
-    find_output = "/tmp/events/old_source/events.jsonl.20260415110000000000\n"
-    sources = _parse_discovered_files(find_output, "/tmp/events")
+def test_build_event_sources_from_listing_only_rotated_file() -> None:
+    entries = [_file_entry("/tmp/events/old_source/events.jsonl.20260415110000000000")]
+    sources = _build_event_sources_from_listing(entries, Path("/tmp/events"))
     assert len(sources) == 1
     assert sources[0].is_current_file_present is False
     assert sources[0].rotated_files == ("events.jsonl.20260415110000000000",)
 
 
+def test_build_event_sources_from_listing_ignores_non_event_files_and_dirs() -> None:
+    """Directories and non-events.jsonl files are skipped."""
+    entries = [
+        _dir_entry("/tmp/events/messages"),
+        _file_entry("/tmp/events/messages/events.jsonl"),
+        _file_entry("/tmp/events/messages/other.log"),
+    ]
+    sources = _build_event_sources_from_listing(entries, Path("/tmp/events"))
+    assert len(sources) == 1
+    assert sources[0].source_path == "messages"
+    assert sources[0].rotated_files == ()
+
+
+def test_build_event_sources_from_listing_root_level_events_file() -> None:
+    """events.jsonl directly under events_path has an empty source_path."""
+    entries = [_file_entry("/tmp/events/events.jsonl")]
+    sources = _build_event_sources_from_listing(entries, Path("/tmp/events"))
+    assert len(sources) == 1
+    assert sources[0].source_path == ""
+    assert sources[0].is_current_file_present is True
+
+
 # =============================================================================
-# discover_event_sources via volume tests
+# discover_event_sources (via readable host) tests
 # =============================================================================
 
 
-def test_discover_event_sources_via_volume(tmp_path: Path) -> None:
-    """Verify _discover_event_sources_via_volume finds all event sources recursively."""
+def test_discover_event_sources_finds_sources_recursively(tmp_path: Path, local_provider) -> None:
+    """Verify discover_event_sources finds all event sources recursively via the host."""
     events_dir = tmp_path / "events"
     events_dir.mkdir()
 
@@ -467,8 +555,8 @@ def test_discover_event_sources_via_volume(tmp_path: Path) -> None:
     (events_dir / "logs" / "mngr").mkdir(parents=True)
     (events_dir / "logs" / "mngr" / "events.jsonl").write_text('{"timestamp":"2026-01-02T00:00:00Z"}\n')
 
-    volume = LocalVolume(root_path=events_dir)
-    sources = _discover_event_sources_via_volume(volume)
+    target = _make_local_host_target(local_provider, events_dir)
+    sources = discover_event_sources(target)
 
     assert len(sources) == 2
     source_paths = [s.source_path for s in sources]
@@ -480,11 +568,11 @@ def test_discover_event_sources_via_volume(tmp_path: Path) -> None:
     assert messages_source.rotated_files == ("events.jsonl.20251201000000000000",)
 
 
-def test_discover_event_sources_via_volume_empty_dir(tmp_path: Path) -> None:
+def test_discover_event_sources_empty_dir(tmp_path: Path, local_provider) -> None:
     events_dir = tmp_path / "events"
     events_dir.mkdir()
-    volume = LocalVolume(root_path=events_dir)
-    sources = _discover_event_sources_via_volume(volume)
+    target = _make_local_host_target(local_provider, events_dir)
+    sources = discover_event_sources(target)
     assert sources == []
 
 
@@ -537,7 +625,7 @@ def test_filter_sources_by_name_exact_match_not_prefix() -> None:
 # =============================================================================
 
 
-def test_read_all_historical_events_merges_and_sorts(tmp_path: Path) -> None:
+def test_read_all_historical_events_merges_and_sorts(tmp_path: Path, local_provider) -> None:
     """Verify events from multiple sources are merged and sorted by timestamp."""
     events_dir = tmp_path / "events"
     events_dir.mkdir()
@@ -555,8 +643,7 @@ def test_read_all_historical_events_merges_and_sorts(tmp_path: Path) -> None:
         '{"timestamp":"2026-01-02T00:00:00Z","event_id":"b2","source":"source_b"}\n'
     )
 
-    volume = LocalVolume(root_path=events_dir)
-    target = EventsTarget(volume=volume, display_name="test")
+    target = _make_local_host_target(local_provider, events_dir)
 
     sources = [
         EventSourceInfo(source_path="source_a", rotated_files=(), is_current_file_present=True),
@@ -570,7 +657,7 @@ def test_read_all_historical_events_merges_and_sorts(tmp_path: Path) -> None:
     assert "source_b" in offsets
 
 
-def test_read_all_historical_events_includes_rotated_files(tmp_path: Path) -> None:
+def test_read_all_historical_events_includes_rotated_files(tmp_path: Path, local_provider) -> None:
     events_dir = tmp_path / "events"
     events_dir.mkdir()
 
@@ -582,8 +669,7 @@ def test_read_all_historical_events_includes_rotated_files(tmp_path: Path) -> No
         '{"timestamp":"2026-01-01T00:00:00Z","event_id":"new1","source":"src"}\n'
     )
 
-    volume = LocalVolume(root_path=events_dir)
-    target = EventsTarget(volume=volume, display_name="test")
+    target = _make_local_host_target(local_provider, events_dir)
 
     sources = [
         EventSourceInfo(source_path="src", rotated_files=("events.jsonl.1",), is_current_file_present=True),
@@ -594,7 +680,7 @@ def test_read_all_historical_events_includes_rotated_files(tmp_path: Path) -> No
     assert [e.event_id for e in events] == ["old1", "new1"]
 
 
-def test_read_all_historical_events_warns_on_mid_file_corruption(tmp_path: Path) -> None:
+def test_read_all_historical_events_warns_on_mid_file_corruption(tmp_path: Path, local_provider) -> None:
     events_dir = tmp_path / "events"
     events_dir.mkdir()
     (events_dir / "src").mkdir()
@@ -605,8 +691,7 @@ def test_read_all_historical_events_warns_on_mid_file_corruption(tmp_path: Path)
         "this is not valid json {{{\n"
         '{"timestamp":"2026-01-02T00:00:00Z","event_id":"e2","source":"src"}\n'
     )
-    volume = LocalVolume(root_path=events_dir)
-    target = EventsTarget(volume=volume, display_name="test")
+    target = _make_local_host_target(local_provider, events_dir)
     sources = [EventSourceInfo(source_path="src", rotated_files=(), is_current_file_present=True)]
 
     with capture_loguru(level="WARNING") as log_output:
@@ -618,7 +703,7 @@ def test_read_all_historical_events_warns_on_mid_file_corruption(tmp_path: Path)
     assert "this is not valid json" in output
 
 
-def test_read_all_historical_events_silent_when_only_last_line_corrupted(tmp_path: Path) -> None:
+def test_read_all_historical_events_silent_when_only_last_line_corrupted(tmp_path: Path, local_provider) -> None:
     events_dir = tmp_path / "events"
     events_dir.mkdir()
     (events_dir / "src").mkdir()
@@ -626,8 +711,7 @@ def test_read_all_historical_events_silent_when_only_last_line_corrupted(tmp_pat
     (events_dir / "src" / "events.jsonl").write_text(
         '{"timestamp":"2026-01-01T00:00:00Z","event_id":"e1","source":"src"}\nincomplete{'
     )
-    volume = LocalVolume(root_path=events_dir)
-    target = EventsTarget(volume=volume, display_name="test")
+    target = _make_local_host_target(local_provider, events_dir)
     sources = [EventSourceInfo(source_path="src", rotated_files=(), is_current_file_present=True)]
 
     with capture_loguru(level="WARNING") as log_output:
@@ -637,7 +721,7 @@ def test_read_all_historical_events_silent_when_only_last_line_corrupted(tmp_pat
     assert log_output.getvalue() == ""
 
 
-def test_read_all_historical_events_with_cel_filter(tmp_path: Path) -> None:
+def test_read_all_historical_events_with_cel_filter(tmp_path: Path, local_provider) -> None:
     """Verify CEL filter is applied to events."""
     events_dir = tmp_path / "events"
     events_dir.mkdir()
@@ -651,8 +735,7 @@ def test_read_all_historical_events_with_cel_filter(tmp_path: Path) -> None:
         '{"timestamp":"2026-01-02T00:00:00Z","event_id":"l1","source":"logs","type":"log"}\n'
     )
 
-    volume = LocalVolume(root_path=events_dir)
-    target = EventsTarget(volume=volume, display_name="test")
+    target = _make_local_host_target(local_provider, events_dir)
 
     sources = [
         EventSourceInfo(source_path="messages", rotated_files=(), is_current_file_present=True),
@@ -675,7 +758,7 @@ class _StopStream(Exception):
     """Raised by test callbacks to break out of stream_all_events."""
 
 
-def test_stream_all_events_emits_sorted_events_from_multiple_sources(tmp_path: Path) -> None:
+def test_stream_all_events_emits_sorted_events_from_multiple_sources(tmp_path: Path, local_provider) -> None:
     events_dir = tmp_path / "events"
     events_dir.mkdir()
 
@@ -689,8 +772,7 @@ def test_stream_all_events_emits_sorted_events_from_multiple_sources(tmp_path: P
         '{"timestamp":"2026-01-02T00:00:00Z","event_id":"b2","source":"beta"}\n'
     )
 
-    volume = LocalVolume(root_path=events_dir)
-    target = EventsTarget(volume=volume, display_name="test")
+    target = _make_local_host_target(local_provider, events_dir)
 
     captured: list[str] = []
 
@@ -707,7 +789,7 @@ def test_stream_all_events_emits_sorted_events_from_multiple_sources(tmp_path: P
     assert captured == ["a1", "b2", "a3"]
 
 
-def test_stream_all_events_head_mode(tmp_path: Path) -> None:
+def test_stream_all_events_head_mode(tmp_path: Path, local_provider) -> None:
     events_dir = tmp_path / "events"
     events_dir.mkdir()
 
@@ -718,8 +800,7 @@ def test_stream_all_events_head_mode(tmp_path: Path) -> None:
         '{"timestamp":"2026-01-03T00:00:00Z","event_id":"e3","source":"src"}\n'
     )
 
-    volume = LocalVolume(root_path=events_dir)
-    target = EventsTarget(volume=volume, display_name="test")
+    target = _make_local_host_target(local_provider, events_dir)
 
     captured: list[str] = []
 
@@ -736,7 +817,7 @@ def test_stream_all_events_head_mode(tmp_path: Path) -> None:
     assert captured == ["e1", "e2"]
 
 
-def test_stream_all_events_with_source_filters(tmp_path: Path) -> None:
+def test_stream_all_events_with_source_filters(tmp_path: Path, local_provider) -> None:
     """Verify source_filters restricts which sources are included."""
     events_dir = tmp_path / "events"
     events_dir.mkdir()
@@ -754,8 +835,7 @@ def test_stream_all_events_with_source_filters(tmp_path: Path) -> None:
         '{"timestamp":"2026-01-03T00:00:00Z","event_id":"other-1","source":"other"}\n'
     )
 
-    volume = LocalVolume(root_path=events_dir)
-    target = EventsTarget(volume=volume, display_name="test")
+    target = _make_local_host_target(local_provider, events_dir)
 
     captured: list[str] = []
 
@@ -775,7 +855,7 @@ def test_stream_all_events_with_source_filters(tmp_path: Path) -> None:
     assert "other-1" not in captured
 
 
-def test_stream_all_events_with_source_filters_and_cel(tmp_path: Path) -> None:
+def test_stream_all_events_with_source_filters_and_cel(tmp_path: Path, local_provider) -> None:
     """Verify source_filters and CEL filters can be used together."""
     events_dir = tmp_path / "events"
     events_dir.mkdir()
@@ -790,8 +870,7 @@ def test_stream_all_events_with_source_filters_and_cel(tmp_path: Path) -> None:
         '{"timestamp":"2026-01-03T00:00:00Z","event_id":"log-1","source":"logs","type":"chat"}\n'
     )
 
-    volume = LocalVolume(root_path=events_dir)
-    target = EventsTarget(volume=volume, display_name="test")
+    target = _make_local_host_target(local_provider, events_dir)
 
     includes, excludes = compile_cel_filters(['type == "chat"'], [])
     captured: list[str] = []
@@ -811,7 +890,7 @@ def test_stream_all_events_with_source_filters_and_cel(tmp_path: Path) -> None:
     assert captured == ["msg-a"]
 
 
-def test_stream_all_events_empty_source_filters_shows_all(tmp_path: Path) -> None:
+def test_stream_all_events_empty_source_filters_shows_all(tmp_path: Path, local_provider) -> None:
     """Verify empty source_filters does not restrict sources."""
     events_dir = tmp_path / "events"
     events_dir.mkdir()
@@ -825,8 +904,7 @@ def test_stream_all_events_empty_source_filters_shows_all(tmp_path: Path) -> Non
         '{"timestamp":"2026-01-02T00:00:00Z","event_id":"b1","source":"b"}\n'
     )
 
-    volume = LocalVolume(root_path=events_dir)
-    target = EventsTarget(volume=volume, display_name="test")
+    target = _make_local_host_target(local_provider, events_dir)
 
     captured: list[str] = []
 
@@ -947,7 +1025,7 @@ def test_emit_historical_events_emits_all_when_no_limits() -> None:
 # =============================================================================
 
 
-def test_stream_all_events_tail_mode(tmp_path: Path) -> None:
+def test_stream_all_events_tail_mode(tmp_path: Path, local_provider) -> None:
     events_dir = tmp_path / "events"
     events_dir.mkdir()
 
@@ -958,8 +1036,7 @@ def test_stream_all_events_tail_mode(tmp_path: Path) -> None:
         '{"timestamp":"2026-01-03T00:00:00Z","event_id":"e3","source":"src"}\n'
     )
 
-    volume = LocalVolume(root_path=events_dir)
-    target = EventsTarget(volume=volume, display_name="test")
+    target = _make_local_host_target(local_provider, events_dir)
 
     captured: list[str] = []
 
@@ -976,7 +1053,7 @@ def test_stream_all_events_tail_mode(tmp_path: Path) -> None:
     assert captured == ["e2", "e3"]
 
 
-def test_stream_all_events_deduplicates(tmp_path: Path) -> None:
+def test_stream_all_events_deduplicates(tmp_path: Path, local_provider) -> None:
     """Verify that events with the same event_id are not emitted twice."""
     events_dir = tmp_path / "events"
     events_dir.mkdir()
@@ -991,8 +1068,7 @@ def test_stream_all_events_deduplicates(tmp_path: Path) -> None:
         '{"timestamp":"2026-01-02T00:00:00Z","event_id":"unique1","source":"src"}\n'
     )
 
-    volume = LocalVolume(root_path=events_dir)
-    target = EventsTarget(volume=volume, display_name="test")
+    target = _make_local_host_target(local_provider, events_dir)
 
     captured: list[str] = []
 
@@ -1011,12 +1087,11 @@ def test_stream_all_events_deduplicates(tmp_path: Path) -> None:
     assert "unique1" in captured
 
 
-def test_stream_all_events_empty_events_dir(tmp_path: Path) -> None:
+def test_stream_all_events_empty_events_dir(tmp_path: Path, local_provider) -> None:
     events_dir = tmp_path / "events"
     events_dir.mkdir()
 
-    volume = LocalVolume(root_path=events_dir)
-    target = EventsTarget(volume=volume, display_name="test")
+    target = _make_local_host_target(local_provider, events_dir)
 
     captured: list[str] = []
 
@@ -1114,15 +1189,14 @@ def test_tail_source_thread_local_picks_up_new_events(tmp_path: Path) -> None:
 
 
 @pytest.mark.timeout(30)
-def test_stream_all_events_follow_detects_new_content(tmp_path: Path) -> None:
+def test_stream_all_events_follow_detects_new_content(tmp_path: Path, local_provider) -> None:
     """Verify that a tail thread started by _start_tail_thread picks up newly appended events."""
     events_dir = tmp_path / "events"
     (events_dir / "src").mkdir(parents=True)
     events_file = events_dir / "src" / "events.jsonl"
     events_file.write_text('{"timestamp":"2026-01-01T00:00:00Z","event_id":"h1","source":"src"}\n')
 
-    volume = LocalVolume(root_path=events_dir)
-    host_target = EventsTarget(volume=volume, display_name="test")
+    host_target = _make_local_host_target(local_provider, events_dir)
 
     # Verify historical events are read in non-follow mode
     captured_historical: list[str] = []
@@ -1186,7 +1260,7 @@ def test_stream_all_events_follow_detects_new_content(tmp_path: Path) -> None:
 # =============================================================================
 
 
-def test_check_for_new_archived_events_finds_newly_rotated_files(tmp_path: Path) -> None:
+def test_check_for_new_archived_events_finds_newly_rotated_files(tmp_path: Path, local_provider) -> None:
     """Verify _check_for_new_archived_events detects rotated files that appeared after initial scan."""
     events_dir = tmp_path / "events"
     (events_dir / "src").mkdir(parents=True)
@@ -1194,8 +1268,7 @@ def test_check_for_new_archived_events_finds_newly_rotated_files(tmp_path: Path)
         '{"timestamp":"2026-01-02T00:00:00Z","event_id":"e2","source":"src"}\n'
     )
 
-    volume = LocalVolume(root_path=events_dir)
-    target = EventsTarget(volume=volume, display_name="test")
+    target = _make_local_host_target(local_provider, events_dir)
 
     # State says we know about "src" but have seen no rotated files yet
     state = _AllEventsStreamState(
@@ -1215,7 +1288,7 @@ def test_check_for_new_archived_events_finds_newly_rotated_files(tmp_path: Path)
     assert "events.jsonl.20260101000000000000" in state.known_rotated_files["src"]
 
 
-def test_check_for_new_archived_events_skips_already_known(tmp_path: Path) -> None:
+def test_check_for_new_archived_events_skips_already_known(tmp_path: Path, local_provider) -> None:
     """Verify _check_for_new_archived_events does not re-read already known rotated files."""
     events_dir = tmp_path / "events"
     (events_dir / "src").mkdir(parents=True)
@@ -1224,8 +1297,7 @@ def test_check_for_new_archived_events_skips_already_known(tmp_path: Path) -> No
         '{"timestamp":"2026-01-01T00:00:00Z","event_id":"old1","source":"src"}\n'
     )
 
-    volume = LocalVolume(root_path=events_dir)
-    target = EventsTarget(volume=volume, display_name="test")
+    target = _make_local_host_target(local_provider, events_dir)
 
     # State already knows about the rotated file
     state = _AllEventsStreamState(
@@ -1242,10 +1314,9 @@ def test_check_for_new_archived_events_skips_already_known(tmp_path: Path) -> No
 # =============================================================================
 
 
-def test_refresh_events_target_returns_same_when_no_provider(tmp_path: Path) -> None:
+def test_refresh_events_target_returns_same_when_no_provider() -> None:
     """Verify refresh_events_target is a no-op when provider info is missing."""
-    volume = LocalVolume(root_path=tmp_path)
-    target = EventsTarget(volume=volume, display_name="test")
+    target = EventsTarget(display_name="test")
 
     refreshed = refresh_events_target(target)
     assert refreshed is target
@@ -1285,11 +1356,9 @@ def test_handle_online_offline_transition_restarts_threads(
     agent_events_dir.mkdir(parents=True)
     (agent_events_dir / "events.jsonl").write_text("")
 
-    # Create a target that appears offline (no online_host)
-    volume = LocalVolume(root_path=per_host_dir)
-    events_volume = volume.scoped(f"agents/{agent_id}/events")
+    # Create a target that appears offline (no readable host yet) but carries
+    # the provider/host_id/events_subpath needed for refresh to resolve one.
     target = EventsTarget(
-        volume=events_volume,
         display_name="test",
         provider=local_provider,
         host_id=local_provider.get_host(HostName(LOCAL_HOST_NAME)).id,
@@ -1321,7 +1390,7 @@ def test_handle_online_offline_transition_restarts_threads(
 
     # Local host is always online, so transition should have occurred
     assert state.is_online is True
-    assert target_holder[0].online_host is not None
+    assert isinstance(target_holder[0].host, OnlineHostInterface)
     # New tail threads should have been started for known sources
     assert len(tail_threads) >= 1
 
@@ -1331,10 +1400,9 @@ def test_handle_online_offline_transition_restarts_threads(
         thread.join(timeout=5.0)
 
 
-def test_handle_online_offline_transition_no_change_when_same_state(tmp_path: Path) -> None:
+def test_handle_online_offline_transition_no_change_when_same_state() -> None:
     """Verify _handle_online_offline_transition is a no-op when state hasn't changed."""
-    volume = LocalVolume(root_path=tmp_path)
-    target = EventsTarget(volume=volume, display_name="test")
+    target = EventsTarget(display_name="test")
 
     # No provider info means refresh returns the same target
     state = _AllEventsStreamState(is_online=False)
@@ -1411,30 +1479,6 @@ def test_build_event_sources_from_grouped_files_empty() -> None:
 
 
 # =============================================================================
-# _group_volume_files_into_sources tests
-# =============================================================================
-
-
-def test_group_volume_files_into_sources_groups_correctly() -> None:
-    """Files should be grouped by directory."""
-    files = [
-        ("messages", "events.jsonl"),
-        ("messages", "events.jsonl.20260415110000000000"),
-        ("logs", "events.jsonl"),
-    ]
-    sources = _group_volume_files_into_sources(files)
-
-    assert len(sources) == 2
-    source_paths = {s.source_path for s in sources}
-    assert source_paths == {"messages", "logs"}
-
-
-def test_group_volume_files_into_sources_empty() -> None:
-    """Empty input should produce empty output."""
-    assert _group_volume_files_into_sources([]) == []
-
-
-# =============================================================================
 # _pygtail_offset_file_path tests
 # =============================================================================
 
@@ -1462,13 +1506,14 @@ def test_pygtail_offset_file_path_with_simple_source_path() -> None:
 # =============================================================================
 
 
-def test_events_target_rejects_online_host_without_events_path(
+def test_events_target_rejects_host_without_events_path(
     local_provider,
 ) -> None:
-    """EventsTarget should reject online_host set without events_path."""
+    """EventsTarget should reject host set without events_path."""
     host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
-    with pytest.raises(MngrError, match="online_host and events_path must both be set"):
-        EventsTarget(online_host=host, events_path=None, display_name="bad-target")
+    assert isinstance(host, HostFileReadInterface)
+    with pytest.raises(MngrError, match="host and events_path must both be set"):
+        EventsTarget(host=host, events_path=None, display_name="bad-target")
 
 
 # =============================================================================
@@ -1599,30 +1644,16 @@ def test_sort_rotated_files_mixed_valid_and_invalid() -> None:
 
 
 # =============================================================================
-# _parse_discovered_files edge cases
+# _build_event_sources_from_listing edge cases
 # =============================================================================
 
 
-def test_parse_discovered_files_skips_paths_not_under_base() -> None:
-    """Files outside the base path should be ignored."""
-    find_output = "/other/path/events.jsonl\n/base/path/messages/events.jsonl\n"
-    result = _parse_discovered_files(find_output, "/base/path")
-    assert len(result) == 1
-    assert result[0].source_path == "messages"
-
-
-def test_parse_discovered_files_root_level_events_file() -> None:
-    """events.jsonl at root level should have empty source_path."""
-    find_output = "/base/path/events.jsonl\n"
-    result = _parse_discovered_files(find_output, "/base/path")
-    assert len(result) == 1
-    assert result[0].source_path == ""
-    assert result[0].is_current_file_present is True
-
-
-def test_parse_discovered_files_ignores_unrelated_files() -> None:
-    """Files that are not events.jsonl or rotated variants should be ignored."""
-    find_output = "/base/path/messages/events.jsonl\n/base/path/messages/other.log\n"
-    result = _parse_discovered_files(find_output, "/base/path")
+def test_build_event_sources_from_listing_skips_paths_not_under_base() -> None:
+    """Entries whose path is not under events_path should be ignored."""
+    entries = [
+        _file_entry("/other/path/events.jsonl"),
+        _file_entry("/base/path/messages/events.jsonl"),
+    ]
+    result = _build_event_sources_from_listing(entries, Path("/base/path"))
     assert len(result) == 1
     assert result[0].source_path == "messages"

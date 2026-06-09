@@ -11,8 +11,8 @@ from pydantic import ConfigDict
 from pydantic import Field
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import VolumeFile
-from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.volume import BaseVolume
 
 # Docker label constants shared between volume.py and instance.py.
@@ -148,7 +148,7 @@ class DockerVolume(BaseVolume):
 
             perms = parts[0]
             size = int(parts[4]) if parts[4].isdigit() else 0
-            file_type = VolumeFileType.DIRECTORY if perms.startswith("d") else VolumeFileType.FILE
+            file_type = FileType.DIRECTORY if perms.startswith("d") else FileType.FILE
             path_str = path.rstrip("/") + "/" + name if path.strip("/") else name
 
             entries.append(
