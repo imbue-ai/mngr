@@ -13,7 +13,6 @@
   confusing "account mixing", so the account section shows the bound account
   with a disabled Disassociate control and offers no association controls.
 #}
-{% set _body_style = "--workspace-accent: " ~ accent ~ ";" %}
 {% set _scripts %}
 <script src="/_static/workspace_settings.js" defer></script>
 <script>
@@ -64,7 +63,6 @@
 {% endset %}
 <Base title={{ "Settings: " ~ ws_name }}
       body_class="bg-zinc-50 text-zinc-900 font-sans antialiased"
-      body_style={{ _body_style }}
       scripts={{ _scripts }}>
   <PageContainer>
     <div id="workspace-settings" data-agent-id="{{ agent_id }}">

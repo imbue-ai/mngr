@@ -5,7 +5,6 @@
   the workspace link in the page title points at
   {mngr_forward_origin}/goto/<agent>/.
 #}
-{% set _body_style = "--workspace-accent: " ~ accent ~ ";" %}
 {% set _scripts %}
 {% if has_account %}
 <script src="/_static/sharing.js" defer></script>
@@ -13,7 +12,6 @@
 {% endset %}
 <Base :title="title"
       body_class="bg-zinc-50 text-zinc-900 font-sans antialiased"
-      body_style={{ _body_style }}
       scripts={{ _scripts }}>
   <PageContainer>
     <h1 id="page-heading" class="text-2xl font-semibold text-zinc-900 leading-tight">
