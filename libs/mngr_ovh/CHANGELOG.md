@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.1] - 2026-06-08
+
 ### Added
 
 - Added: Auto-discovered as a publishable package by the release tooling (peer of the already-published `mngr_vultr`); will be offered for first publication to PyPI on the next release.
