@@ -41,12 +41,30 @@ banner-poll readiness fallback and the single-type plugin skeleton.
   `$CODEX_HOME/hooks.json` or `[hooks]` in config.toml; `type:"command"` handlers get the
   event JSON on **stdin**. **Verified firing live** in the TUI: `SessionStart` ->
   `UserPromptSubmit` -> `Stop` in order on a full turn.
-- **Marker plan**: `UserPromptSubmit` touches `$MNGR_AGENT_STATE_DIR/active`; `Stop` removes
-  it. Hook scripts are POSIX `sh`, parse JSON with `grep`/`sed` (no `jq` on remote hosts).
-- **Subagent gating = Claude's model, not agy's.** `Stop` fires **only at root-agent
-  scope**. Task-style subagents fire a *distinct* `SubagentStop` (and run in **separate
-  rollout files**, linked by `parent_thread_id`). So, like `mngr_claude`, we simply **do not
-  hook `SubagentStop`** -- subagents never touch the marker by construction.
+- **Subagents are ASYNCHRONOUS (the crux, verified against codex source).** Codex subagents
+  (the `spawn_agent` multi-agent feature) are independent `tokio::spawn`'d threads; the
+  `spawn_agent` tool returns immediately and the parent only blocks if the model explicitly
+  calls a separate `wait_agent` tool. So **the root `Stop` fires (root model loop done) while
+  subagents are still running** -- their `SubagentStop` hooks arrive later, with **no ordering
+  guarantee** and **no `fullyIdle`-style signal** (codex test
+  `subagent_notification_is_included_without_wait` proves the no-wait case). `Stop` fires only
+  at root scope; subagents fire the distinct `SubagentStart`/`SubagentStop` (and run in
+  separate rollout files, linked by `parent_thread_id`). **This is unlike claude**, whose
+  Task subagents are *synchronous* (done before the root `Stop`), which is why `mngr_claude`
+  can simply decline to hook `SubagentStop`. Codex cannot.
+- **Marker plan (subagent-aware).** Clearing on the root `Stop` would flip to WAITING while
+  async subagents still work. Instead the `active` marker is recomputed from two pieces of
+  state under a portable `mkdir` lock: `active` exists **iff** (`codex_root_active` present
+  **OR** `codex_subagents/` non-empty). `UserPromptSubmit` sets `codex_root_active` (and
+  records root session/transcript at a turn boundary); `Stop` clears `codex_root_active`
+  (root session only -- the nested-codex guard); `SubagentStart`/`SubagentStop` add/remove a
+  per-`agent_id` file. Whichever of the root `Stop` or the final `SubagentStop` runs last
+  performs the actual clear; the lock serializes the concurrent recompute so it can't strand
+  the marker either way. Hook scripts are POSIX `sh`, parse JSON with `grep`/`sed` (no `jq`).
+  **Limitation**: backgrounded OS processes (`sleep 60 &`) are invisible -- codex emits no
+  hook for them, so they can't keep the marker RUNNING (and arguably shouldn't: a detached
+  process doesn't mean the agent is busy). claude catches these via Linux `/proc` inspection,
+  which isn't portable to macOS.
 - **Nested whole-process guard**: a recursive `codex` subprocess sharing the same
   `CODEX_HOME` would fire its own `SessionStart`/`Stop`. Discriminator: the `SessionStart`
   payload carries `session_id` and `source` (`startup`/`resume`/`clear`/`compact`); record

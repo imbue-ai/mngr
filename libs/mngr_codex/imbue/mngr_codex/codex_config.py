@@ -27,12 +27,16 @@ This module holds the pure, host-agnostic pieces of that scheme:
   load-bearing: the keyring/auto backends hash ``CODEX_HOME`` into the secret
   key, which would make the shared-auth symlink unusable.
 * ``build_codex_hooks_config`` -- the lifecycle ``active``-marker hooks written
-  to ``<CODEX_HOME>/hooks.json``: ``UserPromptSubmit`` -> ``set_active_marker.sh``
-  (mark RUNNING, record the root session id + transcript path) and ``Stop`` ->
-  ``clear_active_marker.sh`` (mark WAITING when the *root* agent stops). Codex's
-  ``Stop`` fires only at root scope and Task-style subagents fire a distinct
-  ``SubagentStop`` -- which mngr deliberately does **not** hook -- so subagents
-  never touch the marker by construction (the Claude model, not agy's).
+  to ``<CODEX_HOME>/hooks.json``. Because codex subagents run *asynchronously*
+  (the root's ``Stop`` fires while subagents are still running, with no
+  ``fullyIdle`` signal and no ordering guarantee on the later ``SubagentStop``
+  hooks), the marker is recomputed under a lock from a root-turn flag plus one
+  file per in-flight subagent, so it stays present until the root turn **and**
+  every subagent are done: ``UserPromptSubmit`` -> ``set_active_marker.sh`` (set
+  the root-turn flag, record the root session id + transcript path), ``Stop`` ->
+  ``clear_active_marker.sh`` (clear the root-turn flag for the recorded root
+  session, then recompute), ``SubagentStart`` -> ``subagent_started.sh`` and
+  ``SubagentStop`` -> ``subagent_stopped.sh`` (register/deregister the subagent).
 * ``merge_project_trust`` -- the additive, idempotent ``[projects."<path>"]
   trust_level = "trusted"`` write used both to persist durable trust in the
   user's global ``config.toml`` and to seed the per-agent one.
@@ -114,12 +118,33 @@ ACTIVE_MARKER_FILENAME: str = "active"
 
 # Per-agent file (in ``$MNGR_AGENT_STATE_DIR``) recording the *root* codex
 # session id for the current conversation -- the session that opened a turn while
-# the marker was absent. ``clear_active_marker.sh`` clears the marker only on a
-# ``Stop`` whose ``session_id`` matches this, so a nested/recursive ``codex``
-# process sharing this ``CODEX_HOME`` cannot flip the root agent to WAITING.
+# the marker was absent. ``clear_active_marker.sh`` acts on a ``Stop`` only when
+# its ``session_id`` matches this, so a nested/recursive ``codex`` process
+# sharing this ``CODEX_HOME`` cannot flip the root agent to WAITING.
 # ``assemble_command`` also reads it to resume the conversation via
-# ``codex resume <id>``. Both shell scripts hardcode this same literal.
+# ``codex resume <id>``. The shell scripts reference this same literal.
 ROOT_SESSION_FILENAME: str = "codex_root_session"
+
+# Per-agent flag file (in ``$MNGR_AGENT_STATE_DIR``) present while the *root*
+# turn's model loop is running. ``set_active_marker.sh`` touches it on a fresh
+# root turn; ``clear_active_marker.sh`` removes it on the root's ``Stop``. It is
+# one of the two inputs to the marker invariant (the marker exists iff this flag
+# is present or a subagent is in flight).
+ROOT_ACTIVE_FILENAME: str = "codex_root_active"
+
+# Per-agent directory (in ``$MNGR_AGENT_STATE_DIR``) holding one empty file per
+# in-flight subagent, named by the subagent's ``agent_id``. ``subagent_started.sh``
+# creates a file when a subagent starts; ``subagent_stopped.sh`` removes it when
+# the subagent stops. A non-empty directory is the second input to the marker
+# invariant -- it keeps the marker present (RUNNING) while async subagents run on
+# after the root turn's ``Stop``.
+SUBAGENTS_DIRNAME: str = "codex_subagents"
+
+# Per-agent lock directory (in ``$MNGR_AGENT_STATE_DIR``) used as an mkdir-based
+# mutex so the four hooks serialize their read-modify-recompute of the marker
+# state. The shared helper acquires/releases it and steals it if a crashed hook
+# left it stale.
+MARKER_LOCK_DIRNAME: str = "codex_marker.lock"
 
 # Per-agent file (in ``$MNGR_AGENT_STATE_DIR``) recording the absolute path of
 # the root session's rollout JSONL (codex hands it to hooks as
@@ -131,6 +156,12 @@ TRANSCRIPT_PATH_FILENAME: str = "codex_transcript_path"
 # sync with the resource files under ``resources/``.
 SET_ACTIVE_MARKER_SCRIPT_NAME: str = "set_active_marker.sh"
 CLEAR_ACTIVE_MARKER_SCRIPT_NAME: str = "clear_active_marker.sh"
+SUBAGENT_STARTED_SCRIPT_NAME: str = "subagent_started.sh"
+SUBAGENT_STOPPED_SCRIPT_NAME: str = "subagent_stopped.sh"
+# Shared POSIX-sh helper sourced by the four lifecycle hooks (mngr_codex-owned,
+# like the way the other scripts source mngr_log.sh). Defines the marker state
+# paths, the mkdir-based lock, and the recompute that enforces the invariant.
+MARKER_STATE_LIB_SCRIPT_NAME: str = "codex_marker_state.sh"
 BACKGROUND_TASKS_SCRIPT_NAME: str = "codex_background_tasks.sh"
 RAW_TRANSCRIPT_SCRIPT_NAME: str = "stream_transcript.sh"
 COMMON_TRANSCRIPT_SCRIPT_NAME: str = "common_transcript.sh"
@@ -345,24 +376,36 @@ def is_project_trusted(config: Mapping[str, Any], project_path: str) -> bool:
 # (provisioned by the plugin).
 _SET_ACTIVE_COMMAND: str = f'bash "$MNGR_AGENT_STATE_DIR/commands/{SET_ACTIVE_MARKER_SCRIPT_NAME}"'
 _CLEAR_ACTIVE_COMMAND: str = f'bash "$MNGR_AGENT_STATE_DIR/commands/{CLEAR_ACTIVE_MARKER_SCRIPT_NAME}"'
+_SUBAGENT_STARTED_COMMAND: str = f'bash "$MNGR_AGENT_STATE_DIR/commands/{SUBAGENT_STARTED_SCRIPT_NAME}"'
+_SUBAGENT_STOPPED_COMMAND: str = f'bash "$MNGR_AGENT_STATE_DIR/commands/{SUBAGENT_STOPPED_SCRIPT_NAME}"'
 
 
 @pure
 def build_codex_hooks_config() -> dict[str, Any]:
     """Build the per-agent ``hooks.json`` body for the codex agent.
 
-    Two handlers maintain the ``active`` lifecycle marker:
+    Four handlers maintain the ``active`` lifecycle marker. Because codex
+    subagents run *asynchronously* -- the root's ``Stop`` fires while subagents
+    are still running, and their ``SubagentStop`` hooks arrive later with no
+    ordering guarantee and no ``fullyIdle`` signal -- the marker is recomputed
+    under a lock from two pieces of tracked state (a root-turn flag and one file
+    per in-flight subagent) so it stays present until the root turn **and** every
+    subagent are done. We therefore DO hook ``SubagentStart``/``SubagentStop``
+    now (to track in-flight subagents), correcting the earlier design that left
+    subagents unhooked.
 
-    * ``UserPromptSubmit`` -> ``set_active_marker.sh``: touch ``active`` (so
-      ``BaseAgent.get_lifecycle_state`` reports RUNNING) and, at a turn boundary,
-      record the root ``session_id`` and ``transcript_path``. ``UserPromptSubmit``
-      fires only for the root user's prompts, not for subagents.
-    * ``Stop`` -> ``clear_active_marker.sh``: remove ``active`` (WAITING) when the
-      *root* agent's turn ends. Codex's ``Stop`` fires only at root scope; Task
-      subagents fire a distinct ``SubagentStop`` which we deliberately do **not**
-      hook, so a subagent finishing never clears the marker. The clear is further
-      guarded on the recorded root ``session_id`` so a nested/recursive ``codex``
-      process sharing this ``CODEX_HOME`` cannot flip the agent to WAITING.
+    * ``UserPromptSubmit`` -> ``set_active_marker.sh``: set the root-turn flag (so
+      ``BaseAgent.get_lifecycle_state`` reports RUNNING) and, at a fresh root
+      turn, record the root ``session_id`` and ``transcript_path``.
+    * ``Stop`` -> ``clear_active_marker.sh``: clear the root-turn flag when the
+      *root* agent's loop ends, then recompute (in-flight subagents keep the
+      marker). The clear is guarded on the recorded root ``session_id`` so a
+      nested/recursive ``codex`` process sharing this ``CODEX_HOME`` cannot flip
+      the agent to WAITING.
+    * ``SubagentStart`` -> ``subagent_started.sh``: register the subagent's
+      ``agent_id`` so the marker stays present while it runs.
+    * ``SubagentStop`` -> ``subagent_stopped.sh``: deregister the ``agent_id`` and
+      recompute; the marker clears once the root turn is also done.
 
     The file is mngr-owned and rewritten from scratch each provision, so no
     merge-with-existing logic is needed. Codex requires command hooks to be
@@ -373,6 +416,8 @@ def build_codex_hooks_config() -> dict[str, Any]:
         "hooks": {
             "UserPromptSubmit": [{"hooks": [{"type": "command", "command": _SET_ACTIVE_COMMAND}]}],
             "Stop": [{"hooks": [{"type": "command", "command": _CLEAR_ACTIVE_COMMAND}]}],
+            "SubagentStart": [{"hooks": [{"type": "command", "command": _SUBAGENT_STARTED_COMMAND}]}],
+            "SubagentStop": [{"hooks": [{"type": "command", "command": _SUBAGENT_STOPPED_COMMAND}]}],
         }
     }
 

@@ -32,14 +32,21 @@ authenticate every agent and propagates refreshes. ``cli_auth_credentials_store
 = "file"`` is pinned in config.toml so codex never falls back to a keyring store
 keyed by the (per-agent) ``CODEX_HOME`` path, which would defeat sharing.
 
-Lifecycle marker: a ``UserPromptSubmit`` -> ``Stop`` hook pair maintains the
-``active`` marker that ``BaseAgent.get_lifecycle_state`` reads (RUNNING vs
-WAITING). Codex's ``Stop`` fires only at *root* scope and Task subagents fire a
-distinct ``SubagentStop`` -- which mngr deliberately does **not** hook -- so
-subagents never touch the marker (the Claude model). A recorded root
-``session_id`` further guards against a nested/recursive ``codex`` process
-sharing the same ``CODEX_HOME``. See :func:`codex_config.build_codex_hooks_config`
-and the ``set_active_marker.sh`` / ``clear_active_marker.sh`` resources.
+Lifecycle marker: four hooks maintain the ``active`` marker that
+``BaseAgent.get_lifecycle_state`` reads (RUNNING vs WAITING). Codex subagents run
+*asynchronously* -- the root's ``Stop`` fires while subagents are still running,
+their ``SubagentStop`` hooks arrive later with no ordering guarantee, and there
+is no ``fullyIdle`` signal -- so the marker is recomputed under a lock from two
+pieces of tracked state: a root-turn flag (``codex_root_active``) and one file
+per in-flight subagent (under ``codex_subagents/``). ``UserPromptSubmit`` sets
+the flag, ``Stop`` clears it, and ``SubagentStart``/``SubagentStop`` register and
+deregister each subagent, so the marker stays RUNNING until the root turn **and**
+every subagent are done. A recorded root ``session_id`` further guards the
+``Stop`` clear against a nested/recursive ``codex`` process sharing the same
+``CODEX_HOME``. See :func:`codex_config.build_codex_hooks_config`, the shared
+``codex_marker_state.sh`` helper, and the ``set_active_marker.sh`` /
+``clear_active_marker.sh`` / ``subagent_started.sh`` / ``subagent_stopped.sh``
+resources.
 
 Readiness: codex's ``SessionStart`` hook fires *lazily* (on the first prompt,
 not at TUI launch -- openai/codex issue #15269), so there is no pre-input
@@ -96,9 +103,12 @@ from imbue.mngr_codex import resources as _codex_resources
 from imbue.mngr_codex.codex_config import BACKGROUND_TASKS_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import CLEAR_ACTIVE_MARKER_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import COMMON_TRANSCRIPT_SCRIPT_NAME
+from imbue.mngr_codex.codex_config import MARKER_STATE_LIB_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import RAW_TRANSCRIPT_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import ROOT_SESSION_FILENAME
 from imbue.mngr_codex.codex_config import SET_ACTIVE_MARKER_SCRIPT_NAME
+from imbue.mngr_codex.codex_config import SUBAGENT_STARTED_SCRIPT_NAME
+from imbue.mngr_codex.codex_config import SUBAGENT_STOPPED_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import build_codex_config
 from imbue.mngr_codex.codex_config import build_codex_hooks_config
 from imbue.mngr_codex.codex_config import get_codex_auth_path
@@ -318,11 +328,19 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
                 self._get_agent_dir(),
                 {
                     BACKGROUND_TASKS_SCRIPT_NAME: _load_codex_resource_script(BACKGROUND_TASKS_SCRIPT_NAME),
-                    # UserPromptSubmit hook: touch the active marker, record the
+                    # Shared helper sourced by the four lifecycle hooks: marker
+                    # state paths, the mkdir-based lock, and the recompute.
+                    MARKER_STATE_LIB_SCRIPT_NAME: _load_codex_resource_script(MARKER_STATE_LIB_SCRIPT_NAME),
+                    # UserPromptSubmit hook: set the root-turn flag, record the
                     # root session id + transcript path (see build_codex_hooks_config).
                     SET_ACTIVE_MARKER_SCRIPT_NAME: _load_codex_resource_script(SET_ACTIVE_MARKER_SCRIPT_NAME),
-                    # Stop hook: clear the active marker on the root agent's stop.
+                    # Stop hook: clear the root-turn flag and recompute the marker
+                    # (in-flight subagents keep it present).
                     CLEAR_ACTIVE_MARKER_SCRIPT_NAME: _load_codex_resource_script(CLEAR_ACTIVE_MARKER_SCRIPT_NAME),
+                    # SubagentStart/Stop hooks: track in-flight subagents so the
+                    # marker stays RUNNING while async subagents are still working.
+                    SUBAGENT_STARTED_SCRIPT_NAME: _load_codex_resource_script(SUBAGENT_STARTED_SCRIPT_NAME),
+                    SUBAGENT_STOPPED_SCRIPT_NAME: _load_codex_resource_script(SUBAGENT_STOPPED_SCRIPT_NAME),
                 },
                 concurrency_group,
             )

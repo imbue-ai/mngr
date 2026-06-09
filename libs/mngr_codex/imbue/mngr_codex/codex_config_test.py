@@ -14,6 +14,8 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_codex.codex_config import CLEAR_ACTIVE_MARKER_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import SET_ACTIVE_MARKER_SCRIPT_NAME
+from imbue.mngr_codex.codex_config import SUBAGENT_STARTED_SCRIPT_NAME
+from imbue.mngr_codex.codex_config import SUBAGENT_STOPPED_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import build_codex_config
 from imbue.mngr_codex.codex_config import build_codex_hooks_config
 from imbue.mngr_codex.codex_config import get_codex_auth_path
@@ -211,11 +213,16 @@ def test_build_codex_hooks_config_maps_lifecycle_events_to_the_marker_scripts() 
     hooks = build_codex_hooks_config()
     user_prompt = hooks["hooks"]["UserPromptSubmit"]
     stop = hooks["hooks"]["Stop"]
-    # SubagentStop is deliberately NOT hooked (subagents must not touch the marker).
-    assert set(hooks["hooks"]) == {"UserPromptSubmit", "Stop"}
+    subagent_start = hooks["hooks"]["SubagentStart"]
+    subagent_stop = hooks["hooks"]["SubagentStop"]
+    # Subagents run asynchronously, so SubagentStart/Stop ARE hooked now: they
+    # track in-flight subagents to keep the marker RUNNING after the root Stop.
+    assert set(hooks["hooks"]) == {"UserPromptSubmit", "Stop", "SubagentStart", "SubagentStop"}
     assert SET_ACTIVE_MARKER_SCRIPT_NAME in user_prompt[0]["hooks"][0]["command"]
     assert user_prompt[0]["hooks"][0]["type"] == "command"
     assert CLEAR_ACTIVE_MARKER_SCRIPT_NAME in stop[0]["hooks"][0]["command"]
+    assert SUBAGENT_STARTED_SCRIPT_NAME in subagent_start[0]["hooks"][0]["command"]
+    assert SUBAGENT_STOPPED_SCRIPT_NAME in subagent_stop[0]["hooks"][0]["command"]
 
 
 def test_serialize_codex_hooks_round_trips_to_json() -> None:

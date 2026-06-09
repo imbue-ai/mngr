@@ -2,7 +2,7 @@ Added real `codex` agent-type support as its own plugin (`imbue-mngr-codex`), wi
 
 - Per-agent `CODEX_HOME` isolation gives each agent its own config, sessions, and transcripts without relocating the user's real `$HOME`.
 - Shared auth via a write-through `auth.json` symlink to a shared `~/.codex/auth.json` (with `cli_auth_credentials_store = "file"` pinned), so logging in once authenticates every agent and token refreshes propagate.
-- RUNNING/WAITING lifecycle from a `UserPromptSubmit`/`Stop` hook pair, with subagent-aware gating: subagents fire a distinct `SubagentStop` in separate rollout files and never touch the `active` marker, and `Stop` clears the marker only at root-agent scope (matched against the recorded root `session_id`).
+- RUNNING/WAITING lifecycle with subagent-aware gating across four hooks (`UserPromptSubmit`, `Stop`, `SubagentStart`, `SubagentStop`). Because codex subagents run asynchronously (the root's `Stop` fires while subagents are still working, with no ordering guarantee on the later `SubagentStop` hooks and no `fullyIdle` signal), the `active` marker is recomputed under a lock from a root-turn flag plus one file per in-flight subagent, so it stays RUNNING until the root turn AND every subagent are done. The `Stop` clear is still guarded against a nested/recursive codex via the recorded root `session_id`.
 - Conversation resume across stop/start: the root `session_id` is captured into a tracking file and `mngr start` shell-evaluates `codex resume <id>` (falling back to a fresh start). The rollout JSONL is flushed per line, so it survives `mngr stop`'s hard kill.
 - Common transcripts readable by `mngr transcript`, plus seeded trust and onboarding for a silent first launch.
 

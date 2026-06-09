@@ -23,11 +23,17 @@ for the full, source-verified investigation behind each decision.
   one login authenticates every agent and token refreshes propagate. `config.toml` pins
   `cli_auth_credentials_store = "file"` so codex never falls back to a keyring entry keyed
   by the per-agent `CODEX_HOME` path (which would defeat sharing).
-- **Lifecycle marker (RUNNING/WAITING).** A `UserPromptSubmit` -> `Stop` hook pair maintains
-  an `active` marker that mngr reads. Codex's `Stop` fires only at root scope and Task
-  subagents fire a distinct `SubagentStop` that mngr does not hook, so subagents never flip
-  the agent to WAITING. A recorded root `session_id` guards against a nested `codex` process
-  sharing the same `CODEX_HOME`.
+- **Lifecycle marker (RUNNING/WAITING), subagent-aware.** Codex subagents (the multi-agent
+  `spawn_agent` feature) run *asynchronously* -- the root agent's `Stop` hook fires while
+  subagents are still running, with no `fullyIdle` signal. So mngr does not just clear the
+  marker on `Stop`; it recomputes an `active` marker that is present while either the root
+  turn is running (`codex_root_active`, set on `UserPromptSubmit`, cleared on the root
+  `Stop`) or any subagent is in flight (one file per `agent_id` under `codex_subagents/`,
+  maintained by the `SubagentStart`/`SubagentStop` hooks). The recompute runs under a portable
+  `mkdir` lock so a concurrent root `Stop` and final `SubagentStop` can't strand it. A
+  recorded root `session_id` guards against a nested `codex` process sharing the same
+  `CODEX_HOME`. (Backgrounded OS processes the agent launches are not tracked -- codex emits
+  no hook for them.)
 - **Conversation resume.** `mngr stop` then `mngr start` resumes the prior conversation: the
   hook records the root `session_id`, and the launch command shell-evaluates
   `codex resume <id>` (codex's session JSONL survives the hard kill `mngr stop` performs).
