@@ -415,3 +415,57 @@ def test_inbox_watcher_injects_only_new_lines(tmp_path: Path) -> None:
     # Pre-existing line not re-injected (offset seeded at load); new lines injected
     # in order with the embedded newline preserved; the malformed line is skipped.
     assert injected == ["first\nmultiline", "second"]
+
+
+# pi's real sendUserMessage returns a Promise; this fake rejects it. The watcher
+# must not let that become an unhandled rejection (which would crash the Node
+# process and take pi down with it). The driver fails its top-level `await` only
+# if the rejection escapes -- so a returncode of 0 *is* the assertion that the
+# rejection was handled. A second, good line proves the poll loop kept running.
+_INBOX_REJECTION_DRIVER_MJS = """
+import { appendFileSync, writeFileSync } from "node:fs";
+const STATE = process.env.MNGR_AGENT_STATE_DIR;
+const inbox = STATE + "/pi_inbox";
+const injected = [];
+const pi = {
+  on: () => {},
+  sendUserMessage: (c) => {
+    injected.push(c);
+    return c === "boom" ? Promise.reject(new Error("rejected inject")) : Promise.resolve();
+  },
+};
+const mod = await import("./mngr_pi_lifecycle.ts");
+mod.default(pi);
+appendFileSync(inbox, JSON.stringify("boom") + "\\n");
+appendFileSync(inbox, JSON.stringify("after") + "\\n");
+await new Promise((r) => setTimeout(r, 600));
+writeFileSync(STATE + "/injected.json", JSON.stringify(injected));
+"""
+
+
+def test_inbox_watcher_swallows_rejected_inject(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not available")
+    work_dir = tmp_path / "work"
+    work_dir.mkdir(exist_ok=True)
+    if not _node_supports_typescript(node, work_dir):
+        pytest.skip("node does not support importing TypeScript modules")
+    (work_dir / _LIFECYCLE_EXTENSION_NAME).write_text(_load_resource(_LIFECYCLE_EXTENSION_NAME))
+    driver = work_dir / "inbox_rejection_driver.mjs"
+    driver.write_text(_INBOX_REJECTION_DRIVER_MJS)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(exist_ok=True)
+    result = subprocess.run(
+        [node, "--unhandled-rejections=throw", str(driver)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={"PATH": os.environ.get("PATH", ""), "MNGR_AGENT_STATE_DIR": str(state_dir)},
+    )
+    # returncode 0 under --unhandled-rejections=throw means the rejection was handled.
+    assert result.returncode == 0, f"rejection escaped:\n{result.stdout}\n{result.stderr}"
+    injected = json.loads((state_dir / "injected.json").read_text())
+    # The rejecting line still advanced the offset (no retry), and the watcher kept
+    # running to inject the following line.
+    assert injected == ["boom", "after"]

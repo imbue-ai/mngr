@@ -135,17 +135,22 @@ const TOOL_OUTPUT_LIMIT = 2000;
 
 // --- Helpers. ---------------------------------------------------------------
 
+// Best-effort log to stderr only; pi treats extension stderr as diagnostic, not
+// as agent input. Wrapped so logging itself can never throw.
+function logDiagnostic(label: string, error: unknown): void {
+  try {
+    process.stderr.write(`[mngr_pi_lifecycle] ${label} failed: ${String(error)}\n`);
+  } catch {
+    // Give up silently -- nothing we can safely do here.
+  }
+}
+
 function safe(label: string, fn: () => void): void {
   try {
     fn();
   } catch (error) {
-    // Never let a lifecycle/transcript failure disrupt pi. Best-effort log to
-    // stderr only; pi treats extension stderr as diagnostic, not as agent input.
-    try {
-      process.stderr.write(`[mngr_pi_lifecycle] ${label} failed: ${String(error)}\n`);
-    } catch {
-      // Give up silently -- nothing we can safely do here.
-    }
+    // Never let a lifecycle/transcript failure disrupt pi.
+    logDiagnostic(label, error);
   }
 }
 
@@ -304,9 +309,19 @@ export default function mngrPiLifecycle(pi: PiApi): void {
             continue;
           }
           if (typeof content === "string") {
-            // Advance only after a successful inject, so a transient failure
-            // retries on the next tick rather than dropping the message.
-            void pi.sendUserMessage(content, { deliverAs: "followUp" });
+            // Delivery is best-effort. pi.sendUserMessage is async (returns a
+            // Promise), so the offset advances right after the call is initiated
+            // (line below), not after the message actually lands -- an async
+            // rejection is logged and the message is not retried. A *synchronous*
+            // throw, by contrast, propagates before the offset advances and so
+            // retries on the next tick. We must attach a rejection handler: a
+            // bare `void promise` would surface as an unhandled rejection, which
+            // on modern Node terminates the process and would take pi down with
+            // it (the one thing this extension must never do).
+            const sent = pi.sendUserMessage(content, { deliverAs: "followUp" });
+            if (sent != null && typeof (sent as Promise<void>).catch === "function") {
+              (sent as Promise<void>).catch((error) => logDiagnostic("inbox inject", error));
+            }
           }
         }
         processedInbox++;
