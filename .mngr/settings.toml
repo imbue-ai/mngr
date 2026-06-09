@@ -77,7 +77,8 @@ default_sandbox_timeout = 7200
 # Only the per-developer allowed_ssh_cidrs is operator-specific and lives in the
 # gitignored .mngr/settings.local.toml; everything here is the same for everyone.
 # These keys merge per-field with that local block (ProviderInstanceConfig.merge_with
-# honors model_fields_set), so the local file only needs backend + allowed_ssh_cidrs.
+# honors model_fields_set), so the local file only needs allowed_ssh_cidrs (backend
+# defaults to "aws" for this config type, and the `[providers.aws]` name resolves it too).
 [providers.aws]
 backend = "aws"
 # us-west-2 (Oregon): has a pinned default Debian 12 AMI; no region is set in ~/.aws.
