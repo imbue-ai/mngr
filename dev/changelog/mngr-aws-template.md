@@ -19,4 +19,6 @@ honors `model_fields_set`). `builder = "DEPOT"` offloads the Rust/`uv sync` buil
 cached remote builders, required to stay under the backend's 600s local-build timeout;
 `DEPOT_TOKEN` and `GH_TOKEN` must be exported when running `mngr create -t aws`. The
 template uses `pass_env__extend` (not plain `pass_env`) so it adds `GH_TOKEN` without
-clobbering any inherited `pass_env` (e.g. a user profile's `ANTHROPIC_API_KEY`).
+clobbering any inherited `pass_env` (e.g. a user profile's `ANTHROPIC_API_KEY`). The
+existing `modal` template's `pass_env` was switched to `pass_env__extend` for the same
+reason.
