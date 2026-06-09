@@ -284,6 +284,35 @@ def resolve_fct_path(scratch_dir: Path) -> Path:
     return _shallow_clone_fct(_FCT_FALLBACK_BRANCH, destination)
 
 
+def materialize_isolated_fct(fct_source: Path, scratch_dir: Path) -> Path:
+    """Return a throwaway FCT working tree the caller may safely write into.
+
+    The pytest wrapper writes a ``is_allowed_in_pytest`` opt-in into the
+    returned tree's ``.mngr/settings.toml`` before ``mngr create`` mirrors
+    it into the workspace container. When ``fct_source`` is the operator's
+    ``.external_worktrees/forever-claude-template/`` checkout, that edit
+    must not land on the real file, so clone it into ``scratch_dir``
+    (committed state) and position it on the create form's default branch
+    (matching :func:`_shallow_clone_fct`). When ``fct_source`` is already a
+    throwaway clone (steps 2-3 of :func:`resolve_fct_path`), return it
+    unchanged.
+    """
+    if fct_source != _FCT_EXTERNAL_WORKTREE:
+        return fct_source
+    destination = scratch_dir / "fct_isolated"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    logger.info("Cloning FCT external worktree into {} to keep the operator's checkout pristine", destination)
+    subprocess.run(
+        ["git", "clone", str(fct_source), str(destination)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    _checkout_best_effort(destination, _FORM_DEFAULT_BRANCH)
+    return destination
+
+
 def ensure_minds_env_defaults(setenv: Callable[[str, str], None]) -> None:
     """Set ``MINDS_ROOT_NAME`` / ``MINDS_CLIENT_CONFIG_PATH`` if unset.
 
@@ -385,8 +414,19 @@ def _launched_electron(
     workspace_git_url: Path,
     workspace_name: str,
     debug_port: int,
+    host_config_dir: Path | None = None,
 ) -> Iterator[subprocess.Popen[bytes]]:
     """Start the Electron app, yield the process, and always tear it down.
+
+    ``host_config_dir`` becomes the Electron process's cwd, so the
+    host-side ``mngr`` invocations the app spawns (e.g. the ``mngr auth
+    list`` account-discovery poll, ``mngr forward``) resolve their
+    project config by walking up from there instead of the mngr repo
+    root. The pytest wrapper points this at an isolated, opted-in config
+    tree so the real repo ``.mngr/`` (which carries ``is_allowed_in_pytest
+    = false`` plus a developer's untracked ``settings.local.toml``) is
+    never loaded under the pytest config guard. ``None`` keeps the mngr
+    repo root, which is what the snapshot script wants.
 
     SIGTERM with a ``_ELECTRON_SIGTERM_GRACE_SECONDS`` grace, then
     SIGKILL. The Electron main process owns the backend subprocess and
@@ -424,7 +464,7 @@ def _launched_electron(
     logger.info("Launching Electron: {}", " ".join(cmd))
     process = subprocess.Popen(
         cmd,
-        cwd=str(_REPO_ROOT),
+        cwd=str(host_config_dir or _REPO_ROOT),
         env=_build_electron_env(workspace_git_url, workspace_name),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -554,7 +594,7 @@ def _advance_onboarding_screen(page: Page, screen_name: str) -> None:
     )
 
 
-def destroy_agent_best_effort(workspace_name: str) -> None:
+def destroy_agent_best_effort(workspace_name: str, config_project_dir: Path | None = None) -> None:
     """Tear down the mngr agent created during a run. Always survives.
 
     ``mngr destroy`` may legitimately fail (e.g. the run crashed before
@@ -564,13 +604,22 @@ def destroy_agent_best_effort(workspace_name: str) -> None:
     an agent into the host. The snapshot script does NOT call it -- the
     whole point of the snapshot is to capture the sandbox with the agent
     alive.
+
+    ``config_project_dir`` is exported as ``MNGR_PROJECT_CONFIG_DIR`` so
+    this subprocess loads the same isolated, opted-in config the pytest
+    wrapper built, rather than the repo's ``.mngr/`` (which would fail the
+    pytest config guard). Leave unset outside pytest.
     """
     cmd = ["uv", "run", "mngr", "destroy", workspace_name, "--force"]
     logger.info("Cleanup: {}", " ".join(cmd))
+    env = dict(os.environ)
+    if config_project_dir is not None:
+        env["MNGR_PROJECT_CONFIG_DIR"] = str(config_project_dir)
     try:
         completed = subprocess.run(
             cmd,
             cwd=str(_REPO_ROOT),
+            env=env,
             capture_output=True,
             text=True,
             timeout=120,
@@ -591,6 +640,7 @@ def create_workspace_via_electron(
     fct_path: Path,
     workspace_name: str,
     debug_port: int,
+    host_config_dir: Path | None = None,
 ) -> None:
     """Drive Electron to create a local Docker workspace from ``fct_path``.
 
@@ -606,8 +656,10 @@ def create_workspace_via_electron(
     - ``debug_port`` must be an unused TCP port (use :func:`find_free_port`).
     - ``MINDS_ROOT_NAME`` must already be set in ``os.environ`` (call
       :func:`ensure_minds_env_defaults` first or activate a minds env).
+    - ``host_config_dir`` is the cwd for the Electron process (see
+      :func:`_launched_electron`); leave unset outside pytest.
     """
-    with _launched_electron(fct_path, workspace_name, debug_port):
+    with _launched_electron(fct_path, workspace_name, debug_port, host_config_dir):
         _wait_for_cdp(debug_port, _CDP_READY_TIMEOUT_SECONDS)
         with sync_playwright() as playwright:
             browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{debug_port}")
