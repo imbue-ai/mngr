@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from imbue.imbue_common.model_update import to_update
+from imbue.imbue_common.ratchet_testing.ratchets import assert_posix_compatible
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.primitives import AgentId
@@ -223,6 +224,13 @@ def test_assemble_command_honors_command_override(codex_agent: CodexAgent) -> No
     command = str(codex_agent.assemble_command(codex_agent.host, (), CommandString("/opt/codex")))
     assert "env CODEX_HOME=" in command
     assert "/opt/codex --dangerously-bypass-hook-trust" in command
+
+
+def test_assemble_command_is_posix_compatible(codex_agent: CodexAgent) -> None:
+    """The assembled command runs in the user's interactive shell (possibly zsh), so it
+    must avoid bash-only constructs (the resume prelude uses POSIX `set --` / "$@")."""
+    command = str(codex_agent.assemble_command(codex_agent.host, ("a b", "--flag"), None))
+    assert_posix_compatible(command)
 
 
 # =============================================================================
