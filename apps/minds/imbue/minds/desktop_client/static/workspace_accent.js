@@ -17,7 +17,7 @@
   // templates.py. A light / low-saturation tone so the full-width
   // titlebar reads as a chrome surface rather than a saturated highlight.
   var ACCENT_L = 85;
-  var ACCENT_C = 0.12;
+  var ACCENT_C = 0.08;
   // Threshold for choosing a contrasting foreground. Above this L the
   // background is light enough that black ink reads better; below it,
   // white. OKLCH lightness is perceptual so a fixed cutoff works

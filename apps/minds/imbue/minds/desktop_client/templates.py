@@ -163,7 +163,7 @@ CATALOG: Final[Catalog] = _build_catalog()
 # low-saturation tone is needed to read as chrome rather than a saturated
 # highlight.
 _WORKSPACE_L: Final[int] = 85
-_WORKSPACE_C: Final[float] = 0.12
+_WORKSPACE_C: Final[float] = 0.08
 
 
 @pure
