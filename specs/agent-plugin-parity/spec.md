@@ -264,12 +264,19 @@ omits). For the manual-`&` case, WAITING is *correct* (the agent genuinely is id
 input); but a first-class background-task tool can make the agent report WAITING while a task
 it launched is still running.
 
-claude handles this in the same `Stop` hook that drains sibling stop hooks: before marking
-idle it waits (up to 120s) for still-running **tagged** descendant bash-tool processes
-(`CLAUDECODE=1` in `/proc/<pid>/environ`), so a background bash keeps the agent RUNNING. The
-*tag* is what makes it safe -- it distinguishes "a background task the agent started" from
-incidental children (the agent's shell, language servers, watchers). A CLI that exposes
-backgrounded work but provides **no** such discriminator cannot do a generic
+Note that even claude does **not** currently solve this for backgrounded bash. Its `Stop`
+hook (`wait_for_stop_hook.sh`) waits before going idle, but only for sibling *stop-hook*
+processes (the recursive-reviewer case of dimension D), which it distinguishes from
+bash-tool tasks via `/proc/<pid>/environ`: a stop hook has `CLAUDE_PROJECT_DIR` *without*
+`CLAUDECODE=1`, whereas a `CLAUDECODE=1` process is a bash-tool task and is **excluded** from
+the wait. So a still-running reviewer keeps the agent RUNNING, but a detached
+`run_in_background` bash does not -- claude's marker stays turn-scoped here too.
+
+This is the right hook to extend if you *did* want background work to count: the
+`CLAUDECODE=1` tag already present on bash-tool tasks is exactly the per-task discriminator
+that makes a descendant-liveness wait *safe* -- it distinguishes "a background task the agent
+started" from incidental children (the agent's shell, language servers, watchers). A CLI that
+exposes backgrounded work but provides **no** such discriminator cannot do a generic
 descendant-liveness check without false-RUNNING (the agent would never go idle once it
 started any long-lived child), so the honest fallback is to scope the marker to the turn and
 *document* that detached/background work is not reflected -- the agy/pi position (agy has no
