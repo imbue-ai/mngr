@@ -350,13 +350,17 @@ def test_unknown_content_and_roles_degrade_gracefully(tmp_path: Path) -> None:
     )
 
     common = _read_jsonl(state / _COMMON_TRANSCRIPT)
+    # Unknown roles are skipped; only modelled roles surface.
     assert [r["type"] for r in common] == ["assistant_message", "user_message"]
     assistant = next(r for r in common if r["type"] == "assistant_message")
-    assert assistant["text"] == "hello"  # unknown content blocks (thinking/image/future) dropped
+    # Unknown content blocks (thinking/image/future) are dropped; text + tool call survive.
+    assert assistant["text"] == "hello"
     assert [c["tool_name"] for c in assistant["tool_calls"]] == ["bash"]
-    assert "secret reasoning" not in json.dumps(common)  # thinking not surfaced in the lossy envelope
+    # Thinking content is not surfaced in the lossy common envelope.
+    assert "secret reasoning" not in json.dumps(common)
     user = next(r for r in common if r["type"] == "user_message")
-    assert user["content"] == ""  # non-string/array content coerced, not crashed
+    # Non-string/array content coerces to empty rather than crashing.
+    assert user["content"] == ""
 
     # Raw preserves every well-formed message verbatim -- unknown roles AND unknown blocks.
     raw = _read_jsonl(state / _RAW_TRANSCRIPT)
