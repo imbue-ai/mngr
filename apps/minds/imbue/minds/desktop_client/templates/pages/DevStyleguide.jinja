@@ -121,15 +121,16 @@
        == rounded-md) was banished in favor of explicit ``rounded-md``
        everywhere for grep-ability. Cards and Modal use rounded-xl so
        confirmation-dialog chrome and card chrome share one shape;
-       rounded-2xl was retired. #}
+       rounded-2xl is reserved for the chrome content surface that tucks
+       under the colored titlebar (Chrome.jinja's #content-frame). #}
     <section class="mb-12">
       <h2 class="text-lg font-semibold text-zinc-900 mb-1">Corner radius</h2>
       <p class="text-xs text-zinc-500 mb-4">
-        Four steps; each plays one role. Prefer the explicit ``rounded-md``
+        Five steps; each plays one role. Prefer the explicit ``rounded-md``
         over bare ``rounded`` so call sites are grep-able for radius
         rather than for the no-suffix shorthand.
       </p>
-      <div class="bg-white border border-zinc-200 rounded-lg p-4 grid grid-cols-2 sm:grid-cols-4 gap-4">
+      <div class="bg-white border border-zinc-200 rounded-lg p-4 grid grid-cols-2 sm:grid-cols-5 gap-4">
         <div class="flex flex-col items-center text-center">
           <div class="w-16 h-16 bg-zinc-200 border border-zinc-300 rounded-md"></div>
           <code class="text-[11px] font-mono text-zinc-500 mt-1">rounded-md (4px)</code>
@@ -144,6 +145,11 @@
           <div class="w-16 h-16 bg-zinc-200 border border-zinc-300 rounded-xl"></div>
           <code class="text-[11px] font-mono text-zinc-500 mt-1">rounded-xl (12px)</code>
           <span class="text-[11px] text-zinc-500">cards, modal / dialog chrome</span>
+        </div>
+        <div class="flex flex-col items-center text-center">
+          <div class="w-16 h-16 bg-zinc-200 border border-zinc-300 rounded-2xl"></div>
+          <code class="text-[11px] font-mono text-zinc-500 mt-1">rounded-2xl (16px)</code>
+          <span class="text-[11px] text-zinc-500">chrome content tuck-under (Chrome.jinja)</span>
         </div>
         <div class="flex flex-col items-center text-center">
           <div class="w-16 h-16 bg-zinc-200 border border-zinc-300 rounded-full"></div>
