@@ -26,6 +26,23 @@ def test_with_expanded_key_file_expands_key_file_and_preserves_other_fields() ->
     assert expanded.user == "me"
 
 
+def test_with_expanded_key_file_preserves_every_field_except_key_file() -> None:
+    """Guard the core invariant: only key_file changes, so no field can be silently dropped
+    even if SSHHostConfig gains new fields in the future."""
+    config = SSHHostConfig(
+        address="host",
+        port=2200,
+        user="me",
+        key_file=Path("~/.ssh/id_ed25519"),
+        known_hosts_file=Path("/etc/ssh/ssh_known_hosts"),
+    )
+
+    expanded = config.with_expanded_key_file()
+
+    assert expanded.model_dump(exclude={"key_file"}) == config.model_dump(exclude={"key_file"})
+    assert expanded.key_file == Path("~/.ssh/id_ed25519").expanduser()
+
+
 def test_with_expanded_key_file_returns_unchanged_when_no_key_file() -> None:
     config = SSHHostConfig(address="host", known_hosts_file=Path("/etc/ssh/ssh_known_hosts"))
 
