@@ -12,7 +12,7 @@ on:
         required: false
         default: false
       template_ref:
-        description: "REQUIRED. forever-claude-template ref (branch / tag / SHA) the agent is created from. Required because agent runtime behavior is a function of (minds binary, FCT template); a moving default would make runs irreproducible the same way an unset commit_sha did. Pass `pilot_2` for the production path, `main` for the user-default path, or a specific SHA for replay."
+        description: "REQUIRED. forever-claude-template ref (branch / tag / SHA) the agent is created from. Required because agent runtime behavior is a function of (minds binary, FCT template); a moving default would make runs irreproducible the same way an unset commit_sha did. Pass the FALLBACK_BRANCH tag (e.g. `v0.2.35`) for the production path, `main` for the user-default path, or a specific SHA for replay."
         required: true
       template_url:
         description: 'Override the FCT git URL (forks). Empty -> https://github.com/imbue-ai/forever-claude-template.'
@@ -375,7 +375,7 @@ jobs:
         # template_ref is required at the dispatch level (branch / tag /
         # SHA accepted). Resolve to a full SHA so the run record names
         # the exact FCT commit the agent was created from; otherwise a
-        # branch ref like `pilot_2` would silently drift between runs
+        # branch ref like `pilot` would silently drift between runs
         # the same way the empty commit_sha trap did.
         id: fct_sha
         env:
