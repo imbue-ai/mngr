@@ -80,7 +80,6 @@ def aws_cli_group() -> None:
     "--allowed-ssh-cidr",
     "allowed_ssh_cidrs",
     multiple=True,
-    default=None,
     help=(
         "Inbound CIDR allowed on tcp/22 and tcp/<container_ssh_port>. Repeat for multiple. "
         "Defaults to ('0.0.0.0/0',) matching the provider config default. Tighten for production."
@@ -90,7 +89,7 @@ def prepare(
     region: str | None,
     sg_name: str | None,
     vpc_id: str | None,
-    allowed_ssh_cidrs: tuple[str, ...] | None,
+    allowed_ssh_cidrs: tuple[str, ...],
 ) -> None:
     """Create (or reuse) the AWS security group for mngr-managed instances.
 
@@ -101,7 +100,10 @@ def prepare(
     DescribeInstances + ImportKeyPair etc. (no SG-management permissions).
     """
     base_defaults = AwsProviderConfig()
-    effective_cidrs = tuple(allowed_ssh_cidrs) if allowed_ssh_cidrs else base_defaults.allowed_ssh_cidrs
+    # Empty tuple => no --allowed-ssh-cidr flags passed: fall back to the
+    # provider config default. Non-empty tuple => caller supplied explicit
+    # values, use them verbatim.
+    effective_cidrs = allowed_ssh_cidrs or base_defaults.allowed_ssh_cidrs
     try:
         client = _build_prepare_client(region, sg_name, vpc_id, effective_cidrs)
     except ValueError as e:
