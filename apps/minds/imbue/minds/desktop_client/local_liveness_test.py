@@ -5,8 +5,8 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.local_liveness import LocalMindState
-from imbue.minds.desktop_client.local_liveness import LocalMindStateProvider
 from imbue.minds.desktop_client.local_liveness import classify_host_state
+from imbue.minds.desktop_client.local_liveness import compute_local_mind_state_by_agent_id
 from imbue.minds.desktop_client.local_liveness import get_local_workspace_agent_ids
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import make_discovered_provider
@@ -111,25 +111,23 @@ def test_get_local_workspace_agent_ids_empty_for_non_mngr_resolver() -> None:
     assert get_local_workspace_agent_ids(resolver) == ()
 
 
-# -- LocalMindStateProvider: discovery-derived state --
+# -- compute_local_mind_state_by_agent_id (over the resolver) --
 
 
 def test_compute_reflects_discovery_host_state() -> None:
     agent = AgentId.generate()
-    provider = LocalMindStateProvider()
 
-    running = provider.compute_state_by_agent_id(_resolver_with_local_agent(agent, HostState.RUNNING))
+    running = compute_local_mind_state_by_agent_id(_resolver_with_local_agent(agent, HostState.RUNNING))
     assert running == {str(agent): LocalMindState.RUNNING}
 
-    stopped = provider.compute_state_by_agent_id(_resolver_with_local_agent(agent, HostState.STOPPED))
+    stopped = compute_local_mind_state_by_agent_id(_resolver_with_local_agent(agent, HostState.STOPPED))
     assert stopped == {str(agent): LocalMindState.STOPPED}
 
 
 def test_compute_unknown_when_host_state_absent() -> None:
     """Before discovery has the host's state, the mind is UNKNOWN (not assumed stopped)."""
     agent = AgentId.generate()
-    provider = LocalMindStateProvider()
-    states = provider.compute_state_by_agent_id(_resolver_with_local_agent(agent, None))
+    states = compute_local_mind_state_by_agent_id(_resolver_with_local_agent(agent, None))
     assert states == {str(agent): LocalMindState.UNKNOWN}
 
 
@@ -153,77 +151,18 @@ def test_compute_excludes_remote_minds() -> None:
         )
     )
 
-    states = LocalMindStateProvider().compute_state_by_agent_id(resolver)
+    states = compute_local_mind_state_by_agent_id(resolver)
 
     # Only the local (docker) mind is computed; the remote one never appears.
     assert states == {str(local_agent): LocalMindState.RUNNING}
 
 
-# -- LocalMindStateProvider: optimistic overrides --
-
-
-def test_override_wins_over_discovery_until_discovery_agrees() -> None:
+def test_compute_reflects_resolver_optimistic_override() -> None:
+    """A Start/Stop override set on the resolver shows through compute ahead of discovery."""
     agent = AgentId.generate()
-    provider = LocalMindStateProvider()
-    changes: list[None] = []
-    provider.add_on_change_callback(lambda: changes.append(None))
+    resolver = _resolver_with_local_agent(agent, HostState.RUNNING)
 
-    # Discovery still says RUNNING, but the user just stopped it: the override
-    # makes the UI read STOPPED at once, and on-change fires to wake the SSE.
-    provider.set_override(agent, LocalMindState.STOPPED)
-    assert len(changes) == 1
-    running_resolver = _resolver_with_local_agent(agent, HostState.RUNNING)
-    assert provider.compute_state_by_agent_id(running_resolver) == {str(agent): LocalMindState.STOPPED}
+    # Discovery still says RUNNING; the resolver-level override flips it to STOPPED.
+    resolver.set_host_state_override(_HOST_A, HostState.STOPPED)
 
-    # Once discovery catches up (STOPPED), the override is confirmed and dropped.
-    stopped_resolver = _resolver_with_local_agent(agent, HostState.STOPPED)
-    assert provider.compute_state_by_agent_id(stopped_resolver) == {str(agent): LocalMindState.STOPPED}
-
-    # With the override gone, discovery is authoritative again: a later restart
-    # detected only by discovery is reflected without any override re-masking it.
-    assert provider.compute_state_by_agent_id(running_resolver) == {str(agent): LocalMindState.RUNNING}
-
-
-def test_clear_override_reverts_to_discovery() -> None:
-    agent = AgentId.generate()
-    provider = LocalMindStateProvider()
-    provider.set_override(agent, LocalMindState.STOPPED)
-
-    changes: list[None] = []
-    provider.add_on_change_callback(lambda: changes.append(None))
-    provider.clear_override(agent)
-    assert len(changes) == 1
-
-    running_resolver = _resolver_with_local_agent(agent, HostState.RUNNING)
-    assert provider.compute_state_by_agent_id(running_resolver) == {str(agent): LocalMindState.RUNNING}
-
-
-def test_clear_override_absent_is_noop() -> None:
-    agent = AgentId.generate()
-    provider = LocalMindStateProvider()
-    changes: list[None] = []
-    provider.add_on_change_callback(lambda: changes.append(None))
-    # No override set -> clearing fires nothing.
-    provider.clear_override(agent)
-    assert changes == []
-
-
-def test_override_pruned_when_mind_leaves_local_set() -> None:
-    """An override for an agent no longer present in discovery is dropped, not retained."""
-    agent = AgentId.generate()
-    provider = LocalMindStateProvider()
-    provider.set_override(agent, LocalMindState.STOPPED)
-
-    # The agent is gone from discovery entirely (e.g. destroyed): it is absent
-    # from the computed map, and the stale override must not linger.
-    empty_resolver = MngrCliBackendResolver()
-    empty_resolver.update_providers(
-        providers=(_provider("docker", "docker"),),
-        error_by_provider_name={},
-        last_full_snapshot_at=datetime.now(timezone.utc),
-    )
-    assert provider.compute_state_by_agent_id(empty_resolver) == {}
-
-    # If the same id reappears RUNNING, the pruned override does not resurrect.
-    running_resolver = _resolver_with_local_agent(agent, HostState.RUNNING)
-    assert provider.compute_state_by_agent_id(running_resolver) == {str(agent): LocalMindState.RUNNING}
+    assert compute_local_mind_state_by_agent_id(resolver) == {str(agent): LocalMindState.STOPPED}

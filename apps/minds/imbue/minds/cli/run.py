@@ -61,7 +61,6 @@ from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPerm
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.latchkey_auto_register import LatchkeyAutoRegister
-from imbue.minds.desktop_client.local_liveness import LocalMindStateProvider
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
@@ -290,11 +289,6 @@ def run(
     # consumer's failure callback (registered before consumer.start() below;
     # otherwise early failures would dispatch against an empty list).
     system_interface_health_tracker = SystemInterfaceHealthTracker()
-    # Derives container liveness of local (docker / lima) minds for the landing-page
-    # Start/Stop controls and the quit-time shutdown prompt straight from the
-    # discovery snapshot's host state (no dedicated poll); the Start/Stop endpoints
-    # set short-lived optimistic overrides on it so the UI flips immediately.
-    local_mind_state_provider = LocalMindStateProvider()
     # The plugin reports every non-2xx response; minds decides which ones count.
     # Only connection-level failures and infrastructure 5xx enroll a suspect --
     # application errors are left for the background probe to adjudicate.
@@ -389,7 +383,6 @@ def run(
         output_format=output_format,
         root_concurrency_group=root_concurrency_group,
         system_interface_health_tracker=system_interface_health_tracker,
-        local_mind_state_provider=local_mind_state_provider,
         mngr_binary=MNGR_BINARY,
         mngr_host_dir=mngr_host_dir,
         minds_api_key=minds_api_key,

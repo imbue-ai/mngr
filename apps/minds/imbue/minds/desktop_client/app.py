@@ -74,7 +74,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.local_liveness import LocalMindState
-from imbue.minds.desktop_client.local_liveness import LocalMindStateProvider
+from imbue.minds.desktop_client.local_liveness import compute_local_mind_state_by_agent_id
 from imbue.minds.desktop_client.local_liveness import get_local_workspace_agent_ids
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
@@ -150,7 +150,9 @@ from imbue.minds.primitives import UserDataPreference
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.telegram.setup import TelegramSetupStatus
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import InvalidName
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
@@ -407,12 +409,9 @@ def _handle_landing_page(
                 info = backend_resolver.get_agent_display_info(aid)
                 agent_names[str(aid)] = info.agent_name if info else str(aid)
         local_agent_ids = get_local_workspace_agent_ids(backend_resolver)
-        state_provider: LocalMindStateProvider | None = request.app.state.local_mind_state_provider
-        local_mind_state_by_agent_id = (
-            {aid: state.value for aid, state in state_provider.compute_state_by_agent_id(backend_resolver).items()}
-            if state_provider is not None
-            else {}
-        )
+        local_mind_state_by_agent_id = {
+            aid: state.value for aid, state in compute_local_mind_state_by_agent_id(backend_resolver).items()
+        }
         html = render_landing_page(
             accessible_agent_ids=all_agent_ids,
             mngr_forward_origin=_get_mngr_forward_origin(request),
@@ -1872,15 +1871,11 @@ async def _handle_chrome_events(
         if tracker is not None:
             tracker.add_on_change_callback(_on_health_change)
 
-        # Local-mind liveness is derived from discovery host state (refreshed on
-        # the resolver's on-change above) plus optimistic overrides set by the
-        # Start/Stop workers. Subscribe to the provider's on-change so an in-app
-        # Start/Stop wakes this loop immediately rather than waiting for the next
-        # discovery snapshot; the loop recomputes and diffs the per-mind states.
-        state_provider: LocalMindStateProvider | None = request.app.state.local_mind_state_provider
-        if state_provider is not None:
-            state_provider.add_on_change_callback(_on_change)
-
+        # Local-mind liveness is derived from discovery host state, which the
+        # resolver already wakes us on (the on-change above). A Start/Stop action
+        # sets an optimistic override on the same resolver and fires that same
+        # on-change, so an in-app action wakes this loop immediately too; each
+        # tick recomputes and diffs the per-mind states.
         try:
             # Send initial workspace list and request count
             session_store: MultiAccountSessionStore | None = request.app.state.session_store
@@ -1922,9 +1917,7 @@ async def _handle_chrome_events(
             # Send the initial local-mind liveness snapshot (derived from
             # discovery host state) so the landing page can render Start/Stop
             # controls. Subsequent ticks diff against this to push only changes.
-            last_local_mind_states: dict[str, LocalMindState] = (
-                state_provider.compute_state_by_agent_id(backend_resolver) if state_provider is not None else {}
-            )
+            last_local_mind_states: dict[str, LocalMindState] = compute_local_mind_state_by_agent_id(backend_resolver)
             for aid_str, state in last_local_mind_states.items():
                 yield "data: {}\n\n".format(json.dumps(_local_mind_state_payload(aid_str, state)))
 
@@ -1981,12 +1974,11 @@ async def _handle_chrome_events(
 
                 # Recompute local-mind liveness from discovery (+ overrides) and
                 # push only the minds whose state changed since the last tick.
-                if state_provider is not None:
-                    current_local_mind_states = state_provider.compute_state_by_agent_id(backend_resolver)
-                    for aid_str, state in current_local_mind_states.items():
-                        if last_local_mind_states.get(aid_str) != state:
-                            yield "data: {}\n\n".format(json.dumps(_local_mind_state_payload(aid_str, state)))
-                    last_local_mind_states = current_local_mind_states
+                current_local_mind_states = compute_local_mind_state_by_agent_id(backend_resolver)
+                for aid_str, state in current_local_mind_states.items():
+                    if last_local_mind_states.get(aid_str) != state:
+                        yield "data: {}\n\n".format(json.dumps(_local_mind_state_payload(aid_str, state)))
+                last_local_mind_states = current_local_mind_states
 
                 current_data = _build_workspace_list(backend_resolver, session_store)
                 current_destroying_ids = _destroying_agent_ids(paths, backend_resolver.list_active_workspace_ids())
@@ -2024,8 +2016,6 @@ async def _handle_chrome_events(
                 backend_resolver.remove_on_change_callback(_on_change)
             if tracker is not None:
                 tracker.remove_on_change_callback(_on_health_change)
-            if state_provider is not None:
-                state_provider.remove_on_change_callback(_on_change)
 
     return StreamingResponse(
         _event_generator(),
@@ -2630,9 +2620,9 @@ def _handle_restart_host_api(
 # (docker / lima); stopping one frees the user's machine while preserving data
 # and leaving it fully restartable. Stop = ``mngr stop --stop-host`` on the
 # host (same teardown the host-restart tier uses); Start = ``mngr start`` (boots
-# the stopped container). Both set an optimistic override on the state provider
-# so the landing page and quit prompt flip at once; the next discovery snapshot
-# then confirms (or corrects) it.
+# the stopped container). Both set an optimistic host-state override on the
+# resolver so the landing page and quit prompt flip at once; the next discovery
+# snapshot then confirms (or corrects) it.
 
 
 class _LocalMindAction(UpperCaseStrEnum):
@@ -2645,7 +2635,6 @@ class _LocalMindAction(UpperCaseStrEnum):
 def _run_local_mind_action(
     workspace_agent_id: AgentId,
     action: _LocalMindAction,
-    state_provider: LocalMindStateProvider,
     backend_resolver: BackendResolverInterface,
     mngr_binary: str,
     mngr_host_dir: Path,
@@ -2656,6 +2645,10 @@ def _run_local_mind_action(
     if services_agent_id is None:
         logger.warning("Could not locate the system-services agent for local-mind action on {}", workspace_agent_id)
         return
+    # The optimistic override is keyed by host id -- the same host the liveness UI
+    # reads via the workspace agent's display info.
+    info = backend_resolver.get_agent_display_info(workspace_agent_id)
+    host_id = HostId(info.host_id) if info is not None else None
     env = dict(os.environ)
     env["MNGR_HOST_DIR"] = str(mngr_host_dir)
     match action:
@@ -2672,16 +2665,19 @@ def _run_local_mind_action(
         # reverts to the authoritative discovery state at once (the container
         # never reached the target state, so discovery still shows the old one).
         logger.warning("Local-mind {} for {} failed: {}", action.value, workspace_agent_id, exc)
-        state_provider.clear_override(workspace_agent_id)
+        if host_id is not None:
+            backend_resolver.clear_host_state_override(host_id)
         return
     # The command ran to completion, so the container has reached the target
     # state; reflect it immediately via an optimistic override that the next
     # discovery snapshot confirms.
+    if host_id is None:
+        return
     match action:
         case _LocalMindAction.STOP:
-            state_provider.set_override(workspace_agent_id, LocalMindState.STOPPED)
+            backend_resolver.set_host_state_override(host_id, HostState.STOPPED)
         case _LocalMindAction.START:
-            state_provider.set_override(workspace_agent_id, LocalMindState.RUNNING)
+            backend_resolver.set_host_state_override(host_id, HostState.RUNNING)
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -2696,10 +2692,9 @@ def _dispatch_local_mind_action(
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return _json_error("Not authenticated", status_code=403)
     aid = AgentId(agent_id)
-    state_provider: LocalMindStateProvider | None = request.app.state.local_mind_state_provider
     concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
     backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
-    if state_provider is None or concurrency_group is None:
+    if concurrency_group is None:
         return _json_error("Local-mind control is unavailable in this configuration", status_code=503)
     try:
         concurrency_group.start_new_thread(
@@ -2707,7 +2702,6 @@ def _dispatch_local_mind_action(
             kwargs={
                 "workspace_agent_id": aid,
                 "action": action,
-                "state_provider": state_provider,
                 "backend_resolver": backend_resolver,
                 "mngr_binary": request.app.state.mngr_binary,
                 "mngr_host_dir": request.app.state.mngr_host_dir,
@@ -2761,12 +2755,9 @@ def _handle_running_local_minds_api(
     """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return _json_error("Not authenticated", status_code=403)
-    state_provider: LocalMindStateProvider | None = request.app.state.local_mind_state_provider
     backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
-    if state_provider is None:
-        return Response(content=json.dumps({"running": []}), media_type="application/json")
     running = []
-    for aid_str, state in state_provider.compute_state_by_agent_id(backend_resolver).items():
+    for aid_str, state in compute_local_mind_state_by_agent_id(backend_resolver).items():
         if state != LocalMindState.RUNNING:
             continue
         aid = AgentId(aid_str)
@@ -3727,7 +3718,6 @@ def create_desktop_client(
     output_format: OutputFormat | None = None,
     root_concurrency_group: ConcurrencyGroup | None = None,
     system_interface_health_tracker: SystemInterfaceHealthTracker | None = None,
-    local_mind_state_provider: LocalMindStateProvider | None = None,
     mngr_binary: str = "mngr",
     mngr_host_dir: Path | None = None,
     minds_api_key: str | None = None,
@@ -3825,7 +3815,6 @@ def create_desktop_client(
     app.state.auth_output_format = output_format or OutputFormat.JSONL
     app.state.root_concurrency_group = root_concurrency_group
     app.state.system_interface_health_tracker = system_interface_health_tracker
-    app.state.local_mind_state_provider = local_mind_state_provider
     app.state.mngr_binary = mngr_binary
     app.state.mngr_host_dir = mngr_host_dir if mngr_host_dir is not None else Path.home() / ".mngr"
     # Always-set (possibly None) so consumers can read directly via
