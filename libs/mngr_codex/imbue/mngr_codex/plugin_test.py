@@ -212,6 +212,23 @@ def test_assemble_command_structure(codex_agent: CodexAgent) -> None:
     assert "set -- resume" in command
 
 
+def test_assemble_command_resets_stale_marker_state(codex_agent: CodexAgent) -> None:
+    """Each launch clears stale lifecycle-marker state a SIGKILL-mid-turn stop can leave.
+
+    Otherwise a killed subagent's `codex_subagents/<id>` file (whose SubagentStop
+    will never arrive) or a leftover `codex_root_active`/`active` could strand the
+    resumed agent as RUNNING. The resume id (`codex_root_session`) is NOT reset.
+    """
+    command = str(codex_agent.assemble_command(codex_agent.host, (), None))
+    assert 'rm -rf "$MNGR_AGENT_STATE_DIR/active"' in command
+    assert "$MNGR_AGENT_STATE_DIR/codex_root_active" in command
+    assert "$MNGR_AGENT_STATE_DIR/codex_subagents" in command
+    assert "$MNGR_AGENT_STATE_DIR/codex_marker.lock" in command
+    # The reset must run before codex launches but must not clobber the resume id.
+    assert command.index("rm -rf") < command.index("env CODEX_HOME=")
+    assert "$MNGR_AGENT_STATE_DIR/codex_root_session" not in command.split("env CODEX_HOME=")[0].split("rm -rf")[1]
+
+
 def test_assemble_command_appends_cli_and_agent_args(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     agent = _make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig(cli_args=("--oss",)))
     command = str(agent.assemble_command(agent.host, ("hello world",), None))

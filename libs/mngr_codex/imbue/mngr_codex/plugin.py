@@ -100,13 +100,17 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr_codex import resources as _codex_resources
+from imbue.mngr_codex.codex_config import ACTIVE_MARKER_FILENAME
 from imbue.mngr_codex.codex_config import BACKGROUND_TASKS_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import CLEAR_ACTIVE_MARKER_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import COMMON_TRANSCRIPT_SCRIPT_NAME
+from imbue.mngr_codex.codex_config import MARKER_LOCK_DIRNAME
 from imbue.mngr_codex.codex_config import MARKER_STATE_LIB_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import RAW_TRANSCRIPT_SCRIPT_NAME
+from imbue.mngr_codex.codex_config import ROOT_ACTIVE_FILENAME
 from imbue.mngr_codex.codex_config import ROOT_SESSION_FILENAME
 from imbue.mngr_codex.codex_config import SET_ACTIVE_MARKER_SCRIPT_NAME
+from imbue.mngr_codex.codex_config import SUBAGENTS_DIRNAME
 from imbue.mngr_codex.codex_config import SUBAGENT_STARTED_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import SUBAGENT_STOPPED_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import build_codex_config
@@ -510,11 +514,13 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
         2. ``mkdir -p <CODEX_HOME>`` -- ensure the config dir exists.
         3. ``cd <work_dir>`` -- codex's cwd becomes the (trusted) work dir; codex
            accepts the dotted ``~/.mngr/...`` path, so no symlink workaround.
-        4. ``{ <resume-prelude>; env CODEX_HOME=<home> codex
+        4. ``{ <reset-marker-state>; <resume-prelude>; env CODEX_HOME=<home> codex
            --dangerously-bypass-hook-trust "$@" <cli/agent args>; }`` -- codex in
            the foreground under the per-agent ``CODEX_HOME`` (injected only on the
-           codex process). The bypass flag goes before the subcommand so it
-           applies whether the prelude selected ``resume <id>`` or a fresh start.
+           codex process). The reset clears stale lifecycle-marker state left by a
+           SIGKILL-mid-turn ``mngr stop`` (see the inline comment). The bypass flag
+           goes before the subcommand so it applies whether the prelude selected
+           ``resume <id>`` or a fresh start.
 
         The resume-prelude reads the root ``session_id`` from
         ``codex_root_session`` (written by the ``UserPromptSubmit`` hook) and sets
@@ -550,8 +556,24 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
         )
         codex_invocation = f"{home_prefix} {base} {_DANGEROUSLY_BYPASS_HOOK_TRUST_FLAG}"
 
+        # Reset the lifecycle-marker state on every launch. `mngr stop` SIGKILLs the
+        # codex process, so if it was mid-turn (or had async subagents in flight)
+        # the `active` marker, `codex_root_active` flag, per-subagent files, and a
+        # held lock can persist. A resumed agent is idle (WAITING) until a new turn
+        # begins -- and the killed subagents' SubagentStop hooks will never arrive --
+        # so clear that stale state at start; the hooks rebuild it from the next turn.
+        # `codex_root_session` / `codex_transcript_path` are intentionally kept (the
+        # resume prelude reads the session id; both are re-recorded on the first
+        # post-resume prompt). `|| true` so a stray failure can't block the launch.
+        state = "$MNGR_AGENT_STATE_DIR"
+        reset_marker_cmd = (
+            f'rm -rf "{state}/{ACTIVE_MARKER_FILENAME}" "{state}/{ROOT_ACTIVE_FILENAME}" '
+            f'"{state}/{SUBAGENTS_DIRNAME}" "{state}/{MARKER_LOCK_DIRNAME}" 2>/dev/null || true'
+        )
+
         return CommandString(
-            f'{background_cmd} {mkdir_cmd} && {cd_cmd} && {{ {resume_prelude}; {codex_invocation} "$@"{extra_str} ; }}'
+            f"{background_cmd} {mkdir_cmd} && {cd_cmd} "
+            f'&& {{ {reset_marker_cmd}; {resume_prelude}; {codex_invocation} "$@"{extra_str} ; }}'
         )
 
 
