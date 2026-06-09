@@ -155,12 +155,36 @@ class AwsVpsClient(VpsClientInterface):
             case _ as unreachable:
                 assert_never(unreachable)
 
-    def _lookup_security_group_id_or_raise(self, sg_name: str) -> str:
+    def _describe_security_groups_or_raise_on_multi_vpc(self, sg_name: str) -> list[dict[str, Any]]:
+        """Describe SGs matching ``sg_name`` (optionally vpc-scoped). Raise on multi-VPC name collision.
+
+        Shared between the lookup-only ``_lookup_security_group_id_or_raise``
+        path and the create-if-missing ``_ensure_auto_created_security_group``
+        path so the filter shape, the describe call, and the multi-VPC error
+        message stay defined in one place. The not-found case is left to the
+        caller (the two paths handle it differently: lookup raises with a
+        prepare hint, ensure proceeds to CreateSecurityGroup).
+        """
         filters: list[dict[str, Any]] = [{"Name": "group-name", "Values": [sg_name]}]
         if self.vpc_id is not None:
             filters.append({"Name": "vpc-id", "Values": [self.vpc_id]})
         with self._translate_aws_errors():
             existing = self._ec2().describe_security_groups(Filters=filters).get("SecurityGroups", [])
+        if len(existing) > 1:
+            # EC2 enforces (group-name, vpc-id) uniqueness, so >1 result here
+            # means our lookup spans multiple VPCs (vpc_id is None and there
+            # are SGs with the same name in different VPCs). Refuse to guess
+            # which one the user wanted -- pick a specific one explicitly.
+            sg_descriptions = ", ".join(f"{g['GroupId']} (vpc={g.get('VpcId', '?')})" for g in existing)
+            raise MngrError(
+                f"Found {len(existing)} security groups named {sg_name!r}: {sg_descriptions}. "
+                "Set vpc_id on the AWS provider config to scope the lookup, or pass an explicit "
+                "security_group=ExistingSecurityGroup(id='sg-...')."
+            )
+        return existing
+
+    def _lookup_security_group_id_or_raise(self, sg_name: str) -> str:
+        existing = self._describe_security_groups_or_raise_on_multi_vpc(sg_name)
         if not existing:
             raise MngrError(
                 f"AWS security group named {sg_name!r} does not exist in region {self.region!r}. "
@@ -169,13 +193,6 @@ class AwsVpsClient(VpsClientInterface):
                 "retry the create with your usual RunInstances-only credentials. Alternatively, "
                 "set security_group = {kind = 'existing', id = 'sg-...'} on the provider config "
                 "to attach an SG you manage outside mngr."
-            )
-        if len(existing) > 1:
-            sg_descriptions = ", ".join(f"{g['GroupId']} (vpc={g.get('VpcId', '?')})" for g in existing)
-            raise MngrError(
-                f"Found {len(existing)} security groups named {sg_name!r}: {sg_descriptions}. "
-                "Set vpc_id on the AWS provider config to scope the lookup, or pass an explicit "
-                "security_group=ExistingSecurityGroup(id='sg-...')."
             )
         return existing[0]["GroupId"]
 
@@ -205,23 +222,7 @@ class AwsVpsClient(VpsClientInterface):
     def _ensure_auto_created_security_group(self, sg_name: str) -> str:
         self._warn_about_cidrs_if_needed(sg_name)
 
-        filters: list[dict[str, Any]] = [{"Name": "group-name", "Values": [sg_name]}]
-        if self.vpc_id is not None:
-            filters.append({"Name": "vpc-id", "Values": [self.vpc_id]})
-
-        with self._translate_aws_errors():
-            existing = self._ec2().describe_security_groups(Filters=filters).get("SecurityGroups", [])
-        if len(existing) > 1:
-            # EC2 enforces (group-name, vpc-id) uniqueness, so >1 result here
-            # means our lookup spans multiple VPCs (vpc_id is None and there
-            # are SGs with the same name in different VPCs). Refuse to guess
-            # which one the user wanted -- pick a specific one explicitly.
-            sg_descriptions = ", ".join(f"{g['GroupId']} (vpc={g.get('VpcId', '?')})" for g in existing)
-            raise MngrError(
-                f"Found {len(existing)} security groups named {sg_name!r}: {sg_descriptions}. "
-                "Set vpc_id on the AWS provider config to scope the lookup, or pass an explicit "
-                "security_group=ExistingSecurityGroup(id='sg-...')."
-            )
+        existing = self._describe_security_groups_or_raise_on_multi_vpc(sg_name)
         if existing:
             sg_id = existing[0]["GroupId"]
             self._authorize_ssh_ingress_idempotent(sg_id)
