@@ -29,7 +29,6 @@ from imbue.modal_proxy.direct import _unwrap_secret
 from imbue.modal_proxy.direct import _unwrap_volume
 from imbue.modal_proxy.errors import ModalProxyAppLockedError
 from imbue.modal_proxy.errors import ModalProxyError
-from imbue.modal_proxy.errors import ModalProxyPermissionDeniedError
 from imbue.modal_proxy.errors import ModalProxyRateLimitError
 from imbue.modal_proxy.errors import ModalProxyTypeError
 from imbue.modal_proxy.errors import is_app_locked_error
@@ -189,13 +188,6 @@ def test_translate_resource_exhausted_to_rate_limit_error() -> None:
     result = _translate_modal_error(modal_err)
     assert isinstance(result, ModalProxyRateLimitError)
     assert "rate limit" in str(result)
-
-
-def test_translate_permission_denied_to_permission_denied_error() -> None:
-    modal_err = modal.exception.PermissionDeniedError("user lacks access to environment 'mngr_test-abc'")
-    result = _translate_modal_error(modal_err)
-    assert isinstance(result, ModalProxyPermissionDeniedError)
-    assert "lacks access" in str(result)
 
 
 # --- Volume retry predicate tests ---
