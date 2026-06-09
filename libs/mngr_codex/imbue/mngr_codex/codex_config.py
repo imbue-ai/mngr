@@ -1,0 +1,383 @@
+"""Read/write helpers for the OpenAI Codex CLI (``codex``) under a per-agent ``CODEX_HOME``.
+
+Unlike Antigravity (which forces a per-agent ``$HOME`` relocation), the Codex
+CLI exposes a first-class config-dir override env var, ``CODEX_HOME`` (default
+``~/.codex``). That is the preferred isolation shape -- the same one
+``mngr_claude`` uses via ``CLAUDE_CONFIG_DIR`` -- so ``mngr_codex`` points each
+agent at its own ``CODEX_HOME`` under the agent state dir and leaves the user's
+real ``$HOME`` untouched. Codex resolves its entire config/auth/session/hook
+tree from ``CODEX_HOME``:
+
+    <CODEX_HOME>/
+      config.toml        # model, approval, sandbox, trust, notices (mngr-owned)
+      hooks.json         # the lifecycle-marker hooks (mngr-owned)
+      auth.json          # credentials -- a symlink to the user's shared ~/.codex/auth.json
+      .personality_migration  # NUX skip marker (mngr-owned, empty)
+      sessions/YYYY/MM/DD/rollout-*-<uuid>.jsonl   # codex-owned transcripts
+
+This module holds the pure, host-agnostic pieces of that scheme:
+
+* Path builders (``get_codex_*_path``) that take a ``CODEX_HOME`` root, so the
+  same functions address both the user's real ``~/.codex`` (the auth source) and
+  each agent's isolated ``CODEX_HOME`` (the destination).
+* ``build_codex_config`` -- layers the per-agent ``config.toml`` body from the
+  agent's model/sandbox/approval knobs, the credential-store pin, the NUX-notice
+  suppressors, the trusted work-dir, and a free-form ``config_overrides`` blob
+  (applied last, so it wins). Pinning ``cli_auth_credentials_store = "file"`` is
+  load-bearing: the keyring/auto backends hash ``CODEX_HOME`` into the secret
+  key, which would make the shared-auth symlink unusable.
+* ``build_codex_hooks_config`` -- the lifecycle ``active``-marker hooks written
+  to ``<CODEX_HOME>/hooks.json``: ``UserPromptSubmit`` -> ``set_active_marker.sh``
+  (mark RUNNING, record the root session id + transcript path) and ``Stop`` ->
+  ``clear_active_marker.sh`` (mark WAITING when the *root* agent stops). Codex's
+  ``Stop`` fires only at root scope and Task-style subagents fire a distinct
+  ``SubagentStop`` -- which mngr deliberately does **not** hook -- so subagents
+  never touch the marker by construction (the Claude model, not agy's).
+* ``merge_project_trust`` -- the additive, idempotent ``[projects."<path>"]
+  trust_level = "trusted"`` write used both to persist durable trust in the
+  user's global ``config.toml`` and to seed the per-agent one.
+
+Trust note: codex gates its first-launch "trust this folder?" dialog on the
+project's ``trust_level`` being set. Seeding the work-dir as ``trusted`` skips
+the dialog; it *also* enables codex to load any repo-local ``.codex/hooks.json``,
+which -- combined with the ``--dangerously-bypass-hook-trust`` flag the plugin
+passes so its own lifecycle hooks run -- is why trusting is consent-gated in the
+plugin (see ``CodexAgent._ensure_source_repo_trusted``).
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any
+
+import tomlkit
+
+from imbue.imbue_common.pure import pure
+from imbue.mngr.errors import UserInputError
+from imbue.mngr.interfaces.host import OnlineHostInterface
+
+# ---------------------------------------------------------------------------
+# CODEX_HOME layout
+# ---------------------------------------------------------------------------
+
+# Per-agent ``CODEX_HOME`` under the agent state dir. Codex resolves its whole
+# config/auth/session/hook tree from here (set via the ``CODEX_HOME`` env var on
+# the codex process). Mirrors ``mngr_claude``'s per-agent ``CLAUDE_CONFIG_DIR``.
+CODEX_HOME_RELATIVE_PATH: tuple[str, ...] = ("plugin", "codex", "home")
+
+_CONFIG_FILENAME: str = "config.toml"
+_AUTH_FILENAME: str = "auth.json"
+_HOOKS_FILENAME: str = "hooks.json"
+# First-run NUX gate: codex skips the personality-migration prompt when this
+# marker file exists (it auto-writes one on a fresh home with no sessions, but
+# seeding it makes the silent-launch behavior explicit and order-independent).
+_PERSONALITY_MIGRATION_FILENAME: str = ".personality_migration"
+
+
+def get_codex_home(agent_state_dir: Path) -> Path:
+    """Return the per-agent ``CODEX_HOME`` directory under ``agent_state_dir``."""
+    return agent_state_dir.joinpath(*CODEX_HOME_RELATIVE_PATH)
+
+
+def get_codex_config_path(codex_home: Path) -> Path:
+    """Return the ``config.toml`` path under ``codex_home``."""
+    return codex_home / _CONFIG_FILENAME
+
+
+def get_codex_auth_path(codex_home: Path) -> Path:
+    """Return the ``auth.json`` path under ``codex_home``."""
+    return codex_home / _AUTH_FILENAME
+
+
+def get_codex_hooks_path(codex_home: Path) -> Path:
+    """Return the ``hooks.json`` path under ``codex_home``."""
+    return codex_home / _HOOKS_FILENAME
+
+
+def get_codex_personality_migration_path(codex_home: Path) -> Path:
+    """Return the ``.personality_migration`` NUX-skip marker path under ``codex_home``."""
+    return codex_home / _PERSONALITY_MIGRATION_FILENAME
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle-marker tracking files and hook script names
+# ---------------------------------------------------------------------------
+
+# Marker file (in ``$MNGR_AGENT_STATE_DIR``) whose presence ``BaseAgent``'s
+# ``get_lifecycle_state`` reads as RUNNING; its absence means WAITING. Name kept
+# in sync with the literal ``"active"`` that core checks and that the hook
+# scripts touch/remove.
+ACTIVE_MARKER_FILENAME: str = "active"
+
+# Per-agent file (in ``$MNGR_AGENT_STATE_DIR``) recording the *root* codex
+# session id for the current conversation -- the session that opened a turn while
+# the marker was absent. ``clear_active_marker.sh`` clears the marker only on a
+# ``Stop`` whose ``session_id`` matches this, so a nested/recursive ``codex``
+# process sharing this ``CODEX_HOME`` cannot flip the root agent to WAITING.
+# ``assemble_command`` also reads it to resume the conversation via
+# ``codex resume <id>``. Both shell scripts hardcode this same literal.
+ROOT_SESSION_FILENAME: str = "codex_root_session"
+
+# Per-agent file (in ``$MNGR_AGENT_STATE_DIR``) recording the absolute path of
+# the root session's rollout JSONL (codex hands it to hooks as
+# ``transcript_path``). ``stream_transcript.sh`` tails the file named here. The
+# capture script hardcodes this same literal.
+TRANSCRIPT_PATH_FILENAME: str = "codex_transcript_path"
+
+# Scripts provisioned into ``$MNGR_AGENT_STATE_DIR/commands/``; names kept in
+# sync with the resource files under ``resources/``.
+SET_ACTIVE_MARKER_SCRIPT_NAME: str = "set_active_marker.sh"
+CLEAR_ACTIVE_MARKER_SCRIPT_NAME: str = "clear_active_marker.sh"
+BACKGROUND_TASKS_SCRIPT_NAME: str = "codex_background_tasks.sh"
+RAW_TRANSCRIPT_SCRIPT_NAME: str = "stream_transcript.sh"
+COMMON_TRANSCRIPT_SCRIPT_NAME: str = "common_transcript.sh"
+
+# Output locations (under ``$MNGR_AGENT_STATE_DIR``) for the transcript layers,
+# matching the conventions the other plugins use: raw bytes under ``logs/`` and
+# the agent-agnostic common transcript under ``events/``.
+RAW_TRANSCRIPT_OUTPUT_RELATIVE: str = "logs/codex_transcript/events.jsonl"
+COMMON_TRANSCRIPT_OUTPUT_RELATIVE: str = "events/codex/common_transcript/events.jsonl"
+
+
+# ---------------------------------------------------------------------------
+# config.toml
+# ---------------------------------------------------------------------------
+
+# Pinning the file credential store is load-bearing for shared auth: the
+# ``keyring``/``auto``/``ephemeral`` backends key the secret by a hash of the
+# canonical ``CODEX_HOME`` path, so each per-agent home would get a *different*
+# entry and the shared-auth symlink would never be read. ``file`` keeps the
+# secret in ``auth.json`` (which we symlink to the shared one). It is codex's
+# current default, but ``auto`` exists (and prefers the OS keyring when present),
+# so we pin it explicitly for cross-platform robustness.
+_CREDENTIAL_STORE_KEY: str = "cli_auth_credentials_store"
+_CREDENTIAL_STORE_FILE: str = "file"
+
+PROJECTS_KEY: str = "projects"
+TRUST_LEVEL_KEY: str = "trust_level"
+TRUST_LEVEL_TRUSTED: str = "trusted"
+
+# First-run notice suppressors (codex's ``[notice]`` table). All booleans; an
+# unknown-to-this-version key is inert, so seeding the full set is safe and keeps
+# the first launch silent regardless of which migration prompts this codex build
+# would otherwise show.
+_NOTICE_SUPPRESSORS: Mapping[str, bool] = {
+    "hide_full_access_warning": True,
+    "hide_world_writable_warning": True,
+    "hide_rate_limit_model_nudge": True,
+}
+
+
+def read_codex_config(host: OnlineHostInterface, config_path: Path) -> dict[str, Any]:
+    """Read a codex ``config.toml`` via the host filesystem into a plain dict.
+
+    A missing or empty file yields an empty dict so provisioning can fall
+    through into a clean write. Malformed TOML raises ``UserInputError`` rather
+    than being silently treated as empty: the user's real ``config.toml`` is
+    state codex itself reads at every launch, and silently discarding it would
+    let mngr overwrite content the user hand-edited. Aligns with the
+    ``check_silent_decode_error_catches`` ratchet's user-config rule.
+    """
+    try:
+        content = host.read_text_file(config_path)
+    except FileNotFoundError:
+        return {}
+    if not content.strip():
+        return {}
+    try:
+        parsed = tomlkit.parse(content)
+    except Exception as exc:  # noqa: BLE001 -- tomlkit raises several parse-error subtypes; surface them all as user-facing.
+        raise UserInputError(
+            f"Codex config at {config_path} contains malformed TOML ({exc}); refusing to "
+            f"overwrite. Inspect the file by hand and either fix it or remove it, then re-run."
+        ) from exc
+    return _tomlkit_to_plain_dict(parsed)
+
+
+def _tomlkit_to_plain_dict(value: Any) -> dict[str, Any]:
+    """Convert a parsed tomlkit document/table into plain Python dicts.
+
+    ``json.loads(json.dumps(...))`` would lose nothing we need and drops the
+    tomlkit proxy types, but tomlkit values are not always JSON-serializable
+    (dates), so walk the mapping explicitly.
+    """
+
+    def convert(node: Any) -> Any:
+        if isinstance(node, Mapping):
+            return {str(k): convert(v) for k, v in node.items()}
+        if isinstance(node, (list, tuple)):
+            return [convert(v) for v in node]
+        return node
+
+    converted = convert(value)
+    if not isinstance(converted, dict):
+        return {}
+    return converted
+
+
+@pure
+def build_codex_config(
+    *,
+    model: str | None,
+    model_reasoning_effort: str | None,
+    sandbox_mode: str | None,
+    approval_policy: str | None,
+    trusted_projects: Sequence[str],
+    config_overrides: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build a per-agent ``config.toml`` body (low -> high precedence).
+
+    1. The fixed credential-store pin (``cli_auth_credentials_store = "file"``)
+       and the ``[notice]`` suppressors -- always present so shared auth works
+       and the first launch is silent.
+    2. ``model`` / ``model_reasoning_effort`` / ``sandbox_mode`` /
+       ``approval_policy`` -- each written only when not ``None`` (``None`` leaves
+       codex's own default in force). ``model`` is intentionally not defaulted
+       here: codex picks the account's default, and a ChatGPT-account login
+       rejects some ``*-codex`` model slugs, so forcing one could break the
+       agent (see the README's model note).
+    3. ``trusted_projects`` -- each path written as ``[projects."<path>"]
+       trust_level = "trusted"`` so codex's folder-trust dialog is skipped.
+    4. ``config_overrides`` -- the per-agent-type blob, merged last (shallow) so
+       it wins; covers anything not surfaced as a typed knob.
+
+    Returns a plain dict; ``serialize_codex_config`` renders it as TOML.
+    """
+    config: dict[str, Any] = {_CREDENTIAL_STORE_KEY: _CREDENTIAL_STORE_FILE}
+    if model is not None:
+        config["model"] = model
+    if model_reasoning_effort is not None:
+        config["model_reasoning_effort"] = model_reasoning_effort
+    if sandbox_mode is not None:
+        config["sandbox_mode"] = sandbox_mode
+    if approval_policy is not None:
+        config["approval_policy"] = approval_policy
+    config["notice"] = dict(_NOTICE_SUPPRESSORS)
+
+    projects: dict[str, Any] = {}
+    for project_path in trusted_projects:
+        projects[project_path] = {TRUST_LEVEL_KEY: TRUST_LEVEL_TRUSTED}
+    if projects:
+        config[PROJECTS_KEY] = projects
+
+    # Shallow merge: a top-level override key replaces the built-in value
+    # wholesale (matching mngr_claude/antigravity ``*_overrides`` semantics).
+    for key, value in config_overrides.items():
+        config[key] = value
+    return config
+
+
+@pure
+def serialize_codex_config(config: Mapping[str, Any]) -> str:
+    """Serialize a ``config.toml`` body as TOML via tomlkit.
+
+    tomlkit quotes table keys correctly, which matters for the
+    ``[projects."<abs-path>"]`` tables whose keys are filesystem paths. The file
+    is mngr-owned, so exact formatting only affects diff readability.
+    """
+    document = tomlkit.document()
+    for key, value in config.items():
+        document[key] = value
+    return tomlkit.dumps(document)
+
+
+@pure
+def merge_project_trust(config: Mapping[str, Any], project_path: str) -> dict[str, Any] | None:
+    """Add ``[projects."<project_path>"] trust_level = "trusted"``; ``None`` if already trusted.
+
+    Returns ``None`` when no change is required (the project is already present
+    with ``trust_level = "trusted"``); otherwise a fresh dict with the project
+    added/updated. Used both to persist durable trust in the user's global
+    ``config.toml`` and -- via ``build_codex_config`` -- to seed the per-agent
+    one. The path key is used verbatim: the caller passes the canonical absolute
+    path codex matches against (codex canonicalizes the cwd, resolving symlinks,
+    before lookup).
+
+    A non-mapping ``projects`` value, or a non-mapping entry for this exact path,
+    raises ``UserInputError`` rather than being silently overwritten -- the
+    user's global config is hand-editable state.
+    """
+    existing_projects_raw = config.get(PROJECTS_KEY, {})
+    if not isinstance(existing_projects_raw, Mapping):
+        raise UserInputError(
+            f"Codex config has a non-table `{PROJECTS_KEY}` value "
+            f"({type(existing_projects_raw).__name__}); refusing to overwrite. Inspect the "
+            f"file by hand and either fix the value or remove the key, then re-run."
+        )
+    existing_entry = existing_projects_raw.get(project_path)
+    if existing_entry is not None and not isinstance(existing_entry, Mapping):
+        raise UserInputError(
+            f"Codex config has a non-table entry for project {project_path!r} "
+            f"({type(existing_entry).__name__}); refusing to overwrite. Inspect the file by "
+            f"hand and either fix the value or remove the key, then re-run."
+        )
+    if isinstance(existing_entry, Mapping) and existing_entry.get(TRUST_LEVEL_KEY) == TRUST_LEVEL_TRUSTED:
+        return None
+
+    merged: dict[str, Any] = dict(config)
+    merged_projects: dict[str, Any] = {str(k): v for k, v in existing_projects_raw.items()}
+    updated_entry: dict[str, Any] = dict(existing_entry) if isinstance(existing_entry, Mapping) else {}
+    updated_entry[TRUST_LEVEL_KEY] = TRUST_LEVEL_TRUSTED
+    merged_projects[project_path] = updated_entry
+    merged[PROJECTS_KEY] = merged_projects
+    return merged
+
+
+def is_project_trusted(config: Mapping[str, Any], project_path: str) -> bool:
+    """Return whether ``project_path`` is recorded as ``trusted`` in ``config``."""
+    projects_raw = config.get(PROJECTS_KEY, {})
+    if not isinstance(projects_raw, Mapping):
+        return False
+    entry = projects_raw.get(project_path)
+    return isinstance(entry, Mapping) and entry.get(TRUST_LEVEL_KEY) == TRUST_LEVEL_TRUSTED
+
+
+# ---------------------------------------------------------------------------
+# hooks.json
+# ---------------------------------------------------------------------------
+
+# Commands codex runs for each lifecycle event (``type: "command"`` handlers
+# receive the event JSON on stdin). ``$MNGR_AGENT_STATE_DIR`` expands in codex's
+# shell at hook-execution time. The scripts live in the agent's commands/ dir
+# (provisioned by the plugin).
+_SET_ACTIVE_COMMAND: str = f'bash "$MNGR_AGENT_STATE_DIR/commands/{SET_ACTIVE_MARKER_SCRIPT_NAME}"'
+_CLEAR_ACTIVE_COMMAND: str = f'bash "$MNGR_AGENT_STATE_DIR/commands/{CLEAR_ACTIVE_MARKER_SCRIPT_NAME}"'
+
+
+@pure
+def build_codex_hooks_config() -> dict[str, Any]:
+    """Build the per-agent ``hooks.json`` body for the codex agent.
+
+    Two handlers maintain the ``active`` lifecycle marker:
+
+    * ``UserPromptSubmit`` -> ``set_active_marker.sh``: touch ``active`` (so
+      ``BaseAgent.get_lifecycle_state`` reports RUNNING) and, at a turn boundary,
+      record the root ``session_id`` and ``transcript_path``. ``UserPromptSubmit``
+      fires only for the root user's prompts, not for subagents.
+    * ``Stop`` -> ``clear_active_marker.sh``: remove ``active`` (WAITING) when the
+      *root* agent's turn ends. Codex's ``Stop`` fires only at root scope; Task
+      subagents fire a distinct ``SubagentStop`` which we deliberately do **not**
+      hook, so a subagent finishing never clears the marker. The clear is further
+      guarded on the recorded root ``session_id`` so a nested/recursive ``codex``
+      process sharing this ``CODEX_HOME`` cannot flip the agent to WAITING.
+
+    The file is mngr-owned and rewritten from scratch each provision, so no
+    merge-with-existing logic is needed. Codex requires command hooks to be
+    trusted before they run; the plugin passes ``--dangerously-bypass-hook-trust``
+    (consent-gated) rather than seeding a brittle, version-specific trust hash.
+    """
+    return {
+        "hooks": {
+            "UserPromptSubmit": [{"hooks": [{"type": "command", "command": _SET_ACTIVE_COMMAND}]}],
+            "Stop": [{"hooks": [{"type": "command", "command": _CLEAR_ACTIVE_COMMAND}]}],
+        }
+    }
+
+
+@pure
+def serialize_codex_hooks(hooks_config: Mapping[str, Any]) -> str:
+    """Serialize a ``hooks.json`` body as two-space-indented JSON."""
+    return json.dumps(dict(hooks_config), indent=2)

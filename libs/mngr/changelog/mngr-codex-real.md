@@ -1,0 +1,1 @@
+Moved the built-in `codex` agent type out of mngr core into the external `imbue-mngr-codex` plugin (added to the plugin catalog as a recommended INDEPENDENT-tier agent type); removed the in-core `codex_agent` stub and its direct registration.
