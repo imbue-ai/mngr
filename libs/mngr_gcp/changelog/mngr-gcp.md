@@ -1,0 +1,11 @@
+## GCP Compute Engine provider
+
+- New `gcp` provider backend (`mngr_gcp`) that runs agents in Docker containers on Google Compute Engine VMs. Built on the shared `mngr_vps_docker` base, exactly like the AWS EC2 provider.
+- Credentials are resolved exclusively via Google Application Default Credentials (`google.auth.default()` — `GOOGLE_APPLICATION_CREDENTIALS`, `gcloud auth application-default login`, attached service account / metadata server). `[providers.gcp]` config has no credential fields, matching the Modal and AWS provider convention. Only the non-secret `project_id` (required) and optional `service_account_email` / `service_account_scopes` identifiers are configured.
+- Auto-creates a network-scoped, tag-targeted firewall rule (`mngr-gcp-ssh` by default) opening tcp/22 and the container SSH port to every CIDR in `allowed_ssh_cidrs`. Default is empty (fail-closed): users must explicitly opt in (e.g. `['203.0.113.4/32']` for their own IP) or pre-create the rule.
+- SSH key injection uses per-instance `ssh-keys` metadata (`debian:<pub>`); OS Login and project-wide keys are disabled per instance (`enable-oslogin=FALSE`, `block-project-ssh-keys=TRUE`). cloud-init is delivered via the `user-data` metadata key.
+- GCE-native auto-delete safety net: when `auto_shutdown_minutes` is set, instances are launched with `scheduling.max_run_duration` + `instance_termination_action=DELETE`, so the VM self-deletes even if the orchestrating process is killed (the true analog of AWS `InstanceInitiatedShutdownBehavior=terminate`).
+- Instances are labeled `mngr-provider`, `mngr-host-id`, and `mngr-created-at`; discovery filters `instances.list` by the `mngr-provider` label. Network tags target the firewall rule.
+- GCE images families are global (no per-region map): `default_image` defaults to `projects/debian-cloud/global/images/family/debian-12`.
+- Boot-disk snapshots implemented via `SnapshotsClient` for interface completeness (the host-snapshot hot path uses `docker commit`, not VPS snapshots).
+- Release tests double-gated by `MNGR_GCP_RELEASE_TESTS=1` plus ADC presence; a `pytest_sessionfinish` hook in `libs/mngr_gcp/imbue/mngr_gcp/conftest.py` scans for any test-tagged GCE instance older than the TTL at session end, force-deletes leaks, and fails the session.
