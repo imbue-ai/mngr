@@ -98,7 +98,6 @@ def test_command_agent_data_pipeline(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 def test_command_agent_dev_server_extra_windows(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # run a dev server with extra tmux windows for logs
@@ -119,10 +118,11 @@ def test_command_agent_dev_server_extra_windows(e2e: E2eSession) -> None:
         )
     ).to_succeed()
 
-    # Verify the agent was created. `mngr list` enumerates every enabled
-    # provider (including Modal), which is what exercises the @pytest.mark.modal
-    # discovery path for this test.
-    list_result = e2e.run("mngr list --format json", comment="Verify the dev-env agent was created")
+    # Verify the agent was created. Scope the listing to the local provider so
+    # it stays fast and does not reach out to remote providers (this agent runs
+    # purely locally; the Modal command-agent path is covered by
+    # test_command_agent_batch_job_modal).
+    list_result = e2e.run("mngr list --provider local --format json", comment="Verify the dev-env agent was created")
     expect(list_result).to_succeed()
     agents = json.loads(list_result.stdout)["agents"]
     matching = [a for a in agents if a["name"] == "dev-env"]
@@ -173,6 +173,17 @@ def test_command_agent_batch_job_modal(e2e: E2eSession) -> None:
     expect(list_result).to_succeed()
     matching = [a for a in json.loads(list_result.stdout)["agents"] if a["name"] == "batch-job"]
     assert len(matching) == 1, f"Expected exactly one batch-job agent, got: {matching}"
-    assert matching[0]["host"]["provider_name"] == "modal", f"Expected batch-job on modal, got: {matching[0]['host']}"
+    batch_job = matching[0]
+    assert batch_job["host"]["provider_name"] == "modal", f"Expected batch-job on modal, got: {batch_job['host']}"
+    assert batch_job["type"] == "command", batch_job
+    # The idle configuration is the distinctive feature of this tutorial line
+    # ("use --idle-mode run so the host stops when the process finishes"), so
+    # assert it round-trips. IdleMode serializes as an upper-case enum value.
+    assert batch_job["idle_mode"] == "RUN", batch_job
+    assert batch_job["idle_timeout_seconds"] == 30, batch_job
+    # The command's quotes are normalized (double -> single) on round-trip, so
+    # assert on the substrings rather than an exact string match.
+    assert "echo train" in batch_job["command"], batch_job
+    assert "echo evaluate" in batch_job["command"], batch_job
 
     expect(e2e.run("mngr conn batch-job", comment="connect back to the batch job")).to_succeed()

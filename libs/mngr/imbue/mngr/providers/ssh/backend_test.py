@@ -3,6 +3,8 @@
 from pathlib import Path
 
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.loader import parse_config
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.ssh.backend import SSHProviderBackend
@@ -158,3 +160,41 @@ def test_ssh_host_config_defaults() -> None:
     assert config.port == 22
     assert config.user == "root"
     assert config.key_file is None
+
+
+def test_static_hosts_from_settings_dict_are_coerced(temp_mngr_ctx: MngrContext) -> None:
+    """Static ``[providers.*.hosts.*]`` tables loaded through the config parser
+    must become ``SSHHostConfig`` objects, not raw dicts.
+
+    Regression test: provider configs are built with ``model_construct`` (to keep
+    unset top-level fields ``None`` for config-layer merging), which skips coercion
+    of nested model fields. Without coercion, ``hosts`` entries stayed raw dicts and
+    every host-enumerating command (``mngr list``, ``mngr connect``, ...) crashed
+    with ``AttributeError: 'dict' object has no attribute 'key_file'`` while
+    building the provider instance. This exercises the real parse path
+    (``parse_config``), unlike the other tests here which hand in already-built
+    ``SSHHostConfig`` objects.
+    """
+    raw_settings = {
+        "providers": {
+            "my-ssh": {
+                "backend": "ssh",
+                "hosts": {
+                    "server1": {"address": "192.168.1.1", "key_file": "~/.ssh/id_rsa"},
+                },
+            },
+        },
+    }
+    config = parse_config(raw_settings, disabled_plugins=frozenset())
+    provider_config = config.providers[ProviderInstanceName("my-ssh")]
+    assert isinstance(provider_config, SSHProviderConfig)
+    assert isinstance(provider_config.hosts["server1"], SSHHostConfig)
+
+    # End-to-end: building the instance and resolving the host must not raise.
+    instance = SSHProviderBackend.build_provider_instance(
+        name=ProviderInstanceName("my-ssh"),
+        config=provider_config,
+        mngr_ctx=temp_mngr_ctx,
+    )
+    host = instance.get_host(HostName("server1"))
+    assert host.id is not None

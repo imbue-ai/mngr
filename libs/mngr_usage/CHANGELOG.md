@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.1] - 2026-06-08
+
 ### Added
 
 - Added: macOS LaunchAgent section in `docs/cron_recipes.md` as the recommended alternative to `cron` on macOS. cron jobs run outside the GUI (Aqua) login session and can't reach the login Keychain (where Claude Code stores credentials), so cron-launched agents come up "Not logged in". A user LaunchAgent loaded into the Aqua session has Keychain access and authenticates normally. Includes a plist skeleton (`StartInterval`, `EnvironmentVariables` PATH, log paths), `launchctl bootstrap`/`bootout` commands, and the runs-only-while-logged-in tradeoff.
