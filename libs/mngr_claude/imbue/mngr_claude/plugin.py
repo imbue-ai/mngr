@@ -850,29 +850,19 @@ def _provision_local_credentials(host: OnlineHostInterface, config_dir: Path, *,
 def _read_credentials_content(
     source_claude_dir: Path, config: ClaudeAgentConfig, concurrency_group: ConcurrencyGroup
 ) -> str | None:
-    """Read credentials content from macOS keychain (preferred) or file. Returns None if unavailable.
-
-    Claude Code 2.x stores OAuth tokens in the macOS keychain (entry label
-    ``Claude Code-credentials``); the CLI's ``refreshToken`` flow updates the
-    keychain in place. ``~/.claude/.credentials.json`` is a Claude Code 1.x
-    artifact that is *not* refreshed automatically -- any value there will
-    eventually go stale, and staging a stale token leads to 401s inside the
-    agent. We therefore prefer keychain on macOS and only fall back to the
-    file on non-macOS hosts or when keychain access fails.
-    """
+    """Read credentials content from file or macOS keychain. Returns None if unavailable."""
+    credentials_path = source_claude_dir / ".credentials.json"
+    if credentials_path.exists():
+        logger.info("Found .credentials.json at {}", credentials_path)
+        return credentials_path.read_text()
     if config.convert_macos_credentials and is_macos():
         keychain_credentials = _read_macos_keychain_credential("Claude Code-credentials", concurrency_group)
         if keychain_credentials is not None:
             logger.info("Found macOS keychain OAuth credentials")
             return keychain_credentials
-        logger.info("Keychain credentials not available; falling back to file")
-    credentials_path = source_claude_dir / ".credentials.json"
-    try:
-        content = credentials_path.read_text()
-        logger.info("Found .credentials.json at {}", credentials_path)
-        return content
-    except (FileNotFoundError, PermissionError, OSError) as e:
-        logger.info("No credentials found ({}: {})", type(e).__name__, e)
+        logger.debug("No credentials found (file does not exist, no keychain credentials)")
+    else:
+        logger.debug("No credentials found (file does not exist at {})", credentials_path)
     return None
 
 
