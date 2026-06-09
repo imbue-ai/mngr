@@ -160,7 +160,7 @@ def extract_presence_flag(args: Sequence[str], flag: str) -> tuple[bool, list[st
 
     Returns ``(True, remaining)`` if any element of ``args`` equals ``flag``
     exactly, else ``(False, args_as_list)``. The flag MUST be passed with no
-    value: ``--aws-spot=true`` or ``--aws-spot=``  raises because that shape
+    value: ``--aws-spot=true`` or ``--aws-spot=`` raises because that shape
     suggests the caller expected a value-bearing flag (likely a typo).
 
     Composable building block for boolean opt-in knobs (e.g. ``--aws-spot``).
