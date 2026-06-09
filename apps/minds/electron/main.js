@@ -1822,6 +1822,16 @@ async function startBackendWithRetry() {
         // saveSessionState preserves recency across restarts.
         mruWindows.length = 0;
         mruWindows.push(initialBundle, ...restoredBundles);
+        // showInactive() blocks keyboard focus but not z-order: on macOS the
+        // restored windows still surface in front of initialBundle. Re-raise
+        // initialBundle as each restored window appears so it stays on top.
+        const raiseInitial = () => {
+          if (!initialBundle.window.isDestroyed()) initialBundle.window.focus();
+        };
+        for (const bundle of restoredBundles) {
+          if (bundle.window.isVisible()) raiseInitial();
+          else bundle.window.once('show', raiseInitial);
+        }
       }
     } else {
       // Retry path: re-load every existing window
