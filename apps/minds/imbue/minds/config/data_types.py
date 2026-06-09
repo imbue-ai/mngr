@@ -20,10 +20,7 @@ DEFAULT_DESKTOP_CLIENT_HOST: Final[str] = "127.0.0.1"
 
 DEFAULT_DESKTOP_CLIENT_PORT: Final[int] = 8420
 
-# `uv run --active` (the spawn pattern in electron/backend.js) prepends
-# `<VIRTUAL_ENV>/bin` to PATH for the spawned Python, so a bare `mngr`
-# resolves to the venv-installed CLI via PATH lookup. Empirically verified
-# on host + clean Tahoe VM.
+# `uv run --active` puts the venv bin on PATH, so bare `mngr` resolves.
 MNGR_BINARY: Final[str] = "mngr"
 
 
