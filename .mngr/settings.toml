@@ -37,19 +37,28 @@ target_path = "/code/mngr"
 # `.mngr/dev/build/` tarball shape doesn't apply. Instead we use the real-source-tree
 # shape: context `.` (the worktree) is cloned + overlaid with uncommitted changes by
 # the mngr_vps_docker build flow, and the Dockerfile's `COPY . /code/mngr/` consumes it.
-# `--git-depth=1` keeps the uploaded clone small.
 #
-# Requirements at `mngr create -t aws` time (see .mngr/settings.local.toml for the
-# per-developer [providers.aws] block with your own allowed_ssh_cidrs):
+# The clone is intentionally FULL history (no --git-depth): after the image build,
+# mngr seeds the work dir by pushing the local repo's refs into the container's
+# /code/mngr/.git as a thin pack. A shallow (--git-depth=1) container repo lacks the
+# base objects those deltas resolve against, so the push fails with "pack has N
+# unresolved deltas / index-pack abnormal exit". (This matches modal/docker, whose
+# keyframe make_tar_of_repo.sh also does a full clone.)
+#
+# The shared [providers.aws] block (region/plan/builder/auto_shutdown) is committed
+# below in the providers section; only the per-developer allowed_ssh_cidrs lives in
+# the gitignored .mngr/settings.local.toml.
+#
+# Requirements at `mngr create -t aws` time:
 #   - DEPOT_TOKEN exported in your shell. The build compiles the Rust offload binary
 #     and runs `uv sync --all-packages`, which exceeds the backend's 600s local-build
-#     cap on a small instance; builder=DEPOT (set in settings.local.toml) offloads it
-#     to depot's cached remote builders. depot.json (project fsjzltqvxq) ships in the
+#     cap on a small instance; builder=DEPOT (set on [providers.aws]) offloads it to
+#     depot's cached remote builders. depot.json (project fsjzltqvxq) ships in the
 #     context, so DEPOT_PROJECT_ID is not needed.
 #   - GH_TOKEN exported (same as the modal template) for git/gh inside the container.
 [create_templates.aws]
 provider = "aws"
-build_arg = ["--git-depth=1", "--file=libs/mngr/imbue/mngr/resources/Dockerfile", "."]
+build_arg = ["--file=libs/mngr/imbue/mngr/resources/Dockerfile", "."]
 extra_window = ["github_setup='ssh-keyscan github.com >> ~/.ssh/known_hosts && git remote set-url origin https://github.com/imbue-ai/mngr.git && gh auth setup-git'"]
 agent_args = ["--dangerously-skip-permissions"]
 # __extend (not plain assign) so we ADD GH_TOKEN to whatever pass_env the merged
@@ -73,6 +82,26 @@ default_cpu = 4
 default_memory = 8
 default_idle_timeout = 600
 default_sandbox_timeout = 7200
+
+# Shared AWS dogfooding config (consumed by the `aws` create-template above).
+# Only the per-developer allowed_ssh_cidrs is operator-specific and lives in the
+# gitignored .mngr/settings.local.toml; everything here is the same for everyone.
+# These keys merge per-field with that local block (ProviderInstanceConfig.merge_with
+# honors model_fields_set), so the local file only needs backend + allowed_ssh_cidrs.
+[providers.aws]
+backend = "aws"
+# us-west-2 (Oregon): has a pinned default Debian 12 AMI; no region is set in ~/.aws.
+default_region = "us-west-2"
+# 2 vCPU / 8 GB. The heavy image build runs on depot's remote builders (builder below),
+# so the instance only needs to comfortably run the agent.
+default_plan = "t3.large"
+# Wall-clock safety net: cloud-init halts + terminates the instance after 2h, mirroring
+# the modal sandbox cap above. Guards against a forgotten host accruing EC2 cost.
+auto_shutdown_minutes = 120
+# Build on depot's cached remote builders, not locally on the VM: the dev image compiles
+# the Rust offload binary + runs `uv sync --all-packages`, blowing past the backend's
+# hardcoded 600s local-build timeout on 2 cores. Requires DEPOT_TOKEN at create time.
+builder = "DEPOT"
 
 [plugins.forward]
 enabled = true
