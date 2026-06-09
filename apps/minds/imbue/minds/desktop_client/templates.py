@@ -170,11 +170,12 @@ _WORKSPACE_C: Final[float] = 0.1
 def workspace_accent(agent_id: str) -> str:
     """Deterministically map an agent id to a CSS OKLCH color.
 
-    Uses a fixed lightness and chroma so every workspace accent sits at the
-    same readable mid-tone, and only the hue varies. Full 360 degree hue
-    range means collisions are effectively impossible, and OKLCH's
-    perceptual uniformity means close hashes still read as visibly
-    different colors.
+    Uses a fixed lightness and chroma (a light, low-saturation tone that
+    reads as a chrome surface across the full-width titlebar) so every
+    workspace accent sits at the same readable level, and only the hue
+    varies. Full 360 degree hue range means collisions are effectively
+    impossible, and OKLCH's perceptual uniformity means close hashes
+    still read as visibly different colors.
     """
     digest = hashlib.sha256(agent_id.encode("utf-8")).digest()
     hue = int.from_bytes(digest[:4], "big") % 360
