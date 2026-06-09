@@ -504,24 +504,39 @@ def encode_claude_project_dir_name(path: Path) -> str:
 
 
 # =============================================================================
-# Managed settings file (loaded via ``claude --settings``)
+# Per-agent Claude artifact directory ($MNGR_AGENT_STATE_DIR/plugin/claude/)
 # =============================================================================
 
-# Path (relative to $MNGR_AGENT_STATE_DIR) of the file holding all of mngr's
-# Claude hooks, loaded via ``claude --settings``. It lives in the agent's private
-# state dir rather than the project's ``.claude/settings.local.json``, which
-# every claude session in that directory reads (including plain non-mngr ones) --
-# so mngr's hooks take effect only inside the agent and never run in a plain
-# ``claude`` session. mngr owns the file outright and rewrites it fresh each provision.
-MANAGED_SETTINGS_RELATIVE_PATH: Final[tuple[str, ...]] = ("plugin", "claude", "mngr_managed_settings.json")
+# Single source of truth for the per-agent ``plugin/claude/`` layout (relative to
+# $MNGR_AGENT_STATE_DIR). It holds the isolated config dir (``anthropic/``), the
+# response-stream buffers, and the managed settings file, and is preserved as part
+# of the agent's ``plugin/`` subtree on clone. Routing every accessor through
+# ``get_agent_claude_plugin_dir`` keeps those call sites from drifting.
+_AGENT_CLAUDE_PLUGIN_SUBPATH: Final[tuple[str, ...]] = ("plugin", "claude")
+
+# Filename of the file holding all of mngr's Claude hooks, loaded via
+# ``claude --settings``. It lives in the agent's private state dir rather than the
+# project's ``.claude/settings.local.json``, which every claude session in that
+# directory reads (including plain non-mngr ones) -- so mngr's hooks take effect
+# only inside the agent and never run in a plain ``claude`` session. mngr owns the
+# file outright and rewrites it fresh each provision.
+MANAGED_SETTINGS_FILENAME: Final[str] = "mngr_managed_settings.json"
+MANAGED_SETTINGS_RELATIVE_PATH: Final[tuple[str, ...]] = (*_AGENT_CLAUDE_PLUGIN_SUBPATH, MANAGED_SETTINGS_FILENAME)
+
+
+def get_agent_claude_plugin_dir(agent_state_dir: Path) -> Path:
+    """Return the per-agent directory holding mngr's Claude artifacts.
+
+    ``agent_state_dir`` is the agent's state directory (on-disk $MNGR_AGENT_STATE_DIR).
+    The directory holds the per-agent config dir (``anthropic/``), the response-stream
+    buffers, and the managed settings file. See ``_AGENT_CLAUDE_PLUGIN_SUBPATH``.
+    """
+    return agent_state_dir.joinpath(*_AGENT_CLAUDE_PLUGIN_SUBPATH)
 
 
 def get_managed_settings_path(agent_state_dir: Path) -> Path:
-    """Return the agent's mngr-managed Claude settings file under ``agent_state_dir``.
-
-    See ``MANAGED_SETTINGS_RELATIVE_PATH``.
-    """
-    return agent_state_dir.joinpath(*MANAGED_SETTINGS_RELATIVE_PATH)
+    """Return the agent's mngr-managed Claude settings file. See ``MANAGED_SETTINGS_FILENAME``."""
+    return get_agent_claude_plugin_dir(agent_state_dir) / MANAGED_SETTINGS_FILENAME
 
 
 # =============================================================================

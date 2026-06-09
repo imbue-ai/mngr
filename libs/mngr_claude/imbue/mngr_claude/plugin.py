@@ -89,6 +89,7 @@ from imbue.mngr_claude.claude_config import dismiss_effort_callout
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.claude_config import find_project_config
 from imbue.mngr_claude.claude_config import find_user_claude_config
+from imbue.mngr_claude.claude_config import get_agent_claude_plugin_dir
 from imbue.mngr_claude.claude_config import get_claude_config_dir
 from imbue.mngr_claude.claude_config import get_managed_settings_path
 from imbue.mngr_claude.claude_config import get_user_claude_config_dir
@@ -1128,7 +1129,7 @@ def _provision_stream_snapshot_script(
     provision_scripts_to_commands_dir(
         host, agent_state_dir, {_CLAUDE_STREAM_SNAPSHOT_SCRIPT_NAME: script}, concurrency_group
     )
-    interval_path = agent_state_dir / "plugin" / "claude" / "stream_interval"
+    interval_path = get_agent_claude_plugin_dir(agent_state_dir) / "stream_interval"
     host.write_file(interval_path, f"{interval_seconds}\n".encode(), "0644")
 
 
@@ -1407,7 +1408,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         """
         if self.agent_config.use_env_config_dir:
             return resolve_shared_claude_config_dir()
-        return self._get_agent_dir() / "plugin" / "claude" / "anthropic"
+        return get_agent_claude_plugin_dir(self._get_agent_dir()) / "anthropic"
 
     def get_stream_buffer_path(self) -> Path:
         """Return the path to this agent's response-streaming buffer file.
@@ -1417,7 +1418,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         the last complete assistant message; the remaining lines are the
         in-progress assistant text reverse-mapped to markdown.
         """
-        return self._get_agent_dir() / "plugin" / "claude" / "stream_buffer"
+        return get_agent_claude_plugin_dir(self._get_agent_dir()) / "stream_buffer"
 
     def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
         """Add CLAUDE_CONFIG_DIR and ORIGINAL_CLAUDE_CONFIG_DIR.
@@ -2217,7 +2218,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         # Layout: plugin/claude/anthropic/projects/<encoded-work-dir>/<sid>.jsonl.
         # The shallow ``*/*.jsonl`` glob excludes nested subagent transcripts
         # at ``<sid>/subagents/agent-X.jsonl``.
-        source_projects_dir = source_state_dir / "plugin" / "claude" / "anthropic" / "projects"
+        source_projects_dir = get_agent_claude_plugin_dir(source_state_dir) / "anthropic" / "projects"
         latest_on_source = source_host.execute_idempotent_command(
             f"ls -t {shlex.quote(str(source_projects_dir))}/*/*.jsonl 2>/dev/null | head -n1",
             timeout_seconds=5.0,
@@ -2243,7 +2244,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         # clobber a pre-existing target: collision means the source had a
         # multi-cwd setup whose encoded name coincidentally matched ours,
         # and silent clobber would risk losing data we don't realize is there.
-        dest_projects_dir = self._get_agent_dir() / "plugin" / "claude" / "anthropic" / "projects"
+        dest_projects_dir = get_agent_claude_plugin_dir(self._get_agent_dir()) / "anthropic" / "projects"
         dest_project_name = encode_claude_project_dir_name(self._resolve_work_dir_on_host())
         if source_project_name != dest_project_name:
             source_subdir = dest_projects_dir / source_project_name
