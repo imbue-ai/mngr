@@ -621,14 +621,11 @@ def _parse_providers(
             if not silent:
                 logger.warning(msg)
             continue
+        # _check_unknown_fields has already raised (strict) or stripped the unknown
+        # keys from raw_config (non-strict), so what remains is only known fields;
+        # model_validate then coerces them to their declared types.
         _check_unknown_fields(raw_config, config_class, f"providers.{name}", strict=strict, silent=silent)
-        # Drop unknown keys before validating: in non-strict mode
-        # _check_unknown_fields only warns and leaves them in raw_config, but the
-        # config models are ``extra="forbid"`` so model_validate would otherwise
-        # raise on them (in strict mode _check_unknown_fields already raised, so
-        # this is a no-op there).
-        known_config = {k: v for k, v in raw_config.items() if k in config_class.model_fields}
-        providers[ProviderInstanceName(name)] = config_class.model_validate(known_config)
+        providers[ProviderInstanceName(name)] = config_class.model_validate(raw_config)
 
     return providers
 
