@@ -287,11 +287,10 @@ _TMUX_STATUS_LEFT_LENGTH: Final[int] = 20
 # subprocess. Without a bound here, a single stuck `tmux list-panes` blocks
 # stop_agents forever (observed hanging an entire offload batch). On timeout the
 # step raises CommandTimeoutError (see _run_bounded_stop_command) rather than
-# degrading: continuing past a wedged command has no real teardown value. Set to
-# match the 5.0s bound get_lifecycle_state uses for its own tmux/ps calls, and
-# kept well under the pytest func-timeout so a bounded command can't itself trip
-# it.
-_STOP_AGENT_COMMAND_TIMEOUT_SECONDS: Final[float] = 5.0
+# degrading: continuing past a wedged command has no real teardown value. These
+# commands normally return near-instantly; the bound is generous headroom
+# (including for slower remote hosts) before declaring a command wedged.
+_STOP_AGENT_COMMAND_TIMEOUT_SECONDS: Final[float] = 10.0
 
 # Default tmux window dimensions used when the agent does not specify its own.
 # These match the historical hard-coded ``-x 200 -y 50`` (see the new-session

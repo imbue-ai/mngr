@@ -1226,7 +1226,7 @@ def test_stop_agents_raises_on_command_timeout(
 
     def handle(command: str) -> CommandResult:
         if "list-panes" in command:
-            raise CommandTimeoutError(f"Command timed out after 5.0s: {command}")
+            raise CommandTimeoutError(f"Command timed out after 10.0s: {command}")
         stdout = "0" if "list-windows" in command else ""
         return CommandResult(stdout=stdout, stderr="", success=True)
 
