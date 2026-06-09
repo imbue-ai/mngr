@@ -208,10 +208,7 @@ def _check_pi_installed(host: OnlineHostInterface) -> bool:
     return result.success
 
 
-# The npm package pi ships under. It migrated from @mariozechner/pi-coding-agent
-# (now deprecated and frozen) to the @earendil-works scope, which carries the
-# current releases; the binary, config dir (.pi), and PI_CODING_AGENT_DIR env var
-# are unchanged across the move.
+# The npm package pi ships under (used for the remote-host auto-install).
 _PI_NPM_PACKAGE: str = "@earendil-works/pi-coding-agent"
 
 

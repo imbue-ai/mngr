@@ -12,8 +12,9 @@ with `pi -e`) that drives everything pi has no shell hooks for:
   New config: `resume_session` (default on).
 - Agent creation now waits on a real readiness signal (a sentinel the extension
   writes when pi's session loads) rather than only scraping the startup banner.
-- Auto-install now uses the current npm package `@earendil-works/pi-coding-agent`
-  (the old `@mariozechner/pi-coding-agent` scope is deprecated and frozen).
+- On remote hosts (when allowed), auto-installs pi from npm
+  (`@earendil-works/pi-coding-agent`); on local hosts it still defers to the user
+  unless `--yes` is passed.
 - Also sync the `agents/` resource dir from `~/.pi/agent/` into each agent's
   config dir (alongside skills/prompts/extensions/themes), so an installed
   subagent extension finds its agent definitions (pi has no built-in subagents).
