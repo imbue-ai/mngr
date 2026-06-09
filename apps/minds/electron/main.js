@@ -1192,6 +1192,17 @@ function handleChromeSSEEvent(evt) {
             b.contentView.webContents.loadURL(backendBaseUrl + '/');
           }
           updateOsTitle(b);
+          // Notify the chrome renderer that this window is no longer
+          // showing a workspace. The did-navigate handler that fires
+          // after the loadURL above would NOT send this IPC: its
+          // diff-guard (`bundle.currentWorkspaceId !== newAgentId`)
+          // sees null !== null and skips. Without this explicit
+          // notification the renderer's `currentTitleAgentId` would
+          // stay as the deleted workspace's id, which then blocks the
+          // `last-workspace-agent-id-changed: null` broadcast below
+          // from clearing the titlebar accent (the chrome.js handler
+          // gates on `currentTitleAgentId` being falsy).
+          sendCurrentWorkspaceToBundleViews(b);
         }
       }
       // If the destroyed workspace is the one currently coloring the

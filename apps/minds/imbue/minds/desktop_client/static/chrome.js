@@ -237,9 +237,14 @@
     // path (``onCurrentWorkspaceChanged``) is the source of truth for
     // windows that have their own displayed workspace, so leave them
     // alone. Windows that *were* displaying the now-deleted workspace
-    // have already had their ``currentTitleAgentId`` reset to null by the
-    // navigate-away that main triggers before the broadcast, so the null
-    // value still lands there and clears the accent.
+    // get a ``current-workspace-changed: null`` IPC from main BEFORE the
+    // last-workspace broadcast (main calls
+    // ``sendCurrentWorkspaceToBundleViews`` after clearing
+    // ``currentWorkspaceId`` in the deletion cleanup, since the
+    // did-navigate handler's diff-guard wouldn't fire one). Electron
+    // delivers IPC in order, so by the time this handler runs
+    // ``currentTitleAgentId`` is already null and the gate falls through,
+    // clearing the accent.
     window.minds.onLastWorkspaceAgentIdChanged(function (agentId) {
       if (currentTitleAgentId) return;
       applyTitleAccent(agentId || null);
