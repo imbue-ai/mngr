@@ -407,6 +407,19 @@ def test_paste_retry_raises_after_exhausting_attempts() -> None:
     assert type(agent).clears == _ScriptedSendAgent._MAX_PASTE_ATTEMPTS - 1
 
 
+# Lifecycle states that mean "the tmux pane is up" -- the same set
+# find.ensure_agent_started treats as already-started (deliberately excludes
+# STOPPED, i.e. no pane, and DONE, i.e. a dead shell pane).
+_PANE_IS_UP_STATES = frozenset(
+    {
+        AgentLifecycleState.RUNNING,
+        AgentLifecycleState.WAITING,
+        AgentLifecycleState.REPLACED,
+        AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
+    }
+)
+
+
 @pytest.mark.tmux
 def test_send_message_delivers_to_real_tmux_pane(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     """End-to-end through real tmux: send_message pastes into a pane and clears cleanly.
@@ -422,12 +435,13 @@ def test_send_message_delivers_to_real_tmux_pane(local_provider: LocalProviderIn
             f"tmux new-session -d -s '{session_name}' 'cat'",
             timeout_seconds=5.0,
         )
-        # Wait for the pane to actually come up. STOPPED is the state when there
-        # is no live tmux pane, so "pane is up" is exactly "not STOPPED" (a bare
-        # ``cat`` pane reports REPLACED, since it is neither ``opencode`` nor a
-        # shell -- still distinct from STOPPED).
+        # Wait for the pane to actually come up. Mirror the "agent is started"
+        # set that find.ensure_agent_started uses, rather than a loose "not
+        # STOPPED" (which would also accept DONE -- a dead shell pane). A bare
+        # ``cat`` pane reports REPLACED (it is neither ``opencode`` nor a shell),
+        # which is in this set.
         wait_for(
-            lambda: agent.get_lifecycle_state() != AgentLifecycleState.STOPPED,
+            lambda: agent.get_lifecycle_state() in _PANE_IS_UP_STATES,
             timeout=5.0,
             error_message="tmux session not ready",
         )
