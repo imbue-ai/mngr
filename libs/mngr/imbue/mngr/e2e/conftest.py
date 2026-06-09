@@ -673,7 +673,6 @@ def e2e(
         "[commands.create]\n"
         'type = "claude"\n'
         'connect_command = "mngr-e2e-connect"\n'
-        'type = "claude"\n'
         "\n"
         "[commands.start]\n"
         'connect_command = "mngr-e2e-connect"\n'
