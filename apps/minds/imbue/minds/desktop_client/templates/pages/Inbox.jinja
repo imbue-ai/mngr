@@ -165,26 +165,31 @@
     }
     window.updateApproveState = updateApproveState;
 
-    // The file-sharing dialog ships its "Browse…" button hidden; reveal
-    // it only when the Electron native-picker bridge is available (in a
-    // plain browser the user pastes a path into the input instead).
-    // Idempotent: safe to call after every detail-pane render.
+    // The file-sharing dialog ships its "Choose file…" / "Choose folder…"
+    // buttons hidden; reveal them only when the Electron native-picker
+    // bridge is available (in a plain browser the user pastes a path into
+    // the input instead). Idempotent: safe to call after every
+    // detail-pane render.
     function wireSharePathControls() {
-      var browseBtn = document.getElementById("file-sharing-browse-btn");
-      if (browseBtn && window.minds && window.minds.showFilePicker) {
-        browseBtn.classList.remove("hidden");
-      }
+      if (!(window.minds && window.minds.showFilePicker)) return;
+      ["file-sharing-browse-file-btn", "file-sharing-browse-folder-btn"].forEach(function (id) {
+        var btn = document.getElementById(id);
+        if (btn) btn.classList.remove("hidden");
+      });
     }
 
-    // Open the OS file/directory picker and write the chosen absolute
-    // path back into the share-path input. Defaults the dialog to the
-    // path already in the field. A cancel (or any bridge error) leaves
-    // the field untouched.
-    window.browseForSharePath = async function () {
+    // Open the OS picker for the requested ``mode`` ('file' or
+    // 'directory') and write the chosen absolute path back into the
+    // share-path input. Defaults the dialog to the path already in the
+    // field. A cancel (or any bridge error) leaves the field untouched.
+    window.browseForSharePath = async function (mode) {
       var input = document.getElementById("file-sharing-path-input");
       if (!input || !(window.minds && window.minds.showFilePicker)) return;
       try {
-        var selected = await window.minds.showFilePicker({ defaultPath: input.value.trim() });
+        var selected = await window.minds.showFilePicker({
+          defaultPath: input.value.trim(),
+          mode: mode === "directory" ? "directory" : "file",
+        });
         if (typeof selected === "string" && selected.length > 0) {
           input.value = selected;
           updateApproveState();

@@ -51,17 +51,25 @@
                :value="file_path"
                extra="font-mono text-sm"
                oninput="window.updateApproveState && window.updateApproveState()" />
-    {# Browse opens the OS file picker and writes the chosen path back into
-       the field above. Placed below the input and left-aligned (rather
-       than to its right) so it does not stack in the same column as the
-       right-aligned Deny / Approve buttons. Hidden unless the Electron
-       native-picker bridge is present; in a plain browser the user pastes
-       a path into the field above. #}
-    <div class="mt-2">
-      <Button id="file-sharing-browse-btn"
+    {# Two single-purpose pickers (file vs. folder) rather than one
+       combined "Browse" button: a dialog can't be both a file and a
+       directory selector on Linux/Windows, so a combined picker there
+       falls back to a directory selector and picking a file returns its
+       parent directory. Each button opens the OS picker for its mode and
+       writes the chosen absolute path back into the field above. Placed
+       below the input and left-aligned (rather than to its right) so they
+       do not stack in the same column as the right-aligned Deny / Approve
+       buttons. Hidden unless the Electron native-picker bridge is present;
+       in a plain browser the user pastes a path into the field above. #}
+    <div class="mt-2 flex gap-2">
+      <Button id="file-sharing-browse-file-btn"
               variant="secondary"
               extra="hidden"
-              onclick="window.browseForSharePath && window.browseForSharePath()">Browse…</Button>
+              onclick="window.browseForSharePath && window.browseForSharePath('file')">Choose file…</Button>
+      <Button id="file-sharing-browse-folder-btn"
+              variant="secondary"
+              extra="hidden"
+              onclick="window.browseForSharePath && window.browseForSharePath('directory')">Choose folder…</Button>
     </div>
     {# Hidden checked input named ``permissions`` so the base dialog's
        updateApproveState treats this fragment as "has a selection":

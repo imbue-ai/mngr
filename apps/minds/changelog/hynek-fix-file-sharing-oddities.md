@@ -11,8 +11,10 @@ because `/home/<name>` and `/tmp` are already lowercase.
 
 Added the ability to change the shared path in the file-sharing permission
 dialog before approving. The agent-requested path is now shown in an editable
-field; you can paste a different absolute path or pick one (file or directory)
-with a new Browse button that opens a native OS file dialog. Approving with an
+field; you can paste a different absolute path or pick one with new
+"Choose file…" / "Choose folder…" buttons that open a native OS file dialog
+(separate file and folder pickers because a single combined picker can't select
+both on Linux/Windows). Approving with an
 edited path retargets the grant to your chosen path -- the access mode the agent
 asked for (read-only vs. read & write) is preserved, and the edited path is
 re-validated for traversal before any grant is written. Approve stays disabled

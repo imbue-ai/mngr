@@ -46,9 +46,9 @@ contextBridge.exposeInMainWorld('minds', {
 
   // Native file/directory picker used by the file-sharing permission
   // dialog so the user can pick the path to share instead of typing it.
-  // Resolves to the selected absolute path, or null if the user
-  // cancelled. ``options.defaultPath`` seeds the dialog's starting
-  // location.
+  // ``options.mode`` is 'file' or 'directory'; ``options.defaultPath``
+  // seeds the dialog's starting location. Resolves to the selected
+  // absolute path, or null if the user cancelled.
   showFilePicker: (options) => ipcRenderer.invoke('show-file-picker', options),
 
   // Multi-window workspace actions

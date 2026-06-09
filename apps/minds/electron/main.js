@@ -1997,19 +1997,18 @@ ipcMain.on('close-modal', (event) => {
 
 // Native file/directory picker for the file-sharing permission dialog.
 // The inbox modal calls this (via the preload bridge) so the user can
-// pick the path to share. We allow selecting either a file or a
-// directory (a shared directory grants access to everything beneath it).
-// Returns the chosen absolute path, or null when the user cancelled.
+// pick the path to share. ``options.mode`` is 'file' or 'directory':
+// the dialog exposes separate "Choose file" / "Choose folder" buttons
+// rather than a single combined picker because a dialog can't be both a
+// file and a directory selector on Linux/Windows (Electron would fall
+// back to a directory selector, so picking a file there returns its
+// parent directory). Returns the chosen absolute path, or null when the
+// user cancelled.
 ipcMain.handle('show-file-picker', async (event, options) => {
   const bundle = getBundleFromEvent(event);
   const opts = options || {};
-  const dialogOptions = {
-    // macOS can offer files and directories in one dialog. On Linux a
-    // dialog can't be both, so Electron shows a directory selector when
-    // both properties are set; a user who needs to share a single file
-    // there can paste its path into the field instead.
-    properties: ['openFile', 'openDirectory'],
-  };
+  const property = opts.mode === 'directory' ? 'openDirectory' : 'openFile';
+  const dialogOptions = { properties: [property] };
   if (typeof opts.defaultPath === 'string' && opts.defaultPath.length > 0) {
     dialogOptions.defaultPath = opts.defaultPath;
   }
