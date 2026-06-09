@@ -4,6 +4,17 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-08
+
+Tests now isolate $HOME the same way as every other mngr plugin: the project
+conftest calls `register_plugin_test_fixtures(globals())`, which brings in the
+autouse `setup_test_mngr_env` fixture. Previously this plugin's tests did not
+redirect $HOME, so running them on their own could read or write the real
+`~/.mngr` / `~/.claude.json`. Internal test-infrastructure change only; no
+user-facing behavior change.
+
+- Now auto-discovered as a publishable package by the release tooling (it is a standalone `mngr forward` plugin, usable outside the minds bundle). It will be offered for first publication to PyPI on the next release. Its previously-unpinned internal deps (`imbue-mngr`, `imbue-common`, `concurrency-group`) are now pinned with `==` to their current workspace versions, as a published wheel requires. No runtime change.
+
 ## 2026-06-05
 
 - Added to the release tooling's publish graph (`scripts/utils.py`). It will be offered for first publication to PyPI on the next release. Its previously-unpinned internal deps (`imbue-mngr`, `imbue-common`, `concurrency-group`) are now pinned with `==` to their current workspace versions, as a published wheel requires. No runtime change.

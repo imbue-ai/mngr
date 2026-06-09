@@ -4,6 +4,1087 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-08
+
+# Install the agent-coordination Claude Code skills
+
+`mngr extras claude-plugin` now installs more than just the code review
+plugin. It offers two Claude Code plugins and lets you install either or
+both:
+
+- `imbue-code-guardian` -- automated code review enforcement (unchanged).
+- `imbue-mngr-skills` -- the `message-agent`, `wait-for-agent`, `find-agent`,
+  and `mngr-help` skills for working with mngr, published from the dedicated
+  `imbue-ai/mngr-claude-skills` repo.
+
+With an interactive terminal the step shows a checkbox picker of the
+not-yet-installed plugins (all preselected; Space toggles, Enter confirms),
+matching the multi-select UI of the `mngr extras plugins` wizard;
+`mngr extras claude-plugin -y` auto-installs every plugin that is not already
+present. `mngr extras` status output reports each plugin's
+installed/not-installed state individually.
+
+Regenerated the `mngr imbue_cloud admin pool create` CLI reference docs to
+include the new `--no-recycle` flag (forces a fresh OVH VPS order instead of
+reclaiming a cancelled one). Docs-only change to `libs/mngr/docs/`.
+
+Test-only flake mitigations (no production code change):
+
+- Made the Docker `test_pull_image_not_found_raises` integration test resilient to a Docker Hub registry-connectivity flake: when the registry is unreachable (the pull times out before returning its 404), the test now skips instead of failing, while still asserting the clean "image not found" path when the registry is reachable. Also marked it `@pytest.mark.flaky` so offload retries it.
+- Marked the tmux integration test `test_start_restart_stopped_agent` `@pytest.mark.flaky` (it occasionally exceeds the 10s pytest-timeout by a few hundred ms under CI load), matching its already-flaky siblings (`test_list`, `test_create`, `test_connect`, `test_destroy`) so offload retries it rather than hard-failing.
+
+- Marked two real-agent integration tests (`test_stop_agent_kills_multi_pane_processes`,
+  `test_cleanup_destroy_json_output_with_real_agent`) as `@pytest.mark.flaky` so
+  offload retries them. They intermittently exceed the 10s `pytest-timeout` under
+  offload load while waiting on a spawned agent process; this matches the
+  already-flaky sibling `test_start_restart_stopped_agent`. No production change.
+
+Fixed a batch of breakage in the test suite introduced by a bulk merge:
+
+- Added missing imports and a missing fixture parameter in the e2e tutorial tests (`json`, `re`, `Path`, `Any`, `sys`, and the `temp_git_repo` fixture) that caused F821 errors.
+- Fixed a stale `_create_my_task` call signature, removed an unused `json` import, deduplicated stray imports, and deleted a dead duplicate transcript-staging helper in `test_transcript.py`.
+- Applied ruff import-sorting (`destroy_test.py`, `start_test.py`) and formatting (14 e2e test files) that the merge left unformatted.
+- Regenerated the CLI markdown docs to reflect new options the merge added (`mngr connect --connect-command`, `mngr destroy --dry-run`, and updates to `start`/`stop`/`message`/`snapshot`).
+- Rephrased a comment in `test_templates.py` that coincidentally tripped the `exec()` ratchet (the prose read "exec (which ...").
+- Replaced `@pytest.mark.flaky` with `@pytest.mark.timeout(30)` on `test_list_command_with_sort_by_name`, the one sibling in the `test_list_command_with_*` family missed by the earlier timeout-flake audit (its teardown latency trips the 10s default under CI load; reruns do not help latency).
+
+No user-facing behavior change.
+
+Added a `docker_runtime` option to the docker provider config. When set (e.g. `docker_runtime = "runsc"`), mngr passes `--runtime=<value>` to `docker run`, letting hosts run agent containers under an alternative runtime such as gVisor. Defaults to unset (no `--runtime` flag, i.e. Docker's default runtime). The named runtime must be registered with the Docker daemon, otherwise container creation fails with Docker's native "unknown runtime" error. Override per-environment with `MNGR__PROVIDERS__<NAME>__DOCKER_RUNTIME` (e.g. `=runc` where gVisor is unavailable, such as CI).
+
+Fixed a shell-quoting bug in agent launch: extra `agent_args` (the arguments passed after `--` on `mngr create`) are now shell-quoted before being spliced into the launch command.
+
+Previously, `BaseAgent.assemble_command` joined `agent_args` into the command string with plain spaces. An argument whose value contained spaces or shell metacharacters -- for example `--model "Gemini 3.5 Flash (Medium)"` -- was emitted raw (`--model Gemini 3.5 Flash (Medium)`), so the shell that evaluates the launch command word-split the value and parsed `(Medium)` as a subshell, failing with `syntax error near unexpected token '('`.
+
+Each `agent_args` element is now passed through `shlex.quote` (via a shared `quote_agent_args` helper, which the `mngr_claude` plugin's own `assemble_command` override also uses so the two cannot drift). `cli_args` are left unquoted, unchanged: string-form `cli_args` configs are split with a quote-preserving (non-POSIX) shlex and so already arrive shell-safe. This fixes every agent type that inherits the base method, including `antigravity`/`agy`.
+
+Added shell tab-completion for the positional arguments of `mngr plugin add` and `mngr plugin remove`.
+
+- `mngr plugin add <TAB>` suggests installable plugin package names (e.g. `imbue-mngr-claude`, `imbue-mngr-modal`) drawn from the plugin catalog -- the same set the `mngr extras` install wizard offers.
+- `mngr plugin remove <TAB>` suggests the plugin packages currently installed (from the uv-tool receipt), filtered to packages that actually register `mngr` entry points -- so non-plugin dependencies installed alongside plugins (e.g. workspace libraries) are not offered.
+
+Both support prefix filtering and repeat the completion for each package when operating on several at once.
+
+Test-infrastructure cleanup: the shared mngr plugin test fixtures (HOME
+isolation via the autouse `setup_test_mngr_env`, temp host/profile/config dirs,
+git-repo helpers, and the shell-stub fixtures `stub_mngr_log_sh` /
+`mngr_transcript_lib_sh`) are now single-sourced in
+`imbue.mngr.utils.plugin_testing` and exposed through
+`register_plugin_test_fixtures`. mngr's own `conftest.py` now registers that
+shared set rather than redefining ~20 duplicate fixtures, keeping only two that
+still differ for mngr-core: the deliberately-blocking `plugin_manager`, and
+`mngr_test_id` (which differs only incidentally -- its `worker_test_ids`
+bookkeeping is read solely by mngr-core's `session_cleanup` leak scan, which is
+not shared with plugins). The shared `temp_mngr_ctx` now resets the
+provider-instance cache on teardown for plugins too, so that behavior no longer
+diverges. No user-facing behavior change.
+
+- `plugin_catalog.py`: `UNPUBLISHED_PACKAGES` is now the single source of truth for "deliberately not published to PyPI", consulted by both the install wizard (which never offers an unpublished package) and the release tooling (which auto-discovers every `libs/*` package as a publish candidate and subtracts this set). Added `imbue-mngr-mapreduce` (internal map-reduce framework library, no CLI), `imbue-mngr-claude-subagent-proxy` (experimental, coupled to Claude Code internals), and `skitwright` (e2e-test-only helper) alongside the existing `imbue-mngr-tmr`. No runtime behavior change.
+
+Fixed `ProviderInstanceConfig.merge_with` so a higher-precedence config layer
+only overrides the provider fields it actually set. It previously used an
+"override wins unless its value is None" rule, which meant any field whose
+default is a non-None value (a `bool` defaulting to `False`, an empty tuple,
+etc.) was silently reset to that default whenever a higher layer touched the
+provider block at all -- even via a single-key override like a create
+template's `setting__extend = ["providers.<name>.is_enabled=true"]`.
+
+Concretely, applying `providers.lima.is_enabled=true` (as the minds
+forever-claude-template's lima create template does) reset `is_host_in_docker`,
+`install_gvisor_runtime`, and `default_container_run_args` back to their
+defaults, so the Lima provider silently ran in direct-in-VM mode instead of
+docker-in-VM mode. The merge now uses `model_fields_set` (matching
+`AgentTypeConfig` / `PluginConfig`), so untouched fields keep their base value.
+
+`mngr create --new-host` now tears down a freshly-created host on *any* failure
+up to and including the initial-message send, so a failed create never leaks a
+host (or, for non-idle-shutdown providers, its lease). The whole create flow --
+host env-var write, on_host_created hooks, post-host-create commands, locking,
+provisioning, agent start, and the initial-message delivery -- is now wrapped in
+a single continuous teardown guard, closing a gap where failures between the
+former two separate guard blocks (and the host env-var write) could leak the
+host. The `--edit-message` send, which the CLI performs after the API create
+returns, is now likewise covered. The existing
+`MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1` escape hatch still
+retains a failed host for debugging.
+
+- Fix the "collect results from all agents" example in the tutorial. It used `mngr exec "$agent" -- git log --oneline -3`, but `mngr exec` takes the command as a single positional argument (not a kubectl-style `--`-separated argv), so the `--oneline`/`-3` tokens were mis-parsed as agent names and the command always failed. The example now passes the command as a single quoted string: `mngr exec "$agent" "git log --oneline -3"`.
+
+- Fix the `test_advanced_fan_out_create` e2e tutorial test so it runs. The
+  fan-out loop creates four local command agents, which invokes `rsync` and
+  `tmux` and takes longer than the default per-test timeout, so the test now
+  carries `@pytest.mark.rsync`, `@pytest.mark.tmux`, and an extended
+  `@pytest.mark.timeout(180)` (plus a larger per-command timeout for the shared
+  loop). The superfluous `@pytest.mark.modal` mark was removed because the test
+  substitutes local agents and never exercises Modal.
+- Strengthen the same test's assertions: instead of only checking the fan-out
+  loop exits 0, it now verifies that one agent was created per task (via
+  `mngr list --provider local --addrs`) and that the task commands are actually
+  running (via `mngr exec ... pgrep`).
+
+Removed the superfluous `@pytest.mark.modal` from the `mngr observe --discovery-only` e2e tutorial test (it never shells out to the `modal` CLI, so the mark was a resource-guard `NEVER_INVOKED` violation) and strengthened it to create a local agent, capture the JSONL discovery stream, and assert the stream is well-formed JSON that reports the agent.
+
+Fixed the `test_advanced_watch_dashboard_running` e2e tutorial test: removed the incorrect `@pytest.mark.modal` mark (the `watch -n 5 mngr list --running` dashboard command only enumerates the local provider when no remote hosts are registered, so it never contacts Modal) and added a verification that the underlying `mngr list --running` query succeeds and returns a well-formed, empty dashboard.
+
+Fixed the `test_advanced_watch_list_live_dashboard` e2e tutorial test. It
+carried a spurious `@pytest.mark.modal` mark, but the `watch -n 5 mngr list`
+dashboard command it exercises only performs Modal host discovery via the
+in-subprocess gRPC SDK, which the resource guard cannot observe (the guard only
+tracks the `modal` CLI binary or in-process gRPC). The mark therefore tripped
+the guard's "marked modal but never invoked modal" check. Removed the mark and
+strengthened the test to create a local agent and assert it appears in the live
+dashboard output, rather than only checking that the `watch` wrapper exits.
+
+Strengthened the `mngr archive` e2e tutorial test (`test_archive_command`) to verify
+the agent is actually archived: it now stops the agent first (mirroring the tutorial
+narrative), runs `mngr archive my-task`, and asserts the `archived_at` label is set and
+the agent appears under `mngr list --archived`. Added an unhappy-path test
+(`test_archive_running_agent_is_skipped`) verifying that archiving a running agent
+without `--force` is a no-op that warns and leaves the agent un-archived.
+
+Fixed the `test_archive_stopped_via_stdin` e2e tutorial test: removed the
+incorrect `@pytest.mark.modal` marker (the test only exercises local lifecycle
+commands and never invokes the Modal CLI, so the resource guard failed the
+otherwise-passing test) and strengthened it to verify the archive's actual
+effect (the `archived_at` label is applied, the agent appears under
+`mngr list --archived`, and is filtered out of `mngr list --active`).
+
+Fixed the `test_command_agent_dev_server_extra_windows` e2e release test, which
+was marked `@pytest.mark.modal` but never ran any command that contacts Modal, so
+the resource guard failed it. It now runs `mngr list` (which exercises the Modal
+discovery path, matching the sibling create tests) to verify the command agent was
+created, and asserts that the extra `logs` tmux window requested via `-w` actually
+exists.
+
+Fixed and strengthened the `test_command_agent_python_http` e2e tutorial test
+for the "RUNNING NON-AGENT PROCESSES" section. The test created a local
+`--type command` agent but was incorrectly marked `@pytest.mark.modal`, so the
+resource guard failed it for never invoking Modal; the mark was removed. The
+test now also verifies actual behavior: it checks that the managed process is
+running inside the agent (`mngr exec ... ps`) and that the agent is listed as a
+local command agent with the expected command (`mngr list --provider local
+--format json`). No production code changes.
+
+- Strengthen the `mngr config edit --scope project` e2e tutorial test (`test_config_edit_scope`) to verify the actual behavior: it now resolves the project-scoped config path via `mngr config path --scope project`, confirms the edit command announces and targets that exact file, and checks that the file is created from the template on disk. Added a companion unhappy-path test (`test_config_edit_scope_missing_editor`) verifying the command fails cleanly with an "Editor not found" message when `$EDITOR`/`$VISUAL` point at a nonexistent program.
+
+Strengthened the `mngr config edit` e2e tutorial test: it now drives the command
+with a fake editor and verifies the editor is invoked on the freshly-created
+config file (rather than only checking the exit code). Added a companion test
+covering the unhappy path where the editor exits non-zero and the command
+propagates the failure.
+
+- Strengthen the `mngr config get` tutorial release test: it now establishes a value with `mngr config set` and reads it back, asserting the returned value is exactly what was set (instead of only checking the exit code). Added a companion test covering the unhappy path where `mngr config get` is asked for a key that has not been set, verifying it exits non-zero with a clear "Key not found" message.
+
+- Fix the `test_config_list_scope` release e2e test, which ran three sequential `mngr config list --scope ...` subprocesses and exceeded the default 10s per-test pytest-timeout (each `mngr` cold-start costs several seconds). Added a `@pytest.mark.timeout(60)` marker, matching how other multi-command e2e tutorial tests handle cumulative subprocess startup time.
+- Strengthen the same test to assert each invocation reports the scope it actually read from (`Config from user/project/local`), so a pass confirms `--scope` selects the right config file rather than silently falling back to the merged view.
+
+- Strengthen the `mngr config list` e2e tutorial test: it now persists a known top-level value (`headless`) and asserts that the human-readable output carries both the "Merged configuration (all scopes):" banner and the persisted `headless = true` line, rather than only checking the exit code. Added a companion `test_config_list_json` covering the same tutorial block via `--format json`, asserting the parsed document carries the value under the top-level `config` object.
+
+Strengthened the `mngr config path --scope user` e2e tutorial test to verify the
+reported path is actually the user-scope config file (by writing a value at user
+scope and confirming it lands in that exact file), and added an unhappy-path test
+that asserts an unsupported `--scope` value is rejected.
+
+Strengthened the `mngr config path` e2e tutorial test (`test_config_path`) to verify actual behavior: it now asserts that all three scopes (user, project, local) are reported, that the user/local scopes resolve to `settings.toml` / `settings.local.toml`, and that the `(exists)`/`(not found)` annotation for each scope matches the real on-disk state.
+
+Fixed the e2e tutorial test harness so that `mngr config set` against the
+project scope works under pytest. The shared e2e fixture now seeds the
+project `settings.toml` with the `is_allowed_in_pytest` opt-in (previously
+only `settings.local.toml` opted in, so a project-scope `config set` created
+a file that the pytest config guard rejected on the next load), and opts the
+harness into the assign-by-default merge semantics
+(`allow_settings_key_assignment_narrowing = true`) so a project-scope
+`commands.create.*` setting no longer collides with the local-scope
+`connect_command` in the command's shared `defaults` map. This unblocks the
+`test_config_set_default_provider` and `test_config_set_headless` tutorial
+tests.
+
+Strengthened the `mngr config set headless true` tutorial e2e test
+(`test_config_set_headless_globally`) to verify the value actually persists to
+the project-scope config file (read back directly as a boolean), rather than
+only checking the command exits 0. Added a companion unhappy-path test
+(`test_config_set_rejects_unknown_key`) that confirms `mngr config set` rejects
+an unknown key with a non-zero exit and does not create the config file. No
+production behavior change.
+
+Fixed the `test_config_set_headless` e2e release test so it reliably passes: added a `@pytest.mark.timeout(60)` marker (two sequential `mngr` invocations exceeded the default 10s per-test timeout) and seeded the project `settings.toml` with `is_allowed_in_pytest = true` before `mngr config set headless true` writes to it, so the follow-up `mngr config get headless` no longer trips the pytest config opt-in guard.
+
+Strengthened the `mngr config set --scope` e2e tutorial test (`test_config_set_scope`) to verify the actual effect of the command: it now reads the value back from the user scope and confirms the value did not leak into the project scope. Added a companion unhappy-path test (`test_config_set_invalid_scope`) that confirms an unrecognized `--scope` value is rejected and writes nothing.
+
+- Harden the `mngr config set` tutorial e2e test: give it an explicit 60s timeout so a cold-start `mngr` subprocess does not blow the default 10s pytest budget, assert that the value actually lands in the project `settings.toml` (rather than only checking the exit code), and add an unhappy-path test verifying that setting an unknown configuration key is rejected and not persisted.
+
+Removed a superfluous `@pytest.mark.modal` mark from the
+`test_connect_by_agent_id_fictional` e2e test. The test connects to a
+non-existent agent id and only verifies that mngr parses the id-as-target
+syntax and reports a clean "not found" error; it never shells out to the
+`modal` CLI (the only Modal chokepoint tracked inside the mngr subprocess),
+so the resource guard correctly flagged the mark as never invoked. The test
+still runs in the release suite (it is `@pytest.mark.release`), which executes
+on Modal infrastructure regardless of the mark. Also strengthened the test's
+assertion to confirm the command exits non-zero and the error explicitly names
+the missing agent id. No production behavior change.
+
+Fixed the `mngr connect` e2e tutorial tests (`test_connect.py`). The happy-path
+tests asserted `mngr connect my-task` succeeds, but the standalone `connect`
+command execs `tmux attach` (the `connect_command` override only applies to
+`create`/`start`), which aborts with "open terminal failed: not a terminal"
+under the plain pipe-based test runner. Added an `E2eSession.run_connect_interactively`
+helper that runs the command under a PTY, waits for the tmux client to attach,
+and detaches it externally so the command exits cleanly, and switched the
+happy-path tests to it (now also asserting the command attaches to the named
+agent's session). Removed the superfluous `@pytest.mark.modal` from the
+local-only connect tests, which never query modal (the resource guard enforces
+this); the id/host error-path tests keep it.
+
+Fixed the `test_connect_explicit_host` e2e tutorial test, which was failing
+because it carried `@pytest.mark.tmux`, `@pytest.mark.rsync`, and
+`@pytest.mark.modal` resource-guard marks that the command never exercises.
+`mngr conn my-task@my-host` fails during host resolution (the host does not
+exist) and exits before attaching a tmux session, running rsync, or making any
+real Modal call, so the resource guard rejected the superfluous marks. The test
+now carries only `@pytest.mark.release`, matching the other unhappy-path connect
+test. Also strengthened the assertion to verify the error clearly reports the
+missing host rather than only checking the exit code.
+
+Fixed the `test_connect_no_start` e2e tutorial test. It now allows enough time for
+the create+connect flow (adds `@pytest.mark.timeout(180)`), drops the superfluous
+`@pytest.mark.modal` mark (the local create/connect path never invokes Modal), and
+asserts the real behavior of `mngr connect my-task --no-start`: a running agent is
+accepted (no auto-start-disabled error) and connect proceeds to a real `tmux attach`,
+which fails cleanly with "open terminal failed" in the headless harness. Also
+corrected the module docstring, which incorrectly claimed the e2e fixture rewrites
+the standalone `connect` command to a no-op recorder.
+
+Fixed the `test_connect_short_form` e2e tutorial test for `mngr conn`.
+
+`mngr connect`/`conn` replaces itself with `tmux attach`, which blocks until the
+user detaches and requires a real terminal, so the test could never succeed when
+run headlessly (it either hung on a tty or failed with "open terminal failed:
+not a terminal"). The e2e session now exposes `run_connecting_command`, which
+launches the connect command under a pseudo-terminal in a background subprocess
+and verifies that a client actually attaches to the agent's tmux session (the
+observable effect of a successful connect). The `@pytest.mark.modal` mark was
+also removed because connecting to a local agent never invokes Modal.
+
+`mngr connect` now honors a custom `connect_command` (via the new
+`--connect-command` flag or the `connect_command` config), running it instead
+of the builtin tmux attach -- matching how `mngr create` and `mngr start`
+already behave. A re-entrancy guard (the `MNGR_CONNECT_COMMAND_ACTIVE`
+environment variable) prevents infinite recursion when a custom connect command
+itself invokes `mngr connect`.
+
+Fixed and expanded the e2e release test for controlling mngr via `MNGR__*`
+environment variables (`test_control_mngr_via_env`). The test now opts into
+assign-by-default behavior so it works around the e2e fixture's
+`[commands.create]` local setting, asserts the agent actually lands on the
+`local` provider chosen via the env var, and adds an unhappy-path test verifying
+that an invalid provider value supplied via the env var is rejected. No
+user-facing behavior change.
+
+- Fix the `test_create_address_syntax_existing_host` tutorial e2e test (`mngr create my-task@my-dev-box`). It now passes an explicit `--type` so the command reaches host resolution (the agent-type default is not configured in the isolated test environment, so without it the command failed earlier on "No agent type provided"), and it verifies the expected "Could not find host" error. Removed the inaccurate `@pytest.mark.modal` mark because resolving a non-existent named host short-circuits before any Modal API call. Also strengthened the test to assert the parsed host name (`my-dev-box`) is echoed in the error.
+
+- Remove the superfluous `@pytest.mark.modal` from the e2e tutorial test `test_create_and_destroy_agent`. The test creates a `--type command` (local) agent and its body never invokes the Modal CLI, so the resource guard correctly flagged the mark as never-invoked (the only Modal touch is the fixture's teardown environment cleanup, which runs after the call-phase guard check). The test still carries the `rsync` and `tmux` marks it genuinely exercises.
+
+- Test-only change (no user-visible behavior change): removed a stale `@pytest.mark.modal` from the `mngr rename` e2e release test, which created only a local command agent and never actually invoked Modal (the mark began failing once the resource-guard's must-use enforcement was re-enabled). Also added an e2e release test covering `mngr rename --dry-run`, asserting it previews the rename without mutating the agent's name.
+
+Updated the "clone" creation tutorial block to use the current `mngr create --transfer=git-mirror` flag instead of the removed `--clone` flag, which created a full git clone (an independent copy of the repo with its own working directory and history) rather than a worktree. The corresponding e2e release test (`test_create_clone`) now runs the updated command and verifies the agent runs in a separate working directory that is a real git clone (its own `.git` directory rather than a worktree's `.git` file).
+
+- Fix the `test_create_codex_agent` e2e tutorial test so its scaffolding `mngr config set agent_types.codex.command 'sleep 99999'` writes to the `local` config scope (`settings.local.toml`) instead of the default `project` scope. The e2e fixture only opts `settings.local.toml` into the pytest run (`is_allowed_in_pytest = true`); writing a fresh `project` `settings.toml` produced a config file without that flag, so the subsequent `mngr create` refused to load it under the pytest config guard. Also strengthen the test to assert the created codex agent's resolved command matches the configured `sleep 99999`.
+
+Fixed the `test_create_codex_explicit_type` release e2e test for the codex agent-type tutorial block: the test now configures the codex command in the local config scope (whose `settings.local.toml` opts into the pytest config guard) instead of the project scope, and dropped the superfluous `@pytest.mark.modal` mark since a local `--no-connect` create never invokes Modal. The test also now verifies via `mngr list --format json` that the created agent has type `codex` and is running, rather than only checking the exit code.
+
+Removed the inapplicable `@pytest.mark.modal` mark from the release e2e test
+`test_create_command_agent_runs_post_dash_command_in_agent`. The test creates a
+`command`-type agent on the default (local) provider and never invokes Modal in
+any way the resource guard can observe, so the mark caused a spurious
+NEVER_INVOKED guard failure. The test still exercises the documented `mngr create
+--type command -- <command>` behavior and verifies the command actually runs in
+the agent.
+
+- Tighten the `test_create_command_custom_script` e2e tutorial test. Dropped the superfluous `@pytest.mark.modal` mark (the local command-agent it creates never exercises Modal, which the resource guard now flags as a `NEVER_INVOKED` violation), and strengthened it to verify that the custom command is actually forwarded to a running `command`-type agent (via `mngr list --format json`) rather than only asserting that `mngr create` exits 0.
+
+Fixed the `test_create_command_python_http` e2e tutorial test: it was marked
+`@pytest.mark.modal` but only creates a local `command`-type agent, so it never
+invoked Modal and failed the resource guard. Removed the spurious mark and added
+verification that the agent is actually created with the expected command and is
+running inside the agent.
+
+- Fixed the BASIC CREATION tutorial: the "create a copy instead of a worktree" example used the removed `--copy` flag. It now uses `mngr create my-task --transfer=git-mirror`, matching the current `--transfer` interface (a plain rsync copy is still the default for non-git projects).
+
+- Add an e2e release test (`test_create_default_branch_distinct_per_agent`) covering the tutorial's claim that `mngr create` creates a *separate* default branch *per agent*: it creates two agents and verifies each lands on its own distinct `mngr/<name>` branch (worktree HEAD checked via `mngr exec`), with both branches starting from the same base commit.
+
+Removed the superfluous `@pytest.mark.modal` from the `test_create_default` e2e
+tutorial test (it creates a local-provider agent and never invokes Modal, so the
+resource guard flagged the mark as never-invoked). Strengthened the test to
+verify the agent is actually running inside its worktree by execing `pwd` in the
+agent and comparing it against the reported `work_dir`.
+
+Fixed the tutorial's Docker resource-limit example: `mngr create my-task
+--provider docker -s cpus=2` used a bare `cpus=2` token, which `docker run`
+would have interpreted as the image name rather than a CPU limit. The example
+now uses the correct `--cpus=2` flag. Also strengthened the corresponding e2e
+release test to specify an agent type and to verify the CPU limit is actually
+applied inside the created container.
+
+Fixed the `test_create_docker_custom_dockerfile` e2e release test, which had been
+failing since the `mngr create` agent-type default was moved into user config
+(an explicit `--type` is now required). The test now passes `--type command` and
+builds the custom image from `debian:bookworm-slim` (which provides `apt-get` for
+the required host packages) instead of `alpine`, and verifies the custom Dockerfile
+was actually used by reading back a marker file baked into the image.
+
+- Fixed the `test_create_docker_default_image` e2e tutorial test: the isolated test profile has no configured default agent type, so the bare `mngr create my-task --provider docker` it ran failed with "No agent type provided". The test now passes `--type command -- sleep <N>` explicitly (matching the basic-creation tutorial tests) and additionally verifies the container is running mngr's default image (`debian:bookworm-slim`) by reading `/etc/os-release` via `mngr exec`.
+
+- Fix the `test_create_docker_start_args_overview` e2e release test so the `mngr create --provider docker` command supplies an agent type (`--type command`), which the isolated test environment does not configure as a default. The test now also reads the container hostname back to confirm the `-s` start arg is forwarded to `docker run`, rather than only checking the create command's exit code.
+
+Fixed the `test_create_docker_start_args` e2e tutorial test: the `mngr create`
+invocation now passes `--type command -- sleep ...` so that the isolated test
+environment (which has no default agent type configured) can create the agent
+and keep the container alive for the follow-up `mngr exec my-task hostname`
+assertion that verifies the `-s "--hostname=..."` start arg was forwarded to
+`docker run`.
+
+Fixed the `test_create_docker_volume_start_arg` e2e tutorial test, which was
+failing because `mngr create` requires an agent type and the test supplied
+none. The test now uses the standard `--type command -- sleep <N>` stand-in
+(matching the other tutorial create tests) and verifies that the `-v` start arg
+actually bind-mounts the host directory into the container.
+
+Strengthened the e2e test for duplicate agent names (`mngr create` with an
+already-used name). It now asserts the failure is specifically the
+duplicate-name rejection ("already exists") and verifies the rejected duplicate
+leaves the original agent untouched -- exactly one agent of that name remains,
+still running its original command rather than the duplicate's.
+
+- Remove the superfluous `@pytest.mark.modal` from the `test_create_from_another_agent` e2e tutorial test. The test only creates local command agents and clones one from another via rsync; it never invokes Modal through the bare `modal` CLI (the only path the resource guard can observe -- exercised solely during Modal *host* creation). `mngr list` enumerates the Modal provider through the in-process-untrackable SDK, so the mark could never be satisfied and the resource guard failed the test with "marked with @pytest.mark.modal but never invoked modal". The mark has no effect on CI test selection (release offload jobs filter by `release`, not `modal`), so dropping it does not change where the test runs.
+- Strengthen `test_create_from_another_agent` to verify the core behavior of `--from <agent>`: it now writes a marker file into the source agent's work directory before cloning and asserts the cloned agent received it, confirming the source agent's directory contents are actually copied (previously the test only checked that the two agents had distinct work dirs on the same host and that the clone got its own branch).
+
+- Fix the release e2e test `test_create_git_mirror_with_existing_branch` so it passes again. The test only ever creates a local-provider agent (via `--transfer=git-mirror --branch <current>`), so it never invokes Modal, but it was marked `@pytest.mark.modal`. Since provider discovery now skips the Modal backend when no Modal environment exists (`ProviderEmptyError`), `mngr list` makes no Modal call and the resource guard failed the test with "marked with @pytest.mark.modal but never invoked modal". Removed the stale mark. Also strengthened the test to assert that omitting the `:NEW` part creates no new `mngr/*` branch in either the source repo or the agent's git mirror. No production behavior change.
+
+- Remove the superfluous `@pytest.mark.modal` from the `test_create_headless` e2e release test. The test creates a local command agent and only runs `mngr list`, which never invokes the Modal CLI (the resource guard only tracks Modal CLI invocations in subprocesses, and `mngr list` discovery does not create a Modal environment), so the resource guard correctly flagged the mark as never-invoked.
+- Strengthen `test_create_headless` to verify the headless agent is actually running by exec-ing into its host, instead of only checking that it appears in `mngr list` output.
+
+Fixed the `test_create_headless` tutorial e2e test (`mngr create --headless`): added a per-test timeout matching the other agent-creating e2e tests so the real create plus `mngr list` no longer trips the global 10s default, and removed the superfluous `@pytest.mark.modal` mark since the test creates a local agent and never invokes Modal. Also strengthened the test to verify the headless agent is actually running and reachable via `mngr exec`.
+
+Strengthened the `mngr create --help` e2e tests: the help command now also asserts that stderr is empty (no stray warnings or deprecation notices), and a new test verifies the abbreviated forms advertised in the help's own SYNOPSIS -- the `-h` short flag and the `c` alias -- both produce the create help output.
+
+Added an unhappy-path e2e test (`test_create_rejects_unknown_option`) covering the same `mngr create` tutorial block: it verifies that an unknown option is rejected with exit code 2, an empty stdout, and a usage error on stderr.
+
+Fixed the `test_create_in_place_alias_target` e2e release test so it passes: added an explicit `@pytest.mark.timeout(120)` (the test runs four sequential `mngr` invocations and was exceeding the global 10s `func_only` timeout), and removed the superfluous `@pytest.mark.modal` mark (the test is local-only and never invokes Modal, which the resource guard correctly flagged).
+
+Fixed the `test_create_in_place` release e2e test: added an explicit
+`@pytest.mark.timeout(120)` so the test's multiple serial `mngr` subprocess
+invocations are not killed by the default 10s per-test timeout, and removed the
+superfluous `@pytest.mark.modal` mark (the in-place `--transfer=none` flow runs
+entirely on the local provider and never invokes Modal). Also strengthened the
+test to confirm at runtime, via `mngr exec my-task pwd`, that the agent process
+actually runs in the source directory rather than relying on `mngr list`
+metadata alone.
+
+Fixed a regression where the first `mngr create --provider modal` for a brand-new
+Modal environment failed with "Provider 'modal' has no state yet" instead of
+bootstrapping the environment. The create flow now resolves the new-host provider
+with `is_for_host_creation=True`, allowing the per-user Modal environment to be
+created on first use.
+
+Strengthened the `test_create_modal_idle_mode_run` e2e test to verify the
+concrete effect of the create (a command-type agent that runs the requested
+command with run idle mode and a 60s timeout) instead of only checking the exit
+code, and marked it flaky so offload retries transient remote Modal create
+failures.
+
+- Fix `mngr create --provider modal` (and any other backend with one-time per-user bootstrap) so the very first create in a fresh Modal environment no longer fails with `Provider 'modal' has no state yet`. The create path resolves the new-host provider for failure-teardown before provisioning; that lookup was constructed without `is_for_host_creation=True`, so on a not-yet-existing Modal environment it eagerly raised `ProviderEmptyError` instead of letting the create bootstrap the environment. It now passes `is_for_host_creation=True`, matching the subsequent host-creation lookup.
+
+- Fixed the `test_create_modal_pass_host_env` e2e tutorial test so it actually runs: the isolated test profile configures no default agent type, so the bare `mngr create my-task --provider modal --pass-host-env MY_VAR` command failed with "No agent type provided". The test now passes `--type command -- sleep ...` (matching the convention used by the other create tests) and additionally verifies, via `mngr exec`, that the forwarded `MY_VAR` host env var actually reaches the host. No production behavior change.
+
+- Fix the `test_create_named_agent` e2e release test so it passes: bump its per-test timeout to 120s (the cumulative `create` + `list` + `exec` work over the full provisioning path exceeds the default 10s func-only timeout, especially when the ttyd download is slow), and drop the spurious `@pytest.mark.modal` mark. The test creates a purely local agent (`mngr create my-task`) and never invokes Modal in a guard-tracked way during the call phase, so the mark tripped the resource-guard NEVER_INVOKED check once the body completed. This matches the 48 other local-only e2e tests that already omit the Modal mark.
+- Strengthen `test_create_named_agent` to assert that `mngr exec my-task pwd` output is rooted in the agent's dedicated worktree (the unique `my-task-<hash>` directory reported by `mngr list`), rather than only checking that the command succeeded.
+
+Fixed the `test_create_short_forms` e2e tutorial test (BASIC CREATION). It now
+carries an explicit `@pytest.mark.timeout(120)` because it issues two `mngr
+create` commands, whose combined function-body time exceeds the global 10s
+pytest-timeout default. Removed its `@pytest.mark.modal` mark: the test only
+creates local (`--type command`) agents and runs `mngr list`, which reaches
+Modal exclusively via the in-process gRPC SDK inside the spawned `mngr`
+subprocess -- a path the resource guard cannot track -- so the mark tripped the
+guard's NEVER_INVOKED check. No user-facing behavior changes.
+
+- Fix the `test_create_stack_templates` e2e tutorial test so it actually runs: add the missing `@pytest.mark.tmux` and a `@pytest.mark.timeout(120)` (a real local `mngr create` exceeds the 10s default), drop the inaccurate `@pytest.mark.modal` (the locally-substituted template never touches Modal), and correct the `with-tests` template stub (a stray trailing comma had been redirecting its body into a `settings.local.toml,` file, and `no_ensure_clean` is not a valid template field -- it now writes `ensure_clean = false`). Also add an unhappy-path test verifying that stacking an undefined `--template` name fails fast with a clear "not found" error.
+
+Fixed the `test_create_template_short_form` e2e tutorial test: it now carries `@pytest.mark.tmux` (command-type agents start via tmux) and no longer carries the spurious `@pytest.mark.modal` (the locally-substituted template runs entirely on the local provider and never invokes modal). Also strengthened the test to verify the template actually took effect by confirming the agent runs in-place.
+
+- Remove the superfluous `@pytest.mark.modal` mark from the `test_create_with_agent_args` e2e tutorial test. The test creates a purely local agent and runs `mngr list`, which only makes Modal gRPC calls when a Modal environment already exists; for a local-only test no Modal call is ever made, so the resource guard correctly flagged the mark as never-invoked.
+- Add a complementary unhappy-path e2e test verifying that agent-targeted flags (e.g. `--model opus`) must be separated with `--`, and that omitting the separator makes `mngr create` reject the flag as an unknown option.
+
+Strengthened the e2e tutorial test for `mngr create --branch BASE:NEW`: the happy-path test now also verifies (via `git worktree list`) that the agent's worktree is actually checked out on the new branch at the base commit, and a new unhappy-path test confirms that creating an agent with a nonexistent base branch fails cleanly without leaving a dangling agent branch.
+
+Fixed the `test_create_with_connect_command` release e2e test (custom `--connect-command` on `mngr create`). Added an explicit `@pytest.mark.timeout(120)` (the default 10s per-test budget was exceeded by the create + list commands) and removed the stale `@pytest.mark.modal` mark: the test uses the default local provider and `mngr list` never shells out to the guarded `modal` CLI, so the mark tripped the resource guard's never-invoked check once the test ran to completion.
+
+Strengthened the `test_create_with_custom_branch_pattern` e2e test to also verify that a `--branch ":feature/*"` pattern (with an omitted BASE) creates the new branch off the current branch, by asserting `feature/my-task` points at the same commit as `HEAD`.
+
+Strengthened the e2e test `test_create_with_dirty_tree_fails` so it actually exercises the dirty-working-tree guard: it now supplies a concrete agent type (previously the create aborted on a missing default type, so the test passed for the wrong reason) and asserts that the failure message specifically mentions the uncommitted changes and the `--no-ensure-clean` escape hatch.
+
+- Fix the `test_create_with_env_file` e2e tutorial test: a plain local command-agent create never exercises cross-provider discovery, so the `@pytest.mark.modal` mark was superfluous and the resource guard failed the otherwise-passing test. Dropped the mark (matching the equivalent local-only test) and strengthened the test to assert that the `--env-file` variable is actually loaded into the agent's on-disk environment, rather than only checking that the command exits cleanly.
+
+Added a `@pytest.mark.timeout(120)` marker to the `test_create_with_env` e2e tutorial test so it no longer hits the global 10s pytest timeout when run directly (the heavier e2e tests already carry explicit timeout markers). Also strengthened the test to assert that `--env` persists the variable into the agent's on-disk env file, in addition to the existing tmux-pane check.
+
+Strengthened the `test_create_with_explicit_branch_name` e2e tutorial test: it now asserts that an explicit `--branch ":feature/my-task"` name is taken literally (no default `mngr/my-task` branch is created) and that the new branch starts from the current branch's commit.
+
+Fixed the `test_create_with_extra_tmux_windows` e2e release test: it now overrides
+the default 10s function timeout (a real local create plus `mngr list` can exceed
+it, especially when `ttyd` is being installed) and no longer carries a stale
+`@pytest.mark.modal`. Since `mngr list` stopped auto-creating the per-user Modal
+environment for read-only commands, this purely local-provider test never invokes
+Modal, so the resource guard was correctly flagging the mark as never-invoked.
+The test also now exercises two named extra tmux windows (`server` and `logs`),
+matching the tutorial more faithfully.
+
+- Fix the `test_create_with_json_output` e2e tutorial test (BASIC CREATION section): remove the incorrect `@pytest.mark.modal` marker (the test uses the local provider and never exercises the Modal CLI, so the resource guard failed it with a "never invoked modal" violation) and add `@pytest.mark.timeout(120)` (the create-plus-list body exceeds the global 10s default and was being killed mid-create).
+- Add `test_create_with_quiet_output`, a sibling e2e test sharing the same output-format tutorial block, that verifies `mngr create --quiet` emits no stdout while still creating the agent (covering the previously-undocumented "--quiet suppresses all output" line of the block).
+
+Fixed the `test_create_with_json_output` e2e release test: added the missing `@pytest.mark.timeout(120)` (matching the other modal-backed e2e tests) and removed the superfluous `@pytest.mark.modal` mark (the test creates a local command agent and only runs `mngr list`, neither of which invokes the guard-tracked `modal` CLI). Also strengthened its assertions to parse and cross-check the `--format json` output of both `mngr create` and `mngr list`.
+
+Fixed the `test_create_with_label` e2e tutorial test: gave it a 120s timeout
+(it creates a real command agent and then runs `mngr list`, which exceeds the
+default 10s budget) and removed the incorrect `@pytest.mark.modal` mark (the
+test only creates a local `--type command` agent and never exercises Modal).
+
+Added `test_create_with_invalid_label_format`, an unhappy-path test sharing the
+same tutorial block, which verifies that `mngr create --label <no-equals>` is
+rejected with a `KEY=VALUE` error and creates no agent.
+
+Fixed the `test_create_with_label` e2e release test. It now raises the pytest
+timeout (the local `mngr create --type command` routinely exceeds the global
+10s default) and drops the superfluous `@pytest.mark.modal` mark, since the
+test performs a purely local create whose Modal discovery never reaches the
+resource guard's subprocess-tracked `modal` CLI path.
+
+Fixed the `test_create_with_message` e2e release test (tutorial `mngr create --message` block). It was hitting the default 10s function timeout during `mngr list` and then failing the resource guard's NEVER_INVOKED check for `@pytest.mark.modal`. Gave it a `@pytest.mark.timeout(120)` (matching the sibling idle-timeout test) and dropped the `@pytest.mark.modal` mark, since the test creates a local command agent and only touches Modal via `mngr list`'s in-subprocess SDK discovery, which the guard cannot observe.
+
+Fixed the `test_create_with_multiple_labels` e2e tutorial test: raised its per-test timeout so the local `mngr create` has time to complete, dropped the superfluous `@pytest.mark.modal` mark (the local create never invokes Modal), and strengthened it to verify that both labels are actually applied to the created agent via `mngr list --format json`.
+
+Fixed the `test_create_with_pass_env` e2e tutorial test, which was failing
+because it carried a superfluous `@pytest.mark.modal` mark while only creating
+a local command agent (the tutorial block uses the default local provider, so
+the test never invoked Modal). Removed the unused mark, then strengthened the
+test to verify that the forwarded `--pass-env` variable is actually present in
+the created agent's environment via `mngr exec`.
+
+Fixed the `test_create_with_pass_env` e2e tutorial test, which was incorrectly
+marked `@pytest.mark.modal` despite never exercising the modal provider (it
+creates a local `--type command` agent). The modal resource guard failed the
+test during teardown; removing the mark fixes it.
+
+Added a companion unhappy-path test, `test_create_with_pass_env_unset`, that
+verifies `mngr create --pass-env` silently skips a variable that is not set in
+the current shell: the agent is still created and the variable is absent from
+its environment.
+
+- Add a happy-path e2e tutorial test (`test_create_with_real_plugin_flags`) for the `mngr create --plugin/--disable-plugin` tutorial block. The existing `test_create_with_plugin_flags` only exercises the unhappy path (non-existent plugin names, where the strict `--disable-plugin` validation fails before `--plugin` is ever applied); the new test passes *real* registered plugin names so both flags take effect and verifies the agent is actually created and running.
+
+Fixed the `test_create_with_project_label` e2e tutorial test, which was marked
+`@pytest.mark.modal` but never invoked the modal binary (provider discovery uses
+the modal Python SDK, not the guarded binary), causing the resource guard to fail
+it. Removed the superfluous mark and added a companion `test_create_default_project_label`
+that verifies the default `project` label is derived from the git repo folder name
+when `--project` is omitted.
+
+Fixed a regression where `mngr create --provider modal` (and any other backend
+with one-time bootstrap resources) failed against a brand-new Modal environment
+with `Provider 'modal' has no state yet: Modal environment ... does not exist
+yet`. The create path eagerly loaded the provider for failure-teardown using a
+read-only construction (`is_for_host_creation=False`), which refused to
+bootstrap the environment before the actual host-creation step could create it.
+It now loads with `is_for_host_creation=True`, matching the create intent (the
+instance is cached, so no second provider is built).
+
+Also tightened the `test_create_with_snapshot_fictional` release test: it now
+runs the full `mngr create --provider modal --snapshot snap-123abc` flow with an
+explicit agent type, verifies the bad snapshot id is actually handed to Modal
+and rejected, and asserts the failure is a clean single-line error with no raw
+Python traceback.
+
+Fixed the `test_create_with_source_path_no_git` e2e tutorial test: removed the superfluous `@pytest.mark.modal` mark (the test only creates a local agent and never invokes Modal, which tripped the resource-guard "marked modal but never invoked" check) and added an explicit `@pytest.mark.timeout(120)` so the create/list/exec sequence is not killed by the default 10s per-test timeout.
+
+Removed the inapplicable `@pytest.mark.modal` mark from the e2e tutorial test
+`test_create_with_source_path`. The test creates a local agent via
+`mngr create --from <path>`; its only modal contact is the incidental
+discovery `mngr list` performs via the in-process modal SDK inside the `mngr`
+subprocess, which the resource guard cannot observe. The mark therefore always
+failed the guard's "marked modal but never invoked modal" check.
+
+Added an explicit `@pytest.mark.timeout(120)` to the `test_create_with_template_modal_disabled` e2e release test so the `mngr create` subprocess it spawns is not killed by the tight global 10s pytest timeout on a cold start. This matches the convention already used by the other subprocess-spawning e2e tests (e.g. in `test_create_modal.py` and `test_create_commands.py`). No user-facing behavior change.
+
+Fixed the `test_create_with_template` e2e release test. The test creates a
+local in-place agent (via a `transfer = "none"` create template), so it does
+not exercise the Modal provider: removed the superfluous `@pytest.mark.modal`
+(which the resource guard correctly flagged as never invoked) and scoped its
+verification `mngr list` to `--provider local` so it no longer fans out to the
+slow, network-bound Modal provider. Also strengthened the test to confirm the
+agent's actual runtime working directory via `mngr exec my-task pwd`, not just
+the `mngr list` metadata. No production behavior change.
+
+Removed the incorrect `@pytest.mark.modal` mark from the `test_create_with_transfer_none` e2e tutorial test. The test creates a purely local in-place agent (`--transfer=none`), so no Modal environment is ever created and `mngr list` correctly skips Modal discovery; the resource guard failed the test for declaring a Modal dependency it never exercises. Also strengthened the test to verify the agent's actual runtime working directory via `mngr exec`.
+
+- Fix the `test_default_output_human_readable` e2e tutorial test: remove the superfluous `@pytest.mark.modal` mark (running `mngr ls` against an empty, isolated test environment makes no Modal API call, so the resource guard correctly rejected the mark) and strengthen its assertions to confirm the default `mngr ls` output is human-readable (`No agents found`) rather than the machine-readable `[]` that `--format json` would emit.
+
+Fixed the tutorial's "destroy all docker agents" one-liner: it now pipes agent
+ids into `mngr destroy -f -` (with the `-` stdin placeholder) instead of
+`mngr destroy -f`. Without `-`, `mngr destroy` does not read from stdin and
+fails with "Must specify at least one agent". This matches every other
+filter-into-stdin example in the tutorial (e.g. `mngr list --ids | mngr stop -`).
+
+Also hardened the corresponding release test to create a real Docker agent and
+verify it is actually destroyed by the command, rather than only running the
+command against an empty agent list.
+
+Fixed the "destroy all Modal agents" tutorial example, which piped agent ids into `mngr destroy -f` without the `-` stdin placeholder. Like every other stdin-consuming command (`exec`, `stop`, `start`, `message`), `destroy` only reads piped input when given an explicit `-`, so the documented command failed with "Must specify at least one agent (use '-' to read from stdin)". The example (and its release test) now read `mngr list --include 'host.provider == "modal"' --ids | mngr destroy -f -`.
+
+Strengthened the `test_destroy_all_modal_agents` release test to create a real Modal agent, confirm it is listed, run the destroy-all command, and verify the agent is gone -- so the test exercises Modal and validates the destroy behavior instead of running against an empty environment.
+
+Added a `@pytest.mark.timeout(120)` marker to the `test_destroy_all_via_stdin`
+e2e tutorial test. The test creates two command agents plus several list/destroy
+commands, which exceeds the default 10s per-test timeout (it previously timed out
+during the second `mngr create`). The new marker matches the convention used by
+other multi-step destroy tests (e.g. `test_create_and_destroy_agent`, which uses
+`@pytest.mark.timeout(60)` for a single create+destroy).
+
+Fixed the `test_destroy_by_session_name` e2e test, which was failing because it
+was marked `@pytest.mark.modal` even though the command under test
+(`mngr destroy --session my-session-name`) fails fast on input validation and
+never provisions a modal-backed agent. Removed the spurious mark and added a
+happy-path test that creates a real agent and destroys it via its derived tmux
+session name, verifying the agent is actually gone.
+
+Corrected the "DESTROYING AGENTS" section of the mega tutorial: the
+`mngr list --ids | mngr destroy - --dry-run` example referenced a `--dry-run`
+flag that was removed from `mngr destroy` (and the other multi-target commands).
+The tutorial now shows how to preview what would be destroyed by running
+`mngr destroy my-task` without `--force` and answering "no" at the confirmation
+prompt, which lists the targets without destroying anything.
+
+Also fixed the corresponding e2e tutorial test (`test_destroy_dry_run`) so it
+exercises this confirmation-preview behavior and gives the agent-creation step a
+realistic timeout.
+
+- Add a `--dry-run` flag to `mngr destroy`. It previews exactly which agents would be destroyed (honoring the same `--format`, JSON, and JSONL output options as a real destroy) and then exits without touching anything -- no agents, hosts, branches, or garbage collection. This matches the behavior already documented in the tutorial (e.g. `mngr list --ids | mngr destroy - --dry-run`) and mirrors the existing `--dry-run` on `mngr archive` and `mngr cleanup`.
+
+Fixed the `test_destroy_multiple_at_once` e2e release test, which destroys
+multiple agents in a single `mngr destroy agent-1 agent-2 agent-3 --force`
+command. The test was hitting the global 10s pytest timeout (it creates three
+agents and destroys them), so it now carries an explicit `@pytest.mark.timeout(120)`.
+The misapplied `@pytest.mark.modal` mark was removed because the test exercises
+only local command agents and never invokes Modal. Also strengthened the test
+to verify all three agents exist before the destroy, that each is reported as
+destroyed, and that none remain afterward. No mngr behavior change.
+
+- Fix the `test_destroy_no_gc` e2e tutorial test, which failed the resource guard with "marked with @pytest.mark.modal but never invoked modal". By design `mngr destroy --no-gc` skips the post-destroy garbage-collection pass, which is the only step that reaches Modal, so the test cannot invoke Modal. Removed the incorrect `@pytest.mark.modal` mark and rewrote the test to actually exercise the flag: it now creates an agent, destroys it with `--no-gc --force`, and verifies the agent is gone and that the "Garbage collecting..." progress output is absent (proving gc was disabled), instead of merely checking that the bare command errors out.
+
+- Fixed the `test_destroy_remove_branch` tutorial e2e test (`mngr destroy --force --remove-created-branch`). It now carries `@pytest.mark.timeout(60)` because destroying an agent and running the default garbage collection exceeds the 10s default pytest timeout, and the spurious `@pytest.mark.modal` mark was removed since the test creates a purely-local command agent and never invokes Modal (the resource guard flagged the unused mark). Also strengthened the test to verify the actual effect: the agent's `mngr/my-task` branch exists after create, the destroy output reports `Deleted branch: mngr/my-task`, and the branch is gone afterward.
+
+- Fixed the `test_destroy_remove_created_branch_inline` e2e tutorial test (WORKING WITH GIT section): a create-then-destroy cycle needs more than the default 10s per-test timeout, so the test now carries `@pytest.mark.timeout(60)` to match the sibling create+destroy tests. Also strengthened the test to verify the actual effect of `mngr destroy --remove-created-branch`: it now confirms the agent's `mngr/my-task` branch exists beforehand, that destroy reports deleting it, and that the branch is genuinely gone from the repo afterward.
+
+Fixed the `test_destroy_short_form` e2e release test, which was timing out under the global 10s default because creating and destroying a real agent takes longer. Added a `@pytest.mark.timeout(120)` override (matching the other agent-creating destroy tests) and strengthened the test to verify that `mngr rm` actually removes the agent, plus added coverage for the safe-by-default behavior where a non-forced `mngr rm` refuses to destroy a still-running agent.
+
+Fixed the `test_destroy_specific` e2e tutorial test so the documented `mngr destroy my-task` command is actually exercised: the agent is now stopped before the bare (non-`--force`) destroy so it is genuinely destroyed instead of being skipped by the running-agent guard, an explicit per-test timeout was added (the destroy + gc exceeds the 10s default), and the test now verifies the agent is really gone via `mngr list`. Removed the superfluous `@pytest.mark.modal` mark: the test creates a localhost agent, which never invokes Modal (only remote-host provisioning does), so the mark could never be satisfied.
+
+Fixed the `test_destroy_with_gc` e2e tutorial test: added a `@pytest.mark.timeout(120)` marker (the global 10s default was too short for the create + destroy + gc flow over the test harness) and removed a superfluous `@pytest.mark.modal` mark (the test exercises a local command agent, so gc never makes a Modal network call and the resource guard flagged the unused mark). Also strengthened the assertions to verify gc actually ran and the agent is gone.
+
+- Remove the superfluous `@pytest.mark.modal` from the `test_env_var_mngr_headless` e2e tutorial test. The test only runs `mngr list` (with no agents) and `mngr config get headless`, which never invoke the Modal provider, so the resource guard failed the otherwise-passing test as a superfluous-mark violation.
+
+Fixed the `mngr event` tutorial e2e tests (`test_event.py`) so they run
+reliably. Each test now carries an explicit `@pytest.mark.timeout(120)` (they
+previously inherited the 10s default, which is too short for a release e2e test
+that creates an agent and reads its events) and passes generous subprocess
+timeouts to the `mngr create`/`mngr event` calls. Removed the superfluous
+`@pytest.mark.modal` mark: these tests use the default (local) provider, which
+never invokes Modal, so the resource guard rejected the unused mark. The tests
+keep the `tmux` and `rsync` marks, which the local agent creation genuinely
+exercises. No production behavior change.
+
+Also strengthened `test_event_default` to verify the tutorial's documented
+contract that `mngr event` emits clean JSONL: every line on stdout must parse
+as a JSON object (catching warnings or log lines leaking into the jq-able
+stream), and any events present must carry the four guaranteed fields
+(`event_id`, `timestamp`, `source`, `type`).
+
+- Fix the `test_event_head` e2e tutorial test (`mngr event my-task --head 10`). It carried a superfluous `@pytest.mark.modal` mark even though creating a local command agent and reading its events never invokes modal, which the resource-guard check flagged as a violation. Removed the mark and added `@pytest.mark.timeout(120)` so the test does not trip the default 10s pytest-timeout while a local agent is created (rsync + tmux) and its events are read. Also strengthened the test to assert that `--head 10` returns at most 10 JSONL events, each carrying the four guaranteed fields (`event_id`, `timestamp`, `source`, `type`), and added an unhappy-path test (`test_event_head_conflicts_with_tail`) verifying that combining `--head` and `--tail` fails with "Cannot specify both --head and --tail".
+
+Fixed the `test_event_tail` tutorial e2e test (`mngr event my-task --tail 20`).
+
+- Added a `@pytest.mark.timeout(120)` override so the test is not killed by the
+  default 10s per-test timeout while it creates a local command agent and reads
+  its events.
+- Removed the inapplicable `@pytest.mark.modal` mark: `mngr event <agent>`
+  resolves the agent via the discovery event-stream optimization, which narrows
+  discovery to the agent's (local) provider and never invokes Modal, so the
+  resource guard flagged the mark as never exercised.
+- Strengthened the assertions to verify the documented JSONL contract: every
+  emitted line is a JSON object carrying the guaranteed `event_id`, `timestamp`,
+  `source`, and `type` fields, and `--tail 20` yields at most 20 events.
+
+- Fixed the `test_exec_all_git_status` tutorial e2e test (WORKING WITH GIT section, `mngr list --ids | mngr exec - "git status --short"`). It was inheriting the 10s default pytest timeout because `test_git.py` was the only e2e tutorial file missing per-test `@pytest.mark.timeout` markers, so it timed out before the piped command finished. Added `@pytest.mark.timeout(120)` and removed the superfluous `@pytest.mark.modal` mark: the test operates entirely on a local agent and never invokes the Modal CLI, which is the only Modal signal the resource guard can observe across the mngr subprocess boundary. Also strengthened the assertion to verify the fan-out actually reaches the agent (not merely that the command exits 0).
+
+- Fix the `test_exec_as_other_user` e2e tutorial test (covering the `mngr exec <agent> "sudo -u other-user ..."` block) so it passes: add a `@pytest.mark.timeout(120)` override (the global 10s pytest timeout killed the test mid-`mngr exec`) and remove the incorrect `@pytest.mark.modal` mark (the test creates a local command agent and never invokes Modal, which tripped the resource-guard "marked modal but never invoked modal" check). Also strengthen the assertion to verify `mngr exec` streams back the executed command's real stdout (a numeric uid line) rather than only checking the exit code.
+
+Removed the superfluous `@pytest.mark.modal` mark from the `test_exec_basic`
+e2e tutorial test. The test creates a single local command agent and runs
+`mngr exec` against it by name, a path that never invokes Modal, so the
+resource guard failed the test for declaring a Modal dependency it did not
+exercise. The `rsync` and `tmux` marks remain because local `mngr create`
+genuinely invokes both.
+
+Also strengthened the assertion to verify that `mngr exec` forwards the
+command's stdout back from the agent's host (checking for the leading
+"total" line of `ls -la`), rather than only checking the exit code.
+
+Fixed the `test_exec_branch_show_current` e2e tutorial test (WORKING WITH GIT
+section). It was hitting the default 10s pytest timeout during agent creation and
+carried a superfluous `@pytest.mark.modal` mark even though it only exercises a
+local command agent. Added `@pytest.mark.timeout(60)` and removed the modal mark,
+and strengthened the assertion to verify the agent reports its own
+`mngr/{agent_name}` branch.
+
+- Fix the `test_exec_cwd` tutorial e2e test: it created a local `command` agent (which never touches Modal) yet carried `@pytest.mark.modal`, so the resource guard failed it with "marked with @pytest.mark.modal but never invoked modal", and it lacked a `@pytest.mark.timeout` override so it hit the 10s default timeout while creating the agent and running exec. Removed the superfluous `modal` mark and added `@pytest.mark.timeout(300)`.
+- Strengthen the same test's assertions: verify `mngr exec --cwd /tmp "pwd"` prints exactly `/tmp` (line-anchored), and add a contrasting run without `--cwd` confirming the command defaults to the agent's work_dir rather than `/tmp`.
+
+Fixed the `test_exec_force_commit` git tutorial e2e test: removed the superfluous `@pytest.mark.modal` mark (the test creates a local command agent and runs `mngr exec`, which never invokes Modal, so the resource guard failed it). Strengthened the test to verify the actual force-commit behavior by creating an uncommitted change in the agent, committing it via `mngr exec`, and asserting the commit message lands in the agent's git log and the change is no longer reported as uncommitted.
+
+Fixed the `test_exec_git_log` tutorial e2e test: removed the superfluous
+`@pytest.mark.modal` marker (the test exercises a local command agent and
+never invokes Modal, which the resource guard flags), and strengthened its
+assertions to verify the agent's `git log --oneline` output shows real commit
+history rather than only checking the exit code.
+
+Fixed the `test_exec_git_push_then_merge` e2e release test. It was marked
+`@pytest.mark.modal` even though its body only creates a local command agent and
+runs local git operations (`mngr exec`, `git fetch`, `git merge`), so it never
+invokes Modal -- the resource guard failed the otherwise-passing test with "never
+invoked modal". Removed the spurious mark. The test now also verifies the actual
+behavior: that the agent-side `git push` fails because no `origin` remote is
+configured (proving `mngr exec` forwards the command to the agent host and
+surfaces its non-zero exit code) and that the local `git fetch && git merge` chain
+succeeds as an up-to-date no-op.
+
+Fixed the `test_exec_git_status_short` e2e tutorial test: removed the superfluous
+`@pytest.mark.modal` marker (the test only creates a local command-type agent and
+never invokes Modal, so the resource guard failed it), and strengthened it to
+deterministically create an uncommitted file in the agent's workspace and assert
+that `git status --short` reports it.
+
+- Fix the `test_exec_no_start` e2e tutorial test (covering `mngr exec --no-start`): removed the spurious `@pytest.mark.modal` mark, since the test creates a local agent and the local-host exec never invokes Modal, which made the resource guard fail the test. Also strengthened the assertion to verify the command actually ran on the agent's host (the `cat /etc/os-release` output contains `NAME=`) rather than only checking the exit code.
+
+Fixed the `mngr exec` "error handling on multiple agents" tutorial block, which
+still referenced the removed `-a`/`--all` flag. It now demonstrates the supported
+pattern for targeting all agents: `mngr list --ids | mngr exec - ...`. The
+corresponding e2e release test was updated to match and to verify the command
+actually runs on the agent's host.
+
+Fixed the `test_exec_short_form` e2e tutorial test: removed the spurious
+`@pytest.mark.modal` mark. The test creates a local `--type command` agent and
+runs `mngr x my-task "git status"` on it, so it never provisions a Modal
+environment and never invokes the `modal` CLI; the modal resource guard
+therefore failed it with "marked with @pytest.mark.modal but never invoked
+modal". Also strengthened the assertion to verify the short-form `mngr x`
+actually ran git in the agent's work_dir (observing the `On branch` output)
+rather than only checking the exit code.
+
+- Fix the `test_exec_with_start` e2e tutorial test (`mngr exec my-task --start`). It was missing the `@pytest.mark.timeout` marker that every other e2e tutorial test carries, so under the default 10s pytest timeout it timed out before `mngr create` finished. It also carried a superfluous `@pytest.mark.modal` mark even though it only exercises a local-provider agent and never invokes Modal, which tripped the resource guard's "marked modal but never invoked modal" check. Added a 180s timeout marker and removed the Modal mark. Also strengthened the test to assert that `mngr exec` actually forwarded the command output (the contents of `/etc/os-release`) rather than only checking the exit code.
+
+- Remove the incorrect `@pytest.mark.modal` from the `test_full_lifecycle` e2e release test. The test exercises a local-provider command agent (create, exec, stop, start, destroy) and never initializes the Modal provider, so it never invokes the Modal CLI. The mark caused the resource guard to fail the otherwise-passing test with "marked with @pytest.mark.modal but never invoked modal". The `tmux` and `rsync` marks are retained because the local command agent runs in tmux and transfers its worktree via rsync.
+- Strengthen `test_full_lifecycle` to verify that `mngr start` actually relaunches the agent's own command after a stop: it now asserts the `sleep 100100` process is running again post-restart (via `mngr exec ... 'ps aux'`), rather than only checking that `exec` works.
+
+- Fix the `test_gc_background_watch` e2e tutorial test (CLEANING UP RESOURCES section). It was marked `@pytest.mark.modal`, but `mngr gc` only reaches Modal via in-process gRPC SDK calls in the `mngr` subprocess -- which the resource guard cannot observe (only `modal environment create`/`deploy` shell out to the guarded `modal` CLI binary, and gc does neither). The mark could therefore never be satisfied, so the test always failed with a "never invoked modal" resource-guard violation. Removed the superfluous mark. Also strengthened the test to verify the `commands.destroy.gc` setting actually persists and that `mngr gc` (the command `watch` runs) produces garbage-collection results.
+
+- Fix `mngr gc --provider <name>` so that an explicitly selected provider which reports it has no state yet (e.g. a Modal per-user environment that has not been created) is skipped rather than failing the whole command. This matches the existing behavior of `mngr list --provider modal` and the documented intent that read/cleanup paths can always safely skip an empty provider; previously `mngr gc --provider modal` exited with an error on a fresh setup.
+- Fix `mngr create` on a fresh Modal account: new-host creation no longer fails with "Provider 'modal' has no state yet". The provider handle used for teardown-on-failure was being constructed read-only *before* the host was resolved, which raised before the create path could bootstrap the Modal per-user environment. It is now obtained after host resolution, reusing the creation-capable (cached) provider instance.
+
+Fixed the `test_get_json_into_var` scripting e2e test. It now overrides the 10s
+global pytest timeout (Modal provider discovery inside the `mngr list` subprocess
+can exceed it) and no longer carries `@pytest.mark.modal`: `mngr list` discovers
+Modal via the in-process Python SDK inside the subprocess, which the modal
+resource guard (whose SDK monkeypatch lives only in the pytest process) cannot
+observe, so the mark produced a spurious "never invoked modal" failure. The test
+also strengthens its assertion to confirm the shell variable actually captured a
+non-empty JSON document.
+
+Fixed the `test_git_merge_agent_branch` e2e release test: removed the
+superfluous `@pytest.mark.modal` marker (the test only creates a local command
+agent and merges its branch, so it never invokes Modal and the resource guard
+failed it). Also strengthened the test to merge real agent work and verify the
+merged file appears in the caller's working tree.
+
+Updated the `mngr --help` tutorial line to list current top-level commands (`git`, `clone`) instead of the removed standalone `push`/`pull` commands, which are now `mngr git push`/`mngr git pull`. Added an unhappy-path e2e test verifying that an unknown command fails with a helpful error pointing back to `--help`.
+
+Strengthened the `mngr --help` e2e test to assert that the help output lists the
+other commands the tutorial advertises (`destroy`, `message`, `connect`, `clone`
+in addition to `create` and `list`), and added an unhappy-path test verifying
+that an unknown command fails and points the user back to `mngr --help`.
+
+Strengthened the `test_invalid_provider_fails` e2e test so it genuinely exercises the unknown-provider path. Previously the command `mngr create my-task --provider nonexistent ...` was rejected first for not specifying an agent type, so the test passed without ever validating the provider. It now passes `--type command` so the failure is attributable to the unknown provider backend, asserts the error message names the offending provider, and confirms via `mngr list` that the failed create left no agent behind. Test-only change; no user-facing behavior change.
+
+Fixed the tutorial example that combines `mngr list --format json` with `jq`. The
+filter now reads `.agents[] | select(.state == "RUNNING") | .name` to match the
+actual JSON shape (`mngr list --format json` emits an object with an `agents`
+array), instead of the previous `.[]` which errored with "Cannot index array with
+string". Tightened the corresponding e2e test accordingly.
+
+- Fix the "JSON and JSONL works with most commands" tutorial example so it actually runs. It previously used `mngr snapshot list --format json`, but `mngr snapshot list` requires an explicit agent or host target and exits with a usage error when given none, so the example never worked standalone. It now uses `mngr list --format json && mngr plugin list --format jsonl`, two commands that work without setup and still demonstrate that `--format json`/`--format jsonl` apply across different commands. The corresponding e2e test additionally parses the combined output to confirm the JSON half is a single object and the JSONL half is one parseable object per line.
+
+Fixed the `test_list_active_filter` e2e tutorial test, which exercises `mngr list --active`. The test was marked `@pytest.mark.modal`, but in a fresh environment with no agents `mngr list` deliberately skips the (not-yet-created) Modal provider instead of invoking it, so the resource guard failed the test for declaring a Modal mark it never used. Removed the superfluous mark and strengthened the test to assert the command reports "No agents found".
+
+Fixed the `test_list_archived_filter` e2e release test: dropped the superfluous `@pytest.mark.modal` mark (the read-only `mngr list --archived` smoke test never invokes the `modal` CLI in an empty environment, so the resource guard flagged the mark as never-invoked) and strengthened it to assert that the `--archived` filter returns an empty, well-formed listing in a fresh environment.
+
+Fixed the `test_list_combine_exclude_filters` e2e tutorial test (LABELS AND FILTERING section). The test was marked `@pytest.mark.modal` but a read-only `mngr list` never invokes the Modal CLI binary (it only uses the Modal SDK, which the resource guard cannot observe from the `mngr` subprocess), so the resource guard failed the test with "marked with @pytest.mark.modal but never invoked modal". Removed the superfluous mark and strengthened the test to create labeled agents and assert that `--exclude` applies OR logic (an agent matching any exclusion filter is dropped).
+
+- Test-only change: fixed and strengthened the `test_list_combine_include_filters` e2e tutorial test for the LABELS AND FILTERING section. Removed an incorrect `@pytest.mark.modal` (the test never invokes Modal, so the resource guard failed it) and rewrote it to create labeled agents, stop one, and assert that combining multiple `--include` CEL filters applies AND semantics (every returned agent must satisfy all clauses).
+
+Fixed the `test_list_compound_cel` LABELS tutorial e2e test, which timed out under the default 10s pytest limit and carried an unsatisfiable `@pytest.mark.modal` mark (a plain `mngr list` never shells out to the `modal` CLI, so the guard reported it never invoked Modal). Added a `@pytest.mark.timeout(120)` override and dropped the Modal mark. The test now creates labelled local agents and asserts that the compound CEL expression `labels.team == "backend" && state == "RUNNING"` enforces both predicates of the conjunction.
+
+- Fix the "OUTPUT FORMATS" tutorial's custom-format example: `mngr list --format '{agent.name} ({agent.state})'` referenced a non-existent `agent.` namespace and rendered empty fields (` ()`). The list item *is* the agent, so fields are referenced bare; the example is now `mngr list --format '{name} ({state})'`, which renders `<name> (<STATE>)`.
+- Strengthen the `test_list_custom_human_format` e2e release test: it now creates a real agent and asserts the template expands to the agent's actual name and state, plus an edge case confirming that unknown template fields render as empty strings.
+
+Fixed the `test_list_exclude_filter` e2e tutorial test. It carried a
+`@pytest.mark.modal` mark, but the documented `mngr list --exclude ...` command
+never shells out to the `modal` CLI (it only performs in-process SDK discovery,
+which the resource guard cannot observe across the subprocess boundary), so the
+guard failed the test with "marked with @pytest.mark.modal but never invoked
+modal". Removed the mark and rewrote the test to create two labeled command
+agents and assert that the exclusion filter actually drops the matching agent
+while keeping the others.
+
+- Fix the WORKING WITH GIT tutorial to reference the real `initial_branch` field (the branch mngr creates for each agent) instead of the non-existent `git.original_branch` field in its `mngr list --fields` example, and harden the corresponding e2e test (correct its resource marks and assert on the command's actual output).
+
+Fixed the `test_list_filter_by_label_cel` e2e tutorial test. It was marked `@pytest.mark.modal`, but a `mngr list` against an empty environment never creates Modal state and so never invokes the Modal CLI -- the only Modal usage the resource guard can track across the e2e subprocess boundary -- causing a spurious "marked with @pytest.mark.modal but never invoked modal" failure. The mark was removed, and the test now creates local agents with distinct `priority` labels to verify that the CEL filter actually includes matching agents and excludes non-matching ones.
+
+Fixed the `test_list_filter_by_state` and `test_multiple_agents_coexist` e2e release tests, which could never pass: they lacked a per-test `@pytest.mark.timeout` override and so inherited the global 10s timeout (too short for creating/stopping agents), and they carried a spurious `@pytest.mark.modal` mark even though they only ever create local-provider agents (tripping the resource guard's "marked modal but never invoked modal" check). Also strengthened `test_list_filter_by_state` to assert on each agent's actual reported `state` (STOPPED vs RUNNING/WAITING), not just name membership in the filtered list.
+
+Fixed the `test_list_filter_project_cel` e2e tutorial test, which exercises filtering agents by project with a CEL expression (`mngr list --include 'project == "my-project"'`). The test carried an unsatisfiable `@pytest.mark.modal` mark: `mngr list` reaches Modal only through the in-process gRPC SDK, which the e2e subprocess harness cannot track (the modal resource guard is only satisfied by the `modal` CLI binary, which list never invokes). Removed the spurious mark so the local CEL-filtering behavior is tested without a false guard failure.
+
+Also strengthened the happy-path assertion (the CEL filter is evaluated and matches no agents in a fresh environment) and added an unhappy-path test that verifies a syntactically invalid `--include` expression is rejected with a clear `Invalid include filter expression` error.
+
+Fixed the `test_list_format_json_recap` e2e test (covering `mngr list --format json`): removed an incorrect `@pytest.mark.modal` marker (a bare `mngr list` against an empty environment never invokes Modal, so the resource guard failed the test) and strengthened it to parse the JSON document and assert the documented `agents`/`errors` array structure.
+
+Fixed the `test_list_format_jsonl_recap` e2e tutorial test (covering `mngr list --format jsonl`). It was failing for two reasons: the bare command exceeded the 10s default pytest timeout because Modal discovery is slow when credentials are present, and `@pytest.mark.modal` deterministically tripped the resource guard's "never invoked modal" check (a read-only `mngr list` reaches Modal only via in-process gRPC inside the `mngr` subprocess, which the in-process SDK guard cannot observe, and it never shells out to the guard-observable `modal` CLI). Added a `@pytest.mark.timeout(180)` override and removed the unenforceable `@pytest.mark.modal`. Also strengthened the assertion to verify the JSONL contract (every emitted line parses as a JSON object).
+
+Removed the unsatisfiable `@pytest.mark.modal` mark from the `test_list_format_jsonl` e2e tutorial test. `mngr list` against an empty environment never shells out to the `modal` CLI binary (it only does in-process SDK discovery), so the modal resource guard reported the mark as never-invoked and failed the test. Also strengthened the test to verify that the JSONL output is well-formed (each emitted line is a standalone JSON object).
+
+Fixed the `mngr list --host-label` e2e tutorial test so it no longer carries a
+`@pytest.mark.modal` mark it cannot satisfy: `mngr list` on a fresh environment
+skips the Modal provider (the environment does not exist yet) and never runs the
+`modal` binary, so the resource guard correctly reported the mark as superfluous.
+Also strengthened the test to verify the empty-result output and added an
+error-path test for an invalid `--host-label` value (missing `KEY=VALUE`).
+
+- Fix the tutorial's jq label-filtering example. `mngr list --format json` emits a top-level object (`{"agents": [...], "errors": [...]}`), not a bare array, so the documented `mngr list --format json | jq '.[] | select(.labels.priority == "high")'` failed with `jq: error: Cannot index array with string "labels"` (because `.[]` iterates the object's values -- the two arrays). The example now uses `.agents[]` to iterate the agent objects. Updated both the `mega_tutorial.sh` resource and the corresponding e2e test (`test_list_jq_filter`).
+
+Fixed the LABELS tutorial e2e test `test_list_jsonl_jq_stream` so it exercises the streaming jq filter against a real fleet: it now seeds two local command agents labeled `priority=high` and `priority=low`, then asserts `mngr list --format jsonl | jq 'select(.labels.priority == "high")'` emits the high-priority agent and drops the low-priority one. Removed the superfluous `@pytest.mark.modal` (plain `mngr list` exercises Modal only via the in-process SDK, which is not tracked across the `mngr` subprocess) and added the `rsync`/`tmux` marks plus a longer timeout that local agent creation requires.
+
+- Remove a superfluous `@pytest.mark.modal` from the e2e tutorial test `test_list_label_filter`. The resource guard correctly flagged it as never invoking modal: `mngr list` skips the Modal provider (via `ProviderEmptyError`) when the per-user Modal environment does not exist yet, which is always the case in these no-agent e2e tests, so the `modal` binary is never invoked.
+- Strengthen the happy-path assertion to verify the label filter actually runs and produces an empty result ("No agents found"), and add an unhappy-path test (`test_list_label_filter_invalid_format`) covering the `KEY=VALUE` validation error for a malformed `--label` value.
+
+Fixed the `test_list_limit` e2e tutorial test: removed the superfluous
+`@pytest.mark.modal` mark. `mngr list --limit 10` in a fresh environment never
+invokes the Modal CLI (the only Modal usage the e2e resource guard can observe
+in a subprocess), so the mark tripped the guard's `NEVER_INVOKED` check.
+
+Strengthened the same test so it actually exercises `--limit`: it now creates
+two agents, asserts that `mngr list --limit 10` shows both, and that
+`mngr list --limit 1` truncates the result to a single agent (previously it
+only ran the command against an empty environment and checked the exit code).
+
+Fixed the `test_list_local_filter` e2e release test (covering the `mngr list --local` tutorial block). The test runs `mngr` as a subprocess, where the real Modal SDK call happens during full provider discovery; the resource guard's in-process Modal SDK monkeypatch cannot observe that subprocess call, so `@pytest.mark.modal` was failing as "never invoked". The test now records the subprocess Modal usage with the guard explicitly (mirroring the lima release test's approach). It also carries an explicit `@pytest.mark.timeout(60)` because `mngr list`'s discovery path routinely runs ~10s, past the default 10s per-test timeout (the release CI lane already overrides this globally to 90s). Strengthened the assertion to verify the command reports "No agents found" in the fresh environment.
+
+Fixed the `test_list_pipe_stdin` e2e tutorial test (covering `mngr list --format "{id}" | head -n 2 | mngr list --stdin`): removed the incorrect `@pytest.mark.modal` mark (the list pipeline never invokes Modal) and gave it a realistic timeout, then improved it to create a real agent and verify that ids piped through `mngr list --stdin` actually filter the listing.
+
+- e2e tests: fixed the PROJECTS tutorial test `test_list_project_dot` by removing the
+  superfluous `@pytest.mark.modal` mark. `mngr list --project .` runs in a subprocess
+  and only touches Modal via the SDK (gRPC), which the resource guard cannot track from
+  the subprocess (it only tracks the Modal CLI there), so the mark tripped the guard's
+  "marked but never invoked" check. Also strengthened the test to assert the command
+  emits a clean "No agents found" listing, confirming `.` is expanded to the current
+  project rather than rejected or treated literally.
+
+- `mngr list --fields` now accepts `project` as a short alias for the `labels.project` field (mirroring the existing `--project` filter flag and the `host.provider` field alias). Previously `mngr list --fields "name,project,state"` rendered an empty `PROJECT` column because `project` resolved to a nonexistent top-level attribute; it now shows each agent's project label.
+
+Removed the superfluous `@pytest.mark.modal` from the `test_list_project_filter`
+e2e tutorial test. A read-only `mngr list --project ...` against a fresh
+environment never invokes the `modal` CLI binary (the only Modal usage trackable
+from a spawned subprocess) and never creates the Modal environment, so the
+resource guard's "marked modal but never invoked modal" check failed the test.
+
+Also strengthened the test to assert the filtered listing renders the expected
+empty result ("No agents found") instead of only checking the exit code, so a
+command that errors but still exits 0 would be caught.
+
+- Fix the `test_list_provider_docker` e2e tutorial test so it actually exercises the docker provider. The test was marked `@pytest.mark.docker` but only ran `mngr list --provider docker`, which reads the state volume via the docker SDK in a subprocess (invisible to the CLI-binary resource guard) and never invokes the `docker` CLI -- so the resource guard flagged the mark as "never invoked". The test now first creates a lightweight docker command agent (which shells out to `docker build`/`docker run`, satisfying the guard) and then asserts that the created agent appears in `mngr list --provider docker` output, making the listing assertion meaningful instead of just checking a clean exit. Added `@pytest.mark.rsync` and `@pytest.mark.timeout(300)` to match the other docker-create tests. The tutorial block itself is unchanged.
+
+Removed the spurious `@pytest.mark.modal` mark from the `mngr list --provider`
+e2e tutorial test. The mark is unsatisfiable for these subprocess-based e2e
+tests (the Modal SDK guard only observes in-process calls, and `mngr list`
+skips the Modal backend entirely when its per-user environment does not exist
+yet), so the resource guard failed them with "marked modal but never invoked".
+Also strengthened the test to assert the empty-listing output and added an
+unhappy-path test covering an unknown provider name.
+
+Fixed the `test_list_remote_filter` e2e tutorial test. It was marked
+`@pytest.mark.modal`, but `mngr list --remote` only performs read-only Modal SDK
+discovery (which short-circuits when no Modal environment exists) and never
+invokes the Modal CLI, so the resource guard correctly reported that the test
+never exercised Modal. Removed the unsatisfiable mark and strengthened the test
+to actually verify the `--remote` filter: it now creates a local agent and
+asserts that the agent is excluded from `mngr list --remote` while remaining
+visible under `mngr list --local`.
+
+Tightened the `mngr list --running` e2e tutorial test (`test_list_running_filter`). It previously carried `@pytest.mark.modal` but only ran `mngr list --running` against an empty environment, which never reaches Modal; the resource guard now flags such superfluous marks. The test now creates real agents and asserts that `--running` includes a genuinely running agent and excludes a stopped one.
+
+- Fix the release test `test_list_stopped_filter` (in `imbue/mngr/e2e/tutorial/test_list.py`) by removing its superfluous `@pytest.mark.modal`. In an isolated, empty environment, `mngr list --stopped` discovers via the provider SDKs (Modal gRPC) and never shells out to the `modal` CLI binary -- the only Modal usage the resource guard can observe across the `mngr` subprocess boundary -- so the mark tripped the guard's "marked with @pytest.mark.modal but never invoked modal" check. Also strengthen the test to assert the command reports `No agents found` rather than only checking the exit code. No production behavior change.
+
+Fixed the `test_list_watch_mode` e2e tutorial test. It was marked
+`@pytest.mark.modal` even though `watch -n5 mngr list` against a fresh,
+empty environment never exercises Modal (the listing pipeline skips the
+Modal provider when its environment does not exist), which made the resource
+guard fail the test for a superfluous mark. Removed the mark and strengthened
+the assertion to verify that `watch` actually renders the wrapped `mngr list`
+output.
+
+- Remove the superfluous `@pytest.mark.modal` mark from the `test_list_with_no_agents` e2e tutorial test. In a fresh, isolated environment `mngr list` correctly short-circuits Modal host discovery (the Modal environment does not exist yet, so the provider raises `ProviderEmptyError` without making any Modal API call). Because the test never actually invokes Modal, the resource guard failed it with "marked with @pytest.mark.modal but never invoked modal". The test still runs under `@pytest.mark.release` and verifies that `mngr list` succeeds and prints "No agents found".
+
+- Add a `-a`/`--all` flag to `mngr message` (alias `mngr msg`) to broadcast a message to every agent, matching the documented tutorial usage (`mngr msg -a -m "..."`). Previously the flag was undocumented in the CLI and rejected with "No such option: -a", even though the underlying API already supported it. `--all` cannot be combined with explicit agent names, and on its own it no longer requires naming an agent.
+
+Fixed the `test_message_commit_request` git tutorial e2e test (`mngr msg`): it
+now has a longer per-test timeout to accommodate cross-provider agent discovery,
+and no longer carries a superfluous `@pytest.mark.modal` mark (the command only
+contacts Modal via the mngr subprocess SDK, which the resource guard cannot
+attribute to the test, so the mark always tripped the "never invoked" check).
+The test also asserts that `mngr msg` actually reports delivery to the target
+agent, not just that the command exits cleanly.
+
+Fixed the `test_message_filtered_backend` e2e tutorial test (LABELS AND FILTERING
+section). The test now creates a real backend-labeled agent and a frontend-labeled
+agent before running the `mngr list --include ... --ids | mngr message -` pipeline,
+and asserts the message reaches only the backend agent. Replaced the incorrect
+`@pytest.mark.modal` marker (the command never invokes Modal) with the markers that
+match the resources actually used (`tmux`, `rsync`) plus an explicit per-test timeout.
+
+Fixed the `test_message_filtered_via_stdin` e2e tutorial test. It now carries a
+`@pytest.mark.timeout(90)` (plus a longer per-command timeout) so the two-stage
+`mngr list | mngr msg` pipeline has enough headroom on slow filesystems, and the
+superfluous `rsync`/`tmux`/`modal` resource marks were dropped because the
+empty-filter pipeline is a no-op that never invokes those resources.
+
+Also hardened the test to assert the filtered id list really is empty and that
+no message is reported as delivered, and added a happy-path companion test
+(`test_message_filtered_via_stdin_delivers_to_matching_agents`) that pipes a
+non-empty id list (local-provider agents) into `mngr msg -` and verifies the
+message is actually delivered to each matched agent.
+
+- Fixed the `test_message_multiple_agents_by_name` e2e tutorial test: added `@pytest.mark.timeout(120)` so creating three local command agents over tmux+rsync no longer trips the default 10s pytest-timeout, and removed the superfluous `@pytest.mark.modal` mark (the test only messages local agents by name and never invokes Modal, which the resource guard correctly rejected). Also strengthened the assertions to verify each named agent is actually reached (`Message sent to: agent-N`) and that the aggregate success count is reported.
+
+- Fix the `test_message_one_agent` e2e tutorial test: messaging a single named local agent never invokes Modal, so its superfluous `@pytest.mark.modal` was removed (the resource guard was failing the otherwise-passing test). Strengthened its assertions to verify the message is actually delivered to the named agent (`Message sent to: my-task`, exactly one successful delivery). Added an unhappy-path `test_message_nonexistent_agent` covering the same tutorial block, which asserts that messaging a non-existent agent is a no-op (`No agents found to send message to`, exit 0) rather than an error.
+
+Fixed the `test_message_short_form` e2e tutorial test. It previously timed out
+under the default 10s pytest timeout while creating the local command agent, and
+it carried an incorrect `@pytest.mark.modal` marker even though messaging a
+single named local agent never invokes Modal (the resource guard fails such
+tests). Added `@pytest.mark.timeout(180)` and removed the `modal` marker. Also
+strengthened the test to assert the message was actually delivered ("Message
+sent to: my-task" / "Successfully sent message to 1 agent(s)") rather than only
+checking the exit code. Test-only change; no user-facing behavior change.
+
+Fixed the multi-agent e2e release tests (`test_multiple_agents_coexist`,
+`test_list_filter_by_state`) so they pass outside of offload: added explicit
+`@pytest.mark.timeout` markers (the global 10s default killed them in plain
+`pytest` runs) and removed the spurious `@pytest.mark.modal` mark. These tests
+create only local-provider command agents and never invoke Modal through a
+tracked code path, so the Modal resource guard failed them with "marked with
+@pytest.mark.modal but never invoked modal".
+
+Fixed the release e2e test `test_observe_discovery_pipe_python` (which exercises the tutorial's `mngr observe --discovery-only | python` pipe). It had been failing the resource-guard check because it carried `@pytest.mark.modal` while a discovery-only command never invokes the `modal` CLI binary (it reaches modal only via the in-process gRPC SDK, whose guard monkeypatch does not cross the `mngr` subprocess boundary). Removed the inapplicable mark and strengthened the test to warm the discovery cache and assert the discovery snapshot actually flows through the python one-liner. Test-only change; no user-visible behavior change.
+
+Fixed the `test_observe_discovery_recap` e2e release test, which covers the
+`mngr observe --discovery-only` tutorial block. The test was marked
+`@pytest.mark.modal`, but on a fresh test environment (no Modal agents created)
+the discovery stream deliberately skips the Modal provider because its
+environment does not exist yet, so no Modal call is ever made. The resource
+guard therefore failed the test for declaring a Modal dependency it never
+exercised. Removed the superfluous mark and strengthened the test to assert that
+the stream actually emits a `DISCOVERY_FULL` JSONL snapshot, rather than only
+checking that the command exits cleanly.
+
+Strengthened the `test_plugin_add_by_git` e2e tutorial test. It now asserts the
+command exits with code 1 and emits a clean "Aborted:" message (rather than just
+a non-zero exit code), confirming that `--git` is accepted as a source specifier
+and the command reaches an intentional error path instead of a click usage error
+or an uncaught traceback.
+
+Raised the per-test timeout for the `mngr plugin add <name>` e2e tutorial test so it accounts for mngr's ~10s cold-start cost, and strengthened its assertions to verify the command exits with a clean, controlled error (non-zero exit plus an "Aborted" message, no traceback) instead of merely checking the exit code.
+
+Strengthened the `mngr plugin add --path` e2e tutorial test to assert a clean abort (exit code 1) with an `Aborted` message and no traceback or click usage error, rather than only checking for a non-zero exit code. This verifies the `--path` option is recognized and the command fails gracefully when the path cannot be installed.
+
+Fixed the `test_plugin_disable_user_scope` e2e tutorial test to match the actual
+behavior of `mngr plugin disable my-plugin --scope user`: disabling a not-yet-installed
+plugin is a soft operation that succeeds (with a warning) and persists the setting. The
+test now asserts the command succeeds, emits the "not currently registered" warning, and
+verifies the disabled state is persisted by reading it back via `mngr config get
+plugins.my-plugin.enabled --scope user`.
+
+Fixed the `test_plugin_enable_project_scope` e2e tutorial test to match the actual behavior of `mngr plugin enable --scope project`. Enabling a not-yet-installed plugin is a soft pre-configuration that succeeds, records `plugins.<name>.enabled = true` in the project `settings.toml`, and warns that the setting applies once the plugin is installed. The test now verifies this concrete effect instead of incorrectly expecting a failure.
+
+Strengthened the `test_plugin_list_active_to_see_types` e2e tutorial test to verify that `mngr plugin list --active` actually lists the built-in agent types (claude, codex, command) the tutorial discusses, instead of only asserting the command exits successfully.
+
+Strengthened the `mngr plugin list --active` e2e tutorial test to verify the actual filtering behavior: it now parses the JSON output to assert every listed plugin is enabled, disables a real plugin, and confirms it disappears from `--active` while still appearing (as disabled) in the unfiltered `mngr plugin list`.
+
+Corrected the plugin-management tutorial: `mngr plugin list --fields` now demonstrates the real `enabled` field instead of the non-existent `active` field (which silently rendered as `-` for every plugin). Strengthened the corresponding e2e release test to assert that the requested fields render real values.
+
+Strengthened the `mngr plugin list` e2e tutorial test (`test_plugin_list_shows_installed`) to assert the listing renders its column headers (NAME, VERSION, DESCRIPTION, ENABLED) and includes core always-shipped plugins (`claude`, `modal`), rather than only checking for the substring `claude`.
+
+Strengthened the `mngr plugin remove` e2e tutorial test to assert that removing
+a non-installed plugin fails cleanly with a user-facing "Aborted" error and
+never a Python traceback, and added an unhappy-path test that verifies an
+invalid package name is rejected with a clear argument-validation error.
+
+Fixed the `test_recipe_launch_check_cleanup` release e2e test (COMMON TASKS recipe block) so it passes against the current CLI. The test substitutes a local `command` (sleep) agent for the recipe's modal claude agent, and several recipe steps behave differently for that stand-in:
+
+- Added the missing `@pytest.mark.timeout(300)` marker (all sibling tutorial e2e tests carry one); without it the test fell back to the global 10s default and timed out partway through.
+- The `mngr transcript` step now asserts the real behavior for a `command` agent: command agents do not produce a common transcript, so the exact recipe command (`mngr transcript fix-bug --tail 3`) exits non-zero with a clear "does not produce a common transcript" message.
+- The `mngr conn` step runs in the e2e harness without a TTY, so the interactive `tmux attach` cannot complete; the test now verifies the command resolves the named agent and reaches the connect step rather than asserting a clean exit.
+- Removed the superfluous `@pytest.mark.modal` marker: the recipe substitutes a local command agent and never invokes Modal, which tripped the resource-guard "marked modal but never invoked modal" check.
+
+Also strengthened the test's verifications: it now confirms the created agent is genuinely alive in its own worktree (`mngr exec fix-bug pwd`) -- the concrete intent of the "check what agents are running" step, which `mngr list --running` alone could not show for the idle `sleep` stand-in (it reports WAITING, not RUNNING) -- and confirms `mngr destroy --remove-created-branch` actually removed the agent's branch.
+</content>
+
+Fixed the `test_recipe_multi_agent_parallel_workflow` e2e release test for the
+MULTI-AGENT WORKFLOWS tutorial recipe:
+
+- Added a `@pytest.mark.timeout(120)` override so the multi-step recipe (which
+  creates three command agents plus list/wait/exec/msg/merge/destroy) is not
+  killed by the default 10s per-test timeout, and removed the superfluous
+  `@pytest.mark.modal` mark since the test exercises local command agents only.
+- Corrected the tutorial's "message all agents" step: `mngr msg -a` is not a
+  valid option. It now uses the documented idiom
+  `mngr list --ids | mngr msg - -m "..."` (updated in `mega_tutorial.sh` too).
+- Strengthened the test to verify actual behavior rather than just exit codes:
+  all three agents are created and isolated in distinct worktrees, the
+  broadcast message reaches all three, and cleanup removes them.
+
+- Fix the very first `mngr create --provider modal` (or any create that bootstraps a fresh per-user Modal environment) so it no longer aborts with `Provider 'modal' has no state yet`. The create path's teardown-guard provider resolution was running with read-only semantics and raising `ProviderEmptyError` before the environment could be created; it now resolves the provider in host-creation mode, creating the environment exactly once.
+- Extend the `mngr snapshot create -` (snapshot-all-via-stdin) e2e test to verify the snapshot is actually recorded for the agent and visible via `mngr snapshot list`, rather than only checking the command's exit code.
+
+- Add a `--dry-run` flag to `mngr snapshot destroy`. It resolves and reports exactly which snapshots would be destroyed (honoring `--snapshot` / `--all-snapshots`) without deleting anything, in human, JSON, JSONL, and `--format` template output. This matches the behavior already documented in the tutorial.
+- Fix a regression where the very first `mngr create --provider modal` (or `mngr create NAME@.modal`) against a brand-new Modal environment failed with "Provider 'modal' has no state yet" instead of bootstrapping the per-user Modal environment. The create path now resolves the new-host provider with `is_for_host_creation=True`, consistent with how the host itself is resolved.
+
+- Fix the `test_start_all_via_stdin` e2e tutorial test (STARTING/STOPPING section). It was failing two ways: the global 10s `pytest-timeout` budget was too short for a test body that runs multiple `mngr` subprocess invocations (rsync + tmux), and it carried a superfluous `@pytest.mark.modal` mark even though it only exercises a local-provider agent and never invokes the `modal` binary (which tripped the resource-guard "marked modal but never invoked modal" check). Added `@pytest.mark.timeout(120)` and removed the modal mark. Also strengthened the test to stop the agent and verify it transitions back to running when started via stdin, rather than only checking the command exit code. Test-only; no runtime behavior change.
+
+Fixed the `test_start_connect` e2e tutorial test (covers `mngr start <agent> --connect`):
+raised its per-test timeout so the full local create + start round-trip fits, and
+dropped the inapplicable `@pytest.mark.modal` mark (starting a named local agent never
+enumerates Modal). Also strengthened the test to verify the `--connect` path actually
+ran the connect command (rather than only checking the command's exit code).
+
+- Add a `--dry-run` flag to `mngr start`. With it, the command reports which agents *would* be started (e.g. `mngr list --ids | mngr start - --dry-run`) and returns without contacting any host or starting anything. This matches the `--dry-run` already supported by `mngr archive`, `mngr destroy`, and `mngr gc`, and the dry-run usage shown in the tutorial.
+
+- Fix the `test_start_idempotent` e2e tutorial test (STARTING AND STOPPING AGENTS) so it can run standalone, not only under the offload release harness. Added an explicit `@pytest.mark.timeout(180)` (the test creates and starts a real agent over tmux, which exceeds the 10s default that applies outside offload) and removed the inaccurate `@pytest.mark.modal` mark (the test exercises a local command agent and never invokes Modal; the resource guard correctly flagged the mark as superfluous).
+- Strengthen the same test to verify actual behavior beyond a zero exit code: after the idempotent start it now confirms the agent was not torn down by exec'ing into it and checking the command lands in the agent's own worktree. Added a companion `test_start_stopped_agent` covering the primary documented path -- stopping a running agent and starting it back up -- asserting on the `Stopped agent` / `Started agent` output and post-restart reachability.
+
+- Remove the incorrect `@pytest.mark.modal` from the `test_start_multiple_agents` e2e tutorial test. The test only creates and starts local `--type command` agents and never runs a Modal-touching command (e.g. `mngr list`), so the resource guard failed it for declaring a `modal` mark that was never exercised. Also strengthened its assertions to verify the single `mngr start agent-1 agent-2 agent-3` invocation actually reports all three agents as started, rather than only checking the exit code.
+
+- Fix the `test_stop_all_via_stdin` lifecycle e2e test (and improve its assertions). It was marked `@pytest.mark.modal` but creates a default (local-provider) command agent, so it never invokes the Modal CLI; the resource guard correctly failed it for declaring a Modal mark it never exercised. Removed the spurious `modal` mark (keeping `rsync`/`tmux`, which the local create path genuinely uses) and added behavioral assertions that verify the agent actually transitions to a stopped state after `mngr list --ids | mngr stop -`.
+
+Fixed the `test_stop_archive` e2e lifecycle test: added a `@pytest.mark.timeout(120)` mark (the test was hitting the global 10s pytest timeout during the create + stop flow) and removed the superfluous `@pytest.mark.modal` mark, since the test only exercises a local command agent and never invokes Modal. Also strengthened the test to verify that `mngr stop my-task --archive` actually stops and archives the agent (the agent now appears under `mngr list --archived` and is excluded from `mngr list --active`).
+
+Corrected the tutorial comment for `mngr stop --archive`: it previously claimed the command "creates a snapshot before stopping", but `--archive` only marks the agent archived (sets the `archived_at` label) while preserving its state -- no snapshot is created.
+
+- Fix the `test_stop_basic` e2e tutorial test (STARTING AND STOPPING AGENTS section). It inherited the global 10s pytest timeout, which was too short for a real agent create + stop and caused the test to time out; it now sets an explicit `@pytest.mark.timeout(180)`. The spurious `@pytest.mark.modal` mark was also removed because the test creates a local command agent and never invokes Modal (its commands run entirely against the local provider). The test now also verifies the concrete effect of `mngr stop` by asserting the agent is reported as `STOPPED` via `mngr list --stopped` and no longer appears in `mngr list --running`.
+
+- Fix the `test_stop_by_session_name` e2e tutorial test (covering `mngr stop --session`) so it reliably passes: add a `@pytest.mark.timeout(60)` override (the default 10s function timeout was too tight for the mngr subprocess cold start, matching the timeout overrides used by every other e2e tutorial test file) and drop the inaccurate `@pytest.mark.modal` mark (the malformed placeholder session name is rejected by the prefix-format guard before any provider/Modal scan runs). Also tighten the assertions to verify a clean non-zero exit with a clear validation error and no Python traceback.
+
+- Add a `--dry-run` flag to `mngr stop`. It reports which agents (or, with `--stop-host`, which hosts) would be stopped without actually stopping anything, matching the `--dry-run` flag already offered by `mngr archive`, `mngr destroy`, and `mngr cleanup`. This makes the documented `mngr list --ids | mngr stop - --dry-run` tutorial example work.
+
+Fixed the create-template e2e tutorial tests (`test_templates.py`). The
+`test_templates_setup_via_config_edit` test now opts the project `settings.toml`
+that `mngr config edit --scope project` creates into the pytest run (via
+`is_allowed_in_pytest = true`) before invoking `mngr create`, so the config
+loader no longer refuses the freshly created project config. Also added the
+missing `@pytest.mark.tmux` to all three template tests, which create local
+command agents that use tmux.
+
+- Fix the `test_tips_exec_env_inspect` e2e tutorial test so it passes: it creates a local `--type command` agent and execs a specific agent by name, which only invokes `tmux` and `rsync` (never Modal), so the spurious `@pytest.mark.modal` was dropped and a `@pytest.mark.timeout(120)` was added (the default 10s pytest timeout was killing the legitimately slow `mngr exec` call). Also strengthened the assertion to confirm `mngr exec my-task -- env` actually runs inside the agent's environment (checking for the injected `MNGR_AGENT_NAME`/`MNGR_AGENT_ID` variables) rather than relying on the pipeline's exit code, which the `| sort` pipe would otherwise mask.
+
+- Fix the `test_tips_transcript_tail_assistant` e2e tutorial test (TIPS AND TRICKS section). The test previously created a `command`-type `my-task`, but `mngr transcript` now rejects agent types that do not produce a common transcript, so the command exited non-zero. The test now seeds a known common transcript on a `claude`-typed agent and asserts that `mngr transcript my-task --tail 5 --role assistant` emits exactly the last five assistant messages and no user messages. Also dropped the superfluous `@pytest.mark.modal` mark (the local-only flow never invokes modal). The tutorial block is unchanged.
+
+- Fix the `test_transcript_assistant_only` e2e tutorial test (`mngr transcript my-task --role assistant`). It previously created a `command`-type agent, which `mngr transcript` correctly rejects because command agents do not emit a common transcript, so the test failed before exercising any transcript behavior. The test now creates a transcript-capable (`claude`-typed) agent and seeds a representative common transcript (user, assistant, and tool-result events), then asserts that `--role assistant` shows only the assistant message and filters out the user message and tool result. No production behavior changed.
+
+Fixed the `mngr transcript` e2e tutorial tests (`test_transcript.py`). They
+previously created a `command`-type agent, which `mngr transcript` rejects
+(command agents produce no common transcript), so the tests could never pass.
+They now create a real local `claude` agent with an initial message, wait for
+the first assistant reply, and assert on the actual transcript content for each
+variant (`--role`, `--tail`, `--format jsonl`).
+
+- Fixed the `mngr transcript` e2e tutorial tests, which previously created a `command`/sleep agent as a Claude stand-in. `mngr transcript` only works for agent types that emit a common transcript (Claude, Antigravity), so those tests failed with "does not produce a common transcript". They now create a real headless Claude agent with an initial message and wait for its transcript before exercising `mngr transcript`. Added a `setup_claude_trust` helper to the e2e session, added per-test `@pytest.mark.timeout(300)` markers, removed the spurious `@pytest.mark.modal` mark (these tests run entirely on a local agent), and added an assertion that the JSONL output parses and contains the sent user message.
+
+- Fix the `test_transcript_tail_one` e2e tutorial test so it actually exercises `mngr transcript my-task --tail 1`. The test previously created a `command`-type agent (a `sleep` stand-in), but `command` agents legitimately produce no common transcript, so `mngr transcript` always exited non-zero. The test now materializes a stopped `claude` agent together with its `claude/common_transcript` events file on disk and asserts that `--tail 1` shows exactly the most recent message. Its `@pytest.mark.modal`, `@pytest.mark.tmux`, and `@pytest.mark.rsync` marks were dropped because the test no longer creates an agent and therefore never touches those resources (the resource guard flags such superfluous marks).
+- Add `test_transcript_tail_one_on_command_agent_errors`, an error-path test for the same tutorial block that confirms `mngr transcript --tail 1` on a `command` agent fails with a clear "does not produce a common transcript" message.
+
+Fixed the `test_troubleshoot_check_agent_state` e2e tutorial test: added the
+`@pytest.mark.timeout(120)` override that every other create-based e2e tutorial
+test uses (the global 10s function-body timeout was killing the create + list)
+and removed the spurious `@pytest.mark.modal` mark, since the test only creates a
+local command agent and never exercises Modal. Also strengthened the assertions to
+verify the just-created agent actually appears in `mngr list` output with its
+resolved `local` provider, rather than only checking the command's exit code.
+
+- Fixed the `test_troubleshoot_follow_events` e2e release test, which was failing reliably. It inherited the global 10s per-test timeout, but each `mngr` subprocess invocation costs several seconds of cold-start, so two invocations (create plus follow) could not fit. Added an explicit `@pytest.mark.timeout(120)` (matching the other e2e tutorial tests) and removed a stale `@pytest.mark.modal` mark -- the test exercises a local command agent and never invokes Modal, which the resource guard flagged once the test ran to completion.
+- Strengthened the same test to bound `mngr event --follow` with a window that outlasts mngr's startup and to assert the command stays in the follow stream loop until killed (exit code 124), instead of masking the exit status with `|| true`. Added a companion unhappy-path test that verifies `mngr event <unknown-agent> --follow` fails fast with an agent-not-found error rather than hanging.
+
+Fixed the `test_troubleshoot_gc_dry_run_then_gc` release test so it no longer
+trips the default 10s pytest timeout: `mngr gc` walks every configured provider
+(including Modal), which routinely takes longer than 10s. The test now carries an
+explicit `@pytest.mark.timeout(120)` and gives each `mngr gc` invocation a
+generous per-run timeout, matching the pattern used by the sibling
+`test_troubleshoot_destroy_and_recreate_modal` test.
+
+Fixed the host-diagnostics block in the mega tutorial. `mngr exec` takes the
+command to run as a single argument (its last positional), so the previous
+`mngr exec my-task -- ps aux` form parsed `ps` as a second agent name and
+failed with "Agent not found". The tutorial now quotes each command, e.g.
+`mngr exec my-task "ps aux"`, which also makes the `cat ... | tail -20` pipe
+run on the agent's host as intended.
+
+- Fix the `test_troubleshoot_recent_events` e2e tutorial test for `mngr event my-task --tail 20`. The test created a local `command` agent and viewed its events, so it never provisions Modal (the event-stream discovery optimization resolves the known agent to the local provider only). The spurious `@pytest.mark.modal` was therefore failing the resource guard's "marked modal but never invoked modal" check. Removed the mark and added a `@pytest.mark.timeout(120)` since the create-plus-view sequence runs longer than the default 10s per-test timeout.
+- Strengthen the `mngr event` tutorial coverage: the happy-path test now asserts the printed output is well-formed JSONL (each event record is a JSON object), and a new `test_troubleshoot_recent_events_missing_agent` covers the unhappy path where viewing events for an unknown agent fails with a clear "Could not find agent" error.
+
+Fixed the `test_troubleshoot_stop_restart` e2e tutorial test (TROUBLESHOOTING section). The test created a local command agent and ran `mngr stop` / `mngr start --connect`, but never exercised Modal, so the superfluous `@pytest.mark.modal` mark tripped the resource guard; it also exceeded the default 10s function timeout. Removed the unused `modal` mark and added `@pytest.mark.timeout(120)`. Added behavioral verification that asserts the agent's state transitions to stopped after `mngr stop` and back to running after `mngr start`.
+
+Fixed the `test_troubleshoot_transcript_for_errors` e2e tutorial test. The
+troubleshooting block substitutes a lightweight `command` agent for the
+tutorial's claude agent, and `mngr transcript` correctly rejects command
+agents (they produce no common transcript). The test now asserts that clear
+diagnostic instead of expecting success, adds a timeout override to cover the
+agent-create latency, and drops the superfluous `modal` mark (the transcript
+diagnostic is a local, client-side agent-type check that never scans modal).
+
+- Fix the `test_usage_wait_and_create` e2e tutorial test: give it a `@pytest.mark.timeout(180)` (the default 10s is far too short for `mngr usage wait`, whose first discovery poll over all providers takes ~30s), raise the command run timeout to 120s, and drop the inapplicable `@pytest.mark.modal` (the timeout-capped `usage wait` short-circuits the chained `mngr create`, so Modal is never invoked in a guard-trackable way). The test now also asserts the command exits 2 (usage wait timed out, create skipped) and that no `chore` agent was created.
+
+## 2026-06-07
+
+# Add a public `set_command` setter on agents
+
+Agents now expose a certified `set_command(command)` setter (on `AgentInterface` / `BaseAgent`)
+alongside the existing `get_command`, mirroring the other certified field getters/setters
+(`set_labels`, `set_is_start_on_boot`, ...). It persists the agent's stored launch command through
+the same atomic write + external-storage save path as the other setters. This lets callers update
+the command that an agent re-runs on its next start/restart without reaching into the agent's
+on-disk `data.json` directly.
+
+Added per-agent tmux window sizing and resize policy.
+
+- `mngr create` accepts `--tmux-width`, `--tmux-height`, and `--tmux-window-size` (`manual|latest|largest|smallest`). These set the agent's tmux window dimensions at session creation and its resize policy.
+- Defaults are unchanged from before: a `200x50` window with tmux's default resize-on-attach behavior. `manual` pins the window to its configured size so it is never resized when a client attaches.
+- The options are persisted on the agent (in `data.json`) and applied on every (re)start, so they survive `stop`/`start`, `clone`, `migrate`, and `snapshot`. They are provider-agnostic (local, docker, modal, remote).
+- `mngr connect` skips its post-attach resize for a `manual`-window agent (decided on the remote host at attach time), so the pinned dimensions survive an interactive attach.
+
 ## 2026-06-06
 
 Regenerated the `mngr robinhood` CLI help doc (`docs/commands/secondary/robinhood.md`) to document the new `--include-partial-messages` and `--stream-plain-text` streaming flags (implemented in `imbue-mngr-robinhood`).
