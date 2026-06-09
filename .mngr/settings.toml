@@ -45,16 +45,16 @@ target_path = "/code/mngr"
 # unresolved deltas / index-pack abnormal exit". (This matches modal/docker, whose
 # keyframe make_tar_of_repo.sh also does a full clone.)
 #
-# The shared [providers.aws] block (region/plan/builder/auto_shutdown) is committed
-# below in the providers section; only the per-developer allowed_ssh_cidrs lives in
-# the gitignored .mngr/settings.local.toml.
+# The shared [providers.aws] block (region/plan/auto_shutdown) is committed below in the
+# providers section; only the per-developer allowed_ssh_cidrs lives in the gitignored
+# .mngr/settings.local.toml.
 #
-# Requirements at `mngr create -t aws` time:
-#   - DEPOT_TOKEN exported in your shell. The build compiles the Rust offload binary
-#     and runs `uv sync --all-packages`, which exceeds the backend's 600s local-build
-#     cap on a small instance; builder=DEPOT (set on [providers.aws]) offloads it to
-#     depot's cached remote builders. depot.json (project fsjzltqvxq) ships in the
-#     context, so DEPOT_PROJECT_ID is not needed.
+# The image is built with the default local `docker build` on the VPS (builder=DOCKER) --
+# the same mechanism the `docker` template uses, and like modal it doesn't use depot. The
+# full dev-image build (compiling the Rust offload binary + `uv sync --all-packages`) fits
+# within the backend's 600s build cap on a t3.large.
+#
+# Requirement at `mngr create -t aws` time:
 #   - GH_TOKEN exported (same as the modal template) for git/gh inside the container.
 [create_templates.aws]
 provider = "aws"
@@ -88,16 +88,12 @@ default_sandbox_timeout = 7200
 backend = "aws"
 # us-west-2 (Oregon): has a pinned default Debian 12 AMI; no region is set in ~/.aws.
 default_region = "us-west-2"
-# 2 vCPU / 8 GB. The heavy image build runs on depot's remote builders (builder below),
-# so the instance only needs to comfortably run the agent.
+# 2 vCPU / 8 GB. Builds the dev image (local docker build) and runs the agent; a cold
+# full build fits within the backend's 600s build cap at this size.
 default_plan = "t3.large"
 # Wall-clock safety net: cloud-init halts + terminates the instance after 2h, mirroring
 # the modal sandbox cap above. Guards against a forgotten host accruing EC2 cost.
 auto_shutdown_minutes = 120
-# Build on depot's cached remote builders, not locally on the VM: the dev image compiles
-# the Rust offload binary + runs `uv sync --all-packages`, blowing past the backend's
-# hardcoded 600s local-build timeout on 2 cores. Requires DEPOT_TOKEN at create time.
-builder = "DEPOT"
 
 [plugins.forward]
 enabled = true

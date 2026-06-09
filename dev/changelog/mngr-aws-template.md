@@ -12,13 +12,13 @@ container repo to already contain the base objects -- a shallow clone fails with
 "pack has N unresolved deltas / index-pack abnormal exit".
 
 The shared `[providers.aws]` config (region `us-west-2`, plan `t3.large`,
-`auto_shutdown_minutes = 120`, `builder = "DEPOT"`) is committed in `.mngr/settings.toml`;
-only the operator-specific `allowed_ssh_cidrs` lives in the gitignored
-`.mngr/settings.local.toml`. The two blocks merge per-field (ProviderInstanceConfig.merge_with
-honors `model_fields_set`). `builder = "DEPOT"` offloads the Rust/`uv sync` build to depot's
-cached remote builders, required to stay under the backend's 600s local-build timeout;
-`DEPOT_TOKEN` and `GH_TOKEN` must be exported when running `mngr create -t aws`. The
-template uses `pass_env__extend` (not plain `pass_env`) so it adds `GH_TOKEN` without
-clobbering any inherited `pass_env` (e.g. a user profile's `ANTHROPIC_API_KEY`). The
-existing `modal` template's `pass_env` was switched to `pass_env__extend` for the same
-reason.
+`auto_shutdown_minutes = 120`) is committed in `.mngr/settings.toml`; only the
+operator-specific `allowed_ssh_cidrs` lives in the gitignored `.mngr/settings.local.toml`.
+The two blocks merge per-field (ProviderInstanceConfig.merge_with honors `model_fields_set`).
+The image is built with the default local `docker build` on the VPS (like the `docker`
+template, and like modal it does not use depot); a cold full build of the dev image fits
+within the backend's 600s build cap on a `t3.large`. Only `GH_TOKEN` need be exported when
+running `mngr create -t aws`. The template uses `pass_env__extend` (not plain `pass_env`)
+so it adds `GH_TOKEN` without clobbering any inherited `pass_env` (e.g. a user profile's
+`ANTHROPIC_API_KEY`); the existing `modal` template's `pass_env` was switched to
+`pass_env__extend` for the same reason.
