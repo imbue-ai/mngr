@@ -1808,10 +1808,19 @@ async function startBackendWithRetry() {
         // Open the lesser-MRU windows without stealing focus, so the
         // MRU-zero window (already focused as initialBundle) stays focused
         // after restore completes.
+        const restoredBundles = [];
         for (const entry of rest) {
           const bundle = openNewWindow(toAbsoluteUrl(entry.url), { showInactive: true });
           restoreWindowBounds(bundle, entry);
+          restoredBundles.push(bundle);
         }
+        // createBundle unshifts each new bundle to the front of mruWindows,
+        // which reverses the saved order. Re-write the MRU list so
+        // initialBundle stays MRU-zero and the restored windows follow in
+        // their saved (i.e. previously most-recent-first) order, so the next
+        // saveSessionState preserves recency across restarts.
+        mruWindows.length = 0;
+        mruWindows.push(initialBundle, ...restoredBundles);
       }
     } else {
       // Retry path: re-load every existing window
