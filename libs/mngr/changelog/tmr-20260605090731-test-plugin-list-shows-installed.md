@@ -1,1 +1,0 @@
-Strengthened the `mngr plugin list` e2e tutorial test (`test_plugin_list_shows_installed`) to assert the listing renders its column headers (NAME, VERSION, DESCRIPTION, ENABLED) and includes core always-shipped plugins (`claude`, `modal`), rather than only checking for the substring `claude`.

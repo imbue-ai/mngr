@@ -1,0 +1,1 @@
+Fix duplicate `type = "claude"` key in the e2e test fixture's generated `settings.local.toml`. The duplicate line made the TOML unparseable, causing config-reading tutorial tests (e.g. `test_config_get_missing_key`) to fail with a parse error instead of exercising the intended behavior.

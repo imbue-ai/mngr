@@ -209,18 +209,18 @@ def _stop_modal_agent(agent_name: str, env: ModalSubprocessTestEnv) -> subproces
 
 
 def _get_preserved_agent_dir(host_dir: Path, agent_name: str) -> Path:
-    """Return the unique preserved-sessions dir for ``agent_name``.
+    """Return the unique preserved dir for ``agent_name``.
 
-    Layout: ``host_dir/plugin/mngr_claude/preserved_sessions/<agent-name>--<agent-id>/``.
-    Asserts the parent dir exists and exactly one child matches the prefix
-    so callers can assume a single unambiguous result.
+    Layout: ``host_dir/preserved/<agent-name>--<agent-id>/``, mirroring the
+    agent state directory verbatim underneath. Asserts the parent dir exists
+    and exactly one child matches the prefix so callers can assume a single
+    unambiguous result.
     """
-    preserved_sessions_dir = host_dir / "plugin" / "mngr_claude" / "preserved_sessions"
-    assert preserved_sessions_dir.exists(), f"Expected preserved_sessions dir at {preserved_sessions_dir}"
-    agent_dirs = [d for d in preserved_sessions_dir.iterdir() if d.is_dir() and d.name.startswith(agent_name)]
+    preserved_dir = host_dir / "preserved"
+    assert preserved_dir.exists(), f"Expected preserved dir at {preserved_dir}"
+    agent_dirs = [d for d in preserved_dir.iterdir() if d.is_dir() and d.name.startswith(agent_name)]
     assert len(agent_dirs) == 1, (
-        f"Expected exactly one preserved dir for {agent_name}, "
-        f"found: {[d.name for d in preserved_sessions_dir.iterdir()]}"
+        f"Expected exactly one preserved dir for {agent_name}, found: {[d.name for d in preserved_dir.iterdir()]}"
     )
     return agent_dirs[0]
 
@@ -228,14 +228,15 @@ def _get_preserved_agent_dir(host_dir: Path, agent_name: str) -> Path:
 def _assert_sessions_preserved(host_dir: Path, agent_name: str) -> None:
     """Assert that session files were preserved for the given agent under host_dir.
 
-    Checks that the preserved_sessions directory exists, contains exactly one
-    directory for the agent, and that directory has at least one non-empty
-    session JSONL file.
+    Checks that the preserved directory exists, contains exactly one directory
+    for the agent, and that directory has at least one non-empty session JSONL
+    file at the mirrored config-dir path (plugin/claude/anthropic/projects).
     """
     agent_preserved_dir = _get_preserved_agent_dir(host_dir, agent_name)
 
-    # At minimum, session JSONL files should be preserved (the projects/ directory)
-    preserved_projects = agent_preserved_dir / "projects"
+    # At minimum, session JSONL files should be preserved (the projects/ directory,
+    # mirrored at the per-agent Claude config-dir path).
+    preserved_projects = agent_preserved_dir / "plugin" / "claude" / "anthropic" / "projects"
     assert preserved_projects.exists(), (
         f"Expected preserved projects/ dir. Contents: {list(agent_preserved_dir.iterdir())}"
     )
@@ -294,7 +295,7 @@ def test_destroy_modal_agent_preserves_sessions_locally(
     This verifies the preserve_sessions_on_destroy feature end-to-end:
     1. Create a Claude agent on Modal with a prompt (session data is generated during create)
     2. Destroy the agent (triggers session file preservation)
-    3. Verify that session files were pulled to the local preserved_sessions dir
+    3. Verify that session files were pulled to the local preserved/<name>--<id> dir
     """
     agent_name = f"test-claude-preserve-{get_short_random_string()}"
     _setup_claude_gitignore(temp_source_dir)
@@ -360,8 +361,9 @@ def test_destroy_stopped_modal_agent_preserves_sessions_from_volume(
 def _read_preserved_session_text(host_dir: Path, agent_name: str) -> str:
     """Return the concatenated text of all preserved session JSONLs for an agent."""
     agent_preserved_dir = _get_preserved_agent_dir(host_dir, agent_name)
-    session_files = list((agent_preserved_dir / "projects").rglob("*.jsonl"))
-    assert len(session_files) >= 1, f"No session .jsonl files under {agent_preserved_dir / 'projects'}"
+    projects_dir = agent_preserved_dir / "plugin" / "claude" / "anthropic" / "projects"
+    session_files = list(projects_dir.rglob("*.jsonl"))
+    assert len(session_files) >= 1, f"No session .jsonl files under {projects_dir}"
     return "\n".join(f.read_text() for f in session_files)
 
 

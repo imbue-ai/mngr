@@ -1,1 +1,0 @@
-Fixed the root `.gitignore` `tmr-report/` pattern to use a `**/` prefix, satisfying the `test_gitignore_patterns_use_double_star` check that keeps `.gitignore` compatible with `.dockerignore`. This was flagged by CI after a bulk merge added the unprefixed pattern.

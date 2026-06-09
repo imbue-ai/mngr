@@ -47,6 +47,7 @@ def test_exec_basic(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(120)
 def test_exec_short_form(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # short form
@@ -123,6 +124,37 @@ def test_exec_cwd(e2e: E2eSession) -> None:
     default_result = e2e.run('mngr exec my-task "pwd"', comment="by default, commands are run in the agent's work_dir")
     expect(default_result).to_succeed()
     expect(default_result.stdout).not_to_match(r"(?m)^/tmp$")
+
+
+@pytest.mark.rsync
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.timeout(300)
+def test_exec_cwd_nonexistent(e2e: E2eSession) -> None:
+    """Unhappy path for the same ``--cwd`` block: a missing directory fails.
+
+    Shares the ``mngr exec --cwd`` tutorial block but exercises the error case
+    where the requested working directory does not exist on the agent host. The
+    command cannot be started there, so exec must surface a nonzero exit code
+    rather than silently falling back to the work_dir.
+    """
+    e2e.write_tutorial_block("""
+        # run a command in a specific working directory
+        mngr exec my-task --cwd /tmp "pwd"
+        # by default, commands are run in the agent's work_dir
+    """)
+    _create_my_task(e2e, 100405)
+    # Point --cwd at a directory that does not exist on the agent host. exec
+    # should fail (nonzero exit) rather than run the command in some fallback
+    # directory; assert on the exit code, which is the user-observable effect.
+    result = e2e.run(
+        'mngr exec my-task --cwd /nonexistent-dir-xyz "pwd"',
+        comment="a nonexistent --cwd directory causes exec to fail",
+    )
+    expect(result).to_fail()
+    # The command must not have run in the default work_dir: a real /tmp-rooted
+    # work_dir path in stdout would mean the bad --cwd was silently ignored.
+    expect(result.stdout).not_to_match(r"(?m)^/tmp/")
 
 
 @pytest.mark.rsync

@@ -1,1 +1,0 @@
-- Remove the superfluous `@pytest.mark.modal` from the `test_env_var_mngr_headless` e2e tutorial test. The test only runs `mngr list` (with no agents) and `mngr config get headless`, which never invoke the Modal provider, so the resource guard failed the otherwise-passing test as a superfluous-mark violation.

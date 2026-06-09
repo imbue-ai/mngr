@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.1] - 2026-06-08
+
 ### Added
 
 - Added: `imbue.mngr_latchkey.remote_gateway` for running the latchkey gateway on the VPS (the agent's outer host). Pins `LATCHKEY_VERSION = 2.15.1` and exposes a small public surface: `sync_credentials(host, latchkey_directory)` copies the local encrypted credential store to `~/.latchkey/` on the VPS; `sync_permissions(host, latchkey_directory, host_id)` copies the per-host permissions file (falling back to the deny-all default when no local file exists); and `provision_remote_gateway(host, host_id, container_ssh_user, container_ssh_port)` orchestrates installing the upstream `latchkey` CLI on the VPS, starting `latchkey gateway` bound to VPS loopback (with `LATCHKEY_ENCRYPTION_KEY` interpolated from the local encryption key), locating the agent's container by its `com.imbue.mngr.host-id` label, minting an ed25519 keypair authorized in the container via `docker exec`, and opening a reverse SSH tunnel from the VPS into the container so the agent reaches the VPS gateway via its unchanged `LATCHKEY_GATEWAY=http://127.0.0.1:INNER_PORT`. No-op when the outer host is the local machine; the detached gateway and tunnel are each idempotent via PID-file plus `/proc/<pid>/cmdline` marker (not `pgrep -f`, which would self-match the launching shell). Both syncs write atomically.
@@ -17,6 +19,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Changed: **Breaking** — `LatchkeyDiscoveryHandler` now takes an `MngrContext`, and the discovery callback now carries the host id. On discovery, every SSH-reachable agent gets the desktop-side gateway reverse-tunneled onto its `127.0.0.1:AGENT_SIDE_LATCHKEY_PORT` (run inline). Agents whose host also has an accessible outer host (cheap connection-free `outer_host_id_for` check) additionally get the heavy VPS-resident gateway provisioning thrown onto its own fire-and-forget concurrency-group thread, reverse-tunneled onto a distinct `127.0.0.1:INNER_PORT`, so a VPS agent can reach both the desktop and VPS gateways at once.
 - Changed: `INNER_PORT` is now `AGENT_SIDE_LATCHKEY_PORT + 1` (not 1989), so the VPS gateway's in-container reverse-tunnel port does not collide with the desktop gateway's in-container port.
+- Changed: Auto-discovered as a publishable package by the release tooling; will be offered for first publication to PyPI on the next release.
 
 ## [v0.1.0] - 2026-06-05
 

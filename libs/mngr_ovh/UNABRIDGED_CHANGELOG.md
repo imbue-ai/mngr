@@ -4,6 +4,30 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-08
+
+OVH provisioning now applies the shared `mngr_vps_docker` host-setup steps over
+SSH (OVH has no cloud-init). This closes a real gap: OVH never installed gVisor
+`runsc` before, so `[providers.ovh] install_gvisor_runtime = true` was silently a
+no-op and OVH-baked hosts (including the imbue_cloud pool) ran the agent
+container under the default runtime. With this change OVH installs the pinned
+Docker version, registers `runsc` when `install_gvisor_runtime` is set, tunes
+sshd, installs the required outer packages, and purges qemu -- all from the
+single shared source of truth.
+
+The OVH-specific `install_required_outer_packages` and `purge_qemu_packages`
+bootstrap helpers are removed; their behavior is now folded into the shared
+host-setup step list as config-gated steps.
+
+Tests now isolate $HOME the same way as every other mngr plugin: the project
+conftest calls `register_plugin_test_fixtures(globals())`, which brings in the
+autouse `setup_test_mngr_env` fixture. Previously this plugin's tests did not
+redirect $HOME, so running them on their own could read or write the real
+`~/.mngr` / `~/.claude.json`. Internal test-infrastructure change only; no
+user-facing behavior change.
+
+- Now auto-discovered as a publishable package by the release tooling (it is a standalone `mngr ovh` VPS-provider plugin, a peer of the already-published `mngr_vultr`). It will be offered for first publication to PyPI on the next release. Its internal pins were already current; no runtime change.
+
 ## 2026-06-05
 
 - Added to the release tooling's publish graph (`scripts/utils.py`). It will be offered for first publication to PyPI on the next release. No runtime change.

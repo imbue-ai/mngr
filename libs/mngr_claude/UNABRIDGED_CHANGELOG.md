@@ -4,6 +4,17 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-08
+
+Internal refactor (no behavior change): the `claude` agent's `assemble_command` now shell-quotes its extra `agent_args` via the shared `quote_agent_args` helper instead of an inline `shlex.quote` loop. This is the same quoting the plugin already performed; it now shares one implementation (and one explanatory comment) with `BaseAgent`, so the two cannot drift.
+
+Standardized mngr_claude's test setup on `register_plugin_test_fixtures(globals())`
+for HOME isolation (matching every other mngr plugin), keeping
+`pytest_plugins = ["imbue.mngr_modal.conftest"]` only to share mngr_modal's test
+fixtures (`modal_subprocess_env`, etc.). Removed the now-redundant
+`enabled_plugins` override. Internal test-infrastructure change only; no
+user-facing behavior change.
+
 ## 2026-06-06
 
 Added approximate response streaming for Claude agents, driven by watching the agent's tmux pane.

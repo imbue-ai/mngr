@@ -4,6 +4,17 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-08
+
+Region-aware host leasing.
+
+- New migration `007_pool_host_region.sql` adds a nullable `region` column to `pool_hosts` (the OVH datacenter the pool VPS was baked in). Rows baked before this migration carry NULL and act as non-preferred fallback until rebaked.
+- `POST /hosts/lease` accepts two optional fields: a hard `region` (adds an equality filter, so only hosts in that datacenter are eligible) and a soft `preferred_region` (adds an `ORDER BY` that prefers a matching region while still falling back to any available host). Both are independent of the existing JSONB attribute filter, and the lease stays a single query so the fast path is unaffected.
+
+- The `POST /hosts/lease` endpoint no longer accepts `preferred_region`. Leases
+  are constrained only by the optional hard `region` field (equality match);
+  when unset, the lease is region-agnostic.
+
 ## 2026-06-04
 
 Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.

@@ -5,6 +5,11 @@ from pydantic import Field
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 
+# The filesystem-entry type enum lives in core mngr (it is produced by every
+# HostFileReadInterface.list_directory). Re-exported here so existing
+# imbue.mngr_file.data_types.FileType references keep resolving.
+from imbue.mngr.interfaces.data_types import FileType
+
 
 class PathRelativeTo(UpperCaseStrEnum):
     """Base directory for resolving relative paths on agent targets."""
@@ -12,19 +17,6 @@ class PathRelativeTo(UpperCaseStrEnum):
     WORK = auto()
     STATE = auto()
     HOST = auto()
-
-
-class FileType(UpperCaseStrEnum):
-    """Type of a file system entry."""
-
-    FILE = auto()
-    DIRECTORY = auto()
-    SYMLINK = auto()
-    PIPE = auto()
-    SOCKET = auto()
-    BLOCK = auto()
-    CHARACTER = auto()
-    OTHER = auto()
 
 
 class FileEntry(FrozenModel):
