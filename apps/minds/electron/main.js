@@ -26,6 +26,30 @@ app.setPath('userData', paths.getDataDir());
 
 const isMac = process.platform === 'darwin';
 const TITLEBAR_HEIGHT = 38;
+// Gap on the left, right, and bottom of the contentView. Matches
+// browser mode's iframe layout (``left-[4px]`` with ``width:
+// calc(100% - 8px)`` in Chrome.jinja) so Electron and browser modes
+// render the same shape. The top of the contentView is flush with the
+// titlebar's bottom edge; the rounded top corners are revealed by the
+// chromeView painting accent in the cutouts.
+const CONTENT_INSET = 4;
+// Corner radius applied to the contentView. Native ``setBorderRadius``
+// rounds all four corners with the same radius; the cutouts at every
+// corner reveal the chromeView underneath (which paints the accent
+// color everywhere it isn't covered by the contentView), so the visible
+// frame around the contentView is uniformly accent-colored regardless
+// of OS or workspace content background.
+//
+// For the inner content corners to look concentric with the OS's outer
+// window rounding (where one exists), the inner radius should be
+// ``outer_radius - inset``. Calibrated by eye against macOS Tahoe's
+// outer rounding (the Liquid Glass redesign bumped this up significantly
+// from Big Sur-era ~11px) -- 12px with our 4px inset reads as a parallel
+// offset of the window's outer curve. Windows/Linux frameless windows
+// are square (no OS rounding to match) so 12px is a free design choice
+// there -- if we ever wire DWM ``DWMWCP_ROUND`` on Win11 the outer would
+// be ~8px and a smaller inner would be more concentric.
+const CONTENT_CORNER_RADIUS = 12;
 const SIDEBAR_WIDTH = 260;
 const CONTENT_PARTITION = 'persist:workspace-content';
 
@@ -92,6 +116,29 @@ function parseWorkspaceId(url) {
     // state before the subdomain cookie is installed. Recognising it lets
     // findBundleForWorkspace de-dupe clicks during the redirect window.
     const pathMatch = parsed.pathname.match(/^\/goto\/(agent-[a-f0-9]+)(?:\/|$)/i);
+    return pathMatch ? pathMatch[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+// Wider than ``parseWorkspaceId`` -- also recognises the workspace-scoped
+// minds-backend routes (``/workspace/<id>/settings``, ``/workspace/<id>/
+// associate``, ``/sharing/<id>/<service>``, ...). Used ONLY to decide
+// which workspace's accent should tint the titlebar; deliberately not
+// fed into ``bundle.currentWorkspaceId`` / ``findBundleForWorkspace``
+// because those drive workspace uniqueness, and we want the user to be
+// able to open ``/workspace/X/settings`` in one window while another
+// window holds the actual workspace X.
+function parseAccentSourceAgentId(url) {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    const hostMatch = parsed.hostname.match(/^(agent-[a-f0-9]+)\.localhost$/i);
+    if (hostMatch) return hostMatch[1];
+    const pathMatch = parsed.pathname.match(
+      /^\/(?:goto|workspace|sharing)\/(agent-[a-f0-9]+)(?:\/|$)/i,
+    );
     return pathMatch ? pathMatch[1] : null;
   } catch {
     return null;
@@ -233,14 +280,29 @@ function updateBundleBounds(bundle) {
   }
 
   if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
-    bundle.chromeView.setBounds({ x: 0, y: 0, width, height: TITLEBAR_HEIGHT });
+    // The chromeView covers the entire window. Its body background is
+    // ``var(--titlebar-bg)``, so wherever the contentView doesn't paint
+    // (the ``CONTENT_INSET``-wide frame around three sides and the
+    // rounded-corner cutouts at all four corners of the contentView),
+    // the chromeView fills in with the current workspace's accent
+    // color. This mirrors browser mode where the iframe sits inside a
+    // matching body inset that paints the same accent color.
+    bundle.chromeView.setBounds({ x: 0, y: 0, width, height });
   }
   if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
+    // Inset the contentView by ``CONTENT_INSET`` on left, right, and
+    // bottom (top is flush with the titlebar's bottom edge). That gap
+    // plus ``setBorderRadius(CONTENT_CORNER_RADIUS)`` (applied in
+    // ``createBundleWebContentsViews``) together create the "tucks
+    // under a rounded inset frame" look without needing per-corner
+    // control: all four corners of the contentView are visibly rounded
+    // and the cutouts reveal accent color (the chromeView below),
+    // independent of whatever background the workspace content paints.
     bundle.contentView.setBounds({
-      x: 0,
+      x: CONTENT_INSET,
       y: TITLEBAR_HEIGHT,
-      width,
-      height: height - TITLEBAR_HEIGHT,
+      width: width - CONTENT_INSET * 2,
+      height: height - TITLEBAR_HEIGHT - CONTENT_INSET,
     });
   }
   if (bundle.sidebarView && !bundle.sidebarView.webContents.isDestroyed()) {
@@ -306,6 +368,22 @@ function createBundleWebContentsViews(win) {
       nodeIntegration: false,
     },
   });
+  // Round all four corners of the contentView so it floats inside a
+  // rounded inset frame painted by the full-window chromeView underneath.
+  // See ``updateBundleBounds`` for how the chromeView covers the entire
+  // window and the contentView is inset on three sides. Note from
+  // Electron docs: ``setBorderRadius`` rounds the RENDERED region, but
+  // the view's bounds rect still captures clicks -- so a click in a
+  // corner cutout hits this contentView, which is fine (the cutouts are
+  // at the corners of the workspace content, not over chrome affordances).
+  contentView.setBorderRadius(CONTENT_CORNER_RADIUS);
+  // Pin the contentView's between-load background to white so navigation
+  // between workspace pages never reveals the chromeView's accent color
+  // through the gap. (When the previous page tears down, Electron paints
+  // the view's background color for a frame or two before the next page's
+  // first paint lands; the default background is transparent, which would
+  // briefly show the accent through.)
+  contentView.setBackgroundColor('#ffffff');
   win.contentView.addChildView(chromeView);
   win.contentView.addChildView(contentView);
 
@@ -408,6 +486,15 @@ function createBundle() {
     inboxListReloadTimer: null,
     currentContentUrl: null,
     currentWorkspaceId: null,
+    // ``lastWorkspaceAgentId`` is the agent id whose accent should color
+    // THIS window's titlebar even after the user navigates away from the
+    // workspace (e.g. to Home). Distinct from ``currentWorkspaceId``
+    // because that clears on every navigate-to-non-workspace; this only
+    // changes when the user opens a *different* workspace in this window,
+    // or when the workspace is deleted / the user signs out. Persisted in
+    // each window-state.json entry so windows restore with their own
+    // accent rather than a single global one stepping on every window.
+    lastWorkspaceAgentId: null,
     preErrorUrl: null,
     isErrorState: false,
     isLoadingState: true,
@@ -456,6 +543,16 @@ function wireContentViewEvents(bundle, contentView) {
     if (bundle.currentWorkspaceId !== newAgentId) {
       bundle.currentWorkspaceId = newAgentId;
       sendCurrentWorkspaceToBundleViews(bundle);
+    }
+    // Tint the titlebar with the workspace's accent on any
+    // workspace-scoped URL, not just the workspace itself: navigating
+    // to ``/workspace/<id>/settings`` or ``/sharing/<id>/<svc>`` is
+    // conceptually still "I'm working on workspace <id>", so the bar
+    // should adopt that accent. Distinct from the narrower
+    // ``parseWorkspaceId`` above which drives workspace uniqueness.
+    const accentAgentId = parseAccentSourceAgentId(url);
+    if (accentAgentId) {
+      updateBundleLastWorkspaceAgentId(bundle, accentAgentId);
     }
     updateOsTitle(bundle);
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
@@ -794,7 +891,7 @@ function scheduleInboxListRefresh(bundle, evt) {
 function sendCurrentWorkspaceToBundleViews(bundle) {
   if (!bundle) return;
   // Both the titlebar (chrome view) and the sidebar key UI off the current
-  // workspace -- the titlebar uses it to scope the per-agent accent swatch
+  // workspace -- the titlebar uses it to drive the per-agent accent color
   // and the auto-redirect to the recovery page (which only fires when a
   // system_interface_status event matches the currently-displayed agent).
   if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
@@ -802,6 +899,15 @@ function sendCurrentWorkspaceToBundleViews(bundle) {
   }
   if (bundle.sidebarView && !bundle.sidebarView.webContents.isDestroyed()) {
     bundle.sidebarView.webContents.send('current-workspace-changed', bundle.currentWorkspaceId);
+  }
+  // Persist this window's "last opened workspace" so a subsequent
+  // navigation to Home (or any non-workspace URL) keeps the bar tinted in
+  // this workspace's color, and so cold-start restores the same color
+  // before the first ``current-workspace-changed`` event lands. Each
+  // window remembers independently -- opening a workspace in window B
+  // does not repaint window A.
+  if (bundle.currentWorkspaceId) {
+    updateBundleLastWorkspaceAgentId(bundle, bundle.currentWorkspaceId);
   }
 }
 
@@ -823,6 +929,14 @@ function loadUrlIntoBundleContentView(bundle, url) {
     bundle.preErrorUrl = url;
     updateOsTitle(bundle);
     sendCurrentWorkspaceToBundleViews(bundle);
+  }
+  // Pre-stamp the accent source the same way, but on the wider
+  // ``parseAccentSourceAgentId`` set -- workspace-scoped settings /
+  // sharing routes paint the bar before their first did-navigate lands
+  // (so the user doesn't see a black flash before the accent applies).
+  const accentAgentId = parseAccentSourceAgentId(url);
+  if (accentAgentId) {
+    updateBundleLastWorkspaceAgentId(bundle, accentAgentId);
   }
   if (bundle.contentView && !bundle.contentView.webContents.isDestroyed() && url) {
     bundle.contentView.webContents.loadURL(url);
@@ -907,6 +1021,12 @@ function prepareAllWindowsForRetry() {
           nodeIntegration: false,
         },
       });
+      // Match the rounding + background applied in
+      // createBundleWebContentsViews so the post-retry contentView keeps
+      // the same tucked-under appearance and doesn't flash the accent
+      // through during in-workspace navigation.
+      contentView.setBorderRadius(CONTENT_CORNER_RADIUS);
+      contentView.setBackgroundColor('#ffffff');
       bundle.contentView = contentView;
       bundle.window.contentView.addChildView(contentView);
       registerShortcutsFor(bundle, contentView.webContents);
@@ -950,17 +1070,39 @@ function readLastLogLines(lineCount) {
 }
 
 // -- Session state --
+//
+// On-disk shape is ``{ windows: [{ url, x, y, width, height, displayId,
+// lastWorkspaceAgentId }, ...] }`` in ``window-state.json``. The
+// pre-titlebar-accent version of the file was a bare array of window
+// entries (no ``lastWorkspaceAgentId`` field); ``loadSessionState``
+// accepts either shape so existing installs migrate transparently on
+// first read. ``lastWorkspaceAgentId`` is per-window: the agent id whose
+// accent colors that window's titlebar across navigation to Home. Each
+// window remembers its own, so opening workspace B in window 2 does not
+// repaint window 1's titlebar. Cleared on workspace deletion (for
+// matching windows) or account sign-out (all windows).
 
 function loadSessionState() {
   try {
     const p = getSessionStatePath();
-    if (!fs.existsSync(p)) return [];
+    if (!fs.existsSync(p)) return { windows: [] };
     const raw = fs.readFileSync(p, 'utf-8');
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((e) => typeof e === 'object' && typeof e.url === 'string');
+    // Legacy shape: a bare array of window entries (pre-titlebar-accent).
+    if (Array.isArray(parsed)) {
+      return {
+        windows: parsed.filter((e) => typeof e === 'object' && typeof e.url === 'string'),
+      };
+    }
+    if (parsed && typeof parsed === 'object') {
+      const windows = Array.isArray(parsed.windows)
+        ? parsed.windows.filter((e) => typeof e === 'object' && typeof e.url === 'string')
+        : [];
+      return { windows };
+    }
+    return { windows: [] };
   } catch {
-    return [];
+    return { windows: [] };
   }
 }
 
@@ -977,7 +1119,7 @@ function toRelativeBackendUrl(url) {
 
 function saveSessionState() {
   try {
-    const state = [];
+    const windows = [];
     // Iterate in MRU order so entry 0 is the most-recently-focused window.
     // The startup path applies entry 0's bounds to the loading window before
     // the loading screen renders, so MRU ordering means the loading window
@@ -989,20 +1131,40 @@ function saveSessionState() {
       if (!relative) continue;
       const bounds = b.window.getBounds();
       const display = screen.getDisplayMatching(bounds);
-      state.push({
+      windows.push({
         url: relative,
         x: bounds.x,
         y: bounds.y,
         width: bounds.width,
         height: bounds.height,
         displayId: display ? display.id : null,
+        lastWorkspaceAgentId: b.lastWorkspaceAgentId || null,
       });
     }
     const p = getSessionStatePath();
     fs.mkdirSync(path.dirname(p), { recursive: true });
-    fs.writeFileSync(p, JSON.stringify(state, null, 2));
+    fs.writeFileSync(p, JSON.stringify({ windows }, null, 2));
   } catch (err) {
     console.log('[session] Failed to save state:', err.message);
+  }
+}
+
+// Update a single bundle's ``lastWorkspaceAgentId`` and notify only that
+// bundle's chrome view. Persists to disk via ``saveSessionState`` (skipped
+// during teardown so a late SSE-driven call doesn't overwrite the legitimate
+// pre-teardown snapshot with a partial windows array). No-op when the value
+// isn't actually changing so a stream of duplicate ``current-workspace-changed``
+// transitions (Electron emits one per content navigation) doesn't thrash the
+// file or the IPC. Pass ``null`` to clear (workspace deleted, user signed
+// out, no active workspace).
+function updateBundleLastWorkspaceAgentId(bundle, agentId) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  const normalized = typeof agentId === 'string' && agentId ? agentId : null;
+  if (normalized === bundle.lastWorkspaceAgentId) return;
+  bundle.lastWorkspaceAgentId = normalized;
+  if (!isShuttingDown) saveSessionState();
+  if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+    bundle.chromeView.webContents.send('last-workspace-agent-id-changed', normalized);
   }
 }
 
@@ -1103,11 +1265,52 @@ function handleChromeSSEEvent(evt) {
             b.contentView.webContents.loadURL(backendBaseUrl + '/');
           }
           updateOsTitle(b);
+          // Notify the chrome renderer that this window is no longer
+          // showing a workspace. The did-navigate handler that fires
+          // after the loadURL above would NOT send this IPC: its
+          // diff-guard (`bundle.currentWorkspaceId !== newAgentId`)
+          // sees null !== null and skips. Without this explicit
+          // notification the renderer's `currentTitleAgentId` would
+          // stay as the deleted workspace's id, which then blocks the
+          // `last-workspace-agent-id-changed: null` broadcast below
+          // from clearing the titlebar accent (the chrome.js handler
+          // gates on `currentTitleAgentId` being falsy).
+          sendCurrentWorkspaceToBundleViews(b);
+        }
+      }
+      // Clear the stored accent in any window whose remembered "last
+      // opened" was the destroyed workspace, so the next render of those
+      // titlebars falls back to the dark default chrome rather than
+      // pointing at a workspace that no longer exists.
+      for (const b of bundles) {
+        if (b.window.isDestroyed()) continue;
+        if (b.lastWorkspaceAgentId === oldId) {
+          updateBundleLastWorkspaceAgentId(b, null);
         }
       }
     }
 
     updateAllOsTitles();
+  } else if (evt.type === 'auth_required') {
+    // Clear every window's stored accent on the authenticated ->
+    // unauthenticated boundary (account sign-out or session expiration).
+    // Without this each window's bar would stay tinted with its
+    // last-opened workspace's color on the sign-in page. The SSE endpoint
+    // emits ``auth_required`` and closes whenever the request is
+    // unauthenticated, so a mid-session sign-out manifests here as:
+    // stream that was delivering ``workspaces`` -> stream closes ->
+    // reconnect after 1.5s -> ``auth_required`` payload.
+    // ``latestChromeState.workspaces`` is only ever set from the
+    // ``workspaces`` branch above, so its non-null state is a stable
+    // "we have been authenticated this session" flag -- gating on it
+    // leaves freshly-hydrated ``bundle.lastWorkspaceAgentId`` values
+    // alone during the cold-start unauthenticated path.
+    if (latestChromeState.workspaces !== null) {
+      for (const b of bundles) {
+        if (b.window.isDestroyed()) continue;
+        updateBundleLastWorkspaceAgentId(b, null);
+      }
+    }
   } else if (evt.type === 'auth_status') {
     latestChromeState.authStatus = evt;
   } else if (evt.type === 'requests') {
@@ -1501,9 +1704,12 @@ async function onReady() {
   initialBundle = createBundle();
   // Apply saved bounds before the loading screen renders so the window doesn't
   // jump from default-centered to its restored position once content loads.
+  // ``loadSessionState`` returns ``{ windows: [...] }`` (see comment above
+  // the function) -- entry 0 is the MRU window, which is the bundle the
+  // loading screen will surface as.
   const initialSavedState = loadSessionState();
-  if (initialSavedState.length > 0) {
-    restoreWindowBounds(initialBundle, initialSavedState[0]);
+  if (initialSavedState.windows.length > 0) {
+    restoreWindowBounds(initialBundle, initialSavedState.windows[0]);
   }
   await runStartupSequence(initialBundle);
 }
@@ -1785,8 +1991,21 @@ async function startBackendWithRetry() {
         ? new Set(workspaceList.map((w) => w.id))
         : null;
       const restorable = authenticated
-        ? filterRestorableUrls(savedState, knownAgentIdsSet)
+        ? filterRestorableUrls(savedState.windows, knownAgentIdsSet)
         : [];
+      // Drop any stored per-window ``lastWorkspaceAgentId`` whose workspace
+      // no longer exists -- otherwise the restored titlebar would paint
+      // with the color of a workspace the user already destroyed.
+      if (knownAgentIdsSet) {
+        for (const entry of restorable) {
+          if (
+            typeof entry.lastWorkspaceAgentId === 'string' &&
+            !knownAgentIdsSet.has(entry.lastWorkspaceAgentId)
+          ) {
+            entry.lastWorkspaceAgentId = null;
+          }
+        }
+      }
 
       initialBundle.isLoadingState = false;
       updateBundleBounds(initialBundle);
@@ -1812,9 +2031,18 @@ async function startBackendWithRetry() {
           initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/');
         }
       } else {
-        // Restore saved windows with their positions and sizes
+        // Restore saved windows with their positions, sizes, and -- so
+        // each window's titlebar repaints in its own accent on launch --
+        // their ``lastWorkspaceAgentId`` from the persisted entry. The
+        // explicit ``updateBundleLastWorkspaceAgentId`` call (rather than
+        // a direct assignment to ``bundle.lastWorkspaceAgentId``) sends
+        // the matching IPC to the chrome view so the accent is applied
+        // before any ``current-workspace-changed`` event arrives.
         const [first, ...rest] = restorable;
         restoreWindowBounds(initialBundle, first);
+        if (first.lastWorkspaceAgentId) {
+          updateBundleLastWorkspaceAgentId(initialBundle, first.lastWorkspaceAgentId);
+        }
         loadUrlIntoBundleContentView(initialBundle, toAbsoluteUrl(first.url));
         // Open the lesser-MRU windows without stealing focus, so the
         // MRU-zero window (already focused as initialBundle) stays focused
@@ -1823,6 +2051,9 @@ async function startBackendWithRetry() {
         for (const entry of rest) {
           const bundle = openNewWindow(toAbsoluteUrl(entry.url), { showInactive: true });
           restoreWindowBounds(bundle, entry);
+          if (entry.lastWorkspaceAgentId) {
+            updateBundleLastWorkspaceAgentId(bundle, entry.lastWorkspaceAgentId);
+          }
           restoredBundles.push(bundle);
         }
         // createBundle unshifts each new bundle to the front of mruWindows,
@@ -2188,6 +2419,18 @@ ipcMain.on('window-maximize', (event) => {
 ipcMain.on('window-close', (event) => {
   const bundle = getBundleFromEvent(event);
   if (bundle && !bundle.window.isDestroyed()) bundle.window.close();
+});
+
+// Renderer (chrome.js) asks for the persisted last-opened workspace agent id
+// on DOMContentLoaded so the titlebar accent can paint before any
+// ``current-workspace-changed`` event arrives. Per-window: scoped to the
+// caller's bundle, so each window's chrome page sees its own value rather
+// than a single shared one. Writes are driven exclusively from main
+// (``sendCurrentWorkspaceToBundleViews`` + SSE-driven cleanup); there is
+// no renderer-side setter.
+ipcMain.handle('get-last-workspace-agent-id', (event) => {
+  const bundle = getBundleFromEvent(event);
+  return bundle ? bundle.lastWorkspaceAgentId : null;
 });
 
 // -- App lifecycle --
