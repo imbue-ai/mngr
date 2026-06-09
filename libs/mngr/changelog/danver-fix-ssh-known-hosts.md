@@ -7,3 +7,6 @@ Fixed the SSH provider silently disabling strict host-key checking for staticall
   host-key checking was turned off for that host. The backend now updates only the `key_file`
   field, preserving `known_hosts_file` (and any future fields), matching the dynamic-hosts path
   that already did this correctly.
+- Consolidated the `key_file` path-expansion logic (previously hand-rolled separately in the static
+  and dynamic host paths) into a single `SSHHostConfig.with_expanded_key_file()` method that both
+  paths now call, so neither can silently drop a field if `SSHHostConfig` gains one in the future.
