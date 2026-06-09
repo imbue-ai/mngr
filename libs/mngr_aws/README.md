@@ -22,7 +22,7 @@ convention). Any of the following works:
 backend = "aws"
 
 default_region = "us-east-1"
-default_plan = "t3.small"          # instance type
+default_instance_type = "t3.small"  # EC2 instance type
 default_ami_id = ""                # leave empty to use default_ami_by_region
 
 # Optional networking
@@ -69,7 +69,7 @@ mngr create my-west-agent --provider aws-west
 
 ```bash
 mngr create my-agent --provider aws
-mngr create my-agent --provider aws -b --vps-plan=t3.medium -b --vps-region=us-west-2
+mngr create my-agent --provider aws -b --aws-instance-type=t3.medium -b --aws-region=us-west-2
 mngr list
 mngr exec my-agent "echo hello"
 mngr stop my-agent
@@ -84,7 +84,7 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | Field | Default | Description |
 |-------|---------|-------------|
 | `default_region` | `us-east-1` | AWS region for new instances. |
-| `default_plan` | `t3.small` | EC2 instance type. |
+| `default_instance_type` | `t3.small` | EC2 instance type. Surfaced to users as `--aws-instance-type=` build arg (not `--aws-plan=`) to match AWS's native terminology. |
 | `default_ami_id` | `""` | Explicit AMI override; takes precedence over the per-region map. |
 | `default_ami_by_region` | (pinned Debian 12 amd64 per region) | Per-region default AMIs. |
 | `security_group` | `AutoCreateSecurityGroup(name="mngr-aws")` | Tagged union: `{kind = "existing", id = "sg-..."}` to attach an existing SG, or `{kind = "auto_create", name = "..."}` to look up / create one. |

@@ -37,7 +37,7 @@ def _clear_aws_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_default_config_values() -> None:
     config = AwsProviderConfig()
     assert config.default_region == "us-east-1"
-    assert config.default_plan == "t3.small"
+    assert config.default_instance_type == "t3.small"
     # Default security_group is AutoCreate with name 'mngr-aws'.
     assert isinstance(config.security_group, AutoCreateSecurityGroup)
     assert config.security_group.name == "mngr-aws"

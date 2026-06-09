@@ -35,9 +35,9 @@ class VpsDockerProviderConfig(ProviderInstanceConfig):
         default=60.0,
         description="Timeout for SSH connections in seconds",
     )
-    vps_boot_timeout: float = Field(
+    instance_boot_timeout: float = Field(
         default=300.0,
-        description="Timeout for VPS to become active after provisioning in seconds",
+        description="Timeout for the cloud instance to become reachable after provisioning, in seconds",
     )
     docker_install_timeout: float = Field(
         default=300.0,
@@ -49,11 +49,7 @@ class VpsDockerProviderConfig(ProviderInstanceConfig):
     )
     default_region: str = Field(
         default="ewr",
-        description="Default VPS region",
-    )
-    default_plan: str = Field(
-        default="vc2-1c-1gb",
-        description="Default VPS plan (CPU/RAM specification)",
+        description="Default cloud region. Provider subclasses override the default value.",
     )
     default_start_args: tuple[str, ...] = Field(
         default=(),

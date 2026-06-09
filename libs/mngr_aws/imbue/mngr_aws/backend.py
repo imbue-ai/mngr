@@ -20,7 +20,9 @@ from imbue.mngr_aws import hookimpl
 from imbue.mngr_aws.cli import aws_cli_group
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AwsProviderConfig
+from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
+from imbue.mngr_vps_docker.instance import parse_vps_build_args
 
 AWS_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("aws")
 
@@ -64,6 +66,16 @@ class AwsProvider(VpsDockerProvider):
                 "instance self-terminates even if pytest is killed."
             )
 
+    def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
+        """Parse AWS-prefixed build args (--aws-region, --aws-instance-type, --git-depth)."""
+        return parse_vps_build_args(
+            build_args,
+            provider_prefix="aws",
+            default_region=self.aws_config.default_region,
+            default_plan=self.aws_config.default_instance_type,
+            plan_arg_name="instance-type",
+        )
+
     def _list_provider_vps_hostnames(self) -> list[str]:
         """Return public IPs of EC2 instances tagged with this provider's name.
 
@@ -102,15 +114,16 @@ class AwsProviderBackend(ProviderBackendInterface):
     def get_build_args_help() -> str:
         return (
             "EC2-specific args (consumed by provider, not passed to docker):\n"
-            "  --vps-region=REGION  AWS region (default: us-east-1)\n"
-            "  --vps-plan=TYPE      EC2 instance type (default: t3.small)\n"
-            "  --git-depth=N        Shallow-clone build context to depth N before upload\n"
+            "  --aws-region=REGION         AWS region (default: us-east-1)\n"
+            "  --aws-instance-type=TYPE    EC2 instance type (default: t3.small)\n"
+            "  --git-depth=N               Shallow-clone build context to depth N before upload\n"
             "\n"
             "AMI is taken from the provider config (default_ami_id / default_ami_by_region);\n"
-            "per-host AMI overrides are not supported via build args.\n"
+            "per-host AMI overrides are not supported via build args. Use a second\n"
+            "[providers.<name>] block with its own default_ami_id for that.\n"
             "\n"
             "All other build args are passed to 'docker build' on the EC2 instance.\n"
-            "Example: -b --vps-plan=t3.medium -b --file=Dockerfile -b .\n"
+            "Example: -b --aws-instance-type=t3.medium -b --file=Dockerfile -b .\n"
         )
 
     @staticmethod

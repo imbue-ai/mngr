@@ -17,13 +17,13 @@ from imbue.mngr_aws.config import ExistingSecurityGroup
 def test_backend_build_args_help_mentions_aws_specific_args() -> None:
     """The build-args help is consumed by ``mngr help create`` and is the only
     user-facing surface that describes EC2-specific build-arg overrides. It
-    must mention the AWS-specific flags (--vps-region, --vps-plan) and the
-    fact that the AMI lives on the provider config, not in build args.
+    must mention the AWS-specific flags (--aws-region, --aws-instance-type) and
+    the fact that the AMI lives on the provider config, not in build args.
     """
     help_text = AwsProviderBackend.get_build_args_help()
     assert "EC2-specific" in help_text, "help should call out that these args are EC2-specific"
-    assert "--vps-region=REGION" in help_text
-    assert "--vps-plan=TYPE" in help_text
+    assert "--aws-region=REGION" in help_text
+    assert "--aws-instance-type=TYPE" in help_text
     # Document the per-host-AMI escape hatch is intentionally absent.
     assert "AMI" in help_text and "default_ami_id" in help_text
 

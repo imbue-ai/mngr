@@ -78,9 +78,14 @@ class AwsProviderConfig(VpsDockerProviderConfig):
         default="us-east-1",
         description="Default AWS region (e.g., 'us-east-1').",
     )
-    default_plan: str = Field(
+    default_instance_type: str = Field(
         default="t3.small",
-        description="Default EC2 instance type (e.g., 't3.small' for 2 vCPU, 2GB RAM).",
+        description=(
+            "Default EC2 instance type (e.g., 't3.small' for 2 vCPU, 2GB RAM). "
+            "Threaded through the shared `plan` slot in the parsed-build-args struct; "
+            "AWS surfaces it to users as `--aws-instance-type=` rather than `--aws-plan=` "
+            "because that's what the AWS docs and console call it."
+        ),
     )
     default_ami_id: str = Field(
         default="",
