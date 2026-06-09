@@ -96,12 +96,14 @@ def _load_resource(filename: str) -> str:
     return importlib.resources.files(_pi_resources).joinpath(filename).read_text()
 
 
-# pi 0.79+ gates loading project-local inputs (CLAUDE.md/AGENTS.md, .pi settings,
-# project extensions) behind a "Trust project folder?" dialog when the cwd or an
-# ancestor has such inputs and there is no saved decision. Decisions are stored
-# per canonical (realpath) cwd in ``<agent-dir>/trust.json`` as ``{path: bool}``
-# (see pi's core/trust-manager.ts). mngr seeds it so the interactive agent never
-# stalls at the dialog.
+# pi 0.79+ shows a "Trust project folder?" dialog when there is no saved decision
+# and the workspace has "project trust inputs": specifically (pi's
+# ``hasProjectTrustInputs``) a ``.pi`` config dir in the cwd, or a ``.agents/skills``
+# dir in the cwd or any ancestor. (CLAUDE.md/AGENTS.md do NOT trigger it -- they are
+# project context pi loads *once trusted*, not trust triggers; verified on 0.79.1.)
+# Decisions are stored per canonical (realpath) cwd in ``<agent-dir>/trust.json`` as
+# ``{path: bool}`` (see pi's core/trust-manager.ts). mngr seeds it so the interactive
+# agent never stalls at the dialog.
 _PI_TRUST_FILE_NAME: str = "trust.json"
 
 
@@ -416,12 +418,8 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin):
 
         The extension writes ``pi_session_started`` from pi's ``session_start``
         event, which fires once pi has loaded the session and can accept input.
-        We wait specifically for that file -- NOT the ``"pi v"`` startup banner,
-        which pi prints earlier, before the session has loaded (and before
-        first-run setup like downloading ``fd``/``rg`` finishes). Gating on the
-        banner would let ``create`` return too early, so the first message sent
-        right afterwards lands before pi can process it and is lost. Raises
-        ``AgentStartError`` if the sentinel does not appear in time.
+        We wait specifically for that file. Raises ``AgentStartError`` if the
+        sentinel does not appear in time.
         """
         start_action()
         if not is_creating:
@@ -608,9 +606,10 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin):
         """Record the agent's *source repo* as trusted in the user's global pi trust store.
 
         pi 0.79+ stops an interactive session at a "Trust project folder?" dialog
-        when the workspace has project-local inputs (CLAUDE.md/AGENTS.md, .pi,
-        .agents/skills) and no saved trust decision. mngr seeds trust so the agent
-        never stalls there, but -- mirroring mngr_claude/mngr_antigravity -- it
+        when the cwd has a ``.pi`` config dir, or the cwd/an ancestor has a
+        ``.agents/skills`` dir, and there is no saved trust decision. mngr seeds
+        trust so the agent never stalls there, but -- mirroring
+        mngr_claude/mngr_antigravity -- it
         does not silently trust code: trust is split into a *durable* and a
         *transient* record.
 

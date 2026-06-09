@@ -99,18 +99,23 @@ def subprocess_env(tmp_path: Path) -> dict[str, str]:
 def _make_git_source(tmp_path: Path) -> Path:
     """A fresh git repo for ``mngr create --source`` (mngr requires a git source).
 
-    Includes a ``CLAUDE.md`` so the agent's worktree has pi "project trust
-    inputs" and would otherwise stop at pi 0.79+'s "Trust project folder?"
-    dialog. ``mngr create --yes`` (this test) makes the plugin pre-seed trust;
-    if that handling regressed, the dialog would swallow the first message and
-    the RUNNING-marker assertion below would fail.
+    Includes a ``.agents/skills/`` dir so the agent's worktree has pi "project
+    trust inputs" and would otherwise stop at pi 0.79+'s "Trust project folder?"
+    dialog. pi triggers that dialog (``hasProjectTrustInputs``) on a ``.pi`` config
+    dir in the cwd, or a ``.agents/skills`` dir in the cwd or any ancestor -- NOT on
+    CLAUDE.md/AGENTS.md, which are only loaded once trusted. ``mngr create --yes``
+    (this test) makes the plugin pre-seed trust; if that handling regressed, the
+    dialog would swallow the first message and the RUNNING-marker assertion below
+    would fail.
     """
     work_dir = tmp_path / "pi-source"
     init_git_repo(work_dir, initial_commit=True)
     (work_dir / ".gitignore").write_text(".pi/\n")
-    (work_dir / "CLAUDE.md").write_text("# Project instructions (gives the worktree pi trust inputs)\n")
-    run_git_command(work_dir, "add", ".gitignore", "CLAUDE.md")
-    run_git_command(work_dir, "commit", "-m", "add gitignore and CLAUDE.md")
+    skills_dir = work_dir / ".agents" / "skills"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "example.md").write_text("# Example skill (gives the worktree pi trust inputs)\n")
+    run_git_command(work_dir, "add", ".gitignore", ".agents")
+    run_git_command(work_dir, "commit", "-m", "add gitignore and .agents/skills")
     return work_dir
 
 

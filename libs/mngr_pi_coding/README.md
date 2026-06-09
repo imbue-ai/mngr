@@ -37,12 +37,13 @@ plugin shares into each agent).
   message stream is also captured under the agent state dir.
 - **Resume.** `mngr stop` then `mngr start` continues the same pi session with full
   context.
-- **Trust.** pi 0.79+ prompts "Trust project folder?" when the workspace has
-  project instructions (`CLAUDE.md`/`AGENTS.md`), `.pi` settings, or extensions.
-  mngr pre-trusts the agent's workspace so it never stalls at that dialog, gating
-  the grant like the other agent types (silent under `mngr create --yes` or
-  `auto_dismiss_dialogs`, an interactive prompt otherwise, and it extends the
-  grant automatically if you already trust the source repo).
+- **Trust.** pi 0.79+ prompts "Trust project folder?" when the workspace (cwd or
+  an ancestor) has pi project trust inputs -- a `.pi` config dir in the cwd, or a
+  `.agents/skills` dir in the cwd or an ancestor. mngr pre-trusts the agent's
+  workspace so it never stalls at that dialog, gating the grant like the other
+  agent types (silent under `mngr create --yes` or `auto_dismiss_dialogs`, an
+  interactive prompt otherwise, and it extends the grant automatically if you
+  already trust the source repo).
 
 These are powered by a small mngr-owned pi extension that the plugin provisions and
 loads with `pi -e`; pi has no shell-hook surface, so its TypeScript extension API is
