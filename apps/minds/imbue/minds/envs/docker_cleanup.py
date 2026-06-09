@@ -26,7 +26,7 @@ from typing import Final
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.errors import ProcessError
+from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.bootstrap import read_active_profile_dir
@@ -105,7 +105,7 @@ def remove_state_container(
                 is_checked_after=False,
                 env=dict(os.environ),
             )
-        except ProcessError as e:
+        except ProcessSetupError as e:
             # The docker binary is not installed / could not be launched.
             logger.info("Docker CLI unavailable; skipping state-container cleanup for {} ({})", container_name, e)
             return
@@ -180,7 +180,7 @@ def stop_state_container(
                 is_checked_after=False,
                 env=dict(os.environ),
             )
-        except ProcessError as e:
+        except ProcessSetupError as e:
             logger.info("Docker CLI unavailable; skipping state-container stop for {} ({})", container_name, e)
             return
 
