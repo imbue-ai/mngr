@@ -543,9 +543,9 @@ scripts get their own `*_test.py`. pyproject sets `--cov`, `fail_under = 95`, py
 ## Recommended bring-up sequence
 
 A suggested order, by what each milestone depends on. The ordering is driven by
-dependencies, not preference: you can't gate the lifecycle marker correctly until the agent
-runs, can't do subagent-aware gating until both the marker and conversation tracking exist,
-and so on.
+dependencies, not preference: you can't maintain a lifecycle marker until the agent runs,
+can't do per-agent isolation meaningfully until you know what config/auth it touches, and
+so on.
 
 1. **Baseline: it runs and you can read it.** Register the agent type and config; get
    `assemble_command` right (workspace handling, backgrounded helpers); pick the readiness
@@ -553,19 +553,23 @@ and so on.
    transcript; handle the trust/onboarding gate so the first message isn't intercepted. At
    this point the agent works end-to-end but has no `active` marker, so it always reports
    WAITING.
-2. **Lifecycle marker.** Wire the CLI's pre-invocation/stop (or equivalent) events to
-   maintain `active`, so the agent reports RUNNING vs WAITING. First confirm the CLI's hooks
-   actually *execute* (not just load).
+2. **Lifecycle marker -- subagent-aware from the start.** Wire the CLI's pre-invocation/stop
+   (or equivalent) events to maintain `active`, so the agent reports RUNNING vs WAITING; and
+   in the same breath make it robust to subagents/nested invocations. Treat these as one
+   piece of work, not two: a marker that flips to idle the moment a child finishes is just a
+   broken marker, and you should design the clear-condition correctly the first time rather
+   than ship a marker that's wrong under concurrency and patch it later. First confirm the
+   CLI's hooks actually *execute* (not just load), then figure out the discriminator your
+   CLI needs (see [dimension D](#d-subagent-aware-idle-gating-the-crux)) -- a distinct
+   subagent event, an env-var guard, a root-vs-child conversation id, a fully-idle flag.
+   Note that if the discriminator is a conversation/session id, this overlaps with step 3
+   (the id usually comes from the same hooks), so the two are naturally done together.
 3. **Conversation resume.** Capture the conversation/session id and append a resume flag in
    `assemble_command` so stop/start keeps context.
 4. **Per-agent isolation.** Usually the biggest step: a per-agent config dir (or, only if
    the CLI forces it, a relocated `$HOME`), shared-but-overridable auth, per-agent
    permissions + model, and trust split into durable-global vs transient-per-agent. Resolve
    host paths over the host shell so it works remotely.
-5. **Subagent-aware idle gating.** Once both the marker (step 2) and conversation tracking
-   (step 3) exist, make the marker robust to subagents/nested invocations -- whatever shape
-   that takes for your CLI (see [dimension D](#d-subagent-aware-idle-gating-the-crux)). This
-   closes the "parent goes idle while a child still works" failure mode.
 
 Then the claude features no port has matched yet, in roughly descending value: **session
 preservation on destroy**, **deploy/scheduling contributions**, **field generators
