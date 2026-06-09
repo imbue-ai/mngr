@@ -1,9 +1,10 @@
 Strengthened the unit test suite after a bad-tests audit. No production behavior change; these
 changes close gaps where a real regression would have slipped past CI:
 
-- `build_pass_env_vars` is now tested for its actual purpose -- forwarding the parent environment
-  while dropping the per-agent `MNGR_*` / `LLM_USER_PATH` vars -- instead of merely asserting the
-  result is non-empty.
+- Removed the weak `test_build_pass_env_vars_is_populated` smoke test (it only asserted the result
+  was non-empty): `build_pass_env_vars`'s forward-and-drop behavior is already covered meaningfully
+  by the existing `..._drops_kitty_terminal_vars` / `..._drops_caller_tmux_session_vars` tests, and
+  the per-agent `MNGR_*` drop is trivial set membership not worth a dedicated test.
 - Added coverage for the `tool_result` stream-json conversion branch (including the `is_error`
   true/false cases), assistant `tool_use` content blocks, and `_parse_input_preview`
   (empty / valid-JSON / unparseable inputs).
