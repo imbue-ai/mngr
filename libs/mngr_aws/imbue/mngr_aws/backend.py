@@ -58,7 +58,7 @@ class ParsedAwsBuildOptions(ParsedVpsBuildOptions):
             "``--aws-spot`` build arg. When True, ``AwsVpsClient.create_instance`` "
             "passes ``InstanceMarketOptions={'MarketType': 'spot'}`` to RunInstances "
             "so the host is billed at the spot price. AWS may reclaim spot instances "
-            "with ~2 minutes' interruption notice; the host is destroyed, not "
+            "with ~2 minutes' interruption notice; the host is terminated, not "
             "stopped, on reclaim. Opt-in only -- safe for ephemeral / experimental "
             "agents, risky for long-lived ones."
         ),
