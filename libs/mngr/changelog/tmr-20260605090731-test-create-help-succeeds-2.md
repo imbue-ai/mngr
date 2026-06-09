@@ -1,1 +1,0 @@
-Strengthened the `mngr create --help` e2e tests: the help command now also asserts that stderr is empty (no stray warnings or deprecation notices), and a new test verifies the abbreviated forms advertised in the help's own SYNOPSIS -- the `-h` short flag and the `c` alias -- both produce the create help output.

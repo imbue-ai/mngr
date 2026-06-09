@@ -46,8 +46,14 @@ app.setPath('userData', paths.getDataDir());
 const isMac = process.platform === 'darwin';
 const TITLEBAR_HEIGHT = 38;
 const SIDEBAR_WIDTH = 260;
-const REQUESTS_PANEL_WIDTH = 320;
 const CONTENT_PARTITION = 'persist:workspace-content';
+
+// Coalesce rapid SSE-triggered list refreshes when the inbox modal is open. A
+// burst of requests events (count 1 -> 2 -> 3 within a few ms) would otherwise
+// re-post the chrome-event multiple times in flight; the inbox shell would
+// queue several /inbox/list fetches and waste backend HTTP load by
+// (open windows) x (events).
+const INBOX_LIST_REFRESH_DEBOUNCE_MS = 50;
 
 // -- Per-window bundle registry --
 const bundles = new Set();
@@ -176,7 +182,7 @@ function getBundleFromEvent(event) {
   const senderId = event.sender.id;
   for (const b of bundles) {
     if (b.window.isDestroyed()) continue;
-    const views = [b.chromeView, b.contentView, b.sidebarView, b.requestsPanelView, b.modalView];
+    const views = [b.chromeView, b.contentView, b.sidebarView, b.modalView];
     for (const v of views) {
       if (!v) continue;
       if (v.webContents.isDestroyed()) continue;
@@ -249,11 +255,10 @@ function updateBundleBounds(bundle) {
     bundle.chromeView.setBounds({ x: 0, y: 0, width, height: TITLEBAR_HEIGHT });
   }
   if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-    const rightOffset = bundle.requestsPanelVisible ? REQUESTS_PANEL_WIDTH : 0;
     bundle.contentView.setBounds({
       x: 0,
       y: TITLEBAR_HEIGHT,
-      width: width - rightOffset,
+      width,
       height: height - TITLEBAR_HEIGHT,
     });
   }
@@ -265,25 +270,20 @@ function updateBundleBounds(bundle) {
       height: height - TITLEBAR_HEIGHT,
     });
   }
-  if (bundle.requestsPanelView && !bundle.requestsPanelView.webContents.isDestroyed()) {
-    bundle.requestsPanelView.setBounds({
-      x: width - REQUESTS_PANEL_WIDTH,
-      y: TITLEBAR_HEIGHT,
-      width: REQUESTS_PANEL_WIDTH,
-      height: height - TITLEBAR_HEIGHT,
-    });
-  }
-  // The modal overlays the entire content area (everything below the title
-  // bar, including the sidebar and requests panel). The title bar stays
-  // uncovered so window controls and the drag handle remain usable. The
-  // view is transparent, so the dialog's own dim backdrop shows the
-  // workspace behind it.
+  // The modal overlays the entire window (including the title bar) so
+  // the inbox drawer reads as a top-level panel rather than something
+  // nested under the chrome. On macOS the OS-level traffic-light
+  // buttons stay visible (they're floating overlays the system draws);
+  // the in-content window controls used on Windows/Linux are hidden
+  // while the modal is open and reappear on close. The view is
+  // transparent, so the dialog's own dim backdrop shows the workspace
+  // behind it.
   if (bundle.modalView && !bundle.modalView.webContents.isDestroyed()) {
     bundle.modalView.setBounds({
       x: 0,
-      y: TITLEBAR_HEIGHT,
+      y: 0,
       width,
-      height: height - TITLEBAR_HEIGHT,
+      height,
     });
   }
 }
@@ -328,13 +328,20 @@ function createBundleWebContentsViews(win) {
   win.contentView.addChildView(chromeView);
   win.contentView.addChildView(contentView);
 
-  // Auto-open DevTools when MINDS_OPEN_DEVTOOLS=1 is set. The built-in
-  // cmd+opt+I shortcut hits an Electron menu handler that assumes a
-  // BrowserWindow (we use BaseWindow + WebContentsViews) and crashes;
-  // this env var is the escape hatch for dev-time inspection.
+  // Auto-open DevTools on both views when MINDS_OPEN_DEVTOOLS=1 is set.
+  // The built-in cmd+opt+I shortcut crashes on BaseWindow + WebContentsViews
+  // (Electron's menu handler assumes BrowserWindow), so this env var is
+  // the dev-time escape hatch.
   if (process.env.MINDS_OPEN_DEVTOOLS === '1') {
+    chromeView.webContents.once('did-finish-load', () => {
+      if (!chromeView.webContents.isDestroyed()) {
+        chromeView.webContents.openDevTools({ mode: 'detach' });
+      }
+    });
     contentView.webContents.once('did-finish-load', () => {
-      contentView.webContents.openDevTools({ mode: 'detach' });
+      if (!contentView.webContents.isDestroyed()) {
+        contentView.webContents.openDevTools({ mode: 'detach' });
+      }
     });
   }
 
@@ -367,11 +374,11 @@ function wireBundleWindowEvents(bundle) {
     // set and we must not overwrite it with a progressively shrinking snapshot
     // as the teardown closes each window.
     if (!isShuttingDown) saveSessionState();
-    if (bundle.requestsPanelReloadTimer) {
-      clearTimeout(bundle.requestsPanelReloadTimer);
-      bundle.requestsPanelReloadTimer = null;
+    if (bundle.inboxListReloadTimer) {
+      clearTimeout(bundle.inboxListReloadTimer);
+      bundle.inboxListReloadTimer = null;
     }
-    const views = [bundle.chromeView, bundle.contentView, bundle.sidebarView, bundle.requestsPanelView, bundle.modalView];
+    const views = [bundle.chromeView, bundle.contentView, bundle.sidebarView, bundle.modalView];
     for (const view of views) {
       if (!view) continue;
       if (view.webContents.isDestroyed()) continue;
@@ -415,11 +422,10 @@ function createBundle() {
     contentView,
     sidebarView: null,
     sidebarVisible: false,
-    requestsPanelView: null,
-    requestsPanelVisible: false,
-    requestsPanelReloadTimer: null,
     modalView: null,
     modalVisible: false,
+    modalUrl: null,
+    inboxListReloadTimer: null,
     currentContentUrl: null,
     currentWorkspaceId: null,
     preErrorUrl: null,
@@ -612,13 +618,13 @@ function notifyOpenFailed(url) {
   }).show();
 }
 
-// -- Sidebar / requests panel helpers (per-bundle) --
+// -- Sidebar helpers (per-bundle) --
 
-// Sidebar and requests-panel views are created lazily the first time the
-// user toggles them on, then reused for all subsequent toggles via
-// setVisible(true/false). Destroying and recreating a WebContentsView on
-// every click means spawning a fresh render process + preload + loadURL
-// round-trip; on rapid clicks these queue up and take seconds to drain.
+// The sidebar view is created lazily the first time the user toggles it
+// on, then reused for all subsequent toggles via setVisible(true/false).
+// Destroying and recreating a WebContentsView on every click means
+// spawning a fresh render process + preload + loadURL round-trip; on
+// rapid clicks these queue up and take seconds to drain.
 
 function openSidebar(bundle) {
   if (!bundle || bundle.window.isDestroyed()) return;
@@ -663,84 +669,15 @@ function toggleSidebar(bundle) {
   else openSidebar(bundle);
 }
 
-function openRequestsPanel(bundle) {
-  if (!bundle || bundle.window.isDestroyed()) return;
-  if (!bundle.requestsPanelView) {
-    const panel = new WebContentsView({
-      webPreferences: {
-        preload: path.join(__dirname, 'preload.js'),
-        contextIsolation: true,
-        nodeIntegration: false,
-      },
-    });
-    bundle.requestsPanelView = panel;
-    bundle.window.contentView.addChildView(panel);
-    registerShortcutsFor(bundle, panel.webContents);
-    if (backendBaseUrl) {
-      panel.webContents.loadURL(backendBaseUrl + '/_chrome/requests-panel');
-    }
-  } else {
-    bundle.window.contentView.removeChildView(bundle.requestsPanelView);
-    bundle.window.contentView.addChildView(bundle.requestsPanelView);
-    bundle.requestsPanelView.setVisible(true);
-    // The panel's HTML is rendered server-side and doesn't subscribe to SSE,
-    // so its cards go stale while hidden. Refresh on show, and cancel any
-    // debounced SSE-driven reload that was pending so we don't double-load.
-    if (bundle.requestsPanelReloadTimer) {
-      clearTimeout(bundle.requestsPanelReloadTimer);
-      bundle.requestsPanelReloadTimer = null;
-    }
-    if (!bundle.requestsPanelView.webContents.isDestroyed()) {
-      bundle.requestsPanelView.webContents.reload();
-    }
-  }
-  bundle.requestsPanelVisible = true;
-  updateBundleBounds(bundle);
-}
-
-function closeRequestsPanel(bundle) {
-  if (!bundle || bundle.window.isDestroyed()) return;
-  if (!bundle.requestsPanelView || !bundle.requestsPanelVisible) return;
-  bundle.requestsPanelView.setVisible(false);
-  bundle.requestsPanelVisible = false;
-  updateBundleBounds(bundle);
-}
-
-// Coalesce rapid SSE-triggered reloads. A burst of requests events
-// (e.g. count 1 -> 2 -> 3 within a few ms) would otherwise restart the
-// panel load multiple times in flight, potentially preventing it from
-// ever settling on a rendered state, and multiplying backend HTTP load
-// by (open windows) x (events).
-const REQUESTS_PANEL_RELOAD_DEBOUNCE_MS = 50;
-function scheduleRequestsPanelReload(bundle) {
-  if (!bundle || bundle.window.isDestroyed()) return;
-  if (!bundle.requestsPanelView || !bundle.requestsPanelVisible) return;
-  if (bundle.requestsPanelReloadTimer) {
-    clearTimeout(bundle.requestsPanelReloadTimer);
-  }
-  bundle.requestsPanelReloadTimer = setTimeout(() => {
-    bundle.requestsPanelReloadTimer = null;
-    if (bundle.window.isDestroyed()) return;
-    if (!bundle.requestsPanelView || !bundle.requestsPanelVisible) return;
-    if (bundle.requestsPanelView.webContents.isDestroyed()) return;
-    bundle.requestsPanelView.webContents.reload();
-  }, REQUESTS_PANEL_RELOAD_DEBOUNCE_MS);
-}
-
-function toggleRequestsPanel(bundle) {
-  if (!bundle || bundle.window.isDestroyed()) return;
-  if (bundle.requestsPanelVisible) closeRequestsPanel(bundle);
-  else openRequestsPanel(bundle);
-}
-
 // -- Modal overlay (per-bundle) --
 //
-// The modal is a full-content-area overlay used for transient dialogs (the
-// permission request page) that should not replace the user's workspace in
-// the content view. Like the sidebar / requests panel it is created lazily
-// and reused via setVisible(true/false). It uses the default session (so it
-// carries the auth cookie, like the chrome / requests-panel views) plus the
-// preload bridge, so the page inside can call `window.minds.closeModal()`.
+// The modal is a full-content-area overlay that hosts the inbox modal and
+// any one-off dialog pages. It does not replace the user's workspace in
+// the content view -- the workspace stays visible behind the dialog's dim
+// backdrop. Created lazily and reused via setVisible(true/false). It uses
+// the default session (so it carries the auth cookie, like the chrome
+// view) plus the preload bridge, so the page inside can call
+// `window.minds.closeModal()`.
 
 function openModal(bundle, url) {
   if (!bundle || bundle.window.isDestroyed() || !url) return;
@@ -765,6 +702,16 @@ function openModal(bundle, url) {
         closeModal(bundle);
       }
     });
+    // Auto-open DevTools for dev-time inspection. Matches the
+    // contentView behavior in createBundleWebContentsViews; gated on
+    // the same env var so a single switch covers both surfaces.
+    if (process.env.MINDS_OPEN_DEVTOOLS === '1') {
+      modal.webContents.once('did-finish-load', () => {
+        if (!modal.webContents.isDestroyed()) {
+          modal.webContents.openDevTools({ mode: 'detach' });
+        }
+      });
+    }
   } else {
     // Re-add to the parent to raise to the top of z-order, then make visible.
     bundle.window.contentView.removeChildView(bundle.modalView);
@@ -772,6 +719,17 @@ function openModal(bundle, url) {
     bundle.modalView.setVisible(true);
   }
   bundle.modalVisible = true;
+  bundle.modalUrl = url;
+  // Notify the chrome view that the modal is open so it can drop the
+  // ``-webkit-app-region: drag`` on #minds-titlebar. macOS unions drag
+  // regions across all visible views in a window, so the chrome
+  // titlebar's drag rule otherwise wins over the modal's no-drag in
+  // the y=0..TITLEBAR strip and intercepts clicks (e.g. the inbox X).
+  if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+    try {
+      bundle.chromeView.webContents.send('modal-state-changed', { open: true });
+    } catch { /* noop */ }
+  }
   if (!bundle.modalView.webContents.isDestroyed()) {
     bundle.modalView.webContents.loadURL(url);
   }
@@ -783,11 +741,73 @@ function closeModal(bundle) {
   if (!bundle.modalView || !bundle.modalVisible) return;
   bundle.modalView.setVisible(false);
   bundle.modalVisible = false;
+  bundle.modalUrl = null;
+  // Restore the chrome titlebar's drag region.
+  if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+    try {
+      bundle.chromeView.webContents.send('modal-state-changed', { open: false });
+    } catch { /* noop */ }
+  }
   // Drop the page so its websockets/timers stop and a stale dialog isn't
   // briefly visible the next time the modal opens.
   if (!bundle.modalView.webContents.isDestroyed()) {
     bundle.modalView.webContents.loadURL('about:blank').catch(() => {});
   }
+  if (bundle.inboxListReloadTimer) {
+    clearTimeout(bundle.inboxListReloadTimer);
+    bundle.inboxListReloadTimer = null;
+  }
+}
+
+function inboxUrlFor(query) {
+  if (!backendBaseUrl) return null;
+  return backendBaseUrl + '/inbox' + (query || '');
+}
+
+function isInboxModalOpen(bundle) {
+  if (!bundle || !bundle.modalVisible) return false;
+  if (!bundle.modalUrl) return false;
+  // Compare path only -- the query (?selected=) may differ between auto-open
+  // and selection-driven loads.
+  try {
+    const u = new URL(bundle.modalUrl);
+    return u.pathname === '/inbox';
+  } catch {
+    return false;
+  }
+}
+
+function openInbox(bundle, query) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  const url = inboxUrlFor(query || '');
+  if (!url) return;
+  openModal(bundle, url);
+}
+
+function toggleInbox(bundle) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  if (isInboxModalOpen(bundle)) closeModal(bundle);
+  else openInbox(bundle, '');
+}
+
+// Coalesce rapid SSE-triggered chrome-event posts so the inbox shell
+// doesn't queue several /inbox/list fetches when a burst of requests
+// events arrives in quick succession.
+function scheduleInboxListRefresh(bundle, evt) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  if (!isInboxModalOpen(bundle)) return;
+  if (bundle.inboxListReloadTimer) {
+    clearTimeout(bundle.inboxListReloadTimer);
+  }
+  bundle.inboxListReloadTimer = setTimeout(() => {
+    bundle.inboxListReloadTimer = null;
+    if (!bundle || bundle.window.isDestroyed()) return;
+    if (!bundle.modalView || !bundle.modalVisible) return;
+    if (bundle.modalView.webContents.isDestroyed()) return;
+    try {
+      bundle.modalView.webContents.send('chrome-event', evt);
+    } catch { /* noop */ }
+  }, INBOX_LIST_REFRESH_DEBOUNCE_MS);
 }
 
 function sendCurrentWorkspaceToBundleViews(bundle) {
@@ -868,7 +888,6 @@ function showErrorInAllWindows(message, details) {
     bundle.isErrorState = true;
 
     if (bundle.sidebarView) closeSidebar(bundle);
-    if (bundle.requestsPanelView) closeRequestsPanel(bundle);
     if (bundle.modalView) closeModal(bundle);
 
     if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
@@ -1049,9 +1068,9 @@ function restoreWindowBounds(bundle, entry) {
 // Every chromeView and sidebarView used to open its own EventSource to
 // /_chrome/events. Chromium caps same-host HTTP/1.1 connections at 6, so
 // with a couple of workspace windows + sidebars, ALL subsequent requests
-// (/_chrome/sidebar, /_chrome/requests-panel, home navigation) queue
-// behind SSE streams -- you'd see load-finish latencies creep from 50ms
-// to 8+ seconds. Running one SSE connection in the main process and
+// (/_chrome/sidebar, /inbox/list, home navigation) queue behind SSE
+// streams -- you'd see load-finish latencies creep from 50ms to 8+
+// seconds. Running one SSE connection in the main process and
 // broadcasting events via IPC avoids the exhaustion entirely.
 
 function handleChromeSSEEvent(evt) {
@@ -1112,9 +1131,9 @@ function handleChromeSSEEvent(evt) {
     // Backend defaults auto_open to true; treat a missing field the same way.
     const autoOpen = evt.auto_open !== false;
     // Diff the pending *set* (ordered ids), not the count, so a swap at
-    // constant size still refreshes the panel. Auto-open keys off a
+    // constant size still refreshes the inbox list. Auto-open keys off a
     // genuinely new id appearing (not a count increase, which is blind to
-    // replacements), so approving/denying never reopens a panel the user
+    // replacements), so approving/denying never reopens an inbox the user
     // closed.
     const prevSet = new Set(prevIds);
     const hasNewRequest = newIds.some((id) => !prevSet.has(id));
@@ -1122,18 +1141,15 @@ function handleChromeSSEEvent(evt) {
     latestChromeState.requestIds = newIds;
     latestChromeState.requestCount = newCount;
     const shouldAutoOpen = autoOpen && hasNewRequest;
-    // Requests panel HTML is static at load time. Refresh visible panels so
-    // their cards reflect the new pending set whenever it changed, OR open
-    // hidden ones when shouldAutoOpen is set. ``openRequestsPanel`` reloads
-    // the panel itself for the visible-bundle case, so we never need to
-    // schedule a reload on top of an open call. Debounced per-bundle so a
-    // burst of changes coalesces into one reload per panel.
+    // When the inbox modal is already open in a bundle, forward the
+    // chrome-event to its shell JS (debounced) so the master list
+    // re-fetches its fragment; otherwise, on a genuinely new id, open it.
     if (idsChanged || shouldAutoOpen) {
       for (const b of bundles) {
-        if (shouldAutoOpen && !b.requestsPanelVisible) {
-          openRequestsPanel(b);
-        } else {
-          scheduleRequestsPanelReload(b);
+        if (shouldAutoOpen && !isInboxModalOpen(b)) {
+          openInbox(b, '');
+        } else if (isInboxModalOpen(b)) {
+          scheduleInboxListRefresh(b, evt);
         }
       }
     }
@@ -1595,6 +1611,32 @@ function installApplicationMenu() {
             }
           },
         },
+        {
+          label: 'Toggle Outer Developer Tools',
+          // Opens DevTools (in detached windows so the small surfaces
+          // aren't constrained to an embedded panel) for all of the
+          // bundle's WebContentsViews -- the chrome view (titlebar +
+          // sidebar shell), the workspace content view, and the modal
+          // view if it exists. Equivalent to setting
+          // MINDS_OPEN_DEVTOOLS=1 at startup but on-demand. No
+          // accelerator -- it's a dev-time affordance.
+          //
+          // ``toggleDevTools()`` ignores its options argument, so to
+          // get the detached window we explicitly open / close.
+          click: () => {
+            const bundle = getMostRecentWindow();
+            if (!bundle || bundle.window.isDestroyed()) return;
+            for (const view of [bundle.chromeView, bundle.contentView, bundle.modalView]) {
+              if (!view) continue;
+              if (view.webContents.isDestroyed()) continue;
+              if (view.webContents.isDevToolsOpened()) {
+                view.webContents.closeDevTools();
+              } else {
+                view.webContents.openDevTools({ mode: 'detach' });
+              }
+            }
+          },
+        },
         { type: 'separator' },
         { role: 'resetZoom' },
         { role: 'zoomIn' },
@@ -1936,13 +1978,8 @@ ipcMain.on('toggle-sidebar', (event) => {
   toggleSidebar(getBundleFromEvent(event));
 });
 
-ipcMain.on('toggle-requests-panel', (event) => {
-  toggleRequestsPanel(getBundleFromEvent(event));
-});
-
-ipcMain.on('open-requests-panel', (event) => {
-  const bundle = getBundleFromEvent(event);
-  openRequestsPanel(bundle);
+ipcMain.on('toggle-inbox', (event) => {
+  toggleInbox(getBundleFromEvent(event));
 });
 
 ipcMain.on('open-workspace-in-new-window', (event, agentId) => {
@@ -1956,25 +1993,23 @@ ipcMain.on('open-workspace-in-new-window', (event, agentId) => {
 
 ipcMain.on('navigate-to-request', (event, _agentId, eventId) => {
   if (!eventId) return;
-  const url = toAbsoluteUrl('/requests/' + eventId);
-  // Open the request in a modal overlay in the window the user clicked from,
-  // rather than navigating its content view. This keeps the user's workspace
-  // exactly as they left it -- closing the dialog returns them to their work
-  // with no context lost, and no window switching.
+  // Open the inbox modal pre-selected on the target request. Keeps the user's
+  // workspace exactly as they left it -- closing the inbox returns them to
+  // their work with no context lost, and no window switching.
   const sender = getBundleFromEvent(event);
-  if (sender) openModal(sender, url);
+  if (sender) openInbox(sender, '?selected=' + encodeURIComponent(eventId));
 });
 
-// Open a permission-request modal on behalf of the (otherwise unprivileged)
-// workspace content view. Only content-relay-preload.js can emit this channel
-// -- the page itself never sees ipcRenderer -- and it does so only for an
-// allowlisted `minds:open-request-modal` postMessage. We re-validate the id
-// here (never trust the renderer) before building the `/requests/<id>` URL,
-// then reuse the same modal path as the requests-panel card click above.
+// Open the inbox modal pre-selected on a request on behalf of the (otherwise
+// unprivileged) workspace content view. Only content-relay-preload.js can
+// emit this channel -- the page itself never sees ipcRenderer -- and it does
+// so only for an allowlisted `minds:open-request-modal` postMessage. We
+// re-validate the id here (never trust the renderer) before building the
+// `/inbox?selected=<id>` URL.
 ipcMain.on('open-request-modal', (event, requestId) => {
   if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
   const sender = getBundleFromEvent(event);
-  if (sender) openModal(sender, toAbsoluteUrl('/requests/' + requestId));
+  if (sender) openInbox(sender, '?selected=' + encodeURIComponent(requestId));
 });
 
 ipcMain.on('close-modal', (event) => {
