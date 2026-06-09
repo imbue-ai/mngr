@@ -21,6 +21,8 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr_pi_coding.plugin import PiCodingAgent
 from imbue.mngr_pi_coding.plugin import PiCodingAgentConfig
+from imbue.mngr_pi_coding.plugin import _LIFECYCLE_EXTENSION_NAME
+from imbue.mngr_pi_coding.plugin import _load_resource
 from imbue.mngr_pi_coding.plugin import register_agent_type
 
 # =============================================================================
@@ -121,6 +123,9 @@ def test_pi_coding_agent_config_has_correct_defaults() -> None:
     assert config.sync_home_settings is True
     assert config.sync_auth is True
     assert config.check_installation is True
+    assert config.resume_session is True
+    assert config.emit_common_transcript is True
+    assert config.emit_raw_transcript is True
 
 
 def test_pi_coding_agent_config_merge_with_override() -> None:
@@ -384,3 +389,123 @@ def test_provision_raises_when_remote_install_disabled(tmp_path: Path, pi_agent:
 
     with pytest.raises(PluginMngrError, match="automatic remote installation is disabled"):
         pi_agent.provision(host, options, mngr_ctx)
+
+
+# =============================================================================
+# Transcript mixin
+# =============================================================================
+
+
+def test_is_common_transcript_enabled_reflects_config(pi_agent: PiCodingAgent) -> None:
+    assert pi_agent.is_common_transcript_enabled is True
+    object.__setattr__(pi_agent, "agent_config", PiCodingAgentConfig(emit_common_transcript=False))
+    assert pi_agent.is_common_transcript_enabled is False
+
+
+def test_transcript_scripts_are_empty_because_extension_emits(pi_agent: PiCodingAgent) -> None:
+    # pi emits both transcript layers from the lifecycle extension, so there are
+    # no commands/ converter scripts to provision (unlike claude/agy).
+    assert pi_agent.get_raw_transcript_scripts() == {}
+    assert pi_agent.get_common_transcript_scripts() == {}
+
+
+# =============================================================================
+# modify_env_vars: lifecycle-extension knobs
+# =============================================================================
+
+
+def test_modify_env_vars_sets_extension_knobs(pi_agent: PiCodingAgent, tmp_path: Path) -> None:
+    env_vars: dict[str, str] = {}
+    pi_agent.modify_env_vars(_fake_host(tmp_path), env_vars)
+    assert env_vars["MNGR_PI_AGENT_TYPE"] == "pi-coding"
+    assert env_vars["MNGR_PI_EMIT_COMMON_TRANSCRIPT"] == "1"
+    assert env_vars["MNGR_PI_EMIT_RAW_TRANSCRIPT"] == "1"
+
+
+def test_modify_env_vars_reflects_disabled_transcripts(pi_agent: PiCodingAgent, tmp_path: Path) -> None:
+    object.__setattr__(
+        pi_agent,
+        "agent_config",
+        PiCodingAgentConfig(emit_common_transcript=False, emit_raw_transcript=False),
+    )
+    env_vars: dict[str, str] = {}
+    pi_agent.modify_env_vars(_fake_host(tmp_path), env_vars)
+    assert env_vars["MNGR_PI_EMIT_COMMON_TRANSCRIPT"] == "0"
+    assert env_vars["MNGR_PI_EMIT_RAW_TRANSCRIPT"] == "0"
+
+
+# =============================================================================
+# assemble_command
+# =============================================================================
+
+
+def test_assemble_command_loads_extension_and_resumes(pi_agent: PiCodingAgent, tmp_path: Path) -> None:
+    host = _fake_host(tmp_path)
+    command = str(pi_agent.assemble_command(host, (), None))
+    ext_path = str(pi_agent._get_lifecycle_extension_path())
+
+    assert ext_path.endswith("commands/mngr_pi_lifecycle.ts")
+    assert "-e " in command
+    assert ext_path in command
+    # Resume is shell-evaluated from the recorded session file path.
+    assert "pi_session_file" in command
+    assert "--session" in command
+    assert command.rstrip().endswith('"$@"')
+    # No backgrounded helper: the lifecycle-detected process is plain pi.
+    assert pi_agent.get_expected_process_name() == "pi"
+
+
+def test_assemble_command_omits_resume_when_disabled(pi_agent: PiCodingAgent, tmp_path: Path) -> None:
+    object.__setattr__(pi_agent, "agent_config", PiCodingAgentConfig(resume_session=False))
+    host = _fake_host(tmp_path)
+    command = str(pi_agent.assemble_command(host, (), None))
+
+    assert "--session" not in command
+    assert "pi_session_file" not in command
+    assert "-e " in command
+    assert str(pi_agent._get_lifecycle_extension_path()) in command
+
+
+def test_assemble_command_preserves_cli_and_agent_args(pi_agent: PiCodingAgent, tmp_path: Path) -> None:
+    object.__setattr__(pi_agent, "agent_config", PiCodingAgentConfig(cli_args=("--thinking", "high")))
+    host = _fake_host(tmp_path)
+    command = str(pi_agent.assemble_command(host, ("--model", "claude"), None))
+
+    assert "--thinking high" in command
+    assert "--model claude" in command
+
+
+# =============================================================================
+# Lifecycle extension provisioning + readiness
+# =============================================================================
+
+
+def test_provision_lifecycle_extension_writes_resource(pi_agent: PiCodingAgent, tmp_path: Path) -> None:
+    host = _fake_host(tmp_path, is_local=True)
+    pi_agent._provision_lifecycle_extension(host)
+    extension_path = pi_agent._get_lifecycle_extension_path()
+    assert extension_path.read_text() == _load_resource(_LIFECYCLE_EXTENSION_NAME)
+
+
+def test_is_ready_signal_present_true_when_sentinel_exists(pi_agent: PiCodingAgent) -> None:
+    sentinel = pi_agent._get_agent_dir() / "pi_session_started"
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    sentinel.write_text("1")
+    assert pi_agent._is_ready_signal_present(sentinel, "pi v") is True
+
+
+def test_wait_for_ready_signal_non_creating_just_runs_start_action(pi_agent: PiCodingAgent) -> None:
+    calls: list[int] = []
+    pi_agent.wait_for_ready_signal(is_creating=False, start_action=lambda: calls.append(1))
+    assert calls == [1]
+
+
+def test_wait_for_ready_signal_returns_once_sentinel_present(pi_agent: PiCodingAgent) -> None:
+    # With the readiness sentinel already written, the creation path returns
+    # immediately (the sentinel short-circuits before any pane capture).
+    sentinel = pi_agent._get_agent_dir() / "pi_session_started"
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    sentinel.write_text("1")
+    calls: list[int] = []
+    pi_agent.wait_for_ready_signal(is_creating=True, start_action=lambda: calls.append(1))
+    assert calls == [1]

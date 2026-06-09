@@ -1,27 +1,68 @@
+import importlib.resources
 import json
 import os
 import shlex
+from collections.abc import Callable
+from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
 
 from loguru import logger
 from pydantic import Field
 
+from imbue.imbue_common.logging import log_span
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_best_effort
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.utils.polling import poll_until
+from imbue.mngr_pi_coding import resources as _pi_resources
 
 _PI_HOME_DIR_NAME: str = ".pi"
 _PI_AGENT_SUBDIR: str = "agent"
+
+# The pi agent-type name, used for the per-agent transcript directories
+# (``events/<type>/common_transcript`` and ``logs/<type>_transcript``) and
+# passed to the lifecycle extension via ``MNGR_PI_AGENT_TYPE``. Kept in sync
+# with the name returned by ``register_agent_type`` and with the default in
+# ``mngr_pi_lifecycle.ts``.
+_PI_AGENT_TYPE: str = "pi-coding"
+
+# The mngr lifecycle extension (see resources/mngr_pi_lifecycle.ts). Provisioned
+# into the agent state dir and loaded with ``pi -e`` so it can maintain the
+# ``active`` marker, the readiness sentinel, and the transcripts -- pi has no
+# shell-hook surface, so an extension is the only lever for these.
+_LIFECYCLE_EXTENSION_NAME: str = "mngr_pi_lifecycle.ts"
+
+# Written by the extension's ``session_start`` handler; polled by
+# ``wait_for_ready_signal`` as the "input is ready" signal. Kept in sync with
+# ``SESSION_STARTED_SENTINEL_NAME`` in mngr_pi_lifecycle.ts.
+_SESSION_STARTED_SENTINEL_NAME: str = "pi_session_started"
+
+# Written by the extension with the main session's file path; read (shell-
+# evaluated) by ``assemble_command`` to resume via ``pi --session <file>``. Kept
+# in sync with ``SESSION_FILE_NAME`` in mngr_pi_lifecycle.ts.
+_SESSION_FILE_NAME: str = "pi_session_file"
+
+# How long to wait for the readiness sentinel (or the TUI banner fallback) at
+# create time. Matches the TUI-ready budget in ``tui_utils`` -- startup can be
+# slow on remote hosts that must render the TUI before the session loads.
+_READY_TIMEOUT_SECONDS: float = 30.0
+
+
+def _load_resource(filename: str) -> str:
+    """Load a resource file (e.g. the lifecycle extension) shipped in the wheel."""
+    return importlib.resources.files(_pi_resources).joinpath(filename).read_text()
 
 
 def _get_pi_home_dir(home_dir: Path | None = None) -> Path:
@@ -49,6 +90,25 @@ class PiCodingAgentConfig(AgentTypeConfig):
     check_installation: bool = Field(
         default=True,
         description="Check if pi is installed (if False, assumes it is already present)",
+    )
+    resume_session: bool = Field(
+        default=True,
+        description=(
+            "Resume this agent's pi session on start (via `pi --session <recorded file>`), so "
+            "`mngr stop` then `mngr start` keeps conversation context. Safe on first start "
+            "(pi starts fresh when there is no recorded session yet)."
+        ),
+    )
+    emit_common_transcript: bool = Field(
+        default=True,
+        description=(
+            "Emit the agent-agnostic common transcript that `mngr transcript` reads. The raw "
+            "pi transcript is always captured; this gates only the common-envelope conversion."
+        ),
+    )
+    emit_raw_transcript: bool = Field(
+        default=True,
+        description="Capture the raw pi message stream under logs/<type>_transcript/events.jsonl.",
     )
 
 
@@ -105,13 +165,40 @@ def _has_api_credentials_available(
     return False
 
 
-class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig]):
-    """Agent implementation for the pi coding agent with TUI handling."""
+class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig], HasCommonTranscriptMixin):
+    """Agent implementation for the pi coding agent with TUI handling.
 
-    # Pi displays "pi v" followed by the version in its startup banner; this
-    # substring stays in the visible pane for the lifetime of the session,
-    # so it serves as the startup ready indicator.
+    pi's only lifecycle-event surface is its TypeScript extension API (no
+    shell hooks). mngr therefore provisions a single extension
+    (``mngr_pi_lifecycle.ts``) and loads it with ``pi -e``; that extension
+    maintains the ``active`` RUNNING/WAITING marker (subagent-aware via a
+    root-session id), writes the readiness sentinel this class waits on, and
+    emits both the raw and common transcripts. Because emission happens inside
+    the extension, the transcript-mixin script hooks return nothing.
+    """
+
+    # The readiness signal is the sentinel the lifecycle extension writes on
+    # session_start (see wait_for_ready_signal); this banner string is only a
+    # fallback for the rare case the extension fails to load. "pi v" precedes
+    # the version in pi's startup banner.
     TUI_READY_INDICATOR = "pi v"
+
+    @property
+    def is_common_transcript_enabled(self) -> bool:
+        return self.agent_config.emit_common_transcript
+
+    def get_raw_transcript_scripts(self) -> Mapping[str, str]:
+        """No ``commands/`` scripts: the lifecycle extension emits the raw transcript.
+
+        pi exposes structured ``message_end`` events, so the extension writes the
+        raw stream directly rather than tailing pi's session JSONL from a
+        backgrounded shell streamer (the claude/agy pattern).
+        """
+        return {}
+
+    def get_common_transcript_scripts(self) -> Mapping[str, str]:
+        """No ``commands/`` scripts: the lifecycle extension emits the common transcript."""
+        return {}
 
     def _send_enter_and_validate(self, tmux_target: TmuxWindowTarget) -> None:
         # Pi has no UserPromptSubmit hook and no input-row placeholder that
@@ -129,8 +216,95 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig]):
         return self._get_agent_dir() / "plugin" / "pi_coding"
 
     def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
-        """Set PI_CODING_AGENT_DIR to isolate pi's config per-agent."""
+        """Isolate pi's config per-agent and hand the lifecycle extension its knobs.
+
+        ``MNGR_AGENT_STATE_DIR`` (where the marker, sentinel, and transcripts
+        live) is injected by the host; the extension reads it directly. The
+        remaining vars tell the extension which agent-type subdirectory to use
+        and whether to emit each transcript layer.
+        """
         env_vars["PI_CODING_AGENT_DIR"] = str(self.get_pi_config_dir())
+        env_vars["MNGR_PI_AGENT_TYPE"] = _PI_AGENT_TYPE
+        env_vars["MNGR_PI_EMIT_COMMON_TRANSCRIPT"] = "1" if self.agent_config.emit_common_transcript else "0"
+        env_vars["MNGR_PI_EMIT_RAW_TRANSCRIPT"] = "1" if self.agent_config.emit_raw_transcript else "0"
+
+    def _get_lifecycle_extension_path(self) -> Path:
+        """Path the lifecycle extension is provisioned to and loaded from (``pi -e``)."""
+        return self._get_agent_dir() / "commands" / _LIFECYCLE_EXTENSION_NAME
+
+    def assemble_command(
+        self,
+        host: OnlineHostInterface,
+        agent_args: tuple[str, ...],
+        command_override: CommandString | None,
+        initial_message: str | None = None,
+    ) -> CommandString:
+        """Build the launch command: the base pi invocation plus the mngr extension and resume.
+
+        ``-e <extension>`` loads the lifecycle extension (marker, readiness
+        sentinel, transcripts). No background helper is launched, so the
+        foreground (and lifecycle-detected) process is plain ``pi``
+        (``get_expected_process_name`` pins ``"pi"`` regardless).
+
+        Resume (when ``resume_session``) appends ``--session <file>`` for the
+        main session's file recorded by the extension in ``pi_session_file``.
+        It is shell-evaluated here because the stored command is replayed on
+        every ``mngr start``: a ``set --`` prelude reads the file and adds the
+        flag only when it names an existing session, so the first start (no file
+        yet) cleanly begins fresh. ``--session <file>`` is preferred over
+        ``--continue`` because ``--continue`` resumes the most-recent session for
+        the cwd, which a nested pi (run via the bash tool, sharing this agent's
+        config dir) can have created -- the recorded file always names *this*
+        agent's session. ``set --`` / ``"$@"`` splices the path without
+        word-splitting, so a path with spaces survives under both bash and zsh.
+        """
+        base_command = super().assemble_command(host, agent_args, command_override, initial_message)
+        invocation = f"{base_command} -e {shlex.quote(str(self._get_lifecycle_extension_path()))}"
+        if not self.agent_config.resume_session:
+            return CommandString(invocation)
+        quoted_session_file = shlex.quote(str(self._get_agent_dir() / _SESSION_FILE_NAME))
+        resume_prelude = (
+            f"__mngr_pi_sess=$(cat {quoted_session_file} 2>/dev/null || true); set --; "
+            'if [ -n "$__mngr_pi_sess" ] && [ -f "$__mngr_pi_sess" ]; then set -- --session "$__mngr_pi_sess"; fi'
+        )
+        return CommandString(f'{resume_prelude}; {invocation} "$@"')
+
+    def wait_for_ready_signal(
+        self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
+    ) -> None:
+        """Start the agent and, on creation, wait for the lifecycle extension's sentinel.
+
+        The extension writes ``pi_session_started`` from pi's ``session_start``
+        event, which fires once the TUI has loaded the session and can accept
+        input -- a real readiness signal, unlike a banner string that may scroll
+        out of the captured pane. The ``TUI_READY_INDICATOR`` banner is kept as a
+        fallback for the rare case the extension does not load. Raises
+        ``AgentStartError`` if neither appears in time.
+        """
+        start_action()
+        if not is_creating:
+            return
+        effective_timeout = timeout if timeout is not None else _READY_TIMEOUT_SECONDS
+        sentinel_path = self._get_agent_dir() / _SESSION_STARTED_SENTINEL_NAME
+        indicator = self.get_tui_ready_indicator()
+        if poll_until(
+            lambda: self._is_ready_signal_present(sentinel_path, indicator),
+            timeout=effective_timeout,
+            poll_interval=0.25,
+        ):
+            return
+        pane_content = self._capture_pane_content(self.tmux_target)
+        raise AgentStartError(
+            str(self.name),
+            f"pi did not signal readiness within {effective_timeout:.1f}s"
+            + (f"\nPane content:\n{pane_content}" if pane_content else ""),
+        )
+
+    def _is_ready_signal_present(self, sentinel_path: Path, indicator: str) -> bool:
+        """True once the extension's readiness sentinel exists, or the TUI banner shows."""
+        if self._check_file_exists(sentinel_path):
+            return True
+        return self._check_pane_contains(self.tmux_target, indicator)
 
     def get_expected_process_name(self) -> str:
         """Return 'pi' as the expected process name.
@@ -288,6 +462,20 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig]):
                     logger.info("pi installed successfully")
 
         self._setup_per_agent_config_dir(host, config)
+        self._provision_lifecycle_extension(host)
+
+    def _provision_lifecycle_extension(self, host: OnlineHostInterface) -> None:
+        """Write the lifecycle extension into the agent state dir for ``pi -e`` to load.
+
+        Placed under ``commands/`` (not the per-agent ``extensions/`` dir) so pi
+        does not *also* auto-discover it -- it must load exactly once, via the
+        explicit ``-e`` flag on the mngr-launched process, so that a nested pi
+        (which is not given ``-e``) never runs it. ``write_text_file`` creates
+        intermediate directories.
+        """
+        extension_path = self._get_lifecycle_extension_path()
+        with log_span("Installing pi lifecycle extension at {}", extension_path):
+            host.write_text_file(extension_path, _load_resource(_LIFECYCLE_EXTENSION_NAME))
 
     def on_after_provisioning(
         self,
