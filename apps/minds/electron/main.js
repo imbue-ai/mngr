@@ -26,15 +26,30 @@ app.setPath('userData', paths.getDataDir());
 
 const isMac = process.platform === 'darwin';
 const TITLEBAR_HEIGHT = 38;
-// Corner radius applied to the content WebContentsView's top edge, so the
-// workspace content visually "tucks under" the accent-colored titlebar. The
-// rounded cutouts at the top reveal whatever sits behind the view; we extend
-// the chromeView's height by this much (see ``updateBundleBounds``) so the
-// chromeView's accent-colored body background paints behind the cutouts.
-// Native ``setBorderRadius`` rounds all four corners; the bottom corners
-// reveal the BaseWindow background, which is acceptable on macOS (the OS
-// already draws an outer window rounding that visually contains them).
-const CONTENT_CORNER_RADIUS = 16;
+// Gap on the left, right, and bottom of the contentView. Matches
+// browser mode's iframe layout (``left-[4px]`` with ``width:
+// calc(100% - 8px)`` in Chrome.jinja) so Electron and browser modes
+// render the same shape. The top of the contentView is flush with the
+// titlebar's bottom edge; the rounded top corners are revealed by the
+// chromeView painting accent in the cutouts.
+const CONTENT_INSET = 4;
+// Corner radius applied to the contentView. Native ``setBorderRadius``
+// rounds all four corners with the same radius; the cutouts at every
+// corner reveal the chromeView underneath (which paints the accent
+// color everywhere it isn't covered by the contentView), so the visible
+// frame around the contentView is uniformly accent-colored regardless
+// of OS or workspace content background.
+//
+// For the inner content corners to look concentric with the OS's outer
+// window rounding (where one exists), the inner radius should be
+// ``outer_radius - inset``. Calibrated by eye against macOS Tahoe's
+// outer rounding (the Liquid Glass redesign bumped this up significantly
+// from Big Sur-era ~11px) -- 12px with our 4px inset reads as a parallel
+// offset of the window's outer curve. Windows/Linux frameless windows
+// are square (no OS rounding to match) so 12px is a free design choice
+// there -- if we ever wire DWM ``DWMWCP_ROUND`` on Win11 the outer would
+// be ~8px and a smaller inner would be more concentric.
+const CONTENT_CORNER_RADIUS = 12;
 const SIDEBAR_WIDTH = 260;
 const CONTENT_PARTITION = 'persist:workspace-content';
 
@@ -242,24 +257,28 @@ function updateBundleBounds(bundle) {
   }
 
   if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
-    // Extend the chromeView a corner-radius worth of pixels past the
-    // titlebar's visual bottom edge so the chromeView paints accent
-    // color behind the contentView's rounded top-corner cutouts. The
-    // titlebar's own HTML still renders at y=0..TITLEBAR_HEIGHT; the
-    // extra strip below is just the chromeView's body background.
-    bundle.chromeView.setBounds({
-      x: 0,
-      y: 0,
-      width,
-      height: TITLEBAR_HEIGHT + CONTENT_CORNER_RADIUS,
-    });
+    // The chromeView covers the entire window. Its body background is
+    // ``var(--titlebar-bg)``, so wherever the contentView doesn't paint
+    // (the 6px frame around three sides and the rounded-corner cutouts
+    // at all four corners of the contentView), the chromeView fills in
+    // with the current workspace's accent color. This mirrors browser
+    // mode where the iframe sits inside a 6px body inset that paints
+    // the same accent color.
+    bundle.chromeView.setBounds({ x: 0, y: 0, width, height });
   }
   if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
+    // Inset the contentView by 6px on left, right, and bottom (top is
+    // flush with the titlebar's bottom edge). The 6px gap + the
+    // contentView's ``setBorderRadius(16)`` together create the "tucks
+    // under a rounded inset frame" look without needing per-corner
+    // control: all four corners of the contentView are visibly rounded
+    // and the cutouts reveal accent color (the chromeView below),
+    // independent of whatever background the workspace content paints.
     bundle.contentView.setBounds({
-      x: 0,
+      x: CONTENT_INSET,
       y: TITLEBAR_HEIGHT,
-      width,
-      height: height - TITLEBAR_HEIGHT,
+      width: width - CONTENT_INSET * 2,
+      height: height - TITLEBAR_HEIGHT - CONTENT_INSET,
     });
   }
   if (bundle.sidebarView && !bundle.sidebarView.webContents.isDestroyed()) {
@@ -299,17 +318,6 @@ function buildBundleWindowOptions() {
     title: 'Minds',
     show: false,
     autoHideMenuBar: true,
-    // ``setBorderRadius`` on the contentView rounds all four corners with
-    // the same radius, but we want top-only rounding (the workspace
-    // content tucks under the colored titlebar; the bottom should look
-    // flat, or follow the OS's outer-window rounding on macOS). Setting
-    // the BaseWindow background to the workspace content's zinc-50 makes
-    // the bottom-corner cutouts paint the same color as the surrounding
-    // workspace, so the bottom rounding visually disappears regardless
-    // of platform. macOS still clips the outer window corners at the OS
-    // level; Linux/Windows users see a square outer window with the
-    // cutout pixels blending into the content.
-    backgroundColor: '#fafafa',
   };
   if (isMac) {
     windowOptions.titleBarStyle = 'hiddenInset';
@@ -336,14 +344,14 @@ function createBundleWebContentsViews(win) {
       nodeIntegration: false,
     },
   });
-  // Round the content view's corners so its top edge visually tucks under
-  // the accent-colored titlebar. The chromeView (extended below the titlebar
-  // in ``updateBundleBounds``) paints accent color behind the rounded
-  // cutouts. Note from Electron docs: ``setBorderRadius`` rounds the
-  // RENDERED region, but the view's bounds rect still captures clicks --
-  // so a click in a top corner cutout hits this contentView, which is
-  // fine (the cutouts are at the top of the workspace content, not over
-  // chrome affordances).
+  // Round all four corners of the contentView so it floats inside a
+  // rounded inset frame painted by the full-window chromeView underneath.
+  // See ``updateBundleBounds`` for how the chromeView covers the entire
+  // window and the contentView is inset on three sides. Note from
+  // Electron docs: ``setBorderRadius`` rounds the RENDERED region, but
+  // the view's bounds rect still captures clicks -- so a click in a
+  // corner cutout hits this contentView, which is fine (the cutouts are
+  // at the corners of the workspace content, not over chrome affordances).
   contentView.setBorderRadius(CONTENT_CORNER_RADIUS);
   win.contentView.addChildView(chromeView);
   win.contentView.addChildView(contentView);

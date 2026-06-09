@@ -310,16 +310,16 @@ def test_render_chrome_page_account_button_uses_titlebar_account_class() -> None
     assert "hover:bg-white/5" not in btn_tag
 
 
-def test_render_chrome_page_content_iframe_uses_2xl_rounded_corners() -> None:
-    # 16px radius (rounded-2xl) matches Electron-side
-    # ``contentView.setBorderRadius(16)`` so both modes render the same
-    # tucked-under shape.
+def test_render_chrome_page_content_iframe_uses_12px_rounded_corners() -> None:
+    # 12px radius (``rounded-xl``) matches Electron-side
+    # ``contentView.setBorderRadius(12)`` (= ``CONTENT_CORNER_RADIUS`` in
+    # electron/main.js) so both modes render the same tucked-under shape
+    # against the OS's outer window rounding.
     html = render_chrome_page()
     iframe_open = html.index('id="content-frame"')
     iframe_close = html.index(">", iframe_open)
     iframe_tag = html[iframe_open:iframe_close]
-    assert "rounded-2xl" in iframe_tag
-    assert "rounded-xl" not in iframe_tag
+    assert "rounded-xl" in iframe_tag
 
 
 def test_render_chrome_page_hides_window_controls_on_mac() -> None:
