@@ -29,10 +29,11 @@ def _build_prepare_client(
 ) -> AwsVpsClient:
     """Construct an ``AwsVpsClient`` for the ``mngr aws prepare`` command.
 
-    Bridges click options into the client constructor. Lives at module
-    scope (rather than inline in the click callback) so unit tests can
-    exercise the ensure-SG path against a stubbed ``AwsVpsClient`` subclass
-    without having to drive the click runtime.
+    Bridges click options into the client constructor: each option falls
+    back to the corresponding ``AwsProviderConfig`` default when not
+    supplied. Pulled out of the click callback purely for readability --
+    the defaults-and-fallback construction would otherwise crowd the
+    callback body alongside the credential-error handling.
     """
     base = AwsProviderConfig()
     effective_region = region or base.default_region
