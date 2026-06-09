@@ -35,21 +35,31 @@ agy process; mngr-owned files rewritten idempotently each ``provision``)::
       config/hooks.json
 
 where ``settings.json`` is a copy of the user's settings (when
-``sync_home_settings``) plus the workspace trust and ``settings_overrides``;
+``sync_home_settings``) plus the workspace trust, ``settings_overrides``, and
+the mngr-owned lifecycle ``statusLine`` (applied last so it wins);
 ``cache/onboarding.json`` is the NUX seed that skips the first-run theme/ToS
 flow; ``antigravity-oauth-token`` is a symlink to the user's shared file token
 (auth) -- created even when that token doesn't exist yet, so the first agent's
 login writes *through* it to the shared path and authenticates every agent (agy
 writes the token in place; copy mode is available for full isolation); and
-``config/hooks.json`` holds the active-marker hooks (agy executes them from
-there directly -- no ``--add-dir``).
+``config/hooks.json`` holds the conversation-id capture hook (agy executes it
+from there directly -- no ``--add-dir``).
 
-Hooks: a ``PreInvocation``/``Stop`` pair maintains an ``active`` marker (see
-``build_antigravity_hooks_config``). ``BaseAgent.get_lifecycle_state`` reads it
-to report RUNNING while the agent works and WAITING when idle; agy maintains no
-such marker on its own. Because the per-agent ``$HOME`` is unconditional, agy
-executes these from ``$HOME/.gemini/config/hooks.json`` directly -- no
-``--add-dir`` symlink workaround.
+Lifecycle: agy invokes a configured ``statusLine`` command on every agent-state
+change (JSON payload on stdin), and ``statusline.sh`` is the single source of
+truth (see ``build_antigravity_statusline_settings``). It maintains an
+``active`` marker that ``BaseAgent.get_lifecycle_state`` reads to report RUNNING
+while the agent works and WAITING when idle (agy maintains no such marker on its
+own), records the root conversation for resume, and fires the tmux
+message-submission signal. agy's top-level ``agent_state`` already aggregates
+subagent activity (stays ``working`` while a subagent runs), so a single state
+check suffices -- replacing the old ``PreInvocation``/``Stop`` marker-hook pair.
+
+Hooks: a single ``PreInvocation`` handler captures every conversation id (incl.
+subagents', which ``statusLine`` does not surface) for transcript scoping (see
+``build_antigravity_hooks_config``). Because the per-agent ``$HOME`` is
+unconditional, agy executes it from ``$HOME/.gemini/config/hooks.json`` directly
+-- no ``--add-dir`` symlink workaround.
 
 Permissions: routed through the per-agent ``settings.json`` (a ``permissions``
 block in ``settings_overrides``) and/or ``--dangerously-skip-permissions``
@@ -58,12 +68,12 @@ block in ``settings_overrides``) and/or ``--dangerously-skip-permissions``
 dialog (verified live against agy 1.0.3 -- the hook runs but the dialog still
 appears).
 
-Readiness is signalled by the ``InteractiveTuiAgent`` banner-poll: agy's hook
-events (``PreToolUse``/``PostToolUse``/``PreInvocation``/``PostInvocation``/
-``Stop``) are execution-loop events with no "input prompt drawn" analog. A
-permission dialog can't be detected via hooks either -- none fires while the
-agent is blocked at it, and the hook input carries no dialog state -- so the
-agent exposes no permission-specific WAITING reason.
+Readiness is signalled by the ``InteractiveTuiAgent`` banner-poll: it gates
+"input row drawn and able to receive a paste", which the ``statusLine``
+``agent_state`` does not (that is about the agent loop and can be ``idle`` before
+the input row renders). A permission dialog can't be detected via hooks either
+-- none fires while the agent is blocked at it -- so the agent exposes no
+permission-specific WAITING reason.
 
 Transcript support: enabled by default. ``stream_transcript.sh`` tails agy's
 per-conversation JSONL files under ``$ANTIGRAVITY_APP_DATA_DIR`` (pointed at the
@@ -96,7 +106,7 @@ from imbue.mngr.agents.common_transcript import maybe_provision_common_transcrip
 from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
-from imbue.mngr.agents.tui_utils import send_enter_best_effort
+from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
@@ -111,12 +121,12 @@ from imbue.mngr.primitives import CommandString
 from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr_antigravity import resources as _antigravity_resources
 from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
-from imbue.mngr_antigravity.antigravity_config import CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import CONVERSATION_IDS_FILENAME
 from imbue.mngr_antigravity.antigravity_config import ROOT_CONVERSATION_FILENAME
-from imbue.mngr_antigravity.antigravity_config import SET_ACTIVE_MARKER_SCRIPT_NAME
+from imbue.mngr_antigravity.antigravity_config import STATUSLINE_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import TRUSTED_WORKSPACES_KEY
 from imbue.mngr_antigravity.antigravity_config import build_antigravity_hooks_config
+from imbue.mngr_antigravity.antigravity_config import build_antigravity_statusline_settings
 from imbue.mngr_antigravity.antigravity_config import build_isolated_settings
 from imbue.mngr_antigravity.antigravity_config import build_onboarding_seed
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_cli_dir
@@ -327,14 +337,23 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         return "agy"
 
     def _send_enter_and_validate(self, tmux_target: TmuxWindowTarget) -> None:
-        # Antigravity has no ``UserPromptSubmit`` analog (so the tmux wait-for
-        # hook trick Claude uses doesn't apply) and its input row has no
-        # placeholder that hides while text is typed and reappears after
-        # submission, so we can't poll for a cleared indicator either.
-        # ``wait_for_paste_visible`` upstream already confirmed the message
-        # landed in the pane before we get here, so a best-effort Enter is
-        # the right strategy.
-        send_enter_best_effort(self, tmux_target)
+        # agy's ``statusLine`` command fires ``tmux wait-for -S`` on the
+        # per-session channel whenever the agent enters a busy state -- i.e. once
+        # it starts processing the just-submitted message (see statusline.sh).
+        # Wait for that, exactly as Claude waits for its UserPromptSubmit hook.
+        # ``queue_log_path_template=None``: the upstream fallback is hardcoded to
+        # Claude's ``"operation":"enqueue"`` + ``jq`` transcript schema, which
+        # conflicts with agy's no-``jq`` constraint; the statusLine busy-signal
+        # already covers the normal and queue-while-busy cases. (Known edge: a
+        # model that *refuses* the prompt -- e.g. quota exhausted -- never enters
+        # a busy state, so this times out even though the prompt was enqueued.)
+        send_enter_via_tmux_wait_for_hook(
+            self,
+            tmux_target,
+            wait_channel=f"mngr-submit-{self.session_name}",
+            timeout_seconds=self.enter_submission_timeout_seconds,
+            queue_log_path_template=None,
+        )
 
     @property
     def is_common_transcript_enabled(self) -> bool:
@@ -435,14 +454,14 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
     def _get_root_conversation_file_path(self) -> Path:
         """Per-agent file recording the *main* (root) agy conversation ID.
 
-        Written by ``set_active_marker.sh`` (the ``PreInvocation`` marker hook)
-        with the conversation that opens each turn -- the true root, since agy
-        runs the root agent's invocation before it spawns subagents. Read on
-        restart by ``assemble_command`` to resume the main conversation via
+        Written by ``statusline.sh`` (the lifecycle ``statusLine`` command) with
+        the ``conversation_id`` from agy's payload, which always reports the root
+        (never a subagent, even while one runs). Read on restart by
+        ``assemble_command`` to resume the main conversation via
         ``agy --conversation``. This is the single source of truth for "the
         agent's current conversation", unaffected by the subagent ids that also
         land in ``CONVERSATION_IDS_FILENAME``. Lives directly under the agent
-        state dir so the hook's ``$MNGR_AGENT_STATE_DIR/{ROOT_CONVERSATION_FILENAME}``
+        state dir so the script's ``$MNGR_AGENT_STATE_DIR/{ROOT_CONVERSATION_FILENAME}``
         and this path resolve to the same file.
         """
         return self._get_agent_dir() / ROOT_CONVERSATION_FILENAME
@@ -465,8 +484,9 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
            agent on untrusted code.
         3. Build the per-agent ``$HOME`` tree (``_provision_agy_home``):
            settings.json (copy of the user's settings + workspace trust +
-           overrides), the onboarding NUX seed, the active-marker hooks, the
-           oauth token symlink/copy, and the shared playwright-cache symlink.
+           overrides + the mngr-owned lifecycle statusLine), the onboarding NUX
+           seed, the conversation-id capture hook, the oauth token symlink/copy,
+           and the shared playwright-cache symlink.
         4. Install the transcript scripts and the background-tasks supervisor
            under ``$MNGR_AGENT_STATE_DIR/commands/``.
         """
@@ -491,20 +511,16 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
                 self._get_agent_dir(),
                 {
                     _BACKGROUND_TASKS_SCRIPT_NAME: _load_antigravity_resource_script(_BACKGROUND_TASKS_SCRIPT_NAME),
-                    # Run by the PreInvocation hook to touch the active marker and
-                    # record the turn's root conversation (see
-                    # build_antigravity_hooks_config).
-                    SET_ACTIVE_MARKER_SCRIPT_NAME: _load_antigravity_resource_script(SET_ACTIVE_MARKER_SCRIPT_NAME),
-                    # Run by the PreInvocation capture hook to record the active
-                    # conversation ID (see build_antigravity_hooks_config).
+                    # Run by agy's statusLine command on every agent-state change:
+                    # maintains the active marker (RUNNING/WAITING), records the
+                    # root conversation, and fires the message-submission signal
+                    # (see build_antigravity_statusline_settings).
+                    STATUSLINE_SCRIPT_NAME: _load_antigravity_resource_script(STATUSLINE_SCRIPT_NAME),
+                    # Run by the PreInvocation capture hook to record every
+                    # conversation ID (incl. subagents') for transcript scoping
+                    # (see build_antigravity_hooks_config).
                     CAPTURE_CONVERSATION_ID_SCRIPT_NAME: _load_antigravity_resource_script(
                         CAPTURE_CONVERSATION_ID_SCRIPT_NAME
-                    ),
-                    # Run by the Stop hook to clear the active marker only when
-                    # agy reports the conversation is fully idle (see
-                    # build_antigravity_hooks_config).
-                    CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME: _load_antigravity_resource_script(
-                        CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME
                     ),
                 },
                 concurrency_group,
@@ -513,8 +529,9 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
     def _provision_agy_home(self, host: OnlineHostInterface, host_home: Path, host_uname: str) -> None:
         """Write the mngr-owned per-agent ``$HOME`` tree (idempotent each provision).
 
-        Provisions the oauth token, settings.json, the onboarding NUX seed, the
-        active-marker hooks, and the shared playwright-cache symlink.
+        Provisions the oauth token, settings.json (including the mngr-owned
+        lifecycle ``statusLine``), the onboarding NUX seed, the conversation-id
+        capture hook, and the shared playwright-cache symlink.
         ``host.write_text_file`` creates intermediate directories. agy-owned
         session dirs (brain/, conversations/) are left intact across re-provision.
         """
@@ -534,6 +551,12 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
             self.agent_config.settings_overrides,
             [self._get_agy_workspace_symlink_path()],
         )
+        # Inject the mngr-owned lifecycle statusLine LAST -- after settings_overrides
+        # -- so it wins. This is the one setting mngr does not let settings_overrides
+        # override: RUNNING/WAITING detection and message-submission confirmation
+        # both depend on statusline.sh running, so a user statusLine would break
+        # them (see build_antigravity_statusline_settings).
+        per_agent_settings.update(build_antigravity_statusline_settings())
         settings_path = get_antigravity_settings_path(agy_home)
         with log_span("Writing per-agent antigravity settings to {}", settings_path):
             host.write_text_file(settings_path, serialize_antigravity_settings(per_agent_settings))
@@ -813,10 +836,10 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
            ``HOME`` is injected only on the agy process (the unambiguous ``env``
            prefix), so the backgrounded supervisor subshell and tmux keep the
            real HOME. agy loads and executes the per-agent ``hooks.json`` (the
-           active marker + the conversation-ID capture hook; see
-           ``build_antigravity_hooks_config``) directly from
-           ``$HOME/.gemini/config/hooks.json`` under the relocated home -- no
-           ``--add-dir`` needed. The ``--dangerously-skip-permissions`` flag is
+           conversation-ID capture hook; see ``build_antigravity_hooks_config``)
+           directly from ``$HOME/.gemini/config/hooks.json`` under the relocated
+           home -- no ``--add-dir`` needed, and the lifecycle ``statusLine`` runs
+           from the per-agent ``settings.json``. The ``--dangerously-skip-permissions`` flag is
            appended only when ``auto_allow_permissions`` is set; the model and
            any permissions policy flow through the per-agent ``settings.json``,
            not the CLI.

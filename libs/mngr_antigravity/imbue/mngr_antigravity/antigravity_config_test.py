@@ -11,9 +11,9 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
-from imbue.mngr_antigravity.antigravity_config import CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME
-from imbue.mngr_antigravity.antigravity_config import SET_ACTIVE_MARKER_SCRIPT_NAME
+from imbue.mngr_antigravity.antigravity_config import STATUSLINE_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import build_antigravity_hooks_config
+from imbue.mngr_antigravity.antigravity_config import build_antigravity_statusline_settings
 from imbue.mngr_antigravity.antigravity_config import build_isolated_settings
 from imbue.mngr_antigravity.antigravity_config import build_onboarding_seed
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_cli_dir
@@ -209,61 +209,59 @@ def test_read_antigravity_settings_returns_parsed_dict(
 
 
 # =============================================================================
+# statusLine settings builder
+# =============================================================================
+
+
+def test_statusline_settings_emits_command_block() -> None:
+    """The statusLine block runs statusline.sh, agy's source of truth for lifecycle.
+
+    agy invokes this command on every agent-state change; statusline.sh maintains
+    the active marker (RUNNING/WAITING), records the root conversation, and fires
+    the message-submission signal. The block must be a {"type":"command"} shape
+    pointing at the provisioned script path.
+    """
+    settings = build_antigravity_statusline_settings()
+    assert settings == {
+        "statusLine": {
+            "type": "command",
+            "command": f'bash "$MNGR_AGENT_STATE_DIR/commands/{STATUSLINE_SCRIPT_NAME}"',
+        }
+    }
+
+
+# =============================================================================
 # Hook config builder
 # =============================================================================
 
 
-def test_hooks_config_always_emits_active_marker_via_preinvocation_and_stop() -> None:
-    """PreInvocation sets the marker (+ root); Stop clears it only on the root's fully-idle.
+def test_hooks_config_emits_only_conversation_id_capture_preinvocation() -> None:
+    """The lone hook is a single PreInvocation handler running capture_conversation_id.sh.
 
-    The active marker drives BaseAgent's RUNNING/WAITING detection. agy runs
-    PreInvocation before each model call (agent working) and the Stop hooks each
-    time any conversation -- the root agent or a subagent -- goes idle. The first
-    PreInvocation handler runs set_active_marker.sh (touch + record the turn's
-    root) and the Stop handler runs clear_active_marker_when_idle.sh, which
-    removes the marker only on the root's fully-idle Stop, so the pair flips the
-    marker at the right boundaries even when subagents / background tasks finish
-    first.
+    Lifecycle (RUNNING/WAITING) and message submission are driven by the
+    statusLine command, NOT hooks -- so the old PreInvocation marker handler and
+    the entire Stop block are gone. The capture hook remains because the
+    statusLine payload only ever reports the root conversation, so subagent ids
+    (needed for transcript scoping) are surfaced only here.
     """
     config = build_antigravity_hooks_config()
 
     mngr = config["mngr"]
-    # PreInvocation/Stop use the flat handler-list shape (no matcher wrapper).
+    # Only PreInvocation remains -- no Stop block.
+    assert set(mngr) == {"PreInvocation"}
     pre = mngr["PreInvocation"]
-    stop = mngr["Stop"]
-    # The marker/root script is the first PreInvocation handler (a second handler
-    # captures the conversation id; see the test below).
-    assert pre[0] == {
-        "type": "command",
-        "command": f'bash "$MNGR_AGENT_STATE_DIR/commands/{SET_ACTIVE_MARKER_SCRIPT_NAME}"',
-    }
-    # Stop runs the root-gated clear script (not a bare `rm`), so the marker is
-    # removed only on the root agent's fully-idle Stop.
-    assert stop == [
+    assert pre == [
         {
             "type": "command",
-            "command": f'bash "$MNGR_AGENT_STATE_DIR/commands/{CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME}"',
+            "command": f'bash "$MNGR_AGENT_STATE_DIR/commands/{CAPTURE_CONVERSATION_ID_SCRIPT_NAME}"',
         }
     ]
 
 
-def test_hooks_config_captures_conversation_id_via_second_preinvocation_handler() -> None:
-    """A second PreInvocation handler runs capture_conversation_id.sh.
-
-    agy delivers the hook-payload stdin to each handler independently (verified
-    live against agy 1.0.4), so the capture handler runs alongside the
-    active-marker touch without contending for stdin. The captured id drives
-    both conversation resume (assemble_command) and transcript scoping
-    (stream_transcript.sh).
-    """
+def test_hooks_config_emits_no_stop_handler() -> None:
+    """No Stop handler: clearing the active marker is the statusLine's job now."""
     config = build_antigravity_hooks_config()
-
-    pre = config["mngr"]["PreInvocation"]
-    assert len(pre) == 2
-    assert pre[1] == {
-        "type": "command",
-        "command": f'bash "$MNGR_AGENT_STATE_DIR/commands/{CAPTURE_CONVERSATION_ID_SCRIPT_NAME}"',
-    }
+    assert "Stop" not in config["mngr"]
 
 
 def test_hooks_config_never_emits_pretooluse() -> None:
@@ -272,11 +270,11 @@ def test_hooks_config_never_emits_pretooluse() -> None:
     agy's documented PreToolUse {"decision": "allow"} output does not actually
     gate the run_command confirmation dialog (verified live against agy 1.0.3),
     so permission auto-approval is wired through --dangerously-skip-permissions
-    in assemble_command instead. The hooks file only carries lifecycle markers.
+    in assemble_command instead. The hooks file only carries the capture handler.
     """
     config = build_antigravity_hooks_config()
     assert "PreToolUse" not in config["mngr"]
-    assert set(config["mngr"]) == {"PreInvocation", "Stop"}
+    assert set(config["mngr"]) == {"PreInvocation"}
 
 
 def test_serialize_antigravity_hooks_round_trips() -> None:

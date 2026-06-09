@@ -25,9 +25,17 @@ This module holds the pure, host-agnostic pieces of that scheme:
   ``$HOME/.gemini/antigravity-cli/cache/onboarding.json``, skips agy's
   first-run NUX (theme + ToS/telemetry) that would otherwise intercept the
   first message.
-* The lifecycle ``active``-marker hooks (``build_antigravity_hooks_config``),
+* The lifecycle ``statusLine`` settings block
+  (``build_antigravity_statusline_settings``): agy invokes a configured
+  ``statusLine`` command on every agent-state change (JSON on stdin), and
+  ``statusline.sh`` uses that as the single source of truth for the agent's
+  lifecycle -- it maintains the ``active`` marker (RUNNING vs WAITING), records
+  the root conversation, and fires the tmux message-submission signal. This is
+  mngr-owned and applied last (winning over ``settings_overrides``).
+* The transcript-scoping ``PreInvocation`` hook (``build_antigravity_hooks_config``),
   written to the per-agent ``$HOME/.gemini/config/hooks.json`` (agy executes
-  hooks from there with no trust prompt and no ``--add-dir``).
+  hooks from there with no trust prompt and no ``--add-dir``). It only captures
+  conversation ids (including subagents', which ``statusLine`` does not surface).
 
 Trust: agy suppresses its first-launch "Do you trust this folder?" dialog for
 any path present in its ``settings.json`` ``trustedWorkspaces`` array. The
@@ -280,94 +288,93 @@ CONVERSATION_IDS_FILENAME: str = "antigravity_conversation_ids"
 CAPTURE_CONVERSATION_ID_SCRIPT_NAME: str = "capture_conversation_id.sh"
 
 # Per-agent file (in ``$MNGR_AGENT_STATE_DIR``) recording the conversation ID of
-# the *root* agent for the current turn -- the conversation that opened the turn
-# (fired ``PreInvocation`` while ``active`` was absent). Subagents share the same
-# hooks and fire their own Stops, so the clear hook uses this to act only on the
-# root's Stop. Written by ``set_active_marker.sh``; both shell scripts hardcode
-# this same literal, so keep them in sync.
+# the *root* agent. agy's ``statusLine`` payload always carries the root
+# ``conversation_id`` (never a subagent's, even while a subagent runs), so
+# ``statusline.sh`` writes it here on every state change. The only consumer is
+# the resume prelude in ``assemble_command``. The shell script hardcodes this
+# same literal, so keep them in sync.
 ROOT_CONVERSATION_FILENAME: str = "root_conversation"
 
-# Script (provisioned into ``$MNGR_AGENT_STATE_DIR/commands/``) that the
-# ``PreInvocation`` hook runs to touch the ``active`` marker and record the
-# turn's root conversation (see ``ROOT_CONVERSATION_FILENAME``). Name kept in
-# sync with the resource file under ``resources/``.
-SET_ACTIVE_MARKER_SCRIPT_NAME: str = "set_active_marker.sh"
+# Script (provisioned into ``$MNGR_AGENT_STATE_DIR/commands/``) that agy runs as
+# its configured ``statusLine`` command on every agent-state change. It owns the
+# whole lifecycle: it maintains the ``active`` marker (RUNNING vs WAITING from
+# ``agent_state``), records the root ``conversation_id``, and fires the tmux
+# submission signal ``mngr message`` waits on. Name kept in sync with the
+# resource file under ``resources/``.
+STATUSLINE_SCRIPT_NAME: str = "statusline.sh"
 
-# Script (provisioned into ``$MNGR_AGENT_STATE_DIR/commands/``) that the
-# ``Stop`` hook runs to clear the ``active`` marker -- but only on the root
-# agent's fully-idle Stop (``"fullyIdle":true`` for the recorded root
-# conversation). Name kept in sync with the resource file under ``resources/``.
-CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME: str = "clear_active_marker_when_idle.sh"
+# The ``statusLine`` command agy invokes (with the JSON payload on stdin) on
+# every agent-state change. ``$MNGR_AGENT_STATE_DIR`` expands in agy's shell at
+# invocation time. Unlike the hook scripts, this command's stdout IS rendered
+# (it is the status row), so the script prints a short status string.
+_STATUSLINE_COMMAND: str = f'bash "$MNGR_AGENT_STATE_DIR/commands/{STATUSLINE_SCRIPT_NAME}"'
 
-# ``PreInvocation`` runs ``set_active_marker.sh`` (touch ``active`` + record the
-# turn's root); ``Stop`` runs ``clear_active_marker_when_idle.sh`` (clear
-# ``active`` only on the root's fully-idle Stop). agy runs the Stop hooks each
-# time *any* conversation -- the root agent or a subagent it launched -- goes
-# idle, reporting ``fullyIdle`` (an interim Stop sends ``false``, the final one
-# ``true``; verified live against agy 1.0.5). Subagents fire their own
-# ``fullyIdle:true`` Stop while the root still works, so the clear hook gates on
-# both ``fullyIdle:true`` *and* the root conversation id, keeping the agent
-# RUNNING until the root itself is done. ``$MNGR_AGENT_STATE_DIR`` expands at
-# hook time. Both scripts emit no stdout (agy would treat it as injected steps /
-# a stop-blocking result).
-_SET_ACTIVE_COMMAND: str = f'bash "$MNGR_AGENT_STATE_DIR/commands/{SET_ACTIVE_MARKER_SCRIPT_NAME}"'
-_CLEAR_ACTIVE_WHEN_IDLE_COMMAND: str = (
-    f'bash "$MNGR_AGENT_STATE_DIR/commands/{CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME}"'
-)
-
-# Second ``PreInvocation`` handler: records the conversation ID from agy's hook
-# payload (delivered on stdin). agy hands each handler its own copy of the
-# payload stdin (verified live against agy 1.0.4), so this runs independently
-# of the active-marker handler above. ``$MNGR_AGENT_STATE_DIR`` expands in
-# agy's shell at hook-execution time.
+# The lone ``PreInvocation`` handler: records the conversation ID from agy's hook
+# payload (delivered on stdin) into ``CONVERSATION_IDS_FILENAME`` for transcript
+# scoping. ``statusLine`` (not a hook) drives lifecycle; this hook only needs to
+# capture subagent ids, which the statusLine payload does not surface (it always
+# reports the root). ``$MNGR_AGENT_STATE_DIR`` expands in agy's shell at
+# hook-execution time.
 _CAPTURE_CONVERSATION_ID_COMMAND: str = f'bash "$MNGR_AGENT_STATE_DIR/commands/{CAPTURE_CONVERSATION_ID_SCRIPT_NAME}"'
+
+
+@pure
+def build_antigravity_statusline_settings() -> dict[str, Any]:
+    """Build the ``statusLine`` settings block for the per-agent ``settings.json``.
+
+    agy invokes this command on every agent-state change, piping a JSON payload
+    (``agent_state``, ``conversation_id``, ``model``, ...) on stdin and rendering
+    the command's stdout in the prompt's status row. ``statusline.sh`` uses that
+    signal as the single source of truth for the agent's lifecycle: it maintains
+    the ``active`` marker, records the root conversation, and fires the tmux
+    submission signal (see the resource script and ``STATUSLINE_SCRIPT_NAME``).
+
+    This block is mngr-owned and must be applied *after* (winning over) the
+    user's ``settings_overrides``: lifecycle correctness depends on it, so a user
+    ``statusLine`` override would break RUNNING/WAITING and message submission.
+    It is the one setting mngr does not let ``settings_overrides`` win.
+    """
+    return {"statusLine": {"type": "command", "command": _STATUSLINE_COMMAND}}
 
 
 @pure
 def build_antigravity_hooks_config() -> dict[str, Any]:
     """Build the per-agent ``hooks.json`` body for the antigravity agent.
 
-    Emits two ``PreInvocation`` handlers plus a ``Stop`` handler:
+    Emits a single ``PreInvocation`` handler running
+    ``capture_conversation_id.sh``, which reads agy's hook payload from stdin and
+    records every distinct conversation ID this agent touches -- the root agent's
+    and its subagents' -- into ``CONVERSATION_IDS_FILENAME``. That file is the
+    transcript-scoping set: ``stream_transcript.sh`` tails each one's transcript.
+    Subagent ids are needed here precisely because the ``statusLine`` payload
+    only ever reports the root conversation (so the hook is the only place
+    subagent ids surface).
 
-    * The ``active``-marker pair: ``PreInvocation`` runs
-      ``set_active_marker.sh`` (touch the marker, record the turn's root
-      conversation) and ``Stop`` runs ``clear_active_marker_when_idle.sh``,
-      which removes the marker only on the root agent's fully-idle Stop.
-      ``BaseAgent.get_lifecycle_state`` reads the marker to report RUNNING vs
-      WAITING; agy maintains no such marker on its own. Gating on
-      ``fullyIdle`` + the root conversation keeps the agent RUNNING while work
-      it launched is still in flight (including subagents, which fire their own
-      ``fullyIdle:true`` Stop), instead of flipping to WAITING when the root
-      turn -- or any subagent -- ends.
-    * The conversation-ID capture handler: a second ``PreInvocation`` handler
-      runs ``capture_conversation_id.sh``, which reads agy's hook payload from
-      stdin and records every distinct conversation ID this agent touches --
-      the root agent's and its subagents' -- into ``CONVERSATION_IDS_FILENAME``.
-      That file is the transcript-scoping set: ``stream_transcript.sh`` tails
-      each one's transcript. Resume does NOT read it (subagents land there too);
-      ``assemble_command`` resumes the agent's main conversation from
-      ``root_conversation`` written by ``set_active_marker.sh`` above. agy
-      delivers the payload stdin to each handler independently (verified live
-      against agy 1.0.4), so the two ``PreInvocation`` handlers do not contend
-      for stdin.
+    The agent's RUNNING/WAITING lifecycle and message-submission signal are NOT
+    hooks: they are driven by the mngr-owned ``statusLine`` command
+    (``statusline.sh``; see ``build_antigravity_statusline_settings``), which agy
+    invokes on every agent-state change. agy's top-level ``agent_state`` already
+    aggregates subagent activity (it stays ``working`` continuously while a
+    subagent runs and returns to ``idle`` only when root + subagents are all
+    done; verified live against agy 1.0.6/1.0.7), so a single ``agent_state``
+    check replaces the old ``PreInvocation``/``Stop`` marker-hook pair that
+    reconstructed the same invariant by hand.
 
-    Auto-approval of tool permissions is NOT a hook: agy's documented
+    Auto-approval of tool permissions is NOT a hook either: agy's documented
     ``PreToolUse`` ``{"decision": "allow"}`` output does not actually gate the
     ``run_command`` confirmation dialog (verified live against agy 1.0.3 -- the
     hook runs but the dialog still appears). The plugin routes permissions
     through the per-agent ``settings.json`` ``permissions`` block or the
     ``--dangerously-skip-permissions`` CLI flag instead.
 
-    ``PreInvocation``/``Stop`` take a flat list of handlers (their matcher is
-    ignored). The file is mngr-owned and rewritten from scratch each provision,
-    so no merge-with-existing-content logic is needed.
+    ``PreInvocation`` takes a flat list of handlers (its matcher is ignored). The
+    file is mngr-owned and rewritten from scratch each provision, so no
+    merge-with-existing-content logic is needed.
     """
     mngr_hook: dict[str, Any] = {
         "PreInvocation": [
-            {"type": "command", "command": _SET_ACTIVE_COMMAND},
             {"type": "command", "command": _CAPTURE_CONVERSATION_ID_COMMAND},
         ],
-        "Stop": [{"type": "command", "command": _CLEAR_ACTIVE_WHEN_IDLE_COMMAND}],
     }
     return {_MNGR_HOOK_NAME: mngr_hook}
 
