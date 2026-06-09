@@ -44,6 +44,16 @@ New `opencode` agent-type config options:
   per-agent permission policy (auto-approve everything not explicitly denied).
 - `emit_common_transcript` (default true) -- emit the common transcript.
 
+Reliability: OpenCode briefly ignores keystrokes right after its TUI first
+paints (its embedded server finishes initializing and the client repaints), so
+the first `mngr message` to a fresh agent could be silently dropped. The send
+now self-heals -- it confirms the paste echoed and, on a drop, clears the input
+and re-sends -- so messages land reliably (a stable agent still lands on the
+first attempt with no added latency). This is covered by a release test
+(`test_opencode_agent.py`) that drives the real `opencode` binary through the
+full `mngr` CLI flow (create, RUNNING/WAITING, transcript, resume across
+stop/start) using OpenCode's free model; release tests do not run in CI.
+
 Not yet implemented (carried, like `mngr_antigravity`): session preservation on
 destroy, scheduled-deploy file/env contributions, the `waiting_reason` listing
 field, the live streaming snapshot, and clone-carries-conversation-forward.

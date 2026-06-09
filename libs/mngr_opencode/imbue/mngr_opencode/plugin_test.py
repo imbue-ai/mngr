@@ -4,11 +4,14 @@ import json
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.errors import ConfigParseError
+from imbue.mngr.errors import SendMessageError
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -16,12 +19,15 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.polling import wait_for
+from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr_opencode.opencode_config import get_opencode_auth_path_for_data_home
 from imbue.mngr_opencode.opencode_config import get_opencode_config_file_path
 from imbue.mngr_opencode.opencode_config import get_opencode_plugin_path
 from imbue.mngr_opencode.opencode_config import get_shared_opencode_auth_path
 from imbue.mngr_opencode.plugin import OpenCodeAgent
 from imbue.mngr_opencode.plugin import OpenCodeAgentConfig
+from imbue.mngr_opencode.plugin import _is_paste_echoed
 from imbue.mngr_opencode.plugin import register_agent_type
 
 
@@ -268,3 +274,161 @@ def test_provision_does_not_write_into_work_dir(opencode_agent: OpenCodeAgent) -
     _provision(opencode_agent)
     assert not (opencode_agent.work_dir / "opencode.json").exists()
     assert not (opencode_agent.work_dir / ".opencode").exists()
+
+
+def test_provision_skips_auth_copy_when_no_shared_auth(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """copy mode with no shared auth.json simply skips seeding (the agent runs OpenCode's login flow)."""
+    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig(symlink_auth=False))
+    _provision(agent)
+    auth_path = get_opencode_auth_path_for_data_home(agent._get_opencode_data_home())
+    assert not auth_path.exists()
+
+
+# --- Paste echo detection + self-healing retry ---
+
+
+_FAKE_TMUX_TARGET = TmuxWindowTarget(session_name="test-session", window=0)
+
+
+class _CannedPaneAgent(OpenCodeAgent):
+    """Test agent that returns a fixed pane capture, for `_is_paste_echoed` checks."""
+
+    canned_pane_content: ClassVar[str | None] = None
+
+    @property
+    def tmux_target(self) -> TmuxWindowTarget:
+        return _FAKE_TMUX_TARGET
+
+    def _capture_pane_content(self, tmux_target: TmuxWindowTarget, include_scrollback: bool = False) -> str | None:
+        return type(self).canned_pane_content
+
+
+def _make_canned_agent(content: str | None) -> _CannedPaneAgent:
+    agent = _CannedPaneAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("canned"),
+        agent_type=AgentTypeName("opencode"),
+        agent_config=OpenCodeAgentConfig(),
+    )
+    type(agent).canned_pane_content = content
+    return agent
+
+
+def test_is_paste_echoed_matches_normalized_tail() -> None:
+    agent = _make_canned_agent("> Count slowly from 1 to 20, one per line\n")
+    assert _is_paste_echoed(agent, "Count slowly from 1 to 20, one per line") is True
+
+
+def test_is_paste_echoed_accepts_bracketed_paste_indicator() -> None:
+    agent = _make_canned_agent("input box [Pasted text +5 lines]")
+    assert _is_paste_echoed(agent, "a very long message that is not literally echoed in the pane") is True
+
+
+def test_is_paste_echoed_false_when_absent() -> None:
+    agent = _make_canned_agent("Ask anything...")
+    assert _is_paste_echoed(agent, "this message never landed") is False
+
+
+def test_is_paste_echoed_false_when_capture_unavailable() -> None:
+    agent = _make_canned_agent(None)
+    assert _is_paste_echoed(agent, "anything") is False
+
+
+class _ScriptedSendAgent(OpenCodeAgent):
+    """Test agent that simulates OpenCode dropping the first N pastes, then echoing.
+
+    Records sends/clears and reports the pasted text as visible only once the
+    configured number of drops has elapsed, so the retry loop can be exercised
+    without a real TUI. ClassVar timeouts are tiny so dropped attempts don't
+    block on real polling.
+    """
+
+    drops_before_echo: ClassVar[int] = 0
+    sends: ClassVar[int] = 0
+    clears: ClassVar[int] = 0
+    last_message: ClassVar[str] = ""
+    _MAX_PASTE_ATTEMPTS: ClassVar[int] = 3
+    _PASTE_ECHO_TIMEOUT_SECONDS: ClassVar[float] = 0.3
+    _PASTE_ECHO_POLL_INTERVAL_SECONDS: ClassVar[float] = 0.05
+
+    @property
+    def tmux_target(self) -> TmuxWindowTarget:
+        return _FAKE_TMUX_TARGET
+
+    def _send_tmux_literal_keys(self, tmux_target: TmuxWindowTarget, message: str) -> None:
+        type(self).sends += 1
+        type(self).last_message = message
+
+    def _clear_input_line(self) -> None:
+        type(self).clears += 1
+
+    def _capture_pane_content(self, tmux_target: TmuxWindowTarget, include_scrollback: bool = False) -> str | None:
+        if type(self).sends > type(self).drops_before_echo:
+            return type(self).last_message
+        return ""
+
+
+def _make_scripted_agent(drops_before_echo: int) -> _ScriptedSendAgent:
+    agent = _ScriptedSendAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("scripted"),
+        agent_type=AgentTypeName("opencode"),
+        agent_config=OpenCodeAgentConfig(),
+    )
+    type(agent).drops_before_echo = drops_before_echo
+    type(agent).sends = 0
+    type(agent).clears = 0
+    type(agent).last_message = ""
+    return agent
+
+
+def test_paste_retry_lands_on_first_attempt_when_stable() -> None:
+    agent = _make_scripted_agent(drops_before_echo=0)
+    agent._paste_message_with_retry("hello there")
+    assert type(agent).sends == 1
+    assert type(agent).clears == 0
+
+
+def test_paste_retry_clears_and_resends_after_a_drop() -> None:
+    agent = _make_scripted_agent(drops_before_echo=1)
+    agent._paste_message_with_retry("hello there")
+    # One drop -> a second send, with exactly one clear in between.
+    assert type(agent).sends == 2
+    assert type(agent).clears == 1
+
+
+def test_paste_retry_raises_after_exhausting_attempts() -> None:
+    agent = _make_scripted_agent(drops_before_echo=99)
+    with pytest.raises(SendMessageError):
+        agent._paste_message_with_retry("never lands")
+    # One send per attempt, and a clear before every retry.
+    assert type(agent).sends == _ScriptedSendAgent._MAX_PASTE_ATTEMPTS
+    assert type(agent).clears == _ScriptedSendAgent._MAX_PASTE_ATTEMPTS - 1
+
+
+@pytest.mark.tmux
+def test_send_message_delivers_to_real_tmux_pane(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """End-to-end through real tmux: send_message pastes into a pane and clears cleanly.
+
+    Uses a ``cat`` pane (terminal echo) as a stand-in for the OpenCode input box
+    so the real ``_send_tmux_literal_keys`` / ``_is_paste_echoed`` /
+    ``_clear_input_line`` paths run without needing the OpenCode binary.
+    """
+    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
+    session_name = agent.session_name
+    try:
+        agent.host.execute_idempotent_command(
+            f"tmux new-session -d -s '{session_name}' 'cat'",
+            timeout_seconds=5.0,
+        )
+        wait_for(
+            lambda: agent.get_lifecycle_state() is not None,
+            timeout=5.0,
+            error_message="tmux session not ready",
+        )
+        agent.send_message("a unique paste probe phrase for the cat pane")
+        assert agent._check_pane_contains(agent.tmux_target, "a unique paste probe phrase for the cat pane")
+        # The clear path (kill-line) runs against the real pane without error.
+        agent._clear_input_line()
+    finally:
+        cleanup_tmux_session(session_name)

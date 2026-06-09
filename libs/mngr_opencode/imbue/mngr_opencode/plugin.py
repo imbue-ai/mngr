@@ -49,6 +49,7 @@ nothing to seed or gate before the first message.
 from __future__ import annotations
 
 import importlib.resources
+import re
 import shlex
 from collections.abc import Mapping
 from pathlib import Path
@@ -61,6 +62,7 @@ from pydantic import Field
 
 from imbue.imbue_common.logging import log_span
 from imbue.mngr import hookimpl
+from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
@@ -68,6 +70,7 @@ from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_best_effort
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.common import copy_on_host
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
@@ -76,6 +79,7 @@ from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_opencode import resources as _opencode_resources
 from imbue.mngr_opencode.opencode_config import PLUGIN_FILENAME
 from imbue.mngr_opencode.opencode_config import ROOT_SESSION_FILENAME
@@ -112,11 +116,37 @@ _XDG_DATA_HOME_ENV_VAR: Final[str] = "XDG_DATA_HOME"
 # never resumes a subagent's session.
 _CONTINUE_FLAG: Final[str] = "--continue"
 
+# Length of the message tail compared against the pane (mirrors the probe length
+# in ``tui_utils._check_paste_content``, which is private and cannot be imported).
+_PASTE_PROBE_LENGTH: Final[int] = 60
+_TMUX_PASTE_INDICATOR: Final[str] = "[Pasted text "
+_NON_ALNUM_RE: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9]")
+
 
 def _load_opencode_resource(filename: str) -> str:
     """Load a resource file from the mngr_opencode resources package."""
     resource_files = importlib.resources.files(_opencode_resources)
     return resource_files.joinpath(filename).read_text()
+
+
+def _is_paste_echoed(agent: BaseAgent[Any], message: str) -> bool:
+    """Return whether ``message`` appears to have landed in the pane's input.
+
+    Mirrors ``tui_utils._check_paste_content`` (private, so not importable): a
+    tmux bracketed-paste indicator counts as success, otherwise a normalized
+    tail of the message must be present in the normalized pane text (robust to
+    input-box line wrapping).
+    """
+    content = agent._capture_pane_content(agent.tmux_target)
+    if content is None:
+        return False
+    if _TMUX_PASTE_INDICATOR in content:
+        return True
+    normalized_message = _NON_ALNUM_RE.sub("", message.lower())
+    if not normalized_message:
+        return True
+    probe = normalized_message[-_PASTE_PROBE_LENGTH:]
+    return probe in _NON_ALNUM_RE.sub("", content.lower())
 
 
 class OpenCodeAgentConfig(AgentTypeConfig):
@@ -193,6 +223,23 @@ class OpenCodeAgent(InteractiveTuiAgent[OpenCodeAgentConfig], HasCommonTranscrip
     # against the live TUI.
     TUI_READY_INDICATOR: ClassVar[str] = "ctrl+p commands"
 
+    # Paste self-healing. OpenCode is a client-server TUI: the input footer first
+    # paints within ~2-3s, but the embedded server then finishes initializing and
+    # the client *repaints* (the screen briefly clears). Keystrokes sent during
+    # that repaint window are silently dropped, and nothing in the create/message
+    # flow waits for the repaint before the first ``send_message`` (a running
+    # agent's send path has no readiness gate). So the paste self-heals: send,
+    # confirm the text echoed, and on a drop clear the input and re-send. Once the
+    # agent is past startup the first attempt lands, so a stable agent pays no
+    # penalty. (The OpenCode form of the spec's dimension-E "input not live yet"
+    # gotcha.) ClassVars so a test subclass can shrink them.
+    _MAX_PASTE_ATTEMPTS: ClassVar[int] = 5
+    _PASTE_ECHO_TIMEOUT_SECONDS: ClassVar[float] = 3.0
+    _PASTE_ECHO_POLL_INTERVAL_SECONDS: ClassVar[float] = 0.3
+    # tmux key that clears OpenCode's input line (readline-style kill-line) so a
+    # re-send can never append to a partially-landed earlier attempt.
+    _CLEAR_INPUT_KEY: ClassVar[str] = "C-u"
+
     def get_expected_process_name(self) -> str:
         # OpenCode ships as a single bun-compiled binary; ps/tmux report ``opencode``.
         return "opencode"
@@ -203,6 +250,52 @@ class OpenCodeAgent(InteractiveTuiAgent[OpenCodeAgentConfig], HasCommonTranscrip
         # with Antigravity -- a best-effort Enter after ``wait_for_paste_visible``
         # (which already confirmed the text landed) is the right strategy.
         send_enter_best_effort(self, tmux_target)
+
+    def send_message(self, message: str) -> None:
+        """Send a message, re-sending if OpenCode drops the paste during its post-launch repaint.
+
+        Mirrors the base ``InteractiveTuiAgent.send_message`` (lock, preflight,
+        paste, submit) but replaces the single paste + visibility-poll with a
+        clear-and-retry loop, because OpenCode silently ignores keystrokes for a
+        moment after the TUI first paints and the send path has no readiness gate
+        to wait that out (see ``_MAX_PASTE_ATTEMPTS``).
+        """
+        with self._message_lock(), log_span("Sending message to agent {} (length={})", self.name, len(message)):
+            self._preflight_send_message(self.tmux_target)
+            self._paste_message_with_retry(message)
+            self._send_enter_and_validate(self.tmux_target)
+
+    def _paste_message_with_retry(self, message: str) -> None:
+        """Paste ``message`` into the TUI, re-sending until it echoes or attempts are exhausted.
+
+        Clears the input line before every retry so a late-landing earlier
+        attempt cannot double the text. A stable agent lands on the first
+        attempt and never clears or retries.
+        """
+        for attempt in range(self._MAX_PASTE_ATTEMPTS):
+            if attempt > 0:
+                self._clear_input_line()
+            self._send_tmux_literal_keys(self.tmux_target, message)
+            if poll_until(
+                lambda: _is_paste_echoed(self, message),
+                timeout=self._PASTE_ECHO_TIMEOUT_SECONDS,
+                poll_interval=self._PASTE_ECHO_POLL_INTERVAL_SECONDS,
+            ):
+                return
+        raise SendMessageError(
+            str(self.name),
+            f"OpenCode did not accept the pasted message after {self._MAX_PASTE_ATTEMPTS} attempts",
+        )
+
+    def _clear_input_line(self) -> None:
+        """Clear OpenCode's input line via tmux (kill-line) before a paste retry."""
+        result = self.host.execute_stateful_command(
+            f"tmux send-keys -t {self.tmux_target.as_shell_arg()} {self._CLEAR_INPUT_KEY}"
+        )
+        if not result.success:
+            raise SendMessageError(
+                str(self.name), f"Failed to clear OpenCode input line: {result.stderr or result.stdout}"
+            )
 
     @property
     def is_common_transcript_enabled(self) -> bool:
