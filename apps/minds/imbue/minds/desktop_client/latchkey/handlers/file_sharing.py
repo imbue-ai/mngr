@@ -11,14 +11,20 @@ appending the response event, and notifying the waiting agent via
 A file-sharing permission request asks the user to grant the agent
 access to a single absolute file path on the desktop host, served
 through the ``minds-api-proxy`` Latchkey extension. Unlike its
-:mod:`.predefined` sibling, the dialog is a plain yes/no on a
-specific path -- there is no per-permission editing because the
-request itself is already fully-specified (one path, both read and
-write methods). Approval calls
-``POST /permission-requests/approve/<id>`` on the gateway's
-``permission-requests`` extension; the extension owns the actual
-write to the agent's ``latchkey_permissions.json`` using the
-``effect`` payload it precomputed when the request was created.
+:mod:`.predefined` sibling, there is no per-permission checkbox list:
+the request already names the single (path, access) pair. The dialog
+does, however, let the user *edit the shared path* before approving
+(the agent-requested path is pre-filled into an editable field, and a
+native file picker in the desktop app can fill it in). The access mode
+is fixed at request-creation time and is not user-editable.
+
+Approval calls ``POST /permission-requests/approve/<id>`` on the
+gateway's ``permission-requests`` extension; the extension owns the
+actual write to the agent's ``latchkey_permissions.json``. When the
+user left the path unchanged the extension uses the ``effect`` payload
+it precomputed at request-creation time; when the user edited the path
+we send it as a ``{"path": ...}`` body and the extension recomputes the
+file-sharing effect for that path (re-validating it for traversal).
 Denial reuses the legacy ``DELETE /permission-requests/<id>`` path so
 the gateway forgets the pending entry.
 """
@@ -53,6 +59,38 @@ from imbue.mngr.primitives import AgentId
 
 # Label shown on the inbox list card (lower-case, short).
 _KIND_LABEL: Final[str] = "file sharing"
+
+# Form field carrying the (possibly user-edited) absolute path to share.
+# The dialog pre-fills it with the agent-requested path; the user may
+# paste a different one or pick it from a native file dialog.
+_FILE_PATH_FIELD: Final[str] = "file_path"
+
+
+class InvalidSharePathError(Exception):
+    """Raised when a user-edited share path is not an acceptable absolute path."""
+
+
+def _normalize_share_path(raw_path: str) -> str:
+    """Validate and normalize a user-edited absolute share path.
+
+    Mirrors the gateway's ``validateAbsoluteFileSharingPath`` so the user
+    gets a clear, immediate error instead of a generic gateway 400. The
+    gateway re-validates on approve regardless -- this is a friendlier
+    first line of defence, not the security boundary.
+
+    Rejects empty, relative, and ``..``-containing paths. Returns the
+    stripped path on success.
+    """
+    path = raw_path.strip()
+    if not path:
+        raise InvalidSharePathError("The path to share must not be empty.")
+    if not path.startswith("/"):
+        raise InvalidSharePathError(f"The path to share must be absolute (start with '/'): {path}")
+    # Reject any ``..`` segment regardless of separator, matching the
+    # gateway's traversal check.
+    if any(segment == ".." for segment in path.replace("\\", "/").split("/")):
+        raise InvalidSharePathError(f"The path to share must not contain a '..' segment: {path}")
+    return path
 
 
 def _access_human_label(access: str) -> str:
@@ -168,10 +206,30 @@ class FileSharingGrantHandler(RequestEventHandler):
             return _json_error("Unsupported request type", status_code=500)
         request_event_id = str(req_event.event_id)
         parsed_agent_id = AgentId(req_event.agent_id)
+
+        # The dialog lets the user edit the shared path (paste or native
+        # file picker) before approving. Read the submitted value, falling
+        # back to the agent-requested path when the field is absent (e.g.
+        # an older client). Validate it up front for a friendly error; the
+        # gateway re-validates on approve.
+        form = await request.form()
+        raw_override = form.get(_FILE_PATH_FIELD)
+        try:
+            effective_path = _normalize_share_path(str(raw_override)) if raw_override is not None else req_event.path
+        except InvalidSharePathError as e:
+            return _json_error(str(e), status_code=400)
+
+        # Only send an override to the gateway when the user actually
+        # changed the path; otherwise the gateway applies the precomputed
+        # effect verbatim (and we avoid recomputation for the common case).
+        override_path = effective_path if effective_path != req_event.path else None
         try:
             await asyncio.get_running_loop().run_in_executor(
                 None,
-                lambda: self.gateway_client.approve_permission_request(request_event_id),
+                lambda: self.gateway_client.approve_permission_request(
+                    request_event_id,
+                    override_path=override_path,
+                ),
             )
         except LatchkeyGatewayClientError as e:
             logger.warning(
@@ -184,11 +242,11 @@ class FileSharingGrantHandler(RequestEventHandler):
                 status_code=502,
             )
 
-        message = _format_granted_message(req_event.path, req_event.access)
+        message = _format_granted_message(effective_path, req_event.access)
         response_event = self._write_response_and_notify(
             request_event_id=request_event_id,
             agent_id=parsed_agent_id,
-            file_path=req_event.path,
+            file_path=effective_path,
             status=RequestStatus.GRANTED,
             message=message,
         )

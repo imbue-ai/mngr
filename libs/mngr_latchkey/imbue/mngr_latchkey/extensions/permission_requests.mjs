@@ -1194,7 +1194,77 @@ function mergeSchemas(existingSchemas, effectSchemas) {
   return base;
 }
 
-function handleApproveRequest(response, rawRequestId) {
+/**
+ * Parse the optional JSON body of a ``POST /permission-requests/approve/<id>``
+ * call. The desktop client sends a body only when the user edited the
+ * shared path in the approval dialog before approving; the body then
+ * carries a single ``path`` field with the (possibly new) absolute
+ * filesystem path the grant should target. An empty body (the common
+ * case -- the user approved the request as-is) yields ``null``.
+ *
+ * The override path is validated here with the same traversal-rejection
+ * rules that guard request *creation* (``validateAbsoluteFileSharingPath``),
+ * so a user-edited path is held to exactly the same security bar as an
+ * agent-supplied one. Any field other than ``path`` is rejected so the
+ * server stays the single source of truth on identity, target, and
+ * access mode.
+ */
+async function parseApproveOverrideBody(request) {
+  const raw = await readRequestBody(request);
+  if (raw.trim().length === 0) {
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new InvalidRequestBodyError(`approve body is not valid JSON: ${message}`);
+  }
+  // A literal JSON ``null`` body means "no override", same as an empty
+  // body -- some HTTP clients serialize an absent payload that way.
+  if (parsed === null) {
+    return null;
+  }
+  if (typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new InvalidRequestBodyError('approve body must be a JSON object.');
+  }
+  ensureNoExtraneousFields('approve body ', ['path'], parsed);
+  if (parsed.path === undefined) {
+    return null;
+  }
+  validateAbsoluteFileSharingPath(parsed.path);
+  return { path: parsed.path };
+}
+
+/**
+ * Resolve the effect that approving ``requestRecord`` should splice in.
+ *
+ * With no override this is just the precomputed ``requestRecord.effect``.
+ * When the user edited the shared path in the dialog (``override`` is
+ * non-null), the effect is recomputed for the new path so the grant
+ * targets exactly what the user chose -- but only for ``file-sharing``
+ * requests, which are the only kind whose effect is path-derived. A
+ * path override on any other request type is a programming error in the
+ * caller and is rejected.
+ */
+function resolveEffectForApproval(requestRecord, override) {
+  if (override === null) {
+    return requestRecord.effect;
+  }
+  if (requestRecord.request_type !== REQUEST_TYPE_FILE_SHARING) {
+    throw new InvalidRequestBodyError(
+      `a 'path' override is only valid for '${REQUEST_TYPE_FILE_SHARING}' requests; `
+      + `request ${requestRecord.request_id} is '${requestRecord.request_type}'.`,
+    );
+  }
+  // The access mode is fixed at request-creation time and is not
+  // user-editable: the user may narrow/redirect *where* the grant
+  // applies, but not escalate read-only to read-write.
+  return computeFileSharingEffect(override.path, requestRecord.payload.access);
+}
+
+function handleApproveRequest(response, rawRequestId, override = null) {
   const requestId = validateRequestId(rawRequestId);
   const filePath = requestFilePath(requestId);
   const requestRecord = readRequestFile(filePath);
@@ -1202,7 +1272,7 @@ function handleApproveRequest(response, rawRequestId) {
     throw new RequestNotFoundError(requestId);
   }
   const target = requestRecord.target;
-  const effect = requestRecord.effect;
+  const effect = resolveEffectForApproval(requestRecord, override);
   const permissionsFile = readPermissionsFileOrEmpty(target);
 
   const updatedRules = effect.rules ? mergeRules(permissionsFile.rules, effect.rules) : permissionsFile.rules;
@@ -1253,7 +1323,8 @@ export default async function permissionRequestsExtension(request, response, con
       return true;
     }
     if (route.kind === 'approve' && method === 'POST') {
-      handleApproveRequest(response, route.requestIdFromPath);
+      const override = await parseApproveOverrideBody(request);
+      handleApproveRequest(response, route.requestIdFromPath, override);
       return true;
     }
     if (route.kind === 'item' && method === 'DELETE') {

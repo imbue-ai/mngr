@@ -17,14 +17,21 @@
     <p class="text-sm text-zinc-700 mb-3">
       {% if access == 'WRITE' %}
         Approving will grant {{ ws_name or agent_id }} and its sibling agents
-        <strong>read and write</strong> access (including delete) to the following file/directory:
+        <strong>read and write</strong> access (including delete) to the file/directory below.
       {% else %}
         Approving will grant {{ ws_name or agent_id }} and its sibling agents
-        <strong>read-only</strong> access to the following file:
+        <strong>read-only</strong> access to the file/directory below.
       {% endif %}
+      You can edit the path before approving -- paste a different one or pick it with Browse.
     </p>
-    <Card layout="row">
-      <code class="text-sm font-mono text-zinc-900 break-all flex-1 min-w-0">{{ file_path }}</code>
+    {# Editable share path. The input is pre-filled with the path the
+       agent requested; the user may change it (paste or native file
+       picker) before approving. The inbox shell's ``browseForSharePath``
+       opens the OS file dialog and writes the chosen path back here, and
+       its ``updateApproveState`` keeps Approve disabled while the field
+       is empty. #}
+    <div class="flex items-center justify-between gap-3 mb-1.5">
+      <FormLabel target="file-sharing-path-input">Path to share</FormLabel>
       {# Access mode badge -- emerald tint for read-only, amber for
          read+write so the broader grant stands out visually. #}
       {% if access == 'WRITE' %}
@@ -36,11 +43,26 @@
           {{ access_human_label }}
         </span>
       {% endif %}
-    </Card>
+    </div>
+    <div class="flex items-stretch gap-2">
+      <TextInput id="file-sharing-path-input"
+                 name="file_path"
+                 :value="file_path"
+                 extra="font-mono text-sm flex-1 min-w-0"
+                 oninput="window.updateApproveState && window.updateApproveState()" />
+      {# Hidden unless the Electron native-picker bridge is present (the
+         inbox shell reveals it on detail render). In a plain browser the
+         user can still paste a path into the input above. #}
+      <Button id="file-sharing-browse-btn"
+              variant="secondary"
+              extra="shrink-0 hidden"
+              onclick="window.browseForSharePath && window.browseForSharePath()">Browse…</Button>
+    </div>
     {# Hidden checked input named ``permissions`` so the base dialog's
-       updateApproveState enables the Approve button on first paint:
+       updateApproveState treats this fragment as "has a selection":
        there is no per-permission choice in this flow, the request itself
-       already names the single (path, access) pair. #}
+       already names the single (path, access) pair. Approve is gated
+       additionally on the path field being non-empty (see the shell). #}
     <input type="checkbox" name="permissions" value="file-sharing" checked hidden>
   </PermissionsForm>
 

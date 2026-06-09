@@ -1,6 +1,8 @@
 """Unit tests for :class:`FileSharingGrantHandler`."""
 
+import json
 from collections.abc import Callable
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Final
 
@@ -30,6 +32,30 @@ from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.mngr.primitives import AgentId
 
 _HttpxHandler: Final = Callable[[httpx.Request], httpx.Response]
+
+
+def _parse_input_attrs(html: str, element_id: str) -> dict[str, str]:
+    """Return the attribute map of the ``<input>`` with the given id.
+
+    Used to assert that user-controlled values are safely encoded into
+    attributes (the HTML parser sees the real attribute boundaries, so a
+    successful breakout would surface as extra attributes rather than a
+    value substring).
+    """
+    found: dict[str, str] = {}
+
+    class _Finder(HTMLParser):
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            if tag != "input":
+                return
+            attr_map = {name: (value or "") for name, value in attrs}
+            if attr_map.get("id") == element_id:
+                found.update(attr_map)
+
+    _Finder().feed(html)
+    if not found:
+        raise AssertionError(f"no <input> with id={element_id!r} found in HTML")
+    return found
 
 
 class _RecordingMessageSender(MngrMessageSender):
@@ -137,6 +163,29 @@ def test_render_request_detail_fragment_shows_path_and_rationale(tmp_path: Path)
     assert "<script>" not in body
 
 
+def test_render_request_detail_fragment_has_editable_path_and_browse(tmp_path: Path) -> None:
+    """The dialog renders the path as an editable input plus a Browse button."""
+    handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
+    event = create_latchkey_file_sharing_permission_request_event(
+        agent_id=str(AgentId()),
+        path="/home/user/important.txt",
+        access="READ",
+        rationale="summarize the doc",
+    )
+    body = handler.render_request_detail_fragment(
+        req_event=event,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        mngr_forward_origin="",
+    )
+    # The path is editable: an input named ``file_path`` pre-filled with
+    # the requested path, plus a Browse button keyed for the inbox shell.
+    assert 'name="file_path"' in body
+    assert 'id="file-sharing-path-input"' in body
+    assert 'value="/home/user/important.txt"' in body
+    assert 'id="file-sharing-browse-btn"' in body
+    assert "browseForSharePath" in body
+
+
 def test_render_request_detail_fragment_marks_write_grants_distinctly(tmp_path: Path) -> None:
     """WRITE grants render the broader human-readable access label."""
     handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
@@ -159,21 +208,33 @@ def test_render_request_detail_fragment_marks_write_grants_distinctly(tmp_path: 
 
 def test_render_request_detail_fragment_escapes_html_in_inputs(tmp_path: Path) -> None:
     handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
+    # A path crafted to break out of the value="" attribute and inject an
+    # event handler if the renderer naively interpolated it.
+    malicious_path = '/tmp/" onfocus="alert(1)'
     event = create_latchkey_file_sharing_permission_request_event(
         agent_id=str(AgentId()),
-        path="/tmp/<script>alert(1)</script>.txt",
+        path=malicious_path,
         access="READ",
         rationale="<img src=x onerror=alert(2)>",
     )
-    body = handler.render_request_detail_fragment(
-        req_event=event,
-        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
-        mngr_forward_origin="",
+    body = str(
+        handler.render_request_detail_fragment(
+            req_event=event,
+            backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+            mngr_forward_origin="",
+        )
     )
-    # Raw HTML must not appear; entities must.
-    assert "<script>alert(1)" not in body
-    assert "&lt;script&gt;alert(1)" in body
+    # The rationale is rendered as element text, so raw HTML must be
+    # entity-escaped.
     assert "<img src=x" not in body
+
+    # The path is rendered into the value="" attribute of the editable
+    # input. Parse the input and verify the attribute carries the path
+    # verbatim with no injected handler -- i.e. the renderer safely quoted
+    # the value rather than letting the crafted ``"`` break out.
+    attrs = _parse_input_attrs(body, element_id="file-sharing-path-input")
+    assert attrs["value"] == malicious_path
+    assert "onfocus" not in attrs
 
 
 # -- apply_grant_request --
@@ -219,6 +280,127 @@ def test_grant_calls_gateway_approve_writes_response_notifies_agent(tmp_path: Pa
 
     # Agent was notified.
     assert sender.sent_messages == [(str(agent_id), body["message"])]
+
+
+def test_grant_with_edited_path_sends_override_and_uses_it(tmp_path: Path) -> None:
+    """Editing the path in the dialog sends an override body and reflects the new path everywhere."""
+    captured: dict[str, object] = {}
+
+    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["content"] = request.content
+        return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
+
+    handler, sender = _make_file_sharing_handler(tmp_path, _gateway_handler)
+    agent_id = AgentId()
+    event = create_latchkey_file_sharing_permission_request_event(
+        agent_id=str(agent_id),
+        path="/home/user/requested.txt",
+        access="READ",
+        rationale="need data",
+    )
+    inbox = RequestInbox().add_request(event)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    edited = "/Users/glenn/Documents/Shared"
+    response = client.post(f"/requests/{event.event_id}/grant", data={"file_path": edited})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["outcome"] == "GRANTED"
+    # The granted message names the edited path, not the requested one.
+    assert edited in body["message"]
+    assert "/home/user/requested.txt" not in body["message"]
+
+    # The gateway received the override path as a JSON body.
+    sent_body = captured["content"]
+    assert isinstance(sent_body, bytes)
+    assert json.loads(sent_body) == {"path": edited}
+
+    # The persisted response event records the edited path as its scope.
+    response_events = load_response_events(tmp_path)
+    assert len(response_events) == 1
+    assert response_events[0].scope == edited
+    # The agent notification names the edited path.
+    assert sender.sent_messages == [(str(agent_id), body["message"])]
+
+
+def test_grant_with_unchanged_path_sends_no_override_body(tmp_path: Path) -> None:
+    """Submitting the original path verbatim must not send an override (gateway uses the precomputed effect)."""
+    captured: dict[str, object] = {}
+
+    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+        captured["content"] = request.content
+        return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
+
+    handler, _sender = _make_file_sharing_handler(tmp_path, _gateway_handler)
+    event = create_latchkey_file_sharing_permission_request_event(
+        agent_id=str(AgentId()),
+        path="/home/user/data.txt",
+        access="READ",
+        rationale="need data",
+    )
+    inbox = RequestInbox().add_request(event)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    response = client.post(f"/requests/{event.event_id}/grant", data={"file_path": "/home/user/data.txt"})
+    assert response.status_code == 200
+    assert response.json()["outcome"] == "GRANTED"
+    assert captured["content"] == b""
+
+
+def test_grant_rejects_relative_edited_path(tmp_path: Path) -> None:
+    """A relative edited path is rejected with a 400 before the gateway is called."""
+    gateway_called = False
+
+    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal gateway_called
+        gateway_called = True
+        del request
+        return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
+
+    handler, sender = _make_file_sharing_handler(tmp_path, _gateway_handler)
+    event = create_latchkey_file_sharing_permission_request_event(
+        agent_id=str(AgentId()),
+        path="/home/user/data.txt",
+        access="READ",
+        rationale="need data",
+    )
+    inbox = RequestInbox().add_request(event)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    response = client.post(f"/requests/{event.event_id}/grant", data={"file_path": "relative/path"})
+    assert response.status_code == 400
+    assert "absolute" in response.json()["error"].lower()
+    assert gateway_called is False
+    # The request stays pending: no response event, no agent notification.
+    assert load_response_events(tmp_path) == []
+    assert sender.sent_messages == []
+
+
+def test_grant_rejects_traversal_in_edited_path(tmp_path: Path) -> None:
+    """A ``..`` segment in the edited path is rejected with a 400 before the gateway is called."""
+    gateway_called = False
+
+    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal gateway_called
+        gateway_called = True
+        del request
+        return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
+
+    handler, _sender = _make_file_sharing_handler(tmp_path, _gateway_handler)
+    event = create_latchkey_file_sharing_permission_request_event(
+        agent_id=str(AgentId()),
+        path="/home/user/data.txt",
+        access="READ",
+        rationale="need data",
+    )
+    inbox = RequestInbox().add_request(event)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    response = client.post(f"/requests/{event.event_id}/grant", data={"file_path": "/home/user/../../etc/shadow"})
+    assert response.status_code == 400
+    assert ".." in response.json()["error"]
+    assert gateway_called is False
 
 
 def test_grant_returns_502_when_gateway_rejects(tmp_path: Path) -> None:

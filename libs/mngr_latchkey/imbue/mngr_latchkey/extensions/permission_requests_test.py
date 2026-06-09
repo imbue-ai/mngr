@@ -698,6 +698,153 @@ def test_approve_404s_on_unknown_request_id(node_extension: tuple[str, Path, Pat
     assert "not found" in json.loads(body)["error"].lower()
 
 
+def test_approve_with_path_override_recomputes_file_sharing_effect(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """A user-edited path in the approve body retargets the file-sharing grant.
+
+    The agent requests one path; the user edits it before approving. The
+    grant that lands must target the user's path -- the per-file schema
+    name and pattern derive from the edited path, and the originally
+    requested path must not appear in the applied permissions.
+    """
+    base_url, _latchkey_directory, permissions_config_path = node_extension
+    requested_path = "/home/example/requested.txt"
+    edited_path = "/home/example/Documents/Shared"
+    create_status, create_body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "needs a file",
+            "type": "file-sharing",
+            "payload": {"path": requested_path, "access": "READ"},
+        },
+    )
+    assert create_status == 201
+    request_id = json.loads(create_body)["request_id"]
+
+    approve_status, approve_body = _post_json(
+        f"{base_url}/permission-requests/approve/{request_id}",
+        {"path": edited_path},
+    )
+    assert approve_status == 200, approve_body
+
+    applied = json.loads(permissions_config_path.read_text())
+    edited_name = _file_sharing_permission_name(edited_path, "READ")
+    requested_name = _file_sharing_permission_name(requested_path, "READ")
+    # The grant targets the edited path, not the originally requested one.
+    assert applied["rules"] == [{_FILE_SHARING_SCOPE_NAME: [edited_name]}]
+    assert edited_name in applied["schemas"]
+    assert requested_name not in applied["schemas"]
+    # The schema's URL pattern embeds the edited path under the WebDAV mount.
+    pattern = applied["schemas"][edited_name]["properties"]["path"]["pattern"]
+    assert edited_path in pattern
+    assert requested_path not in pattern
+
+
+def test_approve_with_path_override_preserves_requested_access_mode(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """Editing the path must not change the access mode fixed at request time."""
+    base_url, _latchkey_directory, permissions_config_path = node_extension
+    create_status, create_body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "needs to write",
+            "type": "file-sharing",
+            "payload": {"path": "/home/example/orig", "access": "WRITE"},
+        },
+    )
+    assert create_status == 201
+    request_id = json.loads(create_body)["request_id"]
+    approve_status, _ = _post_json(
+        f"{base_url}/permission-requests/approve/{request_id}",
+        {"path": "/home/example/edited"},
+    )
+    assert approve_status == 200
+    applied = json.loads(permissions_config_path.read_text())
+    # The recomputed schema keeps the WRITE access mode (write verbs present).
+    write_name = _file_sharing_permission_name("/home/example/edited", "WRITE")
+    assert write_name in applied["schemas"]
+    methods = applied["schemas"][write_name]["properties"]["method"]["enum"]
+    assert "PUT" in methods and "DELETE" in methods
+
+
+def test_approve_rejects_path_override_for_predefined_request(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """A path override only makes sense for file-sharing; reject it elsewhere."""
+    base_url, _latchkey_directory, permissions_config_path = node_extension
+    create_status, create_body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "x",
+            "type": "predefined",
+            "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
+        },
+    )
+    assert create_status == 201
+    request_id = json.loads(create_body)["request_id"]
+    status, body = _post_json(
+        f"{base_url}/permission-requests/approve/{request_id}",
+        {"path": "/home/example/whatever"},
+    )
+    assert status == 400, body
+    assert "file-sharing" in json.loads(body)["error"]
+    # The grant was not applied (the request stays pending).
+    assert not permissions_config_path.exists()
+
+
+def test_approve_rejects_traversal_in_path_override(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """A ``..`` segment in the edited path is rejected just like at creation."""
+    base_url, *_ = node_extension
+    create_status, create_body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "x",
+            "type": "file-sharing",
+            "payload": {"path": "/home/example/ok.txt", "access": "READ"},
+        },
+    )
+    assert create_status == 201
+    request_id = json.loads(create_body)["request_id"]
+    status, body = _post_json(
+        f"{base_url}/permission-requests/approve/{request_id}",
+        {"path": "/home/example/../../etc/shadow"},
+    )
+    assert status == 400, body
+    assert "traversal" in json.loads(body)["error"].lower()
+
+
+def test_approve_rejects_extraneous_field_in_override_body(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """Only ``path`` is allowed in the approve override body."""
+    base_url, *_ = node_extension
+    create_status, create_body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "x",
+            "type": "file-sharing",
+            "payload": {"path": "/home/example/ok.txt", "access": "READ"},
+        },
+    )
+    assert create_status == 201
+    request_id = json.loads(create_body)["request_id"]
+    status, body = _post_json(
+        f"{base_url}/permission-requests/approve/{request_id}",
+        {"path": "/home/example/ok.txt", "access": "WRITE"},
+    )
+    assert status == 400, body
+    assert "access" in json.loads(body)["error"]
+
+
 def test_delete_removes_pending_request(node_extension: tuple[str, Path, Path]) -> None:
     base_url, latchkey_directory, _permissions_config_path = node_extension
     create_status, create_body = _post_json(

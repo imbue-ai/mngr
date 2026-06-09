@@ -44,6 +44,13 @@ contextBridge.exposeInMainWorld('minds', {
   // Modal overlay close (used by the inbox shell and any one-off dialogs)
   closeModal: () => ipcRenderer.send('close-modal'),
 
+  // Native file/directory picker used by the file-sharing permission
+  // dialog so the user can pick the path to share instead of typing it.
+  // Resolves to the selected absolute path, or null if the user
+  // cancelled. ``options.defaultPath`` seeds the dialog's starting
+  // location.
+  showFilePicker: (options) => ipcRenderer.invoke('show-file-picker', options),
+
   // Multi-window workspace actions
   openWorkspaceInNewWindow: (agentId) =>
     ipcRenderer.send('open-workspace-in-new-window', agentId),

@@ -155,9 +155,44 @@
       var approveBtn = document.getElementById("permissions-approve-btn");
       if (!approveBtn) return;
       var anyChecked = form.querySelector('input[name="permissions"]:checked') !== null;
-      approveBtn.disabled = !anyChecked;
+      // The file-sharing dialog adds an editable path field. Its hidden
+      // "permissions" checkbox is always checked, so gate Approve on the
+      // path being non-empty too -- otherwise the user could approve a
+      // blank path.
+      var pathInput = document.getElementById("file-sharing-path-input");
+      var pathOk = !pathInput || pathInput.value.trim().length > 0;
+      approveBtn.disabled = !(anyChecked && pathOk);
     }
     window.updateApproveState = updateApproveState;
+
+    // The file-sharing dialog ships its "Browse…" button hidden; reveal
+    // it only when the Electron native-picker bridge is available (in a
+    // plain browser the user pastes a path into the input instead).
+    // Idempotent: safe to call after every detail-pane render.
+    function wireSharePathControls() {
+      var browseBtn = document.getElementById("file-sharing-browse-btn");
+      if (browseBtn && window.minds && window.minds.showFilePicker) {
+        browseBtn.classList.remove("hidden");
+      }
+    }
+
+    // Open the OS file/directory picker and write the chosen absolute
+    // path back into the share-path input. Defaults the dialog to the
+    // path already in the field. A cancel (or any bridge error) leaves
+    // the field untouched.
+    window.browseForSharePath = async function () {
+      var input = document.getElementById("file-sharing-path-input");
+      if (!input || !(window.minds && window.minds.showFilePicker)) return;
+      try {
+        var selected = await window.minds.showFilePicker({ defaultPath: input.value.trim() });
+        if (typeof selected === "string" && selected.length > 0) {
+          input.value = selected;
+          updateApproveState();
+        }
+      } catch (e) {
+        /* user cancelled or the bridge errored -- keep the current path */
+      }
+    };
 
     function applyEmptyState() {
       var hasCards = !!inboxList.querySelector(".inbox-card");
@@ -236,6 +271,7 @@
       var html = await resp.text();
       inboxDetail.innerHTML = html;
       updateApproveState();
+      wireSharePathControls();
     }
 
     function setSelectedCard(id) {
@@ -457,6 +493,7 @@
     // detail, and pick the right empty/non-empty body class.
     applyEmptyState();
     updateApproveState();
+    wireSharePathControls();
   })();
 </script>
 {% endset %}
