@@ -149,7 +149,7 @@ def test_tui_ready_indicator_is_pi_v() -> None:
 
 
 def test_pi_agent_implements_send_enter_and_validate() -> None:
-    """PiCodingAgent fills in the abstract method by picking the best-effort strategy."""
+    """PiCodingAgent provides a concrete _send_enter_and_validate, satisfying the abstract method."""
     assert "_send_enter_and_validate" not in PiCodingAgent.__abstractmethods__
 
 
