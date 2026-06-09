@@ -1442,60 +1442,73 @@ function sleepInterruptible(ms) {
   });
 }
 
-// ---------- Local-mind shutdown on quit + landing Stop button ----------
+// ---------- Mind shutdown on quit + landing Stop button ----------
 
-const LOCAL_MINDS_HTTP_TIMEOUT_MS = 10000;
-const LOCAL_MIND_STOP_POLL_INTERVAL_MS = 1000;
-// Generous ceiling: a host stop bounces a container, which can take tens of
-// seconds; past this we surface a "couldn't stop" choice rather than hang quit.
-const LOCAL_MIND_STOP_DEADLINE_MS = 90000;
+// Timeout for the instant, in-memory liveness lookup (GET /api/minds/running).
+const MIND_HTTP_TIMEOUT_MS = 10000;
+// Timeout for the synchronous command endpoints (single/bulk host stop, state
+// container stop). These block until the underlying ``mngr``/docker command
+// finishes; the server's own per-command ceiling is ~120s, so allow margin
+// above it here so the server-side failure surfaces rather than a client abort.
+const MIND_COMMAND_TIMEOUT_MS = 150000;
 
-function delayMs(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// GET /api/local-minds/running -> array of {id, name}. Resolves [] on any
-// error (network, parse, no backend) so the quit flow never wedges on it.
-function getRunningLocalMinds() {
+// GET /api/minds/running -> { ok, running }. ``running`` is an array of
+// {id, name}; ``ok`` is false when the check itself failed (network, parse, no
+// backend) so the caller can distinguish "nothing running" from "couldn't tell"
+// instead of silently treating a failed check as an empty list.
+function getRunningMinds() {
   return new Promise((resolve) => {
     if (!backendBaseUrl) {
-      resolve([]);
+      console.warn('[mind-shutdown] no backend URL; cannot list running minds');
+      resolve({ ok: false, running: [] });
       return;
     }
     let req;
     try {
-      req = net.request({ url: backendBaseUrl + '/api/local-minds/running', method: 'GET', useSessionCookies: true });
-    } catch {
-      resolve([]);
+      req = net.request({ url: backendBaseUrl + '/api/minds/running', method: 'GET', useSessionCookies: true });
+    } catch (e) {
+      console.warn('[mind-shutdown] failed to construct running-minds request:', e);
+      resolve({ ok: false, running: [] });
       return;
     }
     let body = '';
     let settled = false;
+    let statusOk = false;
     const settle = (value) => { if (!settled) { settled = true; resolve(value); } };
-    const timer = setTimeout(() => { try { req.abort(); } catch { /* noop */ } settle([]); }, LOCAL_MINDS_HTTP_TIMEOUT_MS);
+    const timer = setTimeout(() => {
+      console.warn(`[mind-shutdown] running-minds request timed out after ${MIND_HTTP_TIMEOUT_MS}ms`);
+      try { req.abort(); } catch { /* noop */ }
+      settle({ ok: false, running: [] });
+    }, MIND_HTTP_TIMEOUT_MS);
     req.on('response', (response) => {
+      statusOk = response.statusCode < 400;
+      if (!statusOk) console.warn(`[mind-shutdown] running-minds returned HTTP ${response.statusCode}`);
       response.on('data', (chunk) => { body += chunk.toString(); });
       response.on('end', () => {
         clearTimeout(timer);
+        if (!statusOk) { settle({ ok: false, running: [] }); return; }
         try {
           const parsed = JSON.parse(body);
-          settle(Array.isArray(parsed.running) ? parsed.running : []);
-        } catch {
-          settle([]);
+          settle({ ok: true, running: Array.isArray(parsed.running) ? parsed.running : [] });
+        } catch (e) {
+          console.warn('[mind-shutdown] failed to parse running-minds response:', e);
+          settle({ ok: false, running: [] });
         }
       });
-      response.on('error', () => { clearTimeout(timer); settle([]); });
+      response.on('error', (err) => { console.warn('[mind-shutdown] running-minds response error:', err); clearTimeout(timer); settle({ ok: false, running: [] }); });
     });
-    req.on('error', () => { clearTimeout(timer); settle([]); });
+    req.on('error', (err) => { console.warn('[mind-shutdown] running-minds request failed:', err); clearTimeout(timer); settle({ ok: false, running: [] }); });
     req.end();
   });
 }
 
-// POST /api/agents/<id>/stop-host. Resolves true when the server accepts the
-// dispatch (<400), false otherwise. Mirrors postRestart's request handling.
-function postLocalMindStop(agentId) {
+// POST /api/agents/<id>/stop-host (synchronous). Resolves true when the server
+// reports the stop succeeded (<400), false otherwise. Used by the single-row
+// landing Stop relay.
+function postMindStop(agentId) {
   return new Promise((resolve) => {
     if (!agentId || !backendBaseUrl) {
+      console.warn('[mind-shutdown] missing agent id or backend URL; cannot stop mind');
       resolve(false);
       return;
     }
@@ -1506,102 +1519,182 @@ function postLocalMindStop(agentId) {
         method: 'POST',
         useSessionCookies: true,
       });
-    } catch {
+    } catch (e) {
+      console.warn('[mind-shutdown] failed to construct stop request:', e);
       resolve(false);
       return;
     }
     let settled = false;
-    let isAccepted = false;
-    const settle = () => { if (!settled) { settled = true; resolve(isAccepted); } };
-    const timer = setTimeout(() => { try { req.abort(); } catch { /* noop */ } settle(); }, LOCAL_MINDS_HTTP_TIMEOUT_MS);
+    let isOk = false;
+    const settle = () => { if (!settled) { settled = true; resolve(isOk); } };
+    const timer = setTimeout(() => {
+      console.warn(`[mind-shutdown] stop request for ${agentId} timed out after ${MIND_COMMAND_TIMEOUT_MS}ms`);
+      try { req.abort(); } catch { /* noop */ }
+      settle();
+    }, MIND_COMMAND_TIMEOUT_MS);
     req.on('response', (response) => {
-      isAccepted = response.statusCode < 400;
+      isOk = response.statusCode < 400;
+      if (!isOk) console.warn(`[mind-shutdown] stop for ${agentId} returned HTTP ${response.statusCode}`);
       response.on('data', () => {});
       response.on('end', () => { clearTimeout(timer); settle(); });
-      response.on('error', () => { clearTimeout(timer); settle(); });
+      response.on('error', (err) => { console.warn(`[mind-shutdown] stop response error for ${agentId}:`, err); clearTimeout(timer); settle(); });
     });
-    req.on('error', () => { clearTimeout(timer); settle(); });
+    req.on('error', (err) => { console.warn(`[mind-shutdown] stop request failed for ${agentId}:`, err); clearTimeout(timer); settle(); });
     req.end();
   });
 }
 
-// POST /api/local-minds/stop-state-container -- stops this env's mngr docker
-// "state container" (provider bookkeeping) so nothing minds-related is left
-// running after a full shutdown. Best-effort: resolves regardless of outcome.
+// POST /api/minds/stop-hosts?agent_id=...&agent_id=... (synchronous). Issues ONE
+// ``mngr stop <ids...> --stop-host`` server-side (mngr stops the hosts
+// concurrently). Resolves { ok, stillRunning }: ``stillRunning`` is the subset
+// of requested minds the server still sees running after the attempt; ``ok`` is
+// false when the request itself failed (so the caller treats it as "couldn't
+// stop" rather than "all stopped").
+function postStopMinds(agentIds) {
+  return new Promise((resolve) => {
+    if (!backendBaseUrl || !agentIds || agentIds.length === 0) {
+      console.warn('[mind-shutdown] no backend URL or no agent ids; cannot bulk-stop minds');
+      resolve({ ok: false, stillRunning: [] });
+      return;
+    }
+    const query = agentIds.map((id) => 'agent_id=' + encodeURIComponent(id)).join('&');
+    let req;
+    try {
+      req = net.request({ url: `${backendBaseUrl}/api/minds/stop-hosts?${query}`, method: 'POST', useSessionCookies: true });
+    } catch (e) {
+      console.warn('[mind-shutdown] failed to construct bulk-stop request:', e);
+      resolve({ ok: false, stillRunning: [] });
+      return;
+    }
+    let body = '';
+    let settled = false;
+    let statusOk = false;
+    const settle = (value) => { if (!settled) { settled = true; resolve(value); } };
+    const timer = setTimeout(() => {
+      console.warn(`[mind-shutdown] bulk-stop request timed out after ${MIND_COMMAND_TIMEOUT_MS}ms`);
+      try { req.abort(); } catch { /* noop */ }
+      settle({ ok: false, stillRunning: [] });
+    }, MIND_COMMAND_TIMEOUT_MS);
+    req.on('response', (response) => {
+      statusOk = response.statusCode < 400;
+      if (!statusOk) console.warn(`[mind-shutdown] bulk-stop returned HTTP ${response.statusCode}`);
+      response.on('data', (chunk) => { body += chunk.toString(); });
+      response.on('end', () => {
+        clearTimeout(timer);
+        if (!statusOk) { settle({ ok: false, stillRunning: [] }); return; }
+        try {
+          const parsed = JSON.parse(body);
+          settle({ ok: true, stillRunning: Array.isArray(parsed.still_running) ? parsed.still_running : [] });
+        } catch (e) {
+          console.warn('[mind-shutdown] failed to parse bulk-stop response:', e);
+          settle({ ok: false, stillRunning: [] });
+        }
+      });
+      response.on('error', (err) => { console.warn('[mind-shutdown] bulk-stop response error:', err); clearTimeout(timer); settle({ ok: false, stillRunning: [] }); });
+    });
+    req.on('error', (err) => { console.warn('[mind-shutdown] bulk-stop request failed:', err); clearTimeout(timer); settle({ ok: false, stillRunning: [] }); });
+    req.end();
+  });
+}
+
+// POST /api/minds/stop-state-container -- stops this env's mngr docker "state
+// container" (provider bookkeeping) so nothing minds-related is left running
+// after a full shutdown. Best-effort: resolves regardless of outcome, but logs.
 function postStopStateContainer() {
   return new Promise((resolve) => {
     if (!backendBaseUrl) {
+      console.warn('[mind-shutdown] no backend URL; cannot stop state container');
       resolve();
       return;
     }
     let req;
     try {
-      req = net.request({ url: backendBaseUrl + '/api/local-minds/stop-state-container', method: 'POST', useSessionCookies: true });
-    } catch {
+      req = net.request({ url: backendBaseUrl + '/api/minds/stop-state-container', method: 'POST', useSessionCookies: true });
+    } catch (e) {
+      console.warn('[mind-shutdown] failed to construct stop-state-container request:', e);
       resolve();
       return;
     }
     let settled = false;
     const settle = () => { if (!settled) { settled = true; resolve(); } };
-    const timer = setTimeout(() => { try { req.abort(); } catch { /* noop */ } settle(); }, LOCAL_MINDS_HTTP_TIMEOUT_MS);
+    const timer = setTimeout(() => {
+      console.warn(`[mind-shutdown] stop-state-container request timed out after ${MIND_COMMAND_TIMEOUT_MS}ms`);
+      try { req.abort(); } catch { /* noop */ }
+      settle();
+    }, MIND_COMMAND_TIMEOUT_MS);
     req.on('response', (response) => {
+      if (response.statusCode >= 400) console.warn(`[mind-shutdown] stop-state-container returned HTTP ${response.statusCode}`);
       response.on('data', () => {});
       response.on('end', () => { clearTimeout(timer); settle(); });
-      response.on('error', () => { clearTimeout(timer); settle(); });
+      response.on('error', (err) => { console.warn('[mind-shutdown] stop-state-container response error:', err); clearTimeout(timer); settle(); });
     });
-    req.on('error', () => { clearTimeout(timer); settle(); });
+    req.on('error', (err) => { console.warn('[mind-shutdown] stop-state-container request failed:', err); clearTimeout(timer); settle(); });
     req.end();
   });
 }
 
-// Dispatch a stop for every running local mind, then poll until they are all
-// down (or the deadline passes). Progress is shown in-page on the quitting
-// takeover screen (which the quit sequence has already flipped to) via
-// `status-update`. Returns true to proceed with the quit, false to cancel it.
-// On a failure to stop everything, offers Retry / Quit anyway / Cancel.
-async function stopAllLocalMindsThenDecide(running) {
+// Stop every running mind via one synchronous bulk-stop call (the server runs a
+// single ``mngr stop --stop-host`` over all of them), then decide what to do
+// about any that did not stop. Progress is shown in-page on the quitting
+// takeover screen (which the quit sequence has already flipped to). Returns true
+// to proceed with the quit, false to cancel it. On a failure to stop everything,
+// offers Retry / Quit anyway / Cancel.
+async function stopAllMindsThenDecide(running) {
   let remaining = running;
   while (true) {
     updateQuittingStatus(remaining.length === 1 ? 'Stopping 1 mind…' : `Stopping ${remaining.length} minds…`);
-    await Promise.all(remaining.map((mind) => postLocalMindStop(mind.id)));
-    const deadline = Date.now() + LOCAL_MIND_STOP_DEADLINE_MS;
-    let stillRunning = await getRunningLocalMinds();
-    while (stillRunning.length > 0 && Date.now() < deadline) {
-      await delayMs(LOCAL_MIND_STOP_POLL_INTERVAL_MS);
-      stillRunning = await getRunningLocalMinds();
-    }
-    if (stillRunning.length === 0) {
-      // Every workspace is down; also stop the mngr docker state container so no
+    const { ok, stillRunning } = await postStopMinds(remaining.map((mind) => mind.id));
+    // ``ok`` && empty stillRunning = the server confirms everything is down. A
+    // request-level failure (ok=false) is treated as "could not confirm", so we
+    // fall through to the recovery dialog rather than quit assuming success.
+    if (ok && stillRunning.length === 0) {
+      // Every mind is down; also stop the mngr docker state container so no
       // minds-related container is left running. Best-effort -- it preserves its
       // volume and restarts on next use.
       await postStopStateContainer();
       return true;
     }
-    const names = stillRunning.map((mind) => mind.name).join(', ');
+    const blocked = stillRunning.length > 0 ? stillRunning : remaining;
+    const names = blocked.map((mind) => mind.name).join(', ');
     const { response } = await dialog.showMessageBox({
       type: 'warning',
       buttons: ['Cancel quit', 'Quit anyway', 'Retry'],
       defaultId: 2,
       cancelId: 0,
-      message: stillRunning.length === 1 ? 'A mind could not be stopped' : 'Some minds could not be stopped',
+      message: blocked.length === 1 ? 'A mind could not be stopped' : 'Some minds could not be stopped',
       detail: `${names}\n\nRetry stopping them, quit anyway (they keep running and using resources), or cancel and stay open.`,
     });
     if (response === 0) return false;
     if (response === 1) return true;
-    remaining = stillRunning;
+    remaining = blocked;
   }
 }
 
-// On quit, ask whether to shut down any still-running local minds. This is the
-// FIRST native prompt and runs BEFORE any window is flipped to the quitting
-// page, so cancelling here leaves the app fully intact with no visual change.
+// On quit, ask whether to shut down any still-running minds. This is the FIRST
+// native prompt and runs BEFORE any window is flipped to the quitting page, so
+// cancelling here leaves the app fully intact with no visual change.
 // Returns a plan: `{ proceed, stop, running }`.
 //   proceed=false           -> user cancelled; stay open.
-//   proceed=true, stop=false -> quit now (no local minds, or "Leave running").
+//   proceed=true, stop=false -> quit now (no minds, or "Leave running").
 //   proceed=true, stop=true  -> quit and stop `running` after the flip.
-async function promptLocalMindShutdown() {
+async function promptMindShutdown() {
   if (!getBackendProcess() || !backendBaseUrl) return { proceed: true, stop: false, running: [] };
-  const running = await getRunningLocalMinds();
+  const { ok, running } = await getRunningMinds();
+  if (!ok) {
+    // The liveness check itself failed -- don't silently quit leaving minds
+    // running. Surface the uncertainty and let the user decide explicitly.
+    const { response } = await dialog.showMessageBox({
+      type: 'warning',
+      buttons: ['Cancel', 'Quit anyway'],
+      defaultId: 1,
+      cancelId: 0,
+      message: 'Could not check for running minds',
+      detail: 'Any local minds still running would keep using your computer\'s resources. '
+        + 'Quit anyway (they may keep running in the background), or cancel and stay open.',
+    });
+    if (response === 0) return { proceed: false, stop: false, running: [] };
+    return { proceed: true, stop: false, running: [] };
+  }
   if (running.length === 0) return { proceed: true, stop: false, running: [] };
   const names = running.map((mind) => mind.name).join(', ');
   const { response } = await dialog.showMessageBox({
@@ -2409,7 +2502,8 @@ ipcMain.on('confirm-stop-mind', async (event, agentId, name) => {
     ? await dialog.showMessageBox(parentWindow, options)
     : await dialog.showMessageBox(options);
   if (response !== 1) return;
-  await postLocalMindStop(agentId);
+  const ok = await postMindStop(agentId);
+  if (!ok) console.warn(`[mind-shutdown] single-row stop for ${agentId} did not succeed`);
 });
 
 ipcMain.on('window-minimize', (event) => {
@@ -2468,7 +2562,7 @@ async function runQuitSequence() {
   let plan = { proceed: true, stop: false, running: [] };
   try {
     if (!isHeadlessQuit) {
-      plan = await promptLocalMindShutdown();
+      plan = await promptMindShutdown();
       if (!plan.proceed) {
         // User cancelled before committing -- stay open, no visual change.
         isQuitSequenceRunning = false;
@@ -2493,7 +2587,7 @@ async function runQuitSequence() {
   if (plan.stop && plan.running.length > 0) {
     let shouldProceed = true;
     try {
-      shouldProceed = await stopAllLocalMindsThenDecide(plan.running);
+      shouldProceed = await stopAllMindsThenDecide(plan.running);
     } catch (err) {
       // A failure in the stop loop must not strand the user; quit anyway.
       console.warn('[lifecycle] stopping local minds failed, quitting anyway:', err);

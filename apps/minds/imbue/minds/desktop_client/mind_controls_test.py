@@ -1,8 +1,8 @@
-"""TestClient coverage for the local-mind Start/Stop endpoints, the quit-prompt
-running-minds lookup, the SSE payload helper, and the landing-page controls.
+"""TestClient coverage for the mind host Start/Stop endpoints, the quit-prompt
+running-minds lookup, the bulk stop-hosts endpoint, and the landing-page controls.
 
-Local-mind liveness is derived from the discovery snapshot's host state (folded
-into the resolver as ``host_state_by_host_id``) plus the resolver's optimistic
+Mind liveness is derived from the discovery snapshot's host state (folded into the
+resolver as ``host_state_by_host_id``) plus the resolver's optimistic
 ``set_host_state_override``; tests seed host state on the resolver rather than
 poking a separate tracker.
 """
@@ -14,14 +14,12 @@ from pathlib import Path
 
 from starlette.testclient import TestClient
 
-from imbue.minds.desktop_client.app import _local_mind_state_payload
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
-from imbue.minds.desktop_client.local_liveness import LocalMindState
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import make_discovered_provider
 from imbue.mngr.config.data_types import ProviderInstanceConfig
@@ -37,7 +35,7 @@ _HOST_A = HostId("host-" + "0" * 31 + "1")
 _HOST_B = HostId("host-" + "0" * 31 + "2")
 
 
-def _local_workspace_agent(agent_id: AgentId, host: HostId = _HOST_A) -> DiscoveredAgent:
+def _capable_workspace_agent(agent_id: AgentId, host: HostId = _HOST_A) -> DiscoveredAgent:
     return DiscoveredAgent(
         host_id=host,
         agent_id=agent_id,
@@ -68,7 +66,7 @@ def _docker_provider() -> DiscoveredProvider:
     )
 
 
-def _resolver_with_local_agents(host_state_by_agent: dict[AgentId, HostState | None]) -> MngrCliBackendResolver:
+def _resolver_with_capable_agents(host_state_by_agent: dict[AgentId, HostState | None]) -> MngrCliBackendResolver:
     """Build a resolver carrying one docker workspace per entry, each on its own host.
 
     Each agent's host gets the supplied ``HostState`` (or none, to model "discovery
@@ -85,7 +83,7 @@ def _resolver_with_local_agents(host_state_by_agent: dict[AgentId, HostState | N
     host_state_by_host_id: dict[str, HostState] = {}
     for index, (agent_id, host_state) in enumerate(host_state_by_agent.items()):
         host = hosts[index]
-        discovered.append(_local_workspace_agent(agent_id, host=host))
+        discovered.append(_capable_workspace_agent(agent_id, host=host))
         if host_state is not None:
             host_state_by_host_id[str(host)] = host_state
     resolver.update_agents(
@@ -98,17 +96,8 @@ def _resolver_with_local_agents(host_state_by_agent: dict[AgentId, HostState | N
     return resolver
 
 
-def _resolver_with_running_local_agent(agent_id: AgentId) -> MngrCliBackendResolver:
-    return _resolver_with_local_agents({agent_id: HostState.RUNNING})
-
-
-# -- SSE payload helper --
-
-
-def test_local_mind_state_payload_shape() -> None:
-    agent = AgentId.generate()
-    payload = _local_mind_state_payload(str(agent), LocalMindState.STOPPED)
-    assert payload == {"type": "local_mind_state", "agent_id": str(agent), "state": "STOPPED"}
+def _resolver_with_running_capable_agent(agent_id: AgentId) -> MngrCliBackendResolver:
+    return _resolver_with_capable_agents({agent_id: HostState.RUNNING})
 
 
 # -- endpoint auth + availability --
@@ -116,45 +105,61 @@ def test_local_mind_state_payload_shape() -> None:
 
 def test_stop_host_requires_authentication(tmp_path: Path) -> None:
     agent = AgentId.generate()
-    client, _ = _make_client(tmp_path, _resolver_with_running_local_agent(agent))
+    client, _ = _make_client(tmp_path, _resolver_with_running_capable_agent(agent))
     response = client.post(f"/api/agents/{agent}/stop-host")
     assert response.status_code == 403
 
 
 def test_start_host_requires_authentication(tmp_path: Path) -> None:
     agent = AgentId.generate()
-    client, _ = _make_client(tmp_path, _resolver_with_running_local_agent(agent))
+    client, _ = _make_client(tmp_path, _resolver_with_running_capable_agent(agent))
     response = client.post(f"/api/agents/{agent}/start-host")
     assert response.status_code == 403
 
 
 def test_stop_host_unavailable_without_concurrency_group(tmp_path: Path) -> None:
-    """Without a concurrency group (test factory), the action can't be dispatched -> 503."""
+    """Without a concurrency group (test factory), the action can't run -> 503."""
     agent = AgentId.generate()
-    client, auth_store = _make_client(tmp_path, _resolver_with_running_local_agent(agent))
+    client, auth_store = _make_client(tmp_path, _resolver_with_running_capable_agent(agent))
     _authenticate(client, auth_store)
     response = client.post(f"/api/agents/{agent}/stop-host")
     assert response.status_code == 503
 
 
-def test_running_local_minds_requires_authentication(tmp_path: Path) -> None:
-    client, _ = _make_client(tmp_path, MngrCliBackendResolver())
-    response = client.get("/api/local-minds/running")
+def test_stop_mind_hosts_requires_authentication(tmp_path: Path) -> None:
+    agent = AgentId.generate()
+    client, _ = _make_client(tmp_path, _resolver_with_running_capable_agent(agent))
+    response = client.post(f"/api/minds/stop-hosts?agent_id={agent}")
     assert response.status_code == 403
 
 
-def test_running_local_minds_empty_when_no_local_minds(tmp_path: Path) -> None:
-    """The quit-prompt lookup returns an empty list when discovery has no local minds."""
+def test_stop_mind_hosts_unavailable_without_concurrency_group(tmp_path: Path) -> None:
+    """The bulk stop runs ``mngr`` synchronously, so without a concurrency group it is 503."""
+    agent = AgentId.generate()
+    client, auth_store = _make_client(tmp_path, _resolver_with_running_capable_agent(agent))
+    _authenticate(client, auth_store)
+    response = client.post(f"/api/minds/stop-hosts?agent_id={agent}")
+    assert response.status_code == 503
+
+
+def test_running_minds_requires_authentication(tmp_path: Path) -> None:
+    client, _ = _make_client(tmp_path, MngrCliBackendResolver())
+    response = client.get("/api/minds/running")
+    assert response.status_code == 403
+
+
+def test_running_minds_empty_when_no_capable_minds(tmp_path: Path) -> None:
+    """The quit-prompt lookup returns an empty list when discovery has no capable minds."""
     client, auth_store = _make_client(tmp_path, MngrCliBackendResolver())
     _authenticate(client, auth_store)
-    response = client.get("/api/local-minds/running")
+    response = client.get("/api/minds/running")
     assert response.status_code == 200
     assert response.json() == {"running": []}
 
 
 def test_stop_state_container_requires_authentication(tmp_path: Path) -> None:
     client, _ = _make_client(tmp_path, MngrCliBackendResolver())
-    response = client.post("/api/local-minds/stop-state-container")
+    response = client.post("/api/minds/stop-state-container")
     assert response.status_code == 403
 
 
@@ -162,12 +167,12 @@ def test_stop_state_container_noop_without_concurrency_group(tmp_path: Path) -> 
     """Without a concurrency group (test factory) the state-container stop is a no-op."""
     client, auth_store = _make_client(tmp_path, MngrCliBackendResolver())
     _authenticate(client, auth_store)
-    response = client.post("/api/local-minds/stop-state-container")
+    response = client.post("/api/minds/stop-state-container")
     assert response.status_code == 200
     assert response.json() == {"stopped": False}
 
 
-def test_running_local_minds_reads_discovery_without_subprocess(tmp_path: Path) -> None:
+def test_running_minds_reads_discovery_without_subprocess(tmp_path: Path) -> None:
     """The quit-prompt lookup returns running minds straight from discovery host state.
 
     No ``root_concurrency_group`` is wired here, so if the endpoint tried to shell
@@ -176,11 +181,11 @@ def test_running_local_minds_reads_discovery_without_subprocess(tmp_path: Path) 
     """
     running_agent = AgentId.generate()
     stopped_agent = AgentId.generate()
-    resolver = _resolver_with_local_agents({running_agent: HostState.RUNNING, stopped_agent: HostState.STOPPED})
+    resolver = _resolver_with_capable_agents({running_agent: HostState.RUNNING, stopped_agent: HostState.STOPPED})
     client, auth_store = _make_client(tmp_path, resolver)
     _authenticate(client, auth_store)
 
-    response = client.get("/api/local-minds/running")
+    response = client.get("/api/minds/running")
 
     assert response.status_code == 200
     running = response.json()["running"]
@@ -188,15 +193,15 @@ def test_running_local_minds_reads_discovery_without_subprocess(tmp_path: Path) 
     assert [entry["id"] for entry in running] == [str(running_agent)]
 
 
-def test_running_local_minds_reflects_optimistic_override(tmp_path: Path) -> None:
+def test_running_minds_reflects_optimistic_override(tmp_path: Path) -> None:
     """A just-issued Stop override hides a still-RUNNING-in-discovery mind from the prompt."""
     agent = AgentId.generate()
-    resolver = _resolver_with_running_local_agent(agent)
+    resolver = _resolver_with_running_capable_agent(agent)
     resolver.set_host_state_override(_HOST_A, HostState.STOPPED)
     client, auth_store = _make_client(tmp_path, resolver)
     _authenticate(client, auth_store)
 
-    response = client.get("/api/local-minds/running")
+    response = client.get("/api/minds/running")
 
     assert response.status_code == 200
     assert response.json() == {"running": []}
@@ -217,9 +222,9 @@ def _button_display(html: str, button_class: str) -> str:
     return "none" if "display:none" in match.group(1) else ""
 
 
-def test_landing_page_stopped_local_mind_shows_only_start(tmp_path: Path) -> None:
+def test_landing_page_stopped_mind_shows_only_start(tmp_path: Path) -> None:
     agent = AgentId.generate()
-    resolver = _resolver_with_local_agents({agent: HostState.STOPPED})
+    resolver = _resolver_with_capable_agents({agent: HostState.STOPPED})
     client, auth_store = _make_client(tmp_path, resolver)
     _authenticate(client, auth_store)
 
@@ -231,9 +236,9 @@ def test_landing_page_stopped_local_mind_shows_only_start(tmp_path: Path) -> Non
     assert "Restart workspace" not in html
 
 
-def test_landing_page_running_local_mind_shows_only_stop(tmp_path: Path) -> None:
+def test_landing_page_running_mind_shows_only_stop(tmp_path: Path) -> None:
     agent = AgentId.generate()
-    resolver = _resolver_with_local_agents({agent: HostState.RUNNING})
+    resolver = _resolver_with_capable_agents({agent: HostState.RUNNING})
     client, auth_store = _make_client(tmp_path, resolver)
     _authenticate(client, auth_store)
 
@@ -243,11 +248,11 @@ def test_landing_page_running_local_mind_shows_only_stop(tmp_path: Path) -> None
     assert _button_display(html, "landing-start-btn") == "none"
 
 
-def test_landing_page_unknown_local_mind_shows_neither_control(tmp_path: Path) -> None:
+def test_landing_page_unknown_mind_shows_neither_control(tmp_path: Path) -> None:
     """Before discovery knows the container state, neither Start nor Stop is shown."""
     agent = AgentId.generate()
     # No host state in discovery yet -> classified UNKNOWN.
-    resolver = _resolver_with_local_agents({agent: None})
+    resolver = _resolver_with_capable_agents({agent: None})
     client, auth_store = _make_client(tmp_path, resolver)
     _authenticate(client, auth_store)
 

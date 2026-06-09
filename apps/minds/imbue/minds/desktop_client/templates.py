@@ -190,8 +190,8 @@ def render_landing_page(
     is_discovering: bool = False,
     agent_names: dict[str, str] | None = None,
     destroying_status_by_agent_id: dict[str, str] | None = None,
-    local_agent_ids: Sequence[AgentId] | None = None,
-    local_mind_state_by_agent_id: dict[str, str] | None = None,
+    shutdown_capable_agent_ids: Sequence[AgentId] | None = None,
+    mind_liveness_by_agent_id: dict[str, str] | None = None,
 ) -> str:
     """Render the landing page listing accessible workspaces.
 
@@ -218,7 +218,7 @@ def render_landing_page(
     envelope-stream consumer hasn't completed initial agent discovery yet.
     """
     agent_accents = {str(aid): workspace_accent(str(aid)) for aid in accessible_agent_ids}
-    local_agent_id_strings = [str(aid) for aid in (local_agent_ids or ())]
+    shutdown_capable_agent_id_strings = [str(aid) for aid in (shutdown_capable_agent_ids or ())]
     return CATALOG.render(
         "pages.Landing",
         agent_ids=accessible_agent_ids,
@@ -229,8 +229,8 @@ def render_landing_page(
         is_discovering=is_discovering,
         agent_names=agent_names or {},
         destroying_status_by_agent_id=destroying_status_by_agent_id or {},
-        local_agent_ids=local_agent_id_strings,
-        local_mind_state_by_agent_id=local_mind_state_by_agent_id or {},
+        shutdown_capable_agent_ids=shutdown_capable_agent_id_strings,
+        mind_liveness_by_agent_id=mind_liveness_by_agent_id or {},
     )
 
 

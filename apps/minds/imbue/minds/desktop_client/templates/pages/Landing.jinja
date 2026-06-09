@@ -1,4 +1,4 @@
-{#def agent_ids, agent_accents, mngr_forward_origin, telegram_enabled, telegram_status_by_agent_id, is_discovering, agent_names, destroying_status_by_agent_id, local_agent_ids, local_mind_state_by_agent_id #}
+{#def agent_ids, agent_accents, mngr_forward_origin, telegram_enabled, telegram_status_by_agent_id, is_discovering, agent_names, destroying_status_by_agent_id, shutdown_capable_agent_ids, mind_liveness_by_agent_id #}
 {#
   Landing page: list of accessible workspaces with per-row health, backup,
   and telegram status. Subscribes to the chrome SSE so the page reloads
@@ -13,10 +13,17 @@
 
     var healthStatusByAgent = {};
 
-    // Server-seeded local-mind container liveness. ``localMindStateByAgent`` maps
-    // agent id -> 'RUNNING' | 'STOPPED' | 'UNKNOWN'; only local (docker/lima)
-    // minds appear, and they are the only rows that get Start/Stop controls.
-    var localMindStateByAgent = {{ local_mind_state_by_agent_id | tojson }};
+    // Server-seeded mind container liveness. ``mindLivenessByAgent`` maps agent id
+    // -> 'RUNNING' | 'STOPPED' | 'UNKNOWN'; only shutdown-capable minds (those on a
+    // provider whose host minds can stop/start -- docker/lima today) appear, and
+    // they are the only rows that get Start/Stop controls.
+    var mindLivenessByAgent = {{ mind_liveness_by_agent_id | tojson }};
+    // While a Start/Stop the user issued is in flight, the row shows an optimistic
+    // transient ('STARTING'/'STOPPING'); this maps agent id -> the target state
+    // ('RUNNING'/'STOPPED') so an interim ``workspaces`` push (still carrying the
+    // pre-action liveness) does not clobber the transient back. Cleared once the
+    // authoritative state reaches the target or the action fails.
+    var pendingMindActionByAgent = {};
     var isElectronShell = navigator.userAgent.indexOf('Electron') !== -1;
 
     function getRow(agentId) {
@@ -28,7 +35,7 @@
       if (!row) return;
       // A stopped container has no server to be unhealthy; suppress the health
       // badge entirely so it doesn't compete with the "Stopped" state badge.
-      if (localMindStateByAgent[agentId] === 'STOPPED') {
+      if (mindLivenessByAgent[agentId] === 'STOPPED') {
         status = 'healthy';
       }
       var badge = row.querySelector('.landing-health-badge');
@@ -68,14 +75,15 @@
         + '/recovery?return_to=' + encodeURIComponent(ret) + '&intent=restart';
     };
 
-    // -- Local-mind Start / Stop controls --
+    // -- Mind Start / Stop controls --
 
-    // Apply a (possibly transient) liveness label to a local row: swap which of
-    // the Start / Stop buttons is shown and set the status badge. Transient
-    // 'STARTING' / 'STOPPING' are client-only optimistic labels set on click;
-    // the authoritative 'RUNNING' / 'STOPPED' / 'UNKNOWN' arrive over the SSE.
-    function applyLocalMindState(agentId, state) {
-      localMindStateByAgent[agentId] = state;
+    // Apply a (possibly transient) liveness label to a shutdown-capable row: swap
+    // which of the Start / Stop buttons is shown and set the status badge.
+    // Transient 'STARTING' / 'STOPPING' are client-only optimistic labels set on
+    // click; the authoritative 'RUNNING' / 'STOPPED' / 'UNKNOWN' arrive folded
+    // into the ``workspaces`` SSE payload.
+    function applyMindLiveness(agentId, state) {
+      mindLivenessByAgent[agentId] = state;
       var row = getRow(agentId);
       if (!row) return;
       var startBtn = row.querySelector('.landing-start-btn');
@@ -106,21 +114,42 @@
       applyRowHealth(agentId, healthStatusByAgent[agentId] || 'healthy');
     }
 
+    // Apply an authoritative liveness (from the ``workspaces`` SSE payload),
+    // honouring any in-flight optimistic action: while a Start/Stop is pending,
+    // an interim payload still carrying the pre-action state is ignored so it
+    // doesn't flicker the transient back; once the payload reaches the target
+    // state the pending guard clears and the real state shows.
+    function applyAuthoritativeMindLiveness(agentId, state) {
+      var pendingTarget = pendingMindActionByAgent[agentId];
+      if (pendingTarget) {
+        if (state !== pendingTarget) return;
+        delete pendingMindActionByAgent[agentId];
+      }
+      applyMindLiveness(agentId, state);
+    }
+
     window.landingStartClick = function (button) {
       var row = button.closest('[data-agent-id]');
       if (!row) return;
       var agentId = row.dataset.agentId;
-      applyLocalMindState(agentId, 'STARTING');
+      pendingMindActionByAgent[agentId] = 'RUNNING';
+      applyMindLiveness(agentId, 'STARTING');
+      // The endpoint is synchronous: it resolves only once the host has actually
+      // started (or failed), so a non-ok response is a real failure to revert.
       fetch('/api/agents/' + encodeURIComponent(agentId) + '/start-host', { method: 'POST' })
         .then(function (response) {
-          if (!response.ok) {
+          if (response.ok) {
+            applyAuthoritativeMindLiveness(agentId, 'RUNNING');
+          } else {
             console.error('Start for', agentId, 'returned HTTP', response.status);
-            applyLocalMindState(agentId, 'STOPPED');
+            delete pendingMindActionByAgent[agentId];
+            applyMindLiveness(agentId, 'STOPPED');
           }
         })
         .catch(function (err) {
           console.error('Start for', agentId, 'failed:', err);
-          applyLocalMindState(agentId, 'STOPPED');
+          delete pendingMindActionByAgent[agentId];
+          applyMindLiveness(agentId, 'STOPPED');
         });
     };
 
@@ -130,8 +159,10 @@
       var agentId = row.dataset.agentId;
       var name = row.dataset.mindName || agentId;
       // In the desktop shell, route through the relay so the main process can
-      // show a native confirmation dialog and issue the stop itself. In a plain
-      // browser there is no shell, so confirm in-page and stop via fetch.
+      // show a native confirmation dialog and issue the stop itself (no in-page
+      // optimistic flip -- the user may still cancel that dialog, and the result
+      // arrives over the SSE). In a plain browser there is no shell, so confirm
+      // in-page and stop via fetch with an optimistic transient.
       if (isElectronShell) {
         window.postMessage({ type: 'minds:confirm-stop-mind', agentId: agentId, name: name }, '*');
         return;
@@ -139,17 +170,22 @@
       var ok = window.confirm('Stop "' + name + '"? Its agents will stop and its services become inaccessible. '
         + 'Data is preserved and you can start it again.');
       if (!ok) return;
-      applyLocalMindState(agentId, 'STOPPING');
+      pendingMindActionByAgent[agentId] = 'STOPPED';
+      applyMindLiveness(agentId, 'STOPPING');
       fetch('/api/agents/' + encodeURIComponent(agentId) + '/stop-host', { method: 'POST' })
         .then(function (response) {
-          if (!response.ok) {
+          if (response.ok) {
+            applyAuthoritativeMindLiveness(agentId, 'STOPPED');
+          } else {
             console.error('Stop for', agentId, 'returned HTTP', response.status);
-            applyLocalMindState(agentId, 'RUNNING');
+            delete pendingMindActionByAgent[agentId];
+            applyMindLiveness(agentId, 'RUNNING');
           }
         })
         .catch(function (err) {
           console.error('Stop for', agentId, 'failed:', err);
-          applyLocalMindState(agentId, 'RUNNING');
+          delete pendingMindActionByAgent[agentId];
+          applyMindLiveness(agentId, 'RUNNING');
         });
     };
 
@@ -441,10 +477,6 @@
           applyRowHealth(aid, data.status);
           return;
         }
-        if (data.type === 'local_mind_state') {
-          applyLocalMindState(data.agent_id, data.state);
-          return;
-        }
         if (data.type === 'providers_state') {
           lastEventAt = data.last_event_at;
           lastFullSnapshotAt = data.last_full_snapshot_at;
@@ -467,7 +499,13 @@
         if (differs) {
           es.close();
           location.reload();
+          return;
         }
+        // Same set of rows: apply each shutdown-capable mind's liveness in place
+        // (it rides the workspace entry now, not a separate event).
+        data.workspaces.forEach(function (w) {
+          if (w.liveness) applyAuthoritativeMindLiveness(w.id, w.liveness);
+        });
       };
       es.onerror = function () {
         if (!es) return;
@@ -477,8 +515,8 @@
       };
     }
     // Reconcile each row with its server-seeded liveness before the SSE opens.
-    Object.keys(localMindStateByAgent).forEach(function (agentId) {
-      applyLocalMindState(agentId, localMindStateByAgent[agentId]);
+    Object.keys(mindLivenessByAgent).forEach(function (agentId) {
+      applyMindLiveness(agentId, mindLivenessByAgent[agentId]);
     });
     connect();
   })();
@@ -501,8 +539,8 @@
           {% set accent_style = "--workspace-accent: " ~ agent_accents.get(agent_id | string, "oklch(65% 0.15 230)") ~ ";" %}
           {% set goto_href = mngr_forward_origin ~ "/goto/" ~ agent_id ~ "/" %}
           {% set destroying_href = "/destroying/" ~ agent_id %}
-          {% set is_local_mind = (agent_id | string) in local_agent_ids %}
-          {% set mind_state = local_mind_state_by_agent_id.get(agent_id | string, "UNKNOWN") %}
+          {% set supports_shutdown = (agent_id | string) in shutdown_capable_agent_ids %}
+          {% set mind_state = mind_liveness_by_agent_id.get(agent_id | string, "UNKNOWN") %}
           {# Inline display (not a ``.hidden`` class) controls which control shows:
              the button base class is ``inline-flex`` and would win over ``.hidden``.
              JinjaX evaluates ``:``-prefixed attrs as Python, so precompute here. #}
@@ -536,9 +574,9 @@
               <Link href="#" class="landing-backup-download hidden cursor-pointer" extra="text-xs">download</Link>
               <span class="landing-mind-state-badge inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium" style="display:none"></span>
               <span class="landing-health-badge hidden inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium"></span>
-              {% if is_local_mind %}
-                {# Local (docker/lima) minds get container Start/Stop instead of
-                   the recovery-only Restart button; JS toggles which is shown.
+              {% if supports_shutdown %}
+                {# Shutdown-capable (docker/lima) minds get container Start/Stop
+                   instead of the recovery-only Restart button; JS toggles which is shown.
                    Visibility is driven by inline ``display`` (not a ``.hidden``
                    class) because the button base class is ``inline-flex``, which
                    would otherwise win and show both buttons. #}
