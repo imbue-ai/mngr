@@ -556,7 +556,7 @@ def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr
     """Install subagent-proxy hooks on Claude agents.
 
     Runs trylast so mngr_claude's provisioning (which writes the base
-    settings.local.json) has already completed. For agents we recognize
+    mngr-managed settings file) has already completed. For agents we recognize
     as our own spawned proxy-children, refuse to proceed if they inherit
     any Stop / SubagentStop hooks whose semantics differ between top-level
     and subagent contexts -- the user has to decide how those should apply.
