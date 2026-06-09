@@ -1606,7 +1606,7 @@ async function promptLocalMindShutdown() {
   const names = running.map((mind) => mind.name).join(', ');
   const { response } = await dialog.showMessageBox({
     type: 'question',
-    buttons: ['Cancel', 'Leave running', 'Shut down'],
+    buttons: ['Cancel', 'Leave running', 'Shut down all'],
     defaultId: 2,
     cancelId: 0,
     message: running.length === 1
@@ -2457,7 +2457,7 @@ let isHeadlessQuit = false;
 //      Cancelling here leaves the app fully intact -- no window has changed yet.
 //   2. Once the user has committed, flip every window to the quitting page so
 //      the teardown delay shows a clear "quitting" state instead of frozen UI.
-//   3. If they chose "Shut down", stop the local minds with progress rendered
+//   3. If they chose "Shut down all", stop the local minds with progress rendered
 //      on that page. Backing out there (its native "Cancel quit") restores the
 //      windows and leaves the app running.
 //   4. Tear the backend down and quit.

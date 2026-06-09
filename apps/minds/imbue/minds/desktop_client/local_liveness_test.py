@@ -1,16 +1,13 @@
-import json
 from datetime import datetime
 from datetime import timezone
 
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
-from imbue.minds.desktop_client.local_liveness import LocalMindLivenessTracker
 from imbue.minds.desktop_client.local_liveness import LocalMindState
-from imbue.minds.desktop_client.local_liveness import build_local_host_state_list_argv
-from imbue.minds.desktop_client.local_liveness import get_local_provider_names
+from imbue.minds.desktop_client.local_liveness import LocalMindStateProvider
+from imbue.minds.desktop_client.local_liveness import classify_host_state
 from imbue.minds.desktop_client.local_liveness import get_local_workspace_agent_ids
-from imbue.minds.desktop_client.local_liveness import parse_local_mind_states_from_list_json
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import make_discovered_provider
 from imbue.mngr.config.data_types import ProviderInstanceConfig
@@ -18,10 +15,12 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 
-_HOST = HostId("host-" + "0" * 31 + "1")
+_HOST_A = HostId("host-" + "0" * 31 + "1")
+_HOST_B = HostId("host-" + "0" * 31 + "2")
 
 
 def _provider(name: str, backend: str) -> DiscoveredProvider:
@@ -31,7 +30,7 @@ def _provider(name: str, backend: str) -> DiscoveredProvider:
     )
 
 
-def _workspace_agent(agent_id: AgentId, provider_name: str, host: HostId = _HOST) -> DiscoveredAgent:
+def _workspace_agent(agent_id: AgentId, provider_name: str, host: HostId = _HOST_A) -> DiscoveredAgent:
     return DiscoveredAgent(
         host_id=host,
         agent_id=agent_id,
@@ -41,80 +40,43 @@ def _workspace_agent(agent_id: AgentId, provider_name: str, host: HostId = _HOST
     )
 
 
-def _list_json(agent_states: dict[str, str]) -> str:
-    return json.dumps({"agents": [{"id": aid, "host": {"state": state}} for aid, state in agent_states.items()]})
-
-
-# -- host-state parsing / classification --
-
-
-def test_parse_local_mind_states_classifies_running_stopped_unknown() -> None:
-    running = AgentId.generate()
-    stopped = AgentId.generate()
-    crashed = AgentId.generate()
-    weird = AgentId.generate()
-    list_json = _list_json(
-        {
-            str(running): "RUNNING",
-            str(stopped): "STOPPED",
-            str(crashed): "CRASHED",
-            str(weird): "PAUSED",
-        }
+def _resolver_with_local_agent(
+    agent_id: AgentId,
+    host_state: HostState | None,
+    host: HostId = _HOST_A,
+) -> MngrCliBackendResolver:
+    """Build a resolver carrying one docker-backed workspace whose host has ``host_state``."""
+    resolver = MngrCliBackendResolver()
+    resolver.update_providers(
+        providers=(_provider("docker", "docker"),),
+        error_by_provider_name={},
+        last_full_snapshot_at=datetime.now(timezone.utc),
     )
-
-    states = parse_local_mind_states_from_list_json(list_json, (running, stopped, crashed, weird))
-
-    assert states[str(running)] == LocalMindState.RUNNING
-    assert states[str(stopped)] == LocalMindState.STOPPED
-    # CRASHED counts as offline -> STOPPED; an unrecognized state -> UNKNOWN.
-    assert states[str(crashed)] == LocalMindState.STOPPED
-    assert states[str(weird)] == LocalMindState.UNKNOWN
-
-
-def test_parse_local_mind_states_marks_missing_agents_unknown() -> None:
-    present = AgentId.generate()
-    absent = AgentId.generate()
-    list_json = _list_json({str(present): "RUNNING"})
-
-    states = parse_local_mind_states_from_list_json(list_json, (present, absent))
-
-    assert states[str(present)] == LocalMindState.RUNNING
-    # An agent whose host could not be enumerated is unknown, not assumed stopped.
-    assert states[str(absent)] == LocalMindState.UNKNOWN
+    host_state_by_host_id = {str(host): host_state} if host_state is not None else {}
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(agent_id,),
+            discovered_agents=(_workspace_agent(agent_id, "docker", host=host),),
+            host_state_by_host_id=host_state_by_host_id,
+        )
+    )
+    return resolver
 
 
-def test_parse_local_mind_states_handles_malformed_json() -> None:
-    agent = AgentId.generate()
-
-    states = parse_local_mind_states_from_list_json("not valid json", (agent,))
-
-    assert states[str(agent)] == LocalMindState.UNKNOWN
+# -- host-state classification --
 
 
-# -- argv building --
-
-
-def test_build_local_host_state_list_argv_scopes_to_providers_and_agents() -> None:
-    agent_a = AgentId.generate()
-    agent_b = AgentId.generate()
-
-    argv = build_local_host_state_list_argv("mngr", ("docker", "lima"), (agent_a, agent_b))
-
-    assert argv[:2] == ["mngr", "list"]
-    assert "json" in argv
-    # Scopes discovery fan-out to local providers only (never touches remote ones).
-    assert argv.count("--provider") == 2
-    assert "docker" in argv and "lima" in argv
-    # Includes only the workspaces we care about.
-    include_value = argv[argv.index("--include") + 1]
-    assert str(agent_a) in include_value
-    assert str(agent_b) in include_value
-    assert "--on-error" in argv
-
-
-def test_build_local_host_state_list_argv_omits_include_without_agents() -> None:
-    argv = build_local_host_state_list_argv("mngr", ("docker",), ())
-    assert "--include" not in argv
+def test_classify_host_state_maps_running_stopped_unknown() -> None:
+    assert classify_host_state(HostState.RUNNING) == LocalMindState.RUNNING
+    # Every "container exists but is down" state collapses to STOPPED.
+    assert classify_host_state(HostState.STOPPED) == LocalMindState.STOPPED
+    assert classify_host_state(HostState.STOPPING) == LocalMindState.STOPPED
+    assert classify_host_state(HostState.CRASHED) == LocalMindState.STOPPED
+    assert classify_host_state(HostState.FAILED) == LocalMindState.STOPPED
+    # Transient / unobserved states are UNKNOWN, not assumed stopped.
+    assert classify_host_state(HostState.STARTING) == LocalMindState.UNKNOWN
+    assert classify_host_state(HostState.PAUSED) == LocalMindState.UNKNOWN
+    assert classify_host_state(None) == LocalMindState.UNKNOWN
 
 
 # -- local classification from a resolver --
@@ -134,7 +96,7 @@ def test_get_local_workspace_agent_ids_keeps_only_local_backends() -> None:
             agent_ids=(local_agent, remote_agent),
             discovered_agents=(
                 _workspace_agent(local_agent, "docker"),
-                _workspace_agent(remote_agent, "modal", host=HostId("host-" + "0" * 31 + "2")),
+                _workspace_agent(remote_agent, "modal", host=_HOST_B),
             ),
         )
     )
@@ -144,76 +106,124 @@ def test_get_local_workspace_agent_ids_keeps_only_local_backends() -> None:
     assert local_ids == (local_agent,)
 
 
-def test_get_local_provider_names_returns_docker_and_lima_only() -> None:
-    resolver = MngrCliBackendResolver()
-    resolver.update_providers(
-        providers=(_provider("docker", "docker"), _provider("my-lima", "lima"), _provider("modal", "modal")),
-        error_by_provider_name={},
-        last_full_snapshot_at=datetime.now(timezone.utc),
-    )
-
-    names = set(get_local_provider_names(resolver))
-
-    assert names == {"docker", "my-lima"}
-
-
 def test_get_local_workspace_agent_ids_empty_for_non_mngr_resolver() -> None:
     resolver = StaticBackendResolver(url_by_agent_and_service={})
     assert get_local_workspace_agent_ids(resolver) == ()
 
 
-# -- tracker --
+# -- LocalMindStateProvider: discovery-derived state --
 
 
-def test_tracker_set_state_fires_on_change_only_on_change() -> None:
-    tracker = LocalMindLivenessTracker()
+def test_compute_reflects_discovery_host_state() -> None:
     agent = AgentId.generate()
-    changes: list[tuple[str, LocalMindState]] = []
-    tracker.add_on_change_callback(lambda aid, state: changes.append((str(aid), state)))
+    provider = LocalMindStateProvider()
 
-    tracker.set_state(agent, LocalMindState.RUNNING)
-    # A repeat of the same state must not re-fire on-change.
-    tracker.set_state(agent, LocalMindState.RUNNING)
-    tracker.set_state(agent, LocalMindState.STOPPED)
+    running = provider.compute_state_by_agent_id(_resolver_with_local_agent(agent, HostState.RUNNING))
+    assert running == {str(agent): LocalMindState.RUNNING}
 
-    assert changes == [(str(agent), LocalMindState.RUNNING), (str(agent), LocalMindState.STOPPED)]
-    assert tracker.get_state(agent) == LocalMindState.STOPPED
+    stopped = provider.compute_state_by_agent_id(_resolver_with_local_agent(agent, HostState.STOPPED))
+    assert stopped == {str(agent): LocalMindState.STOPPED}
 
 
-def test_tracker_get_state_defaults_unknown() -> None:
-    tracker = LocalMindLivenessTracker()
-    assert tracker.get_state(AgentId.generate()) == LocalMindState.UNKNOWN
-
-
-def test_tracker_apply_poll_results_diffs_and_drops_absent_agents() -> None:
-    tracker = LocalMindLivenessTracker()
-    a = AgentId.generate()
-    b = AgentId.generate()
-    changes: list[tuple[str, LocalMindState]] = []
-    tracker.add_on_change_callback(lambda aid, state: changes.append((str(aid), state)))
-
-    tracker.apply_poll_results({str(a): LocalMindState.RUNNING, str(b): LocalMindState.STOPPED})
-    assert set(changes) == {(str(a), LocalMindState.RUNNING), (str(b), LocalMindState.STOPPED)}
-
-    # Second poll: a unchanged (no event), b now running (event), and a dropped
-    # agent leaves the snapshot entirely.
-    changes.clear()
-    tracker.apply_poll_results({str(a): LocalMindState.RUNNING, str(b): LocalMindState.RUNNING})
-    assert changes == [(str(b), LocalMindState.RUNNING)]
-
-    # b absent from the next snapshot -> dropped from tracking (no event), so a
-    # fresh snapshot that omits it does not keep reporting it.
-    changes.clear()
-    tracker.apply_poll_results({str(a): LocalMindState.RUNNING})
-    assert tracker.snapshot_all() == {a: LocalMindState.RUNNING}
-
-
-def test_tracker_snapshot_all_returns_copy() -> None:
-    tracker = LocalMindLivenessTracker()
+def test_compute_unknown_when_host_state_absent() -> None:
+    """Before discovery has the host's state, the mind is UNKNOWN (not assumed stopped)."""
     agent = AgentId.generate()
-    tracker.set_state(agent, LocalMindState.RUNNING)
+    provider = LocalMindStateProvider()
+    states = provider.compute_state_by_agent_id(_resolver_with_local_agent(agent, None))
+    assert states == {str(agent): LocalMindState.UNKNOWN}
 
-    snapshot = tracker.snapshot_all()
-    snapshot[agent] = LocalMindState.STOPPED
 
-    assert tracker.get_state(agent) == LocalMindState.RUNNING
+def test_compute_excludes_remote_minds() -> None:
+    resolver = MngrCliBackendResolver()
+    local_agent = AgentId.generate()
+    remote_agent = AgentId.generate()
+    resolver.update_providers(
+        providers=(_provider("docker", "docker"), _provider("modal", "modal")),
+        error_by_provider_name={},
+        last_full_snapshot_at=datetime.now(timezone.utc),
+    )
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(local_agent, remote_agent),
+            discovered_agents=(
+                _workspace_agent(local_agent, "docker", host=_HOST_A),
+                _workspace_agent(remote_agent, "modal", host=_HOST_B),
+            ),
+            host_state_by_host_id={str(_HOST_A): HostState.RUNNING, str(_HOST_B): HostState.RUNNING},
+        )
+    )
+
+    states = LocalMindStateProvider().compute_state_by_agent_id(resolver)
+
+    # Only the local (docker) mind is computed; the remote one never appears.
+    assert states == {str(local_agent): LocalMindState.RUNNING}
+
+
+# -- LocalMindStateProvider: optimistic overrides --
+
+
+def test_override_wins_over_discovery_until_discovery_agrees() -> None:
+    agent = AgentId.generate()
+    provider = LocalMindStateProvider()
+    changes: list[None] = []
+    provider.add_on_change_callback(lambda: changes.append(None))
+
+    # Discovery still says RUNNING, but the user just stopped it: the override
+    # makes the UI read STOPPED at once, and on-change fires to wake the SSE.
+    provider.set_override(agent, LocalMindState.STOPPED)
+    assert len(changes) == 1
+    running_resolver = _resolver_with_local_agent(agent, HostState.RUNNING)
+    assert provider.compute_state_by_agent_id(running_resolver) == {str(agent): LocalMindState.STOPPED}
+
+    # Once discovery catches up (STOPPED), the override is confirmed and dropped.
+    stopped_resolver = _resolver_with_local_agent(agent, HostState.STOPPED)
+    assert provider.compute_state_by_agent_id(stopped_resolver) == {str(agent): LocalMindState.STOPPED}
+
+    # With the override gone, discovery is authoritative again: a later restart
+    # detected only by discovery is reflected without any override re-masking it.
+    assert provider.compute_state_by_agent_id(running_resolver) == {str(agent): LocalMindState.RUNNING}
+
+
+def test_clear_override_reverts_to_discovery() -> None:
+    agent = AgentId.generate()
+    provider = LocalMindStateProvider()
+    provider.set_override(agent, LocalMindState.STOPPED)
+
+    changes: list[None] = []
+    provider.add_on_change_callback(lambda: changes.append(None))
+    provider.clear_override(agent)
+    assert len(changes) == 1
+
+    running_resolver = _resolver_with_local_agent(agent, HostState.RUNNING)
+    assert provider.compute_state_by_agent_id(running_resolver) == {str(agent): LocalMindState.RUNNING}
+
+
+def test_clear_override_absent_is_noop() -> None:
+    agent = AgentId.generate()
+    provider = LocalMindStateProvider()
+    changes: list[None] = []
+    provider.add_on_change_callback(lambda: changes.append(None))
+    # No override set -> clearing fires nothing.
+    provider.clear_override(agent)
+    assert changes == []
+
+
+def test_override_pruned_when_mind_leaves_local_set() -> None:
+    """An override for an agent no longer present in discovery is dropped, not retained."""
+    agent = AgentId.generate()
+    provider = LocalMindStateProvider()
+    provider.set_override(agent, LocalMindState.STOPPED)
+
+    # The agent is gone from discovery entirely (e.g. destroyed): it is absent
+    # from the computed map, and the stale override must not linger.
+    empty_resolver = MngrCliBackendResolver()
+    empty_resolver.update_providers(
+        providers=(_provider("docker", "docker"),),
+        error_by_provider_name={},
+        last_full_snapshot_at=datetime.now(timezone.utc),
+    )
+    assert provider.compute_state_by_agent_id(empty_resolver) == {}
+
+    # If the same id reappears RUNNING, the pruned override does not resurrect.
+    running_resolver = _resolver_with_local_agent(agent, HostState.RUNNING)
+    assert provider.compute_state_by_agent_id(running_resolver) == {str(agent): LocalMindState.RUNNING}
