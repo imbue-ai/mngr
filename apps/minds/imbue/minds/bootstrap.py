@@ -646,7 +646,19 @@ def list_disabled_provider_names(*, root_name: str | None = None) -> list[str]:
     settings_path = _resolve_active_settings_path(root_name)
     if settings_path is None or not settings_path.exists():
         return []
-    parsed = tomllib.loads(settings_path.read_text())
+    # Like the other branches here, a read/parse failure degrades to "nothing
+    # disabled" rather than crashing this passive providers-panel enumeration on
+    # a corrupt settings.toml.
+    try:
+        raw_settings = settings_path.read_text()
+    except OSError as e:
+        logger.warning("Could not read mngr settings {} to list disabled providers: {}", settings_path, e)
+        return []
+    try:
+        parsed = tomllib.loads(raw_settings)
+    except tomllib.TOMLDecodeError as e:
+        logger.warning("Malformed mngr settings {} while listing disabled providers: {}", settings_path, e)
+        return []
     providers = parsed.get("providers")
     if not isinstance(providers, dict):
         return []
