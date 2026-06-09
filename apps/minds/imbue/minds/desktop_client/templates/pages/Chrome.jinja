@@ -80,6 +80,21 @@
     </div>
   </div>
 
+  {# White "mirror" sized exactly like the Electron contentView (left:4
+     / top:38 / right:4 / bottom:4 / radius:12 -- matches CONTENT_INSET
+     and CONTENT_CORNER_RADIUS in electron/main.js). Sits behind the
+     iframe in browser mode (the iframe covers it completely so it's
+     invisible there) and shows through in Electron mode whenever the
+     WebContentsView's compositor surface goes briefly transparent --
+     which Chromium does on cross-origin history navigation
+     (goBack/goForward between Home and a workspace), between the old
+     frame tearing down and the new frame's first paint. Without this
+     mirror the chromeView body's accent color would flash through.
+     Pointer-events:none so it never intercepts clicks. #}
+  <div id="content-bg-mirror"
+       class="fixed left-[4px] top-[38px] rounded-xl bg-white pointer-events-none"
+       style="width: calc(100% - 8px); height: calc(100% - 42px);"></div>
+
   <iframe id="content-frame"
           src="/"
           class="fixed left-[4px] top-[38px] border-0 rounded-xl bg-white"
