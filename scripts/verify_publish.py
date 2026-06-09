@@ -3,7 +3,8 @@
 Called from the publish workflow. In its default mode, verifies:
 1. Displays all package versions
 2. If --expected-mngr-version is given, checks mngr version matches (for tag/dispatch checks)
-3. The auto-discovered package graph matches actual pyproject.toml declarations
+3. The publish graph is closed: no publishable package depends at runtime on a
+   workspace package excluded from publication (which would be unresolvable on PyPI)
 4. All internal dependency pins are consistent
 
 With --list-package-dirs, instead prints `libs/<dir_name>` for each publishable
@@ -60,7 +61,8 @@ def main() -> None:
             sys.exit(1)
         print(f"\nmngr version matches expected: {mngr_version}")
 
-    # Verify the auto-discovered package graph matches actual pyproject.toml declarations
+    # Verify the publish graph is closed: no publishable package depends at runtime
+    # on a workspace package excluded from publication (unresolvable on PyPI).
     print("\n=== Package graph validation ===")
     validate_package_graph()
     print("Package graph is consistent.")
