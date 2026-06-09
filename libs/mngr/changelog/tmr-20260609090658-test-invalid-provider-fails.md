@@ -1,0 +1,1 @@
+Fixed the e2e test fixture so it no longer writes a duplicate `type = "claude"` key into the generated `settings.local.toml`. The duplicate caused a TOML parse error ("Cannot overwrite a value") that broke `test_invalid_provider_fails` (and any other e2e test that loaded the merged config), masking the real behavior under test.

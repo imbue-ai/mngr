@@ -253,6 +253,10 @@ def test_ensure_latchkey_gateway_running_starts_detached_gateway_on_outer_port_l
     assert f"LATCHKEY_GATEWAY_PORT={OUTER_PORT}" in command
     assert "LATCHKEY_GATEWAY_LISTEN_HOST=127.0.0.1" in command
     assert "LATCHKEY_DISABLE_COUNTING=1" in command
+    # Credential refresh is disabled so the VPS gateway never rotates the
+    # user's OAuth token: it runs on a synced copy and the desktop-side
+    # latchkey remains the single owner of credential refresh.
+    assert "LATCHKEY_DISABLE_CREDENTIALS_REFRESH=1" in command
     assert "LATCHKEY_ENCRYPTION_KEY=" in command
     assert "nohup latchkey gateway" in command
     # Idempotent via a PID file + kill -0 (not pgrep, which would self-match the

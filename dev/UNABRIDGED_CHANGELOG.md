@@ -6,6 +6,10 @@ For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
 ## 2026-06-08
 
+Fixed the `publish` workflow, which had been failing at the "Verify versions and pin consistency" step since `scripts/utils.py` started importing `UNPUBLISHED_PACKAGES` from `imbue.mngr`. A bare `uv run` only syncs the root project (which does not depend on `imbue-mngr`), so the import raised `ModuleNotFoundError: No module named 'imbue.mngr'`. The three `scripts/verify_publish.py` invocations now use `uv run --all-packages` so the workspace package is installed.
+
+## 2026-06-08
+
 Added the inbox-modal-refactor blueprint under ``blueprint/`` describing
 the consolidation of the requests panel into the same modal surface as
 the permission dialogs. The implementation lives under ``apps/minds/``.
