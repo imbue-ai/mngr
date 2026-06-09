@@ -209,6 +209,24 @@ def _drain_ssh_stderr_into(state: _SSHStderrState) -> None:
         logger.debug("stderr reader stopped: {}", exc)
 
 
+def _prepend_env_exports(command: str, env: Mapping[str, str] | None) -> str:
+    """Prefix a remote command with ``export KEY=VAL &&`` for each env var.
+
+    paramiko's ``exec_command(env=...)`` is unreliable across servers (sshd's
+    ``AcceptEnv`` usually rejects it), so we set env vars inside the command
+    instead. We use ``export KEY=VAL &&`` (mirroring pyinfra's non-streaming
+    path) rather than a bare ``KEY=VAL command`` prefix: a variable-assignment
+    prefix only applies to the single simple command it precedes, so it would
+    NOT survive a compound ``command`` containing ``&&`` / ``||`` / ``|`` (e.g.
+    ``install && depot build`` would lose the var before ``depot build``).
+    ``export`` sets it in the shell environment for the whole command.
+    """
+    if not env:
+        return command
+    exports = " ".join(f"export {shlex.quote(f'{k}={v}')} &&" for k, v in env.items())
+    return f"{exports} {command}"
+
+
 class OuterHost(OuterHostInterface):
     """A minimal, agent-less host backed by a pyinfra connector.
 
@@ -760,14 +778,9 @@ class OuterHost(OuterHostInterface):
         if client is None:
             raise HostConnectionError("No SSH client available for streaming")
 
-        # paramiko's exec_command env= is unreliable across servers (sshd's
-        # AcceptEnv usually rejects it), so we prepend env vars to the command
-        # instead. Same approach used elsewhere in mngr.
-        if env:
-            env_prefix = " ".join(f"{shlex.quote(k)}={shlex.quote(v)}" for k, v in env.items())
-            full_command = f"{env_prefix} {command}"
-        else:
-            full_command = command
+        # Set env vars via an ``export ... &&`` prefix so they survive compound
+        # commands (paramiko's exec_command env= is unreliable across servers).
+        full_command = _prepend_env_exports(command, env)
 
         try:
             stdin, stdout, stderr = client.exec_command(
