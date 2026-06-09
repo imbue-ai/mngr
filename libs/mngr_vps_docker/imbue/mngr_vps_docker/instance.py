@@ -2114,20 +2114,16 @@ class MinimalVpsDockerProvider(VpsDockerProvider):
     """
 
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
-        git_depth: int | None = None
+        # Composed from the shared helpers rather than hand-rolling the same
+        # git-depth / --vps-* migration handling: this is the same pattern
+        # ``parse_vps_build_args`` and the AWS provider use, just without any
+        # region / plan extraction (provisioning lives outside this provider).
+        args = list(build_args or ())
+        git_depth, args = extract_git_depth(args)
         docker_build_args: list[str] = []
-        if build_args:
-            for arg in build_args:
-                if arg.startswith("--git-depth="):
-                    git_depth = int(arg.split("=", 1)[1])
-                elif arg.startswith("--vps-"):
-                    raise MngrError(
-                        f"{arg.split('=', 1)[0]} is no longer supported. Build args are now "
-                        "per-provider (--aws-*, --vultr-*, --ovh-*); for the externally-managed "
-                        "VPS path only docker build args and --git-depth= are accepted."
-                    )
-                else:
-                    docker_build_args.append(arg)
+        for arg in args:
+            raise_if_vps_migration_arg(arg)
+            docker_build_args.append(arg)
         # ``region`` / ``plan`` are unused on the externally-managed path
         # (callers pass them as explicit kwargs to ``create_host_on_existing_vps``),
         # so the sentinels are harmless.
