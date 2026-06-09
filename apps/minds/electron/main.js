@@ -975,7 +975,11 @@ function toRelativeBackendUrl(url) {
 function saveSessionState() {
   try {
     const state = [];
-    for (const b of bundles) {
+    // Iterate in MRU order so entry 0 is the most-recently-focused window.
+    // The startup path applies entry 0's bounds to the loading window before
+    // the loading screen renders, so MRU ordering means the loading window
+    // appears at the user's last-active window's position.
+    for (const b of mruWindows) {
       if (b.window.isDestroyed()) continue;
       const url = b.preErrorUrl || b.currentContentUrl;
       const relative = toRelativeBackendUrl(url);
