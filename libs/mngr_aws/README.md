@@ -71,6 +71,7 @@ mngr create my-west-agent --provider aws-west
 mngr create my-agent --provider aws
 mngr create my-agent --provider aws -b --aws-instance-type=t3.medium -b --aws-region=us-west-2
 mngr create my-agent --provider aws -b --aws-ami=ami-0123abcd456    # per-host AMI override
+mngr create my-agent --provider aws -b --aws-spot                    # run on EC2 spot capacity
 mngr list
 mngr exec my-agent "echo hello"
 mngr stop my-agent
@@ -145,6 +146,7 @@ Tags are set in the `RunInstances` call via `TagSpecifications`, not via a separ
 - Instance shutdown behavior is set to `terminate` so a self-halted instance is garbage-collected automatically.
 - The security group (`mngr-aws` by default) is provisioned out-of-band via `mngr aws prepare` (one-time admin setup) and reused across hosts. `create_host` looks it up read-only and raises a clear "run `mngr aws prepare`" error if missing. It is not deleted on `destroy_host` — clean up manually when retiring a provider.
 - **No automatic snapshot-on-create**: unlike `mngr_modal`, where every sandbox is snapshotted at create time so a hard-killed host can be rehydrated, this provider does not snapshot EC2 instances automatically. `AwsVpsClient.create_snapshot` / `list_snapshots` / `delete_snapshot` are implemented; you can call them manually via `mngr snapshot`, or write a plugin that hooks `on_host_created` to do it for you.
+- **Spot capacity via `--aws-spot`**: opt-in (presence-only build arg). When set, the instance launches with `InstanceMarketOptions={"MarketType": "spot"}` and is billed at the spot rate. AWS may reclaim the instance with ~2 minutes' notice; mngr does not currently surface the spot-interruption signal, so the host is terminated cold from mngr's perspective (cloud-init's auto-shutdown safety net still fires correctly). Use for cheap experimental agents, not for long-running production-shaped workloads.
 
 ## Release tests and cost
 
@@ -170,7 +172,6 @@ Tagged `[future]` items are deferred but tracked so the user-facing surface in t
 
 - `[future]` `mngr aws ami` subcommand that builds and registers a Debian + Docker + deps-baked AMI. Bypasses the ~60-90s cloud-init bootstrap on every create.
 - `[future]` mngr-published public AMIs (so users skip the build step entirely). Requires us to commit to a publishing cadence.
-- `[future]` Spot instances via `InstanceMarketOptions={"MarketType": "spot"}`. Useful for cheap stateless workloads; complicated by AWS's 2-minute interruption notice not fitting long-lived mngr hosts.
 - `[future]` GPU AMI automation: the Debian 12 AMIs in `DEFAULT_AMI_BY_REGION` have no CUDA / NVIDIA drivers / nvidia-container-toolkit. Pairs naturally with `mngr aws ami` above.
 - `[future]` Optional EIP allocation for stable public addressing across stops/starts. ~$3.60/month per idle EIP.
 - `[future]` Auto SSM Parameter Store lookup for current Debian AMIs per region (so the pinned map in `config.py` doesn't drift).

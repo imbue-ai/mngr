@@ -24,6 +24,7 @@ from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vps_docker.instance import extract_git_depth
+from imbue.mngr_vps_docker.instance import extract_presence_flag
 from imbue.mngr_vps_docker.instance import extract_single_value_arg
 from imbue.mngr_vps_docker.instance import raise_if_unknown_provider_arg
 from imbue.mngr_vps_docker.instance import raise_if_vps_migration_arg
@@ -48,6 +49,18 @@ class ParsedAwsBuildOptions(ParsedVpsBuildOptions):
             "``AwsVpsClient.create_instance`` launches this AMI instead of the "
             "provider config's default. When unset, the client's configured "
             "default AMI applies."
+        ),
+    )
+    spot: bool = Field(
+        default=False,
+        description=(
+            "Per-host opt-in for EC2 spot capacity, from the presence-only "
+            "``--aws-spot`` build arg. When True, ``AwsVpsClient.create_instance`` "
+            "passes ``InstanceMarketOptions={'MarketType': 'spot'}`` to RunInstances "
+            "so the host is billed at the spot price. AWS may reclaim spot instances "
+            "with ~2 minutes' interruption notice; the host is destroyed, not "
+            "stopped, on reclaim. Opt-in only -- safe for ephemeral / experimental "
+            "agents, risky for long-lived ones."
         ),
     )
 
@@ -94,19 +107,28 @@ class AwsProvider(VpsDockerProvider):
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedAwsBuildOptions:
         """Parse AWS-prefixed build args.
 
-        Accepts ``--aws-region=``, ``--aws-instance-type=``, ``--aws-ami=``,
-        and the shared ``--git-depth=``. ``--aws-ami=<ami-id>`` is the per-host
-        AMI override; when omitted, the client's configured default AMI applies.
+        Accepts ``--aws-region=REGION``, ``--aws-instance-type=TYPE``,
+        ``--aws-ami=AMI-ID``, ``--aws-spot`` (presence-only), and the shared
+        ``--git-depth=N``. ``--aws-ami=`` is the per-host AMI override (falls
+        back to the provider config when omitted); ``--aws-spot`` opts the
+        host into EC2 spot capacity.
 
         Composed from the shared low-level helpers rather than the convenience
-        ``parse_vps_build_args`` because AWS has the extra ``--aws-ami=`` knob.
+        ``parse_vps_build_args`` because AWS has knobs beyond region + plan.
         """
         args = list(build_args or ())
         region, args = extract_single_value_arg(args, "--aws-region=")
         instance_type, args = extract_single_value_arg(args, "--aws-instance-type=")
         ami_override, args = extract_single_value_arg(args, "--aws-ami=")
+        spot, args = extract_presence_flag(args, "--aws-spot")
         git_depth, args = extract_git_depth(args)
-        valid_args = ("--aws-region=", "--aws-instance-type=", "--aws-ami=", "--git-depth=")
+        valid_args = (
+            "--aws-region=",
+            "--aws-instance-type=",
+            "--aws-ami=",
+            "--aws-spot",
+            "--git-depth=",
+        )
         docker_build_args: list[str] = []
         for arg in args:
             raise_if_vps_migration_arg(arg)
@@ -116,6 +138,7 @@ class AwsProvider(VpsDockerProvider):
             region=region or self.aws_config.default_region,
             plan=instance_type or self.aws_config.default_instance_type,
             ami_id_override=ami_override,
+            spot=spot,
             git_depth=git_depth,
             docker_build_args=tuple(docker_build_args),
         )
@@ -137,7 +160,7 @@ class AwsProvider(VpsDockerProvider):
         default AMI applies.
         """
         match parsed:
-            case ParsedAwsBuildOptions(ami_id_override=ami_id_override):
+            case ParsedAwsBuildOptions(ami_id_override=ami_id_override, spot=spot):
                 pass
             case _:
                 raise MngrError(
@@ -153,6 +176,7 @@ class AwsProvider(VpsDockerProvider):
             ssh_key_ids=ssh_key_ids,
             tags=tags,
             ami_id_override=ami_id_override,
+            spot=spot,
         )
 
     def _list_provider_vps_hostnames(self) -> list[str]:
@@ -198,6 +222,9 @@ class AwsProviderBackend(ProviderBackendInterface):
             "  --aws-ami=AMI-ID            Override the per-host AMI for this create only\n"
             "                              (default: provider config's default_ami_id /\n"
             "                              default_ami_by_region for the chosen region)\n"
+            "  --aws-spot                  Run on EC2 spot capacity (presence-only flag).\n"
+            "                              AWS may reclaim with ~2 min notice; the host is\n"
+            "                              terminated, not stopped, on reclaim. Opt-in only.\n"
             "  --git-depth=N               Shallow-clone build context to depth N before upload\n"
             "\n"
             "All other build args are passed to 'docker build' on the EC2 instance.\n"

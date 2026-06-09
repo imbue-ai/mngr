@@ -211,6 +211,9 @@ Provider: aws
     --aws-ami=AMI-ID            Override the per-host AMI for this create only
                                 (default: provider config's default_ami_id /
                                 default_ami_by_region for the chosen region)
+    --aws-spot                  Run on EC2 spot capacity (presence-only flag).
+                                AWS may reclaim with ~2 min notice; the host is
+                                terminated, not stopped, on reclaim. Opt-in only.
     --git-depth=N               Shallow-clone build context to depth N before upload
 
   All other build args are passed to 'docker build' on the EC2 instance.

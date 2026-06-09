@@ -24,6 +24,7 @@ from imbue.mngr_vps_docker.instance import MinimalVpsDockerProvider
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import _wait_for_cloud_init_marker
 from imbue.mngr_vps_docker.instance import build_vps_tags
+from imbue.mngr_vps_docker.instance import extract_presence_flag
 from imbue.mngr_vps_docker.instance import parse_vps_build_args
 
 _DEFAULT_REGION = "ewr"
@@ -155,6 +156,34 @@ def test_parse_build_args_aws_rejects_aws_plan() -> None:
             default_plan="t3.small",
             plan_arg_name="instance-type",
         )
+
+
+# =============================================================================
+# extract_presence_flag (composable helper for boolean opt-in flags)
+# =============================================================================
+
+
+def test_extract_presence_flag_returns_false_when_absent() -> None:
+    """Default behavior: no occurrence -> (False, args verbatim)."""
+    present, remaining = extract_presence_flag(["--file=Dockerfile", "."], "--aws-spot")
+    assert present is False
+    assert remaining == ["--file=Dockerfile", "."]
+
+
+def test_extract_presence_flag_returns_true_and_strips_when_present() -> None:
+    """Bare flag occurrence -> (True, args with flag removed)."""
+    present, remaining = extract_presence_flag(
+        ["--file=Dockerfile", "--aws-spot", "."],
+        "--aws-spot",
+    )
+    assert present is True
+    assert remaining == ["--file=Dockerfile", "."]
+
+
+def test_extract_presence_flag_rejects_value_bearing_form() -> None:
+    """``--aws-spot=anything`` -> error (clearer than silently accepting either form)."""
+    with pytest.raises(MngrError, match="presence-only flag"):
+        extract_presence_flag(["--aws-spot=true"], "--aws-spot")
 
 
 # =============================================================================

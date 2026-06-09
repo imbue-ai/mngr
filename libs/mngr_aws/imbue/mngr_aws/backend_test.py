@@ -126,6 +126,7 @@ def test_parse_build_args_extracts_all_aws_knobs_plus_docker_passthrough(
             "--aws-region=us-west-2",
             "--aws-instance-type=t3.medium",
             "--aws-ami=ami-deadbeef",
+            "--aws-spot",
             "--git-depth=1",
             "--file=Dockerfile",
             ".",
@@ -134,15 +135,30 @@ def test_parse_build_args_extracts_all_aws_knobs_plus_docker_passthrough(
     assert parsed.region == "us-west-2"
     assert parsed.plan == "t3.medium"
     assert parsed.ami_id_override == "ami-deadbeef"
+    assert parsed.spot is True
     assert parsed.git_depth == 1
     assert parsed.docker_build_args == ("--file=Dockerfile", ".")
+
+
+def test_parse_build_args_spot_defaults_false(temp_mngr_ctx: MngrContext) -> None:
+    """Without --aws-spot, the parsed object reports spot=False (default on-demand)."""
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
+    parsed = provider._parse_build_args(None)
+    assert parsed.spot is False
+
+
+def test_parse_build_args_rejects_aws_spot_with_value(temp_mngr_ctx: MngrContext) -> None:
+    """``--aws-spot`` is presence-only; passing a value (e.g. ``--aws-spot=true``) raises."""
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
+    with pytest.raises(MngrError, match="presence-only flag"):
+        provider._parse_build_args(["--aws-spot=true"])
 
 
 def test_parse_build_args_rejects_unknown_aws_flag(temp_mngr_ctx: MngrContext) -> None:
     """A typo / unknown --aws-* flag raises with the valid-args list, not silently forwarded."""
     provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
-    with pytest.raises(MngrError, match="Unknown aws build arg.*--aws-spot"):
-        provider._parse_build_args(["--aws-spot=true"])
+    with pytest.raises(MngrError, match="Unknown aws build arg.*--aws-bogus"):
+        provider._parse_build_args(["--aws-bogus=foo"])
 
 
 def test_parse_build_args_rejects_dropped_vps_prefix(temp_mngr_ctx: MngrContext) -> None:

@@ -202,6 +202,73 @@ def test_create_instance_uses_default_ami_when_override_none(stubbed_client: tup
     ) == VpsInstanceId("i-default")
 
 
+def test_create_instance_spot_sets_instance_market_options(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """``spot=True`` (from --aws-spot) makes RunInstances see InstanceMarketOptions={MarketType: spot}."""
+    client, stubber = stubbed_client
+    stubber.add_response(
+        "run_instances",
+        {"Instances": [{"InstanceId": "i-spot"}]},
+        expected_params={
+            "ImageId": "ami-test12345",
+            "InstanceType": "t3.small",
+            "MinCount": 1,
+            "MaxCount": 1,
+            "UserData": "test-user-data",
+            "BlockDeviceMappings": ANY,
+            "NetworkInterfaces": ANY,
+            "InstanceInitiatedShutdownBehavior": "terminate",
+            "MetadataOptions": ANY,
+            "TagSpecifications": ANY,
+            "InstanceMarketOptions": {"MarketType": "spot"},
+        },
+    )
+    assert client.create_instance(
+        label="mngr-test-aws-host",
+        region="us-east-1",
+        plan="t3.small",
+        user_data="test-user-data",
+        ssh_key_ids=[],
+        tags={},
+        spot=True,
+    ) == VpsInstanceId("i-spot")
+
+
+def test_create_instance_no_spot_omits_instance_market_options(
+    stubbed_client: tuple[AwsVpsClient, Stubber],
+) -> None:
+    """``spot=False`` (the default) must NOT emit InstanceMarketOptions; the Stubber asserts on shape.
+
+    The expected_params dict is the *full* set of kwargs sent to RunInstances. If
+    AwsVpsClient.create_instance ever started leaking ``InstanceMarketOptions`` into
+    the on-demand path, this stub would reject the call as a parameter mismatch.
+    """
+    client, stubber = stubbed_client
+    stubber.add_response(
+        "run_instances",
+        {"Instances": [{"InstanceId": "i-ondemand"}]},
+        expected_params={
+            "ImageId": "ami-test12345",
+            "InstanceType": "t3.small",
+            "MinCount": 1,
+            "MaxCount": 1,
+            "UserData": "test-user-data",
+            "BlockDeviceMappings": ANY,
+            "NetworkInterfaces": ANY,
+            "InstanceInitiatedShutdownBehavior": "terminate",
+            "MetadataOptions": ANY,
+            "TagSpecifications": ANY,
+        },
+    )
+    assert client.create_instance(
+        label="mngr-test-aws-host",
+        region="us-east-1",
+        plan="t3.small",
+        user_data="test-user-data",
+        ssh_key_ids=[],
+        tags={},
+    ) == VpsInstanceId("i-ondemand")
+
+
 def test_create_instance_no_instances_raises(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
     client, stubber = stubbed_client
     stubber.add_response("run_instances", {"Instances": []})

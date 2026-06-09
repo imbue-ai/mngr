@@ -155,6 +155,28 @@ def extract_git_depth(args: Sequence[str]) -> tuple[int | None, list[str]]:
     return (int(raw) if raw is not None else None), remaining
 
 
+def extract_presence_flag(args: Sequence[str], flag: str) -> tuple[bool, list[str]]:
+    """Pop a presence-only flag like ``--aws-spot`` from ``args``.
+
+    Returns ``(True, remaining)`` if any element of ``args`` equals ``flag``
+    exactly, else ``(False, args_as_list)``. The flag MUST be passed with no
+    value: ``--aws-spot=true`` or ``--aws-spot=``  raises because that shape
+    suggests the caller expected a value-bearing flag (likely a typo).
+
+    Composable building block for boolean opt-in knobs (e.g. ``--aws-spot``).
+    """
+    present = False
+    remaining: list[str] = []
+    for arg in args:
+        if arg == flag:
+            present = True
+        elif arg.startswith(f"{flag}="):
+            raise MngrError(f"{flag} is a presence-only flag; pass it as bare {flag!r} (no value). Got: {arg!r}")
+        else:
+            remaining.append(arg)
+    return present, remaining
+
+
 _VPS_MIGRATION_HINT: Final[str] = (
     "Build args are now per-provider: use --aws-region= / --aws-instance-type= / --aws-ami=, "
     "--vultr-region= / --vultr-plan=, or --ovh-datacenter= (alias --ovh-region=) / --ovh-plan= "

@@ -304,16 +304,22 @@ class AwsVpsClient(VpsClientInterface):
         ssh_key_ids: Sequence[str],
         tags: Mapping[str, str],
         ami_id_override: str | None = None,
+        spot: bool = False,
     ) -> VpsInstanceId:
         """Provision an EC2 instance.
 
         Uses ``ami_id_override`` when supplied (from ``--aws-ami=<ami-id>`` on
         ``mngr create``), otherwise the client's configured default
-        (``self.ami_id``). The kwarg is AWS-specific: it widens
-        ``AwsVpsClient.create_instance``'s signature beyond the shared
-        ``VpsClientInterface.create_instance`` contract, so providers reach it
-        through ``self.aws_client.create_instance(...)`` (via
-        ``AwsProvider._create_vps_instance``) rather than the abstract
+        (``self.ami_id``). When ``spot`` is True (from the presence-only
+        ``--aws-spot`` build arg), passes ``InstanceMarketOptions={'MarketType':
+        'spot'}`` to RunInstances so the host runs on EC2 spot capacity. AWS
+        may reclaim spot instances with ~2 minutes' interruption notice; the
+        host is terminated, not stopped, on reclaim. Opt-in only.
+
+        Both kwargs are AWS-specific: they widen ``AwsVpsClient.create_instance``'s
+        signature beyond the shared ``VpsClientInterface.create_instance`` contract,
+        so providers reach them through ``self.aws_client.create_instance(...)``
+        (via ``AwsProvider._create_vps_instance``) rather than the abstract
         interface.
         """
         if region != self.region:
@@ -391,6 +397,16 @@ class AwsVpsClient(VpsClientInterface):
             run_kwargs["KeyName"] = ssh_key_ids[0]
         if self.iam_instance_profile is not None:
             run_kwargs["IamInstanceProfile"] = {"Name": self.iam_instance_profile}
+        if spot:
+            # Default spot config: AWS sets max price to the on-demand price
+            # automatically; no need to specify SpotInstanceType or
+            # MaxPrice for the dev-host use case (any non-zero capacity is
+            # acceptable, and a higher max price just lengthens uptime when
+            # spot prices spike). InstanceInitiatedShutdownBehavior=terminate
+            # (always set above) interacts cleanly with spot's
+            # interruption-by-terminate semantics: the cloud-init auto-shutdown
+            # safety net still fires the same way.
+            run_kwargs["InstanceMarketOptions"] = {"MarketType": "spot"}
 
         with self._translate_aws_errors():
             result = self._ec2().run_instances(**run_kwargs)
