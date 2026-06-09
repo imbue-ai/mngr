@@ -24,6 +24,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.errors import AgentError
 from imbue.mngr.errors import AgentStartError
+from imbue.mngr.errors import CommandTimeoutError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostDataSchemaError
 from imbue.mngr.errors import InvalidActivityTypeError
@@ -1107,6 +1108,7 @@ def _make_stop_agents_test_host(
             cwd: Path | None = None,
             env: Any = None,
             timeout_seconds: float | None = None,
+            raise_on_timeout: bool = False,
         ) -> CommandResult:
             recorded_timeouts.append((command, timeout_seconds))
             return command_handler(command)
@@ -1132,10 +1134,9 @@ def test_stop_agents_bounds_every_command_with_a_timeout(
     Regression for an offload hang: a wedged ``tmux list-panes`` client (tmux
     occasionally fails to return under CI load) blocked the unbounded command in
     the stop path forever, stalling the whole test batch. Every step in the
-    stop/cleanup path is idempotent and best-effort, so each must carry a
-    timeout; a timed-out step simply yields no PIDs while the rest of cleanup
-    proceeds. This records the timeout passed to each command and asserts none
-    is unbounded.
+    stop/cleanup path must carry a timeout so a wedged command can't hang
+    cleanup. This records the timeout passed to each command and asserts none is
+    unbounded.
     """
     agent = make_test_agent_details("cleanup-timeout-agent")
     fake_pid = "12345"
@@ -1163,38 +1164,55 @@ def test_stop_agents_bounds_every_command_with_a_timeout(
     assert unbounded == [], f"stop_agents ran command(s) without a timeout: {unbounded}"
 
 
-@pytest.mark.allow_warnings(match=r"^Stop-path command timed out")
-def test_stop_agents_keeps_cleaning_up_when_a_command_times_out(
+def test_stop_agents_raises_on_command_timeout(
     local_provider: LocalProviderInstance,
 ) -> None:
-    """A timed-out stop-path command must not abort the rest of cleanup.
+    """A timed-out stop-path command must surface as a loud CommandTimeoutError.
 
-    The local runner reports a timeout as a failed CommandResult, but the
-    remote SSH layer raises ``socket.timeout`` (a ``TimeoutError``, which is not
-    classified as a transient SSH error and so is not retried). stop_agents must
-    treat either as "no output" and still reach ``tmux kill-session``, so a
-    single wedged ``tmux list-panes`` cannot leave the session un-torn-down. This
-    simulates the remote raise path on the wedged command.
+    A timeout is not silently swallowed: continuing past a wedged command has no
+    real value (the only teardown step, kill-session, would itself be wedged if
+    the tmux server is stuck), so stop_agents raises rather than report a false
+    success. This simulates execute_idempotent_command's behavior with
+    raise_on_timeout=True, where both backends' timeouts are normalized to
+    CommandTimeoutError. The wedged list-panes must abort before kill-session.
     """
     agent = make_test_agent_details("cleanup-timeout-agent")
 
     def handle(command: str) -> CommandResult:
-        # Mimic the remote SSH timeout (socket.timeout, a TimeoutError) on the
-        # wedged list-panes command; everything else succeeds.
         if "list-panes" in command:
-            raise TimeoutError("timed out")
+            raise CommandTimeoutError(f"Command timed out after 5.0s: {command}")
         stdout = "0" if "list-windows" in command else ""
         return CommandResult(stdout=stdout, stderr="", success=True)
 
     host, recorded = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle)
 
-    # Must not raise even though list-panes timed out mid-collection.
-    host.stop_agents([agent.id])
+    with pytest.raises(CommandTimeoutError):
+        host.stop_agents([agent.id])
 
     commands = [command for command, _ in recorded]
     assert any("list-panes" in command for command in commands)
-    # The timeout was swallowed and cleanup still reached the session teardown.
-    assert any("kill-session" in command for command in commands)
+    # Fail-fast: a wedged command aborts before the session teardown step.
+    assert not any("kill-session" in command for command in commands)
+
+
+def test_execute_idempotent_command_raises_command_timeout_error_on_local_timeout(
+    local_host: Host,
+) -> None:
+    """raise_on_timeout normalizes a local timeout into a loud CommandTimeoutError.
+
+    Exercises the real local backend: a command that outlives its timeout is
+    killed and, with raise_on_timeout=True, surfaces as CommandTimeoutError
+    (a MngrError) rather than the default failed CommandResult. The default
+    (raise_on_timeout=False) path is asserted too, to confirm existing callers
+    still see success=False on a timeout.
+    """
+    # Default: a local timeout is reported as a failed result, not raised.
+    result = local_host.execute_idempotent_command("sleep 10", timeout_seconds=1)
+    assert result.success is False
+
+    # Opt-in: the same timeout is raised loudly as CommandTimeoutError.
+    with pytest.raises(CommandTimeoutError):
+        local_host.execute_idempotent_command("sleep 10", timeout_seconds=1, raise_on_timeout=True)
 
 
 @pytest.mark.parametrize(

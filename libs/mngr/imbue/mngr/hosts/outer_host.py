@@ -376,8 +376,17 @@ class OuterHost(OuterHostInterface):
         _env: dict[str, str] | None,
         _chdir: str | None,
         _shell_executable: str,
+        _raise_on_timeout: bool = False,
     ) -> tuple[bool, CommandOutput]:
-        """Run a shell command on the local machine without going through pyinfra."""
+        """Run a shell command on the local machine without going through pyinfra.
+
+        When ``_raise_on_timeout`` is set, a timeout raises ``ProcessTimeoutError``
+        instead of being reported as an ordinary failed result. This mirrors the
+        remote SSH layer, which always surfaces a timeout as ``socket.timeout``,
+        so opt-in callers can treat a timeout as a hard failure uniformly across
+        backends. Left off by default because most callers want a timeout to look
+        like any other failed command (``success=False``).
+        """
         full_env: dict[str, str] | None = None
         if _env is not None:
             full_env = {**os.environ, **_env}
@@ -389,6 +398,10 @@ class OuterHost(OuterHostInterface):
             cwd=cwd_path,
             env=full_env,
         )
+        if _raise_on_timeout and finished.is_timed_out:
+            # check() inspects is_timed_out before the return code, so this raises
+            # ProcessTimeoutError (not a plain ProcessError) for the timeout case.
+            finished.check()
         success_codes: tuple[int, ...] = _success_exit_codes if _success_exit_codes else (0,)
         success = finished.returncode in success_codes
 

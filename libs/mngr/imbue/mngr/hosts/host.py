@@ -35,6 +35,7 @@ from tenacity import wait_chain
 from tenacity import wait_fixed
 
 from imbue.concurrency_group.errors import ProcessError
+from imbue.concurrency_group.errors import ProcessTimeoutError
 from imbue.concurrency_group.thread_utils import ObservableThread
 from imbue.imbue_common.logging import info_span
 from imbue.imbue_common.logging import log_span
@@ -49,6 +50,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import AgentStartError
+from imbue.mngr.errors import CommandTimeoutError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostDataSchemaError
 from imbue.mngr.errors import InvalidActivityTypeError
@@ -374,6 +376,8 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         _retries: int = 0,
         _retry_delay: int = 0,
         _retry_until: str | None = None,
+        # Timeout handling
+        _raise_on_timeout: bool = False,
     ) -> tuple[bool, CommandOutput]:
         """
         Execute a shell command on the host.
@@ -381,6 +385,11 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         This is an internal-only method, in case you need to do something fancy
 
         Prefer using execute_command() instead whenever possible.
+
+        When ``_raise_on_timeout`` is set, a local timeout raises
+        ``ProcessTimeoutError`` (the remote SSH path already raises
+        ``socket.timeout`` on its own), so opt-in callers see a timeout as a hard
+        failure on both backends rather than an ordinary failed result.
         """
         if self.is_local:
             # Bypass pyinfra's LocalConnector, which spawns local processes via
@@ -399,6 +408,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 _env=_env,
                 _chdir=_chdir,
                 _shell_executable=_shell_executable,
+                _raise_on_timeout=_raise_on_timeout,
             )
         pyinfra_kwargs: dict[str, Any] = {
             "_timeout": _timeout,
@@ -448,23 +458,41 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         cwd: Path | None = None,
         env: Mapping[str, str] | None = None,
         timeout_seconds: float | None = None,
+        raise_on_timeout: bool = False,
     ) -> CommandResult:
         """Execute a command and return the result.
 
         Note: the underlying _run_shell_command retries on transient SSH errors,
         so commands passed here are assumed to be idempotent.
+
+        By default a timeout is reported like any other failed command
+        (``success=False`` on local; the remote SSH layer's ``socket.timeout``
+        propagates as-is, preserving prior behavior). When ``raise_on_timeout``
+        is set, a timeout on either backend is normalized into a single loud
+        ``CommandTimeoutError`` (a ``MngrError``) instead -- for callers that must
+        not silently treat a wedged command as "no output".
         """
         logger.trace("Executing command on host {}: {}", self.id, command)
         logger.trace(
             "Resolved command parameters: user={}, cwd={}, env={}, timeout={}", user, cwd, env, timeout_seconds
         )
-        success, output = self._run_shell_command(
-            StringCommand(command),
-            _su_user=user,
-            _chdir=str(cwd) if cwd else None,
-            _env=dict(env) if env else None,
-            _timeout=int(timeout_seconds) if timeout_seconds else None,
-        )
+        try:
+            success, output = self._run_shell_command(
+                StringCommand(command),
+                _su_user=user,
+                _chdir=str(cwd) if cwd else None,
+                _env=dict(env) if env else None,
+                _timeout=int(timeout_seconds) if timeout_seconds else None,
+                _raise_on_timeout=raise_on_timeout,
+            )
+        except (ProcessTimeoutError, TimeoutError) as e:
+            # ProcessTimeoutError: local backend (only when raise_on_timeout).
+            # TimeoutError: remote SSH socket.timeout (raised regardless of the
+            # flag). Re-raise unchanged unless the caller opted into the loud,
+            # typed CommandTimeoutError.
+            if not raise_on_timeout:
+                raise
+            raise CommandTimeoutError(f"Command timed out after {timeout_seconds}s: {command}") from e
         return CommandResult(
             stdout=output.stdout,
             stderr=output.stderr,
@@ -2571,25 +2599,25 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         command: str,
         timeout_seconds: float = _STOP_AGENT_COMMAND_TIMEOUT_SECONDS,
     ) -> CommandResult:
-        """Run one shell step of the stop/cleanup path, bounded and degrading gracefully on timeout.
+        """Run one shell step of the stop/cleanup path, bounded and raising loudly on timeout.
 
-        Every step in the stop path is idempotent and best-effort, so a step
-        that fails to return in time must not abort the rest of cleanup. The two
-        execution backends report a timeout differently: the local runner kills
-        the process and returns a failed CommandResult (non-zero exit), but the
-        remote SSH layer raises ``socket.timeout`` (a ``TimeoutError``, which is
-        not classified as a transient SSH error and so is not retried). We catch
-        the latter and return the same failed result, so both paths behave
-        identically -- the caller treats it as "no output" and cleanup proceeds
-        (env-scan fallback, kill-session, ...) instead of stalling or aborting.
+        Every step is bounded so a wedged tmux/pgrep client can't hang cleanup
+        (the original bug). A timeout does not silently degrade: it raises
+        ``CommandTimeoutError`` (a ``MngrError``). The stop path can't usefully
+        continue past a wedged command -- the only step with real teardown value
+        is ``tmux kill-session``, and if the tmux server is wedged enough to hang
+        ``list-panes`` it will hang ``kill-session`` too -- so we surface the
+        failure rather than report a false success. ``cleanup.execute_cleanup``
+        records it in ``CleanupResult.errors`` and honors the caller's
+        ``ErrorBehavior``, and at the CLI it renders as a clean error.
+
+        Benign failures (a command that runs and exits non-zero, e.g. a
+        ``list-panes`` whose session is already gone) still return
+        ``success=False`` and are handled by the caller as before -- only a
+        genuine timeout raises (``raise_on_timeout`` normalizes the local and
+        remote backends, which report timeouts differently, into one error).
         """
-        try:
-            return self.execute_idempotent_command(command, timeout_seconds=timeout_seconds)
-        except TimeoutError:
-            logger.warning(
-                "Stop-path command timed out after {}s; treating as no output: {}", timeout_seconds, command
-            )
-            return CommandResult(stdout="", stderr="", success=False)
+        return self.execute_idempotent_command(command, timeout_seconds=timeout_seconds, raise_on_timeout=True)
 
     def _get_all_descendant_pids(self, parent_pid: str, visited: set[str] | None = None) -> list[str]:
         """Recursively get all descendant PIDs of a given parent PID.
