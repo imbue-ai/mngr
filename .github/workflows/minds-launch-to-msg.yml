@@ -515,6 +515,10 @@ jobs:
           # `template_ref=main` run silently exercises v0.2.35 instead.
           # The full SHA (not the branch name) keeps the run reproducible
           # if `template_ref` was a moving ref like `main`.
+          # MINDS_WORKSPACE_BRANCH is gated by MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1
+          # in templates._operator_workspace_default (an end-user `minds run` ignores
+          # a stray MINDS_WORKSPACE_* in the shell unless explicitly opted in).
+          MINDS_USE_LOCAL_WORKSPACE_DEFAULTS: "1"
           MINDS_WORKSPACE_BRANCH: ${{ steps.fct_sha.outputs.full_sha }}
         run: |
           # pipefail is REQUIRED: without it, the pipeline below exits
