@@ -249,20 +249,17 @@
     // update so the bar tracks the source of truth even when this renderer
     // wasn't the one that triggered the change.
     //
-    // Scope: ``setLastWorkspaceAgentId`` in main broadcasts to *every*
-    // chrome view across every window, so an update fired because *another*
-    // window opened a workspace (non-null) or because the last-opened
-    // workspace was deleted / the user signed out (null) must not clobber
-    // the accent of a window that is actively showing its own workspace.
-    // Gate on ``currentTitleAgentId === null`` (i.e. this window is on
-    // Home / sign-in / some non-workspace URL): the active-workspace-driven
-    // path (``onCurrentWorkspaceChanged``) is the source of truth for
-    // windows that have their own displayed workspace, so leave them
-    // alone. The ``current-workspace-changed: null`` branch above re-queries
-    // ``getLastWorkspaceAgentId`` once the window leaves its workspace, so
-    // we don't rely on cross-stream IPC ordering to deliver clears that
-    // arrived (over the chrome SSE event handler) before this window's
-    // own ``current-workspace-changed: null`` lands.
+    // Scope: ``updateBundleLastWorkspaceAgentId`` in main sends this event
+    // only to THIS window's chrome view, so it never carries another
+    // window's state. The gate on ``currentTitleAgentId`` exists for a
+    // different reason: when the displayed workspace is deleted or the
+    // user signs out, main fires this with ``null`` *before* the
+    // content view's redirect to ``/`` has had a chance to emit
+    // ``current-workspace-changed: null``. The gate keeps the accent
+    // visible across that brief window so the bar doesn't flash to the
+    // default zinc-900 before the proper ``current-workspace-changed:
+    // null`` branch above re-queries ``getLastWorkspaceAgentId`` and
+    // applies the (now-null) value cleanly.
     window.minds.onLastWorkspaceAgentIdChanged(function (agentId) {
       if (currentTitleAgentId) return;
       applyTitleAccent(agentId || null);
