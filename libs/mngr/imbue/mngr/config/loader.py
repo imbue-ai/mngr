@@ -591,6 +591,14 @@ def _coerce_nested_model_fields(
     None-for-unset merge semantics for unset fields are both unaffected. Nested
     entries are atomic (validated as a unit), which is why coercing them does not
     interfere with the layer merge. Returns a new dict; the input is not mutated.
+
+    Unlike ``_check_unknown_fields``, this does not take ``strict``/``silent``: a
+    malformed nested value is always fatal. Downgrading to warn-and-skip is not an
+    option here, because the only way to "skip" coercion is to leave the raw dict
+    in place -- which reintroduces the exact late ``AttributeError`` this function
+    exists to prevent. A clear ``ConfigParseError`` at parse time is strictly
+    better, and this path was already a hard crash before coercion existed, so
+    always raising is not a forward-compat regression.
     """
     result = dict(raw_config)
     for field_name, value in raw_config.items():
