@@ -1711,3 +1711,38 @@ def test_emit_human_output_empty_list_is_noop(capsys: pytest.CaptureFixture[str]
     _emit_human_output([], fields=["name", "state"])
     captured = capsys.readouterr()
     assert captured.out == ""
+
+
+def test_list_schema_json_lists_referenceable_fields(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """`mngr list --schema --format json` dumps the field catalog without touching agents."""
+    result = cli_runner.invoke(
+        list_command,
+        ["--schema", "--format", "json"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    output = json.loads(result.output)
+    rows_by_key = {row["key"]: row for row in output["schema"]}
+    # Live model fields (including a deeply nested one) and a computed field.
+    assert {"name", "host.resource.cpu.count"} <= set(rows_by_key)
+    assert rows_by_key["age"]["contexts"] == "filter, sort"
+    assert rows_by_key["name"]["contexts"] == "filter, sort, template"
+
+
+def test_list_schema_rejects_agent_selection_options(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """`--schema` is a static field dump; combining it with a filter is a UsageError."""
+    result = cli_runner.invoke(
+        list_command,
+        ["--schema", "--running"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code != 0
+    assert "--schema lists fields and cannot be combined with" in result.output
