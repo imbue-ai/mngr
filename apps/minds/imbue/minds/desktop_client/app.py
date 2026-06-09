@@ -1005,13 +1005,18 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
         if session_store_inst is not None:
             account_email = session_store_inst.get_account_email(account_id) or ""
 
-    # FIXME: the duplicate check below fires only on this JSON API path.
-    # The form path (``_handle_create_form_submit``) lacks it, and the
-    # auto-name branch (empty ``host_name``) skips it here. Both fail
-    # downstream as a deferred FAILED status mid-creation. Fix: uniquify
-    # the auto-name (e.g. ``assistant`` -> ``assistant-2``) and run the
-    # same duplicate check from the form handler so user-typed collisions
-    # surface inline.
+    # FIXME: two duplicate-name footguns this 409 doesn't cover:
+    # (1) API + empty ``host_name``: a second POST with the same
+    #     ``git_url`` auto-derives the same name via
+    #     ``extract_repo_name`` and fails as a deferred ``FAILED``
+    #     status mid-creation. Fix: derive + uniquify here, or
+    #     reject the duplicate inline.
+    # (2) Form + default ``"assistant"``: the form pre-fills with
+    #     ``_FALLBACK_HOST_NAME``, but ``_handle_create_form_submit``
+    #     never runs this check, so a second Create with the
+    #     untouched default also fails as ``FAILED``. Fix: uniquify
+    #     the default at render time, or mirror this 409 on the form
+    #     path.
     if host_name:
         backend_resolver = request.app.state.backend_resolver
         existing_names: set[str] = set()
