@@ -55,6 +55,30 @@ def test_list_fields_original_branch(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(120)
+def test_list_fields_original_branch_with_agent(e2e: E2eSession) -> None:
+    e2e.write_tutorial_block("""
+        # you can see the branch mngr created for each agent as part of the details in "mngr list" as well (field name: "initial_branch")
+        mngr list --fields "name,state,initial_branch"
+    """)
+    # The happy path: with an agent present, the initial_branch column must
+    # actually display the branch mngr created for it (mngr/{agent_name} by
+    # default), which is the behavior the tutorial line advertises.
+    _create_my_task(e2e, 100921)
+    result = e2e.run(
+        'mngr list --fields "name,state,initial_branch"',
+        comment="list with initial_branch field",
+        timeout=90.0,
+    )
+    expect(result).to_succeed()
+    # The agent row must appear with both its name and the branch mngr created.
+    expect(result.stdout).to_contain("my-task")
+    expect(result.stdout).to_contain("mngr/my-task")
+
+
+@pytest.mark.rsync
+@pytest.mark.release
+@pytest.mark.tmux
 def test_exec_git_status_short(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # check if the agent has uncommitted changes
@@ -80,6 +104,7 @@ def test_exec_git_status_short(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(60)
 def test_exec_git_log(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # see the agent's recent commits
@@ -216,6 +241,7 @@ def test_git_merge_agent_branch(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(120)
 def test_exec_git_push_then_merge(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # and if remote, force the agent to push, then fetch and merge:

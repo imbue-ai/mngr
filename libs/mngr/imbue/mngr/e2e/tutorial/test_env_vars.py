@@ -11,7 +11,6 @@ from imbue.skitwright.expect import expect
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 def test_create_with_env_vars(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # set environment variables for the agent at creation time
@@ -67,6 +66,34 @@ def test_create_with_env_file(e2e: E2eSession) -> None:
     expect(env_file_result.stdout).to_contain("FOO=bar")
 
 
+@pytest.mark.release
+def test_create_with_missing_env_file_is_rejected(e2e: E2eSession) -> None:
+    """Unhappy path for the same tutorial block: pointing ``--env-file`` at a
+    file that does not exist is rejected up front (the option is declared with
+    ``click.Path(exists=True)``), proving the flag genuinely resolves the path
+    rather than silently ignoring a missing file.
+    """
+    e2e.write_tutorial_block("""
+        # load environment variables from a file (recommended for sensitive values, eg, secrets/api keys/tokens/etc)
+        mngr create my-task --env-file .env.agent
+    """)
+    # Deliberately do NOT create .env.agent, so the path cannot resolve.
+    result = e2e.run(
+        "mngr create my-task --env-file .env.agent --type command --no-ensure-clean --no-connect -- sleep 100965",
+        comment="reject --env-file pointing at a nonexistent file",
+    )
+    expect(result).to_fail()
+    # The error must name the offending option and the missing path, not be a
+    # generic create failure.
+    expect(result.stderr).to_contain("--env-file")
+    expect(result.stderr).to_contain(".env.agent")
+    # The agent must not have been created when the env file is missing.
+    list_result = e2e.run("mngr list --provider local --format json", comment="confirm no agent was created")
+    expect(list_result).to_succeed()
+    agents = json.loads(list_result.stdout)["agents"]
+    assert not any(a["name"] == "my-task" for a in agents), f"Expected no 'my-task' agent, got: {agents}"
+
+
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
@@ -95,6 +122,44 @@ def test_create_with_pass_env(e2e: E2eSession) -> None:
     )
     expect(env_result).to_succeed()
     expect(env_result.stdout).to_contain("sk-ant-test")
+
+
+@pytest.mark.rsync
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.timeout(180)
+def test_create_with_pass_env_skips_unset_var(e2e: E2eSession) -> None:
+    """Unhappy path for the same tutorial block: ``--pass-env`` forwards a
+    variable *from the current shell*, so naming a variable that is not set in
+    the shell must not break ``create`` -- it is simply skipped and ends up
+    absent from the agent's environment (see ``resolve_env_vars``).
+    """
+    e2e.write_tutorial_block("""
+        # forward an environment variable from your current shell
+        export ANTHROPIC_API_KEY=sk-ant-...
+        mngr create my-task --pass-env ANTHROPIC_API_KEY
+    """)
+    # Explicitly unset the variable in the shell so the outcome does not depend
+    # on the test runner's ambient environment, then forward it anyway.
+    expect(
+        e2e.run(
+            "unset MNGR_E2E_DEFINITELY_UNSET"
+            " && mngr create my-task --pass-env MNGR_E2E_DEFINITELY_UNSET --type command --no-ensure-clean --no-connect -- sleep 100965",
+            comment="forward a variable that is not set in the current shell",
+        )
+    ).to_succeed()
+
+    # The agent must not have the variable: `printenv` exits non-zero for an
+    # unset name, so the branch resolves to ABSENT. This proves --pass-env
+    # silently skips unset variables rather than forwarding an empty value.
+    env_result = e2e.run(
+        "mngr exec my-task 'if printenv MNGR_E2E_DEFINITELY_UNSET; then echo PRESENT; else echo ABSENT; fi'",
+        comment="confirm the unset variable was not forwarded into the agent",
+        timeout=120.0,
+    )
+    expect(env_result).to_succeed()
+    expect(env_result.stdout).to_contain("ABSENT")
+    expect(env_result.stdout).not_to_contain("PRESENT")
 
 
 @pytest.mark.release
@@ -208,4 +273,8 @@ def test_control_mngr_via_env_rejects_invalid_value(e2e: E2eSession) -> None:
     # The failure must come from provider resolution (naming the bad value we
     # supplied via the env var), not from the narrowing guard we opted out of.
     expect(result.stderr).not_to_contain("Settings narrowing detected")
+    # Assert on the provider-backend rejection specifically (and that it names
+    # the bad value), so this proves the env var flowed into provider selection
+    # rather than merely that some error mentioning "nonexistent" occurred.
+    expect(result.stderr).to_contain("Unknown provider backend")
     expect(result.stderr).to_contain("nonexistent")
