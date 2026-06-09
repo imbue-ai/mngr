@@ -14,6 +14,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from imbue.mngr.utils.pydantic_utils import unwrap_optional
+
 
 def render_annotation(annotation: Any) -> str:
     """Render a type annotation as a short, user-facing string.
@@ -57,25 +59,20 @@ def _resolve_nested_model(
     """Return the nested ``BaseModel`` to recurse into for ``annotation``, or None.
 
     A bare ``BaseModel`` subclass always qualifies. ``X | None`` qualifies only
-    when ``recurse_optional`` is set (and resolves to the single non-None
-    member). ``list[Model]`` / ``tuple[Model, ...]`` qualify only when
-    ``recurse_sequence`` is set. Anything else (dicts, scalars, unions of
-    multiple real types) returns None so the field is emitted as a leaf.
+    when ``recurse_optional`` is set (it is unwrapped to ``X`` via the shared
+    ``unwrap_optional``, which -- per the repo's UP007 rule -- handles the
+    PEP 604 form the codebase uses). ``list[Model]`` / ``tuple[Model, ...]``
+    qualify only when ``recurse_sequence`` is set. Anything else (dicts, scalars,
+    multi-arm unions) returns None so the field is emitted as a leaf.
     """
+    if recurse_optional:
+        annotation = unwrap_optional(annotation)
+
     if isinstance(annotation, type) and issubclass(annotation, BaseModel):
         return annotation
 
-    origin = typing.get_origin(annotation)
-    args = typing.get_args(annotation)
-
-    if recurse_optional and (origin is typing.Union or origin is types.UnionType):
-        non_none = [arg for arg in args if arg is not type(None)]
-        if len(non_none) == 1:
-            return _resolve_nested_model(non_none[0], recurse_optional, recurse_sequence)
-        return None
-
-    if recurse_sequence and origin in (list, tuple, set, frozenset):
-        element_args = [arg for arg in args if arg is not Ellipsis]
+    if recurse_sequence and typing.get_origin(annotation) in (list, tuple, set, frozenset):
+        element_args = [arg for arg in typing.get_args(annotation) if arg is not Ellipsis]
         if len(element_args) == 1:
             return _resolve_nested_model(element_args[0], recurse_optional, recurse_sequence)
 

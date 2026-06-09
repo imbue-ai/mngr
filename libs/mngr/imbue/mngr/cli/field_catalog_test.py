@@ -4,6 +4,7 @@ from pathlib import Path
 
 from imbue.mngr.api.list import agent_details_to_cel_context
 from imbue.mngr.cli.field_catalog import FieldContext
+from imbue.mngr.cli.field_catalog import FieldSection
 from imbue.mngr.cli.field_catalog import _CEL_COMPUTED_KEYS
 from imbue.mngr.cli.field_catalog import build_list_field_catalog
 from imbue.mngr.cli.field_catalog import catalog_rows_as_dicts
@@ -98,6 +99,19 @@ def test_catalog_covers_every_field_alias() -> None:
     without surfacing it in the field catalog / help.
     """
     assert set(_FIELD_ALIASES) <= _catalog_keys()
+
+
+def test_no_orphan_computed_or_alias_rows() -> None:
+    """Every row in the "Computed and alias fields" section is backed by reality.
+
+    Each such row must be either a live-computed key (``_CEL_COMPUTED_KEYS``) or a
+    real alias (``_FIELD_ALIASES``). This is the reverse of the two pins above and
+    catches a row left behind in the catalog after its source is removed.
+    """
+    backed = set(_CEL_COMPUTED_KEYS) | set(_FIELD_ALIASES)
+    computed_rows = [row for row in build_list_field_catalog() if row.section == FieldSection.COMPUTED]
+    orphans = [row.key for row in computed_rows if row.key not in backed]
+    assert not orphans, f"catalog has computed/alias rows not backed by the computation or alias table: {orphans}"
 
 
 def test_rows_as_dicts_collapse_contexts_to_string() -> None:

@@ -63,6 +63,11 @@ def _walk_dict_paths(model: type[BaseModel], prefix: tuple[str, ...] = ()) -> li
 
     Used to compute `_AGENT_SCHEMALESS_PATHS` from the AgentDetails type tree
     at module load time -- see the rationale on that constant.
+
+    This is intentionally separate from `cli.model_schema.walk_model_fields`
+    (which enumerates *all* fields for the `--schema` view): this walk yields
+    only dict-typed leaf paths as tuples and has no use for non-dict leaves, so
+    expressing it on the general walker would be more indirect, not less.
     """
     paths: list[tuple[str, ...]] = []
     for name, field in model.model_fields.items():
