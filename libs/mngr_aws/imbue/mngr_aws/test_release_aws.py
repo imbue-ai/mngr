@@ -81,7 +81,11 @@ def aws_test_settings_dir(tmp_path: Path) -> Iterator[Path]:
     written directly into ``tmp_path``.
     """
     (tmp_path / "settings.toml").write_text(
-        "[providers.aws]\n"
+        # Opt this config past the pytest guard: the ``mngr create`` subprocess
+        # inherits ``PYTEST_CURRENT_TEST`` and refuses to load any config that
+        # does not set this. Top-level key, so it must precede the first table.
+        "is_allowed_in_pytest = true\n"
+        "\n[providers.aws]\n"
         'backend = "aws"\n'
         # Auto-terminate via cloud-init if pytest is killed before the
         # per-test cleanup runs (combined with InstanceInitiatedShutdownBehavior=terminate).
