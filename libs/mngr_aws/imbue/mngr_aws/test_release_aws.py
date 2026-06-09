@@ -298,6 +298,38 @@ def test_api_client_list_snapshots_does_not_error(aws_release_client: AwsVpsClie
     assert isinstance(snapshots, list)
 
 
+def _latest_debian_12_amd64_ami_id(region: str) -> str | None:
+    """Return the latest published Debian 12 amd64 AMI ID in ``region``, or ``None`` on error.
+
+    Queries the canonical Debian publisher account (owner id 136693071363)
+    and picks the newest ``debian-12-amd64-*`` image by creation date. Used
+    to surface a copy-pasteable replacement when ``DEFAULT_AMI_BY_REGION``
+    has gone stale; failures here (no creds, no matching images, etc.) are
+    suppressed because the lookup is best-effort hint generation -- the
+    primary assertion has already detected the staleness.
+    """
+    try:
+        response = (
+            boto3.Session(region_name=region)
+            .client("ec2")
+            .describe_images(
+                Owners=["136693071363"],
+                Filters=[
+                    {"Name": "name", "Values": ["debian-12-amd64-*"]},
+                    {"Name": "architecture", "Values": ["x86_64"]},
+                    {"Name": "state", "Values": ["available"]},
+                ],
+            )
+        )
+    except ClientError:
+        return None
+    images = response.get("Images", [])
+    if not images:
+        return None
+    latest = max(images, key=lambda img: img.get("CreationDate", ""))
+    return latest.get("ImageId") or None
+
+
 def test_default_amis_describe_successfully() -> None:
     """Every entry in DEFAULT_AMI_BY_REGION must still resolve via DescribeImages.
 
@@ -308,28 +340,52 @@ def test_default_amis_describe_successfully() -> None:
 
     Collects errors across every region rather than aborting on the first
     failure, so a sweep produces a complete list of stale / inaccessible
-    entries in one run.
+    entries in one run. When any failure is detected, the test additionally
+    queries the canonical Debian publisher and emits a copy-pasteable
+    replacement dict so the fix is mechanical.
     """
     failures: list[str] = []
+    suggestions: dict[str, str] = {}
     for region, ami_id in DEFAULT_AMI_BY_REGION.items():
         ec2 = boto3.Session(region_name=region).client("ec2")
+        is_stale = False
         try:
             response = ec2.describe_images(ImageIds=[ami_id])
         except ClientError as e:
             # InvalidAMIID.NotFound -> deprecated; UnauthorizedOperation /
             # AuthFailure -> the cred set lacks access to this region.
             failures.append(f"{region}: AMI {ami_id} {e.response.get('Error', {}).get('Code', 'Unknown')}: {e}")
-            continue
-        images = response.get("Images", [])
-        if not images:
-            failures.append(f"{region}: AMI {ami_id} not found")
-            continue
-        image = images[0]
-        state = image.get("State", "")
-        if state != "available":
-            failures.append(f"{region}: AMI {ami_id} state={state!r} (expected 'available')")
-    assert not failures, (
-        "DEFAULT_AMI_BY_REGION has stale or inaccessible entries:\n  " + "\n  ".join(failures) + "\n"
-        "Update the constant in libs/mngr_aws/imbue/mngr_aws/config.py with current "
-        "Debian 12 amd64 AMI IDs from https://wiki.debian.org/Cloud/AmazonEC2Image."
-    )
+            is_stale = True
+        else:
+            images = response.get("Images", [])
+            if not images:
+                failures.append(f"{region}: AMI {ami_id} not found")
+                is_stale = True
+            else:
+                image = images[0]
+                state = image.get("State", "")
+                if state != "available":
+                    failures.append(f"{region}: AMI {ami_id} state={state!r} (expected 'available')")
+                    is_stale = True
+        if is_stale:
+            latest = _latest_debian_12_amd64_ami_id(region)
+            if latest is not None:
+                suggestions[region] = latest
+
+    if not failures:
+        return
+    message = "DEFAULT_AMI_BY_REGION has stale or inaccessible entries:\n  " + "\n  ".join(failures)
+    if suggestions:
+        message += "\n\nSuggested replacement (verified via DescribeImages, owner 136693071363):\n"
+        message += "DEFAULT_AMI_BY_REGION = {\n"
+        for region in DEFAULT_AMI_BY_REGION:
+            ami_id = suggestions.get(region, DEFAULT_AMI_BY_REGION[region])
+            message += f'    "{region}": "{ami_id}",\n'
+        message += "}\n"
+    else:
+        message += (
+            "\nCould not query the Debian publisher for replacement IDs (no creds for those "
+            "regions, or DescribeImages rate-limited). See "
+            "https://wiki.debian.org/Cloud/AmazonEC2Image for manual lookup.\n"
+        )
+    raise AssertionError(message)
