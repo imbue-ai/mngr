@@ -410,15 +410,16 @@ function wireBundleShowLogic(bundle) {
   // Show the window once chrome has painted (avoids flashing a bare BaseWindow
   // for the half-second before the WebContentsView renders). Fall back to a
   // longer timer in case the chrome load never completes.
-  chromeView.webContents.once('did-finish-load', () => {
-    if (!win.isDestroyed() && !win.isVisible()) win.show();
-  });
-  win.once('ready-to-show', () => {
-    if (!win.isDestroyed() && !win.isVisible()) win.show();
-  });
-  setTimeout(() => {
-    if (!win.isDestroyed() && !win.isVisible()) win.show();
-  }, 3000);
+  // showInactiveOnFirstShow lets callers (e.g. the startup multi-window restore
+  // loop) surface the window without stealing focus from another bundle.
+  const surface = () => {
+    if (win.isDestroyed() || win.isVisible()) return;
+    if (bundle.showInactiveOnFirstShow) win.showInactive();
+    else win.show();
+  };
+  chromeView.webContents.once('did-finish-load', surface);
+  win.once('ready-to-show', surface);
+  setTimeout(surface, 3000);
 }
 
 function createBundle() {
@@ -441,6 +442,7 @@ function createBundle() {
     isErrorState: false,
     isLoadingState: true,
     isQuittingState: false,
+    showInactiveOnFirstShow: false,
     _maximizedByUs: false,
     _boundsBeforeMaximize: null,
   };
@@ -455,7 +457,7 @@ function createBundle() {
   chromeView.webContents.on('did-finish-load', () => {
     updateOsTitle(bundle);
     sendCurrentWorkspaceToBundleViews(bundle);
-    primeViewWithCachedChromeState(chromeView.webContents);
+    primeViewWithCachedChromeState(bundle, chromeView.webContents);
   });
 
   wireContentViewEvents(bundle, contentView);
@@ -651,7 +653,7 @@ function openSidebar(bundle) {
     registerShortcutsFor(bundle, sidebarView.webContents);
     sidebarView.webContents.on('did-finish-load', () => {
       sendCurrentWorkspaceToBundleViews(bundle);
-      primeViewWithCachedChromeState(sidebarView.webContents);
+      primeViewWithCachedChromeState(bundle, sidebarView.webContents);
     });
     if (backendBaseUrl) {
       sidebarView.webContents.loadURL(backendBaseUrl + '/_chrome/sidebar');
@@ -868,8 +870,9 @@ function openOrFocusWorkspace(agentId, url) {
   return openNewWindow(absolute);
 }
 
-function openNewWindow(url) {
+function openNewWindow(url, { showInactive = false } = {}) {
   const bundle = createBundle();
+  if (showInactive) bundle.showInactiveOnFirstShow = true;
   bundle.isLoadingState = false;
   updateBundleBounds(bundle);
   if (bundle.chromeView && backendBaseUrl) {
@@ -1079,7 +1082,11 @@ function toRelativeBackendUrl(url) {
 function saveSessionState() {
   try {
     const state = [];
-    for (const b of bundles) {
+    // Iterate in MRU order so entry 0 is the most-recently-focused window.
+    // The startup path applies entry 0's bounds to the loading window before
+    // the loading screen renders, so MRU ordering means the loading window
+    // appears at the user's last-active window's position.
+    for (const b of mruWindows) {
       if (b.window.isDestroyed()) continue;
       const url = b.preErrorUrl || b.currentContentUrl;
       const relative = toRelativeBackendUrl(url);
@@ -1253,7 +1260,7 @@ function broadcastChromeEvent(evt) {
   }
 }
 
-function primeViewWithCachedChromeState(wc) {
+function primeViewWithCachedChromeState(bundle, wc) {
   if (!wc || wc.isDestroyed()) return;
   if (latestChromeState.workspaces !== null) {
     wc.send('chrome-event', { type: 'workspaces', workspaces: latestChromeState.workspaces });
@@ -1266,6 +1273,16 @@ function primeViewWithCachedChromeState(wc) {
     count: latestChromeState.requestCount,
     request_ids: latestChromeState.requestIds,
   });
+  // Re-send modal state to the chrome titlebar in case the modal opened
+  // before chrome.js registered its onModalStateChanged listener (e.g. the
+  // requests panel auto-opens at startup faster than chrome.js loads).
+  // Electron IPC drops events with no listener, so without this replay the
+  // initial open is missed and the titlebar drag region wins over the
+  // modal's no-drag in the y=0..TITLEBAR strip. The sidebar view doesn't
+  // listen for this event so we scope the send to the chrome view.
+  if (bundle && bundle.chromeView && wc === bundle.chromeView.webContents) {
+    wc.send('modal-state-changed', { open: !!bundle.modalVisible });
+  }
 }
 
 function kickChromeSSEReconnect() {
@@ -1877,6 +1894,12 @@ async function onReady() {
   await syncContentCookiesToDefaultSession();
 
   initialBundle = createBundle();
+  // Apply saved bounds before the loading screen renders so the window doesn't
+  // jump from default-centered to its restored position once content loads.
+  const initialSavedState = loadSessionState();
+  if (initialSavedState.length > 0) {
+    restoreWindowBounds(initialBundle, initialSavedState[0]);
+  }
   await runStartupSequence(initialBundle);
 }
 
@@ -2184,9 +2207,31 @@ async function startBackendWithRetry() {
         const [first, ...rest] = restorable;
         restoreWindowBounds(initialBundle, first);
         loadUrlIntoBundleContentView(initialBundle, toAbsoluteUrl(first.url));
+        // Open the lesser-MRU windows without stealing focus, so the
+        // MRU-zero window (already focused as initialBundle) stays focused
+        // after restore completes.
+        const restoredBundles = [];
         for (const entry of rest) {
-          const bundle = openNewWindow(toAbsoluteUrl(entry.url));
+          const bundle = openNewWindow(toAbsoluteUrl(entry.url), { showInactive: true });
           restoreWindowBounds(bundle, entry);
+          restoredBundles.push(bundle);
+        }
+        // createBundle unshifts each new bundle to the front of mruWindows,
+        // which reverses the saved order. Re-write the MRU list so
+        // initialBundle stays MRU-zero and the restored windows follow in
+        // their saved (i.e. previously most-recent-first) order, so the next
+        // saveSessionState preserves recency across restarts.
+        mruWindows.length = 0;
+        mruWindows.push(initialBundle, ...restoredBundles);
+        // showInactive() blocks keyboard focus but not z-order: on macOS the
+        // restored windows still surface in front of initialBundle. Re-raise
+        // initialBundle as each restored window appears so it stays on top.
+        const raiseInitial = () => {
+          if (initialBundle && !initialBundle.window.isDestroyed()) initialBundle.window.focus();
+        };
+        for (const bundle of restoredBundles) {
+          if (bundle.window.isVisible()) raiseInitial();
+          else bundle.window.once('show', raiseInitial);
         }
       }
     } else {
