@@ -201,7 +201,7 @@ def _make_ticker_target(local_host: Host, tmp_path: Path) -> tuple[EventsTarget,
     transcript_path.parent.mkdir(parents=True)
     transcript_path.write_text("")
     target = EventsTarget(
-        online_host=local_host,
+        host=local_host,
         events_path=events_path,
         display_name="agent 'agent-x'",
     )

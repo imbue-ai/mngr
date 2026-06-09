@@ -143,21 +143,16 @@ elapsed="$(jq -r '
 
 [[ "$elapsed" == "yes" ]] || exit 0
 
-# Make sure the warmer is up: create it the first time, else (re)start the one we
-# stopped last boundary (`|| true` tolerates it already running from an
-# interrupted run).
-if mngr list --include "name == \"$WARMER\"" --ids | grep -q .; then
-  mngr start "$WARMER" 2>/dev/null || true
-else
-  mngr create "$WARMER" claude --no-connect -- --model haiku
-fi
+# Clean up any warmer left over from an interrupted run, then spin up a fresh one.
+mngr destroy "$WARMER" --force 2>/dev/null || true
+mngr create "$WARMER" claude --no-connect -- --model haiku
 
-# One cheap prompt opens the new 5h window. Wait for the turn to finish, then STOP
-# (don't destroy): a stopped agent keeps its events, so the snapshot reflects the
-# new window and the check above won't re-fire until the next window rolls.
+# One cheap prompt opens the new 5h window. Wait for the turn to finish, then
+# destroy the warmer -- it's a throwaway, and its usage events are preserved on
+# destroy (the `preserve_on_destroy` usage-plugin option, on by default).
 mngr message "$WARMER" --message 'just say hi'
 mngr wait "$WARMER" WAITING --timeout 5m
-mngr stop "$WARMER"
+mngr destroy "$WARMER" --force
 ```
 
 ## Dispatch tasks from a queue directory
