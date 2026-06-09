@@ -966,9 +966,15 @@ def _create_agent(
     # edit-message send (which happens outside api_create's own teardown guard)
     # can still tear the new host down on failure. None when we adopted an
     # existing host -- in that case the guard below is a no-op and never destroys.
+    # Pass is_for_host_creation=True (matching api_create's own resolution) so a
+    # backend with one-time per-user bootstrap (Modal's environment) does not
+    # raise ProviderEmptyError here on the very first create: this is the create
+    # path, and the environment is about to be bootstrapped, not listed.
     new_host_provider: ProviderInstanceInterface | None = None
     if _is_creating_new_host(address, opts.new_host) and isinstance(resolved_target_host, NewHostOptions):
-        new_host_provider = get_provider_instance(resolved_target_host.provider, mngr_ctx)
+        new_host_provider = get_provider_instance(
+            resolved_target_host.provider, mngr_ctx, is_for_host_creation=True
+        )
 
     # Call the API create function
     with _editor_cleanup_scope(setup.editor_session):
