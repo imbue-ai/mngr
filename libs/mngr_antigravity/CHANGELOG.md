@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.3] - 2026-06-08
+
 ### Fixed
 
 - Fixed: Antigravity onboarding seed now also skips agy's first-run NUX for users authenticated through an enterprise account, by marking `enterpriseOnboardingComplete` as `True` (previously `False`); enterprise-authenticated users were getting stuck in the enterprise onboarding flow on their first message.

@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.1] - 2026-06-08
+
 ### Added
 
 - Added: `imbue.mngr_latchkey.remote_gateway` for running the latchkey gateway on the VPS (the agent's outer host). Pins `LATCHKEY_VERSION = 2.15.1` and exposes a small public surface: `sync_credentials(host, latchkey_directory)` copies the local encrypted credential store to `~/.latchkey/` on the VPS; `sync_permissions(host, latchkey_directory, host_id)` copies the per-host permissions file (falling back to the deny-all default when no local file exists); and `provision_remote_gateway(host, host_id, container_ssh_user, container_ssh_port)` orchestrates installing the upstream `latchkey` CLI on the VPS, starting `latchkey gateway` bound to VPS loopback (with `LATCHKEY_ENCRYPTION_KEY` interpolated from the local encryption key), locating the agent's container by its `com.imbue.mngr.host-id` label, minting an ed25519 keypair authorized in the container via `docker exec`, and opening a reverse SSH tunnel from the VPS into the container so the agent reaches the VPS gateway via its unchanged `LATCHKEY_GATEWAY=http://127.0.0.1:INNER_PORT`. No-op when the outer host is the local machine; the detached gateway and tunnel are each idempotent via PID-file plus `/proc/<pid>/cmdline` marker (not `pgrep -f`, which would self-match the launching shell). Both syncs write atomically.
