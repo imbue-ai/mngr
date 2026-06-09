@@ -353,6 +353,13 @@ function createBundleWebContentsViews(win) {
   // corner cutout hits this contentView, which is fine (the cutouts are
   // at the corners of the workspace content, not over chrome affordances).
   contentView.setBorderRadius(CONTENT_CORNER_RADIUS);
+  // Pin the contentView's between-load background to white so navigation
+  // between workspace pages never reveals the chromeView's accent color
+  // through the gap. (When the previous page tears down, Electron paints
+  // the view's background color for a frame or two before the next page's
+  // first paint lands; the default background is transparent, which would
+  // briefly show the accent through.)
+  contentView.setBackgroundColor('#ffffff');
   win.contentView.addChildView(chromeView);
   win.contentView.addChildView(contentView);
 
@@ -969,9 +976,12 @@ function prepareAllWindowsForRetry() {
           nodeIntegration: false,
         },
       });
-      // Match the rounding applied in createBundleWebContentsViews so the
-      // post-retry contentView keeps the same tucked-under appearance.
+      // Match the rounding + background applied in
+      // createBundleWebContentsViews so the post-retry contentView keeps
+      // the same tucked-under appearance and doesn't flash the accent
+      // through during in-workspace navigation.
       contentView.setBorderRadius(CONTENT_CORNER_RADIUS);
+      contentView.setBackgroundColor('#ffffff');
       bundle.contentView = contentView;
       bundle.window.contentView.addChildView(contentView);
       registerShortcutsFor(bundle, contentView.webContents);
