@@ -1733,6 +1733,50 @@ def test_lease_host_returns_503_when_version_mismatch(monkeypatch: pytest.Monkey
     assert backend.pool_rows[0].status == "available"
 
 
+def test_lease_host_hard_region_filters_out_other_regions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hard ``region`` only leases a host in that datacenter; otherwise 503."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_available_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000001"),
+        version="v0.1.0",
+        region="US-WEST-OR",
+    )
+    resp = client.post(
+        "/hosts/lease",
+        json={
+            "ssh_public_key": "ssh-ed25519 AAAA testkey",
+            "host_name": "my-workspace",
+            "attributes": {"version": "v0.1.0"},
+            "region": "US-EAST-VA",
+        },
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 503
+    assert backend.pool_rows[0].status == "available"
+
+
+def test_lease_host_hard_region_leases_matching_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hard ``region`` leases a host whose region matches."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_available_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000001"),
+        version="v0.1.0",
+        region="US-EAST-VA",
+    )
+    resp = client.post(
+        "/hosts/lease",
+        json={
+            "ssh_public_key": "ssh-ed25519 AAAA testkey",
+            "host_name": "my-workspace",
+            "attributes": {"version": "v0.1.0"},
+            "region": "US-EAST-VA",
+        },
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 200
+    assert backend.pool_rows[0].status == "leased"
+
+
 def test_lease_host_rejects_invalid_host_name(monkeypatch: pytest.MonkeyPatch) -> None:
     """POST /hosts/lease rejects host_name values that fail the SafeName regex."""
     client, backend = _make_pool_test_client(monkeypatch)

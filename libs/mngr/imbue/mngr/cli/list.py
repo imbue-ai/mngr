@@ -45,6 +45,7 @@ from imbue.mngr.utils.cel_utils import evaluate_cel_sort_key
 from imbue.mngr.utils.terminal import ANSI_DIM_GRAY
 from imbue.mngr.utils.terminal import ANSI_ERASE_LINE
 from imbue.mngr.utils.terminal import ANSI_RESET
+from imbue.mngr.uv_tool import get_installed_plugin_package_names
 
 _DEFAULT_HUMAN_DISPLAY_FIELDS: Final[tuple[str, ...]] = (
     "name",
@@ -74,6 +75,9 @@ _HEADER_LABELS: Final[dict[str, str]] = {
 # documented for CEL; the underlying attribute is host.provider_name.
 _FIELD_ALIASES: Final[dict[str, str]] = {
     "host.provider": "host.provider_name",
+    # `project` is the documented short form for the project label, mirroring
+    # the `--project` filter flag; the underlying data lives in labels.project.
+    "project": "labels.project",
 }
 
 
@@ -203,6 +207,7 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
         cli_group = ctx.parent.command
         registered_agent_types = list_registered_agent_types()
         topic_names = sorted(get_all_topics().keys())
+        installed_plugin_packages = get_installed_plugin_package_names()
         mngr_ctx.concurrency_group.start_new_thread(
             target=write_cli_completions_cache,
             kwargs={
@@ -210,6 +215,7 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
                 "mngr_ctx": mngr_ctx,
                 "registered_agent_types": registered_agent_types,
                 "topic_names": topic_names,
+                "installed_plugin_packages": installed_plugin_packages,
             },
             name="completion-cache-writer",
             is_checked=False,

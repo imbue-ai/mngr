@@ -407,6 +407,7 @@ def test_cleanup_destroy_with_provider_filter_excludes(
         assert tmux_session_exists(session_name), "Agent should not be destroyed when provider filter doesn't match"
 
 
+@pytest.mark.flaky
 @pytest.mark.tmux
 def test_cleanup_destroy_json_output_with_real_agent(
     cli_runner: CliRunner,

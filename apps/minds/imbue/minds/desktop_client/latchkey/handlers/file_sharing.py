@@ -29,7 +29,6 @@ from pathlib import Path
 from typing import Final
 
 from fastapi import Request
-from fastapi.responses import HTMLResponse
 from fastapi.responses import Response
 from loguru import logger
 from pydantic import Field
@@ -52,7 +51,7 @@ from imbue.minds.desktop_client.request_events import create_request_response_ev
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.mngr.primitives import AgentId
 
-# Label shown on the requests-panel card (lower-case, short).
+# Label shown on the inbox list card (lower-case, short).
 _KIND_LABEL: Final[str] = "file sharing"
 
 
@@ -139,17 +138,17 @@ class FileSharingGrantHandler(RequestEventHandler):
             return ""
         return req_event.path
 
-    def render_request_page(
+    def render_request_detail_fragment(
         self,
         req_event: RequestEvent,
         backend_resolver: BackendResolverInterface,
         mngr_forward_origin: str,
-    ) -> Response:
+    ) -> str:
         if not isinstance(req_event, LatchkeyFileSharingPermissionRequestEvent):
-            return HTMLResponse(content="<p>Unsupported request type</p>", status_code=500)
+            return "<p>Unsupported request type</p>"
         parsed_agent_id = AgentId(req_event.agent_id)
         ws_name = _resolve_workspace_name(backend_resolver, parsed_agent_id, fallback=req_event.agent_id)
-        rendered = render_file_sharing_permission_dialog(
+        return render_file_sharing_permission_dialog(
             agent_id=req_event.agent_id,
             request_id=str(req_event.event_id),
             ws_name=ws_name,
@@ -159,7 +158,6 @@ class FileSharingGrantHandler(RequestEventHandler):
             access_human_label=_access_human_label(req_event.access),
             mngr_forward_origin=mngr_forward_origin,
         )
-        return HTMLResponse(content=rendered)
 
     async def apply_grant_request(
         self,

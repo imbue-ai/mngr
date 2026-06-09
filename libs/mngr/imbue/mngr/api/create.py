@@ -47,7 +47,7 @@ _RETAIN_FAILED_HOSTS_ENV_VAR: Final[str] = "MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HO
 
 
 @contextmanager
-def _destroy_new_host_on_create_failure(
+def destroy_new_host_on_create_failure(
     host: OnlineHostInterface, provider: ProviderInstanceInterface | None
 ) -> Iterator[None]:
     """Destroy a freshly-created host if the create fails, so we don't leak it.
@@ -212,15 +212,34 @@ def create(
     is_new_host = isinstance(target_host, NewHostOptions)
     # Resolve the provider that owns a newly-created host so we can tear it down
     # if the rest of the create fails (None when adopting an existing host).
+    # Pass is_for_host_creation=True so backends with one-time bootstrap (Modal's
+    # per-user environment) don't raise ProviderEmptyError here: this is the
+    # create path, and resolve_target_host below constructs the same (cached)
+    # instance with is_for_host_creation=True to actually create the host.
     new_host_provider: ProviderInstanceInterface | None = (
-        get_provider_instance(target_host.provider, mngr_ctx) if isinstance(target_host, NewHostOptions) else None
+        get_provider_instance(target_host.provider, mngr_ctx, is_for_host_creation=True)
+        if isinstance(target_host, NewHostOptions)
+        else None
     )
     with log_span("Resolving target host"):
         host = resolve_target_host(target_host, mngr_ctx)
 
-    # Notify plugins that a new host was created (only for new hosts)
-    if is_new_host:
-        with _destroy_new_host_on_create_failure(host, new_host_provider):
+    # Wrap everything from here through the return in a single destroy-on-failure
+    # guard so a new host we just created is torn down (and, for imbue_cloud, its
+    # lease released) if ANY step below fails -- env-var write, on_host_created
+    # hooks, post-host-create commands, locking, provisioning, agent start, or
+    # the initial-message send. This is a no-op when ``new_host_provider`` is
+    # None (an existing host the caller already owned), so wrapping
+    # unconditionally is safe.
+    with destroy_new_host_on_create_failure(host, new_host_provider):
+        # Notify plugins that a new host was created (only for new hosts)
+        if is_new_host:
+            # Write the host's env vars first, before any hook or command runs,
+            # so an env-var-write failure also tears the new host down. This is
+            # the new host's first post-create step (``target_host`` is a
+            # ``NewHostOptions`` here, so ``.environment`` is available).
+            _write_host_env_vars(host, target_host.environment)
+
             with log_span("Calling on_host_created hooks"):
                 mngr_ctx.pm.hook.on_host_created(host=host, mngr_ctx=mngr_ctx)
 
@@ -231,132 +250,135 @@ def create(
             # subsequent exec depends on.
             _run_post_host_create_commands(host, target_host.provisioning.post_host_create_commands)
 
-    # ``host.pre_baked_agent_id`` (default None on the base Host class,
-    # populated by providers whose ``create_host`` returns a host with a
-    # baked-in agent -- ``ImbueCloudHost`` is the only one today) marks
-    # a specific agent id that ``host.create_agent_state`` knows how to
-    # adopt in place when ``agent_options.name`` matches. Pulled out
-    # before the lock so the duplicate-name check below can recognize
-    # the adopt scenario.
-    pre_baked_agent_id: AgentId | None = host.pre_baked_agent_id
+        # ``host.pre_baked_agent_id`` (default None on the base Host class,
+        # populated by providers whose ``create_host`` returns a host with a
+        # baked-in agent -- ``ImbueCloudHost`` is the only one today) marks
+        # a specific agent id that ``host.create_agent_state`` knows how to
+        # adopt in place when ``agent_options.name`` matches. Pulled out
+        # before the lock so the duplicate-name check below can recognize
+        # the adopt scenario. Keep hooks/post-host-create above this read and
+        # before the lock is acquired.
+        pre_baked_agent_id: AgentId | None = host.pre_baked_agent_id
 
-    # While we are deploying an agent, lock the host. Wrap in the
-    # destroy-on-failure guard so a new host we just created is torn down (and,
-    # for imbue_cloud, its lease released) if any step below fails.
-    with _destroy_new_host_on_create_failure(host, new_host_provider), host.lock_cooperatively():
-        # Prevent duplicate agent names on the same host. The tmux session name
-        # is derived from the agent name, so two agents with the same name would
-        # collide on the same tmux session. This check must be inside the lock to
-        # prevent TOCTOU races between concurrent create calls.
-        # In update mode, the agent already exists so we skip this check.
-        # Also skip when the existing agent IS the host's pre-baked agent
-        # (imbue_cloud lease-adopt): the bake intentionally seeds the host
-        # with the same agent name the caller is creating, and
-        # ``host.create_agent_state`` will hydrate it in place. Without this
-        # skip the post-lease duplicate check fires immediately and aborts
-        # every fresh imbue_cloud create with ``DuplicateAgentNameError``.
-        if agent_options.name is not None and not agent_options.is_update:
-            for existing_agent in host.get_agents():
-                if existing_agent.name == agent_options.name:
-                    if pre_baked_agent_id is not None and existing_agent.id == pre_baked_agent_id:
-                        continue
-                    raise DuplicateAgentNameError(agent_options.name, existing_agent.id)
+        # While we are deploying an agent, lock the host.
+        with host.lock_cooperatively():
+            # Prevent duplicate agent names on the same host. The tmux session name
+            # is derived from the agent name, so two agents with the same name would
+            # collide on the same tmux session. This check must be inside the lock to
+            # prevent TOCTOU races between concurrent create calls.
+            # In update mode, the agent already exists so we skip this check.
+            # Also skip when the existing agent IS the host's pre-baked agent
+            # (imbue_cloud lease-adopt): the bake intentionally seeds the host
+            # with the same agent name the caller is creating, and
+            # ``host.create_agent_state`` will hydrate it in place. Without this
+            # skip the post-lease duplicate check fires immediately and aborts
+            # every fresh imbue_cloud create with ``DuplicateAgentNameError``.
+            if agent_options.name is not None and not agent_options.is_update:
+                for existing_agent in host.get_agents():
+                    if existing_agent.name == agent_options.name:
+                        if pre_baked_agent_id is not None and existing_agent.id == pre_baked_agent_id:
+                            continue
+                        raise DuplicateAgentNameError(agent_options.name, existing_agent.id)
 
-        # Create the agent's work_dir on the host
-        if create_work_dir:
-            with log_span("Calling on_before_initial_file_copy hooks"):
-                mngr_ctx.pm.hook.on_before_initial_file_copy(agent_options=agent_options, host=host)
-            with log_span("Creating agent work directory from source {}", source_location.path):
-                work_dir_result = host.create_agent_work_dir(source_location.host, source_location.path, agent_options)
-                work_dir_path = work_dir_result.path
-                created_branch_name = work_dir_result.created_branch_name
-        else:
-            # Work dir was already created (e.g. by CLI's early copy).
-            # Use target_path if set (it should contain the actual work_dir path),
-            # otherwise fall back to source path (in-place mode).
-            work_dir_path = (
-                agent_options.target_path if agent_options.target_path is not None else source_location.path
-            )
-
-        # If anything below fails, the worktree (and any branch we created for
-        # it) is orphaned. On failure, remove the worktree we created and -- if
-        # we also created a new branch -- delete that branch, so neither leaks
-        # into the source repo. The branch deletion is gated on created_branch_name
-        # so pre-existing branches the user attached to are left alone (mirrors
-        # the destroy-path safety check); the worktree removal is unconditional
-        # for worktree mode because we always create the worktree ourselves
-        # there. Cleanup is also gated on create_work_dir, since when False the
-        # work_dir was provided by the caller and we must not remove it.
-        is_success = False
-        try:
+            # Create the agent's work_dir on the host
             if create_work_dir:
-                with log_span("Calling on_after_initial_file_copy hooks"):
-                    mngr_ctx.pm.hook.on_after_initial_file_copy(
-                        agent_options=agent_options, host=host, work_dir_path=work_dir_path
+                with log_span("Calling on_before_initial_file_copy hooks"):
+                    mngr_ctx.pm.hook.on_before_initial_file_copy(agent_options=agent_options, host=host)
+                with log_span("Creating agent work directory from source {}", source_location.path):
+                    work_dir_result = host.create_agent_work_dir(
+                        source_location.host, source_location.path, agent_options
+                    )
+                    work_dir_path = work_dir_result.path
+                    created_branch_name = work_dir_result.created_branch_name
+            else:
+                # Work dir was already created (e.g. by CLI's early copy).
+                # Use target_path if set (it should contain the actual work_dir path),
+                # otherwise fall back to source path (in-place mode).
+                work_dir_path = (
+                    agent_options.target_path if agent_options.target_path is not None else source_location.path
+                )
+
+            # If anything below fails, the worktree (and any branch we created for
+            # it) is orphaned. On failure, remove the worktree we created and -- if
+            # we also created a new branch -- delete that branch, so neither leaks
+            # into the source repo. The branch deletion is gated on created_branch_name
+            # so pre-existing branches the user attached to are left alone (mirrors
+            # the destroy-path safety check); the worktree removal is unconditional
+            # for worktree mode because we always create the worktree ourselves
+            # there. Cleanup is also gated on create_work_dir, since when False the
+            # work_dir was provided by the caller and we must not remove it.
+            is_success = False
+            try:
+                if create_work_dir:
+                    with log_span("Calling on_after_initial_file_copy hooks"):
+                        mngr_ctx.pm.hook.on_after_initial_file_copy(
+                            agent_options=agent_options, host=host, work_dir_path=work_dir_path
+                        )
+
+                # Create the agent state (registers the agent with the host)
+                with log_span("Creating agent state in work directory {}", work_dir_path):
+                    agent = host.create_agent_state(
+                        work_dir_path, agent_options, created_branch_name=created_branch_name
                     )
 
-            # Create the agent state (registers the agent with the host)
-            with log_span("Creating agent state in work directory {}", work_dir_path):
-                agent = host.create_agent_state(work_dir_path, agent_options, created_branch_name=created_branch_name)
+                # Run provisioning for the agent (hooks, dependency installation, etc.)
+                with log_span("Calling on_before_provisioning hooks"):
+                    mngr_ctx.pm.hook.on_before_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)
+                with log_span("Provisioning agent {}", agent.name):
+                    host.provision_agent(agent, agent_options, mngr_ctx)
+                with log_span("Calling on_after_provisioning hooks"):
+                    mngr_ctx.pm.hook.on_after_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)
 
-            # Run provisioning for the agent (hooks, dependency installation, etc.)
-            with log_span("Calling on_before_provisioning hooks"):
-                mngr_ctx.pm.hook.on_before_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)
-            with log_span("Provisioning agent {}", agent.name):
-                host.provision_agent(agent, agent_options, mngr_ctx)
-            with log_span("Calling on_after_provisioning hooks"):
-                mngr_ctx.pm.hook.on_after_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)
+                # Deliver the initial message (if any) and start the agent.
+                #
+                # Interactive agents do the ready-signal dance and send the message
+                # via the tmux pane after the agent is up. Headless agents cannot
+                # receive messages that way: they communicate via stdout/stdin
+                # pipes, so wait_for_ready_signal / send_message both raise. For
+                # those we stage the message on disk first (the agent's command
+                # cats the file at startup) and then just start the process.
+                initial_message = agent.get_initial_message()
+                if isinstance(agent, StreamingHeadlessAgentMixin):
+                    if initial_message is not None:
+                        agent.stage_initial_message(initial_message)
+                    logger.info("Starting agent {} ...", agent.name)
+                    host.start_agents([agent.id])
+                elif initial_message is not None:
+                    # Start agent with signal-based readiness detection
+                    # Raises AgentStartError if the agent doesn't signal readiness in time
+                    logger.info("Starting agent {} ...", agent.name)
+                    timeout = (
+                        agent_options.ready_timeout_seconds
+                        if agent_options.ready_timeout_seconds is not None
+                        else mngr_ctx.config.agent_ready_timeout
+                    )
+                    agent.wait_for_ready_signal(
+                        is_creating=True,
+                        start_action=lambda: host.start_agents([agent.id]),
+                        timeout=timeout,
+                    )
+                    logger.info("Sending initial message...")
+                    agent.send_message(initial_message)
+                else:
+                    # No initial message - just start the agent
+                    logger.info("Starting agent {} ...", agent.name)
+                    host.start_agents([agent.id])
 
-            # Deliver the initial message (if any) and start the agent.
-            #
-            # Interactive agents do the ready-signal dance and send the message
-            # via the tmux pane after the agent is up. Headless agents cannot
-            # receive messages that way: they communicate via stdout/stdin
-            # pipes, so wait_for_ready_signal / send_message both raise. For
-            # those we stage the message on disk first (the agent's command
-            # cats the file at startup) and then just start the process.
-            initial_message = agent.get_initial_message()
-            if isinstance(agent, StreamingHeadlessAgentMixin):
-                if initial_message is not None:
-                    agent.stage_initial_message(initial_message)
-                logger.info("Starting agent {} ...", agent.name)
-                host.start_agents([agent.id])
-            elif initial_message is not None:
-                # Start agent with signal-based readiness detection
-                # Raises AgentStartError if the agent doesn't signal readiness in time
-                logger.info("Starting agent {} ...", agent.name)
-                timeout = (
-                    agent_options.ready_timeout_seconds
-                    if agent_options.ready_timeout_seconds is not None
-                    else mngr_ctx.config.agent_ready_timeout
-                )
-                agent.wait_for_ready_signal(
-                    is_creating=True,
-                    start_action=lambda: host.start_agents([agent.id]),
-                    timeout=timeout,
-                )
-                logger.info("Sending initial message...")
-                agent.send_message(initial_message)
-            else:
-                # No initial message - just start the agent
-                logger.info("Starting agent {} ...", agent.name)
-                host.start_agents([agent.id])
+                # Build and return the result
+                result = CreateAgentResult(agent=agent, host=host)
 
-            # Build and return the result
-            result = CreateAgentResult(agent=agent, host=host)
+                # Call on_agent_created hooks to notify plugins about the new agent
+                with log_span("Calling on_agent_created hooks"):
+                    mngr_ctx.pm.hook.on_agent_created(agent=result.agent, host=result.host)
 
-            # Call on_agent_created hooks to notify plugins about the new agent
-            with log_span("Calling on_agent_created hooks"):
-                mngr_ctx.pm.hook.on_agent_created(agent=result.agent, host=result.host)
+                # Emit discovery events for the host and newly created agent
+                emit_discovery_events_for_host(mngr_ctx.config, host)
+                is_success = True
+            finally:
+                if not is_success and create_work_dir:
+                    _cleanup_failed_worktree_create(work_dir_path, created_branch_name, mngr_ctx)
 
-            # Emit discovery events for the host and newly created agent
-            emit_discovery_events_for_host(mngr_ctx.config, host)
-            is_success = True
-        finally:
-            if not is_success and create_work_dir:
-                _cleanup_failed_worktree_create(work_dir_path, created_branch_name, mngr_ctx)
-
-    return result
+        return result
 
 
 def _run_post_host_create_commands(
@@ -434,7 +456,12 @@ def _create_new_host(
     target_host: NewHostOptions,
     mngr_ctx: MngrContext,
 ) -> OnlineHostInterface:
-    """Create a new host and write its environment variables."""
+    """Create a new host.
+
+    The host's environment variables are written by the caller (``create``)
+    under the destroy-on-failure guard, so a failed env-var write also tears
+    the new host down.
+    """
     with log_span("Calling on_before_host_create hooks"):
         mngr_ctx.pm.hook.on_before_host_create(name=host_name, provider_name=target_host.provider, mngr_ctx=mngr_ctx)
     with log_span(
@@ -459,7 +486,6 @@ def _create_new_host(
             snapshot=target_host.build.snapshot,
         )
 
-    _write_host_env_vars(new_host, target_host.environment)
     return new_host
 
 

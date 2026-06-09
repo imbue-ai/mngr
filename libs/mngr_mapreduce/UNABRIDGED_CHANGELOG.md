@@ -2,6 +2,14 @@
 
 This file contains the full, verbatim per-PR entries for the `mngr_mapreduce` library. For the curated summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-08
+
+- Marked unpublished-on-purpose in `UNPUBLISHED_PACKAGES` (it is an internal map-reduce framework library with no CLI of its own, consumed only by recipes like `mngr_tmr`), so the release tooling will not offer it for publication. Its stale `imbue-mngr==0.1.6` pin is realigned to the current `0.2.10` so `uv lock` stays solvable. No runtime change.
+
+## 2026-06-04
+
+Updated the `get_local_host` import to its new canonical home in `imbue.mngr.api.providers` (it previously lived in `imbue.mngr.cli.headless_runner`). No behavior change.
+
 ## 2026-06-04
 
 - `sanitize_for_agent_name` now also strips trailing hyphens after the 40-char truncation, not just before it. Without this, a task slug whose 40th character was a hyphen (e.g. `test_create_modal_idle_mode_ssh_timeout_300`) produced `test-create-modal-idle-mode-ssh-timeout-`, which `AgentName` rejects as "alphanumeric with dashes/underscores allowed in the middle". TMR runs against the e2e test corpus hit this for the first time once `test_create_modal_idle_mode_ssh_timeout_300` landed.

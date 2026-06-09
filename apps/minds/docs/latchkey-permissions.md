@@ -26,10 +26,10 @@ and how the agent receives the answer.
    idle.
 4. **Desktop notifies the user.** The desktop client tails the agent's
    request events file via `mngr events --follow`, adds a card to the
-   right-side requests inbox panel, and surfaces a notification.
+   inbox drawer, and surfaces a notification.
 5. **User opens the dialog.** Clicking the card opens
-   `/requests/<event_id>` in a **modal overlay** over the current window
-   (a transparent full-content-area `WebContentsView` stacked above the
+   `/inbox?selected=<event_id>` in a **modal overlay** over the current
+   window (a transparent full-window `WebContentsView` stacked above the
    workspace, with a dim backdrop). The user's workspace view is never
    navigated away, so dismissing the dialog -- via Approve/Deny, the close
    button, a backdrop click, or Escape -- returns them to their work with

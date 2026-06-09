@@ -15,6 +15,7 @@ from imbue.mngr.utils.git_utils import delete_git_branch
 from imbue.mngr.utils.git_utils import derive_project_name_for_source
 from imbue.mngr.utils.git_utils import derive_project_name_from_path
 from imbue.mngr.utils.git_utils import find_git_common_dir
+from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr.utils.git_utils import find_git_worktree_root
 from imbue.mngr.utils.git_utils import find_source_repo_of_worktree
 from imbue.mngr.utils.git_utils import get_current_branch
@@ -394,6 +395,45 @@ def test_find_git_common_dir_from_subdirectory(tmp_path: Path, cg: ConcurrencyGr
     result = find_git_common_dir(subdir, cg)
     assert result is not None
     assert result == git_dir / ".git"
+
+
+def test_find_git_source_path_returns_none_when_not_in_git(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    """find_git_source_path returns None when the path is not inside a git repo."""
+    non_git_dir = tmp_path / "not-a-repo"
+    non_git_dir.mkdir()
+
+    result = find_git_source_path(non_git_dir, cg)
+    assert result is None
+
+
+def test_find_git_source_path_returns_repo_root_for_regular_repo(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    """find_git_source_path returns the repo root (parent of .git) for a regular repository."""
+    git_dir = tmp_path / "my-repo"
+    git_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=git_dir, check=True, capture_output=True)
+
+    result = find_git_source_path(git_dir, cg)
+    assert result == git_dir
+
+
+def test_find_git_source_path_returns_main_repo_root_from_worktree(
+    cg: ConcurrencyGroup, tmp_path: Path, temp_git_repo: Path
+) -> None:
+    """find_git_source_path returns the *main* repo root (not the worktree dir) from a worktree.
+
+    This is the property both agent plugins rely on: a single trust grant on the
+    source repo must cover every worktree of the same repo.
+    """
+    worktree_path = tmp_path / "worktree"
+    subprocess.run(
+        ["git", "worktree", "add", str(worktree_path), "-b", "test-branch"],
+        cwd=temp_git_repo,
+        check=True,
+        capture_output=True,
+    )
+
+    result = find_git_source_path(worktree_path, cg)
+    assert result == temp_git_repo
 
 
 # =============================================================================

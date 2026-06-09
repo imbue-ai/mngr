@@ -83,9 +83,13 @@ class _PutServiceInfosAttempt(FrozenModel):
 
     ``poll_for_value`` expects a no-arg callable returning ``None``
     when it should retry, non-``None`` when it has a real value. We
-    return :class:`True` on a successful PUT and ``None`` when the
-    PUT failed with OVH's transient ``"subscription is not active
-    yet"`` 400 message. Anything else propagates.
+    return :class:`True` on a successful PUT and ``None`` for retryable
+    transient failures: OVH's ``"subscription is not active yet"`` 400
+    (the billing layer lagging a fresh order) and transport-level errors
+    (which :meth:`OvhVpsClient._call` tags with ``status_code == 0`` --
+    e.g. a dropped connection during the failure-cleanup cancel that
+    would otherwise leak a freshly-ordered month of billing). Anything
+    else propagates.
 
     Lifted to module scope (vs. an inline ``def`` inside the method)
     so the project ratchet against inline functions is satisfied and
@@ -108,6 +112,18 @@ class _PutServiceInfosAttempt(FrozenModel):
                     "OVH PUT {} returned 'subscription is not active yet'; "
                     "the billing layer hasn't propagated this VPS's subscription state yet. Will retry.",
                     self.path,
+                )
+                return None
+            # Transient transport failure (dropped connection, timeout):
+            # ``_call`` tags these with status_code 0. Retrying matters most
+            # for the failure-cleanup cancel, where a single dropped
+            # connection would otherwise leak a freshly-ordered month of
+            # billing.
+            if e.status_code == 0:
+                logger.warning(
+                    "OVH PUT {} failed with a transient transport error; will retry: {}",
+                    self.path,
+                    e,
                 )
                 return None
             raise
@@ -392,10 +408,12 @@ class OvhVpsClient(VpsClientInterface):
         renew at the next anniversary even though our flag flip succeeded.
 
         Retries on the OVH ``"subscription is not active yet"`` 400 error
-        (see :data:`_SUBSCRIPTION_NOT_ACTIVE_MARKER` for full context). The
-        billing subsystem takes a few minutes to propagate a fresh
-        order's subscription state, during which any ``PUT serviceInfos``
-        call fails with that specific message; without the retry, the
+        (see :data:`_SUBSCRIPTION_NOT_ACTIVE_MARKER` for full context) and
+        on transient transport failures (a dropped connection / timeout,
+        tagged ``status_code == 0`` by :meth:`_call`). The billing
+        subsystem takes a few minutes to propagate a fresh order's
+        subscription state, during which any ``PUT serviceInfos`` call
+        fails with that specific message; without the retry, the
         ``OvhProvider._terminate_orphaned_fresh_order`` cleanup loses
         the race and silently leaks a freshly-ordered month of billing
         (F39 in OVH_AUDIT.md). Verified live: a single 30-second-later
@@ -411,13 +429,16 @@ class OvhVpsClient(VpsClientInterface):
         self._put_service_infos_with_retry(service_name, info)
 
     def _put_service_infos_with_retry(self, service_name: str, info: dict[str, Any]) -> None:
-        """``PUT /vps/{s}/serviceInfos`` with retry-on-subscription-not-active-yet.
+        """``PUT /vps/{s}/serviceInfos`` with retry on transient failures.
 
         Wraps :meth:`_call` so OTHER 400s / 404s / 5xxs propagate
-        immediately. Only the OVH-side ``"subscription is not active
-        yet"`` message triggers retry -- it's a documented transient
-        state the billing system reports for the first few minutes
-        after a fresh order. See F39 in OVH_AUDIT.md.
+        immediately. Two transient conditions trigger retry: the OVH-side
+        ``"subscription is not active yet"`` message (a documented
+        transient state the billing system reports for the first few
+        minutes after a fresh order; F39 in OVH_AUDIT.md) and transport
+        failures (``status_code == 0``: dropped connection / timeout),
+        which would otherwise fail a failure-cleanup cancel and leak a
+        freshly-ordered month of billing.
         """
         path = f"/vps/{service_name}/serviceInfos"
         attempt = _PutServiceInfosAttempt(client=self, path=path, info=info)
@@ -429,8 +450,8 @@ class OvhVpsClient(VpsClientInterface):
         if result is None:
             raise VpsApiError(
                 400,
-                f"OVH {path} kept returning 'subscription is not active yet' after {polls} attempt(s) "
-                f"over {elapsed:.0f}s; the billing layer never propagated the subscription activation. "
+                f"OVH {path} kept failing with a retryable transient error ('subscription is not active yet' "
+                f"or a transport failure) after {polls} attempt(s) over {elapsed:.0f}s. "
                 "Manual cleanup may be needed.",
             )
         if polls > 1:

@@ -7,6 +7,8 @@
 #   - /Applications/minds.app already running, with ~/.minds/logs/minds-events.jsonl
 #     containing a fresh "Login URL" event (use launch-and-verify.sh first).
 #   - ANTHROPIC_API_KEY in env.
+#
+# FIXME: convert the script so that `-e` can be used.
 set -uo pipefail
 
 EVENTS_LOG="$HOME/.minds/logs/minds-events.jsonl"

@@ -817,6 +817,12 @@ kill -TERM 1
         """
         cmd = ["run", "-d", "--name", container_name, "-p", f":{CONTAINER_SSH_PORT}"]
 
+        # Select a non-default container runtime (e.g. 'runsc' for gVisor) when configured.
+        # The named runtime must be registered with the Docker daemon, otherwise this run
+        # fails with Docker's native "unknown runtime" error (no silent fallback).
+        if self.config.docker_runtime is not None:
+            cmd.extend(["--runtime", self.config.docker_runtime])
+
         for key, value in labels.items():
             cmd.extend(["--label", f"{key}={value}"])
 
