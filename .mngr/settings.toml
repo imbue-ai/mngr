@@ -52,7 +52,11 @@ provider = "aws"
 build_arg = ["--git-depth=1", "--file=libs/mngr/imbue/mngr/resources/Dockerfile", "."]
 extra_window = ["github_setup='ssh-keyscan github.com >> ~/.ssh/known_hosts && git remote set-url origin https://github.com/imbue-ai/mngr.git && gh auth setup-git'"]
 agent_args = ["--dangerously-skip-permissions"]
-pass_env = ["GH_TOKEN"]
+# __extend (not plain assign) so we ADD GH_TOKEN to whatever pass_env the merged
+# config already carries (e.g. a user profile's pass_env = ["ANTHROPIC_API_KEY"])
+# instead of clobbering it -- a plain `pass_env = [...]` trips the settings-narrowing
+# guard and would silently drop the inherited entries.
+pass_env__extend = ["GH_TOKEN"]
 pass_host_env = ["EDITOR"]
 target_path = "/code/mngr"
 
