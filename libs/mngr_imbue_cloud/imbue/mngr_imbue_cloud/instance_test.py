@@ -16,6 +16,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.data_types import LeasedHostInfo
 from imbue.mngr_imbue_cloud.instance import ImbueCloudProvider
+from imbue.mngr_imbue_cloud.instance import _DelegatedVpsDockerProvider
 from imbue.mngr_imbue_cloud.instance import _build_delegated_vps_config
 from imbue.mngr_imbue_cloud.instance import _map_docker_status_to_host_state
 from imbue.mngr_imbue_cloud.instance import build_pool_host_wipe_script
@@ -99,6 +100,30 @@ def test_build_delegated_vps_config_defaults_to_no_runtime() -> None:
     assert vps_config.docker_runtime is None
     assert vps_config.install_gvisor_runtime is False
     assert vps_config.default_start_args == ()
+
+
+def test_delegated_vps_docker_provider_parse_build_args_empty() -> None:
+    """No build args -> no git_depth, no docker args; region/plan defaults are unused sentinels."""
+    delegated = _DelegatedVpsDockerProvider.model_construct()
+    parsed = delegated._parse_build_args(None)
+    assert parsed.git_depth is None
+    assert parsed.docker_build_args == ()
+
+
+def test_delegated_vps_docker_provider_parse_build_args_extracts_git_depth() -> None:
+    """--git-depth=N is consumed and surfaced separately; not forwarded to docker."""
+    delegated = _DelegatedVpsDockerProvider.model_construct()
+    parsed = delegated._parse_build_args(["--git-depth=1", "--file=Dockerfile", "."])
+    assert parsed.git_depth == 1
+    assert parsed.docker_build_args == ("--file=Dockerfile", ".")
+
+
+def test_delegated_vps_docker_provider_parse_build_args_passes_through_unknown() -> None:
+    """Everything else (including raw docker flags and positional args) is forwarded verbatim."""
+    delegated = _DelegatedVpsDockerProvider.model_construct()
+    parsed = delegated._parse_build_args(["--build-arg=FOO=bar", "--no-cache", "."])
+    assert parsed.git_depth is None
+    assert parsed.docker_build_args == ("--build-arg=FOO=bar", "--no-cache", ".")
 
 
 class _StubImbueCloudProvider(ImbueCloudProvider):
