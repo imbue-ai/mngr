@@ -45,7 +45,6 @@ from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyInternalError
 from imbue.modal_proxy.errors import ModalProxyInvalidError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
-from imbue.modal_proxy.errors import ModalProxyPermissionDeniedError
 from imbue.modal_proxy.errors import ModalProxyRateLimitError
 from imbue.modal_proxy.errors import ModalProxyRemoteError
 from imbue.modal_proxy.errors import ModalProxyTypeError
@@ -79,8 +78,6 @@ def _translate_modal_error(e: modal.exception.Error) -> ModalProxyError:
     """Convert a modal exception to the corresponding ModalProxy exception."""
     if isinstance(e, modal.exception.AuthError):
         return ModalProxyAuthError(str(e))
-    if isinstance(e, modal.exception.PermissionDeniedError):
-        return ModalProxyPermissionDeniedError(str(e))
     if isinstance(e, modal.exception.NotFoundError):
         return ModalProxyNotFoundError(str(e))
     if isinstance(e, modal.exception.InvalidError):
