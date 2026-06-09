@@ -6,6 +6,12 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.12] - 2026-06-08
+
+### Fixed
+
+- Fixed: Creating a Modal host with an invalid argument (e.g. a non-existent `--snapshot` image id) now fails with a clean single-line `Error: Failed to create Modal host: '<id>' is not a valid Image ID.` instead of dumping a raw Python traceback — `create_host` now wraps `ModalProxyInvalidError` in a user-facing `MngrError`, mirroring how `ModalProxyRemoteError` was already handled.
+
 ## [v0.2.11] - 2026-06-05
 
 ## [v0.2.10] - 2026-06-01

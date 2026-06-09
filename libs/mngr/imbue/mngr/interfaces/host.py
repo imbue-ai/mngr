@@ -27,6 +27,7 @@ from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import SnapshotInfo
+from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -201,7 +202,90 @@ class HostInterface(MutableModel, ABC):
         """
 
 
-class OuterHostInterface(MutableModel, ABC):
+class HostFileReadInterface(MutableModel, ABC):
+    """Read-only access to a host's persistent files.
+
+    The subset of file operations that work even when a host is not online for
+    command execution, as long as its persistent storage (volume) is reachable.
+    All paths are absolute paths as seen under the host's ``host_dir``.
+
+    Implemented by:
+    - :class:`OuterHostInterface` (and thus every online host), reading the
+      live filesystem over SSH / locally.
+    - :class:`~imbue.mngr.hosts.offline_host.OfflineHostWithVolume`, reading the
+      host's persisted volume when the host itself is stopped.
+
+    Splitting these reads out of :class:`OuterHostInterface` lets callers that
+    only need to *read* files (log / transcript / session readers, session
+    preservation, ``mngr file get``/``list``) accept a stopped-but-volume-backed
+    host without it having to pretend it can execute commands or write files.
+    """
+
+    @abstractmethod
+    def read_file(self, path: Path) -> bytes:
+        """Read a file and return its contents as bytes."""
+        ...
+
+    @abstractmethod
+    def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
+        """Read a file and return its contents as a string."""
+        ...
+
+    @abstractmethod
+    def path_exists(self, path: Path) -> bool:
+        """Whether ``path`` exists on this host."""
+        ...
+
+    @abstractmethod
+    def get_file_mtime(self, path: Path) -> datetime | None:
+        """Return the modification time of a file, or None if the file doesn't exist."""
+        ...
+
+    @abstractmethod
+    def list_directory(self, path: Path, *, recursive: bool = False) -> list[VolumeFile]:
+        """List the entries under directory ``path``.
+
+        Returns one :class:`~imbue.mngr.interfaces.data_types.VolumeFile` per
+        entry, each with an absolute ``path`` under the host's ``host_dir``.
+        When ``recursive`` is True, descends into subdirectories and returns
+        every nested entry. Returns an empty list if ``path`` does not exist or
+        is not a directory.
+        """
+        ...
+
+
+class HostFileWriteInterface(MutableModel, ABC):
+    """Write access to a host's files.
+
+    The companion to :class:`HostFileReadInterface`. Implemented by:
+    - :class:`OuterHostInterface` (and thus every online host), writing the live
+      filesystem over SSH / locally.
+    - :class:`~imbue.mngr.hosts.offline_host.OfflineHostWithVolume`, writing the
+      host's persisted volume when the host itself is stopped (so files can be
+      staged for the next time it starts). File modes are not settable on a
+      volume write, so ``mode`` is ignored there.
+
+    All paths are absolute paths as seen under the host's ``host_dir``.
+    """
+
+    @abstractmethod
+    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
+        """Write bytes content to a file."""
+        ...
+
+    @abstractmethod
+    def write_text_file(
+        self,
+        path: Path,
+        content: str,
+        encoding: str = "utf-8",
+        mode: str | None = None,
+    ) -> None:
+        """Write string content to a file."""
+        ...
+
+
+class OuterHostInterface(HostFileReadInterface, HostFileWriteInterface, ABC):
     """Minimal interface for the "outer" machine that hosts a container/sandbox.
 
     Outer hosts have a strictly smaller surface than mngr-managed hosts: just the
@@ -288,44 +372,6 @@ class OuterHostInterface(MutableModel, ABC):
         and tolerate duplicate lines on retry. Use this for commands like
         ``docker build`` where re-running is safe.
         """
-        ...
-
-    @abstractmethod
-    def read_file(
-        self,
-        path: Path,
-    ) -> bytes:
-        """Read a file and return its contents as bytes."""
-        ...
-
-    @abstractmethod
-    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
-        """Write bytes content to a file."""
-        ...
-
-    @abstractmethod
-    def read_text_file(
-        self,
-        path: Path,
-        encoding: str = "utf-8",
-    ) -> str:
-        """Read a file and return its contents as a string."""
-        ...
-
-    @abstractmethod
-    def write_text_file(
-        self,
-        path: Path,
-        content: str,
-        encoding: str = "utf-8",
-        mode: str | None = None,
-    ) -> None:
-        """Write string content to a file."""
-        ...
-
-    @abstractmethod
-    def get_file_mtime(self, path: Path) -> datetime | None:
-        """Return the modification time of a file, or None if the file doesn't exist."""
         ...
 
     @abstractmethod

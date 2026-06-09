@@ -6,6 +6,20 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.1] - 2026-06-08
+
+### Added
+
+- Added: Auto-discovered as a publishable package by the release tooling (peer of the already-published `mngr_vultr`); will be offered for first publication to PyPI on the next release.
+
+### Changed
+
+- Changed: OVH provisioning now applies the shared `mngr_vps_docker` host-setup steps over SSH (OVH has no cloud-init). With this change OVH installs the pinned Docker version, registers gVisor `runsc` when `install_gvisor_runtime` is set, tunes sshd, installs the required outer packages, and purges qemu — all from the single shared source of truth. This closes a real gap: OVH never installed `runsc` before, so `[providers.ovh] install_gvisor_runtime = true` was silently a no-op and OVH-baked hosts (including the imbue_cloud pool) ran the agent container under the default runtime.
+
+### Removed
+
+- Removed: OVH-specific `install_required_outer_packages` and `purge_qemu_packages` bootstrap helpers — their behavior is now folded into the shared host-setup step list as config-gated steps.
+
 ## [v0.1.0] - 2026-06-05
 
 ### Fixed

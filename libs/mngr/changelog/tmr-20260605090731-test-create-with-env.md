@@ -1,1 +1,0 @@
-Added a `@pytest.mark.timeout(120)` marker to the `test_create_with_env` e2e tutorial test so it no longer hits the global 10s pytest timeout when run directly (the heavier e2e tests already carry explicit timeout markers). Also strengthened the test to assert that `--env` persists the variable into the agent's on-disk env file, in addition to the existing tmux-pane check.

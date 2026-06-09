@@ -1,1 +1,0 @@
-- Gitignore the `tmr-report/` directory at the repo root: it holds transient task-runner orchestration scratch output (e.g. `events.jsonl`) and should never be committed.

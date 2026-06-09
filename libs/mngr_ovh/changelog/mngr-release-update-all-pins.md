@@ -1,1 +1,0 @@
-- Now auto-discovered as a publishable package by the release tooling (it is a standalone `mngr ovh` VPS-provider plugin, a peer of the already-published `mngr_vultr`). It will be offered for first publication to PyPI on the next release. Its internal pins were already current; no runtime change.

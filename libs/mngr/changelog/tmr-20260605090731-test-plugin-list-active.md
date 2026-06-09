@@ -1,1 +1,0 @@
-Strengthened the `mngr plugin list --active` e2e tutorial test to verify the actual filtering behavior: it now parses the JSON output to assert every listed plugin is enabled, disables a real plugin, and confirms it disappears from `--active` while still appearing (as disabled) in the unfiltered `mngr plugin list`.
