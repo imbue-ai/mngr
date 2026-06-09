@@ -340,6 +340,42 @@ jobs:
       - name: reset to clean state and install fresh app
         run: bash apps/minds/scripts/mac-runner-reset.sh "${{ steps.url.outputs.url }}"
 
+      - name: probe lima image cache + cloud.debian.org reachability
+        # Runs 27226429762 and 27229065721 both failed identically:
+        # lima HEAD to cloud.debian.org times out (TLS handshake),
+        # lima falls back to a cached image entry, but then fatals
+        # opening ~/.lima/<vm>/basedisk. Dump cache state + network
+        # probe so we can tell whether (a) the cache entry is real
+        # but lima's fallback path is buggy, (b) the cache entry is
+        # empty / partial from a previous failed download, or (c)
+        # the runner truly cannot reach cloud.debian.org.
+        run: |
+          set +e
+          DEBIAN_URL="https://cloud.debian.org/images/cloud/bookworm/20260601-2496/debian-12-genericcloud-arm64-20260601-2496.qcow2"
+          CACHE_KEY="8774030760d00b6458319cdbb37dce5d0a878cde994448674bd9f3e6eca6e761"
+          CACHE_DIR="$HOME/Library/Caches/lima/download/by-url-sha256/$CACHE_KEY"
+          echo "=== lima cache dir for the Debian image:"
+          ls -la "$CACHE_DIR" 2>&1 || echo "(cache dir absent)"
+          if [[ -f "$CACHE_DIR/data" ]]; then
+            echo "=== data file size + sha256:"
+            stat -f '%z %N' "$CACHE_DIR/data"
+            shasum -a 256 "$CACHE_DIR/data" | head -1
+            echo "=== qemu-img info (if available):"
+            qemu-img info "$CACHE_DIR/data" 2>&1 | head -10 || true
+            file "$CACHE_DIR/data" 2>&1 | head -1
+          fi
+          echo "=== curl HEAD to $DEBIAN_URL (10s timeout):"
+          /opt/homebrew/opt/curl/bin/curl --max-time 10 -sI "$DEBIAN_URL" 2>&1 | head -5
+          echo "=== curl HEAD via system curl:"
+          /usr/bin/curl --max-time 10 -sI "$DEBIAN_URL" 2>&1 | head -5
+          echo "=== openssl s_client to cloud.debian.org:443 (10s timeout):"
+          timeout 10 openssl s_client -connect cloud.debian.org:443 -servername cloud.debian.org < /dev/null 2>&1 | head -10
+          echo "=== dig cloud.debian.org:"
+          dig +short +tries=1 +time=3 cloud.debian.org 2>&1 | head -5
+          echo "=== installed lima version (bundled):"
+          /Applications/Minds.app/Contents/Resources/lima/bin/limactl --version 2>&1 || true
+          true  # never fail the step itself
+
       - name: ensure socat (slack mock TLS terminator)
         run: |
           for BREW in /opt/homebrew/bin/brew /usr/local/bin/brew; do
