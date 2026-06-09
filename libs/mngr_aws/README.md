@@ -70,6 +70,7 @@ mngr create my-west-agent --provider aws-west
 ```bash
 mngr create my-agent --provider aws
 mngr create my-agent --provider aws -b --aws-instance-type=t3.medium -b --aws-region=us-west-2
+mngr create my-agent --provider aws -b --aws-ami=ami-0123abcd456    # per-host AMI override
 mngr list
 mngr exec my-agent "echo hello"
 mngr stop my-agent

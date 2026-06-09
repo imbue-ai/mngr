@@ -1,4 +1,5 @@
 import os
+from collections.abc import Mapping
 from collections.abc import Sequence
 from typing import Any
 from typing import Final
@@ -22,9 +23,33 @@ from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
-from imbue.mngr_vps_docker.instance import parse_vps_build_args
+from imbue.mngr_vps_docker.instance import extract_git_depth
+from imbue.mngr_vps_docker.instance import extract_single_value_arg
+from imbue.mngr_vps_docker.instance import raise_if_unknown_provider_arg
+from imbue.mngr_vps_docker.instance import raise_if_vps_migration_arg
+from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 AWS_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("aws")
+
+
+class ParsedAwsBuildOptions(ParsedVpsBuildOptions):
+    """``ParsedVpsBuildOptions`` extended with AWS-specific knobs.
+
+    Returned by ``AwsProvider._parse_build_args`` and consumed by
+    ``AwsProvider._create_vps_instance`` so the AWS-only ``--aws-ami=``
+    override flows through to ``AwsVpsClient.create_instance`` without
+    touching the shared ``VpsClientInterface``.
+    """
+
+    ami_id_override: str | None = Field(
+        default=None,
+        description=(
+            "Per-host AMI override from ``--aws-ami=<ami-id>``. When set, "
+            "``AwsVpsClient.create_instance`` launches this AMI instead of the "
+            "provider config's default. When unset, the client's configured "
+            "default AMI applies."
+        ),
+    )
 
 
 class AwsProvider(VpsDockerProvider):
@@ -66,14 +91,68 @@ class AwsProvider(VpsDockerProvider):
                 "instance self-terminates even if pytest is killed."
             )
 
-    def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
-        """Parse AWS-prefixed build args (--aws-region, --aws-instance-type, --git-depth)."""
-        return parse_vps_build_args(
-            build_args,
-            provider_prefix="aws",
-            default_region=self.aws_config.default_region,
-            default_plan=self.aws_config.default_instance_type,
-            plan_arg_name="instance-type",
+    def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedAwsBuildOptions:
+        """Parse AWS-prefixed build args.
+
+        Accepts ``--aws-region=``, ``--aws-instance-type=``, ``--aws-ami=``,
+        and the shared ``--git-depth=``. ``--aws-ami=<ami-id>`` is the per-host
+        AMI override; when omitted, the client's configured default AMI applies.
+
+        Composed from the shared low-level helpers rather than the convenience
+        ``parse_vps_build_args`` because AWS has the extra ``--aws-ami=`` knob.
+        """
+        args = list(build_args or ())
+        region, args = extract_single_value_arg(args, "--aws-region=")
+        instance_type, args = extract_single_value_arg(args, "--aws-instance-type=")
+        ami_override, args = extract_single_value_arg(args, "--aws-ami=")
+        git_depth, args = extract_git_depth(args)
+        valid_args = ("--aws-region=", "--aws-instance-type=", "--aws-ami=", "--git-depth=")
+        docker_build_args: list[str] = []
+        for arg in args:
+            raise_if_vps_migration_arg(arg)
+            raise_if_unknown_provider_arg(arg, "aws", valid_args)
+            docker_build_args.append(arg)
+        return ParsedAwsBuildOptions(
+            region=region or self.aws_config.default_region,
+            plan=instance_type or self.aws_config.default_instance_type,
+            ami_id_override=ami_override,
+            git_depth=git_depth,
+            docker_build_args=tuple(docker_build_args),
+        )
+
+    def _create_vps_instance(
+        self,
+        parsed: ParsedVpsBuildOptions,
+        label: str,
+        user_data: str,
+        ssh_key_ids: Sequence[str],
+        tags: Mapping[str, str],
+    ) -> VpsInstanceId:
+        """AWS override: thread the per-host AMI override into ``AwsVpsClient.create_instance``.
+
+        Calls through ``self.aws_client`` (the concrete typed AWS client) rather
+        than the shared ``self.vps_client`` interface so the AWS-only
+        ``ami_id_override`` kwarg is statically visible. ``ami_id_override``
+        comes from ``--aws-ami=<ami-id>``; when None, the client's configured
+        default AMI applies.
+        """
+        match parsed:
+            case ParsedAwsBuildOptions(ami_id_override=ami_id_override):
+                pass
+            case _:
+                raise MngrError(
+                    f"AwsProvider._create_vps_instance expected ParsedAwsBuildOptions, "
+                    f"got {type(parsed).__name__}. This indicates the parser hook returned a "
+                    "non-AWS shape; _parse_build_args must return ParsedAwsBuildOptions."
+                )
+        return self.aws_client.create_instance(
+            label=label,
+            region=parsed.region,
+            plan=parsed.plan,
+            user_data=user_data,
+            ssh_key_ids=ssh_key_ids,
+            tags=tags,
+            ami_id_override=ami_id_override,
         )
 
     def _list_provider_vps_hostnames(self) -> list[str]:
@@ -116,11 +195,10 @@ class AwsProviderBackend(ProviderBackendInterface):
             "EC2-specific args (consumed by provider, not passed to docker):\n"
             "  --aws-region=REGION         AWS region (default: us-east-1)\n"
             "  --aws-instance-type=TYPE    EC2 instance type (default: t3.small)\n"
+            "  --aws-ami=AMI-ID            Override the per-host AMI for this create only\n"
+            "                              (default: provider config's default_ami_id /\n"
+            "                              default_ami_by_region for the chosen region)\n"
             "  --git-depth=N               Shallow-clone build context to depth N before upload\n"
-            "\n"
-            "AMI is taken from the provider config (default_ami_id / default_ami_by_region);\n"
-            "per-host AMI overrides are not supported via build args. Use a second\n"
-            "[providers.<name>] block with its own default_ami_id for that.\n"
             "\n"
             "All other build args are passed to 'docker build' on the EC2 instance.\n"
             "Example: -b --aws-instance-type=t3.medium -b --file=Dockerfile -b .\n"

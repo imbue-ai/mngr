@@ -336,8 +336,7 @@ class OvhProvider(VpsDockerProvider):
         self,
         host_id: HostId,
         name: HostName,
-        region: str,
-        plan: str,
+        parsed: ParsedVpsBuildOptions,
         vps_host_key_path: Path,
         vps_host_public_key: str,
         vps_ssh_key_id: str,
@@ -368,6 +367,8 @@ class OvhProvider(VpsDockerProvider):
         like ``vps-eec8860b.vps.ovh.us`` that resolves to the VPS's IP.
         """
         del vps_host_key_path, vps_host_public_key
+        region = parsed.region
+        plan = parsed.plan
         image_name = self.ovh_config.default_image_name
 
         public_key = self.ovh_client.get_cached_public_key(vps_ssh_key_id)

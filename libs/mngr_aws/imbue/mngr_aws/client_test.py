@@ -140,6 +140,68 @@ def test_create_instance(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
     assert instance_id == VpsInstanceId("i-0abc123def456")
 
 
+def test_create_instance_uses_ami_id_override(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """``ami_id_override`` (from --aws-ami=) wins over the client's configured default AMI."""
+    client, stubber = stubbed_client
+    stubber.add_response(
+        "run_instances",
+        {"Instances": [{"InstanceId": "i-override"}]},
+        # Critical assertion: the override (not the client's default ami-test12345) is sent.
+        expected_params={
+            "ImageId": "ami-override-xyz",
+            "InstanceType": "t3.small",
+            "MinCount": 1,
+            "MaxCount": 1,
+            "UserData": "test-user-data",
+            "BlockDeviceMappings": ANY,
+            "NetworkInterfaces": ANY,
+            "InstanceInitiatedShutdownBehavior": "terminate",
+            "MetadataOptions": ANY,
+            "TagSpecifications": ANY,
+        },
+    )
+    instance_id = client.create_instance(
+        label="mngr-test-aws-host",
+        region="us-east-1",
+        plan="t3.small",
+        user_data="test-user-data",
+        ssh_key_ids=[],
+        tags={},
+        ami_id_override="ami-override-xyz",
+    )
+    assert instance_id == VpsInstanceId("i-override")
+
+
+def test_create_instance_uses_default_ami_when_override_none(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """When ``ami_id_override`` is None (default), the client's configured AMI flows through."""
+    client, stubber = stubbed_client
+    stubber.add_response(
+        "run_instances",
+        {"Instances": [{"InstanceId": "i-default"}]},
+        # The client was built with ami_id="ami-test12345"; that's what should be sent.
+        expected_params={
+            "ImageId": "ami-test12345",
+            "InstanceType": "t3.small",
+            "MinCount": 1,
+            "MaxCount": 1,
+            "UserData": "test-user-data",
+            "BlockDeviceMappings": ANY,
+            "NetworkInterfaces": ANY,
+            "InstanceInitiatedShutdownBehavior": "terminate",
+            "MetadataOptions": ANY,
+            "TagSpecifications": ANY,
+        },
+    )
+    assert client.create_instance(
+        label="mngr-test-aws-host",
+        region="us-east-1",
+        plan="t3.small",
+        user_data="test-user-data",
+        ssh_key_ids=[],
+        tags={},
+    ) == VpsInstanceId("i-default")
+
+
 def test_create_instance_no_instances_raises(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
     client, stubber = stubbed_client
     stubber.add_response("run_instances", {"Instances": []})

@@ -626,7 +626,6 @@ class VpsDockerProvider(BaseProviderInstance):
         logger.info("Creating VPS Docker host {} ({}) ...", name, host_id)
 
         parsed = self._parse_build_args(build_args)
-        region, plan = parsed.region, parsed.plan
 
         _vps_key_path, vps_public_key = self._get_vps_ssh_keypair()
         vps_host_key_path, vps_host_public_key = self._get_vps_host_keypair()
@@ -641,8 +640,7 @@ class VpsDockerProvider(BaseProviderInstance):
             vps_instance_id, vps_ip = self._provision_vps(
                 host_id=host_id,
                 name=name,
-                region=region,
-                plan=plan,
+                parsed=parsed,
                 vps_host_key_path=vps_host_key_path,
                 vps_host_public_key=vps_host_public_key,
                 vps_ssh_key_id=vps_ssh_key_id,
@@ -657,8 +655,8 @@ class VpsDockerProvider(BaseProviderInstance):
                     vps_instance_id=vps_instance_id,
                     vps_ssh_key_id=vps_ssh_key_id,
                     vps_host_public_key=vps_host_public_key,
-                    region=region,
-                    plan=plan,
+                    region=parsed.region,
+                    plan=parsed.plan,
                     image=image,
                     tags=tags,
                     build_args=build_args,
@@ -805,12 +803,41 @@ class VpsDockerProvider(BaseProviderInstance):
             except (HostConnectionError, MngrError) as e:
                 logger.warning("Failed to remove volume {} for host {}: {}", volume_name, host_id, e)
 
+    def _create_vps_instance(
+        self,
+        parsed: ParsedVpsBuildOptions,
+        label: str,
+        user_data: str,
+        ssh_key_ids: Sequence[str],
+        tags: Mapping[str, str],
+    ) -> VpsInstanceId:
+        """Provider hook that issues the cloud-API instance create.
+
+        Default implementation: call the shared ``self.vps_client.create_instance``
+        with the standard (label, region, plan, user_data, ssh_key_ids, tags)
+        shape, which is what every current backend's wire contract needs.
+
+        Providers that have per-host knobs beyond region + plan (e.g. AWS's
+        ``--aws-ami=`` override) override this hook to pass their extra kwargs
+        through their own concrete typed client (``self.aws_client`` rather
+        than the shared interface). That way the shared ``VpsClientInterface``
+        contract stays minimal and per-provider extensions don't ripple across
+        every other provider's signature.
+        """
+        return self.vps_client.create_instance(
+            label=label,
+            region=parsed.region,
+            plan=parsed.plan,
+            user_data=user_data,
+            ssh_key_ids=ssh_key_ids,
+            tags=tags,
+        )
+
     def _provision_vps(
         self,
         host_id: HostId,
         name: HostName,
-        region: str,
-        plan: str,
+        parsed: ParsedVpsBuildOptions,
         vps_host_key_path: Path,
         vps_host_public_key: str,
         vps_ssh_key_id: str,
@@ -832,13 +859,18 @@ class VpsDockerProvider(BaseProviderInstance):
             auto_shutdown_minutes=self._get_effective_auto_shutdown_minutes(),
         )
 
-        logger.log(LogLevel.BUILD.value, "Creating VPS instance (region: {}, plan: {})...", region, plan, source="vps")
+        logger.log(
+            LogLevel.BUILD.value,
+            "Creating VPS instance (region: {}, plan: {})...",
+            parsed.region,
+            parsed.plan,
+            source="vps",
+        )
         with log_span("Creating VPS instance"):
             vps_tags = build_vps_tags(host_id, self.name, os.environ.get("MNGR_VPS_EXTRA_TAGS", ""))
-            vps_instance_id = self.vps_client.create_instance(
+            vps_instance_id = self._create_vps_instance(
+                parsed=parsed,
                 label=f"mngr-{name}",
-                region=region,
-                plan=plan,
                 user_data=user_data,
                 ssh_key_ids=[vps_ssh_key_id],
                 tags=vps_tags,

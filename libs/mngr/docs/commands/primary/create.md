@@ -208,11 +208,10 @@ Provider: aws
   EC2-specific args (consumed by provider, not passed to docker):
     --aws-region=REGION         AWS region (default: us-east-1)
     --aws-instance-type=TYPE    EC2 instance type (default: t3.small)
+    --aws-ami=AMI-ID            Override the per-host AMI for this create only
+                                (default: provider config's default_ami_id /
+                                default_ami_by_region for the chosen region)
     --git-depth=N               Shallow-clone build context to depth N before upload
-
-  AMI is taken from the provider config (default_ami_id / default_ami_by_region);
-  per-host AMI overrides are not supported via build args. Use a second
-  [providers.<name>] block with its own default_ami_id for that.
 
   All other build args are passed to 'docker build' on the EC2 instance.
   Example: -b --aws-instance-type=t3.medium -b --file=Dockerfile -b .

@@ -303,14 +303,27 @@ class AwsVpsClient(VpsClientInterface):
         user_data: str,
         ssh_key_ids: Sequence[str],
         tags: Mapping[str, str],
+        ami_id_override: str | None = None,
     ) -> VpsInstanceId:
-        """Provision an EC2 instance using the client's configured AMI."""
+        """Provision an EC2 instance.
+
+        Uses ``ami_id_override`` when supplied (from ``--aws-ami=<ami-id>`` on
+        ``mngr create``), otherwise the client's configured default
+        (``self.ami_id``). The kwarg is AWS-specific: it widens
+        ``AwsVpsClient.create_instance``'s signature beyond the shared
+        ``VpsClientInterface.create_instance`` contract, so providers reach it
+        through ``self.aws_client.create_instance(...)`` (via
+        ``AwsProvider._create_vps_instance``) rather than the abstract
+        interface.
+        """
         if region != self.region:
             raise VpsApiError(
                 400,
                 f"Cross-region create not supported: client bound to {self.region!r}, "
                 f"got region={region!r}. Instantiate a region-specific client.",
             )
+
+        effective_ami_id = ami_id_override or self.ami_id
 
         sg_id = self.resolve_security_group_id()
 
@@ -351,7 +364,7 @@ class AwsVpsClient(VpsClientInterface):
             network_interfaces[0]["SubnetId"] = self.subnet_id
 
         run_kwargs: dict[str, Any] = {
-            "ImageId": self.ami_id,
+            "ImageId": effective_ami_id,
             "InstanceType": plan,
             "MinCount": 1,
             "MaxCount": 1,
@@ -391,7 +404,7 @@ class AwsVpsClient(VpsClientInterface):
             label,
             region,
             plan,
-            self.ami_id,
+            effective_ami_id,
         )
         return VpsInstanceId(instance_id)
 
