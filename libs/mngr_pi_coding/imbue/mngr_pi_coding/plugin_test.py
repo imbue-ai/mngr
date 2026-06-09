@@ -15,6 +15,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -24,7 +25,10 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr_pi_coding.plugin import PiCodingAgent
 from imbue.mngr_pi_coding.plugin import PiCodingAgentConfig
+from imbue.mngr_pi_coding.plugin import _INBOX_FILE_NAME
 from imbue.mngr_pi_coding.plugin import _LIFECYCLE_EXTENSION_NAME
+from imbue.mngr_pi_coding.plugin import _SESSION_FILE_NAME
+from imbue.mngr_pi_coding.plugin import _SESSION_STARTED_SENTINEL_NAME
 from imbue.mngr_pi_coding.plugin import _inbox_append_command
 from imbue.mngr_pi_coding.plugin import _load_resource
 from imbue.mngr_pi_coding.plugin import _read_pi_trust
@@ -204,14 +208,14 @@ def test_on_before_provisioning_completes_without_credentials(pi_agent: PiCoding
 # =============================================================================
 
 
-def test_setup_local_config_dir_symlinks_auth(tmp_path: Path, pi_agent: PiCodingAgent) -> None:
+def test_setup_local_config_dir_symlinks_auth(tmp_path: Path, pi_agent: PiCodingAgent, local_host: Host) -> None:
     home = _setup_home_pi(tmp_path)
     (home / ".pi" / "agent" / "auth.json").write_text('{"anthropic": {}}')
 
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True)
 
-    host = _fake_host(tmp_path, is_local=True)
+    host = local_host
     config = PiCodingAgentConfig()
 
     pi_agent._setup_local_config_dir(host, config, config_dir, home)
@@ -235,14 +239,14 @@ def test_setup_remote_config_dir_copies_auth(tmp_path: Path, pi_agent: PiCodingA
     assert (config_dir / "auth.json").read_text() == auth_content
 
 
-def test_setup_local_config_dir_symlinks_settings(tmp_path: Path, pi_agent: PiCodingAgent) -> None:
+def test_setup_local_config_dir_symlinks_settings(tmp_path: Path, pi_agent: PiCodingAgent, local_host: Host) -> None:
     home = _setup_home_pi(tmp_path)
     (home / ".pi" / "agent" / "settings.json").write_text('{"defaultModel": "sonnet"}')
 
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True)
 
-    host = _fake_host(tmp_path, is_local=True)
+    host = local_host
     config = PiCodingAgentConfig(sync_home_settings=True)
 
     pi_agent._setup_local_config_dir(host, config, config_dir, home)
@@ -250,14 +254,16 @@ def test_setup_local_config_dir_symlinks_settings(tmp_path: Path, pi_agent: PiCo
     assert (config_dir / "settings.json").is_symlink()
 
 
-def test_setup_local_config_dir_skips_settings_when_disabled(tmp_path: Path, pi_agent: PiCodingAgent) -> None:
+def test_setup_local_config_dir_skips_settings_when_disabled(
+    tmp_path: Path, pi_agent: PiCodingAgent, local_host: Host
+) -> None:
     home = _setup_home_pi(tmp_path)
     (home / ".pi" / "agent" / "settings.json").write_text('{"defaultModel": "sonnet"}')
 
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True)
 
-    host = _fake_host(tmp_path, is_local=True)
+    host = local_host
     config = PiCodingAgentConfig(sync_home_settings=False)
 
     pi_agent._setup_local_config_dir(host, config, config_dir, home)
@@ -265,7 +271,9 @@ def test_setup_local_config_dir_skips_settings_when_disabled(tmp_path: Path, pi_
     assert not (config_dir / "settings.json").exists()
 
 
-def test_setup_local_config_dir_symlinks_resource_dirs(tmp_path: Path, pi_agent: PiCodingAgent) -> None:
+def test_setup_local_config_dir_symlinks_resource_dirs(
+    tmp_path: Path, pi_agent: PiCodingAgent, local_host: Host
+) -> None:
     home = _setup_home_pi(tmp_path)
     (home / ".pi" / "agent" / "skills").mkdir()
     (home / ".pi" / "agent" / "prompts").mkdir()
@@ -275,7 +283,7 @@ def test_setup_local_config_dir_symlinks_resource_dirs(tmp_path: Path, pi_agent:
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True)
 
-    host = _fake_host(tmp_path, is_local=True)
+    host = local_host
     config = PiCodingAgentConfig(sync_home_settings=True)
 
     pi_agent._setup_local_config_dir(host, config, config_dir, home)
@@ -701,3 +709,33 @@ def test_send_message_raises_when_inbox_write_fails(tmp_path: Path, pi_agent: Pi
     object.__setattr__(pi_agent, "host", host)
     with pytest.raises(SendMessageError, match="failed to write to pi inbox"):
         pi_agent.send_message("hello")
+
+
+def test_lifecycle_extension_contract_matches_python_constants() -> None:
+    """Guard against Python<->TypeScript drift in the shared file/env-var contract.
+
+    plugin.py and mngr_pi_lifecycle.ts hardcode the same filenames and env-var names
+    independently: the Python side writes/reads them under the agent state dir and sets the
+    env vars; the extension reads/writes the same names. The release e2e covers the full
+    round-trip but does not run in CI, so this asserts every shared name plugin.py relies on
+    appears verbatim in the extension source. A rename on either side fails here instead of
+    silently breaking message delivery, resume, readiness, or transcripts.
+    """
+    extension_source = _load_resource(_LIFECYCLE_EXTENSION_NAME)
+    shared_names = (
+        # filenames written by one side and read by the other, under $MNGR_AGENT_STATE_DIR
+        "active",
+        _SESSION_STARTED_SENTINEL_NAME,
+        _SESSION_FILE_NAME,
+        _INBOX_FILE_NAME,
+        # env vars the Python side sets and the extension reads
+        "MNGR_AGENT_STATE_DIR",
+        "MNGR_PI_AGENT_TYPE",
+        "MNGR_PI_EMIT_COMMON_TRANSCRIPT",
+        "MNGR_PI_EMIT_RAW_TRANSCRIPT",
+    )
+    for name in shared_names:
+        assert name in extension_source, (
+            f"{name!r} is used in plugin.py but absent from {_LIFECYCLE_EXTENSION_NAME} -- "
+            "the Python<->TypeScript contract has drifted"
+        )

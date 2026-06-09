@@ -20,6 +20,7 @@ from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.data_types import FileTransferSpec
@@ -505,35 +506,30 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin):
         """Set up the per-agent config dir on a local host via symlinks."""
         home_pi = _get_pi_home_dir(home_dir)
 
+        # `symlink_on_host` centralizes the shell quoting and uses `ln -sfn` + an mkdir of
+        # the link's parent (the shared helper every plugin uses; see hosts/common.py).
         if config.sync_auth:
-            auth_source = home_pi / "auth.json"
-            if auth_source.exists():
-                result = host.execute_idempotent_command(
-                    f"ln -sf {shlex.quote(str(auth_source))} {shlex.quote(str(config_dir / 'auth.json'))}",
-                    timeout_seconds=5.0,
-                )
-                if not result.success:
-                    logger.warning("Failed to symlink auth.json: {}", result.stderr)
+            # Linked even if it does not exist yet: a `/login` or token refresh inside any
+            # agent then writes through to the shared ~/.pi/agent/auth.json and propagates to
+            # the rest (the dangling-symlink-before-source case the helper handles).
+            symlink_on_host(
+                host,
+                home_pi / "auth.json",
+                config_dir / "auth.json",
+                ensure_source_parent=True,
+            )
 
         if config.sync_home_settings:
+            # settings + resource dirs are read-shares of the user's existing config: only
+            # link what is actually present, rather than fabricating a write-through link.
             settings_source = home_pi / "settings.json"
             if settings_source.exists():
-                result = host.execute_idempotent_command(
-                    f"ln -sf {shlex.quote(str(settings_source))} {shlex.quote(str(config_dir / 'settings.json'))}",
-                    timeout_seconds=5.0,
-                )
-                if not result.success:
-                    logger.warning("Failed to symlink settings.json: {}", result.stderr)
+                symlink_on_host(host, settings_source, config_dir / "settings.json")
 
             for dir_name in _SYNCED_RESOURCE_DIRS:
                 source = home_pi / dir_name
                 if source.exists():
-                    result = host.execute_idempotent_command(
-                        f"ln -sf {shlex.quote(str(source))} {shlex.quote(str(config_dir / dir_name))}",
-                        timeout_seconds=5.0,
-                    )
-                    if not result.success:
-                        logger.warning("Failed to symlink {}: {}", dir_name, result.stderr)
+                    symlink_on_host(host, source, config_dir / dir_name)
 
     def _setup_remote_config_dir(
         self,
