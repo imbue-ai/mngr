@@ -7,3 +7,5 @@ visible jump occurs when content loads.
 Window state is now persisted in most-recently-focused order, so for
 multi-window users the loading screen opens at the bounds of the last
 window they interacted with (rather than the oldest still-open one).
+The lesser-MRU windows are restored without stealing focus, so the
+most-recently-focused window stays in front after restore completes.

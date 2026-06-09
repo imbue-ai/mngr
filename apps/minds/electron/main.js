@@ -380,15 +380,16 @@ function wireBundleShowLogic(bundle) {
   // Show the window once chrome has painted (avoids flashing a bare BaseWindow
   // for the half-second before the WebContentsView renders). Fall back to a
   // longer timer in case the chrome load never completes.
-  chromeView.webContents.once('did-finish-load', () => {
-    if (!win.isDestroyed() && !win.isVisible()) win.show();
-  });
-  win.once('ready-to-show', () => {
-    if (!win.isDestroyed() && !win.isVisible()) win.show();
-  });
-  setTimeout(() => {
-    if (!win.isDestroyed() && !win.isVisible()) win.show();
-  }, 3000);
+  // showInactiveOnFirstShow lets callers (e.g. the startup multi-window restore
+  // loop) surface the window without stealing focus from another bundle.
+  const surface = () => {
+    if (win.isDestroyed() || win.isVisible()) return;
+    if (bundle.showInactiveOnFirstShow) win.showInactive();
+    else win.show();
+  };
+  chromeView.webContents.once('did-finish-load', surface);
+  win.once('ready-to-show', surface);
+  setTimeout(surface, 3000);
 }
 
 function createBundle() {
@@ -837,8 +838,9 @@ function openOrFocusWorkspace(agentId, url) {
   return openNewWindow(absolute);
 }
 
-function openNewWindow(url) {
+function openNewWindow(url, { showInactive = false } = {}) {
   const bundle = createBundle();
+  if (showInactive) bundle.showInactiveOnFirstShow = true;
   bundle.isLoadingState = false;
   updateBundleBounds(bundle);
   if (bundle.chromeView && backendBaseUrl) {
@@ -1803,8 +1805,11 @@ async function startBackendWithRetry() {
         const [first, ...rest] = restorable;
         restoreWindowBounds(initialBundle, first);
         loadUrlIntoBundleContentView(initialBundle, toAbsoluteUrl(first.url));
+        // Open the lesser-MRU windows without stealing focus, so the
+        // MRU-zero window (already focused as initialBundle) stays focused
+        // after restore completes.
         for (const entry of rest) {
-          const bundle = openNewWindow(toAbsoluteUrl(entry.url));
+          const bundle = openNewWindow(toAbsoluteUrl(entry.url), { showInactive: true });
           restoreWindowBounds(bundle, entry);
         }
       }
