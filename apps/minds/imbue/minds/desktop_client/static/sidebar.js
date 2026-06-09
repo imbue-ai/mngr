@@ -249,6 +249,29 @@
     renderWorkspaces(lastWorkspaces);
   }
 
+  // Tell the main process how tall the rendered menu actually is so it can
+  // size the sidebar WebContentsView to match. A transparent view that
+  // extends past the menu silently absorbs clicks intended for the
+  // workspace content behind it; with a matched height, clicks below the
+  // menu fall through to the underlying content view. ResizeObserver picks
+  // up workspace-list changes (rows added / removed) automatically.
+  if (isElectron && window.minds.setSidebarHeight) {
+    var menu = document.getElementById('sidebar-menu');
+    if (menu && typeof ResizeObserver !== 'undefined') {
+      var report = function () {
+        var rect = menu.getBoundingClientRect();
+        // top:2 + bottom:2 -- the menu uses `top-2 left-2 right-2`. Add a
+        // small headroom so the drop-shadow renders without being clipped
+        // and the panel doesn't sit flush against the WebContentsView edge.
+        var totalPx = Math.ceil(rect.bottom + 16);
+        window.minds.setSidebarHeight(totalPx);
+      };
+      var ro = new ResizeObserver(report);
+      ro.observe(menu);
+      report();
+    }
+  }
+
   if (isElectron && window.minds.onChromeEvent) {
     window.minds.onChromeEvent(handleChromeEvent);
   } else {
