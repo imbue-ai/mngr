@@ -103,7 +103,18 @@ def _build_wsgidav_config(share_roots: tuple[Path, ...]) -> dict[str, Any]:
     """Build the WsgiDAV config dict for ``share_roots``."""
     provider_mapping: dict[str, FilesystemProvider] = {}
     for root in share_roots:
-        provider_mapping[str(root)] = FilesystemProvider(str(root), readonly=False)
+        # WsgiDAV matches the request path against a *lowercased* copy of
+        # the share keys but then looks the matched share back up in
+        # ``provider_mapping`` using that lowercased string. A share key
+        # containing uppercase characters (e.g. a macOS home directory
+        # ``/Users/<name>``) therefore never resolves: the lookup misses,
+        # the provider comes back ``None``, and WsgiDAV answers 404. We
+        # register the share under a lowercased key so the lookup always
+        # hits; the ``FilesystemProvider`` keeps the real, correct-case
+        # path so files still resolve on case-sensitive filesystems. The
+        # share prefix length is identical regardless of case, so WsgiDAV's
+        # ``PATH_INFO`` stripping stays correct.
+        provider_mapping[str(root).lower()] = FilesystemProvider(str(root), readonly=False)
     return {
         "provider_mapping": provider_mapping,
         # Auth is enforced by the outer ASGI bearer-token gate; WsgiDAV
