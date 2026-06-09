@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.12] - 2026-06-08
+
 ### Added
 
 - Added: Public `set_command(command)` setter on `AgentInterface` / `BaseAgent`, mirroring the existing `get_command` and the other certified field setters (`set_labels`, `set_is_start_on_boot`, ...). Persists the agent's stored launch command through the same atomic-write + external-storage path; lets callers update the command an agent re-runs on its next start/restart without touching `data.json` directly.

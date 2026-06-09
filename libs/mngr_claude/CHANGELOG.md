@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.12] - 2026-06-08
+
 ### Added
 
 - Added: Approximate response streaming for Claude agents, driven by watching the agent's tmux pane. A new `streaming_snapshot_interval_seconds` (float, default `0.0`) on the `claude` agent type config enables a background watcher that writes the in-progress assistant text to `$MNGR_AGENT_STATE_DIR/plugin/claude/stream_buffer` every N seconds; `<= 0` (the default) leaves existing behavior unchanged. The buffer is written atomically (temp file + `mv`) with line 1 carrying the `uuid` of the last complete assistant message and lines 2+ the in-progress text reverse-mapped from the terminal rendering back into markdown; it is cleared on watcher startup and emptied (body cleared, id line kept) when the agent goes idle.
