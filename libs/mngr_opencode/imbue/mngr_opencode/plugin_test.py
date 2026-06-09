@@ -14,6 +14,7 @@ from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostName
@@ -421,8 +422,12 @@ def test_send_message_delivers_to_real_tmux_pane(local_provider: LocalProviderIn
             f"tmux new-session -d -s '{session_name}' 'cat'",
             timeout_seconds=5.0,
         )
+        # Wait for the pane to actually come up. STOPPED is the state when there
+        # is no live tmux pane, so "pane is up" is exactly "not STOPPED" (a bare
+        # ``cat`` pane reports REPLACED, since it is neither ``opencode`` nor a
+        # shell -- still distinct from STOPPED).
         wait_for(
-            lambda: agent.get_lifecycle_state() is not None,
+            lambda: agent.get_lifecycle_state() != AgentLifecycleState.STOPPED,
             timeout=5.0,
             error_message="tmux session not ready",
         )
