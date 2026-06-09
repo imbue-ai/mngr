@@ -49,3 +49,42 @@ def test_create_with_template(e2e: E2eSession) -> None:
     pwd_result = e2e.run("mngr exec my-task pwd", comment="Confirm the agent runs in-place in the repo")
     expect(pwd_result).to_succeed()
     expect(pwd_result.stdout).to_contain(work_dir)
+
+
+@pytest.mark.release
+def test_create_with_nonexistent_template(e2e: E2eSession) -> None:
+    """Unhappy path: creating with an unknown template fails with a helpful error.
+
+    Shares the templates tutorial block with ``test_create_with_template``: it
+    defines one real template so the error path can report the set of available
+    templates, then references a template name that was never configured.
+    """
+    # Write a real template so there is at least one available template to report.
+    cfg = ".$MNGR_ROOT_NAME/settings.local.toml"
+    expect(
+        e2e.run(
+            f"echo '' >> {cfg}"
+            f" && echo '[create_templates.my_local_template]' >> {cfg}"
+            f" && echo 'transfer = \"none\"' >> {cfg}",
+            comment="Write a template that sets transfer=none",
+        )
+    ).to_succeed()
+
+    # Reference a template that does not exist -- create must refuse before
+    # provisioning any agent.
+    result = e2e.run(
+        "mngr create my-task --template does_not_exist --type command --no-ensure-clean --no-connect -- sleep 100069",
+        comment="Create with a template name that was never configured",
+    )
+    expect(result).to_fail()
+    # The error should name the missing template and list the configured ones,
+    # so the user can correct the typo.
+    expect(result.stderr).to_contain("does_not_exist")
+    expect(result.stderr).to_contain("not found")
+    expect(result.stderr).to_contain("my_local_template")
+
+    # No agent should have been created by the failed command.
+    list_result = e2e.run("mngr list --provider local --format json", comment="Confirm no agent was created")
+    expect(list_result).to_succeed()
+    agents = json.loads(list_result.stdout)["agents"]
+    assert [a for a in agents if a["name"] == "my-task"] == []

@@ -75,6 +75,12 @@ def test_recipe_launch_check_cleanup(e2e: E2eSession) -> None:
     # the agent's branch should no longer exist.
     branch_result = e2e.run("git branch --list mngr/fix-bug", comment="verify the created branch was removed")
     expect(branch_result.stdout).to_be_empty()
+    # Destroy must also remove the agent itself, not just its branch: it should
+    # no longer be listed, and resolving it by name should now fail.
+    final_listing = e2e.run("mngr list", comment="confirm the agent is gone after cleanup")
+    expect(final_listing).to_succeed()
+    expect(final_listing.stdout).not_to_contain("fix-bug")
+    expect(e2e.run("mngr exec fix-bug pwd", comment="verify the destroyed agent can no longer be reached")).to_fail()
 
 
 @pytest.mark.rsync
