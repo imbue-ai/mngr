@@ -40,6 +40,17 @@ _PI_AGENT_SUBDIR: str = "agent"
 # definitions (``*.md``) that subagent extensions (pi's in-tree example, or
 # community packages like ``pi-subagents``) read from the config dir; without it
 # a synced subagent extension would load but find no agents to delegate to.
+#
+# Note: the ``npm`` dir (where ``pi install`` materialises npm-package extensions
+# under ``npm/node_modules``) is deliberately NOT synced. pi re-resolves the
+# ``packages`` list in the synced ``settings.json`` on every startup and
+# auto-installs any missing ones into the per-agent ``$PI_CODING_AGENT_DIR/npm``,
+# so npm-package extensions (e.g. ``npm:pi-subagents``) become available without
+# copying ``node_modules`` around, and each agent keeps an isolated install. The
+# only cost is a per-agent ``npm install`` (~1s) on first launch, which needs
+# network and so would not work on a fully-offline host; if that latency or the
+# offline case ever matters, copy ``npm`` into the per-agent dir here (copy, not
+# symlink -- a shared ``node_modules`` would race across concurrent startups).
 _SYNCED_RESOURCE_DIRS: tuple[str, ...] = ("skills", "prompts", "extensions", "themes", "agents")
 
 # The pi agent-type name, used for the per-agent transcript directories
