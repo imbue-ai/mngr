@@ -35,6 +35,12 @@ plugin shares into each agent).
   message stream is also captured under the agent state dir.
 - **Resume.** `mngr stop` then `mngr start` continues the same pi session with full
   context.
+- **Trust.** pi 0.79+ prompts "Trust project folder?" when the workspace has
+  project instructions (`CLAUDE.md`/`AGENTS.md`), `.pi` settings, or extensions.
+  mngr pre-trusts the agent's workspace so it never stalls at that dialog, gating
+  the grant like the other agent types (silent under `mngr create --yes` or
+  `auto_dismiss_dialogs`, an interactive prompt otherwise, and it extends the
+  grant automatically if you already trust the source repo).
 
 These are powered by a small mngr-owned pi extension that the plugin provisions and
 loads with `pi -e`; pi has no shell-hook surface, so its TypeScript extension API is
@@ -67,5 +73,6 @@ Tunables on the `pi-coding` agent type:
 | `resume_session` | `true` | Resume this agent's pi session on start, so stop/start keeps context. |
 | `emit_common_transcript` | `true` | Emit the transcript `mngr transcript` reads. |
 | `emit_raw_transcript` | `true` | Capture the raw pi message stream. |
+| `auto_dismiss_dialogs` | `false` | Trust the workspace without prompting (suppress pi's "Trust project folder?" dialog). Also implied by `mngr create --yes`. |
 
 See the [mngr agent types documentation](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/concepts/agent_types.md) for more details.

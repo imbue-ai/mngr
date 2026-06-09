@@ -12,6 +12,7 @@ from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import PluginMngrError
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -23,6 +24,8 @@ from imbue.mngr_pi_coding.plugin import PiCodingAgent
 from imbue.mngr_pi_coding.plugin import PiCodingAgentConfig
 from imbue.mngr_pi_coding.plugin import _LIFECYCLE_EXTENSION_NAME
 from imbue.mngr_pi_coding.plugin import _load_resource
+from imbue.mngr_pi_coding.plugin import _read_pi_trust
+from imbue.mngr_pi_coding.plugin import _serialize_pi_trust
 from imbue.mngr_pi_coding.plugin import register_agent_type
 
 # =============================================================================
@@ -106,6 +109,9 @@ def pi_agent(tmp_path: Path) -> PiCodingAgent:
     object.__setattr__(agent, "host", _fake_host(tmp_path))
     object.__setattr__(agent, "id", AgentId.generate())
     object.__setattr__(agent, "name", AgentName("test-pi"))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir(exist_ok=True)
+    object.__setattr__(agent, "work_dir", work_dir)
     return agent
 
 
@@ -366,9 +372,14 @@ def test_provision_auto_installs_on_remote(tmp_path: Path, pi_agent: PiCodingAge
     object.__setattr__(pi_agent, "agent_config", config)
     object.__setattr__(pi_agent, "host", host)
     options = _make_options()
-    mngr_ctx = _make_test_mngr_ctx(tmp_path)
+    # is_auto_approve so the workspace-trust gate proceeds silently (the autouse
+    # HOME redirect keeps the global trust write inside the test's temp home).
+    mngr_ctx = _make_test_mngr_ctx(tmp_path, is_auto_approve=True)
 
-    pi_agent.provision(host, options, mngr_ctx)
+    # The trust gate resolves the git source via the concurrency group, which
+    # must be active (it is during real provisioning).
+    with mngr_ctx.concurrency_group:
+        pi_agent.provision(host, options, mngr_ctx)
 
 
 def test_provision_raises_when_remote_install_disabled(tmp_path: Path, pi_agent: PiCodingAgent) -> None:
@@ -502,3 +513,140 @@ def test_wait_for_ready_signal_returns_once_sentinel_present(pi_agent: PiCodingA
     calls: list[int] = []
     pi_agent.wait_for_ready_signal(is_creating=True, start_action=lambda: calls.append(1))
     assert calls == [1]
+
+
+# =============================================================================
+# Workspace trust (pi 0.79+ "Trust project folder?" dialog)
+# =============================================================================
+
+
+def test_read_pi_trust_parses_bools_and_drops_null(tmp_path: Path) -> None:
+    parsed = _read_pi_trust('{"/a": true, "/b": false, "/c": null}', tmp_path / "trust.json")
+    assert parsed == {"/a": True, "/b": False}
+
+
+def test_read_pi_trust_empty_is_empty_map() -> None:
+    assert _read_pi_trust(None, Path("/x")) == {}
+    assert _read_pi_trust("   ", Path("/x")) == {}
+
+
+def test_read_pi_trust_rejects_malformed() -> None:
+    with pytest.raises(UserInputError):
+        _read_pi_trust("{not json", Path("/x"))
+    with pytest.raises(UserInputError):
+        _read_pi_trust("[1, 2]", Path("/x"))
+    with pytest.raises(UserInputError):
+        _read_pi_trust('{"/a": "yes"}', Path("/x"))
+
+
+def test_serialize_pi_trust_is_sorted_with_trailing_newline() -> None:
+    assert _serialize_pi_trust({"/b": True, "/a": False}) == '{\n  "/a": false,\n  "/b": true\n}\n'
+
+
+class _TrustConfirmAgent(PiCodingAgent):
+    """Agent whose source-path lookup and trust prompt are stubbed for tests (confirms)."""
+
+    def _find_git_source_path(self, mngr_ctx: MngrContext) -> Path | None:
+        # Returning None makes the source fall back to work_dir (no git probe needed).
+        return None
+
+    def _prompt_user_to_trust_workspace(self, source_path: Path, trust_path: Path) -> bool:
+        return True
+
+
+class _TrustDeclineAgent(PiCodingAgent):
+    """Like _TrustConfirmAgent but declines the trust prompt."""
+
+    def _find_git_source_path(self, mngr_ctx: MngrContext) -> Path | None:
+        return None
+
+    def _prompt_user_to_trust_workspace(self, source_path: Path, trust_path: Path) -> bool:
+        return False
+
+
+def _make_trust_agent(cls: type[PiCodingAgent], tmp_path: Path, **config_kwargs: Any) -> PiCodingAgent:
+    agent = cls.__new__(cls)
+    object.__setattr__(agent, "agent_config", PiCodingAgentConfig(**config_kwargs))
+    object.__setattr__(agent, "host", _fake_host(tmp_path))
+    object.__setattr__(agent, "id", AgentId.generate())
+    object.__setattr__(agent, "name", AgentName("test-pi"))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir(exist_ok=True)
+    object.__setattr__(agent, "work_dir", work_dir)
+    return agent
+
+
+def _make_interactive_mngr_ctx(tmp_path: Path) -> MngrContext:
+    return make_mngr_ctx(
+        config=MngrConfig(),
+        pm=pluggy.PluginManager("mngr"),
+        profile_dir=tmp_path / "profile",
+        is_interactive=True,
+        is_auto_approve=False,
+        concurrency_group=ConcurrencyGroup(name="test"),
+    )
+
+
+def _read_global_trust(home: Path) -> dict[str, bool]:
+    trust_path = home / ".pi" / "agent" / "trust.json"
+    content = trust_path.read_text() if trust_path.exists() else None
+    return _read_pi_trust(content, trust_path)
+
+
+def test_ensure_source_trusted_auto_dismiss_writes_global(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    agent = _make_trust_agent(_TrustDeclineAgent, tmp_path, auto_dismiss_dialogs=True)
+    agent._ensure_source_repo_trusted(_make_test_mngr_ctx(tmp_path), home_dir=home)
+    assert _read_global_trust(home)[str(agent.work_dir.resolve())] is True
+
+
+def test_ensure_source_trusted_auto_approve_writes_global(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    agent = _make_trust_agent(_TrustDeclineAgent, tmp_path)
+    agent._ensure_source_repo_trusted(_make_test_mngr_ctx(tmp_path, is_auto_approve=True), home_dir=home)
+    assert _read_global_trust(home)[str(agent.work_dir.resolve())] is True
+
+
+def test_ensure_source_trusted_noninteractive_without_optin_exits(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    agent = _make_trust_agent(_TrustDeclineAgent, tmp_path)
+    with pytest.raises(SystemExit):
+        agent._ensure_source_repo_trusted(_make_test_mngr_ctx(tmp_path), home_dir=home)
+    assert not (home / ".pi" / "agent" / "trust.json").exists()
+
+
+def test_ensure_source_trusted_interactive_confirm_writes(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    agent = _make_trust_agent(_TrustConfirmAgent, tmp_path)
+    agent._ensure_source_repo_trusted(_make_interactive_mngr_ctx(tmp_path), home_dir=home)
+    assert _read_global_trust(home)[str(agent.work_dir.resolve())] is True
+
+
+def test_ensure_source_trusted_interactive_decline_exits(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    agent = _make_trust_agent(_TrustDeclineAgent, tmp_path)
+    with pytest.raises(SystemExit):
+        agent._ensure_source_repo_trusted(_make_interactive_mngr_ctx(tmp_path), home_dir=home)
+    assert not (home / ".pi" / "agent" / "trust.json").exists()
+
+
+def test_ensure_source_trusted_already_trusted_is_noop(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    # Uses the decline agent: if it did not short-circuit on already-trusted, the
+    # non-interactive gate (or a decline) would SystemExit instead of passing.
+    agent = _make_trust_agent(_TrustDeclineAgent, tmp_path)
+    trust_dir = home / ".pi" / "agent"
+    trust_dir.mkdir(parents=True)
+    key = str(agent.work_dir.resolve())
+    (trust_dir / "trust.json").write_text(_serialize_pi_trust({key: True}))
+    # Non-interactive, no opt-in: would SystemExit if it did not short-circuit on already-trusted.
+    agent._ensure_source_repo_trusted(_make_test_mngr_ctx(tmp_path), home_dir=home)
+    assert _read_global_trust(home)[key] is True
+
+
+def test_seed_per_agent_workspace_trust_writes_per_agent_file(pi_agent: PiCodingAgent) -> None:
+    pi_agent._seed_per_agent_workspace_trust(pi_agent.host)
+    trust_path = pi_agent.get_pi_config_dir() / "trust.json"
+    data = _read_pi_trust(trust_path.read_text(), trust_path)
+    assert len(data) == 1
+    assert all(value is True for value in data.values())

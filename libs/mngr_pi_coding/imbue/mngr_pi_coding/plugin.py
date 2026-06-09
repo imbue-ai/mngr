@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
 
+import click
 from loguru import logger
 from pydantic import Field
 
@@ -19,6 +20,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendMessageError
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
@@ -26,6 +28,7 @@ from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_pi_coding import resources as _pi_resources
 
@@ -74,6 +77,46 @@ def _load_resource(filename: str) -> str:
     return importlib.resources.files(_pi_resources).joinpath(filename).read_text()
 
 
+# pi 0.79+ gates loading project-local inputs (CLAUDE.md/AGENTS.md, .pi settings,
+# project extensions) behind a "Trust project folder?" dialog when the cwd or an
+# ancestor has such inputs and there is no saved decision. Decisions are stored
+# per canonical (realpath) cwd in ``<agent-dir>/trust.json`` as ``{path: bool}``
+# (see pi's core/trust-manager.ts). mngr seeds it so the interactive agent never
+# stalls at the dialog.
+_PI_TRUST_FILE_NAME: str = "trust.json"
+
+
+def _read_pi_trust(content: str | None, path: Path) -> dict[str, bool]:
+    """Parse a pi ``trust.json`` body into ``{canonical_path: bool}``.
+
+    Mirrors pi's own reader: the file is a JSON object of path -> true/false/null.
+    ``null`` means "no saved decision" and is dropped. A malformed file is a hard
+    error (``UserInputError``) rather than silently overwritten, so a schema we
+    don't understand is surfaced instead of clobbered.
+    """
+    if content is None or content.strip() == "":
+        return {}
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError as error:
+        raise UserInputError(f"pi trust store at {path} is not valid JSON: {error}") from error
+    if not isinstance(parsed, dict):
+        raise UserInputError(f"pi trust store at {path} must be a JSON object, got {type(parsed).__name__}")
+    result: dict[str, bool] = {}
+    for key, value in parsed.items():
+        if value is None:
+            continue
+        if not isinstance(value, bool):
+            raise UserInputError(f"pi trust store at {path}: value for {key!r} must be true, false, or null")
+        result[str(key)] = value
+    return result
+
+
+def _serialize_pi_trust(trust: Mapping[str, bool]) -> str:
+    """Serialize a trust map in pi's format (sorted keys, 2-space indent, trailing newline)."""
+    return json.dumps({key: trust[key] for key in sorted(trust)}, indent=2) + "\n"
+
+
 def _get_pi_home_dir(home_dir: Path | None = None) -> Path:
     """Return the pi agent home directory (defaults to ~/.pi/agent/)."""
     if home_dir is None:
@@ -118,6 +161,15 @@ class PiCodingAgentConfig(AgentTypeConfig):
     emit_raw_transcript: bool = Field(
         default=True,
         description="Capture the raw pi message stream under logs/<type>_transcript/events.jsonl.",
+    )
+    auto_dismiss_dialogs: bool = Field(
+        default=False,
+        description=(
+            "Trust the agent's workspace for pi without prompting, suppressing pi's "
+            "'Trust project folder?' dialog (which would otherwise block the first message). "
+            "Also implied by `mngr create --yes`. When False and the source repo is not already "
+            "trusted, mngr prompts interactively and refuses to run non-interactively."
+        ),
     )
 
 
@@ -498,8 +550,132 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig], HasCommonTranscrip
                     _install_pi(host)
                     logger.info("pi installed successfully")
 
+        # Trust gate first (consent + durable global record), so a declined /
+        # non-interactive-without-opt-in case exits cleanly before any setup.
+        self._ensure_source_repo_trusted(mngr_ctx)
         self._setup_per_agent_config_dir(host, config)
+        self._seed_per_agent_workspace_trust(host)
         self._provision_lifecycle_extension(host)
+
+    def _ensure_source_repo_trusted(self, mngr_ctx: MngrContext, home_dir: Path | None = None) -> None:
+        """Record the agent's *source repo* as trusted in the user's global pi trust store.
+
+        pi 0.79+ stops an interactive session at a "Trust project folder?" dialog
+        when the workspace has project-local inputs (CLAUDE.md/AGENTS.md, .pi,
+        .agents/skills) and no saved trust decision. mngr seeds trust so the agent
+        never stalls there, but -- mirroring mngr_claude/mngr_antigravity -- it
+        does not silently trust code: trust is split into a *durable* and a
+        *transient* record.
+
+        This method handles the **durable** half. The git source-repo root (the
+        parent repo of a worktree, or the work_dir for a standalone project) is
+        the stable thing worth persisting: once trusted, later agents/worktrees of
+        the same repo extend that trust without re-prompting, and a manual ``pi``
+        run in the repo is likewise trusted. It is written to the user's global
+        ``~/.pi/agent/trust.json``.
+
+        Consent gating: source already trusted -> no-op; ``auto_dismiss_dialogs``
+        or ``mngr create --yes`` (``is_auto_approve``) -> silent; interactive ->
+        ``click.confirm`` (defaults to no); non-interactive without opt-in, or a
+        declined prompt -> ``SystemExit(1)`` (a clean exit, not a traceback).
+
+        The global store is the local user's own config, so it is read and
+        written with local filesystem ops regardless of where the agent runs
+        (a remote agent still reflects the trust decisions of the user who
+        created it). ``home_dir`` is injectable for tests.
+        """
+        source_path = self._find_git_source_path(mngr_ctx) or self.work_dir
+        source_key = str(source_path.resolve())
+        trust_path = _get_pi_home_dir(home_dir) / _PI_TRUST_FILE_NAME
+        existing = trust_path.read_text() if trust_path.exists() else None
+        trust = _read_pi_trust(existing, trust_path)
+        if trust.get(source_key) is True:
+            logger.debug("pi source repo {} already trusted in {}", source_key, trust_path)
+            return
+
+        if not (self.agent_config.auto_dismiss_dialogs or mngr_ctx.is_auto_approve):
+            if not mngr_ctx.is_interactive:
+                logger.error(
+                    "Source directory {} is not trusted by pi. mngr will not silently run an agent on "
+                    "untrusted code. Re-run interactively to be prompted, re-run with `--yes`, or set "
+                    "`auto_dismiss_dialogs = true` on the pi-coding agent type.",
+                    source_path,
+                )
+                raise SystemExit(1)
+            if not self._prompt_user_to_trust_workspace(source_path, trust_path):
+                logger.error("User declined to trust {} in {}. Aborting agent creation.", source_path, trust_path)
+                raise SystemExit(1)
+
+        trust[source_key] = True
+        trust_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_span("Persisting trusted pi source repo {} in {}", source_key, trust_path):
+            trust_path.write_text(_serialize_pi_trust(trust))
+
+    def _find_git_source_path(self, mngr_ctx: MngrContext) -> Path | None:
+        """Source repo root for ``work_dir`` (the durable path persisted in global trust).
+
+        For a worktree this is the parent repo, so a single trust grant covers
+        every worktree of the same repo. A method (not a direct call to the free
+        helper) so tests can override it without an active concurrency group.
+        """
+        return find_git_source_path(self.work_dir, mngr_ctx.concurrency_group)
+
+    def _prompt_user_to_trust_workspace(self, source_path: Path, trust_path: Path) -> bool:
+        """Ask the user to trust the agent's source directory in pi's global trust store.
+
+        Returns True iff the user confirms. Refers to the *source* directory (the
+        git repo root, or the bare work_dir if not a git repo) so the user sees a
+        stable path across worktrees. Defaults to False so a stray Enter does not
+        grant trust. A method (not a free function) so tests can override it.
+        """
+        logger.info(
+            "\nSource directory {} is not yet trusted by pi.\n"
+            "mngr needs to add a trust entry for it to {}\n"
+            "so agents for this repo are not stranded at pi's trust dialog.\n",
+            source_path,
+            trust_path,
+        )
+        return click.confirm(f"Would you like to update {trust_path} to trust this directory?", default=False)
+
+    def _seed_per_agent_workspace_trust(self, host: OnlineHostInterface) -> None:
+        """Record the agent's *transient* work_dir as trusted in the per-agent pi trust store.
+
+        This is the **transient** half of trust (see ``_ensure_source_repo_trusted``):
+        pi matches trust on the exact canonical (realpath) cwd, and the agent runs
+        in a per-agent worktree, so the entry that actually dismisses *this*
+        agent's dialog is the worktree path. It goes only into the per-agent
+        ``PI_CODING_AGENT_DIR/trust.json`` (which pi reads as ``<agent-dir>/trust.json``
+        and which is deleted with the agent), never into the global store, so
+        per-worktree paths don't accumulate there. The key is resolved on the host
+        (``pwd -P``) to match how pi canonicalizes its cwd.
+        """
+        work_key = self._get_host_canonical_work_dir(host)
+        trust_path = self.get_pi_config_dir() / _PI_TRUST_FILE_NAME
+        try:
+            existing = host.read_text_file(trust_path)
+        except FileNotFoundError:
+            existing = None
+        trust = _read_pi_trust(existing, trust_path)
+        if trust.get(work_key) is True:
+            return
+        trust[work_key] = True
+        with log_span("Trusting pi workspace {} in {}", work_key, trust_path):
+            host.write_text_file(trust_path, _serialize_pi_trust(trust))
+
+    def _get_host_canonical_work_dir(self, host: OnlineHostInterface) -> str:
+        """Resolve the work_dir to its canonical (realpath) form on the host.
+
+        pi keys trust on ``realpathSync(cwd)``; matching that requires resolving
+        symlinks on the host the agent runs on (``/tmp`` -> ``/private/tmp`` on
+        macOS, etc.), so we ask the host rather than resolving locally.
+        """
+        result = host.execute_idempotent_command(
+            f"cd {shlex.quote(str(self.work_dir))} && pwd -P", timeout_seconds=5.0
+        )
+        if result.success and result.stdout.strip():
+            return result.stdout.strip()
+        logger.warning("Could not resolve canonical work dir for {}; using the literal path", self.work_dir)
+        return str(self.work_dir)
 
     def _provision_lifecycle_extension(self, host: OnlineHostInterface) -> None:
         """Write the lifecycle extension into the agent state dir for ``pi -e`` to load.

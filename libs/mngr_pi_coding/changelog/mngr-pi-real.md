@@ -14,6 +14,11 @@ with `pi -e`) that drives everything pi has no shell hooks for:
   writes when pi's session loads) rather than only scraping the startup banner.
 - Auto-install now uses the current npm package `@earendil-works/pi-coding-agent`
   (the old `@mariozechner/pi-coding-agent` scope is deprecated and frozen).
+- Handle pi 0.79+'s "Trust project folder?" dialog: mngr pre-trusts the agent's
+  workspace (seeding pi's `trust.json`) so the agent never stalls at the dialog,
+  gated like the claude/antigravity agent types -- silent under `mngr create --yes`
+  or the new `auto_dismiss_dialogs` config, an interactive prompt otherwise, and
+  it extends the grant automatically when the source repo is already trusted.
 
 Known gaps carried for follow-up (matching the other ports): session preservation
 on destroy, scheduled-deploy file/env contributions, a `waiting_reason` listing

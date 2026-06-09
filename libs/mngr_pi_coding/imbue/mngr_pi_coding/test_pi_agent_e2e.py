@@ -12,6 +12,9 @@ exercising the four capabilities this plugin adds over the bare stub:
   ``mngr transcript`` renders it.
 * **Resume across stop/start** -- after a stop/start the agent recalls a secret
   planted before the stop, proving the prior conversation was restored.
+* **Workspace trust** -- the source has a CLAUDE.md, so the worktree would hit
+  pi's "Trust project folder?" dialog; the plugin pre-seeds trust, so the run
+  (and its first message) succeeds rather than stalling at the dialog.
 
 Release tests do not run in CI; run this manually with a real key::
 
@@ -93,12 +96,20 @@ def subprocess_env(tmp_path: Path) -> dict[str, str]:
 
 
 def _make_git_source(tmp_path: Path) -> Path:
-    """A fresh git repo for ``mngr create --source`` (mngr requires a git source)."""
+    """A fresh git repo for ``mngr create --source`` (mngr requires a git source).
+
+    Includes a ``CLAUDE.md`` so the agent's worktree has pi "project trust
+    inputs" and would otherwise stop at pi 0.79+'s "Trust project folder?"
+    dialog. ``mngr create --yes`` (this test) makes the plugin pre-seed trust;
+    if that handling regressed, the dialog would swallow the first message and
+    the RUNNING-marker assertion below would fail.
+    """
     work_dir = tmp_path / "pi-source"
     init_git_repo(work_dir, initial_commit=True)
     (work_dir / ".gitignore").write_text(".pi/\n")
-    run_git_command(work_dir, "add", ".gitignore")
-    run_git_command(work_dir, "commit", "-m", "add gitignore")
+    (work_dir / "CLAUDE.md").write_text("# Project instructions (gives the worktree pi trust inputs)\n")
+    run_git_command(work_dir, "add", ".gitignore", "CLAUDE.md")
+    run_git_command(work_dir, "commit", "-m", "add gitignore and CLAUDE.md")
     return work_dir
 
 
