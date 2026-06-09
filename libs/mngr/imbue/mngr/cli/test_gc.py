@@ -185,19 +185,22 @@ def _make_gc_opts(provider: tuple[str, ...]) -> GcCliOptions:
     )
 
 
-def test_get_selected_providers_skips_empty_and_unavailable_providers(temp_mngr_ctx: MngrContext) -> None:
-    """An explicit --provider that is empty or unavailable is skipped, not an error.
+def test_get_selected_providers_records_skipped_empty_and_unavailable_providers(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """An explicit --provider that is empty or unavailable is skipped and reported.
 
-    This mirrors how `mngr list --provider modal` already skips a not-yet-created
-    Modal environment: gc must stay consistent so `mngr gc --provider modal` does
-    not fail just because the provider has no state yet.
+    gc still runs against any providers that did resolve (so the user's
+    explicit call does most of the work), but the skipped providers come back
+    as error strings so the caller can exit non-zero -- the user asked us to
+    gc those providers specifically and we did not.
     """
     backends = (_FakeEmptyBackend, _FakeUnavailableBackend)
     for backend in backends:
         _backend_registry[backend.get_name()] = backend
         register_provider_config(str(backend.get_name()), ProviderInstanceConfig)
     try:
-        selected = _get_selected_providers(
+        selected, skipped_errors = _get_selected_providers(
             mngr_ctx=temp_mngr_ctx,
             opts=_make_gc_opts(("fake-empty-backend", "fake-unavailable-backend")),
         )
@@ -206,7 +209,35 @@ def test_get_selected_providers_skips_empty_and_unavailable_providers(temp_mngr_
             del _backend_registry[backend.get_name()]
             del _provider_config_registry[backend.get_name()]
 
-    # Both providers declared themselves empty/unavailable at construction, so
-    # neither is selected -- gc treats them as "nothing to collect" rather than
-    # raising.
     assert selected == []
+    assert len(skipped_errors) == 2
+    assert any("fake-empty-backend" in err and "empty" in err for err in skipped_errors)
+    assert any("fake-unavailable-backend" in err and "unavailable" in err for err in skipped_errors)
+
+
+def test_gc_exits_non_zero_when_explicit_provider_is_empty(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """`mngr gc --provider X` with X empty/unavailable still exits non-zero.
+
+    The skipped provider's error message is surfaced in the summary so the user
+    can see what was not gc'd. gc still runs against any other providers, but
+    the overall command fails so the explicit request is not silently dropped.
+    """
+    _backend_registry[_FakeEmptyBackend.get_name()] = _FakeEmptyBackend
+    register_provider_config(str(_FakeEmptyBackend.get_name()), ProviderInstanceConfig)
+    try:
+        result = cli_runner.invoke(
+            gc,
+            ["--provider", "fake-empty-backend"],
+            obj=plugin_manager,
+            catch_exceptions=False,
+        )
+    finally:
+        del _backend_registry[_FakeEmptyBackend.get_name()]
+        del _provider_config_registry[_FakeEmptyBackend.get_name()]
+
+    assert result.exit_code == 1, result.output
+    assert "fake-empty-backend" in result.output
+    assert "empty" in result.output
