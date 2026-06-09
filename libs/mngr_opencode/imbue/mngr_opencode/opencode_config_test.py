@@ -15,16 +15,26 @@ from imbue.mngr_opencode import resources as _opencode_resources
 from imbue.mngr_opencode.opencode_config import ACTIVE_MARKER_FILENAME
 from imbue.mngr_opencode.opencode_config import COMMON_TRANSCRIPT_RELATIVE_PATH
 from imbue.mngr_opencode.opencode_config import COMMON_TRANSCRIPT_SOURCE
+from imbue.mngr_opencode.opencode_config import LAUNCH_SCRIPT_NAME
+from imbue.mngr_opencode.opencode_config import OPENCODE_BIN_ENV_VAR
+from imbue.mngr_opencode.opencode_config import OPENCODE_PORT_ENV_VAR
+from imbue.mngr_opencode.opencode_config import OPENCODE_WORKDIR_ENV_VAR
 from imbue.mngr_opencode.opencode_config import PLUGIN_FILENAME
 from imbue.mngr_opencode.opencode_config import RAW_TRANSCRIPT_RELATIVE_PATH
+from imbue.mngr_opencode.opencode_config import ROLE_ENV_VAR
 from imbue.mngr_opencode.opencode_config import ROOT_SESSION_FILENAME
+from imbue.mngr_opencode.opencode_config import SERVER_PORT_FILENAME
+from imbue.mngr_opencode.opencode_config import SERVER_ROLE
 from imbue.mngr_opencode.opencode_config import build_opencode_config
+from imbue.mngr_opencode.opencode_config import compute_server_port
 from imbue.mngr_opencode.opencode_config import get_opencode_app_data_dir
 from imbue.mngr_opencode.opencode_config import get_opencode_auth_path_for_data_home
 from imbue.mngr_opencode.opencode_config import get_opencode_config_dir
 from imbue.mngr_opencode.opencode_config import get_opencode_config_file_path
 from imbue.mngr_opencode.opencode_config import get_opencode_data_home
 from imbue.mngr_opencode.opencode_config import get_opencode_plugin_path
+from imbue.mngr_opencode.opencode_config import get_opencode_root_session_file_path
+from imbue.mngr_opencode.opencode_config import get_opencode_server_port_file_path
 from imbue.mngr_opencode.opencode_config import get_shared_opencode_auth_path
 from imbue.mngr_opencode.opencode_config import read_opencode_config
 from imbue.mngr_opencode.opencode_config import serialize_opencode_config
@@ -106,23 +116,46 @@ def test_path_helpers_layout(tmp_path: Path) -> None:
     assert get_opencode_plugin_path(config_dir) == config_dir / "plugin" / PLUGIN_FILENAME
     assert get_opencode_app_data_dir(data_home) == data_home / "opencode"
     assert get_opencode_auth_path_for_data_home(data_home) == data_home / "opencode" / "auth.json"
+    assert get_opencode_root_session_file_path(state) == state / ROOT_SESSION_FILENAME
+    assert get_opencode_server_port_file_path(state) == state / SERVER_PORT_FILENAME
 
 
 def test_shared_auth_path_under_xdg_default(tmp_path: Path) -> None:
     assert get_shared_opencode_auth_path(tmp_path) == tmp_path / ".local" / "share" / "opencode" / "auth.json"
 
 
+def test_compute_server_port_is_deterministic_in_range_and_distinct() -> None:
+    port_a = compute_server_port("agent-aaaa")
+    port_b = compute_server_port("agent-bbbb")
+    # Stable across calls so resume reuses the same port; distinct per agent.
+    assert port_a == compute_server_port("agent-aaaa")
+    assert port_a != port_b
+    for port in (port_a, port_b):
+        assert 49200 <= port < 49200 + 15000
+
+
 def test_plugin_resource_literals_stay_in_sync_with_constants() -> None:
-    """The TS plugin hardcodes filenames/paths the Python side owns; guard against drift.
+    """The TS plugin hardcodes filenames/paths/role the Python side owns; guard against drift.
 
     The plugin can't import opencode_config.py, so it duplicates these literals.
-    If a constant changes here without the .ts being updated, marker/resume/raw
-    capture would silently break -- this test fails loudly instead.
+    If a constant changes here without the .ts being updated, the marker / raw
+    capture / role guard would silently break -- this test fails loudly instead.
     """
     plugin_source = importlib.resources.files(_opencode_resources).joinpath(PLUGIN_FILENAME).read_text()
     assert f'"{ACTIVE_MARKER_FILENAME}"' in plugin_source
-    assert f'"{ROOT_SESSION_FILENAME}"' in plugin_source
     assert f'"{RAW_TRANSCRIPT_RELATIVE_PATH}"' in plugin_source
+    assert f'"{ROLE_ENV_VAR}"' in plugin_source
+    assert f'"{SERVER_ROLE}"' in plugin_source
+
+
+def test_launch_script_literals_stay_in_sync_with_constants() -> None:
+    """The launch script hardcodes the file names / role / env vars the Python side owns."""
+    launch_source = importlib.resources.files(_opencode_resources).joinpath(LAUNCH_SCRIPT_NAME).read_text()
+    assert ROOT_SESSION_FILENAME in launch_source
+    assert SERVER_PORT_FILENAME in launch_source
+    assert f"{ROLE_ENV_VAR}={SERVER_ROLE}" in launch_source
+    for env_var in (OPENCODE_BIN_ENV_VAR, OPENCODE_PORT_ENV_VAR, OPENCODE_WORKDIR_ENV_VAR):
+        assert env_var in launch_source
 
 
 def test_converter_resource_paths_stay_in_sync_with_constants() -> None:

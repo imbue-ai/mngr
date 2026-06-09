@@ -8,27 +8,26 @@ from typing import ClassVar
 
 import pytest
 
+from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import SendMessageError
-from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
-from imbue.mngr.utils.polling import wait_for
-from imbue.mngr.utils.testing import cleanup_tmux_session
+from imbue.mngr_opencode.opencode_config import compute_server_port
 from imbue.mngr_opencode.opencode_config import get_opencode_auth_path_for_data_home
 from imbue.mngr_opencode.opencode_config import get_opencode_config_file_path
 from imbue.mngr_opencode.opencode_config import get_opencode_plugin_path
 from imbue.mngr_opencode.opencode_config import get_shared_opencode_auth_path
 from imbue.mngr_opencode.plugin import OpenCodeAgent
 from imbue.mngr_opencode.plugin import OpenCodeAgentConfig
-from imbue.mngr_opencode.plugin import _is_paste_echoed
+from imbue.mngr_opencode.plugin import _build_prompt_post_command
 from imbue.mngr_opencode.plugin import register_agent_type
 
 
@@ -66,26 +65,16 @@ def test_opencode_agent_config_merge_with_rejects_other_type() -> None:
         OpenCodeAgentConfig().merge_with(_OtherConfig())
 
 
-def test_opencode_agent_subclasses_interactive_tui_agent() -> None:
-    assert issubclass(OpenCodeAgent, InteractiveTuiAgent)
-
-
-def test_opencode_agent_advertises_tui_ready_indicator() -> None:
-    """Ready indicator is a footer-hint substring shown only once the input row is drawn.
-
-    Deliberately not the ASCII-art splash banner, which renders before the
-    input prompt exists. Verified against the live opencode 1.16.2 TUI.
-    """
-    assert OpenCodeAgent.TUI_READY_INDICATOR == "ctrl+p commands"
+def test_opencode_agent_subclasses_base_agent() -> None:
+    # OpenCode is driven via its server (API send), not TUI keystrokes, so it is a
+    # BaseAgent rather than an InteractiveTuiAgent (which models keystroke sending).
+    assert issubclass(OpenCodeAgent, BaseAgent)
+    assert not issubclass(OpenCodeAgent, InteractiveTuiAgent)
 
 
 def test_opencode_agent_reports_opencode_process_name() -> None:
     agent = OpenCodeAgent.model_construct(agent_config=OpenCodeAgentConfig())
     assert agent.get_expected_process_name() == "opencode"
-
-
-def test_opencode_agent_implements_send_enter_and_validate() -> None:
-    assert "_send_enter_and_validate" not in OpenCodeAgent.__abstractmethods__
 
 
 def test_register_agent_type_returns_opencode_class_and_config() -> None:
@@ -142,23 +131,25 @@ def opencode_agent_no_common(local_provider: LocalProviderInstance, tmp_path: Pa
     return _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig(emit_common_transcript=False))
 
 
-def test_assemble_command_injects_per_agent_config_and_data_env(opencode_agent: OpenCodeAgent) -> None:
-    """OPENCODE_CONFIG_DIR + XDG_DATA_HOME are injected as an env prefix on the opencode process."""
+def test_assemble_command_runs_launch_script_with_isolation_and_server_env(opencode_agent: OpenCodeAgent) -> None:
+    """The launch script runs with per-agent config/data isolation + the bin/port/workdir it needs."""
     command = str(opencode_agent.assemble_command(opencode_agent.host, (), command_override=None))
     config_dir = str(opencode_agent._get_opencode_config_dir())
     data_home = str(opencode_agent._get_opencode_data_home())
-    assert f"env OPENCODE_CONFIG_DIR={config_dir} XDG_DATA_HOME={data_home}" in command
-    # The env prefix sits immediately before the opencode command, not on the whole chain.
-    assert command.index("XDG_DATA_HOME") < command.index(" opencode")
+    port = compute_server_port(str(opencode_agent.id))
+    assert f"OPENCODE_CONFIG_DIR={config_dir}" in command
+    assert f"XDG_DATA_HOME={data_home}" in command
+    assert "MNGR_OPENCODE_BIN=opencode" in command
+    assert f"MNGR_OPENCODE_PORT={port}" in command
+    assert f"MNGR_OPENCODE_WORKDIR={opencode_agent.work_dir}" in command
+    assert "bash $MNGR_AGENT_STATE_DIR/commands/opencode_launch.sh" in command
 
 
-def test_assemble_command_resume_prelude_guards_continue_on_root_session_file(
-    opencode_agent: OpenCodeAgent,
-) -> None:
-    """`--continue` is appended only when the plugin-written root-session file exists."""
-    command = str(opencode_agent.assemble_command(opencode_agent.host, (), command_override=None))
-    root_file = str(opencode_agent._get_root_session_file_path())
-    assert f"if [ -s {root_file} ]; then set -- --continue; fi" in command
+def test_assemble_command_uses_command_override_as_bin(opencode_agent: OpenCodeAgent) -> None:
+    command = str(
+        opencode_agent.assemble_command(opencode_agent.host, (), command_override=CommandString("/opt/opencode"))
+    )
+    assert "MNGR_OPENCODE_BIN=/opt/opencode" in command
 
 
 def test_assemble_command_launches_background_supervisor_when_common_enabled(
@@ -174,16 +165,16 @@ def test_assemble_command_omits_supervisor_when_common_disabled(
 ) -> None:
     command = str(opencode_agent_no_common.assemble_command(opencode_agent_no_common.host, (), command_override=None))
     assert "opencode_background_tasks.sh" not in command
-    assert "env OPENCODE_CONFIG_DIR=" in command
+    assert "bash $MNGR_AGENT_STATE_DIR/commands/opencode_launch.sh" in command
 
 
-def test_assemble_command_appends_user_agent_args(opencode_agent: OpenCodeAgent) -> None:
-    command = str(opencode_agent.assemble_command(opencode_agent.host, ("run", "hello"), command_override=None))
-    assert " opencode run hello " in command
+def test_assemble_command_forwards_user_args_to_attach_client(opencode_agent: OpenCodeAgent) -> None:
+    command = str(opencode_agent.assemble_command(opencode_agent.host, ("--agent", "plan"), command_override=None))
+    assert command.rstrip().endswith("opencode_launch.sh --agent plan")
 
 
-def test_assemble_command_shell_quotes_agent_args_with_spaces_and_parens(opencode_agent: OpenCodeAgent) -> None:
-    """A model name with spaces/parens is shell-quoted, not spliced in raw (bash would mis-parse `(`)."""
+def test_assemble_command_shell_quotes_user_args_with_spaces_and_parens(opencode_agent: OpenCodeAgent) -> None:
+    """A value with spaces/parens is shell-quoted, not spliced in raw (bash would mis-parse `(`)."""
     command = str(opencode_agent.assemble_command(opencode_agent.host, ("--model", "A B (C)"), command_override=None))
     assert "'A B (C)'" in command
 
@@ -285,169 +276,110 @@ def test_provision_skips_auth_copy_when_no_shared_auth(local_provider: LocalProv
     assert not auth_path.exists()
 
 
-# --- Paste echo detection + self-healing retry ---
+# --- API-based send_message (POST to the agent's opencode server) ---
 
 
-_FAKE_TMUX_TARGET = TmuxWindowTarget(session_name="test-session", window=0)
+def test_build_prompt_post_command_targets_prompt_async_with_json_part() -> None:
+    command = _build_prompt_post_command("50123", "ses_abc123", "count to twenty please")
+    assert command.startswith("curl -sf -X POST ")
+    assert "http://127.0.0.1:50123/session/ses_abc123/prompt_async" in command
+    # Delivered as a JSON text part so the body is structured, not screen-typed.
+    assert '"count to twenty please"' in command
+    assert "content-type: application/json" in command
 
 
-class _CannedPaneAgent(OpenCodeAgent):
-    """Test agent that returns a fixed pane capture, for `_is_paste_echoed` checks."""
-
-    canned_pane_content: ClassVar[str | None] = None
-
-    @property
-    def tmux_target(self) -> TmuxWindowTarget:
-        return _FAKE_TMUX_TARGET
-
-    def _capture_pane_content(self, tmux_target: TmuxWindowTarget, include_scrollback: bool = False) -> str | None:
-        return type(self).canned_pane_content
+def test_build_prompt_post_command_json_encodes_special_characters() -> None:
+    command = _build_prompt_post_command("1", "ses_x", 'a "quoted" line\nand another')
+    # JSON-encoded (escaped quotes + \n), not raw, so the HTTP body stays valid.
+    assert '\\"quoted\\"' in command
+    assert "\\n" in command
 
 
-def _make_canned_agent(content: str | None) -> _CannedPaneAgent:
-    agent = _CannedPaneAgent.model_construct(
-        id=AgentId.generate(),
-        name=AgentName("canned"),
-        agent_type=AgentTypeName("opencode"),
-        agent_config=OpenCodeAgentConfig(),
-    )
-    type(agent).canned_pane_content = content
-    return agent
+class _RecordingDispatchAgent(OpenCodeAgent):
+    """Test agent that stubs the launch-file reads and records the _post_prompt dispatch.
 
-
-def test_is_paste_echoed_matches_normalized_tail() -> None:
-    agent = _make_canned_agent("> Count slowly from 1 to 20, one per line\n")
-    assert _is_paste_echoed(agent, "Count slowly from 1 to 20, one per line") is True
-
-
-def test_is_paste_echoed_accepts_bracketed_paste_indicator() -> None:
-    agent = _make_canned_agent("input box [Pasted text +5 lines]")
-    assert _is_paste_echoed(agent, "a very long message that is not literally echoed in the pane") is True
-
-
-def test_is_paste_echoed_false_when_absent() -> None:
-    agent = _make_canned_agent("Ask anything...")
-    assert _is_paste_echoed(agent, "this message never landed") is False
-
-
-def test_is_paste_echoed_false_when_capture_unavailable() -> None:
-    agent = _make_canned_agent(None)
-    assert _is_paste_echoed(agent, "anything") is False
-
-
-class _ScriptedSendAgent(OpenCodeAgent):
-    """Test agent that simulates OpenCode dropping the first N pastes, then echoing.
-
-    Records sends/clears and reports the pasted text as visible only once the
-    configured number of drops has elapsed, so the retry loop can be exercised
-    without a real TUI. ClassVar timeouts are tiny so dropped attempts don't
-    block on real polling.
+    Overrides host-touching methods (no monkeypatch) so send_message's file-read +
+    dispatch logic can be checked without a running server.
     """
 
-    drops_before_echo: ClassVar[int] = 0
-    sends: ClassVar[int] = 0
-    clears: ClassVar[int] = 0
-    last_message: ClassVar[str] = ""
-    _MAX_PASTE_ATTEMPTS: ClassVar[int] = 3
-    _PASTE_ECHO_TIMEOUT_SECONDS: ClassVar[float] = 0.3
-    _PASTE_ECHO_POLL_INTERVAL_SECONDS: ClassVar[float] = 0.05
+    fake_port: ClassVar[str] = "50123"
+    fake_session: ClassVar[str] = "ses_abc123"
+    posted: ClassVar[tuple[str, str, str] | None] = None
 
-    @property
-    def tmux_target(self) -> TmuxWindowTarget:
-        return _FAKE_TMUX_TARGET
+    def _try_read_nonempty_file(self, path: Path) -> str | None:
+        if path == self._get_server_port_file_path():
+            return type(self).fake_port
+        if path == self._get_root_session_file_path():
+            return type(self).fake_session
+        return None
 
-    def _send_tmux_literal_keys(self, tmux_target: TmuxWindowTarget, message: str) -> None:
-        type(self).sends += 1
-        type(self).last_message = message
-
-    def _clear_input_line(self) -> None:
-        type(self).clears += 1
-
-    def _capture_pane_content(self, tmux_target: TmuxWindowTarget, include_scrollback: bool = False) -> str | None:
-        if type(self).sends > type(self).drops_before_echo:
-            return type(self).last_message
-        return ""
+    def _post_prompt(self, port: str, session_id: str, message: str) -> None:
+        type(self).posted = (port, session_id, message)
 
 
-def _make_scripted_agent(drops_before_echo: int) -> _ScriptedSendAgent:
-    agent = _ScriptedSendAgent.model_construct(
+def _make_dispatch_agent(local_provider: LocalProviderInstance, tmp_path: Path) -> _RecordingDispatchAgent:
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    agent = _RecordingDispatchAgent.model_construct(
         id=AgentId.generate(),
-        name=AgentName("scripted"),
+        name=AgentName("dispatch"),
         agent_type=AgentTypeName("opencode"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=host.id,
+        mngr_ctx=local_provider.mngr_ctx,
         agent_config=OpenCodeAgentConfig(),
+        host=host,
     )
-    type(agent).drops_before_echo = drops_before_echo
-    type(agent).sends = 0
-    type(agent).clears = 0
-    type(agent).last_message = ""
+    type(agent).posted = None
     return agent
 
 
-def test_paste_retry_lands_on_first_attempt_when_stable() -> None:
-    agent = _make_scripted_agent(drops_before_echo=0)
-    agent._paste_message_with_retry("hello there")
-    assert type(agent).sends == 1
-    assert type(agent).clears == 0
+def test_send_message_reads_launch_files_and_dispatches(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    agent = _make_dispatch_agent(local_provider, tmp_path)
+    agent.send_message("count to twenty please")
+    assert type(agent).posted == ("50123", "ses_abc123", "count to twenty please")
 
 
-def test_paste_retry_clears_and_resends_after_a_drop() -> None:
-    agent = _make_scripted_agent(drops_before_echo=1)
-    agent._paste_message_with_retry("hello there")
-    # One drop -> a second send, with exactly one clear in between.
-    assert type(agent).sends == 2
-    assert type(agent).clears == 1
+class _NoFilesAgent(OpenCodeAgent):
+    """Test agent whose launch files never appear, to exercise the timeout path quickly."""
+
+    _SEND_FILE_WAIT_SECONDS: ClassVar[float] = 0.2
+    _SEND_FILE_POLL_INTERVAL_SECONDS: ClassVar[float] = 0.05
+
+    def _try_read_nonempty_file(self, path: Path) -> str | None:
+        return None
 
 
-def test_paste_retry_raises_after_exhausting_attempts() -> None:
-    agent = _make_scripted_agent(drops_before_echo=99)
+def _make_agent_of(
+    agent_class: type[OpenCodeAgent], local_provider: LocalProviderInstance, tmp_path: Path
+) -> OpenCodeAgent:
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    return agent_class.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("oc"),
+        agent_type=AgentTypeName("opencode"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=host.id,
+        mngr_ctx=local_provider.mngr_ctx,
+        agent_config=OpenCodeAgentConfig(),
+        host=host,
+    )
+
+
+def test_send_message_raises_when_launch_files_missing(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    agent = _make_agent_of(_NoFilesAgent, local_provider, tmp_path)
     with pytest.raises(SendMessageError):
-        agent._paste_message_with_retry("never lands")
-    # One send per attempt, and a clear before every retry.
-    assert type(agent).sends == _ScriptedSendAgent._MAX_PASTE_ATTEMPTS
-    assert type(agent).clears == _ScriptedSendAgent._MAX_PASTE_ATTEMPTS - 1
+        agent.send_message("no server")
 
 
-# Lifecycle states that mean "the tmux pane is up" -- the same set
-# find.ensure_agent_started treats as already-started (deliberately excludes
-# STOPPED, i.e. no pane, and DONE, i.e. a dead shell pane).
-_PANE_IS_UP_STATES = frozenset(
-    {
-        AgentLifecycleState.RUNNING,
-        AgentLifecycleState.WAITING,
-        AgentLifecycleState.REPLACED,
-        AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
-    }
-)
-
-
-@pytest.mark.tmux
-def test_send_message_delivers_to_real_tmux_pane(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
-    """End-to-end through real tmux: send_message pastes into a pane and clears cleanly.
-
-    Uses a ``cat`` pane (terminal echo) as a stand-in for the OpenCode input box
-    so the real ``_send_tmux_literal_keys`` / ``_is_paste_echoed`` /
-    ``_clear_input_line`` paths run without needing the OpenCode binary.
-    """
+def test_post_prompt_raises_when_server_unreachable(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """A real curl to a closed port fails, and _post_prompt surfaces it as SendMessageError."""
     agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
-    session_name = agent.session_name
-    try:
-        agent.host.execute_idempotent_command(
-            f"tmux new-session -d -s '{session_name}' 'cat'",
-            timeout_seconds=5.0,
-        )
-        # Wait for the pane to actually come up. Mirror the "agent is started"
-        # set that find.ensure_agent_started uses, rather than a loose "not
-        # STOPPED" (which would also accept DONE -- a dead shell pane). A bare
-        # ``cat`` pane reports REPLACED (it is neither ``opencode`` nor a shell),
-        # which is in this set.
-        wait_for(
-            lambda: agent.get_lifecycle_state() in _PANE_IS_UP_STATES,
-            timeout=5.0,
-            error_message="tmux session not ready",
-        )
-        agent.send_message("a unique paste probe phrase for the cat pane")
-        assert agent._check_pane_contains(agent.tmux_target, "a unique paste probe phrase for the cat pane")
-        # The clear path (kill-line) runs against the real pane without error.
-        agent._clear_input_line()
-    finally:
-        cleanup_tmux_session(session_name)
+    # Port 1 is not listening; curl -sf returns non-zero.
+    with pytest.raises(SendMessageError):
+        agent._post_prompt("1", "ses_nope", "hello")

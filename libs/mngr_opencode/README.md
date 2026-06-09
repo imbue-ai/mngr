@@ -26,18 +26,27 @@ it works and WAITING when it is idle.
 
 ## How it works
 
-OpenCode is a client-server app with SQLite-backed sessions and no POSIX-sh hook
-mechanism, so the integration uses OpenCode's own extension points:
+OpenCode is a **client-server** app (a server owns the sessions and event bus;
+TUI / CLI / HTTP clients talk to it) with SQLite-backed sessions and no POSIX-sh
+hook mechanism. mngr leans into that shape:
 
+- **The agent runs as a server + an attached TUI.** Each agent's tmux pane runs
+  a launch script that starts a headless `opencode serve` plus an `opencode
+  attach` TUI client. `mngr connect` shows the attached client; the server owns
+  the session.
+- **Messages are sent via the server's HTTP API**, not by typing into the TUI:
+  `mngr message` POSTs the prompt to the agent's server (`prompt_async`), and the
+  attached client renders it — so the conversation is fully visible while sending
+  stays robust (no keystroke races, no screen-scraping).
 - **Isolation** is via `OPENCODE_CONFIG_DIR` (a per-agent config dir holding
   `opencode.json` + an auto-loaded plugin) and `XDG_DATA_HOME` (a per-agent data
   dir holding the session db, `auth.json`, storage, and logs), injected only on
-  the OpenCode process. No `$HOME` relocation.
+  the OpenCode processes. No `$HOME` relocation.
 - **Lifecycle (RUNNING/WAITING)** is maintained by a small in-process TypeScript
-  plugin that watches OpenCode's event bus and touches/removes the mngr `active`
-  marker. It is subagent-aware: the marker clears only when the *root* session
-  goes idle, so spawning task-tool subagents keeps the agent RUNNING until the
-  whole turn finishes.
+  plugin that watches the server's event bus and touches/removes the mngr
+  `active` marker (it runs only in the server process). It is subagent-aware: the
+  marker clears only when the *root* session goes idle, so spawning task-tool
+  subagents keeps the agent RUNNING until the whole turn finishes.
 - **Transcripts**: the same plugin writes the raw transcript; a background
   converter turns it into the common format `mngr transcript` reads.
 - **Auth**: the per-agent `auth.json` symlinks to the user's shared

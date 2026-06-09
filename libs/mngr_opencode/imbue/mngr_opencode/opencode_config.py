@@ -28,6 +28,7 @@ truth those resources are kept in sync with.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from pathlib import Path
@@ -64,15 +65,38 @@ PLUGIN_FILENAME: str = "mngr_opencode_plugin.ts"
 ACTIVE_MARKER_FILENAME: str = "active"
 
 # Per-agent file (in ``$MNGR_AGENT_STATE_DIR``) recording the *root* OpenCode
-# session id -- the session with no ``parentID``. The plugin writes it once a
-# root session exists; ``assemble_command`` checks its *presence* to decide
-# whether to resume (via ``opencode --continue``, which resumes the most recent
-# root session). ``--continue`` is used rather than ``--session <id>`` because
-# OpenCode errors on a missing session id; the recorded id itself is therefore
-# informational (and ready for a future ``--session`` pin). Subagents run as
-# child sessions (with a ``parentID``) and never overwrite it. The plugin
-# hardcodes this same literal.
+# session id. ``opencode_launch.sh`` creates the session (via the server API)
+# and writes its id here on first launch, then reuses it on every restart so the
+# attached TUI resumes the same conversation; ``send_message`` reads it to know
+# which session to POST to. The launch script hardcodes this same literal.
 ROOT_SESSION_FILENAME: str = "opencode_root_session"
+
+# Per-agent file (in ``$MNGR_AGENT_STATE_DIR``) recording the TCP port the
+# agent's ``opencode serve`` bound. ``opencode_launch.sh`` writes it (parsed from
+# the server's "listening on" line); ``send_message`` reads it to POST prompts to
+# the right server. The launch script hardcodes this same literal.
+SERVER_PORT_FILENAME: str = "opencode_server_port"
+
+# The launch orchestrator provisioned into ``commands/``: starts ``opencode
+# serve`` + pre-creates/reuses the session + attaches the TUI (see the resource).
+LAUNCH_SCRIPT_NAME: str = "opencode_launch.sh"
+
+# Env var that marks the single process allowed to maintain the marker/transcript
+# (the ``serve`` process). The launch script sets it only on ``serve``; the plugin
+# checks it so the attach client stays inert. Both resources hardcode these.
+ROLE_ENV_VAR: str = "MNGR_OPENCODE_ROLE"
+SERVER_ROLE: str = "server"
+
+# Env vars the launch script reads (set by ``assemble_command``).
+OPENCODE_BIN_ENV_VAR: str = "MNGR_OPENCODE_BIN"
+OPENCODE_PORT_ENV_VAR: str = "MNGR_OPENCODE_PORT"
+OPENCODE_WORKDIR_ENV_VAR: str = "MNGR_OPENCODE_WORKDIR"
+
+# Per-agent server port is derived deterministically from the agent id so it is
+# stable across restarts (resume reuses the same port) and distinct per agent.
+# A high, uncommon range avoids the OpenCode default (4096) and well-known ports.
+_SERVER_PORT_RANGE_START: int = 49200
+_SERVER_PORT_RANGE_SIZE: int = 15000
 
 # Raw transcript path (relative to ``$MNGR_AGENT_STATE_DIR``). The plugin appends
 # each ``message.updated`` / ``message.part.updated`` event here verbatim; the
@@ -86,6 +110,23 @@ COMMON_TRANSCRIPT_RELATIVE_PATH: str = "events/opencode/common_transcript/events
 
 # ``source`` stamped on every common-transcript event (mirrors agy's scheme).
 COMMON_TRANSCRIPT_SOURCE: str = "opencode/common_transcript"
+
+
+def get_opencode_root_session_file_path(agent_state_dir: Path) -> Path:
+    """Return the file recording the agent's root OpenCode session id."""
+    return agent_state_dir / ROOT_SESSION_FILENAME
+
+
+def get_opencode_server_port_file_path(agent_state_dir: Path) -> Path:
+    """Return the file recording the port the agent's OpenCode server bound."""
+    return agent_state_dir / SERVER_PORT_FILENAME
+
+
+@pure
+def compute_server_port(agent_id: str) -> int:
+    """Derive a stable, per-agent server port from the agent id (deterministic across restarts)."""
+    digest = hashlib.sha256(agent_id.encode()).digest()
+    return _SERVER_PORT_RANGE_START + int.from_bytes(digest[:4], "big") % _SERVER_PORT_RANGE_SIZE
 
 
 def get_opencode_config_dir(agent_state_dir: Path) -> Path:
