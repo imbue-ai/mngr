@@ -238,9 +238,12 @@
     if (menu && typeof ResizeObserver !== 'undefined') {
       var report = function () {
         var rect = menu.getBoundingClientRect();
-        // top:2 + bottom:2 -- the menu uses `top-2 left-2 right-2`. Add a
-        // small headroom so the drop-shadow renders without being clipped
-        // and the panel doesn't sit flush against the WebContentsView edge.
+        // `rect.bottom` is the menu's bottom edge relative to the viewport.
+        // The menu sits at `top-2 left-2 right-2` (no `bottom-2`), so
+        // `rect.bottom` already includes the 8px top inset plus the menu's
+        // rendered height. The +16 is extra headroom past the menu so the
+        // drop-shadow renders without being clipped at the WebContentsView's
+        // bottom edge.
         var totalPx = Math.ceil(rect.bottom + 16);
         window.minds.setSidebarHeight(totalPx);
       };
