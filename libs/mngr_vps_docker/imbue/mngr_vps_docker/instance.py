@@ -1096,7 +1096,7 @@ class VpsDockerProvider(BaseProviderInstance):
 
         Each VpsDockerProvider subclass must override this method to supply
         the provider-specific ``provider_prefix`` and ``plan_arg_name`` to the
-        shared ``_parse_build_args`` helper (e.g., ``aws`` + ``instance-type``,
+        shared ``parse_vps_build_args`` helper (e.g., ``aws`` + ``instance-type``,
         ``vultr`` + ``plan``, ``ovh`` + ``plan``). The shared helper handles
         ``--git-depth=``, the deprecated ``--vps-*`` migration error, and the
         unknown-arg case.
