@@ -228,15 +228,20 @@
     // wasn't the one that triggered the change.
     //
     // Scope: ``setLastWorkspaceAgentId`` in main broadcasts to *every*
-    // chrome view across every window, so a non-null update fired because
-    // *another* window opened a workspace must not clobber the accent of
-    // a window that is actively showing its own workspace. Gate non-null
-    // updates on ``currentTitleAgentId === null`` (i.e. this window is on
-    // Home / sign-in / some non-workspace URL). ``null`` updates
-    // (workspace deleted, signed out) still land everywhere so the bar
-    // is cleared globally on those events.
+    // chrome view across every window, so an update fired because *another*
+    // window opened a workspace (non-null) or because the last-opened
+    // workspace was deleted / the user signed out (null) must not clobber
+    // the accent of a window that is actively showing its own workspace.
+    // Gate on ``currentTitleAgentId === null`` (i.e. this window is on
+    // Home / sign-in / some non-workspace URL): the active-workspace-driven
+    // path (``onCurrentWorkspaceChanged``) is the source of truth for
+    // windows that have their own displayed workspace, so leave them
+    // alone. Windows that *were* displaying the now-deleted workspace
+    // have already had their ``currentTitleAgentId`` reset to null by the
+    // navigate-away that main triggers before the broadcast, so the null
+    // value still lands there and clears the accent.
     window.minds.onLastWorkspaceAgentIdChanged(function (agentId) {
-      if (agentId && currentTitleAgentId) return;
+      if (currentTitleAgentId) return;
       applyTitleAccent(agentId || null);
     });
   } else {
