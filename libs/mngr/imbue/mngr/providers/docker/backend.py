@@ -84,11 +84,19 @@ class DockerProviderBackend(ProviderBackendInterface):
             mngr_ctx=mngr_ctx,
             config=config,
         )
-        if not is_for_host_creation and not instance.has_state_container():
-            raise ProviderEmptyError(
-                name,
-                "no Docker state container exists yet (nothing has been created on this daemon)",
-            )
+        # The emptiness check materializes the instance's Docker client. If the
+        # provider declares itself empty (or the daemon is unreachable), the
+        # instance is discarded without being cached, so its close() would never
+        # run -- leaking the client connection. Close it here before re-raising.
+        try:
+            if not is_for_host_creation and not instance.has_state_container():
+                raise ProviderEmptyError(
+                    name,
+                    "no Docker state container exists yet (nothing has been created on this daemon)",
+                )
+        except BaseException:
+            instance.close()
+            raise
         return instance
 
 
