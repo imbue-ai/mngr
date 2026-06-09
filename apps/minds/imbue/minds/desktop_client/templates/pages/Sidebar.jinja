@@ -1,8 +1,12 @@
 {#def mngr_forward_origin #}
 {#
   Standalone sidebar page served into the Electron sidebar WebContentsView.
-  Same SSE subscription as the chrome-embedded sidebar but stripped down
-  (no titlebar/iframe). All interactivity in /_static/sidebar.js.
+  Renders as a floating menu (dark teal panel, rounded, shadowed) positioned
+  at the top-left of the WebContentsView so the workspace content shows
+  behind the empty space below. Workspace rows, the "New workspace" CTA,
+  and the "Manage account(s)" / "Log in" row are wired up in
+  /_static/sidebar.js. The same SSE subscription as the chrome-embedded
+  sidebar drives the workspace list.
 
   mngr_forward_origin is exposed via data-mngr-forward-origin so sidebar.js
   can build the cross-origin /goto/<agent>/ URL the plugin serves.
@@ -13,11 +17,36 @@
 <script src="/_static/sidebar.js" defer></script>
 {% endset %}
 <Base title="Projects"
-      body_class="bg-zinc-900 font-sans antialiased overflow-y-auto"
+      body_class="font-sans antialiased bg-transparent"
       body_attrs={{ _body_attrs }}
       scripts={{ _scripts }}>
-  <h2 class="text-sm text-zinc-200 p-3 m-0 border-b border-white/10 font-medium">Projects</h2>
-  <div id="sidebar-workspaces">
-    <div class="px-4 py-6 text-sm text-zinc-400 text-center">No projects</div>
+  <div id="sidebar-menu"
+       class="absolute top-2 left-2 right-2 flex flex-col gap-px p-1.5 rounded-[10px] border border-white/10 bg-[#0b292b] shadow-[0_12px_32px_rgba(0,0,0,0.25)] overflow-hidden">
+    <div id="sidebar-workspaces" class="flex flex-col gap-px">
+      <div class="px-2 py-2 text-xs text-zinc-400 text-center">No projects</div>
+    </div>
+    <button id="sidebar-new-workspace"
+            type="button"
+            class="sidebar-action group flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer text-[13px] text-white/70 hover:text-white hover:bg-white/10 bg-transparent border-0 text-left">
+      <svg class="w-4 h-4 shrink-0" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <line x1="8" y1="3.33" x2="8" y2="12.67"/>
+        <line x1="3.33" y1="8" x2="12.67" y2="8"/>
+      </svg>
+      <span>New workspace</span>
+    </button>
+    <div class="px-2 py-1.5">
+      <div class="h-px bg-white/10"></div>
+    </div>
+    <button id="sidebar-account"
+            type="button"
+            class="sidebar-action group flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer text-[13px] text-white hover:bg-white/10 bg-transparent border-0 text-left"
+            title="">
+      <svg class="w-4 h-4 shrink-0" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="8" cy="6" r="2.33"/>
+        <path d="M3.33 13.33a4.67 4.67 0 0 1 9.33 0"/>
+        <circle cx="8" cy="8" r="6.67"/>
+      </svg>
+      <span id="sidebar-account-label">Log in</span>
+    </button>
   </div>
 </Base>

@@ -31,27 +31,41 @@
   }
 
   // -- Sidebar toggle -------------------------------------------------------
+  //
+  // Browser mode: slides the floating panel into view via translate +
+  // opacity. Electron mode: defers to the main process, which toggles the
+  // separate sidebar WebContentsView.
   var sidebarOpen = false;
+  function showSidebarPanel() {
+    var panel = document.getElementById('sidebar-panel');
+    panel.classList.remove('-translate-x-[260px]', 'opacity-0');
+    panel.classList.add('translate-x-0', 'opacity-100');
+  }
+  function hideSidebarPanel() {
+    var panel = document.getElementById('sidebar-panel');
+    panel.classList.add('-translate-x-[260px]', 'opacity-0');
+    panel.classList.remove('translate-x-0', 'opacity-100');
+  }
   function toggleSidebar() {
     if (isElectron) {
       window.minds.toggleSidebar();
       sidebarOpen = !sidebarOpen;
     } else {
-      var panel = document.getElementById('sidebar-panel');
       sidebarOpen = !sidebarOpen;
-      if (sidebarOpen) panel.classList.remove('-translate-x-full');
-      else panel.classList.add('-translate-x-full');
+      if (sidebarOpen) showSidebarPanel();
+      else hideSidebarPanel();
     }
+  }
+  function closeSidebar() {
+    if (!sidebarOpen) return;
+    sidebarOpen = false;
+    if (!isElectron) hideSidebarPanel();
+    else window.minds.toggleSidebar();
   }
 
   function selectWorkspace(agentId) {
     navigateContent(mngrForwardOrigin + '/goto/' + agentId + '/');
-    if (isElectron) {
-      sidebarOpen = false;
-    } else {
-      sidebarOpen = false;
-      document.getElementById('sidebar-panel').classList.add('-translate-x-full');
-    }
+    closeSidebar();
   }
 
   // -- Titlebar per-project swatch ------------------------------------------
@@ -76,6 +90,11 @@
       document.documentElement.style.setProperty('--workspace-accent', c);
       swatch.classList.remove('hidden');
     });
+    // The Electron sidebar's renderWorkspaces decides per-row "is-current"
+    // styling and the bonus settings icon from this same agent id, but
+    // browser-mode does its own render here; rerender to pick up the
+    // selected-row affordances when the user navigates inside the frame.
+    if (!isElectron) renderWorkspaces(lastWorkspaces);
     maybeRedirectToRecovery();
   }
 
@@ -161,6 +180,7 @@
     // that doesn't match /goto/<id>/, which would prevent the recovery-page
     // redirect from firing for the current agent.
     window.minds.onCurrentWorkspaceChanged(function (agentId) {
+      currentWorkspaceId = agentId || null;
       applyTitleSwatch(agentId || null);
     });
   } else {
@@ -170,32 +190,50 @@
         if (t) document.getElementById('page-title').textContent = t;
         var loc = document.getElementById('content-frame').contentWindow.location.pathname;
         var m = loc.match(/^\/goto\/([^/]+)/);
-        applyTitleSwatch(m ? m[1] : null);
+        var aid = m ? m[1] : null;
+        currentWorkspaceId = aid;
+        applyTitleSwatch(aid);
       } catch (e) {}
     }, 500);
     document.getElementById('content-frame').addEventListener('load', refreshAuthStatus);
   }
 
-  // -- Auth status ----------------------------------------------------------
+  // -- Auth status (drives the in-sidebar account row) ----------------------
+  //
+  // Browser mode renders the floating sidebar inline (this script owns it),
+  // so we also keep the "Manage account(s)" / "Log in" label up-to-date here
+  // by toggling the same DOM the Electron sidebar.js uses. In Electron mode
+  // the sidebar lives in its own WebContentsView with its own copy of this
+  // logic; the DOM lookup below no-ops (the inline #sidebar-account is
+  // hidden) and the main process drives the separate view.
   var signedIn = false;
   function updateAuthUI(data) {
-    var btn = document.getElementById('user-btn');
-    if (data.signedIn) {
-      signedIn = true;
-      btn.textContent = 'Manage account(s)';
+    signedIn = !!(data && data.signedIn);
+    var label = document.getElementById('sidebar-account-label');
+    var btn = document.getElementById('sidebar-account');
+    if (!label || !btn) return;
+    if (signedIn) {
+      label.textContent = 'Manage account(s)';
       btn.title = data.email || 'Manage accounts';
     } else {
-      signedIn = false;
-      btn.textContent = 'Log in';
+      label.textContent = 'Log in';
       btn.title = 'Sign in to your account';
     }
   }
   refreshAuthStatus();
 
-  document.getElementById('user-btn').onclick = function () {
-    if (signedIn) navigateContent('/accounts');
-    else navigateContent('/auth/login');
-  };
+  // -- Sidebar action wiring (browser mode only) ----------------------------
+  if (!isElectron) {
+    var newWsBtn = document.getElementById('sidebar-new-workspace');
+    if (newWsBtn) newWsBtn.onclick = function () { navigateContent('/create'); closeSidebar(); };
+    var accountBtn = document.getElementById('sidebar-account');
+    if (accountBtn) {
+      accountBtn.onclick = function () {
+        navigateContent(signedIn ? '/accounts' : '/auth/login');
+        closeSidebar();
+      };
+    }
+  }
 
   document.getElementById('requests-toggle').onclick = function () {
     if (isElectron) window.minds.toggleInbox();
@@ -226,12 +264,29 @@
   }
 
   // -- SSE-driven sidebar (browser mode only) -------------------------------
+  var lastWorkspaces = [];
+  var currentWorkspaceId = null;
+
+  function buildIconButton(title, pathSvg, dataAttr, agentId) {
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'sidebar-row-icon flex items-center justify-center bg-transparent border-none p-0.5 cursor-pointer text-white/70 rounded hover:text-white hover:bg-white/10';
+    btn.title = title;
+    btn.tabIndex = -1;
+    btn.setAttribute(dataAttr, agentId);
+    btn.innerHTML =
+      '<svg class="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" ' +
+      'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' + pathSvg + '</svg>';
+    return btn;
+  }
+
   function renderWorkspaces(workspaces) {
     var container = document.getElementById('sidebar-workspaces');
+    if (!container) return;
     container.textContent = '';
     if (!workspaces || workspaces.length === 0) {
       var empty = document.createElement('div');
-      empty.className = 'px-4 py-6 text-sm text-zinc-400 text-center';
+      empty.className = 'px-2 py-2 text-xs text-zinc-400 text-center';
       empty.textContent = 'No projects';
       container.appendChild(empty);
       return;
@@ -247,31 +302,61 @@
       if (b === 'Private') return 1;
       return a.localeCompare(b);
     });
-    keys.forEach(function (key) {
-      var header = document.createElement('div');
-      header.className = 'px-3 pt-2 pb-0.5 text-[11px] text-zinc-400 tracking-wider';
-      header.textContent = key === 'Private' ? 'PRIVATE' : key;
-      container.appendChild(header);
+    keys.forEach(function (key, keyIdx) {
+      if (keyIdx > 0 || keys.length > 1) {
+        var header = document.createElement('div');
+        header.className = 'px-2 pt-2 pb-1 text-[10px] text-white/40 uppercase tracking-wider';
+        header.textContent = key === 'Private' ? 'Private' : key;
+        container.appendChild(header);
+      }
       groups[key].forEach(function (w) {
         var row = document.createElement('div');
-        row.className = 'sidebar-item cursor-pointer text-sm font-medium text-zinc-200 rounded-md mx-1.5 my-0.5 py-2.5 pl-4 pr-3 transition-colors hover:bg-white/5';
-        row.textContent = w.name || w.id;
+        var isCurrent = w.id === currentWorkspaceId;
+        row.className = 'sidebar-item group flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer text-[13px] text-white'
+          + (isCurrent ? ' is-current bg-white/15' : ' hover:bg-white/5');
         row.setAttribute('data-agent-id', w.id);
-        // Retained-but-unverified workspace (its provider's last discovery poll
-        // errored): append an amber dot. The row stays fully clickable.
+        var dot = document.createElement('span');
+        dot.className = 'sidebar-dot w-2.5 h-2.5 rounded-full shrink-0';
+        row.appendChild(dot);
+        var label = document.createElement('span');
+        label.className = 'flex-1 whitespace-nowrap overflow-hidden text-ellipsis';
+        label.textContent = w.name || w.id;
+        row.appendChild(label);
         if (w.is_stale) {
           row.classList.add('is-stale');
           var staleDot = document.createElement('span');
-          staleDot.className = 'sidebar-stale-dot inline-block w-1.5 h-1.5 ml-1.5 rounded-full bg-amber-400/80 align-middle';
+          staleDot.className = 'sidebar-stale-dot inline-block w-1.5 h-1.5 rounded-full bg-amber-400/80 shrink-0';
           staleDot.title = "This workspace's provider had a discovery error; its status is unverified (still usable).";
           row.appendChild(staleDot);
         }
-        if (typeof w.accent === 'string') {
-          row.style.setProperty('--workspace-accent', w.accent);
-        } else {
-          getAccent(w.id, function (c) { row.style.setProperty('--workspace-accent', c); });
+        if (isCurrent) {
+          var settingsBtn = buildIconButton(
+            'Workspace settings',
+            '<circle cx="8" cy="8" r="2"/>'
+            + '<path d="M12.93 10a1.1 1.1 0 0 0 .22 1.21l.04.04a1.33 1.33 0 1 1-1.89 1.89l-.04-.04a1.1 1.1 0 0 0-1.21-.22 1.1 1.1 0 0 0-.67 1.01v.11a1.33 1.33 0 1 1-2.67 0v-.06A1.1 1.1 0 0 0 6 12.93a1.1 1.1 0 0 0-1.21.22l-.04.04a1.33 1.33 0 1 1-1.89-1.89l.04-.04A1.1 1.1 0 0 0 3.12 10a1.1 1.1 0 0 0-1.01-.67H2a1.33 1.33 0 1 1 0-2.67h.06A1.1 1.1 0 0 0 3.07 6a1.1 1.1 0 0 0-.22-1.21l-.04-.04a1.33 1.33 0 1 1 1.89-1.89l.04.04A1.1 1.1 0 0 0 6 3.12a1.1 1.1 0 0 0 .67-1.01V2a1.33 1.33 0 1 1 2.67 0v.06A1.1 1.1 0 0 0 10 3.07a1.1 1.1 0 0 0 1.21-.22l.04-.04a1.33 1.33 0 1 1 1.89 1.89l-.04.04A1.1 1.1 0 0 0 12.93 6a1.1 1.1 0 0 0 1.01.67H14a1.33 1.33 0 1 1 0 2.67h-.06a1.1 1.1 0 0 0-1.01.67z"/>',
+            'data-open-settings',
+            w.id,
+          );
+          row.appendChild(settingsBtn);
         }
-        row.addEventListener('click', function () { selectWorkspace(w.id); });
+        var accent = typeof w.accent === 'string' ? w.accent : null;
+        if (accent) {
+          dot.style.background = accent;
+          row.style.setProperty('--workspace-accent', accent);
+        } else {
+          getAccent(w.id, function (c) {
+            dot.style.background = c;
+            row.style.setProperty('--workspace-accent', c);
+          });
+        }
+        row.addEventListener('click', function (e) {
+          if (e.target.closest('[data-open-settings]')) {
+            navigateContent('/workspace/' + w.id + '/settings');
+            closeSidebar();
+            return;
+          }
+          selectWorkspace(w.id);
+        });
         container.appendChild(row);
       });
     });
@@ -286,7 +371,10 @@
 
   function handleChromeEvent(data) {
     try {
-      if (data.type === 'workspaces') renderWorkspaces(data.workspaces);
+      if (data.type === 'workspaces') {
+        lastWorkspaces = data.workspaces || [];
+        renderWorkspaces(lastWorkspaces);
+      }
       if (data.type === 'auth_status') updateAuthUI(data);
       if (data.type === 'requests') updateRequestsBadge(data.count);
       if (data.type === 'system_interface_status') handleSystemInterfaceStatus(data.agent_id, data.status);

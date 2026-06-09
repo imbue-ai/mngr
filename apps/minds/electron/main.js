@@ -615,6 +615,12 @@ function openSidebar(bundle) {
         nodeIntegration: false,
       },
     });
+    // Transparent background so the dark teal floating menu rendered by
+    // Sidebar.jinja appears to float over the workspace content view.
+    // The WebContentsView still intercepts mouse events in its bounds,
+    // so the user toggles it closed via the titlebar sidebar button or
+    // by making a selection in the menu.
+    sidebarView.setBackgroundColor('#00000000');
     bundle.sidebarView = sidebarView;
     bundle.window.contentView.addChildView(sidebarView);
     registerShortcutsFor(bundle, sidebarView.webContents);
