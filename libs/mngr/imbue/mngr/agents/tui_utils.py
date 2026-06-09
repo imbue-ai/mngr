@@ -284,7 +284,7 @@ def _send_enter_and_wait_for_signal(
 def _build_signal_only_command(full_timeout: float, wait_channel: str, tmux_target: TmuxWindowTarget) -> str:
     """The original behavior: send Enter, then block on the hook's wait-for channel.
 
-    Used for TUIs with no enqueue log to watch. The waiter is started (in the
+    Used for TUIs with no acceptance-marker command to watch. The waiter is started (in the
     foreground here) before Enter is sent from a backgrounded subshell, so the
     signal cannot fire before a waiter is registered (signals wake exactly one
     waiter; a signal with none registered is lost).
