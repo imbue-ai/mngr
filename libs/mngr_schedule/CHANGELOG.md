@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.1] - 2026-06-08
+
 ### Fixed
 
 - Fixed: `imbue-mngr-schedule` is now auto-discovered as a publishable package by the release tooling and will be offered for first publication to PyPI on the next release. Fixes a latent bug where the install wizard already listed it (it is in the mngr install catalog), so a user picking it hit a PyPI 404.
