@@ -10,19 +10,19 @@ LIMA_INSTANCE_PREFIX: Final[str] = "mngr-"
 # Minimum supported Lima version (major, minor, patch)
 MINIMUM_LIMA_VERSION: Final[tuple[int, int, int]] = (1, 0, 0)
 
-# Default image URLs for Lima VMs (Debian 12 "bookworm" genericcloud images).
-# Debian's genericcloud variant is a minimal cloud image -- now that the agent
-# runs inside a Docker container in the VM (is_host_in_docker), the VM only
-# needs Docker + btrfs + sshd, so a lighter base than Ubuntu suffices. This
-# also mirrors the OVH provider's "Debian 12 - Docker" base. The provisioning
-# script is apt-based, so it works on Debian unchanged and installs any missing
-# mngr dependencies. Pinned to a specific dated snapshot for reproducibility;
-# bump the snapshot id (in both URLs) to pick up a newer point release.
+# Default image URLs for Lima VMs (Ubuntu 24.04 LTS cloud images).
+# wz/minds_onboard carries this Ubuntu pin: main switched to Debian 12
+# bookworm assuming is_host_in_docker=True, but minds today runs with
+# is_host_in_docker=False, and pilot_2's extra_provision_command (uv
+# tool install / cpython 3.14.5) deterministically SIGILLs on the
+# Debian 12 genericcloud base. Ubuntu 24.04 is the last known-good
+# combo with pilot_2; revert when main lands a Debian-12-compatible
+# pilot or when minds enables is_host_in_docker.
 DEFAULT_IMAGE_URL_AARCH64: Final[str] = (
-    "https://cloud.debian.org/images/cloud/bookworm/20260601-2496/debian-12-genericcloud-arm64-20260601-2496.qcow2"
+    "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
 )
 DEFAULT_IMAGE_URL_X86_64: Final[str] = (
-    "https://cloud.debian.org/images/cloud/bookworm/20260601-2496/debian-12-genericcloud-amd64-20260601-2496.qcow2"
+    "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
 )
 
 # Default host directory inside the VM
