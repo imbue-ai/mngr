@@ -38,15 +38,14 @@ def render_annotation(annotation: Any) -> str:
         return " | ".join(render_annotation(arg) for arg in args)
 
     if origin is not None:
-        origin_name = getattr(origin, "__name__", None) or getattr(origin, "_name", None) or str(origin)
+        origin_name = origin.__name__ if isinstance(origin, type) else str(origin)
         if not args:
             return origin_name
         rendered_args = ", ".join("..." if arg is Ellipsis else render_annotation(arg) for arg in args)
         return f"{origin_name}[{rendered_args}]"
 
-    name = getattr(annotation, "__name__", None)
-    if name:
-        return name
+    if isinstance(annotation, type):
+        return annotation.__name__
     return repr(annotation)
 
 

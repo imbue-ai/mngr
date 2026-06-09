@@ -44,22 +44,26 @@ def test_walk_default_recurses_required_models_only_emitting_leaves() -> None:
     """Default walk recurses into a bare nested model but stops at Optional/list/dict."""
     rows = {key: (render_annotation(ann), desc) for key, ann, desc in walk_model_fields(_Branch)}
     assert "name" in rows
-    assert "leaf.value" in rows  # recursed into the required nested model
-    assert "leaf" not in rows  # container row not emitted by default
-    assert "optional_leaf" in rows  # Optional[model] stays a leaf without recurse_optional
+    # Recursed into the required nested model, but did not emit the container row.
+    assert "leaf.value" in rows
+    assert "leaf" not in rows
+    # Optional[model] stays a leaf without recurse_optional; dict fields stop here.
+    assert "optional_leaf" in rows
     assert "optional_leaf.value" not in rows
-    assert rows["tags"][0] == "dict[str, str]"  # dict stops here
+    assert rows["tags"][0] == "dict[str, str]"
 
 
 def test_walk_recurse_optional_and_container_rows() -> None:
     rows = {key for key, _, _ in walk_model_fields(_Branch, recurse_optional=True, emit_container_rows=True)}
-    assert "optional_leaf" in rows  # container row emitted
-    assert "optional_leaf.value" in rows  # recursed through Optional
+    # Container rows are emitted, and the walk recurses through Optional wrappers.
+    assert "optional_leaf" in rows
+    assert "optional_leaf.value" in rows
     assert "leaf" in rows
     assert "leaf.value" in rows
 
 
 def test_walk_does_not_recurse_sequences_by_default() -> None:
     rows = {key for key, _, _ in walk_model_fields(_Branch, recurse_optional=True, emit_container_rows=True)}
-    assert "leaves" in rows  # list field is a leaf row
-    assert "leaves.value" not in rows  # list element fields are not dot-addressable schema paths
+    # The list field is a leaf row; list element fields are not dot-addressable schema paths.
+    assert "leaves" in rows
+    assert "leaves.value" not in rows

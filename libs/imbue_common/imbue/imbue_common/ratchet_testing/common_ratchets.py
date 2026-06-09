@@ -257,7 +257,10 @@ PREVENT_RETURNS_IN_DOCSTRINGS = RegexRatchetRule(
 PREVENT_LITERAL_MULTIPLE_OPTIONS = RegexRatchetRule(
     rule_name="Literal with multiple options",
     rule_description="Never use Literal with multiple string options. Create an UpperCaseStrEnum instead per the style guide",
-    pattern_string=r"Literal\[.*,.*\]",
+    # The negative lookbehind avoids matching the text inside a string literal
+    # (e.g. building a display string for a type annotation in a type renderer);
+    # a real multi-option Literal annotation is never immediately preceded by a quote.
+    pattern_string=r"(?<![\"'])Literal\[.*,.*\]",
 )
 
 PREVENT_BARE_GENERIC_TYPES = RegexRatchetRule(

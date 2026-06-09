@@ -104,7 +104,7 @@ def test_prevent_getattr() -> None:
     # (HOST_PROVISIONING_FIELD_MAP). Both are data-driven traversals where
     # the attribute name only exists in the map; static field access is not
     # possible.
-    rc.check_getattr(_DIR, snapshot(12))
+    rc.check_getattr(_DIR, snapshot(11))
 
 
 def test_prevent_setattr() -> None:
