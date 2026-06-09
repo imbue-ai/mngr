@@ -69,8 +69,6 @@ The base config (`VpsDockerProviderConfig`) provides these settings:
 | `btrfs_loop_file_path` | `/var/lib/mngr-btrfs.img` | Outer-host path of the loop-backed btrfs image file (allocated with `fallocate`, persisted across reboots via `/etc/fstab`) |
 | `outer_disk_reserved_gb` | `20` | GB of free space on the outer's root filesystem to reserve at provisioning time; loop file size is `free_gb - outer_disk_reserved_gb` |
 
-Note: ``default_plan`` is no longer a shared base field — each provider's config carries its own native name (Vultr / OVH: ``default_plan``; AWS: ``default_instance_type``). Likewise the per-host build args are now per-provider: see the provider's README for the exact flag names.
-
 ## Build and start args
 
 Build args (`-b`) serve two purposes: VPS provisioning and Docker image building.
