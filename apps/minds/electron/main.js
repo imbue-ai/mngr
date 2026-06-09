@@ -122,6 +122,29 @@ function parseWorkspaceId(url) {
   }
 }
 
+// Wider than ``parseWorkspaceId`` -- also recognises the workspace-scoped
+// minds-backend routes (``/workspace/<id>/settings``, ``/workspace/<id>/
+// associate``, ``/sharing/<id>/<service>``, ...). Used ONLY to decide
+// which workspace's accent should tint the titlebar; deliberately not
+// fed into ``bundle.currentWorkspaceId`` / ``findBundleForWorkspace``
+// because those drive workspace uniqueness, and we want the user to be
+// able to open ``/workspace/X/settings`` in one window while another
+// window holds the actual workspace X.
+function parseAccentSourceAgentId(url) {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    const hostMatch = parsed.hostname.match(/^(agent-[a-f0-9]+)\.localhost$/i);
+    if (hostMatch) return hostMatch[1];
+    const pathMatch = parsed.pathname.match(
+      /^\/(?:goto|workspace|sharing)\/(agent-[a-f0-9]+)(?:\/|$)/i,
+    );
+    return pathMatch ? pathMatch[1] : null;
+  } catch {
+    return null;
+  }
+}
+
 function toAbsoluteUrl(url) {
   if (!url) return url;
   if (url.startsWith('/') && backendBaseUrl) return backendBaseUrl + url;
@@ -518,6 +541,16 @@ function wireContentViewEvents(bundle, contentView) {
       bundle.currentWorkspaceId = newAgentId;
       sendCurrentWorkspaceToBundleViews(bundle);
     }
+    // Tint the titlebar with the workspace's accent on any
+    // workspace-scoped URL, not just the workspace itself: navigating
+    // to ``/workspace/<id>/settings`` or ``/sharing/<id>/<svc>`` is
+    // conceptually still "I'm working on workspace <id>", so the bar
+    // should adopt that accent. Distinct from the narrower
+    // ``parseWorkspaceId`` above which drives workspace uniqueness.
+    const accentAgentId = parseAccentSourceAgentId(url);
+    if (accentAgentId) {
+      updateBundleLastWorkspaceAgentId(bundle, accentAgentId);
+    }
     updateOsTitle(bundle);
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
       bundle.chromeView.webContents.send('content-url-changed', url);
@@ -893,6 +926,14 @@ function loadUrlIntoBundleContentView(bundle, url) {
     bundle.preErrorUrl = url;
     updateOsTitle(bundle);
     sendCurrentWorkspaceToBundleViews(bundle);
+  }
+  // Pre-stamp the accent source the same way, but on the wider
+  // ``parseAccentSourceAgentId`` set -- workspace-scoped settings /
+  // sharing routes paint the bar before their first did-navigate lands
+  // (so the user doesn't see a black flash before the accent applies).
+  const accentAgentId = parseAccentSourceAgentId(url);
+  if (accentAgentId) {
+    updateBundleLastWorkspaceAgentId(bundle, accentAgentId);
   }
   if (bundle.contentView && !bundle.contentView.webContents.isDestroyed() && url) {
     bundle.contentView.webContents.loadURL(url);
