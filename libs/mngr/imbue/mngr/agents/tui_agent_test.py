@@ -1,6 +1,8 @@
 """Unit tests for InteractiveTuiAgent's contract."""
 
 from types import SimpleNamespace
+from typing import Any
+from typing import cast
 
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
@@ -38,8 +40,13 @@ def test_send_enter_and_validate_is_abstract_on_interactive_tui_agent() -> None:
     assert "_send_enter_and_validate" not in _ProbeTuiAgent.__abstractmethods__
 
 
-def _fake_agent_capturing(commands: list[str], *, success: bool = True) -> SimpleNamespace:
-    """A minimal agent whose host records each submission command and reports ``success``."""
+def _fake_agent_capturing(commands: list[str], *, success: bool = True) -> BaseAgent[Any]:
+    """A minimal agent whose host records each submission command and reports ``success``.
+
+    Returned as ``BaseAgent[Any]`` via ``cast``: ``_send_enter_and_wait_for_signal``
+    only ever touches ``agent.name`` and ``agent.host``, so a duck-typed namespace
+    is sufficient at runtime while keeping the call sites type-correct.
+    """
 
     def execute_stateful_command(command: str, *args: object, **kwargs: object) -> SimpleNamespace:
         commands.append(command)
@@ -49,10 +56,10 @@ def _fake_agent_capturing(commands: list[str], *, success: bool = True) -> Simpl
         build_source_env_prefix=lambda agent: "export MNGR_AGENT_STATE_DIR=/s &&",
         execute_stateful_command=execute_stateful_command,
     )
-    return SimpleNamespace(name="probe", host=host)
+    return cast(BaseAgent[Any], SimpleNamespace(name="probe", host=host))
 
 
-_FAKE_TARGET = SimpleNamespace(as_shell_arg=lambda: "session:0.0")
+_FAKE_TARGET = TmuxWindowTarget(session_name="session", window=0)
 
 
 def test_send_enter_waits_on_hook_only_without_a_queue_log() -> None:

@@ -258,9 +258,7 @@ def _send_enter_and_wait_for_signal(
     if queue_log_path_template is None:
         cmd = _build_signal_only_command(full_timeout, wait_channel, tmux_target)
     else:
-        cmd = _build_signal_or_enqueue_command(
-            agent, full_timeout, wait_channel, tmux_target, queue_log_path_template
-        )
+        cmd = _build_signal_or_enqueue_command(agent, full_timeout, wait_channel, tmux_target, queue_log_path_template)
 
     # Give the remote command a beat past its own internal deadline to return
     # cleanly before the pyinfra-level timeout fires.
@@ -328,7 +326,7 @@ def _build_signal_or_enqueue_command(
     # Reads the latest enqueue timestamp from the transcript event log; empty if
     # none. Backslash-escaped quotes are interpreted by the inner bash -c.
     read_enqueue_ts = (
-        f'{env_command_prefix} cat {queue_log_path_template} 2>/dev/null '
+        f"{env_command_prefix} cat {queue_log_path_template} 2>/dev/null "
         f'| grep "\\"operation\\":\\"enqueue\\"," | tail -n 1 | jq -r .timestamp 2>/dev/null'
     )
     script = (

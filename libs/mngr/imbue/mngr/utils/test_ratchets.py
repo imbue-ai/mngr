@@ -262,12 +262,14 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 # the agent background-task scripts, ttyd's attach script) where Python types
 # don't reach.
 #
-# Baseline 1 accounts for agents/tui_utils.py:269: `tmux send-keys -t "$1"`
-# where $1 is bound from `tmux_target.as_shell_arg()` at the f-string
-# boundary -- variable indirection that the regex can't see through; safe in
-# practice because the value of $1 includes the `=` prefix.
+# Baseline 2 accounts for two `tmux send-keys -t "$N"` occurrences in
+# agents/tui_utils.py -- one in the signal-only submission command and one in
+# the signal-or-enqueue command. In both, the positional ($1 / $2) is bound
+# from `tmux_target.as_shell_arg()` at the shell-arg boundary -- variable
+# indirection the regex can't see through; safe in practice because the value
+# already includes the exact-match `=` prefix.
 def test_prevent_bare_tmux_targets() -> None:
-    rc.check_bare_tmux_targets(_DIR, snapshot(1))
+    rc.check_bare_tmux_targets(_DIR, snapshot(2))
 
 
 def test_prevent_direct_subprocess() -> None:
