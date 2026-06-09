@@ -31,10 +31,9 @@ default_ami_id = ""                # leave empty to use default_ami_by_region
 # kind = "existing"
 # id = "sg-..."
 # subnet_id = "subnet-..."          # default-VPC subnet if unset
-# Required (fail-closed): every CIDR allowed inbound on tcp/22 and the
-# container SSH port of the auto-created security group. Empty default
-# refuses to auto-create the SG -- you must opt in to either a tight
-# range like ['203.0.113.4/32'] or the wide-open '0.0.0.0/0'.
+# Inbound CIDRs for tcp/22 and the container SSH port on the auto-created
+# security group. Default ['0.0.0.0/0'] matches Vultr/OVH defaults in this
+# monorepo (no managed firewall); tighten for production.
 allowed_ssh_cidrs = ["203.0.113.4/32"]
 
 # Optional EBS sizing
@@ -91,7 +90,7 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | `security_group` | `AutoCreateSecurityGroup(name="mngr-aws")` | Tagged union: `{kind = "existing", id = "sg-..."}` to attach an existing SG, or `{kind = "auto_create", name = "..."}` to look up / create one. |
 | `subnet_id` | `None` | Optional explicit subnet. |
 | `vpc_id` | `None` | Scopes auto-SG lookup. |
-| `allowed_ssh_cidrs` | `()` | Tuple of inbound CIDRs for tcp/22 and tcp/`container_ssh_port`. Empty (fail-closed): the auto-SG path raises unless you explicitly list a CIDR or pre-create the SG. |
+| `allowed_ssh_cidrs` | `("0.0.0.0/0",)` | Tuple of inbound CIDRs for tcp/22 and tcp/`container_ssh_port`. Default matches Vultr/OVH default reachability in this repo (no provider-managed firewall). A warning is logged at provision time when the effective range includes `0.0.0.0/0`; tighten for production (e.g. `("203.0.113.4/32",)`). Empty tuple means "add no ingress" — the SG is unreachable from outside its VPC, also warned. |
 | `associate_public_ip` | `True` | Assign a public IPv4 to instances. |
 | `root_volume_size_gb` | `30` | Root EBS volume size. |
 | `root_volume_type` | `gp3` | Root EBS volume type. |

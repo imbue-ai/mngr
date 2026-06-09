@@ -69,14 +69,13 @@ class AwsVpsClient(VpsClientInterface):
     subnet_id: str | None = Field(default=None, description="Subnet ID, or None to let EC2 pick a default")
     vpc_id: str | None = Field(default=None, description="VPC ID, used only to scope SG lookup")
     allowed_ssh_cidrs: tuple[str, ...] = Field(
-        default=(),
+        default=("0.0.0.0/0",),
         description=(
             "CIDR blocks allowed inbound on tcp/22 and tcp/container_ssh_port of the auto-created "
-            "security group. Empty by default (fail-closed): when `security_group` is "
-            "`AutoCreateSecurityGroup(...)` and this tuple is empty, `ensure_security_group` "
-            "raises rather than creating a wide-open SG. Set to e.g. ('203.0.113.4/32',) to "
-            "restrict to your own IP, or ('0.0.0.0/0',) to expose to the public internet (NOT "
-            "recommended for production)."
+            "security group. Default ('0.0.0.0/0',) matches Vultr/OVH default reachability in "
+            "this monorepo (neither provider ships a managed firewall). Tighten for production "
+            "(e.g. ('203.0.113.4/32',) for a single IP). Empty tuple means 'add no ingress' -- "
+            "the SG ends up unreachable from outside its VPC; logged as a warning."
         ),
     )
     associate_public_ip: bool = Field(default=True, description="Assign a public IPv4 to launched instances")
@@ -119,11 +118,13 @@ class AwsVpsClient(VpsClientInterface):
           scoped to ``vpc_id``); create if absent. Open tcp/22 and
           tcp/``container_ssh_port`` to every CIDR in ``allowed_ssh_cidrs``.
 
-        The auto-create path fails closed if ``allowed_ssh_cidrs`` is empty:
-        rather than create a no-ingress SG (unreachable instances) or default
-        to ``0.0.0.0/0`` (public-internet SSH), raise so the caller makes an
-        explicit decision. Matches AWS's own default for a brand-new SG: no
-        ingress until you add it.
+        Empty ``allowed_ssh_cidrs`` means "no ingress rules added": the SG is
+        created (or reused) but the instance is unreachable from outside its
+        VPC. Logged as a warning rather than raised so the behavior matches
+        the Vultr / OVH default (no provider-managed firewall) -- key-only
+        SSH is what protects the host, not network ACLs. The default ingress
+        of ``0.0.0.0/0`` is logged as a warning too, prompting production
+        users to tighten it.
         """
         match self.security_group:
             case ExistingSecurityGroup(id=sg_id):
@@ -135,11 +136,18 @@ class AwsVpsClient(VpsClientInterface):
 
     def _ensure_auto_created_security_group(self, sg_name: str) -> str:
         if not self.allowed_ssh_cidrs:
-            raise MngrError(
-                "Cannot auto-create an AWS security group: allowed_ssh_cidrs is empty. "
-                "Either set allowed_ssh_cidrs to a tuple of CIDR blocks (e.g. ('203.0.113.4/32',) "
-                "for your own IP), or pre-create the SG and pass it as "
-                "security_group=ExistingSecurityGroup(id='sg-...')."
+            logger.warning(
+                "AWS allowed_ssh_cidrs is empty; auto-created security group {!r} will have no "
+                "ingress rules and the instance will be unreachable from outside its VPC. Set "
+                "allowed_ssh_cidrs on the provider config (e.g. ('203.0.113.4/32',)) to fix.",
+                sg_name,
+            )
+        elif "0.0.0.0/0" in self.allowed_ssh_cidrs:
+            logger.warning(
+                "AWS allowed_ssh_cidrs includes 0.0.0.0/0; auto-created security group {!r} will "
+                "permit SSH from the public internet. Acceptable for ephemeral dev hosts (key-only "
+                "auth); tighten to a single IP / CIDR (e.g. ('203.0.113.4/32',)) for production.",
+                sg_name,
             )
 
         filters: list[dict[str, Any]] = [{"Name": "group-name", "Values": [sg_name]}]

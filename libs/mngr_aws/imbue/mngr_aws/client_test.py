@@ -6,7 +6,9 @@ and wraps it in a stubber so each test can declaratively queue expected
 requests and canned responses.
 """
 
+from collections.abc import Generator
 from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 
@@ -14,8 +16,8 @@ import boto3
 import pytest
 from botocore.stub import ANY
 from botocore.stub import Stubber
+from loguru import logger
 
-from imbue.mngr.errors import MngrError
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import ExistingSecurityGroup
@@ -25,6 +27,20 @@ from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
 from imbue.mngr_vps_docker.primitives import VpsSnapshotId
+
+
+@contextmanager
+def _captured_loguru_warnings() -> Generator[list[str], None, None]:
+    """Capture loguru WARNING messages for in-test assertions."""
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
+    try:
+        yield messages
+    finally:
+        try:
+            logger.remove(handler_id)
+        except ValueError:
+            pass
 
 
 @pytest.fixture()
@@ -418,24 +434,77 @@ def test_ensure_security_group_returns_preset_id_when_provided(
     assert client.ensure_security_group() == "sg-test"
 
 
-def test_ensure_security_group_auto_create_fails_closed_when_no_cidrs() -> None:
-    """AutoCreateSecurityGroup + empty allowed_ssh_cidrs must raise, not create an unreachable SG."""
+def test_ensure_security_group_auto_create_warns_when_no_cidrs() -> None:
+    """Empty allowed_ssh_cidrs creates/reuses the SG with no ingress and logs a warning.
+
+    Mirrors how Vultr/OVH provisioning behaves in this monorepo (no provider-managed firewall);
+    the empty case is a "I'll wire my own ingress later" signal, not a fail-closed gate.
+    """
     session = boto3.Session(
         aws_access_key_id="AKIATEST",
         aws_secret_access_key="secret",
         region_name="us-east-1",
     )
     ec2 = session.client("ec2", region_name="us-east-1")
+    stubber = Stubber(ec2)
     client = _StubbedAwsVpsClient(
         session=session,
         region="us-east-1",
         ami_id="ami-test",
-        # Explicit default mirroring config.py
-        security_group=AutoCreateSecurityGroup(),
+        security_group=AutoCreateSecurityGroup(name="mngr-aws-empty"),
+        allowed_ssh_cidrs=(),
         stubbed_ec2_client=ec2,
     )
-    with pytest.raises(MngrError, match="allowed_ssh_cidrs is empty"):
-        client.ensure_security_group()
+    stubber.add_response(
+        "describe_security_groups",
+        {"SecurityGroups": [{"GroupId": "sg-empty", "GroupName": "mngr-aws-empty"}]},
+        expected_params={"Filters": [{"Name": "group-name", "Values": ["mngr-aws-empty"]}]},
+    )
+    # Even with no CIDRs we still call authorize_security_group_ingress (twice, once
+    # per port), with an empty IpRanges list. AWS treats that as a no-op — the SG
+    # ends up with no usable ingress, which is the intended "wire it yourself" shape.
+    stubber.add_response("authorize_security_group_ingress", {})
+    stubber.add_response("authorize_security_group_ingress", {})
+    stubber.activate()
+    try:
+        with _captured_loguru_warnings() as warnings:
+            assert client.ensure_security_group() == "sg-empty"
+    finally:
+        stubber.deactivate()
+    assert any("allowed_ssh_cidrs is empty" in msg for msg in warnings)
+
+
+def test_ensure_security_group_auto_create_warns_when_open_to_internet() -> None:
+    """0.0.0.0/0 is the default but should still produce a visible warning at provision time."""
+    session = boto3.Session(
+        aws_access_key_id="AKIATEST",
+        aws_secret_access_key="secret",
+        region_name="us-east-1",
+    )
+    ec2 = session.client("ec2", region_name="us-east-1")
+    stubber = Stubber(ec2)
+    client = _StubbedAwsVpsClient(
+        session=session,
+        region="us-east-1",
+        ami_id="ami-test",
+        security_group=AutoCreateSecurityGroup(name="mngr-aws-open"),
+        allowed_ssh_cidrs=("0.0.0.0/0",),
+        stubbed_ec2_client=ec2,
+    )
+    stubber.add_response(
+        "describe_security_groups",
+        {"SecurityGroups": [{"GroupId": "sg-open", "GroupName": "mngr-aws-open"}]},
+        expected_params={"Filters": [{"Name": "group-name", "Values": ["mngr-aws-open"]}]},
+    )
+    stubber.add_response("authorize_security_group_ingress", {})
+    stubber.add_response("authorize_security_group_ingress", {})
+    stubber.activate()
+    try:
+        with _captured_loguru_warnings() as warnings:
+            assert client.ensure_security_group() == "sg-open"
+    finally:
+        stubber.deactivate()
+    assert any("0.0.0.0/0" in msg for msg in warnings)
 
 
 def test_ensure_security_group_reuses_existing_sg_when_found(

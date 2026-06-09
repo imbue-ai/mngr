@@ -90,12 +90,9 @@ def aws_test_settings_dir(tmp_path: Path) -> Iterator[Path]:
         # Auto-terminate via cloud-init if pytest is killed before the
         # per-test cleanup runs (combined with InstanceInitiatedShutdownBehavior=terminate).
         f"auto_shutdown_minutes = {AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES}\n"
-        # Open the auto-created SG to the public internet so the test SSH
-        # connection (from the developer laptop / CI runner) works without
-        # caller IP discovery. Production callers must pick a tight CIDR;
-        # ``allowed_ssh_cidrs`` defaults to empty (fail-closed) to force
-        # an explicit choice. The instance only lives for the duration of
-        # the test and is then destroyed.
+        # Default is already ("0.0.0.0/0",), but write it explicitly so the
+        # test settings file is self-documenting -- the test SSH connection
+        # from the developer laptop / CI runner needs ingress from any IP.
         'allowed_ssh_cidrs = ["0.0.0.0/0"]\n'
         # Disable other remote providers so the create-host preflight
         # doesn't trip on them looking for credentials.
