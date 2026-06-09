@@ -151,6 +151,31 @@ def test_assemble_command_uses_command_override_as_bin(opencode_agent: OpenCodeA
     assert "MNGR_OPENCODE_BIN=/opt/opencode" in command
 
 
+def test_assemble_command_url_encodes_workdir_for_session_query(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """The work dir is URL-encoded (in Python) since it goes into the session-create query string."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "a work dir"
+    work_dir.mkdir()
+    agent = OpenCodeAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("spacey"),
+        agent_type=AgentTypeName("opencode"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=host.id,
+        mngr_ctx=local_provider.mngr_ctx,
+        agent_config=OpenCodeAgentConfig(),
+        host=host,
+    )
+    command = str(agent.assemble_command(host, (), command_override=None))
+    # The space is percent-encoded; path separators stay readable.
+    assert "MNGR_OPENCODE_WORKDIR=" in command
+    assert "a%20work%20dir" in command
+    assert "a work dir" not in command.split("MNGR_OPENCODE_WORKDIR=", 1)[1].split(" bash ", 1)[0]
+
+
 def test_assemble_command_launches_background_supervisor_when_common_enabled(
     opencode_agent: OpenCodeAgent,
 ) -> None:

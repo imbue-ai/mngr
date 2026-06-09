@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import importlib.resources
 import shlex
+import urllib.parse
 from collections.abc import Callable
 from collections.abc import Mapping
 from pathlib import Path
@@ -451,13 +452,18 @@ class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin):
         config_dir = self._get_opencode_config_dir()
         data_home = self._get_opencode_data_home()
         launch_script = "$MNGR_AGENT_STATE_DIR/commands/" + LAUNCH_SCRIPT_NAME
+        # The launch script puts this straight into the session-create URL query
+        # (?directory=...), so URL-encode it here (in Python, via the stdlib)
+        # rather than hand-rolling an encoder in bash. ``safe="/"`` keeps path
+        # separators readable; spaces and other URL-significant chars are escaped.
+        directory_query = urllib.parse.quote(str(self.work_dir), safe="/")
 
         env_prefix = (
             f"env {_OPENCODE_CONFIG_DIR_ENV_VAR}={shlex.quote(str(config_dir))}"
             f" {_XDG_DATA_HOME_ENV_VAR}={shlex.quote(str(data_home))}"
             f" {OPENCODE_BIN_ENV_VAR}={shlex.quote(opencode_bin)}"
             f" {OPENCODE_PORT_ENV_VAR}={_EPHEMERAL_PORT}"
-            f" {OPENCODE_WORKDIR_ENV_VAR}={shlex.quote(str(self.work_dir))}"
+            f" {OPENCODE_WORKDIR_ENV_VAR}={shlex.quote(directory_query)}"
         )
         launch_command = f"{env_prefix} bash {launch_script}"
         if forwarded_args:

@@ -22,7 +22,8 @@
 #   MNGR_AGENT_STATE_DIR   - agent state dir (holds the port/session files, logs)
 #   MNGR_OPENCODE_BIN      - the opencode command (e.g. "opencode")
 #   MNGR_OPENCODE_PORT     - the per-agent port to ask the server to bind
-#   MNGR_OPENCODE_WORKDIR  - directory the session is created in
+#   MNGR_OPENCODE_WORKDIR  - URL-encoded directory for the session-create query
+#                            (mngr encodes it in Python before passing it here)
 #   OPENCODE_CONFIG_DIR / XDG_DATA_HOME - per-agent isolation (inherited by serve+attach)
 
 set -uo pipefail
@@ -62,27 +63,12 @@ fi
 printf '%s' "$BOUND_PORT" > "$PORT_FILE"
 BASE_URL="http://127.0.0.1:$BOUND_PORT"
 
-# Percent-encode a string for safe use in a URL query value (RFC 3986
-# unreserved chars pass through; everything else, including spaces and `%`, is
-# %XX-escaped). Iterates bytes under the C locale so UTF-8 paths encode correctly.
-urlencode() {
-    local string="$1" char encoded="" i
-    local LC_ALL=C
-    for (( i = 0; i < ${#string}; i++ )); do
-        char="${string:i:1}"
-        case "$char" in
-            [A-Za-z0-9.~_-]) encoded+="$char" ;;
-            *) encoded+=$(printf '%%%02X' "'$char") ;;
-        esac
-    done
-    printf '%s' "$encoded"
-}
-
 # Reuse the recorded root session across stop/start; otherwise create one and
 # record its id (so send_message can POST to it and so the next start resumes it).
+# WORKDIR is already URL-encoded by mngr (Python) for the query value.
 SESSION_ID=$(cat "$ROOT_SESSION_FILE" 2>/dev/null || true)
 if [ -z "$SESSION_ID" ]; then
-    SESSION_ID=$(curl -s -X POST "$BASE_URL/session?directory=$(urlencode "$WORKDIR")" \
+    SESSION_ID=$(curl -s -X POST "$BASE_URL/session?directory=$WORKDIR" \
         -H 'content-type: application/json' -d '{}' 2>/dev/null \
         | sed -n 's/.*"id":"\(ses_[A-Za-z0-9]*\)".*/\1/p' | head -n 1)
     if [ -z "$SESSION_ID" ]; then

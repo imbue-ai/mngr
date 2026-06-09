@@ -88,7 +88,9 @@ SERVER_ROLE: str = "server"
 
 # Env vars the launch script reads (set by ``assemble_command``). The port is
 # passed as ``0`` so ``opencode serve`` binds an OS-assigned free port; the launch
-# script records the actual bound port (co-resident agents never collide).
+# script records the actual bound port (co-resident agents never collide). The
+# workdir is passed already URL-encoded (mngr encodes it in Python) because the
+# script drops it straight into the session-create ``?directory=`` query.
 OPENCODE_BIN_ENV_VAR: str = "MNGR_OPENCODE_BIN"
 OPENCODE_PORT_ENV_VAR: str = "MNGR_OPENCODE_PORT"
 OPENCODE_WORKDIR_ENV_VAR: str = "MNGR_OPENCODE_WORKDIR"
