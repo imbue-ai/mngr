@@ -21,6 +21,7 @@ from imbue.mngr_opencode.opencode_config import OPENCODE_PORT_ENV_VAR
 from imbue.mngr_opencode.opencode_config import OPENCODE_WORKDIR_ENV_VAR
 from imbue.mngr_opencode.opencode_config import PLUGIN_FILENAME
 from imbue.mngr_opencode.opencode_config import RAW_TRANSCRIPT_RELATIVE_PATH
+from imbue.mngr_opencode.opencode_config import READY_SENTINEL_FILENAME
 from imbue.mngr_opencode.opencode_config import ROLE_ENV_VAR
 from imbue.mngr_opencode.opencode_config import ROOT_SESSION_FILENAME
 from imbue.mngr_opencode.opencode_config import SERVER_PORT_FILENAME
@@ -142,6 +143,7 @@ def test_launch_script_literals_stay_in_sync_with_constants() -> None:
     launch_source = importlib.resources.files(_opencode_resources).joinpath(LAUNCH_SCRIPT_NAME).read_text()
     assert ROOT_SESSION_FILENAME in launch_source
     assert SERVER_PORT_FILENAME in launch_source
+    assert READY_SENTINEL_FILENAME in launch_source
     assert f"{ROLE_ENV_VAR}={SERVER_ROLE}" in launch_source
     for env_var in (OPENCODE_BIN_ENV_VAR, OPENCODE_PORT_ENV_VAR, OPENCODE_WORKDIR_ENV_VAR):
         assert env_var in launch_source

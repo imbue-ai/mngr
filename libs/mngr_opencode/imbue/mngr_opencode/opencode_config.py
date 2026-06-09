@@ -76,6 +76,12 @@ ROOT_SESSION_FILENAME: str = "opencode_root_session"
 # the right server. The launch script hardcodes this same literal.
 SERVER_PORT_FILENAME: str = "opencode_server_port"
 
+# Readiness sentinel (in ``$MNGR_AGENT_STATE_DIR``). ``opencode_launch.sh`` clears
+# it at startup and writes it once the server is up and the session exists -- i.e.
+# the agent can accept messages. ``wait_for_ready_signal`` polls for it instead of
+# scraping the TUI footer. The launch script hardcodes this same literal.
+READY_SENTINEL_FILENAME: str = "opencode_ready"
+
 # The launch orchestrator provisioned into ``commands/``: starts ``opencode
 # serve`` + pre-creates/reuses the session + attaches the TUI (see the resource).
 LAUNCH_SCRIPT_NAME: str = "opencode_launch.sh"

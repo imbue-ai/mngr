@@ -35,8 +35,13 @@ WORKDIR="${MNGR_OPENCODE_WORKDIR:?MNGR_OPENCODE_WORKDIR must be set}"
 
 ROOT_SESSION_FILE="$STATE/opencode_root_session"
 PORT_FILE="$STATE/opencode_server_port"
+READY_SENTINEL="$STATE/opencode_ready"
 SERVER_LOG="$STATE/logs/opencode_server.log"
 mkdir -p "$STATE/logs"
+
+# Clear any stale readiness sentinel from a prior run before we (re)start, so
+# wait_for_ready_signal can't return early against an old marker.
+rm -f "$READY_SENTINEL"
 
 # Start the headless server. MNGR_OPENCODE_ROLE=server is scoped to this command
 # so the lifecycle plugin acts here and stays inert in the attach client below.
@@ -77,6 +82,12 @@ if [ -z "$SESSION_ID" ]; then
     fi
     printf '%s' "$SESSION_ID" > "$ROOT_SESSION_FILE"
 fi
+
+# Signal readiness: the server is up and the session exists, so the agent can
+# accept messages (which are delivered over the HTTP API, not by typing into the
+# TUI). This is what wait_for_ready_signal polls for -- a real signal from the
+# launch script rather than scraping the attach client's footer.
+: > "$READY_SENTINEL"
 
 # Liveness watcher: the attach client does NOT exit when the server dies, so
 # without this a dead server would leave a live `opencode attach` in the pane and

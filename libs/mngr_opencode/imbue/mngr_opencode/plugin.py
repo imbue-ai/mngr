@@ -64,9 +64,9 @@ from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
-from imbue.mngr.agents.tui_utils import wait_for_tui_ready
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.common import copy_on_host
 from imbue.mngr.hosts.common import symlink_on_host
@@ -76,12 +76,14 @@ from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.utils.polling import poll_for_value
+from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_opencode import resources as _opencode_resources
 from imbue.mngr_opencode.opencode_config import LAUNCH_SCRIPT_NAME
 from imbue.mngr_opencode.opencode_config import OPENCODE_BIN_ENV_VAR
 from imbue.mngr_opencode.opencode_config import OPENCODE_PORT_ENV_VAR
 from imbue.mngr_opencode.opencode_config import OPENCODE_WORKDIR_ENV_VAR
 from imbue.mngr_opencode.opencode_config import PLUGIN_FILENAME
+from imbue.mngr_opencode.opencode_config import READY_SENTINEL_FILENAME
 from imbue.mngr_opencode.opencode_config import build_opencode_config
 from imbue.mngr_opencode.opencode_config import get_opencode_auth_path_for_data_home
 from imbue.mngr_opencode.opencode_config import get_opencode_config_dir
@@ -114,10 +116,10 @@ _XDG_DATA_HOME_ENV_VAR: Final[str] = "XDG_DATA_HOME"
 # bound port, so co-resident agents never collide and there is no port to pick.
 _EPHEMERAL_PORT: Final[str] = "0"
 
-# Stable footer-hint substring OpenCode renders only once the input prompt is
-# drawn and ready. Deliberately not the ASCII-art splash banner (renders before
-# the input row exists). Verified against the live TUI / attach client.
-_TUI_READY_INDICATOR: Final[str] = "ctrl+p commands"
+# How long to wait for the launch script's readiness sentinel (server up +
+# session created). Generous because a cold start migrates OpenCode's SQLite db.
+_READY_TIMEOUT_SECONDS: Final[float] = 30.0
+_READY_POLL_INTERVAL_SECONDS: Final[float] = 0.25
 
 # OpenCode server endpoint that enqueues a prompt without blocking on the reply
 # (the agent's lifecycle marker tracks completion, so send is fire-and-forget).
@@ -218,16 +220,33 @@ class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin):
     def wait_for_ready_signal(
         self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
     ) -> None:
-        """Start the agent and, on creation, wait for the attach client's input row to render.
+        """Start the agent and, on creation, wait for the launch script's readiness sentinel.
 
-        OpenCode has no readiness sentinel event, so -- like Antigravity -- we
-        poll for a footer string that appears only once the TUI can accept input.
-        (Sending does not depend on this; the launch script has the server +
-        session ready before the client attaches.)
+        ``opencode_launch.sh`` writes ``READY_SENTINEL_FILENAME`` once the server is
+        up and the session exists -- i.e. the agent can accept messages (delivered
+        over the HTTP API). Polling that sentinel is a real signal from the launch
+        script, replacing the flakier approach of scraping the attach client's TUI
+        footer. The sentinel is cleared by the launch script before each (re)start,
+        so a stale one can't make this return early.
         """
         super().wait_for_ready_signal(is_creating, start_action, timeout)
-        if is_creating:
-            wait_for_tui_ready(self, self.tmux_target, _TUI_READY_INDICATOR)
+        if not is_creating:
+            return
+        effective_timeout = timeout if timeout is not None else _READY_TIMEOUT_SECONDS
+        sentinel_path = self._get_agent_dir() / READY_SENTINEL_FILENAME
+        if poll_until(
+            lambda: self._check_file_exists(sentinel_path),
+            timeout=effective_timeout,
+            poll_interval=_READY_POLL_INTERVAL_SECONDS,
+        ):
+            return
+        pane_content = self._capture_pane_content(self.tmux_target)
+        raise AgentStartError(
+            str(self.name),
+            f"OpenCode did not signal readiness within {effective_timeout:.0f}s "
+            "(did `opencode serve` fail to start? check the agent's logs/opencode_server.log)"
+            + (f"\nPane content:\n{pane_content}" if pane_content else ""),
+        )
 
     @property
     def is_common_transcript_enabled(self) -> bool:
@@ -271,8 +290,15 @@ class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin):
 
         The attached TUI client renders the prompt and reply, so the message is
         visible in ``mngr connect`` -- without typing into the TUI (which would
-        race OpenCode's post-launch input repaint). Fire-and-forget: the prompt is
-        enqueued via ``prompt_async`` and the lifecycle marker tracks completion.
+        race OpenCode's post-launch input repaint). The prompt is enqueued via
+        ``prompt_async`` and the lifecycle marker tracks completion.
+
+        We deliberately do NOT poll the marker afterwards to confirm the turn
+        actually started: ``curl -fsS`` already fails loudly if the POST is dropped
+        or the server rejects it (the real, observed failure), and an
+        accepted-but-never-started turn is not a demonstrated failure mode here.
+        Revisit (poll the active marker for a turn-start ACK, as mngr_pi does) if
+        that case ever shows up.
         """
         with self._message_lock(), log_span("Sending message to agent {} (length={})", self.name, len(message)):
             port = self._read_launch_file(self._get_server_port_file_path(), "server port")

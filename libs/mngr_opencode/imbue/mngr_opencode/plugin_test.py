@@ -10,6 +10,7 @@ import pytest
 
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
+from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -20,6 +21,7 @@ from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr_opencode.opencode_config import READY_SENTINEL_FILENAME
 from imbue.mngr_opencode.opencode_config import get_opencode_auth_path_for_data_home
 from imbue.mngr_opencode.opencode_config import get_opencode_config_file_path
 from imbue.mngr_opencode.opencode_config import get_opencode_plugin_path
@@ -407,3 +409,36 @@ def test_post_prompt_raises_when_server_unreachable(local_provider: LocalProvide
     # Port 1 is not listening; curl -fsS returns non-zero.
     with pytest.raises(SendMessageError):
         agent._post_prompt("1", "ses_nope", "hello")
+
+
+# --- Readiness sentinel ---
+
+
+def _noop_start() -> None:
+    return None
+
+
+def test_wait_for_ready_signal_returns_when_sentinel_present(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
+    agent_dir = agent._get_agent_dir()
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / READY_SENTINEL_FILENAME).write_text("")
+    # Returns without raising once the sentinel the launch script writes is present.
+    agent.wait_for_ready_signal(is_creating=True, start_action=_noop_start, timeout=2.0)
+
+
+def test_wait_for_ready_signal_skips_when_not_creating(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
+    # On a restart (is_creating=False) we do not block on the sentinel.
+    agent.wait_for_ready_signal(is_creating=False, start_action=_noop_start, timeout=0.2)
+
+
+@pytest.mark.tmux
+def test_wait_for_ready_signal_raises_when_sentinel_never_appears(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
+    with pytest.raises(AgentStartError):
+        agent.wait_for_ready_signal(is_creating=True, start_action=_noop_start, timeout=0.2)
