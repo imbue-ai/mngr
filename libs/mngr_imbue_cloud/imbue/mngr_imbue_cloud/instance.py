@@ -60,6 +60,7 @@ from imbue.mngr.hosts.common import resolve_expected_process_name
 from imbue.mngr.hosts.common import timestamp_to_datetime
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
@@ -1083,11 +1084,13 @@ class ImbueCloudProvider(BaseProviderInstance):
             created_at=now,
             updated_at=now,
         )
-        return OfflineHost(
-            id=host_id,
-            certified_host_data=certified_host_data,
-            provider_instance=self,
-            mngr_ctx=self.mngr_ctx,
+        return make_readable_offline_host(
+            OfflineHost(
+                id=host_id,
+                certified_host_data=certified_host_data,
+                provider_instance=self,
+                mngr_ctx=self.mngr_ctx,
+            )
         )
 
     def get_host_resources(self, host: HostInterface) -> HostResources:

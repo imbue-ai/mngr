@@ -34,6 +34,7 @@ from imbue.mngr.hosts.common import timestamp_to_datetime
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import derive_offline_host_state
+from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
 from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -466,17 +467,24 @@ class VpsDockerProvider(BaseProviderInstance):
         self,
         host_record: VpsDockerHostRecord,
     ) -> OfflineHost:
-        """Create an OfflineHost from a host record."""
+        """Create an OfflineHost from a host record.
+
+        Wrapped so the offline host is readable (file reads served from its
+        persisted volume) whether reached via ``get_host`` or
+        ``to_offline_host``; the volume is resolved lazily, so this is free.
+        """
         host_id = HostId(host_record.certified_host_data.host_id)
         vps_ip = host_record.vps_ip or ""
-        offline = OfflineHost(
-            id=host_id,
-            certified_host_data=host_record.certified_host_data,
-            provider_instance=self,
-            mngr_ctx=self.mngr_ctx,
-            on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
-                callback_host_id, certified_data, vps_ip
-            ),
+        offline = make_readable_offline_host(
+            OfflineHost(
+                id=host_id,
+                certified_host_data=host_record.certified_host_data,
+                provider_instance=self,
+                mngr_ctx=self.mngr_ctx,
+                on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
+                    callback_host_id, certified_data, vps_ip
+                ),
+            )
         )
         self._evict_cached_host(host_id, replacement=offline)
         return offline
