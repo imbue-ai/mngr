@@ -122,9 +122,7 @@ def test_command_agent_dev_server_extra_windows(e2e: E2eSession) -> None:
     # it stays fast and does not reach out to remote providers (this agent runs
     # purely locally; the Modal command-agent path is covered by
     # test_command_agent_batch_job_modal).
-    list_result = e2e.run(
-        "mngr list --provider local --format json", comment="Verify the dev-env agent was created"
-    )
+    list_result = e2e.run("mngr list --provider local --format json", comment="Verify the dev-env agent was created")
     expect(list_result).to_succeed()
     agents = json.loads(list_result.stdout)["agents"]
     matching = [a for a in agents if a["name"] == "dev-env"]

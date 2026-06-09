@@ -1147,7 +1147,7 @@ def test_create_modal_idle_mode_ssh_timeout_300(e2e: E2eSession) -> None:
     # and the 300s timeout leaves ample margin before any idle shutdown.
     list_result = e2e.run(
         "mngr list --provider modal --format json",
-        comment='idle when no SSH sessions are connected',
+        comment="idle when no SSH sessions are connected",
         timeout=_REMOTE_TIMEOUT,
     )
     expect(list_result).to_succeed()
@@ -1386,7 +1386,7 @@ def test_create_modal_provision_sudo_apt(e2e: E2eSession) -> None:
     expect(
         e2e.run(
             "mngr create my-task --provider modal"
-            f" --extra-provision-command \"id -u > {marker_path}\""
+            f' --extra-provision-command "id -u > {marker_path}"'
             " --type command --no-connect --no-ensure-clean -- sleep 100985",
             comment="run a command as root during provisioning (substituted to record the effective uid)",
             timeout=_REMOTE_TIMEOUT,

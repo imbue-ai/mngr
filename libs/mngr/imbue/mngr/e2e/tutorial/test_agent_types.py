@@ -125,9 +125,7 @@ def test_plugin_list_active_to_see_types(e2e: E2eSession) -> None:
     expect(json_result).to_succeed()
     plugins_by_name = {p["name"]: p for p in json.loads(json_result.stdout)["plugins"]}
     for agent_type in ("claude", "codex", "command"):
-        assert agent_type in plugins_by_name, (
-            f"expected a plugin named {agent_type!r}, got {sorted(plugins_by_name)}"
-        )
+        assert agent_type in plugins_by_name, f"expected a plugin named {agent_type!r}, got {sorted(plugins_by_name)}"
         assert plugins_by_name[agent_type]["enabled"] == "true", (
             f"expected {agent_type} to be enabled under --active, got {plugins_by_name[agent_type]}"
         )
@@ -270,9 +268,7 @@ def test_create_custom_yolo_agent_type(e2e: E2eSession) -> None:
     # `yolo` type (not a fallback), and be running. Scope discovery to the local
     # provider so the check stays fast and never queries remote providers (the
     # agent was created on the local provider).
-    list_result = e2e.run(
-        "mngr list --provider local --format json", comment="confirm the yolo agent is running"
-    )
+    list_result = e2e.run("mngr list --provider local --format json", comment="confirm the yolo agent is running")
     expect(list_result).to_succeed()
     agents = json.loads(list_result.stdout)["agents"]
     matching = [agent for agent in agents if agent["name"] == "my-task"]

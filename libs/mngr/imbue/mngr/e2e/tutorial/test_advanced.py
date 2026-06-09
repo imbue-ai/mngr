@@ -218,9 +218,7 @@ def test_advanced_create_reuse_modal(e2e: E2eSession) -> None:
     # Second create with --reuse: my-task already exists, so it must be reused
     # (started/attached) rather than creating a duplicate -- this is the
     # idempotency the tutorial block is demonstrating.
-    second_create = e2e.run(
-        create_cmd, comment="re-running with --reuse reuses the existing agent", timeout=150.0
-    )
+    second_create = e2e.run(create_cmd, comment="re-running with --reuse reuses the existing agent", timeout=150.0)
     expect(second_create).to_succeed()
     # Verify the second create actually took the reuse code path rather than
     # provisioning a fresh agent: it must report "Reusing existing agent" and

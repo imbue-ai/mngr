@@ -253,12 +253,12 @@ def test_config_unset(e2e: E2eSession) -> None:
     # value at the default (project) scope, then unset it the way the tutorial
     # shows -- with no `--scope`, which also resolves to the project scope so
     # both commands touch the same settings.toml.
-    expect(
-        e2e.run("mngr config set commands.create.provider modal", comment="set the value first")
-    ).to_succeed()
+    expect(e2e.run("mngr config set commands.create.provider modal", comment="set the value first")).to_succeed()
     # Confirm the value really landed in the project settings file before we
     # remove it, the way a human would when debugging.
-    settings_before = e2e.run("cat .$MNGR_ROOT_NAME/settings.toml", comment="confirm the value is present before unset")
+    settings_before = e2e.run(
+        "cat .$MNGR_ROOT_NAME/settings.toml", comment="confirm the value is present before unset"
+    )
     expect(settings_before).to_succeed()
     expect(settings_before.stdout).to_contain('provider = "modal"')
 

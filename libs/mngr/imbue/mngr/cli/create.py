@@ -972,9 +972,7 @@ def _create_agent(
     # path, and the environment is about to be bootstrapped, not listed.
     new_host_provider: ProviderInstanceInterface | None = None
     if _is_creating_new_host(address, opts.new_host) and isinstance(resolved_target_host, NewHostOptions):
-        new_host_provider = get_provider_instance(
-            resolved_target_host.provider, mngr_ctx, is_for_host_creation=True
-        )
+        new_host_provider = get_provider_instance(resolved_target_host.provider, mngr_ctx, is_for_host_creation=True)
 
     # Call the API create function
     with _editor_cleanup_scope(setup.editor_session):

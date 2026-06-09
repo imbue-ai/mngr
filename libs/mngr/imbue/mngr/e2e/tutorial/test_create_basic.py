@@ -297,9 +297,7 @@ def test_create_agent_args_require_dash_separator(e2e: E2eSession) -> None:
     # Pin down the *reason* for failure: mngr's option parser must reject
     # `--model` as an unrecognized option, not fail for some unrelated reason
     # (e.g. a bad config) that merely happens to echo the flag back.
-    assert "No such option" in combined_output, (
-        f"Expected an unrecognized-option parse error, got:\n{combined_output}"
-    )
+    assert "No such option" in combined_output, f"Expected an unrecognized-option parse error, got:\n{combined_output}"
 
     # The failed create must not have left an agent behind.
     list_result = e2e.run("mngr list --format json", comment="Verify the rejected create produced no agent")
