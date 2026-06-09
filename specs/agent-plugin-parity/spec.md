@@ -278,9 +278,21 @@ that makes a descendant-liveness wait *safe* -- it distinguishes "a background t
 started" from incidental children (the agent's shell, language servers, watchers). A CLI that
 exposes backgrounded work but provides **no** such discriminator cannot do a generic
 descendant-liveness check without false-RUNNING (the agent would never go idle once it
-started any long-lived child), so the honest fallback is to scope the marker to the turn and
-*document* that detached/background work is not reflected -- the agy/pi position (agy has no
-background-task tool; pi's port keeps the marker turn-scoped).
+started any long-lived child).
+
+Be careful to separate two things, because the CLIs' idle signals *do* correctly gate
+**in-loop** pending work; it is only **detached** work they miss. agy's `fullyIdle` stays
+`false` through a turn's interim Stops and the root-vs-subagent id match ignores a subagent's
+own idle ([dimension D](#d-subagent-aware-idle-gating-the-crux)), so the marker clears only on
+the root's final, everything-done Stop -- not mid-turn, and not when a subagent it launched
+finishes. pi reaches the same outcome differently: its foreground tools (including the
+subagent tool) block the turn, so `agent_end` fires only once the turn -- subagents included
+-- is fully complete. What *none* of the three reflects is a process the agent **detaches
+from its loop entirely** (`cmd &` / `nohup` / a CLI `run_in_background` tool that returns
+before its task finishes): that is loop/turn-scoped for claude, agy, and pi alike. So the
+honest fallback, absent a per-task tag to wait on, is to scope the marker to the agent's
+turn/loop (using whatever "fully done" signal the CLI gives -- agy's `fullyIdle:true`, pi's
+`agent_end`) and *document* that detached work is not reflected.
 
 **Questions**: Does the CLI have a `run_in_background`-style tool (one that returns before
 its work finishes)? If so, what identifies those tasks (a process tag like `CLAUDECODE=1`, a
