@@ -2590,8 +2590,8 @@ def test_host_health_api_requires_authentication(tmp_path: Path) -> None:
 # -- Workspace color route ---------------------------------------------
 #
 # POST /api/workspaces/<agent_id>/color writes the per-workspace color
-# label via ``mngr label`` (CLI merge semantics). Tests cover the four
-# error responses (401 / 400 invalid_hex / 404 not_primary /
+# label via ``mngr label`` (CLI merge semantics). Tests cover the
+# error responses (403 unauthenticated / 400 invalid_hex / 404 not_primary /
 # 409 stale_provider / 502 host_unreachable) and the success path through
 # a fake mngr stub. The optimistic-resolver-update path is unit-tested
 # in backend_resolver_test.py; here we cover the route's plumbing.
