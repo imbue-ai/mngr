@@ -5,6 +5,9 @@ plugin emits into the stream `mngr transcript` reads, with a validator and a
 conformance test asserting that all five emitters -- claude, antigravity,
 opencode, pi-coding, and codex -- produce records matching it, so the
 independently written emitters cannot silently drift on the shared fields.
+A meta-test discovers every registered agent type that emits a common transcript
+and fails if any lacks such a conformance test, so the requirement is enforced
+rather than relying on convention -- a new agent plugin cannot merge without one.
 
 Added a shared agent release-lifecycle harness
 (`imbue.mngr.agents.agent_release_testing`) that drives the common create -> WAITING ->
