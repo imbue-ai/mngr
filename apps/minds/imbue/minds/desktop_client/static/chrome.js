@@ -220,11 +220,12 @@
     }
     // The account row that refreshAuthStatus would update lives inside the
     // inline #sidebar-backdrop, which is display:none in Electron mode --
-    // the visible copy is the separate sidebar WebContentsView, which
+    // the visible copy renders inside the shared modal WebContentsView when
+    // it is loaded with /_chrome/sidebar, and the sidebar.js running there
     // subscribes to its own content-url-changed IPC and re-fetches
-    // /auth/api/status there. So we don't subscribe to onContentURLChange
-    // here in Electron mode; doing so would fire the fetch on every nav
-    // for no visible effect.
+    // /auth/api/status. So we don't subscribe to onContentURLChange here in
+    // Electron mode; doing so would fire the fetch on every nav for no
+    // visible effect.
     // In Electron mode the current workspace is authoritative via IPC: main.js
     // tracks the active workspace per bundle (handles both /goto/<id>/ URLs and
     // post-redirect agent-<id>.localhost subdomains) and pushes it here. Deriving
