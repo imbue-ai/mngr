@@ -123,7 +123,7 @@ def test_prevent_yaml_usage() -> None:
     # in sync with app.py. app_test.py likewise parses the config the proxy
     # writes. These are references to litellm's externally-required format, not
     # new YAML config of our own.
-    rc.check_yaml_usage(_DIR, snapshot(10))
+    rc.check_yaml_usage(_DIR, snapshot(15))
 
 
 def test_prevent_functools_partial() -> None:

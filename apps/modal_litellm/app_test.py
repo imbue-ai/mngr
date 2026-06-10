@@ -32,10 +32,16 @@ def test_litellm_config_routes_each_model_to_anthropic_with_api_key_reference(
     model_names = [entry["model_name"] for entry in litellm_proxy_config["model_list"]]
     assert model_names == snapshot(
         [
+            "claude-opus-4-8",
             "claude-opus-4-7",
-            "claude-sonnet-4-6",
-            "claude-sonnet-4-20250514",
+            "claude-opus-4-6",
+            "claude-opus-4-5",
+            "claude-opus-4-1",
             "claude-opus-4-20250514",
+            "claude-sonnet-4-6",
+            "claude-sonnet-4-5",
+            "claude-sonnet-4-20250514",
+            "claude-haiku-4-5",
             "claude-haiku-4-5-20251001",
         ]
     )
