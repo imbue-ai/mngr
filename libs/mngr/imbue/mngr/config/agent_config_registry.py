@@ -184,10 +184,11 @@ def resolve_agent_type(
     For plugin-registered or direct command types, returns the registered
     class and config directly.
 
-    A name that is a registered alias is resolved to its canonical type first
-    (a custom ``[agent_types.X]`` block can never share a name with an alias --
-    that collision is rejected at config-load time). A custom type's
-    ``parent_type`` is normalized to canonical at config-load time too.
+    A name that is a registered alias is resolved to its canonical type first.
+    If a custom ``[agent_types.X]`` block shares a name with an alias, the alias
+    is dropped at config-load time so the custom type wins -- by the time this
+    runs the name is no longer an alias and resolves to the custom type. A custom
+    type's ``parent_type`` is normalized to canonical at config-load time too.
 
     Raises UnknownAgentTypeError if the agent type name is not known via any
     registry or user config (or, in the parent-type branch, if the parent
