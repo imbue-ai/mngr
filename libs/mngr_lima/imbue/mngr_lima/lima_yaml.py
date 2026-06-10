@@ -73,6 +73,7 @@ def generate_default_lima_yaml(
     host_public_key_openssh: str | None = None,
     host_data_disk_name: str | None = None,
     host_data_disk_size: str | None = None,
+    root_authorized_public_key: str | None = None,
 ) -> dict:
     """Generate the default Lima YAML configuration.
 
@@ -96,9 +97,21 @@ def generate_default_lima_yaml(
             symlinked into it via the provisioning script.
         host_data_disk_size: Logical size of the additional disk (Lima size
             string, e.g. '100GiB'). Ignored unless `host_data_disk_name` is set.
+        root_authorized_public_key: Optional client public key to authorize for
+            the VM's root user. When provided, the provisioning script enables
+            key-based root login so mngr can run the agent as root.
     """
     image_url = custom_image_url or _get_default_image_url(config_image_url_aarch64, config_image_url_x86_64)
     arch = _get_arch_string()
+
+    port_forwards = _disable_port_forwards_rules()
+    provision_script = _build_provisioning_script(
+        host_private_key_pem,
+        host_public_key_openssh,
+        host_dir=host_dir,
+        host_data_disk_name=host_data_disk_name,
+        root_authorized_public_key=root_authorized_public_key,
+    )
 
     config: dict = {
         "images": [
@@ -107,17 +120,12 @@ def generate_default_lima_yaml(
                 "arch": arch,
             },
         ],
-        "portForwards": _disable_port_forwards_rules(),
+        "portForwards": port_forwards,
         # Provision required packages if not in the image
         "provision": [
             {
                 "mode": "system",
-                "script": _build_provisioning_script(
-                    host_private_key_pem,
-                    host_public_key_openssh,
-                    host_dir=host_dir,
-                    host_data_disk_name=host_data_disk_name,
-                ),
+                "script": provision_script,
             },
         ],
     }
@@ -151,10 +159,22 @@ def _build_provisioning_script(
     host_public_key_openssh: str | None = None,
     host_dir: str = "/mngr",
     host_data_disk_name: str | None = None,
+    root_authorized_public_key: str | None = None,
 ) -> str:
-    """Build the Lima ``provision[mode=system]`` script that installs required packages, configures sshd, optionally lands the btrfs host-data disk at the canonical mount point, and (when a keypair is supplied) installs it as the guest's ed25519 sshd host key."""
+    """Build the Lima ``provision[mode=system]`` script that installs required packages, configures sshd, optionally lands the btrfs host-data disk at the canonical mount point, optionally enables key-based root login (when running the agent as root), and (when a keypair is supplied) installs it as the guest's ed25519 sshd host key."""
     host_key_block = _build_host_key_block(host_private_key_pem, host_public_key_openssh)
     host_data_disk_block = _build_host_data_disk_block(host_data_disk_name, host_dir)
+    root_authorized_keys_block = _build_root_authorized_keys_block(root_authorized_public_key)
+    # Permit key-based root login only when the agent runs as root; the default
+    # (non-root) path leaves sshd's PermitRootLogin untouched.
+    permit_root_login_line = "\nPermitRootLogin prohibit-password" if root_authorized_public_key is not None else ""
+    # The btrfs data disk is formatted in-guest (see _build_format_and_mount_data_disk_block),
+    # so mkfs.btrfs must be present; minimal images (e.g. Debian genericcloud) don't ship it.
+    btrfs_pkg_line = (
+        '\ncommand -v mkfs.btrfs >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL btrfs-progs"'
+        if host_data_disk_name is not None
+        else ""
+    )
     return f"""\
 #!/bin/bash
 set -eux -o pipefail
@@ -168,7 +188,7 @@ command -v rsync >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL rsync"
 command -v curl >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL curl"
 command -v xxd >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL xxd"
 test -x /usr/sbin/sshd || PKGS_TO_INSTALL="$PKGS_TO_INSTALL openssh-server"
-test -f /etc/ssl/certs/ca-certificates.crt || PKGS_TO_INSTALL="$PKGS_TO_INSTALL ca-certificates"
+test -f /etc/ssl/certs/ca-certificates.crt || PKGS_TO_INSTALL="$PKGS_TO_INSTALL ca-certificates"{btrfs_pkg_line}
 
 if [ -n "$PKGS_TO_INSTALL" ]; then
     apt-get update -qq && apt-get install -y -qq $PKGS_TO_INSTALL
@@ -193,20 +213,38 @@ SSHD_CONFIG_CHANGED=0
 if ! grep -q '^MaxSessions' /etc/ssh/sshd_config 2>/dev/null; then
     cat >> /etc/ssh/sshd_config <<SSHD_EOF
 MaxSessions 100
-MaxStartups 100:30:200
+MaxStartups 100:30:200{permit_root_login_line}
 SSHD_EOF
     SSHD_CONFIG_CHANGED=1
 fi
+
+# Authorize mngr's client key for root when the agent runs as root, so mngr can
+# ssh in as root. No-op (inert comment) in the default non-root path.
+{root_authorized_keys_block}
 
 if [ "$SSH_KEY_CHANGED" = "1" ] || [ "$SSHD_CONFIG_CHANGED" = "1" ]; then
     systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null || true
 fi
 
-# Optional: if a Lima-managed btrfs additional disk was attached, symlink
-# host_dir to Lima's auto-mount path for that disk. No-op when the block
-# below is the inert comment placeholder.
+# Optional: if a btrfs additional disk was attached, format + mount it at the
+# canonical path and symlink host_dir to it. No-op when the block below is the
+# inert comment placeholder.
 {host_data_disk_block}
 """
+
+
+def _build_root_authorized_keys_block(root_authorized_public_key: str | None) -> str:
+    """Return a bash block that authorizes ``root_authorized_public_key`` for the VM's root user, or an inert comment."""
+    if root_authorized_public_key is None:
+        return "# (no client key to authorize for root)"
+    return f"""\
+mkdir -p /root/.ssh
+chmod 700 /root/.ssh
+cat > /root/.ssh/authorized_keys <<'MNGR_LIMA_ROOT_KEY'
+{root_authorized_public_key.strip()}
+MNGR_LIMA_ROOT_KEY
+chmod 600 /root/.ssh/authorized_keys
+chown -R root:root /root/.ssh"""
 
 
 def _build_host_data_disk_block(host_data_disk_name: str | None, host_dir: str) -> str:
@@ -223,25 +261,17 @@ def _build_host_data_disk_block(host_data_disk_name: str | None, host_dir: str) 
     if host_data_disk_name is None:
         return "# (no host-data disk attached; host_dir uses today's bind mount or local fs)"
     lima_mount = lima_host_data_disk_mount_path(host_data_disk_name)
+    format_and_mount_block = _build_format_and_mount_data_disk_block(host_data_disk_name)
     return f"""\
-# Wait for Lima to finish auto-mounting the additional btrfs disk.
-for _ in $(seq 1 60); do
-    if mountpoint -q {lima_mount}; then
-        break
-    fi
-    sleep 1
-done
-if ! mountpoint -q {lima_mount}; then
-    echo "ERROR: Lima additional disk not mounted at {lima_mount}" >&2
-    exit 1
-fi
+# Format + mount the additional btrfs disk ourselves (Lima can't on minimal images).
+{format_and_mount_block}
 
 # Open up the btrfs root so the Lima default (non-root) user can write to
 # host_dir without sudo (a fresh mkfs.btrfs leaves the root dir owned by
 # root:root with 0755). Mirrors the chmod 777 the script applies to /code.
 chmod 0777 {lima_mount}
 
-# Replace host_dir with a symlink to Lima's auto-mounted btrfs disk.
+# Replace host_dir with a symlink to the mounted btrfs disk.
 # ``ln -sfn`` alone won't replace an existing directory, so rm any real
 # dir first. Idempotent across re-runs.
 if [ -L {host_dir} ] || [ ! -e {host_dir} ]; then
@@ -249,6 +279,54 @@ if [ -L {host_dir} ] || [ ! -e {host_dir} ]; then
 else
     rm -rf {host_dir}
     ln -sfn {lima_mount} {host_dir}
+fi"""
+
+
+def _build_format_and_mount_data_disk_block(host_data_disk_name: str) -> str:
+    """Return a bash block that formats (if needed) and mounts the Lima btrfs data disk.
+
+    Minimal cloud images (e.g. Debian genericcloud) ship no ``mkfs.btrfs``, so
+    Lima's guestagent cannot format the ``format: true`` btrfs additionalDisk at
+    boot -- it partitions the disk but leaves it unformatted, and nothing mounts
+    at ``/mnt/lima-<name>``. ``btrfs-progs`` is installed earlier in the
+    provisioning script; here we format + mount the disk ourselves at exactly the
+    path Lima would have used, so the per-host btrfs subvolume can be created.
+
+    Idempotent: a no-op when already mounted, and ``mkfs`` runs only when the
+    device is not already btrfs (so re-provisioning and existing snapshot data
+    survive). The data disk is identified as the one ``disk``-type block device
+    that is not the root disk -- in this mode there is exactly one additional
+    disk. On later boots Lima's guestagent handles the mount itself (``btrfs-progs``
+    now persists in the image's root fs), so this is first-boot setup; the mount
+    path is the same either way.
+    """
+    lima_mount = lima_host_data_disk_mount_path(host_data_disk_name)
+    return f"""\
+if ! mountpoint -q {lima_mount}; then
+    DATA_ROOT_SRC="$(findmnt -no SOURCE /)"
+    DATA_ROOT_DISK="$(lsblk -no PKNAME "$DATA_ROOT_SRC" | head -1)"
+    if [ -z "$DATA_ROOT_DISK" ]; then
+        echo "ERROR: could not determine root disk for $DATA_ROOT_SRC; refusing to format data disk" >&2
+        exit 1
+    fi
+    DATA_DISK=""
+    for DATA_CANDIDATE in $(lsblk -dn -o NAME,TYPE | awk '$2=="disk"{{print $1}}'); do
+        if [ "$DATA_CANDIDATE" != "$DATA_ROOT_DISK" ]; then
+            DATA_DISK="$DATA_CANDIDATE"
+            break
+        fi
+    done
+    if [ -z "$DATA_DISK" ]; then
+        echo "ERROR: no additional data disk found to back {lima_mount}" >&2
+        exit 1
+    fi
+    DATA_PART="$(lsblk -ln -o NAME "/dev/$DATA_DISK" | sed -n '2p')"
+    DATA_DEV="/dev/${{DATA_PART:-$DATA_DISK}}"
+    if ! blkid -t TYPE=btrfs "$DATA_DEV" >/dev/null 2>&1; then
+        mkfs.btrfs -f "$DATA_DEV"
+    fi
+    mkdir -p {lima_mount}
+    mount "$DATA_DEV" {lima_mount}
 fi"""
 
 

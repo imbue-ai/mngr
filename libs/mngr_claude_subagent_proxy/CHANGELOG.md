@@ -9,6 +9,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Changed
 
 - Changed: `mngr_claude_subagent_proxy` typed `subagent_type` (e.g. `imbue-code-guardian:verify-and-fix`) now preserves Claude Code's system-prompt contract in both PROXY and DENY modes by resolving on-disk agent definitions.
+- Changed: Destroyed-agent transcript fallback now reads the preserved common transcript from its new location at `preserved/<name>--<id>/events/claude/common_transcript/events.jsonl` (via the shared `get_preserved_agent_dir` helper), reflecting `mngr_claude`'s switch to the unified `preserve_agent_data` layout; the former `plugin/mngr_claude/preserved_sessions/<name>--<id>/common_transcript/events.jsonl` path is no longer consulted.
 
 ## [v0.2.8] - 2026-05-13
 

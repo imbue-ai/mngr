@@ -64,3 +64,39 @@ is_host_data_volume_exposed = false
 # Optional: override the default 100GiB logical disk size.
 host_data_disk_size = "200GiB"
 ```
+
+## Running the agent as root in the VM (`is_run_as_root`)
+
+By default the agent runs as the Lima default user (passwordless `sudo`
+available). With `is_run_as_root=true` mngr instead runs the agent **as root**
+inside the VM (uid 0), matching the `docker` / `vps_docker` providers where the
+agent is root inside its container: the agent can `apt install` and write
+anywhere with no `sudo`. The VM itself is the isolation boundary.
+
+How it works:
+
+- The provisioning script enables key-based root login (`PermitRootLogin
+  prohibit-password`) and authorizes a mngr-managed root client key; mngr then
+  connects to the VM as root over Lima's normal SSH port. The agent still runs
+  directly in the VM -- there is no nested container.
+- This mode **requires** the btrfs additional-disk layout, so it must be paired
+  with `is_host_data_volume_exposed=false`. Root cannot traverse the
+  9p/reverse-sshfs bind mount the exposed layout uses, so the combination is
+  rejected at config construction.
+- Consistent backups keep working: with `host_dir` on btrfs and the agent
+  running as root, a backup service in the workspace (e.g.
+  forever-claude-template's `host-backup`) takes `btrfs subvolume snapshot`
+  directly -- no snapshot helper or trigger volume is needed.
+
+```toml
+[providers.lima]
+is_run_as_root = true
+is_host_data_volume_exposed = false  # required by is_run_as_root
+```
+
+This is how a workspace gets the **same** dependency setup as a Dockerfile-built
+host: the project ships idempotent setup scripts that its `Dockerfile` runs (for
+the `docker` / `vps_docker` / `ovh` providers) and that the Lima host runs
+directly after the project is synced in (via the create template's agent
+provisioning command). One definition, run the same way everywhere, with the
+agent as root so it never needs `sudo`.

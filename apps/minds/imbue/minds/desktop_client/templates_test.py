@@ -14,7 +14,10 @@ from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_recovery_page
+from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
+from imbue.minds.desktop_client.templates import render_workspace_settings
+from imbue.minds.desktop_client.templates import workspace_accent
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
@@ -33,6 +36,42 @@ def test_render_landing_page_with_agents_lists_them_as_links() -> None:
     assert f"/goto/{_AGENT_B}/" in html
     assert str(_AGENT_A) in html
     assert str(_AGENT_B) in html
+
+
+def test_render_landing_page_settings_link_interpolates_agent_id() -> None:
+    # Regression: the settings gear is a <Button> (JinjaX component), so its
+    # onclick must use the `attr={{ expr }}` form -- a quoted `onclick="...{{ }}..."`
+    # is forwarded literally, which sent `/workspace/{{ agent_id }}/settings` to the
+    # server and 500'd the AgentId parse on destroy.
+    html = render_landing_page(accessible_agent_ids=(_AGENT_A,))
+    assert f"/workspace/{_AGENT_A}/settings" in html
+    assert "{{" not in html
+
+
+def test_render_workspace_settings_data_agent_id_interpolates() -> None:
+    html = render_workspace_settings(
+        agent_id=str(_AGENT_A),
+        ws_name="ws",
+        current_account=None,
+        accounts=(),
+        servers=(),
+    )
+    assert f'data-agent-id="{_AGENT_A}"' in html
+    assert "{{" not in html
+
+
+def test_render_sharing_editor_workspace_link_interpolates_agent_id() -> None:
+    # Regression: the workspace <Link href="...{{ }}..."> must interpolate
+    # (component quoted-attribute interpolation does not happen in JinjaX).
+    html = render_sharing_editor(
+        agent_id=str(_AGENT_A),
+        service_name="svc",
+        title="Share",
+        mngr_forward_origin="http://localhost:8421",
+        ws_name="ws",
+    )
+    assert f"/goto/{_AGENT_A}/" in html
+    assert "{{" not in html
 
 
 def test_render_landing_page_with_no_agents_shows_empty_state() -> None:
@@ -136,13 +175,14 @@ def test_render_create_form_shows_error_message_when_supplied() -> None:
     assert "Imbue cloud requires an account." in html
 
 
-def test_render_create_form_honors_workspace_env_vars_in_dev_tier(monkeypatch: pytest.MonkeyPatch) -> None:
-    """In a dev tier, the MINDS_WORKSPACE_* env vars pre-fill the create form.
+def test_render_create_form_honors_workspace_env_vars_when_opted_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the explicit opt-in, the MINDS_WORKSPACE_* env vars pre-fill the form.
 
-    Used by ``just minds-start`` to point the form at the operator's local
-    FCT worktree + current branch so the dev-iteration loop is one click.
+    Used by ``just minds-start`` (and the e2e runner) to point the form at the
+    operator's local FCT worktree + current branch so the dev-iteration loop is
+    one click.
     """
-    monkeypatch.setenv("MINDS_ROOT_NAME", "minds-dev-josh")
+    monkeypatch.setenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", "1")
     monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/fct/path")
     monkeypatch.setenv("MINDS_WORKSPACE_NAME", "mindtest")
     monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
@@ -152,16 +192,37 @@ def test_render_create_form_honors_workspace_env_vars_in_dev_tier(monkeypatch: p
     assert "mngr/some-feature" in html
 
 
-def test_render_create_form_ignores_workspace_env_vars_in_staging(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Staging must not honor MINDS_WORKSPACE_* env vars.
+def test_render_create_form_honors_workspace_env_vars_on_staging_when_opted_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The opt-in is tier-independent: it works even on a shared tier (staging).
 
-    Without the gate, a stray ``MINDS_WORKSPACE_BRANCH=mngr/some-branch`` in
-    the operator's shell (e.g. left over from a prior ``just minds-start``
-    invocation) would pre-fill the form's branch field and propagate to
-    the imbue_cloud lease request as ``-b repo_branch_or_tag=...``, which
-    would silently fail to match any pool host baked with the tier's
-    canonical branch.
+    Regression test: staging previously dropped MINDS_WORKSPACE_* unconditionally,
+    so ``just minds-start`` against staging silently fell back to the public
+    GitHub FCT on ``main`` -- meaning local FCT changes could never be tested
+    against staging.
     """
+    monkeypatch.setenv("MINDS_ROOT_NAME", "minds-staging")
+    monkeypatch.setenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", "1")
+    monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/fct/path")
+    monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
+    html = render_create_form()
+    assert "/local/fct/path" in html
+    assert "mngr/some-feature" in html
+
+
+def test_render_create_form_ignores_workspace_env_vars_without_opt_in_on_shared_tier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without the opt-in, a stray MINDS_WORKSPACE_* in the shell is ignored.
+
+    A stray ``MINDS_WORKSPACE_BRANCH=mngr/some-branch`` (e.g. left over from a
+    prior ``just minds-start``) must not pre-fill the form's branch field for an
+    end-user ``minds run``, where it would propagate to the imbue_cloud lease as
+    ``-b repo_branch_or_tag=...`` and fail to match any pool host baked with the
+    tier's canonical branch.
+    """
+    monkeypatch.delenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", raising=False)
     monkeypatch.setenv("MINDS_ROOT_NAME", "minds-staging")
     monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/fct/path")
     monkeypatch.setenv("MINDS_WORKSPACE_NAME", "mindtest")
@@ -175,21 +236,16 @@ def test_render_create_form_ignores_workspace_env_vars_in_staging(monkeypatch: p
     assert "assistant" in html
 
 
-def test_render_create_form_ignores_workspace_env_vars_in_production(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Production -- like staging -- must not honor the dev-iteration env vars."""
-    monkeypatch.setenv("MINDS_ROOT_NAME", "minds")
-    monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
-    html = render_create_form()
-    assert "mngr/some-feature" not in html
+def test_render_create_form_ignores_workspace_env_vars_without_opt_in_on_dev_tier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tier no longer matters: even a dev-tier root name ignores the vars without opt-in.
 
-
-def test_render_create_form_ignores_workspace_env_vars_when_unactivated(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No activated env (no MINDS_ROOT_NAME) -- treat as non-dev and ignore env vars.
-
-    Mirrors the conservative default: a bare ``minds run`` without any
-    activation context shouldn't accidentally pull from ad-hoc env vars.
+    This closes the old gap where dev tiers honored a stray MINDS_WORKSPACE_*
+    purely by tier, with no explicit operator intent.
     """
-    monkeypatch.delenv("MINDS_ROOT_NAME", raising=False)
+    monkeypatch.delenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", raising=False)
+    monkeypatch.setenv("MINDS_ROOT_NAME", "minds-dev-josh")
     monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
     html = render_create_form()
     assert "mngr/some-feature" not in html
@@ -207,6 +263,63 @@ def test_render_chrome_page_contains_titlebar() -> None:
     assert "home-btn" in html
     assert "back-btn" in html
     assert "content-frame" in html
+
+
+def test_render_chrome_page_drops_title_swatch_and_seam_border() -> None:
+    # The full-width accent bar replaces the small swatch and the
+    # ``border-b border-white/10`` seam: the rounded content corner
+    # already provides separation below.
+    html = render_chrome_page()
+    assert 'id="title-swatch"' not in html
+    # The seam class shouldn't appear on the titlebar element. Other
+    # uses of border-white/10 elsewhere on the page are fine; assert
+    # on the specific titlebar markup.
+    titlebar_open = html.index('id="minds-titlebar"')
+    titlebar_close = html.index(">", titlebar_open)
+    titlebar_tag = html[titlebar_open:titlebar_close]
+    assert "border-b" not in titlebar_tag
+    assert "border-white" not in titlebar_tag
+
+
+def test_render_chrome_page_titlebar_background_follows_titlebar_bg_var() -> None:
+    # The titlebar paints via the ``--titlebar-bg`` CSS variable (set by
+    # chrome.js when a workspace is active) with a zinc-900 fallback, so
+    # the dark default chrome transitions cleanly to the active
+    # workspace's accent color.
+    html = render_chrome_page()
+    assert "var(--titlebar-bg" in html
+
+
+def test_render_chrome_page_page_title_uses_titlebar_title_class() -> None:
+    # ``.titlebar-title`` reads ``--titlebar-fg`` so the page-title text
+    # flips between dark and light depending on the accent's lightness.
+    html = render_chrome_page()
+    assert 'id="page-title" class="titlebar-title' in html
+
+
+def test_render_chrome_page_account_button_uses_titlebar_account_class() -> None:
+    html = render_chrome_page()
+    assert 'id="user-btn"' in html
+    # ``.titlebar-account`` carries the accent-aware foreground; the old
+    # hard-coded ``text-zinc-400`` / ``hover:bg-white/5`` recipe is gone.
+    btn_open = html.index('id="user-btn"')
+    btn_close = html.index(">", btn_open)
+    btn_tag = html[btn_open:btn_close]
+    assert "titlebar-account" in btn_tag
+    assert "text-zinc-400" not in btn_tag
+    assert "hover:bg-white/5" not in btn_tag
+
+
+def test_render_chrome_page_content_iframe_uses_12px_rounded_corners() -> None:
+    # 12px radius (``rounded-xl``) matches Electron-side
+    # ``contentView.setBorderRadius(12)`` (= ``CONTENT_CORNER_RADIUS`` in
+    # electron/main.js) so both modes render the same tucked-under shape
+    # against the OS's outer window rounding.
+    html = render_chrome_page()
+    iframe_open = html.index('id="content-frame"')
+    iframe_close = html.index(">", iframe_open)
+    iframe_tag = html[iframe_open:iframe_close]
+    assert "rounded-xl" in iframe_tag
 
 
 def test_render_chrome_page_hides_window_controls_on_mac() -> None:
@@ -572,13 +685,15 @@ def test_button_passes_through_arbitrary_attrs() -> None:
 
 def test_titlebar_button_default_is_nav_variant() -> None:
     html = CATALOG.render("TitlebarButton", _content="<svg/>")
-    # nav variant => w-8 h-7 rounded active:bg-white/10
+    # nav variant => w-8 h-7 rounded-md, default tone => the .titlebar-btn
+    # class (defined in tokens.css) carries the accent-aware color +
+    # hover + active rules.
     assert "w-8" in html
     assert "h-7" in html
-    assert "active:bg-white/10" in html
-    # default tone => hover lifts to white/5 + zinc-200 text
-    assert "hover:bg-white/5" in html
-    assert "hover:text-zinc-200" in html
+    assert "rounded-md" in html
+    assert "titlebar-btn" in html
+    # The danger tone modifier should NOT be present on the default tone.
+    assert "titlebar-btn-danger" not in html
     # Window-control geometry should NOT bleed into nav
     assert "w-9" not in html
     assert "h-[38px]" not in html
@@ -593,10 +708,76 @@ def test_titlebar_button_control_variant_renders_window_control_geometry() -> No
 
 def test_titlebar_button_danger_tone_applies_red_hover() -> None:
     html = CATALOG.render("TitlebarButton", variant="control", tone="danger", _content="<svg/>")
-    assert "hover:bg-red-600" in html
-    assert "hover:text-white" in html
-    # The default tone's hover should be replaced, not merged.
-    assert "hover:bg-white/5" not in html
+    # ``.titlebar-btn-danger`` (in tokens.css) supplies the red hover.
+    assert "titlebar-btn-danger" in html
+    # Base ``.titlebar-btn`` still applies (geometry + base colors).
+    assert "titlebar-btn " in html
+
+
+# -- Workspace accent + titlebar tokens ----------------------------------
+#
+# The accent is set per-workspace via a CSS variable on document.documentElement
+# (chrome.js) so the value is computed; the *shape* of the computation lives
+# in workspace_accent() (mirrored in static/workspace_accent.js). These tests
+# pin the OKLCH lightness / chroma at 85% / 0.08 -- a calm tone that reads as
+# chrome across the full-width titlebar -- and pin the deterministic
+# agent-id -> hue mapping that powers identity color across the app.
+
+
+def test_workspace_accent_uses_85_lightness_and_0_08_chroma() -> None:
+    accent = workspace_accent(str(_AGENT_A))
+    # Match the full-width-titlebar tuning. If you bump these, also update
+    # ``ACCENT_L`` / ``ACCENT_C`` in static/workspace_accent.js so the two
+    # stay in lockstep.
+    assert accent.startswith("oklch(85% 0.08 ")
+    assert accent.endswith(")")
+
+
+def test_workspace_accent_is_deterministic_for_a_given_agent_id() -> None:
+    # The deterministic mapping is the whole point: an agent's identity
+    # color must not flicker across renders.
+    assert workspace_accent(str(_AGENT_A)) == workspace_accent(str(_AGENT_A))
+
+
+def test_workspace_accent_differs_across_distinct_agent_ids() -> None:
+    # Distinct agent ids should hash to distinct hues; with a 360-degree
+    # space and SHA-256 hashes, a collision between two specific ids is
+    # effectively impossible.
+    assert workspace_accent(str(_AGENT_A)) != workspace_accent(str(_AGENT_B))
+
+
+def test_tokens_css_defines_titlebar_utility_classes() -> None:
+    """Drift guard: the chrome HTML emits these class names; tokens.css must
+    define them, otherwise the bar paints with no foreground hierarchy."""
+    css = _TOKENS_CSS_PATH.read_text()
+    assert ".titlebar-title" in css
+    assert ".titlebar-btn" in css
+    assert ".titlebar-btn-danger" in css
+    assert ".titlebar-account" in css
+    # All of them read --titlebar-fg with an alpha for hierarchy.
+    assert "var(--titlebar-fg" in css
+
+
+def test_tokens_css_drops_page_workspace_top_stripe() -> None:
+    """The 3px ``.page-workspace::before`` stripe is now redundant with
+    the colored chrome bar above; tokens.css must not redeclare it."""
+    css = _TOKENS_CSS_PATH.read_text()
+    assert ".page-workspace::before" not in css
+
+
+def test_tokens_css_accent_fallbacks_use_the_pinned_lightness_chroma() -> None:
+    """``--workspace-accent`` may not be set (e.g. the dev styleguide or
+    a sidebar item rendered before chrome.js applies the accent), in
+    which case consumers fall back to a fixed default. Pin that default
+    to the 85 / 0.08 tuning so the fallback doesn't pop visually against
+    the rest of the accent system."""
+    css = _TOKENS_CSS_PATH.read_text()
+    # Pre-titlebar-accent values must not linger in fallbacks.
+    assert "oklch(65% 0.15" not in css
+    assert "oklch(80% 0.1" not in css
+    assert "oklch(85% 0.12" not in css
+    # All fallbacks should use the current tuning.
+    assert "oklch(85% 0.08 230)" in css
 
 
 def test_notice_renders_each_variant() -> None:

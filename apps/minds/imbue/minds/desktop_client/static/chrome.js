@@ -54,29 +54,73 @@
     }
   }
 
-  // -- Titlebar per-project swatch ------------------------------------------
+  // -- Titlebar accent ------------------------------------------------------
+  //
+  // The titlebar background and contrasting foreground are driven by three
+  // CSS variables set on the document root:
+  //   --workspace-accent  the OKLCH color (also consumed by sidebar spines etc.)
+  //   --titlebar-bg       the same color, used by the titlebar background
+  //   --titlebar-fg       an RGB triple ("0 0 0" | "255 255 255") for the
+  //                       contrasting foreground; titlebar-* utility classes
+  //                       compose this with per-element alpha for hierarchy
+  // Cleared back to defaults (dark bar, white foreground) when there's no
+  // active workspace, so a sign-out / workspace-delete / freshly-launched
+  // app renders the default zinc-900 chrome.
+  //
+  // ``currentTitleAgentId`` tracks the workspace ACTUALLY DISPLAYED in this
+  // window's content view -- it gates ``maybeRedirectToRecovery`` so a stuck
+  // agent only redirects this window when this window is the one showing it.
+  // It is intentionally separate from the ACCENT SOURCE (the persisted
+  // last-opened workspace), which can differ when another window opens a
+  // workspace while this one is on Home, sign-in, etc. Accent application
+  // must never write to ``currentTitleAgentId`` or trigger recovery, or a
+  // stuck agent in another window will hijack this window's content view.
   var currentTitleAgentId = null;
-  function applyTitleSwatch(agentId) {
-    var swatch = document.getElementById('title-swatch');
+  // Tracks the in-flight accent target so the async ``getAccent`` callback
+  // can guard against landing after a newer accent application has already
+  // been kicked off. (``pickForeground`` is synchronous and applied inline,
+  // so it doesn't need a token.) Independent of ``currentTitleAgentId`` so
+  // the accent-only call paths (bootstrap + ``onLastWorkspaceAgentIdChanged``)
+  // can apply colors without claiming to represent the displayed workspace.
+  var pendingAccentAgentId = null;
+  function applyTitleAccent(agentId) {
     if (!agentId) {
-      swatch.classList.add('hidden');
+      pendingAccentAgentId = null;
       document.documentElement.style.removeProperty('--workspace-accent');
-      currentTitleAgentId = null;
+      document.documentElement.style.removeProperty('--titlebar-bg');
+      document.documentElement.style.removeProperty('--titlebar-fg');
       return;
     }
-    if (currentTitleAgentId !== agentId) {
+    pendingAccentAgentId = agentId;
+    // ``pickForeground`` is synchronous (the threshold depends only on the
+    // accent's lightness, which is constant for today's hash-derived
+    // accents), so we apply ``--titlebar-fg`` immediately. The background
+    // color resolves asynchronously via SHA-256; the in-flight token
+    // (``pendingAccentAgentId``) guards against a stale callback landing
+    // after a newer ``applyTitleAccent`` has been kicked off.
+    document.documentElement.style.setProperty(
+      '--titlebar-fg',
+      window.mindsAccent.pickForeground(),
+    );
+    getAccent(agentId, function (c) {
+      if (pendingAccentAgentId !== agentId) return;
+      document.documentElement.style.setProperty('--workspace-accent', c);
+      document.documentElement.style.setProperty('--titlebar-bg', c);
+    });
+  }
+  // Update the "displayed workspace" tracker and trigger the recovery
+  // redirect when warranted. Called from the displayed-workspace sources
+  // (``onCurrentWorkspaceChanged`` in Electron, the URL-poll in browser mode)
+  // but NOT from the accent-only call paths.
+  function setDisplayedWorkspaceAgentId(agentId) {
+    if (currentTitleAgentId !== agentId && agentId) {
       // Agent identity changed -- clear the recovery-redirect lock so a
       // user who navigates back to a still-stuck workspace gets bounced
       // to recovery again instead of landing on the 503 page.
       delete redirectedAgents[agentId];
     }
-    currentTitleAgentId = agentId;
-    getAccent(agentId, function (c) {
-      if (currentTitleAgentId !== agentId) return;
-      document.documentElement.style.setProperty('--workspace-accent', c);
-      swatch.classList.remove('hidden');
-    });
-    maybeRedirectToRecovery();
+    currentTitleAgentId = agentId || null;
+    if (currentTitleAgentId) maybeRedirectToRecovery();
   }
 
   // -- System-interface recovery redirect -----------------------------------
@@ -160,8 +204,65 @@
     // it from the content URL alone would clobber it to null on every navigation
     // that doesn't match /goto/<id>/, which would prevent the recovery-page
     // redirect from firing for the current agent.
+    //
+    // Distinct from the persisted "last opened workspace" accent (below):
+    // ``onCurrentWorkspaceChanged`` carries null whenever the content view is
+    // on a non-workspace URL (Home, sign-in, ...) so it can't be used as the
+    // titlebar accent source. We track both -- the current workspace drives
+    // the recovery-page redirect lock, the last-opened workspace drives the
+    // accent color.
     window.minds.onCurrentWorkspaceChanged(function (agentId) {
-      applyTitleSwatch(agentId || null);
+      // Authoritative for what THIS window is displaying: drive both the
+      // recovery-redirect lock and the accent off the same event.
+      setDisplayedWorkspaceAgentId(agentId || null);
+      if (agentId) {
+        // Real workspace navigation -- apply the accent immediately. Main
+        // also persists this id so it survives a restart; we don't need to
+        // push it back over IPC here.
+        applyTitleAccent(agentId);
+        return;
+      }
+      // Non-workspace URL (Home, sign-in, accounts, ...): the bar should
+      // track the persisted last-opened workspace, which main may have
+      // *already cleared* by the time we get here (sign-out, deletion of
+      // the displayed workspace). Re-query rather than relying on the
+      // ``onLastWorkspaceAgentIdChanged`` broadcast: that broadcast's
+      // gate (``if (currentTitleAgentId) return;``) blocks the clear in
+      // any flow where the broadcast arrives BEFORE this null
+      // ``current-workspace-changed``, which is the case on sign-out (the
+      // two events come from different async streams and aren't ordered).
+      // The deletion path explicitly orders the IPC, but pulling the
+      // stored value here covers both paths uniformly.
+      window.minds.getLastWorkspaceAgentId().then(function (storedId) {
+        // A subsequent workspace open may have set ``currentTitleAgentId``
+        // while this IPC was in flight; let that win.
+        if (currentTitleAgentId) return;
+        applyTitleAccent(storedId || null);
+      });
+    });
+    // Bootstrap: paint the accent on chrome page load using the persisted
+    // last-opened workspace, before any other IPC fires.
+    window.minds.getLastWorkspaceAgentId().then(function (agentId) {
+      if (agentId && !currentTitleAgentId) applyTitleAccent(agentId);
+    });
+    // Main pushes the new value on workspace-delete / sign-out / any other
+    // update so the bar tracks the source of truth even when this renderer
+    // wasn't the one that triggered the change.
+    //
+    // Scope: ``updateBundleLastWorkspaceAgentId`` in main sends this event
+    // only to THIS window's chrome view, so it never carries another
+    // window's state. The gate on ``currentTitleAgentId`` exists for a
+    // different reason: when the displayed workspace is deleted or the
+    // user signs out, main fires this with ``null`` *before* the
+    // content view's redirect to ``/`` has had a chance to emit
+    // ``current-workspace-changed: null``. The gate keeps the accent
+    // visible across that brief window so the bar doesn't flash to the
+    // default zinc-900 before the proper ``current-workspace-changed:
+    // null`` branch above re-queries ``getLastWorkspaceAgentId`` and
+    // applies the (now-null) value cleanly.
+    window.minds.onLastWorkspaceAgentIdChanged(function (agentId) {
+      if (currentTitleAgentId) return;
+      applyTitleAccent(agentId || null);
     });
   } else {
     setInterval(function () {
@@ -170,7 +271,9 @@
         if (t) document.getElementById('page-title').textContent = t;
         var loc = document.getElementById('content-frame').contentWindow.location.pathname;
         var m = loc.match(/^\/goto\/([^/]+)/);
-        applyTitleSwatch(m ? m[1] : null);
+        var derivedAgentId = m ? m[1] : null;
+        setDisplayedWorkspaceAgentId(derivedAgentId);
+        applyTitleAccent(derivedAgentId);
       } catch (e) {}
     }, 500);
     document.getElementById('content-frame').addEventListener('load', refreshAuthStatus);
@@ -198,7 +301,8 @@
   };
 
   document.getElementById('requests-toggle').onclick = function () {
-    if (isElectron) window.minds.toggleRequestsPanel();
+    if (isElectron) window.minds.toggleInbox();
+    else navigateContent('/inbox');
   };
 
   // -- Open a permission request from workspace content (browser mode) -------
@@ -206,11 +310,11 @@
   // The workspace (the cross-origin content iframe) can ask the shell to show
   // a permission request by posting `{type:'minds:open-request-modal',
   // requestId}` to `window.parent`. In Electron this is handled by the content
-  // view's relay preload + main process (which opens a modal overlay); in
-  // browser mode there is no overlay, so we navigate the content iframe to the
-  // request page instead. Only honour messages from the content iframe itself,
-  // and only well-formed server-issued ids (`evt-<uuid hex>`), so arbitrary
-  // pages cannot drive navigation.
+  // view's relay preload + main process (which opens the inbox modal pre-
+  // selected on the target); in browser mode there is no overlay, so we
+  // navigate the content iframe to the inbox page instead. Only honour
+  // messages from the content iframe itself, and only well-formed server-
+  // issued ids (`evt-<uuid hex>`), so arbitrary pages cannot drive navigation.
   if (!isElectron) {
     window.addEventListener('message', function (e) {
       var frame = document.getElementById('content-frame');
@@ -220,7 +324,7 @@
       if (data.type !== 'minds:open-request-modal') return;
       var requestId = data.requestId;
       if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
-      navigateContent('/requests/' + requestId);
+      navigateContent('/inbox?selected=' + encodeURIComponent(requestId));
     });
   }
 
@@ -294,6 +398,18 @@
 
   if (isElectron && window.minds.onChromeEvent) {
     window.minds.onChromeEvent(handleChromeEvent);
+    // Toggle a ``modal-open`` class on the body when the inbox modal
+    // (or any modal hosted in the main process's modalView) opens or
+    // closes. The chrome titlebar's CSS keys ``app-region: no-drag``
+    // off this class so the OS drag region doesn't intercept clicks
+    // intended for the modal's interior in the y=0..TITLEBAR strip.
+    if (window.minds.onModalStateChanged) {
+      window.minds.onModalStateChanged(function (data) {
+        if (!data) return;
+        if (data.open) document.body.classList.add('modal-open');
+        else document.body.classList.remove('modal-open');
+      });
+    }
   } else {
     var evtSource = null;
     function connectSSE() {

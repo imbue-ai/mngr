@@ -48,6 +48,7 @@ from pydantic import PrivateAttr
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
@@ -59,6 +60,7 @@ from imbue.mngr.hosts.common import resolve_expected_process_name
 from imbue.mngr.hosts.common import timestamp_to_datetime
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
@@ -112,6 +114,7 @@ from imbue.mngr_imbue_cloud.primitives import FastMode
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.session_store import ImbueCloudSessionStore
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
+from imbue.mngr_vps_docker.host_setup import apply_host_setup_on_outer
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.vps_client import ExternallyManagedVpsClient
@@ -376,6 +379,24 @@ def _scan_ssh_host_key(host: str, port: int) -> str | None:
         except (OSError, paramiko.SSHException):
             pass
     return f"{host_key.get_name()} {host_key.get_base64()}"
+
+
+@pure
+def _build_delegated_vps_config(config: ImbueCloudProviderConfig) -> VpsDockerProviderConfig:
+    """Build the delegated vps_docker config for the slow-path rebuild.
+
+    Forwards the runtime knobs (``docker_runtime`` / ``install_gvisor_runtime`` /
+    ``default_start_args``) from the imbue_cloud config so the rebuilt container
+    runs under the configured runtime with the configured hardening args.
+    """
+    return VpsDockerProviderConfig(
+        backend=ProviderBackendName("vps_docker"),
+        host_dir=config.host_dir,
+        container_ssh_port=config.container_ssh_port,
+        docker_runtime=config.docker_runtime,
+        install_gvisor_runtime=config.install_gvisor_runtime,
+        default_start_args=config.default_start_args,
+    )
 
 
 class ImbueCloudProvider(BaseProviderInstance):
@@ -1063,11 +1084,13 @@ class ImbueCloudProvider(BaseProviderInstance):
             created_at=now,
             updated_at=now,
         )
-        return OfflineHost(
-            id=host_id,
-            certified_host_data=certified_host_data,
-            provider_instance=self,
-            mngr_ctx=self.mngr_ctx,
+        return make_readable_offline_host(
+            OfflineHost(
+                id=host_id,
+                certified_host_data=certified_host_data,
+                provider_instance=self,
+                mngr_ctx=self.mngr_ctx,
+            )
         )
 
     def get_host_resources(self, host: HostInterface) -> HostResources:
@@ -1141,7 +1164,12 @@ class ImbueCloudProvider(BaseProviderInstance):
                         "imbue_cloud fast_mode=require does not accept --image or --start-arg; "
                         "the pre-baked agent is adopted as-is. Use fast_mode=prevent to rebuild."
                     )
-                return self._create_host_fast_path(name=name, attributes=parsed.attributes, token=token)
+                return self._create_host_fast_path(
+                    name=name,
+                    attributes=parsed.attributes,
+                    token=token,
+                    region=parsed.region,
+                )
             case FastMode.PREVENT:
                 return self._create_host_slow_path(
                     name=name,
@@ -1154,6 +1182,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                     known_hosts=known_hosts,
                     authorized_keys=authorized_keys,
                     passthrough_build_args=parsed.passthrough_build_args,
+                    region=parsed.region,
                 )
             case _ as unreachable:
                 assert_never(unreachable)
@@ -1164,6 +1193,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         name: HostName,
         attributes: LeaseAttributes,
         token: SecretStr,
+        region: str | None,
     ) -> Host:
         """Lease an exact-attribute pool host and adopt its pre-baked agent.
 
@@ -1174,7 +1204,13 @@ class ImbueCloudProvider(BaseProviderInstance):
         logger.info("imbue_cloud[{}] FAST PATH: leasing exact-attribute pool host for {!r}", self.name, str(name))
         tmp_private_key, tmp_public_key, public_key_text = self._prepare_pending_keypair()
         try:
-            lease_result = self.client.lease_host(token, attributes, public_key_text, str(name))
+            lease_result = self.client.lease_host(
+                token,
+                attributes,
+                public_key_text,
+                str(name),
+                region=region,
+            )
         except ImbueCloudLeaseUnavailableError as exc:
             self._discard_pending_keypair(tmp_private_key, tmp_public_key)
             raise FastPathUnavailableError(
@@ -1229,6 +1265,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         known_hosts: Sequence[str] | None,
         authorized_keys: Sequence[str] | None,
         passthrough_build_args: tuple[str, ...],
+        region: str | None,
     ) -> Host:
         """Lease any available host (relaxed attributes), nuke its container, and rebuild it.
 
@@ -1248,7 +1285,15 @@ class ImbueCloudProvider(BaseProviderInstance):
         )
         tmp_private_key, tmp_public_key, public_key_text = self._prepare_pending_keypair()
         try:
-            lease_result = self.client.lease_host(token, relaxed_attributes, public_key_text, str(name))
+            # Region constraints are NOT relaxed: a hard ``region`` requirement
+            # still applies to the rebuilt host.
+            lease_result = self.client.lease_host(
+                token,
+                relaxed_attributes,
+                public_key_text,
+                str(name),
+                region=region,
+            )
         except ImbueCloudLeaseUnavailableError:
             # Genuinely no available host in the pool -- nothing was leased, so
             # there is nothing to release. Surface the pool-exhausted signal.
@@ -1328,6 +1373,22 @@ class ImbueCloudProvider(BaseProviderInstance):
         combined_authorized_keys = tuple(authorized_keys or ()) + (per_host_public_key,)
         with self._outer_for_leased_vps(host_id, lease_result) as outer:
             delegated_provider.teardown_container_on_existing_vps(outer, host_id)
+            # Re-apply the full idempotent host setup on the leased VPS before
+            # rebuilding, so a host baked with an old version (or before runsc
+            # existed) is brought up to current: pinned Docker, runsc, sshd
+            # tuning, base packages. This is the single source of truth shared
+            # with the OVH bake + cloud-init backends. Runs after teardown (no
+            # container running, so a Docker upgrade/restart is safe) and before
+            # the rebuild; a failure raises and aborts the create. ``runsc`` is
+            # installed when the provider is configured for it (minds writes
+            # ``install_gvisor_runtime=true`` into the per-account block), so the
+            # rebuilt container can run under ``--runtime runsc``. qemu purge is
+            # enabled because the pool is OVH-backed (a no-op when no qemu).
+            apply_host_setup_on_outer(
+                outer,
+                install_gvisor_runtime=self.config.install_gvisor_runtime,
+                is_qemu_purge_enabled=True,
+            )
             delegated_provider.create_host_on_existing_vps(
                 outer=outer,
                 host_id=host_id,
@@ -1355,12 +1416,16 @@ class ImbueCloudProvider(BaseProviderInstance):
         ``create_host_on_existing_vps`` (which take a caller-supplied ``outer``
         and make no VPS-API calls), so its ``vps_client`` is the
         ``ExternallyManagedVpsClient`` stub that raises on any ordering call.
+
+        Forwards the runtime knobs from ``self.config`` (an
+        ``ImbueCloudProviderConfig``, which extends ``VpsDockerProviderConfig``)
+        so the rebuilt container runs under the configured runtime with the
+        configured hardening args -- e.g. ``docker_runtime='runsc'`` plus
+        ``--workdir=/`` / ``--security-opt=no-new-privileges`` from
+        ``default_start_args``, which minds bootstrap writes into the per-account
+        block.
         """
-        vps_config = VpsDockerProviderConfig(
-            backend=ProviderBackendName("vps_docker"),
-            host_dir=self.config.host_dir,
-            container_ssh_port=self.config.container_ssh_port,
-        )
+        vps_config = _build_delegated_vps_config(self.config)
         return VpsDockerProvider(
             name=self.name,
             host_dir=self.config.host_dir,

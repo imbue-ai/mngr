@@ -210,8 +210,9 @@
 **/marimo/_lsp/
 **/__marimo__/
 
-# task folders for local custom claude workflow
-*/*/_tasks/
+# task folders for local custom claude workflow (at any depth, incl. the
+# root-level `dev` project's `dev/_tasks/`, which `*/*/_tasks/` missed)
+**/_tasks/
 **/.sesskey
 
 # Node.js
@@ -247,6 +248,7 @@
 
 # TMR output directories (reports + test outputs)
 **/tmr_*/
+**/tmr-report/
 
 # Active session marker file (used to detect interrupted sessions)
 **/.claude/active
@@ -344,3 +346,6 @@
 
 # Playwright MCP scratch artifacts (mock screenshots, page snapshots)
 **/.playwright-mcp/
+
+# tmr (task-runner) orchestration scratch report
+**/tmr-report/

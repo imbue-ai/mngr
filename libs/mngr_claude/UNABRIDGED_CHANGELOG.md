@@ -4,6 +4,37 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-09
+
+- Readiness hooks: a Claude agent restarted/resumed mid-turn no longer reports the RUNNING lifecycle state forever. The `active` marker is set on UserPromptSubmit and only removed by the Stop / idle Notification hooks, so a turn abandoned by an abnormal exit (container restart, OOM, crash) left it stale and the agent stuck at RUNNING. The SessionStart hook now clears `active`/`permissions_waiting` on `startup`/`resume` (a fresh, not-mid-turn process), so the lifecycle state self-heals on the next (re)start; `compact` is excluded because auto-compaction fires mid-turn while Claude is genuinely active. The same hook touches a new `claude_process_started` marker whose mtime gives consumers a restart boundary to compare transcript timestamps against (any transcript event older than it belongs to a turn the current process did not run). The shared "clear active markers and emit an activity event" shell snippet is extracted into a constant reused by the Notification idle hook and the new SessionStart hook so the two stay byte-identical.
+
+Claude session preservation on destroy was rewritten onto the new shared
+`preserve_agent_data` machinery in core mngr. Behavior is unchanged in substance -- session
+JSONLs, the raw and common transcripts, and the session-id history are still preserved before
+the agent state directory is deleted, and `projects/` is still skipped in `use_env_config_dir`
+mode -- but the implementation is now a single declarative list of files preserved through one
+code path for both online and offline (volume-backed) hosts, replacing the previously
+duplicated SSH and Volume implementations.
+
+The on-disk layout of preserved sessions changed: files now live at
+`<local_host_dir>/preserved/<agent-name>--<agent-id>/` and mirror the agent state directory
+verbatim (e.g. `plugin/claude/anthropic/projects/...`, `logs/claude_transcript/...`,
+`events/claude/common_transcript/...`, `claude_session_id_history`), instead of the old
+`<local_host_dir>/plugin/mngr_claude/preserved_sessions/<agent-name>--<agent-id>/` location
+with renamed subdirectories. This is a switch-forward change; previously preserved sessions in
+the old location are left in place.
+
+## 2026-06-08
+
+Internal refactor (no behavior change): the `claude` agent's `assemble_command` now shell-quotes its extra `agent_args` via the shared `quote_agent_args` helper instead of an inline `shlex.quote` loop. This is the same quoting the plugin already performed; it now shares one implementation (and one explanatory comment) with `BaseAgent`, so the two cannot drift.
+
+Standardized mngr_claude's test setup on `register_plugin_test_fixtures(globals())`
+for HOME isolation (matching every other mngr plugin), keeping
+`pytest_plugins = ["imbue.mngr_modal.conftest"]` only to share mngr_modal's test
+fixtures (`modal_subprocess_env`, etc.). Removed the now-redundant
+`enabled_plugins` override. Internal test-infrastructure change only; no
+user-facing behavior change.
+
 ## 2026-06-06
 
 Added approximate response streaming for Claude agents, driven by watching the agent's tmux pane.

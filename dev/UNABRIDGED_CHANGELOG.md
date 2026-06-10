@@ -4,6 +4,123 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-09
+
+Added the titlebar-workspace-accent blueprint under ``blueprint/`` describing
+the rework of the per-workspace accent from a small swatch next to the title
+into a full-width colored top bar with rounded edges below. The
+implementation lives under ``apps/minds/``.
+
+Add a blueprint plan under `blueprint/loading-window-position/` describing
+the fix for the startup loading window jumping from the default centered
+position to its restored bounds when the backend comes up. The plan
+covers reusing the existing `restoreWindowBounds()` helper at the
+app-startup site, expected behavior in first-launch, multi-window,
+display-gone, and deleted-workspace cases, and the manual verification
+scenarios used since this is Electron main-process code with no
+automated test harness in the repo.
+
+Updated the changelog-writing guidance in `CLAUDE.md`: when a per-PR changelog
+entry uses a list, its bullets should be separated by a double newline (a blank
+line between each bullet).
+
+Added a blueprint plan (`blueprint/docker-state-container-leak/`) documenting the investigation and fix for leaked Docker state containers from local test runs.
+
+Added an implementation-plan design doc under `blueprint/` for the create-template `setting`/`setting__extend` fix (see the `libs/mngr` entry for the user-visible behavior change).
+
+`scripts/snapshot_minds_e2e_state.py` now sets `LATCHKEY_DISABLE_COUNTING=1` in the in-sandbox runner before booting minds. The snapshot builder is test infrastructure (it captures on-disk state into the fixture image used by the `minds_snapshot_resume` tests), so its booted minds -> `mngr latchkey forward` -> `latchkey gateway` chain should not count toward Latchkey's usage -- mirroring the opt-out the pytest conftest already applies to the equivalent e2e test. Genuine minds installs (including dev-from-source launches via `just minds-start`) intentionally still count.
+
+## 2026-06-08
+
+Fixed the `publish` workflow, which had been failing at the "Verify versions and pin consistency" step since `scripts/utils.py` started importing `UNPUBLISHED_PACKAGES` from `imbue.mngr`. A bare `uv run` only syncs the root project (which does not depend on `imbue-mngr`), so the import raised `ModuleNotFoundError: No module named 'imbue.mngr'`. The three `scripts/verify_publish.py` invocations now use `uv run --all-packages` so the workspace package is installed.
+
+## 2026-06-08
+
+Added the inbox-modal-refactor blueprint under ``blueprint/`` describing
+the consolidation of the requests panel into the same modal surface as
+the permission dialogs. The implementation lives under ``apps/minds/``.
+
+Fixed the `mngr-shim-installed` pre-commit hook (`scripts/check_mngr_shim.sh`) giving a false failure when invoked under `uv run` (e.g. during `mngr create`, which makes its initial commit under uv). `uv run` force-prepends the project's `.venv/bin` to PATH, so the project-local `mngr` console script shadowed the dev shim inside the hook even though the shim wins in a normal shell. The hook now drops the active `VIRTUAL_ENV`'s bin dir before resolving `mngr`, evaluating resolution the way an interactive shell would, while still catching a genuinely stale global ahead of `~/.local/bin`.
+
+# Point mngr at the imbue-mngr-skills Claude Code plugin
+
+The `imbue-mngr-skills` Claude Code plugin (the `message-agent`,
+`wait-for-agent`, `find-agent`, and `mngr-help` skills) is published from its
+own GitHub repo, `imbue-ai/mngr-claude-skills`, as a Claude Code plugin
+marketplace -- mirroring how `imbue-code-guardian` is distributed from its own
+repo.
+
+This repo dogfoods the published plugin: `.claude/settings.json` registers the
+`imbue-mngr` marketplace from `imbue-ai/mngr-claude-skills` and enables
+`imbue-mngr-skills@imbue-mngr`, and `scripts/claude_update_plugin.sh` refreshes
+it on SessionStart alongside `imbue-code-guardian`.
+
+These skills previously lived in this repo's project-level `.claude/skills/`
+directory; they have moved out to the dedicated repo so any mngr user can
+install them for any project (via `mngr extras claude-plugin`, or
+`claude plugin marketplace add imbue-ai/mngr-claude-skills` +
+`claude plugin install imbue-mngr-skills@imbue-mngr`).
+
+Added the implementation blueprint for the minds create-flow fixes under `blueprint/minds-create-flow-fixes/`.
+
+- Added the implementation plan for the final workspace-create fixes under
+  `blueprint/`.
+
+Fixed the root `.gitignore` `tmr-report/` pattern to use a `**/` prefix, satisfying the `test_gitignore_patterns_use_double_star` check that keeps `.gitignore` compatible with `.dockerignore`. This was flagged by CI after a bulk merge added the unprefixed pattern.
+
+Added a blueprint plan (`blueprint/gvisor-docker-hardening/`) for hardening docker invocations with the gVisor (runsc) runtime.
+
+Added a dev `mngr` shim (`scripts/mngr`) so `mngr` always runs the checkout you're working in (per-worktree, by cwd) instead of a stale global install. A pre-commit hook (`scripts/check_mngr_shim.sh`) installs the shim automatically (a symlink in `~/.local/bin`) and verifies it's on PATH -- no per-worktree setup. Updated the README dev-install notes accordingly (use the shim, not `uv tool install -e libs/mngr`).
+
+Added the implementation blueprint for the Lima docker-in-VM (`is_host_in_docker`)
+work under `blueprint/lima-docker-host/`, and recorded the new
+`imbue-mngr-lima` -> `imbue-mngr-vps-docker` internal dependency in the
+`scripts/utils.py` package graph (used by the version-sync check).
+
+Added `test_every_mngr_plugin_isolates_home_in_tests` to `test_meta_ratchets.py`:
+every mngr plugin (any project with a `[project.entry-points.mngr]` table) must
+call `register_plugin_test_fixtures(globals())` in a conftest, guaranteeing its
+tests redirect $HOME away from the developer's real home directory.
+
+- Release tooling (`scripts/release.py`, `scripts/utils.py`): the publish graph is now **auto-discovered from the workspace** instead of being a hand-maintained allowlist. Every `libs/*` package is a publish candidate unless it is explicitly listed in `UNPUBLISHED_PACKAGES` (in `libs/mngr/.../plugin_catalog.py`, the single opt-out shared with the install wizard). Previously a package nobody remembered to add to the hardcoded `PACKAGES` tuple was invisible to the release script -- never bumped, never pin-aligned, never offered -- which let several plugins (`mngr_usage`, `mngr_ovh`, `mngr_imbue_cloud`, `mngr_latchkey`, `mngr_forward`, `mngr_schedule`, `mngr_claude_usage`, `mngr_robinhood`) silently fall into limbo with stale internal pins.
+- Pin alignment (`update_internal_dep_pins`) now walks **every workspace member** (`libs/` and `apps/`) across `[project.dependencies]`, every `[project.optional-dependencies]` extra, and every `[dependency-groups]` group -- not just the published packages' main dependencies. Publishable packages have their publishable internal runtime deps forced to `==<version>` (a published wheel must pin its internal deps); everywhere else, only existing `==` pins are realigned, so deliberately-unpinned deps stay unpinned. This is what keeps the override-free `uv lock` that `apps/minds/scripts/build.js` runs resolvable.
+- Pin-consistency verification (`verify_pin_consistency`) was generalized to the same broad scope so a stale or missing internal pin now fails `test_internal_dep_pins_are_consistent` in CI, rather than only surfacing when someone builds the ToDesktop bundle. `validate_package_graph` now asserts the publish graph is *closed* (no publishable package has a runtime dependency on an unpublished workspace package, which would be unresolvable on PyPI). A new `test_every_lib_is_classified` ratchet guarantees every `libs/*` package is either published or in `UNPUBLISHED_PACKAGES` -- nothing can silently fall through again.
+- New-package detection now considers the full release candidate set (directly-changed packages **plus** everything pulled in by the cascade and the mngr-always rule), not just directly-changed packages. An unpublished package reached only via cascade (e.g. one that depends on `imbue-mngr` and so cascades every release) is now correctly offered for first publication instead of being silently bumped and published as if it already existed.
+
+`just minds-start` now exports `MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1` alongside
+the `MINDS_WORKSPACE_*` vars. This is the explicit opt-in that makes the minds
+desktop create-form honor the local-worktree defaults on any tier (including
+staging / production), instead of only on per-developer dev envs.
+
+Added `**/tmr-report/` to the root `.gitignore` so the test-orchestrator
+(mapreduce) run-report directory written into a worktree is not flagged as an
+untracked change. The existing `**/tmr_*/` pattern did not match the
+dash-separated `tmr-report/` name.
+
+- Gitignore the `tmr-report/` orchestrator output directory (alongside the existing `tmr_*/` rule) so test-runner report artifacts are not flagged as uncommitted changes.
+
+- Gitignore the `tmr-report/` directory at the repo root: it holds transient task-runner orchestration scratch output (e.g. `events.jsonl`) and should never be committed.
+
+Add `tmr-report/` to `.gitignore` so the TMR (test-mediated reconciliation) orchestrator's scratch output directory is ignored (the existing `**/tmr_*/` pattern uses an underscore and did not match the dash-named directory).
+
+## 2026-06-07
+
+Added the blueprint plan `blueprint/mngr-agent-sdk/plan-mngr-agent-sdk.md` describing the
+mngr-backed Claude Agent SDK (`imbue.mngr_robinhood.agent_sdk`). The implementation itself lives
+under `libs/mngr_robinhood` (see that project's changelog).
+
+Excluded the new opt-in live Claude Agent SDK test suite from CI by adding `and not sdk_live`
+to both pytest filter expressions in `offload-modal.toml`. Added a `just test-sdk-live` recipe
+that sets `RUN_SDK_LIVE_TESTS=1` and runs the `sdk_live`-marked tests in `libs/mngr_robinhood`.
+
+# Blueprint plan for finishing the mngr-backed Agent SDK
+
+Added the implementation plan at `blueprint/finish-agent-sdk/plan-finish-agent-sdk.md` describing
+how the remaining control surfaces of the mngr-backed Agent SDK are completed (see the
+`libs/mngr_robinhood` changelog entry for the user-visible behavior).
+
+Added a blueprint design doc (`blueprint/tmux-window-size/`) describing the configurable tmux window-size feature implemented in this branch.
+
 ## 2026-06-06
 
 Added `blueprint/claude-stream-buffer/plan-claude-stream-buffer.md`, the design plan for approximate Claude response streaming via the mngr tmux session (implemented in `imbue-mngr-claude` and `imbue-mngr-robinhood`).

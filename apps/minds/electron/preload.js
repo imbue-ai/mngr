@@ -31,16 +31,25 @@ contextBridge.exposeInMainWorld('minds', {
   onChromeEvent: (callback) => {
     ipcRenderer.on('chrome-event', (_event, data) => callback(data));
   },
+  onModalStateChanged: (callback) => {
+    ipcRenderer.on('modal-state-changed', (_event, data) => callback(data));
+  },
 
   // Sidebar
   toggleSidebar: () => ipcRenderer.send('toggle-sidebar'),
 
-  // Requests panel
-  toggleRequestsPanel: () => ipcRenderer.send('toggle-requests-panel'),
-  openRequestsPanel: () => ipcRenderer.send('open-requests-panel'),
+  // Inbox modal (formerly the right-side requests panel)
+  toggleInbox: () => ipcRenderer.send('toggle-inbox'),
 
-  // Modal overlay (e.g. permission request dialogs)
+  // Modal overlay close (used by the inbox shell and any one-off dialogs)
   closeModal: () => ipcRenderer.send('close-modal'),
+
+  // Native file/directory picker used by the file-sharing permission
+  // dialog so the user can pick the path to share instead of typing it.
+  // ``options.mode`` is 'file' or 'directory'; ``options.defaultPath``
+  // seeds the dialog's starting location. Resolves to the selected
+  // absolute path, or null if the user cancelled.
+  showFilePicker: (options) => ipcRenderer.invoke('show-file-picker', options),
 
   // Multi-window workspace actions
   openWorkspaceInNewWindow: (agentId) =>
@@ -51,6 +60,17 @@ contextBridge.exposeInMainWorld('minds', {
     ipcRenderer.send('show-workspace-context-menu', agentId, x, y),
   onCurrentWorkspaceChanged: (callback) => {
     ipcRenderer.on('current-workspace-changed', (_event, agentId) => callback(agentId));
+  },
+
+  // Persisted "last opened workspace" agent id. The chrome page reads this
+  // on bootstrap to paint the titlebar accent before the first
+  // ``current-workspace-changed`` event arrives. Main owns writes
+  // (driven by ``current-workspace-changed`` + SSE-driven cleanup) and
+  // broadcasts updates via ``onLastWorkspaceAgentIdChanged`` (workspace
+  // deleted, user signed out, a different bundle opened a workspace).
+  getLastWorkspaceAgentId: () => ipcRenderer.invoke('get-last-workspace-agent-id'),
+  onLastWorkspaceAgentIdChanged: (callback) => {
+    ipcRenderer.on('last-workspace-agent-id-changed', (_event, agentId) => callback(agentId));
   },
 
   // Actions

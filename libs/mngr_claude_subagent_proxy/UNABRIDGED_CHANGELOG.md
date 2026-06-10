@@ -4,6 +4,24 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-09
+
+Updated the destroyed-agent fallback to read the preserved common transcript from its new
+location. Preserved Claude sessions now mirror the agent state directory under
+`<local_host_dir>/preserved/<agent-name>--<agent-id>/`, so the common transcript is read from
+`preserved/<name>--<id>/events/claude/common_transcript/events.jsonl` (via the shared
+`get_preserved_agent_dir` helper) instead of the former
+`plugin/mngr_claude/preserved_sessions/<name>--<id>/common_transcript/events.jsonl`.
+
+## 2026-06-08
+
+Standardized this plugin's test setup on `register_plugin_test_fixtures(globals())`
+instead of `pytest_plugins = ["imbue.mngr.conftest"]`, so HOME isolation is wired
+the same single way across all mngr plugins. Internal test-infrastructure change
+only; no user-facing behavior change.
+
+- Marked unpublished-on-purpose in `UNPUBLISHED_PACKAGES` (it is an experimental plugin coupled to Claude Code internals), so the release tooling will not offer it for publication. Its stale `imbue-mngr==0.2.5` / `imbue-mngr-claude==0.2.5` pins and the dev-group `imbue-mngr-modal==0.1.0` pin are realigned to current workspace versions so `uv lock` stays solvable. No runtime change.
+
 ## 2026-06-04
 
 Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.

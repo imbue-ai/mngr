@@ -2,8 +2,8 @@ from typing import Mapping
 
 import pytest
 
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import VolumeFile
-from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.volume import BaseVolume
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.interfaces.volume import ScopedVolume
@@ -23,7 +23,7 @@ class InMemoryVolume(BaseVolume):
             parent = file_path.rsplit("/", 1)[0] if "/" in file_path else ""
             if parent == path or (not path and "/" not in file_path):
                 results.append(
-                    VolumeFile(path=file_path, file_type=VolumeFileType.FILE, mtime=0, size=len(self.files[file_path]))
+                    VolumeFile(path=file_path, file_type=FileType.FILE, mtime=0, size=len(self.files[file_path]))
                 )
         return results
 
@@ -181,7 +181,7 @@ def test_scoped_volume_listdir_preserves_file_type(volume_with_files: InMemoryVo
     scoped = volume_with_files.scoped("/host")
     entries = scoped.listdir("agents")
     for entry in entries:
-        assert entry.file_type == VolumeFileType.FILE
+        assert entry.file_type == FileType.FILE
 
 
 def test_scoped_volume_chained_scoping(volume_with_files: InMemoryVolume) -> None:
@@ -223,16 +223,16 @@ def test_scoped_volume_path_exists_missing(volume_with_files: InMemoryVolume) ->
 
 
 def test_volume_file_fields() -> None:
-    vf = VolumeFile(path="/test.txt", file_type=VolumeFileType.FILE, mtime=1000, size=42)
+    vf = VolumeFile(path="/test.txt", file_type=FileType.FILE, mtime=1000, size=42)
     assert vf.path == "/test.txt"
-    assert vf.file_type == VolumeFileType.FILE
+    assert vf.file_type == FileType.FILE
     assert vf.mtime == 1000
     assert vf.size == 42
 
 
 def test_volume_file_type_enum_values() -> None:
-    assert VolumeFileType.FILE == "FILE"
-    assert VolumeFileType.DIRECTORY == "DIRECTORY"
+    assert FileType.FILE == "FILE"
+    assert FileType.DIRECTORY == "DIRECTORY"
 
 
 # =============================================================================

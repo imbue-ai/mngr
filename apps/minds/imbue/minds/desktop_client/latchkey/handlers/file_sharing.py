@@ -11,25 +11,31 @@ appending the response event, and notifying the waiting agent via
 A file-sharing permission request asks the user to grant the agent
 access to a single absolute file path on the desktop host, served
 through the ``minds-api-proxy`` Latchkey extension. Unlike its
-:mod:`.predefined` sibling, the dialog is a plain yes/no on a
-specific path -- there is no per-permission editing because the
-request itself is already fully-specified (one path, both read and
-write methods). Approval calls
-``POST /permission-requests/approve/<id>`` on the gateway's
-``permission-requests`` extension; the extension owns the actual
-write to the agent's ``latchkey_permissions.json`` using the
-``effect`` payload it precomputed when the request was created.
+:mod:`.predefined` sibling, there is no per-permission checkbox list:
+the request already names the single (path, access) pair. The dialog
+does, however, let the user *edit the shared path* before approving
+(the agent-requested path is pre-filled into an editable field, and a
+native file picker in the desktop app can fill it in). The access mode
+is fixed at request-creation time and is not user-editable.
+
+Approval calls ``POST /permission-requests/approve/<id>`` on the
+gateway's ``permission-requests`` extension; the extension owns the
+actual write to the agent's ``latchkey_permissions.json``. When the
+user left the path unchanged the extension uses the ``effect`` payload
+it precomputed at request-creation time; when the user edited the path
+we send it as a ``{"path": ...}`` body and the extension recomputes the
+file-sharing effect for that path (re-validating it for traversal).
 Denial reuses the legacy ``DELETE /permission-requests/<id>`` path so
 the gateway forgets the pending entry.
 """
 
 import asyncio
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
 from fastapi import Request
-from fastapi.responses import HTMLResponse
 from fastapi.responses import Response
 from loguru import logger
 from pydantic import Field
@@ -50,10 +56,63 @@ from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import append_response_event
 from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
+from imbue.minds.desktop_client.webdav import get_file_sharing_roots
 from imbue.mngr.primitives import AgentId
 
-# Label shown on the requests-panel card (lower-case, short).
+# Label shown on the inbox list card (lower-case, short).
 _KIND_LABEL: Final[str] = "file sharing"
+
+# Form field carrying the (possibly user-edited) absolute path to share.
+# The dialog pre-fills it with the agent-requested path; the user may
+# paste a different one or pick it from a native file dialog.
+_FILE_PATH_FIELD: Final[str] = "file_path"
+
+
+class InvalidSharePathError(Exception):
+    """Raised when a user-edited share path is not an acceptable absolute path."""
+
+
+def _is_path_within_roots(path: str, allowed_roots: Sequence[Path]) -> bool:
+    """Whether ``path`` is at or beneath one of ``allowed_roots``.
+
+    Case-insensitive and purely lexical, mirroring how the WebDAV server
+    matches its mount prefixes (WsgiDAV lowercases both the share keys
+    and the request path) so we never reject a path the server would
+    actually serve.
+    """
+    lower_path = path.lower()
+    for root in allowed_roots:
+        lower_root = str(root).rstrip("/").lower() or "/"
+        if lower_path == lower_root or lower_path.startswith(f"{lower_root}/"):
+            return True
+    return False
+
+
+def _normalize_share_path(raw_path: str, allowed_roots: Sequence[Path]) -> str:
+    """Validate and normalize a user-edited absolute share path.
+
+    Mirrors the gateway's ``validateAbsoluteFileSharingPath`` so the user
+    gets a clear, immediate error instead of a generic gateway 4xx. The
+    gateway re-validates on approve regardless -- this is a friendlier
+    first line of defence, not the security boundary.
+
+    Rejects empty, relative, and ``..``-containing paths, and paths that
+    fall outside ``allowed_roots`` (the WebDAV mount roots: home + temp).
+    Returns the stripped path on success.
+    """
+    path = raw_path.strip()
+    if not path:
+        raise InvalidSharePathError("The path to share must not be empty.")
+    if not path.startswith("/"):
+        raise InvalidSharePathError(f"The path to share must be absolute (start with '/'): {path}")
+    # Reject any ``..`` segment regardless of separator, matching the
+    # gateway's traversal check.
+    if any(segment == ".." for segment in path.replace("\\", "/").split("/")):
+        raise InvalidSharePathError(f"The path to share must not contain a '..' segment: {path}")
+    if not _is_path_within_roots(path, allowed_roots):
+        roots_str = ", ".join(str(root) for root in allowed_roots)
+        raise InvalidSharePathError(f"The path to share must be within a shared folder ({roots_str}): {path}")
+    return path
 
 
 def _access_human_label(access: str) -> str:
@@ -125,6 +184,15 @@ class FileSharingGrantHandler(RequestEventHandler):
     mngr_message_sender: MngrMessageSender = Field(
         description="Sends ``mngr message`` nudges to the waiting agent on resolution.",
     )
+    share_roots: tuple[Path, ...] = Field(
+        default_factory=get_file_sharing_roots,
+        frozen=True,
+        description=(
+            "On-disk roots the WebDAV file server mounts (home + temp). A requested or "
+            "user-edited path outside these is rejected up front with a clear error rather "
+            "than being forwarded to the gateway. Defaults to the live WebDAV mount roots."
+        ),
+    )
 
     # -- RequestEventHandler interface ---------------------------------------
 
@@ -139,17 +207,17 @@ class FileSharingGrantHandler(RequestEventHandler):
             return ""
         return req_event.path
 
-    def render_request_page(
+    def render_request_detail_fragment(
         self,
         req_event: RequestEvent,
         backend_resolver: BackendResolverInterface,
         mngr_forward_origin: str,
-    ) -> Response:
+    ) -> str:
         if not isinstance(req_event, LatchkeyFileSharingPermissionRequestEvent):
-            return HTMLResponse(content="<p>Unsupported request type</p>", status_code=500)
+            return "<p>Unsupported request type</p>"
         parsed_agent_id = AgentId(req_event.agent_id)
         ws_name = _resolve_workspace_name(backend_resolver, parsed_agent_id, fallback=req_event.agent_id)
-        rendered = render_file_sharing_permission_dialog(
+        return render_file_sharing_permission_dialog(
             agent_id=req_event.agent_id,
             request_id=str(req_event.event_id),
             ws_name=ws_name,
@@ -157,9 +225,9 @@ class FileSharingGrantHandler(RequestEventHandler):
             file_path=req_event.path,
             access=req_event.access,
             access_human_label=_access_human_label(req_event.access),
+            allowed_roots_json=json.dumps([str(root) for root in self.share_roots]),
             mngr_forward_origin=mngr_forward_origin,
         )
-        return HTMLResponse(content=rendered)
 
     async def apply_grant_request(
         self,
@@ -170,10 +238,34 @@ class FileSharingGrantHandler(RequestEventHandler):
             return _json_error("Unsupported request type", status_code=500)
         request_event_id = str(req_event.event_id)
         parsed_agent_id = AgentId(req_event.agent_id)
+
+        # The dialog lets the user edit the shared path (paste or native
+        # file picker) before approving. Read the submitted value, falling
+        # back to the agent-requested path when the field is absent (e.g.
+        # an older client). Validate it up front for a friendly error; the
+        # gateway re-validates on approve.
+        form = await request.form()
+        raw_override = form.get(_FILE_PATH_FIELD)
+        try:
+            effective_path = (
+                _normalize_share_path(str(raw_override), self.share_roots)
+                if raw_override is not None
+                else req_event.path
+            )
+        except InvalidSharePathError as e:
+            return _json_error(str(e), status_code=400)
+
+        # Only send an override to the gateway when the user actually
+        # changed the path; otherwise the gateway applies the precomputed
+        # effect verbatim (and we avoid recomputation for the common case).
+        override_path = effective_path if effective_path != req_event.path else None
         try:
             await asyncio.get_running_loop().run_in_executor(
                 None,
-                lambda: self.gateway_client.approve_permission_request(request_event_id),
+                lambda: self.gateway_client.approve_permission_request(
+                    request_event_id,
+                    override_path=override_path,
+                ),
             )
         except LatchkeyGatewayClientError as e:
             logger.warning(
@@ -186,11 +278,11 @@ class FileSharingGrantHandler(RequestEventHandler):
                 status_code=502,
             )
 
-        message = _format_granted_message(req_event.path, req_event.access)
+        message = _format_granted_message(effective_path, req_event.access)
         response_event = self._write_response_and_notify(
             request_event_id=request_event_id,
             agent_id=parsed_agent_id,
-            file_path=req_event.path,
+            file_path=effective_path,
             status=RequestStatus.GRANTED,
             message=message,
         )

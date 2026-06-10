@@ -32,11 +32,15 @@ from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
+from imbue.mngr.api.discovery_events import HostDiscoveryEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
@@ -379,6 +383,77 @@ def test_host_destroyed_destroys_all_agents_on_host(consumer: EnvelopeStreamCons
 
     assert set(destroyed) == {_AGENT_ID_1, _AGENT_ID_2}
     assert consumer.resolver.list_known_agent_ids() == ()
+
+
+# --- observe stream: host state threading ---------------------------------
+
+
+def _make_host(host_id: HostId, state: HostState) -> DiscoveredHost:
+    return DiscoveredHost(
+        host_id=host_id,
+        host_name=HostName(f"host-name-{host_id[-4:]}"),
+        provider_name=ProviderInstanceName("local"),
+        host_state=state,
+    )
+
+
+def test_full_snapshot_threads_host_state_into_resolver(consumer: EnvelopeStreamConsumer) -> None:
+    counter = [0]
+    snapshot = FullDiscoverySnapshotEvent(
+        timestamp=_TIMESTAMP,
+        event_id=_next_event_id(counter),
+        source=_EVENT_SOURCE,
+        agents=(_make_agent(_AGENT_ID_1, host_id=_HOST_ID_1),),
+        hosts=(_make_host(_HOST_ID_1, HostState.RUNNING),),
+    )
+    _dispatch(consumer, _observe_envelope(snapshot))
+
+    assert consumer.resolver.get_host_state(_HOST_ID_1) is HostState.RUNNING
+
+
+def test_host_discovered_event_updates_host_state(consumer: EnvelopeStreamConsumer) -> None:
+    counter = [0]
+    snapshot = FullDiscoverySnapshotEvent(
+        timestamp=_TIMESTAMP,
+        event_id=_next_event_id(counter),
+        source=_EVENT_SOURCE,
+        agents=(_make_agent(_AGENT_ID_1, host_id=_HOST_ID_1),),
+        hosts=(_make_host(_HOST_ID_1, HostState.RUNNING),),
+    )
+    _dispatch(consumer, _observe_envelope(snapshot))
+
+    host_event = HostDiscoveryEvent(
+        timestamp=_TIMESTAMP,
+        event_id=_next_event_id(counter),
+        source=_EVENT_SOURCE,
+        host=_make_host(_HOST_ID_1, HostState.STOPPED),
+    )
+    _dispatch(consumer, _observe_envelope(host_event))
+
+    assert consumer.resolver.get_host_state(_HOST_ID_1) is HostState.STOPPED
+
+
+def test_host_destroyed_event_marks_host_state_destroyed(consumer: EnvelopeStreamConsumer) -> None:
+    counter = [0]
+    snapshot = FullDiscoverySnapshotEvent(
+        timestamp=_TIMESTAMP,
+        event_id=_next_event_id(counter),
+        source=_EVENT_SOURCE,
+        agents=(_make_agent(_AGENT_ID_1, host_id=_HOST_ID_1),),
+        hosts=(_make_host(_HOST_ID_1, HostState.RUNNING),),
+    )
+    _dispatch(consumer, _observe_envelope(snapshot))
+
+    host_destroyed = HostDestroyedEvent(
+        timestamp=_TIMESTAMP,
+        event_id=_next_event_id(counter),
+        source=_EVENT_SOURCE,
+        host_id=_HOST_ID_1,
+        agent_ids=(_AGENT_ID_1,),
+    )
+    _dispatch(consumer, _observe_envelope(host_destroyed))
+
+    assert consumer.resolver.get_host_state(_HOST_ID_1) is HostState.DESTROYED
 
 
 # --- event stream: services / requests ------------------------------------

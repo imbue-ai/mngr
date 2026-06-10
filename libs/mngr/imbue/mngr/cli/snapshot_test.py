@@ -11,6 +11,7 @@ from imbue.mngr.cli.snapshot import SnapshotDestroyCliOptions
 from imbue.mngr.cli.snapshot import SnapshotListCliOptions
 from imbue.mngr.cli.snapshot import _bucketize_mixed_identifiers
 from imbue.mngr.cli.snapshot import _emit_create_result
+from imbue.mngr.cli.snapshot import _emit_destroy_dry_run
 from imbue.mngr.cli.snapshot import _emit_destroy_result
 from imbue.mngr.cli.snapshot import _emit_list_snapshots
 from imbue.mngr.cli.snapshot import snapshot
@@ -90,6 +91,7 @@ def test_snapshot_destroy_cli_options_fields() -> None:
         snapshots=("snap-123",),
         all_snapshots=False,
         force=True,
+        dry_run=False,
         output_format="human",
         quiet=False,
         verbose=0,
@@ -100,6 +102,7 @@ def test_snapshot_destroy_cli_options_fields() -> None:
     )
     assert opts.snapshots == ("snap-123",)
     assert opts.force is True
+    assert opts.dry_run is False
 
 
 # =============================================================================
@@ -258,6 +261,43 @@ def test_emit_destroy_result_format_template(capsys: pytest.CaptureFixture[str])
     assert capsys.readouterr().out.strip() == "snap-abc\thost-1"
 
 
+def test_emit_destroy_dry_run_human(capsys: pytest.CaptureFixture[str]) -> None:
+    """_emit_destroy_dry_run lists each snapshot that would be destroyed."""
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    snapshots_to_delete = [
+        ("host-1", ProviderInstanceName("modal"), SnapshotId("snap-abc"), "before-refactor"),
+    ]
+    _emit_destroy_dry_run(snapshots_to_delete, output_opts=output_opts)
+    out = capsys.readouterr().out
+    assert "Would destroy 1 snapshot(s)" in out
+    assert "snap-abc" in out
+    assert "before-refactor" in out
+    assert "host-1" in out
+
+
+def test_emit_destroy_dry_run_json(capsys: pytest.CaptureFixture[str]) -> None:
+    """_emit_destroy_dry_run emits a dry_run JSON payload without a destroy count key."""
+    output_opts = OutputOptions(output_format=OutputFormat.JSON)
+    snapshots_to_delete = [
+        ("host-1", ProviderInstanceName("modal"), SnapshotId("snap-abc"), "before-refactor"),
+    ]
+    _emit_destroy_dry_run(snapshots_to_delete, output_opts=output_opts)
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["dry_run"] is True
+    assert parsed["count"] == 1
+    assert parsed["snapshots"][0]["snapshot_id"] == "snap-abc"
+
+
+def test_emit_destroy_dry_run_format_template(capsys: pytest.CaptureFixture[str]) -> None:
+    """_emit_destroy_dry_run renders custom format templates."""
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN, format_template="{snapshot_id}\t{host_id}")
+    snapshots_to_delete = [
+        ("host-1", ProviderInstanceName("modal"), SnapshotId("snap-abc"), "before-refactor"),
+    ]
+    _emit_destroy_dry_run(snapshots_to_delete, output_opts=output_opts)
+    assert capsys.readouterr().out.strip() == "snap-abc\thost-1"
+
+
 # =============================================================================
 # Options model instantiation tests
 # =============================================================================
@@ -271,6 +311,7 @@ def test_snapshot_destroy_cli_options_can_be_instantiated() -> None:
         snapshots=(),
         all_snapshots=True,
         force=False,
+        dry_run=False,
         output_format="json",
         quiet=True,
         verbose=1,

@@ -117,10 +117,13 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
         opts.agent_list
     )
 
-    # Validate input: must have agents specified
+    # Validate input: must have agents specified.
     if not agent_addresses:
         if not stdin_consumed:
-            raise UserInputError("Must specify at least one agent (use '-' to read from stdin)")
+            raise UserInputError(
+                "Must specify at least one agent (use '-' to read agent ids from stdin, "
+                "e.g. `mngr list --ids | mngr message -`)"
+            )
         return
 
     # Read message from file if --message-file is provided
@@ -158,7 +161,6 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
             message_content=message_content,
             include_filters=tuple(include_filters),
             exclude_filters=(),
-            all_agents=False,
             error_behavior=error_behavior,
             is_start_desired=opts.start,
             on_success=lambda agent_name: _emit_jsonl_success(agent_name),
@@ -175,7 +177,6 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
         message_content=message_content,
         include_filters=tuple(include_filters),
         exclude_filters=(),
-        all_agents=False,
         error_behavior=error_behavior,
         is_start_desired=opts.start,
         provider_names=opts.provider,
@@ -302,7 +303,7 @@ Use '-' in place of agent names to read them from stdin, one per line.""",
     examples=(
         ("Send a message to an agent", 'mngr message my-agent --message "Hello"'),
         ("Send to multiple agents", 'mngr message agent1 agent2 --message "Hello to all"'),
-        ("Send to all agents", "mngr list --ids | mngr message - --message 'Hello everyone'"),
+        ("Send to all agents via stdin", "mngr list --ids | mngr message - --message 'Hello everyone'"),
         ("Send message from a file", "mngr message my-agent --message-file prompt.txt"),
         ("Pipe message from stdin", 'echo "Hello" | mngr message my-agent'),
         ("Use --agent flag (repeatable)", 'mngr message --agent my-agent --agent another-agent --message "Hello"'),
